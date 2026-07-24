@@ -126,6 +126,9 @@ check(
   "Release workflow builds a signed Android TV package",
   /android-tv:/.test(releaseWorkflow) &&
     /Validate Android signing secrets/.test(releaseWorkflow) &&
+    /Expose Android build tools/.test(releaseWorkflow) &&
+    /build-tools\/36\.0\.0/.test(releaseWorkflow) &&
+    /GITHUB_PATH/.test(releaseWorkflow) &&
     /:app:testDebugUnitTest :app:lintRelease :app:assembleRelease/.test(
       releaseWorkflow,
     ) &&
@@ -143,6 +146,9 @@ check(
     ) &&
     /SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
     /SIGNING_CERT_SHA256/.test(cleanInstallWorkflow) &&
+    /Expose Android build tools/.test(cleanInstallWorkflow) &&
+    /build-tools\/36\.0\.0/.test(cleanInstallWorkflow) &&
+    /GITHUB_PATH/.test(cleanInstallWorkflow) &&
     /apksigner verify --print-certs/.test(releaseWorkflow) &&
     /apksigner verify --print-certs/.test(cleanInstallWorkflow),
   "release and clean-install workflows must reject an Android APK signed by a different certificate",
