@@ -1,0 +1,150 @@
+.tv-pairing-dock {
+  position: fixed;
+  z-index: 120;
+  right: max(1.5rem, env(safe-area-inset-right));
+  bottom: max(1.5rem, env(safe-area-inset-bottom));
+  display: grid;
+  width: min(24rem, calc(100vw - 3rem));
+  gap: 0.7rem;
+  padding: 1.25rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line));
+}
+
+.tv-pairing-dock.is-collapsed {
+  width: auto;
+  padding: 0.7rem;
+}
+
+.tv-pairing-toggle {
+  justify-self: end;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+}
+
+.tv-pairing-eyebrow {
+  color: var(--accent);
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tv-pairing-code {
+  font-size: clamp(2.8rem, 7vw, 5.5rem);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.16em;
+  line-height: 1;
+}
+
+.phone-remote {
+  min-height: 100dvh;
+  display: grid;
+  place-content: center;
+  gap: 1.5rem;
+  padding: max(1.25rem, env(safe-area-inset-top))
+    max(1.25rem, env(safe-area-inset-right))
+    max(1.25rem, env(safe-area-inset-bottom))
+    max(1.25rem, env(safe-area-inset-left));
+}
+
+.phone-remote > header,
+.phone-remote-card {
+  width: min(34rem, calc(100vw - 2.5rem));
+}
+
+.phone-remote > header h1 {
+  margin: 0.35rem 0;
+}
+
+.phone-remote-card {
+  display: grid;
+  gap: 1rem;
+  padding: 1.35rem;
+}
+
+.phone-remote-code-input {
+  width: 100%;
+  min-height: 4rem;
+  text-align: center;
+  font-size: 2rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3em;
+}
+
+.phone-remote-now h2 {
+  margin: 0.35rem 0 0;
+}
+
+.phone-remote-progress {
+  height: 0.45rem;
+  overflow: hidden;
+  border-radius: calc(999px * var(--radius-scale));
+  background: var(--surface-3);
+}
+
+.phone-remote-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.phone-remote-clock {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.phone-remote-controls {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+}
+
+.phone-remote-controls button {
+  min-height: 3.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.phone-remote-controls .phone-remote-primary {
+  background: var(--accent);
+  color: var(--on-accent, #031016);
+}
+
+.phone-remote-disconnect {
+  justify-self: center;
+}
+
+html[data-tv-mode="true"] {
+  font-size: calc(1.1875rem * var(--text-scale));
+  scroll-behavior: smooth;
+}
+
+html[data-tv-mode="true"] :where(button, a, input, select, [tabindex]):focus-visible {
+  outline: 4px solid var(--accent);
+  outline-offset: 5px;
+}
+
+html[data-tv-mode="true"] :where(button, a, input, select) {
+  min-height: 3.25rem;
+}
+
+html[data-tv-mode="true"] .nav-mobile {
+  display: none !important;
+}
+
+@media (max-width: 520px) {
+  .phone-remote-controls {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .phone-remote-controls button {
+    padding-inline: 0.35rem;
+    font-size: 0.86rem;
+  }
+}

@@ -64,7 +64,45 @@ const windowsSigningConfig = read("scripts/generate_windows_signing_config.mjs")
 const linuxGtkMigration = read("docs/TAURI_LINUX_GTK_MIGRATION.md");
 const bundleBudgetCheck = read("scripts/check_bundle_budgets.mjs");
 const webPackage = JSON.parse(read("web/package.json"));
+const webPackageLock = JSON.parse(read("web/package-lock.json"));
+const serverPackage = JSON.parse(read("server/package.json"));
+const serverPackageLock = JSON.parse(read("server/package-lock.json"));
 const websitePackage = JSON.parse(read("website-app/package.json"));
+const websitePackageLock = JSON.parse(read("website-app/package-lock.json"));
+const serverVersion = read("server/src/version.ts").match(
+  /SERVER_VERSION\s*=\s*"([^"]+)"/,
+)?.[1];
+const cargoTomlVersion = read("web/src-tauri/Cargo.toml").match(
+  /^version\s*=\s*"([^"]+)"/m,
+)?.[1];
+const cargoLockVersion = read("web/src-tauri/Cargo.lock").match(
+  /\[\[package\]\]\s*\nname = "debridstreamer"\s*\nversion = "([^"]+)"/,
+)?.[1];
+const websiteVersion = read("website-app/src/lib/site.ts").match(
+  /APP_VERSION\s*=\s*'([^']+)'/,
+)?.[1];
+const androidTVVersion = read("android-tv/app/build.gradle").match(
+  /versionName\s+"([^"]+)"/,
+)?.[1];
+const releaseVersions = [
+  tauri.version,
+  webPackage.version,
+  webPackageLock.version,
+  serverPackage.version,
+  serverPackageLock.version,
+  serverVersion,
+  websitePackage.version,
+  websitePackageLock.version,
+  websiteVersion,
+  cargoTomlVersion,
+  cargoLockVersion,
+  androidTVVersion,
+];
+check(
+  "Release version surfaces match",
+  releaseVersions.every((version) => version === tauri.version),
+  `web, server, website, Tauri, Cargo, and Android TV versions must all match ${tauri.version}`,
+);
 check(
   "Release workflow emits updater JSON",
   /includeUpdaterJson:\s*true/.test(releaseWorkflow),
@@ -83,6 +121,29 @@ check(
     /attestations:\s*write/.test(releaseWorkflow) &&
     /id-token:\s*write/.test(releaseWorkflow),
   ".github/workflows/web-release.yml must checksum and attest the completed release asset set",
+);
+check(
+  "Release workflow builds a signed Android TV package",
+  /android-tv:/.test(releaseWorkflow) &&
+    /Validate Android signing secrets/.test(releaseWorkflow) &&
+    /:app:testDebugUnitTest :app:lintRelease :app:assembleRelease/.test(
+      releaseWorkflow,
+    ) &&
+    /YAWF\.Stream_Android\.TV_\$\{version\}\.apk/.test(releaseWorkflow) &&
+    /apksigner verify/.test(releaseWorkflow) &&
+    /SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
+    /needs:\s*\[release, android-tv\]/.test(releaseWorkflow),
+  ".github/workflows/web-release.yml must test, lint, sign, verify, and upload Android TV before checksums are finalized",
+);
+check(
+  "Android TV signing certificate is publicly pinned",
+  existsSync(join(root, "android-tv/SIGNING_CERT_SHA256")) &&
+    /^[0-9a-f]{64}\n?$/.test(read("android-tv/SIGNING_CERT_SHA256")) &&
+    /SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
+    /SIGNING_CERT_SHA256/.test(cleanInstallWorkflow) &&
+    /apksigner verify --print-certs/.test(releaseWorkflow) &&
+    /apksigner verify --print-certs/.test(cleanInstallWorkflow),
+  "release and clean-install workflows must reject an Android APK signed by a different certificate",
 );
 check(
   "Release workflow builds macOS, Linux, and Windows",
@@ -180,6 +241,17 @@ check(
     /amd64\.AppImage/.test(cleanInstallWorkflow) &&
     /amd64\.deb/.test(cleanInstallWorkflow),
   ".github/workflows/clean-install.yml must install both macOS architectures, Windows MSI and NSIS, Linux AppImage, and Linux deb assets",
+);
+check(
+  "Clean-install workflow verifies Android TV identity",
+  /android-tv:/.test(cleanInstallWorkflow) &&
+    /YAWF\.Stream_Android\.TV_\$\{version\}\.apk/.test(cleanInstallWorkflow) &&
+    /apksigner verify/.test(cleanInstallWorkflow) &&
+    /SIGNING_CERT_SHA256/.test(cleanInstallWorkflow) &&
+    /com\.yawf\.stream\.tv/.test(cleanInstallWorkflow) &&
+    /android\.software\.leanback/.test(cleanInstallWorkflow) &&
+    /android\.hardware\.touchscreen/.test(cleanInstallWorkflow),
+  ".github/workflows/clean-install.yml must verify the APK signature, package identity, version, Leanback launcher, and optional touchscreen",
 );
 check(
   "Clean-install workflow verifies trust and first launch",
@@ -630,6 +702,13 @@ check(
     /check_website_static\.mjs/.test(ciWorkflow) &&
     /check_website_path_mount\.mjs/.test(ciWorkflow),
   ".github/workflows/ci.yml must test and run the public repo gate plus release readiness and website checks",
+);
+check(
+  "CI tests the Android TV package",
+  /android-tv:/.test(ciWorkflow) &&
+    /platforms;android-36/.test(ciWorkflow) &&
+    /:app:testDebugUnitTest :app:lintDebug :app:assembleDebug/.test(ciWorkflow),
+  ".github/workflows/ci.yml must test, lint, and assemble the Android TV app",
 );
 check(
   "CI runs security decisions",

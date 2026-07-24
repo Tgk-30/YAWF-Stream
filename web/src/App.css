@@ -187,3 +187,13 @@
     --nav-safe-left: 0px;
   }
 }
+.app-alert-stack {
+  position: fixed;
+  top: max(var(--sp-lg), env(safe-area-inset-top));
+  left: 50%;
+  z-index: 1050;
+  display: grid;
+  gap: var(--sp-sm);
+  width: min(680px, calc(100vw - 2 * var(--sp-lg)));
+  transform: translateX(-50%);
+}

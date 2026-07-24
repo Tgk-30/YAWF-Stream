@@ -145,6 +145,54 @@ describe("serverApi - request building (via serverRequest)", () => {
     );
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("exports and imports a portable Server Mode profile", async () => {
+    const bundle: Awaited<
+      ReturnType<typeof api.exportServerPortableProfile>
+    > = {
+      product: "YAWF Stream",
+      format: "yawf-profile-portable",
+      version: 1,
+      createdAt: "2026-07-24T10:00:00.000Z",
+      settings: [],
+      watchlist: [],
+      history: [],
+      folders: [],
+      library: [],
+    };
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ bundle }) as never)
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          counts: {
+            settings: 0,
+            watchlist: 0,
+            history: 0,
+            folders: 0,
+            library: 0,
+          },
+        }) as never,
+      );
+
+    await expect(api.exportServerPortableProfile()).resolves.toEqual(bundle);
+    await expect(
+      api.importServerPortableProfile(bundle, "replace"),
+    ).resolves.toEqual({
+      settings: 0,
+      watchlist: 0,
+      history: 0,
+      folders: 0,
+      library: 0,
+    });
+    expect(lastCall().url).toBe(
+      "https://server.example/api/portability/import",
+    );
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({
+      mode: "replace",
+      bundle,
+    });
+  });
 });
 
 describe("serverApi - JSON parsing & error handling", () => {

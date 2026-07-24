@@ -76,6 +76,19 @@ describe("TMDBService privacy gate", () => {
   });
 });
 
+describe("TMDBService locale", () => {
+  it("applies the configured language and region to catalog requests", async () => {
+    const mock = makeMockFetch(() => ok(searchBody));
+    const service = new TMDBService("key", mock.fetchImpl, {
+      language: "pt-BR",
+      region: "BR",
+    });
+    await service.search("Cidade de Deus", "movie");
+    expect(mock.lastURL()?.searchParams.get("language")).toBe("pt-BR");
+    expect(mock.lastURL()?.searchParams.get("region")).toBe("BR");
+  });
+});
+
 /** A fetch stub that dispatches per-path so a single service can answer the
  * multi-request flows (getDetail-via-find, etc.). Routes on URL.pathname. */
 function makeRoutedFetch(routes: Record<string, MockResponse>): MockFetch {
@@ -545,7 +558,7 @@ describe("TMDBService search type=null (multi)", () => {
     expect(url.searchParams.get("include_adult")).toBe("false");
   });
 
-  it("omits the language param for a typed search", async () => {
+  it("adds the configured language param for a typed search", async () => {
     const mock = makeMockFetch(() => ok(searchBody));
     const service = new TMDBService("tmdb-key", mock.fetchImpl);
 
@@ -553,7 +566,7 @@ describe("TMDBService search type=null (multi)", () => {
 
     const url = mock.lastURL()!;
     expect(url.pathname).toBe("/3/search/tv");
-    expect(url.searchParams.get("language")).toBeNull();
+    expect(url.searchParams.get("language")).toBe("en-US");
   });
 
   it("drops person results and entries with no title, and infers type from title/name", async () => {

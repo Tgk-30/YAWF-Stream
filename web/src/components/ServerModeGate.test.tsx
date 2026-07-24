@@ -18,8 +18,12 @@ import userEvent from "@testing-library/user-event";
 
 // configuredServerURL drives Local vs Server mode. Default: a server URL.
 const configuredServerURL = vi.fn<() => string | null>(() => "https://srv.test");
+const configuredServerURLSource = vi.fn(() => "saved");
+const saveServerURL = vi.fn();
 vi.mock("../lib/serverMode", () => ({
   configuredServerURL: () => configuredServerURL(),
+  configuredServerURLSource: () => configuredServerURLSource(),
+  saveServerURL: (value: string | null) => saveServerURL(value),
 }));
 
 const setCsrfToken = vi.fn();
@@ -98,8 +102,10 @@ beforeEach(() => {
   // so a never-resolving fetch from one test would leak into the next).
   fetchMock.mockReset();
   configuredServerURL.mockReset();
+  configuredServerURLSource.mockReset();
   unauthorizedHandler = null;
   configuredServerURL.mockReturnValue("https://srv.test");
+  configuredServerURLSource.mockReturnValue("saved");
   needsCloudflareAccessLogin.mockResolvedValue(false);
   openServerAccessLogin.mockResolvedValue();
   vi.stubGlobal("fetch", fetchMock);
@@ -212,6 +218,12 @@ describe("ServerModeGate", () => {
 
     expect(await screen.findByText("Server unavailable")).toBeInTheDocument();
     expect(screen.getByText("boom: down")).toBeInTheDocument();
+    expect(
+      screen.getByText(/host may be asleep, powered off, or unavailable/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Use Local Mode" }),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
 

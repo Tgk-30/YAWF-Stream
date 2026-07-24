@@ -105,8 +105,8 @@ export default function Hero() {
         </h1>
 
         <p className="dl-lede lede mx-auto mt-6 max-w-[680px]">
-          Free, MIT open source. v1 is available for macOS and Linux, plus a mobile PWA served by your own server.
-          Windows follows after its signing gate passes.
+          Free, MIT open source. v2 is available for macOS, Linux, Android TV, Google TV, and any phone or tablet
+          through your server-hosted PWA. Windows follows after its signing gate passes.
         </p>
 
         <div className="mt-8 flex flex-wrap items-center justify-center gap-2.5">

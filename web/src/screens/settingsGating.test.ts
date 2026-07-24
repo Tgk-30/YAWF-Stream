@@ -5,9 +5,10 @@ describe("visibleTabs", () => {
   const ids = (opts: { serverMode: boolean; simpleMode: boolean }) =>
     visibleTabs(opts).map((t) => t.id);
 
-  it("Advanced + Server Mode shows all 9 tabs", () => {
+  it("Advanced + Server Mode shows all 10 tabs", () => {
     expect(ids({ serverMode: true, simpleMode: false })).toEqual([
       "appearance",
+      "language",
       "playback",
       "privacy",
       "install",
@@ -30,6 +31,7 @@ describe("visibleTabs", () => {
     const out = ids({ serverMode: true, simpleMode: true });
     expect(out).toEqual([
       "appearance",
+      "language",
       "playback",
       "privacy",
       "install",

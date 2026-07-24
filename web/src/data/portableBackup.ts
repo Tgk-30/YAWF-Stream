@@ -15,6 +15,7 @@ import {
 
 const BACKUP_VERSION = 2;
 const MAX_BACKUP_BYTES = 100 * 1024 * 1024;
+const MAX_PROFILE_BUNDLE_BYTES = 10 * 1024 * 1024;
 const PORTABLE_TABLES = [
   "settings",
   "watchlist",
@@ -41,7 +42,7 @@ type PortableRows = Record<PortableTableName, Array<Record<string, unknown>>>;
 
 type PortableProfile = Omit<LocalProfile, "passwordHash">;
 
-interface PortableProfileData {
+export interface PortableProfileData {
   profile: PortableProfile;
   databaseName: string;
   data: PortableRows;
@@ -57,6 +58,56 @@ export interface PortableBackup {
   multiUserEnabled: boolean;
   exclusions: string[];
   profiles: PortableProfileData[];
+}
+
+export interface PortableProfileBundle {
+  product: "YAWF Stream";
+  format: "yawf-profile-portable";
+  version: 1;
+  createdAt: string;
+  settings: Array<{ key: string; value: string }>;
+  watchlist: Array<{
+    mediaId: string;
+    addedAt: string;
+    preview: Record<string, unknown>;
+  }>;
+  history: Array<{
+    mediaId: string;
+    episodeId: string | null;
+    progressSeconds: number;
+    durationSeconds: number | null;
+    completed: boolean;
+    lastWatched: string;
+    streamQuality: string | null;
+    preview: Record<string, unknown>;
+  }>;
+  folders: Array<{
+    id: string;
+    name: string;
+    parentId: string | null;
+    listType: "watchlist" | "favorites" | "custom";
+    folderKind: "system_root" | "manual" | "watched" | "release_wait";
+    isSystem: boolean;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  library: Array<{
+    mediaId: string;
+    folderId: string | null;
+    listType: "watchlist" | "favorites" | "custom";
+    addedAt: string;
+    customListName: string | null;
+    releaseDateHint: string | null;
+    renewalStatus: string | null;
+    preview: Record<string, unknown>;
+  }>;
+}
+
+export interface PortableProfileConversion {
+  bundle: PortableProfileBundle;
+  profileName: string;
+  skippedRows: number;
+  omissions: string[];
 }
 
 function requireLocalStore(store = getStore()): DexieStore {
@@ -258,6 +309,298 @@ export function parsePortableBackup(text: string): PortableBackup {
   }
   validateBackup(value);
   return value;
+}
+
+export function parsePortableProfileBundle(
+  text: string,
+): PortableProfileBundle {
+  if (new TextEncoder().encode(text).byteLength > MAX_PROFILE_BUNDLE_BYTES) {
+    throw new Error("Profile bundle is larger than the 10 MB safety limit.");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("Profile bundle is not valid JSON.");
+  }
+  const candidate = portableObject(value);
+  if (
+    candidate?.product !== "YAWF Stream" ||
+    candidate.format !== "yawf-profile-portable" ||
+    candidate.version !== 1 ||
+    portableDate(candidate.createdAt) == null ||
+    !Array.isArray(candidate.settings) ||
+    !Array.isArray(candidate.watchlist) ||
+    !Array.isArray(candidate.history) ||
+    !Array.isArray(candidate.folders) ||
+    !Array.isArray(candidate.library) ||
+    candidate.settings.length > 300 ||
+    candidate.watchlist.length > 10_000 ||
+    candidate.history.length > 20_000 ||
+    candidate.folders.length > 5_000 ||
+    candidate.library.length > 20_000
+  ) {
+    throw new Error("Profile bundle format or version is not supported.");
+  }
+  if (!candidate.settings.every(isPortableSetting)) {
+    throw new Error("Profile bundle contains a secret-valued setting.");
+  }
+  return value as PortableProfileBundle;
+}
+
+function portableObject(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function portableString(
+  value: unknown,
+  maxLength: number,
+  allowEmpty = false,
+): string | null {
+  if (typeof value !== "string" || value.length > maxLength) return null;
+  const trimmed = value.trim();
+  return allowEmpty || trimmed.length > 0 ? trimmed : null;
+}
+
+function portableNullableString(
+  value: unknown,
+  maxLength: number,
+): string | null | undefined {
+  if (value == null) return null;
+  return portableString(value, maxLength, true) ?? undefined;
+}
+
+function portableDate(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 80) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function portableNumber(value: unknown, minimum = 0): number | null {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= minimum
+    ? value
+    : null;
+}
+
+function portablePreview(value: unknown): Record<string, unknown> | null {
+  const preview = portableObject(value);
+  if (preview == null) return null;
+  try {
+    if (JSON.stringify(preview).length > 32_768) return null;
+  } catch {
+    return null;
+  }
+  return preview;
+}
+
+function portableListType(
+  value: unknown,
+): "watchlist" | "favorites" | "custom" | null {
+  return value === "watchlist" || value === "favorites" || value === "custom"
+    ? value
+    : null;
+}
+
+function portableFolderKind(
+  value: unknown,
+): "system_root" | "manual" | "watched" | "release_wait" | null {
+  return value === "system_root" ||
+    value === "manual" ||
+    value === "watched" ||
+    value === "release_wait"
+    ? value
+    : null;
+}
+
+/** Convert one selected profile from a full Local Mode backup into the
+ * profile-scoped, secret-free Server Mode portability contract. Local-only
+ * caches, taste events, AI cost history, and watchlist-folder assignments are
+ * intentionally omitted because Server Mode has no equivalent tables. */
+export function portableProfileBundleFromBackup(
+  backup: PortableBackup,
+  profileId = backup.activeProfileId,
+): PortableProfileConversion {
+  const selected = backup.profiles.find(
+    (entry) => entry.profile.id === profileId,
+  );
+  if (selected == null) {
+    throw new Error("The selected local profile is not present in this backup.");
+  }
+
+  let skippedRows = 0;
+  const settings: PortableProfileBundle["settings"] = [];
+  for (const raw of selected.data.settings) {
+    if (!isPortableSetting(raw)) {
+      skippedRows += 1;
+      continue;
+    }
+    settings.push({ key: raw.key, value: raw.value });
+  }
+
+  const watchlist: PortableProfileBundle["watchlist"] = [];
+  let omittedWatchlistAssignments = 0;
+  for (const raw of selected.data.watchlist.slice(0, 10_000)) {
+    const row = portableObject(raw);
+    const mediaId = portableString(row?.mediaId, 128);
+    const addedAt = portableDate(row?.addedAt);
+    const preview = portablePreview(row?.preview);
+    if (mediaId == null || addedAt == null || preview == null) {
+      skippedRows += 1;
+      continue;
+    }
+    if (portableString(row?.folderId, 128) != null) {
+      omittedWatchlistAssignments += 1;
+    }
+    watchlist.push({ mediaId, addedAt, preview });
+  }
+
+  const history: PortableProfileBundle["history"] = [];
+  for (const raw of selected.data.watchHistory.slice(0, 20_000)) {
+    const row = portableObject(raw);
+    const mediaId = portableString(row?.mediaId, 128);
+    const episodeId = portableNullableString(row?.episodeId, 128);
+    const progressSeconds = portableNumber(row?.progressSeconds);
+    const durationSeconds =
+      row?.durationSeconds == null
+        ? null
+        : portableNumber(row.durationSeconds, Number.MIN_VALUE);
+    const lastWatched = portableDate(row?.lastWatched);
+    const streamQuality = portableNullableString(row?.streamQuality, 80);
+    const preview = portablePreview(row?.preview);
+    if (
+      mediaId == null ||
+      episodeId === undefined ||
+      progressSeconds == null ||
+      (durationSeconds == null && row?.durationSeconds != null) ||
+      typeof row?.completed !== "boolean" ||
+      lastWatched == null ||
+      streamQuality === undefined ||
+      preview == null
+    ) {
+      skippedRows += 1;
+      continue;
+    }
+    history.push({
+      mediaId,
+      episodeId,
+      progressSeconds,
+      durationSeconds,
+      completed: row.completed,
+      lastWatched,
+      streamQuality,
+      preview,
+    });
+  }
+
+  const folders: PortableProfileBundle["folders"] = [];
+  for (const raw of selected.data.folders.slice(0, 5_000)) {
+    const row = portableObject(raw);
+    const id = portableString(row?.id, 128);
+    const name = portableString(row?.name, 120);
+    const parentId = portableNullableString(row?.parentId, 128);
+    const listType = portableListType(row?.listType);
+    const folderKind = portableFolderKind(row?.folderKind);
+    const createdAt = portableDate(row?.createdAt);
+    const updatedAt = portableDate(row?.updatedAt);
+    if (
+      id == null ||
+      name == null ||
+      parentId === undefined ||
+      listType == null ||
+      folderKind == null ||
+      typeof row?.isSystem !== "boolean" ||
+      createdAt == null ||
+      updatedAt == null
+    ) {
+      skippedRows += 1;
+      continue;
+    }
+    folders.push({
+      id,
+      name,
+      parentId,
+      listType,
+      folderKind,
+      isSystem: row.isSystem,
+      createdAt,
+      updatedAt,
+    });
+  }
+
+  const library: PortableProfileBundle["library"] = [];
+  for (const raw of selected.data.library.slice(0, 20_000)) {
+    const row = portableObject(raw);
+    const mediaId = portableString(row?.mediaId, 128);
+    const folderId = portableNullableString(row?.folderId, 128);
+    const listType = portableListType(row?.listType);
+    const addedAt = portableDate(row?.addedAt);
+    const customListName = portableNullableString(row?.customListName, 200);
+    const releaseDateHint = portableNullableString(row?.releaseDateHint, 64);
+    const renewalStatus = portableNullableString(row?.renewalStatus, 64);
+    const preview = portablePreview(row?.preview);
+    if (
+      mediaId == null ||
+      folderId === undefined ||
+      listType == null ||
+      addedAt == null ||
+      customListName === undefined ||
+      releaseDateHint === undefined ||
+      renewalStatus === undefined ||
+      preview == null
+    ) {
+      skippedRows += 1;
+      continue;
+    }
+    library.push({
+      mediaId,
+      folderId,
+      listType,
+      addedAt,
+      customListName,
+      releaseDateHint,
+      renewalStatus,
+      preview,
+    });
+  }
+
+  const omissions = [
+    "Credentials, profile locks, stream URLs, and device paths remain excluded.",
+  ];
+  if (omittedWatchlistAssignments > 0) {
+    omissions.push(
+      `${omittedWatchlistAssignments} watchlist folder assignment(s) were flattened because Server Mode watchlists do not use local folders.`,
+    );
+  }
+  if (
+    selected.data.tasteEvents.length > 0 ||
+    selected.data.mediaCache.length > 0 ||
+    selected.data.aiUsage.length > 0
+  ) {
+    omissions.push(
+      "Local taste events, cached metadata, and AI usage history were not migrated.",
+    );
+  }
+
+  return {
+    profileName: selected.profile.name,
+    skippedRows,
+    omissions,
+    bundle: {
+      product: "YAWF Stream",
+      format: "yawf-profile-portable",
+      version: 1,
+      createdAt: new Date().toISOString(),
+      settings,
+      watchlist,
+      history,
+      folders,
+      library,
+    },
+  };
 }
 
 async function restoreRows(local: DexieStore, data: PortableRows): Promise<number> {

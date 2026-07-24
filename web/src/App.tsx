@@ -58,8 +58,10 @@ import { ProfileMenu } from "./components/ProfileMenu";
 import { Spinner } from "./components/Spinner";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { BandwidthWarningBanner } from "./components/BandwidthWarningBanner";
+import { HostAvailabilityBanner } from "./components/HostAvailabilityBanner";
 import { InstallPrompt, isInstallPromptEligible } from "./components/InstallPrompt";
 import { LocalPlayerHost } from "./components/LocalPlayerHost";
+import { TVPairingDock } from "./components/TVPairingDock";
 // Eager (not lazy): the lock screen must paint in the SAME commit as the app
 // shell, or a code-split chunk load would flash a protected profile's content
 // behind a null Suspense fallback before the gate appears.
@@ -80,6 +82,12 @@ import { devBypassesOnboarding, isFirstRun, needsKeyOnboarding } from "./lib/fir
 import { secretReadsFailedThisSession } from "./storage/KeychainSecretStore";
 import { shouldShowServerSetup } from "./lib/serverSetup";
 import { fetchServerAdminHealth } from "./lib/serverApi";
+import { isTVMode } from "./lib/tvMode";
+import {
+  applyDocumentLocale,
+  resolveInterfaceLocale,
+  translate,
+} from "./lib/localization";
 import { useTheme } from "./theme/useTheme";
 import "./App.css";
 
@@ -320,6 +328,18 @@ export function App() {
     switchLocalProfile,
   } = useAppStore();
   const playerMounted = usePlayerMounted();
+  const interfaceLocale = resolveInterfaceLocale(settings.interfaceLanguage);
+  const routeTitle = translate(
+    interfaceLocale,
+    `nav.${route === "debrid" ? "debrid" : route}` as Parameters<
+      typeof translate
+    >[1],
+    ROUTE_TITLES[route],
+  );
+  const routePageLabel = translate(interfaceLocale, "route.page", "page");
+  useEffect(() => {
+    applyDocumentLocale(settings.interfaceLanguage);
+  }, [settings.interfaceLanguage]);
   // Calendar data is resolved once in AppStore. Recompute this bounded selector
   // only when that data, its watermark, or navigation changes - never on every
   // shell render. A failed/unavailable Server Mode calendar simply has no badge.
@@ -583,25 +603,27 @@ export function App() {
   const routeFrameRef = useRef<HTMLDivElement | null>(null);
   const initialRouteRef = useRef(true);
   useEffect(() => {
-    const title = ROUTE_TITLES[route];
-    document.title = `${title} | YAWF Stream`;
+    document.title = `${routeTitle} | YAWF Stream`;
     if (initialRouteRef.current) {
       initialRouteRef.current = false;
       return;
     }
     const frame = window.requestAnimationFrame(() => routeFrameRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
-  }, [route]);
+  }, [route, routeTitle]);
 
   return (
     // data-setup-nudge reserves scroll room under the fixed get-started card
     // (App.css) so the last content row is never stranded behind it.
     <div className="app" data-setup-nudge={showSetupNudge || showInstallPrompt || undefined}>
       <a className="skip-to-content" href="#main-content">
-        Skip to content
+        {translate(interfaceLocale, "common.skipContent", "Skip to content")}
       </a>
       <div className="aurora-glow" />
-      <BandwidthWarningBanner />
+      <div className="app-alert-stack">
+        <HostAvailabilityBanner />
+        <BandwidthWarningBanner />
+      </div>
 
       <NavRail
         selected={route}
@@ -614,11 +636,12 @@ export function App() {
         navOrder={settings.appearanceNavOrder}
         navHidden={settings.appearanceNavHidden}
         calendarBadgeCount={calendarBadgeCount}
+        interfaceLocale={interfaceLocale}
       />
 
       <main id="main-content" className="app-content" tabIndex={-1}>
         <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {ROUTE_TITLES[route]} page
+          {routeTitle} {routePageLabel}
         </span>
         {showsGlobalSearch && <GlobalSearch />}
         {showsGlobalSearch && (
@@ -640,7 +663,7 @@ export function App() {
           key={route}
           className="route-frame"
           tabIndex={-1}
-          aria-label={`${ROUTE_TITLES[route]} page`}
+          aria-label={`${routeTitle} ${routePageLabel}`}
           ref={(element) => {
             routeFrameRef.current = element;
             element?.toggleAttribute(
@@ -710,6 +733,7 @@ export function App() {
       {/* Completed downloads can launch playback without opening a Detail
           overlay. The host owns the app-wide native-mpv mount. */}
       <LocalPlayerHost />
+      {isTVMode() && <TVPairingDock />}
 
       {/* Lazily-loaded overlays - each chunk downloads only when first opened.
           A null Suspense fallback is correct here: these are modals, so "nothing

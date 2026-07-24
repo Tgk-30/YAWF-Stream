@@ -7,7 +7,7 @@ const ITEMS = [
   { icon: Server, title: 'Self-hosted', text: 'Your server, your debrid keys, your data.', instant: false },
   { icon: Zap, title: 'Instant', text: 'Plays already-cached streams - no waiting.', instant: true },
   { icon: Users, title: 'Profiles', text: 'Separate libraries per person, optional passwords.', instant: false },
-  { icon: MonitorSmartphone, title: 'Everywhere', text: 'Desktop apps plus a mobile PWA.', instant: false },
+  { icon: MonitorSmartphone, title: 'Everywhere', text: 'Desktop, mobile PWA, and native Android TV.', instant: false },
 ];
 
 /** Section 2 - Proof strip: 4 StatChips on a --bg-1 band. */

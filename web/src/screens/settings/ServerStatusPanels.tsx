@@ -70,6 +70,17 @@ export interface ServerHealth {
     available: boolean;
     url: string;
   };
+  transcode?: {
+    enabled: boolean;
+    ready: boolean;
+    configuredEncoder: string;
+    activeEncoder: string | null;
+    availableVideoEncoders: string[];
+    adaptive: boolean;
+    seekOffset: boolean;
+    subtitleSidecar: boolean;
+    toneMapping: boolean;
+  };
   warnings: string[];
 }
 
@@ -319,6 +330,55 @@ export function ServerHealthPanel({ health }: ServerHealthPanelProps) {
     health.config.publicMode ? "Public mode on" : "Private mode",
     health.config.bindSessionUserAgent ? "Sessions bound to device" : "Device binding off",
   ];
+  const encoderLabels: Record<string, string> = {
+    libx264: "CPU software",
+    h264_videotoolbox: "Apple VideoToolbox",
+    h264_nvenc: "NVIDIA NVENC",
+    h264_qsv: "Intel Quick Sync",
+  };
+  const transcodeRows =
+    health.transcode == null
+      ? []
+      : [
+          {
+            feature: "Transcoding",
+            ready: health.transcode.ready,
+            detail: !health.transcode.enabled
+              ? "Disabled by server configuration"
+              : health.transcode.ready
+                ? "FFmpeg and an H.264 encoder are ready"
+                : "FFmpeg or the configured H.264 encoder was not detected",
+          },
+          {
+            feature: "Active encoder",
+            ready: health.transcode.activeEncoder != null,
+            detail:
+              health.transcode.activeEncoder == null
+                ? `Configured: ${encoderLabels[health.transcode.configuredEncoder] ?? health.transcode.configuredEncoder}`
+                : encoderLabels[health.transcode.activeEncoder] ??
+                  health.transcode.activeEncoder,
+          },
+          {
+            feature: "Adaptive quality",
+            ready: health.transcode.adaptive,
+            detail: "1080p, 720p, and 480p HLS renditions",
+          },
+          {
+            feature: "Accurate seeking",
+            ready: health.transcode.seekOffset,
+            detail: "Server-side seek offset for resumed playback",
+          },
+          {
+            feature: "Subtitle sidecar",
+            ready: health.transcode.subtitleSidecar,
+            detail: "Extracted WebVTT track when ffprobe is available",
+          },
+          {
+            feature: "HDR tone mapping",
+            ready: health.transcode.toneMapping,
+            detail: "Uses FFmpeg zscale when detected",
+          },
+        ];
 
   return (
     <div className="settings-source glass-rest">
@@ -363,6 +423,42 @@ export function ServerHealthPanel({ health }: ServerHealthPanelProps) {
           </span>
         ))}
       </div>
+
+      {health.transcode != null && (
+        <div className="settings-transcode-matrix">
+          <div className="settings-sources-head">
+            <span className="settings-sources-title">Transcoding matrix</span>
+            <span
+              className={`chip${health.transcode.ready ? " is-active" : ""}`}
+            >
+              {health.transcode.ready ? "Ready" : "Unavailable"}
+            </span>
+          </div>
+          <div className="settings-usage-list">
+            {transcodeRows.map((row) => (
+              <div className="settings-usage-row" key={row.feature}>
+                <span>
+                  <strong>{row.feature}</strong>
+                  <span className="t-secondary"> {row.detail}</span>
+                </span>
+                <span className={`chip${row.ready ? " is-active" : ""}`}>
+                  {row.ready ? "Ready" : "No"}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="settings-hint t-secondary">
+            Detected encoders:{" "}
+            {health.transcode.availableVideoEncoders.length > 0
+              ? health.transcode.availableVideoEncoders
+                  .map((encoder) => encoderLabels[encoder] ?? encoder)
+                  .join(", ")
+              : "None"}
+            . YAWF Stream automatically falls back to CPU software encoding when
+            libx264 is available.
+          </p>
+        </div>
+      )}
 
       {health.warnings.length > 0 && (
         <div className="settings-usage-list">

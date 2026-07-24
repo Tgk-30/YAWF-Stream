@@ -3,6 +3,7 @@ export type SettingsSection =
   | "debrid"
   | "sources"
   | "appearance"
+  | "language"
   | "playback"
   | "privacy"
   | "updates"

@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from 'framer-motion';
-import { AppWindow, Apple, Smartphone, Terminal } from 'lucide-react';
+import { AppWindow, Apple, Smartphone, Terminal, Tv } from 'lucide-react';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import SectionHeading from '@/components/SectionHeading';
 import StreamRow from '@/components/StreamRow';
@@ -28,6 +28,16 @@ const ROWS = [
     ],
     size: '.AppImage',
     href: DOWNLOAD_LINKS.linuxAppImage,
+  },
+  {
+    icon: <Tv className="h-5 w-5" />,
+    title: 'Android TV & Google TV',
+    meta: [
+      { label: 'Native player', variant: 'instant' as const },
+      { label: 'D-pad ready', variant: 'dim' as const },
+    ],
+    size: '.apk',
+    href: DOWNLOAD_LINKS.androidTV,
   },
   {
     icon: <Smartphone className="h-5 w-5" />,
@@ -83,7 +93,7 @@ export default function DownloadTeaser() {
           <div className="flex items-start gap-3 rounded-row border border-line bg-[var(--surface-glass)] px-4 py-3">
             <AppWindow className="mt-0.5 h-5 w-5 shrink-0 text-ink-3" />
             <div>
-              <p className="font-body text-[0.9rem] font-semibold text-ink-1">Windows v1 is held</p>
+              <p className="font-body text-[0.9rem] font-semibold text-ink-1">Windows release is held</p>
               <p className="mt-1 font-mono text-[0.75rem] leading-relaxed tracking-[0.04em] text-ink-3">
                 Publishing after Authenticode signing passes.
               </p>

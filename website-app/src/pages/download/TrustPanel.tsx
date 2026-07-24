@@ -19,7 +19,7 @@ const TRUST_ROWS: TrustRow[] = [
   { icon: Apple, label: 'macOS notarized builds', note: 'Gatekeeper-approved' },
   { icon: PackageCheck, label: 'Linux AppImage', note: 'signed updater inside' },
   { icon: Fingerprint, label: 'checksums and provenance', note: 'SHA256SUMS · GitHub attestations' },
-  { icon: Clock, label: 'Windows v1 signing gate', note: 'held until Authenticode is proven', held: true },
+  { icon: Clock, label: 'Windows signing gate', note: 'held until Authenticode is proven', held: true },
   { icon: Clock, label: 'update on your schedule', note: 'auto-check can be disabled in Settings' },
 ];
 

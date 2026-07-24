@@ -106,6 +106,7 @@ jobs:
             "YAWF.Stream_${expected_version}_amd64.AppImage.sig" \
             "YAWF.Stream_${expected_version}_amd64.deb" \
             "YAWF.Stream_${expected_version}_amd64.deb.sig" \
+            "YAWF.Stream_Android.TV_${expected_version}.apk" \
             "YAWF.Stream_aarch64.app.tar.gz" \
             "YAWF.Stream_aarch64.app.tar.gz.sig" \
             "YAWF.Stream_x64.app.tar.gz" \
@@ -133,6 +134,77 @@ jobs:
             grep -Ei '\.(msi|exe)(\.sig)?$|windows' "$ASSET_NAMES" >&2
             exit 1
           fi
+
+  android-tv:
+    name: Android TV package verification
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        run: sdkmanager "build-tools;36.0.0"
+
+      - name: Download and verify APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          version="${version%-web}"
+          asset="YAWF.Stream_Android.TV_${version}.apk"
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$asset" \
+            --dir "$RUNNER_TEMP/release-assets"
+          apk="$RUNNER_TEMP/release-assets/$asset"
+          test -f "$apk"
+          apksigner verify "$apk"
+          expected_digest="$(tr -d '[:space:]:' < android-tv/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')"
+          actual_digest="$(
+            apksigner verify --print-certs "$apk" \
+              | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+              | head -1 \
+              | tr -d '[:space:]:' \
+              | tr '[:upper:]' '[:lower:]'
+          )"
+          if [ -z "$actual_digest" ] || [ "$actual_digest" != "$expected_digest" ]; then
+            echo "Android TV signing certificate does not match android-tv/SIGNING_CERT_SHA256" >&2
+            exit 1
+          fi
+          test "$(apkanalyzer manifest application-id "$apk")" = "com.yawf.stream.tv"
+          test "$(apkanalyzer manifest version-name "$apk")" = "$version"
+          manifest="$RUNNER_TEMP/android-tv-manifest.xml"
+          apkanalyzer manifest print "$apk" > "$manifest"
+          EXPECTED_VERSION="$version" MANIFEST="$manifest" python3 - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          android = "{http://schemas.android.com/apk/res/android}"
+          root = ET.parse(os.environ["MANIFEST"]).getroot()
+          assert root.attrib[f"{android}versionName"] == os.environ["EXPECTED_VERSION"]
+          features = {
+              node.attrib[f"{android}name"]: node.attrib.get(f"{android}required")
+              for node in root.findall("uses-feature")
+          }
+          assert features["android.software.leanback"] == "true"
+          assert features["android.hardware.touchscreen"] == "false"
+          application = root.find("application")
+          assert application is not None and application.attrib.get(f"{android}banner")
+          categories = {
+              node.attrib.get(f"{android}name")
+              for node in root.findall(".//category")
+          }
+          assert "android.intent.category.LEANBACK_LAUNCHER" in categories
+          PY
 
   macos:
     name: macOS ${{ matrix.arch }} clean install

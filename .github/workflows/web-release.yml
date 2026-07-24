@@ -413,7 +413,7 @@ jobs:
           if [ "${{ vars.YAWF_RELEASE_WINDOWS }}" = "true" ]; then
             echo "RELEASE_BODY=Signed macOS, Linux, and Windows desktop builds, plus self-hosted server packages. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
           else
-            echo "RELEASE_BODY=Signed macOS and Linux desktop builds, plus self-hosted server packages. Windows v1 is held until Authenticode signing is proven. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
+            echo "RELEASE_BODY=Signed macOS and Linux desktop builds, Android TV, and self-hosted server packages. Windows is held until Authenticode signing is proven. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
           fi
 
       - name: Build, bundle, sign & release
@@ -480,9 +480,104 @@ jobs:
           fi
           gh release upload "$tag" "$dmg" --clobber --repo "$GITHUB_REPOSITORY"
 
+  android-tv:
+    name: Signed Android TV APK
+    needs: release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate Android signing secrets
+        shell: bash
+        env:
+          ANDROID_TV_KEYSTORE_BASE64: ${{ secrets.ANDROID_TV_KEYSTORE_BASE64 }}
+          ANDROID_TV_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_TV_KEYSTORE_PASSWORD }}
+          ANDROID_TV_KEY_ALIAS: ${{ secrets.ANDROID_TV_KEY_ALIAS }}
+          ANDROID_TV_KEY_PASSWORD: ${{ secrets.ANDROID_TV_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in ANDROID_TV_KEYSTORE_BASE64 ANDROID_TV_KEYSTORE_PASSWORD ANDROID_TV_KEY_ALIAS ANDROID_TV_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing $name. Configure the stable Android TV signing identity before publishing v2."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+
+      - name: Restore Android signing key
+        shell: bash
+        env:
+          ANDROID_TV_KEYSTORE_BASE64: ${{ secrets.ANDROID_TV_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$ANDROID_TV_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/yawf-android-tv.jks"
+          echo "YAWF_ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/yawf-android-tv.jks" >> "$GITHUB_ENV"
+
+      - name: Test, lint, and build signed Android TV APK
+        working-directory: android-tv
+        env:
+          YAWF_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_TV_KEYSTORE_PASSWORD }}
+          YAWF_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_TV_KEY_ALIAS }}
+          YAWF_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_TV_KEY_PASSWORD }}
+        run: gradle --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
+
+      - name: Verify and upload Android TV APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          version="${version%-web}"
+          source="android-tv/app/build/outputs/apk/release/app-release.apk"
+          asset="$RUNNER_TEMP/YAWF.Stream_Android.TV_${version}.apk"
+          test -f "$source"
+          cp "$source" "$asset"
+          apksigner verify "$asset"
+          expected_digest="$(tr -d '[:space:]:' < android-tv/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')"
+          actual_digest="$(
+            apksigner verify --print-certs "$asset" \
+              | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+              | head -1 \
+              | tr -d '[:space:]:' \
+              | tr '[:upper:]' '[:lower:]'
+          )"
+          if [ -z "$actual_digest" ] || [ "$actual_digest" != "$expected_digest" ]; then
+            echo "::error::Android TV signing certificate does not match android-tv/SIGNING_CERT_SHA256"
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$asset" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
+
   finalize-release-assets:
     name: Checksums and provenance
-    needs: release
+    needs: [release, android-tv]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:

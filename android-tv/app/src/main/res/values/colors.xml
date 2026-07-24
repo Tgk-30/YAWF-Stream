@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="yawf_background">#050A10</color>
+    <color name="yawf_surface">#111B26</color>
+    <color name="yawf_cyan">#16D9F4</color>
+    <color name="yawf_gold">#F4B84A</color>
+    <color name="yawf_text">#F5FAFF</color>
+    <color name="yawf_muted">#A8B5C2</color>
+</resources>

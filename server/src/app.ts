@@ -67,6 +67,10 @@ import {
 } from "./transcodeSession.js";
 import { SERVER_VERSION } from "./version.js";
 import {
+  RemoteControlRegistry,
+  type RemoteCommandType,
+} from "./remoteControl.js";
+import {
   CREDENTIAL_PROVIDERS,
   type AuthContext,
   type BuildAppOptions,
@@ -162,6 +166,69 @@ const acceptInviteSchema = z.object({
   username: usernameSchema,
   password: passwordSchema,
   displayName: z.string().trim().min(1).max(100).optional(),
+});
+
+const remotePairSchema = z.object({
+  code: z.string().regex(/^\d{6}$/),
+  controllerName: z.string().trim().min(1).max(80).nullable().optional(),
+});
+
+const remoteCommandTypeSchema = z.enum([
+  "play",
+  "pause",
+  "seek-relative",
+  "seek-absolute",
+  "volume",
+  "mute",
+  "fullscreen",
+  "next",
+  "close",
+] satisfies RemoteCommandType[]);
+
+const remoteCommandSchema = z
+  .object({
+    type: remoteCommandTypeSchema,
+    value: z.union([z.number().finite(), z.boolean()]).optional(),
+  })
+  .superRefine((command, context) => {
+    if (
+      (command.type === "seek-relative" ||
+        command.type === "seek-absolute" ||
+        command.type === "volume") &&
+      typeof command.value !== "number"
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: `${command.type} requires a numeric value.`,
+        path: ["value"],
+      });
+    }
+    if (command.type === "mute" && typeof command.value !== "boolean") {
+      context.addIssue({
+        code: "custom",
+        message: "mute requires a boolean value.",
+        path: ["value"],
+      });
+    }
+  });
+
+const remoteStateSchema = z.object({
+  title: z.string().trim().max(300).nullable(),
+  subtitle: z.string().trim().max(300).nullable(),
+  playing: z.boolean(),
+  positionSeconds: z.number().finite().min(0).max(7 * 24 * 60 * 60),
+  durationSeconds: z
+    .number()
+    .finite()
+    .min(0)
+    .max(7 * 24 * 60 * 60)
+    .nullable(),
+  volume: z.number().finite().min(0).max(1),
+  muted: z.boolean(),
+});
+
+const remoteViewerQuerySchema = z.object({
+  after: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
 });
 
 const patchProfileSchema = z.object({
@@ -304,6 +371,99 @@ const folderSaveBodySchema = z.object({
   isSystem: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
+});
+
+const portableSettingSchema = z.object({
+  key: z.string().trim().min(1).max(120),
+  value: z.string().max(16_384),
+});
+
+const portableWatchlistSchema = z.object({
+  mediaId: mediaIdParamSchema,
+  addedAt: z.string().datetime(),
+  preview: boundedPreview,
+});
+
+const portableHistorySchema = z.object({
+  mediaId: mediaIdParamSchema,
+  episodeId: z.string().trim().min(1).max(128).nullable(),
+  progressSeconds: z.number().finite().nonnegative(),
+  durationSeconds: z.number().finite().positive().nullable(),
+  completed: z.boolean(),
+  lastWatched: z.string().datetime(),
+  streamQuality: z.string().trim().max(80).nullable(),
+  preview: boundedPreview,
+});
+
+const portableFolderSchema = z.object({
+  id: z.string().trim().min(1).max(128),
+  name: z.string().trim().min(1).max(120),
+  parentId: z.string().trim().min(1).max(128).nullable(),
+  listType: listTypeSchema,
+  folderKind: z.enum(["system_root", "manual", "watched", "release_wait"]),
+  isSystem: z.boolean(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+
+const portableLibrarySchema = z.object({
+  mediaId: mediaIdParamSchema,
+  folderId: z.string().trim().min(1).max(128).nullable(),
+  listType: listTypeSchema,
+  addedAt: z.string().datetime(),
+  customListName: z.string().max(200).nullable(),
+  releaseDateHint: z.string().max(64).nullable(),
+  renewalStatus: z.string().max(64).nullable(),
+  preview: boundedPreview,
+});
+
+const portableProfileBundleSchema = z
+  .object({
+    product: z.literal("YAWF Stream"),
+    format: z.literal("yawf-profile-portable"),
+    version: z.literal(1),
+    createdAt: z.string().datetime(),
+    settings: z.array(portableSettingSchema).max(300),
+    watchlist: z.array(portableWatchlistSchema).max(10_000),
+    history: z.array(portableHistorySchema).max(20_000),
+    folders: z.array(portableFolderSchema).max(5_000),
+    library: z.array(portableLibrarySchema).max(20_000),
+  })
+  .superRefine((bundle, context) => {
+    const folderIds = new Set<string>();
+    bundle.folders.forEach((folder, index) => {
+      if (folderIds.has(folder.id)) {
+        context.addIssue({
+          code: "custom",
+          message: "Folder IDs must be unique.",
+          path: ["folders", index, "id"],
+        });
+      }
+      folderIds.add(folder.id);
+      if (folder.isSystem !== (folder.folderKind !== "manual")) {
+        context.addIssue({
+          code: "custom",
+          message: "Folder system state does not match its kind.",
+          path: ["folders", index, "isSystem"],
+        });
+      }
+      if (
+        (folder.folderKind === "watched" ||
+          folder.folderKind === "release_wait") &&
+        folder.listType !== "favorites"
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Favorite system folders must use the favorites list.",
+          path: ["folders", index, "listType"],
+        });
+      }
+    });
+  });
+
+const portableImportSchema = z.object({
+  mode: z.enum(["merge", "replace"]).default("merge"),
+  bundle: portableProfileBundleSchema,
 });
 
 const credentialBodySchema = z.object({
@@ -493,6 +653,25 @@ const PROTECTED_PROFILE_SETTING_KEYS: ReadonlySet<string> = new Set([
   "profile_gate_kind",
   "bandwidth_cap_bytes",
 ]);
+
+const PORTABILITY_SECRET_SETTING_KEYS: ReadonlySet<string> = new Set([
+  "tmdb_api_key",
+  "trakt_client_id",
+  "trakt_client_secret",
+  "omdb_api_key",
+  "ai_api_key",
+  "opensubtitles_api_key",
+  "server_indexer_configs",
+]);
+
+function isPortableProfileSetting(key: string, value?: string): boolean {
+  return (
+    !PROTECTED_PROFILE_SETTING_KEYS.has(key) &&
+    !PORTABILITY_SECRET_SETTING_KEYS.has(key) &&
+    !/(?:^|_)(?:api_?key|token|secret|password|credential)(?:_|$)/i.test(key) &&
+    !(value?.startsWith("secret:") ?? false)
+  );
+}
 
 function httpError(statusCode: number, message: string): Error & { statusCode: number } {
   return Object.assign(new Error(message), { statusCode });
@@ -2235,6 +2414,13 @@ function registerRoutes(
 ): void {
   const rateLimit = createRateLimiter();
   const loginFailures = new Map<string, LoginFailureState>();
+  const remoteControls = new RemoteControlRegistry();
+
+  const readRemoteToken = (request: FastifyRequest): string | null => {
+    const raw = request.headers["x-yawf-remote-token"];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    return typeof value === "string" && value.length <= 256 ? value : null;
+  };
 
   app.get("/api/health", async () => ({
     ok: true,
@@ -2279,11 +2465,109 @@ function registerRoutes(
     };
   });
 
+  // TV-browser and phone remote. The TV's authenticated profile owns the
+  // ephemeral viewer session. A six-digit, single-use code grants one
+  // controller a separate random token, so a household member cannot discover
+  // or control another screen merely by enumerating session IDs. No stream URL,
+  // account cookie, provider credential, or title history is copied into the
+  // pairing token.
+  app.post("/api/remote/sessions", async (request) => {
+    const auth = requireAuth(db, request);
+    requireCsrf(request);
+    rateLimit(request, `remote:create:${auth.profileId}`, 12, 60 * 60_000);
+    const session = remoteControls.create(auth.profileId);
+    audit(db, auth, "remote.session.create", "remote_session", session.id);
+    return { session };
+  });
+
+  app.post("/api/remote/pair", async (request) => {
+    const auth = requireAuth(db, request);
+    requireCsrf(request);
+    rateLimit(request, `remote:pair:${auth.profileId}`, 20, 15 * 60_000);
+    const body = parseBody(remotePairSchema, request.body);
+    const session = remoteControls.pair(
+      body.code,
+      body.controllerName?.trim() || null,
+    );
+    if (session == null) {
+      throw httpError(404, "Pairing code is invalid or expired.");
+    }
+    audit(db, auth, "remote.session.pair", "remote_session", session.id);
+    return { session };
+  });
+
+  app.get("/api/remote/sessions/:id", async (request) => {
+    const auth = requireAuth(db, request);
+    const id = sessionIdParamSchema.parse((request.params as { id: string }).id);
+    const query = parseBody(remoteViewerQuerySchema, request.query);
+    const session = remoteControls.viewerSnapshot(id, auth.profileId, query.after);
+    if (session == null) throw httpError(404, "Remote session not found.");
+    return { session };
+  });
+
+  app.put("/api/remote/sessions/:id/state", async (request) => {
+    const auth = requireAuth(db, request);
+    requireCsrf(request);
+    const id = sessionIdParamSchema.parse((request.params as { id: string }).id);
+    const body = parseBody(remoteStateSchema, request.body);
+    const state = remoteControls.updateState(id, auth.profileId, body);
+    if (state == null) throw httpError(404, "Remote session not found.");
+    return { state };
+  });
+
+  app.get("/api/remote/sessions/:id/controller", async (request) => {
+    requireAuth(db, request);
+    const id = sessionIdParamSchema.parse((request.params as { id: string }).id);
+    const token = readRemoteToken(request);
+    const session =
+      token == null ? null : remoteControls.controllerSnapshot(id, token);
+    if (session == null) throw httpError(404, "Remote session not found.");
+    return { session };
+  });
+
+  app.post("/api/remote/sessions/:id/commands", async (request) => {
+    const auth = requireAuth(db, request);
+    requireCsrf(request);
+    rateLimit(request, `remote:command:${auth.profileId}`, 600, 60_000);
+    const id = sessionIdParamSchema.parse((request.params as { id: string }).id);
+    const token = readRemoteToken(request);
+    const body = parseBody(remoteCommandSchema, request.body);
+    const command =
+      token == null ? null : remoteControls.enqueue(id, token, body);
+    if (command == null) throw httpError(404, "Remote session not found.");
+    return { command };
+  });
+
+  app.delete("/api/remote/sessions/:id", async (request) => {
+    const auth = requireAuth(db, request);
+    requireCsrf(request);
+    const id = sessionIdParamSchema.parse((request.params as { id: string }).id);
+    if (!remoteControls.remove(id, auth.profileId)) {
+      throw httpError(404, "Remote session not found.");
+    }
+    audit(db, auth, "remote.session.revoke", "remote_session", id);
+    return { ok: true };
+  });
+
   app.get("/api/admin/health", async (request) => {
     const auth = requireAuth(db, request);
     requireAdmin(auth);
     return {
       ...adminHealthSummary(db, config),
+      transcode: {
+        enabled: config.enableTranscode,
+        ready: transcode.ready,
+        configuredEncoder: config.transcodeVideoEncoder,
+        activeEncoder: transcode.ready ? config.transcodeVideoEncoder : null,
+        availableVideoEncoders: transcode.ready
+          ? transcode.availableVideoEncoders
+          : [],
+        adaptive: transcode.ready,
+        seekOffset: transcode.ready,
+        subtitleSidecar:
+          transcode.ready && transcode.subtitleSidecarAvailable,
+        toneMapping: transcode.ready && transcode.toneMappingAvailable,
+      },
       update: await serverUpdateStatus(config.updateCheck),
     };
   });
@@ -3437,6 +3721,85 @@ function registerRoutes(
     };
   });
 
+  app.post("/api/admin/invites/:id/reissue", async (request) => {
+    const auth = requireAuth(db, request);
+    requireAdmin(auth);
+    requireCsrf(request);
+    rateLimit(request, `invite:reissue:${auth.userId}`, 20, 60 * 60_000);
+    const sourceId = z
+      .string()
+      .trim()
+      .min(1)
+      .max(120)
+      .parse((request.params as { id: string }).id);
+    const source = db.sqlite
+      .prepare(
+        `SELECT id, label, role, simple_mode, max_uses, used_count,
+                created_at, expires_at, revoked_at
+         FROM invites
+         WHERE id = ?`,
+      )
+      .get(sourceId) as Parameters<typeof mapInviteRow>[0] | undefined;
+    if (source == null) throw httpError(404, "Invite not found.");
+    if (auth.role !== "owner" && source.role === "admin") {
+      throw httpError(403, "Only the owner can reissue admin invites.");
+    }
+
+    const originalLifetimeSeconds = Math.round(
+      (new Date(source.expires_at).getTime() -
+        new Date(source.created_at).getTime()) /
+        1000,
+    );
+    const lifetimeSeconds = Math.min(
+      60 * 60 * 24 * 30,
+      Math.max(60, originalLifetimeSeconds),
+    );
+    const replacementId = randomId("invite");
+    const token = randomToken(32);
+    const now = nowISO();
+    const expiresAt = addSecondsISO(lifetimeSeconds);
+    const replacement = db.transaction(() => {
+      db.sqlite
+        .prepare(
+          "UPDATE invites SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+        )
+        .run(now, sourceId);
+      db.sqlite
+        .prepare(
+          `INSERT INTO invites
+           (id, token_hash, created_by_user_id, created_by_profile_id, label,
+            role, simple_mode, max_uses, used_count, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        )
+        .run(
+          replacementId,
+          sha256(token),
+          auth.userId,
+          auth.profileId,
+          source.label,
+          source.role,
+          source.simple_mode,
+          source.max_uses,
+          now,
+          expiresAt,
+        );
+      return db.sqlite
+        .prepare(
+          `SELECT id, label, role, simple_mode, max_uses, used_count,
+                  created_at, expires_at, revoked_at
+           FROM invites
+           WHERE id = ?`,
+        )
+        .get(replacementId) as Parameters<typeof mapInviteRow>[0];
+    });
+    audit(db, auth, "invite.reissue", "invite", replacementId, {
+      sourceInviteId: sourceId,
+      role: source.role,
+      maxUses: source.max_uses,
+    });
+    return { invite: mapInviteRow(replacement), token };
+  });
+
   app.delete("/api/admin/invites/:id", async (request) => {
     const auth = requireAuth(db, request);
     requireAdmin(auth);
@@ -4045,6 +4408,317 @@ function registerRoutes(
     audit(db, auth, "library.entry.delete", "library_entry", id);
     return { ok: true };
   });
+
+  app.get("/api/portability/export", async (request) => {
+    const auth = requireAuth(db, request);
+    ensureLibrarySystemFolders(db, auth.profileId);
+    const settings = (
+      db.sqlite
+        .prepare(
+          `SELECT key, value
+           FROM profile_settings
+           WHERE profile_id = ?
+           ORDER BY key`,
+        )
+        .all(auth.profileId) as Array<{ key: string; value: string }>
+    ).filter((row) => isPortableProfileSetting(row.key, row.value));
+    const watchlist = (
+      db.sqlite
+        .prepare(
+          `SELECT media_id, added_at, preview_json
+           FROM watchlist
+           WHERE profile_id = ?
+           ORDER BY added_at DESC`,
+        )
+        .all(auth.profileId) as Array<{
+        media_id: string;
+        added_at: string;
+        preview_json: string;
+      }>
+    ).map((row) => ({
+      mediaId: row.media_id,
+      addedAt: row.added_at,
+      preview: deserializePreview(row.preview_json),
+    }));
+    const history = (
+      db.sqlite
+        .prepare(
+          `SELECT media_id, episode_id, progress_seconds, duration_seconds,
+                  completed, last_watched, stream_quality, preview_json
+           FROM watch_history
+           WHERE profile_id = ?
+           ORDER BY last_watched DESC`,
+        )
+        .all(auth.profileId) as Parameters<typeof mapWatchHistoryRow>[0][]
+    ).map(mapWatchHistoryRow);
+    const folders = (
+      db.sqlite
+        .prepare(
+          `SELECT ${FOLDER_COLS}
+           FROM library_folders
+           WHERE profile_id = ?`,
+        )
+        .all(auth.profileId) as unknown as LibraryFolderRow[]
+    ).map(mapFolderRow);
+    const library = (
+      db.sqlite
+        .prepare(
+          `SELECT ${LIBRARY_COLS}
+           FROM user_library
+           WHERE profile_id = ?
+           ORDER BY added_at DESC`,
+        )
+        .all(auth.profileId) as unknown as LibraryRow[]
+    ).map(mapLibraryRow);
+
+    return {
+      bundle: {
+        product: "YAWF Stream",
+        format: "yawf-profile-portable",
+        version: 1,
+        createdAt: nowISO(),
+        settings,
+        watchlist,
+        history,
+        folders,
+        library,
+      },
+    };
+  });
+
+  app.post(
+    "/api/portability/import",
+    { bodyLimit: 10 * 1024 * 1024 },
+    async (request) => {
+      const auth = requireAuth(db, request);
+      requireNotRestricted(auth);
+      requireCsrf(request);
+      rateLimit(request, `portability:import:${auth.profileId}`, 6, 60 * 60_000);
+      const body = parseBody(portableImportSchema, request.body);
+      const counts = {
+        settings: 0,
+        watchlist: 0,
+        history: 0,
+        folders: 0,
+        library: 0,
+      };
+
+      ensureLibrarySystemFolders(db, auth.profileId);
+      db.transaction(() => {
+        if (body.mode === "replace") {
+          db.sqlite
+            .prepare("DELETE FROM watchlist WHERE profile_id = ?")
+            .run(auth.profileId);
+          db.sqlite
+            .prepare("DELETE FROM watch_history WHERE profile_id = ?")
+            .run(auth.profileId);
+          db.sqlite
+            .prepare("DELETE FROM user_library WHERE profile_id = ?")
+            .run(auth.profileId);
+          db.sqlite
+            .prepare(
+              "DELETE FROM library_folders WHERE profile_id = ? AND is_system = 0",
+            )
+            .run(auth.profileId);
+          const existingSettings = db.sqlite
+            .prepare("SELECT key, value FROM profile_settings WHERE profile_id = ?")
+            .all(auth.profileId) as Array<{ key: string; value: string }>;
+          const removeSetting = db.sqlite.prepare(
+            "DELETE FROM profile_settings WHERE profile_id = ? AND key = ?",
+          );
+          for (const setting of existingSettings) {
+            if (isPortableProfileSetting(setting.key, setting.value)) {
+              removeSetting.run(auth.profileId, setting.key);
+            }
+          }
+        }
+
+        const saveSetting = db.sqlite.prepare(
+          `INSERT INTO profile_settings (profile_id, key, value)
+           VALUES (?, ?, ?)
+           ON CONFLICT(profile_id, key) DO UPDATE SET value = excluded.value`,
+        );
+        for (const setting of body.bundle.settings) {
+          if (!isPortableProfileSetting(setting.key, setting.value)) continue;
+          saveSetting.run(auth.profileId, setting.key, setting.value);
+          counts.settings += 1;
+        }
+
+        const saveWatchlist = db.sqlite.prepare(
+          `INSERT INTO watchlist (profile_id, media_id, added_at, preview_json)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(profile_id, media_id) DO UPDATE SET
+             added_at = CASE
+               WHEN excluded.added_at > watchlist.added_at
+               THEN excluded.added_at ELSE watchlist.added_at END,
+             preview_json = CASE
+               WHEN excluded.added_at >= watchlist.added_at
+               THEN excluded.preview_json ELSE watchlist.preview_json END`,
+        );
+        for (const entry of body.bundle.watchlist) {
+          saveWatchlist.run(
+            auth.profileId,
+            entry.mediaId,
+            entry.addedAt,
+            serializePreview(entry.preview),
+          );
+          counts.watchlist += 1;
+        }
+
+        const saveHistory = db.sqlite.prepare(
+          `INSERT INTO watch_history
+             (profile_id, media_id, episode_key, episode_id, progress_seconds,
+              duration_seconds, completed, last_watched, stream_quality, preview_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(profile_id, media_id, episode_key) DO UPDATE SET
+             episode_id = CASE WHEN excluded.last_watched >= watch_history.last_watched
+               THEN excluded.episode_id ELSE watch_history.episode_id END,
+             progress_seconds = CASE WHEN excluded.last_watched >= watch_history.last_watched
+               THEN excluded.progress_seconds ELSE watch_history.progress_seconds END,
+             duration_seconds = CASE WHEN excluded.last_watched >= watch_history.last_watched
+               THEN excluded.duration_seconds ELSE watch_history.duration_seconds END,
+             completed = CASE WHEN excluded.last_watched >= watch_history.last_watched
+               THEN excluded.completed ELSE watch_history.completed END,
+             last_watched = MAX(excluded.last_watched, watch_history.last_watched),
+             stream_quality = CASE WHEN excluded.last_watched >= watch_history.last_watched
+               THEN excluded.stream_quality ELSE watch_history.stream_quality END,
+             preview_json = CASE WHEN excluded.last_watched >= watch_history.last_watched
+               THEN excluded.preview_json ELSE watch_history.preview_json END`,
+        );
+        for (const entry of body.bundle.history) {
+          saveHistory.run(
+            auth.profileId,
+            entry.mediaId,
+            entry.episodeId ?? "",
+            entry.episodeId,
+            entry.progressSeconds,
+            entry.durationSeconds,
+            entry.completed ? 1 : 0,
+            entry.lastWatched,
+            entry.streamQuality,
+            serializePreview(entry.preview),
+          );
+          counts.history += 1;
+        }
+
+        const portableFolders = new Map(
+          body.bundle.folders.map((folder) => [folder.id, folder]),
+        );
+        const folderMap = new Map<string, string>();
+        for (const folder of body.bundle.folders) {
+          if (folder.folderKind === "system_root") {
+            folderMap.set(folder.id, systemRootId(auth.profileId, folder.listType));
+          } else if (folder.folderKind === "watched") {
+            folderMap.set(folder.id, favWatchedId(auth.profileId));
+          } else if (folder.folderKind === "release_wait") {
+            folderMap.set(folder.id, favReleaseWaitId(auth.profileId));
+          } else {
+            folderMap.set(
+              folder.id,
+              `import-${sha256(`${auth.profileId}:${folder.id}`).slice(0, 32)}`,
+            );
+          }
+        }
+
+        const saveFolder = db.sqlite.prepare(
+          `INSERT INTO library_folders
+             (id, profile_id, name, parent_id, list_type, folder_kind,
+              is_system, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'manual', 0, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name,
+             parent_id = excluded.parent_id,
+             updated_at = excluded.updated_at`,
+        );
+        const pendingFolders = body.bundle.folders.filter(
+          (folder) => !folder.isSystem && folder.folderKind === "manual",
+        );
+        const insertedFolders = new Set<string>();
+        while (pendingFolders.length > 0) {
+          let nextIndex = pendingFolders.findIndex((folder) => {
+            if (folder.parentId == null) return true;
+            const parent = portableFolders.get(folder.parentId);
+            return (
+              parent == null ||
+              parent.folderKind !== "manual" ||
+              parent.listType !== folder.listType ||
+              insertedFolders.has(parent.id)
+            );
+          });
+          // A remaining cycle is still recoverable. Break one edge by attaching
+          // the first stable entry to its list root, then continue in dependency
+          // order so the rest of the hierarchy is preserved.
+          if (nextIndex < 0) nextIndex = 0;
+          const [folder] = pendingFolders.splice(nextIndex, 1);
+          const parent =
+            folder.parentId == null
+              ? null
+              : portableFolders.get(folder.parentId) ?? null;
+          const parentId =
+            parent != null &&
+            parent.listType === folder.listType &&
+            (parent.folderKind !== "manual" || insertedFolders.has(parent.id))
+              ? (folderMap.get(parent.id) ??
+                systemRootId(auth.profileId, folder.listType))
+              : systemRootId(auth.profileId, folder.listType);
+          saveFolder.run(
+            folderMap.get(folder.id)!,
+            auth.profileId,
+            folder.name,
+            parentId,
+            folder.listType,
+            folder.createdAt,
+            folder.updatedAt,
+          );
+          insertedFolders.add(folder.id);
+          counts.folders += 1;
+        }
+
+        const saveLibrary = db.sqlite.prepare(
+          `INSERT INTO user_library
+             (id, profile_id, media_id, folder_id, list_type, added_at,
+              custom_list_name, release_date_hint, renewal_status, preview_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(profile_id, media_id, folder_id) DO UPDATE SET
+             added_at = MAX(excluded.added_at, user_library.added_at),
+             custom_list_name = excluded.custom_list_name,
+             release_date_hint = excluded.release_date_hint,
+             renewal_status = excluded.renewal_status,
+             preview_json = excluded.preview_json`,
+        );
+        for (const entry of body.bundle.library) {
+          const sourceFolder =
+            entry.folderId == null
+              ? null
+              : portableFolders.get(entry.folderId) ?? null;
+          const folderId =
+            sourceFolder != null && sourceFolder.listType === entry.listType
+              ? (folderMap.get(sourceFolder.id) ??
+                systemRootId(auth.profileId, entry.listType))
+              : systemRootId(auth.profileId, entry.listType);
+          saveLibrary.run(
+            randomId("lib"),
+            auth.profileId,
+            entry.mediaId,
+            folderId,
+            entry.listType,
+            entry.addedAt,
+            entry.customListName,
+            entry.releaseDateHint,
+            entry.renewalStatus,
+            serializePreview(entry.preview),
+          );
+          counts.library += 1;
+        }
+      });
+
+      audit(db, auth, "portability.import", "profile", auth.profileId, {
+        mode: body.mode,
+        counts,
+      });
+      return { ok: true, counts };
+    },
+  );
 
   app.get("/api/credentials/effective", async (request) => {
     const auth = requireAuth(db, request);

@@ -14,6 +14,8 @@ import {
 import {
   exportPortableBackup,
   parsePortableBackup,
+  parsePortableProfileBundle,
+  portableProfileBundleFromBackup,
   restorePortableBackup,
 } from "./portableBackup";
 
@@ -89,6 +91,101 @@ describe("portable local backup", () => {
     expect(await target.getSetting("tmdb_api_key")).toBe("secret:tmdb_api_key");
     expect(await target.getSecret("tmdb_api_key")).toBe("keep-me");
     expect(await target.listWatchlist()).toHaveLength(1);
+  });
+
+  it("converts one local profile into the Server Mode portability contract", async () => {
+    const store = new DexieStore(`portable-server-${crypto.randomUUID()}`);
+    stores.push(store);
+    await store.setSetting("ui_theme", "midnight");
+    await store.addToWatchlist({
+      id: "movie-1",
+      type: "movie",
+      title: "Saved film",
+      posterPath: null,
+      backdropPath: null,
+    });
+    const watchlistFolder = await store.createWatchlistFolder("Weekend");
+    await store.assignWatchlistFolder("movie-1", watchlistFolder.id);
+    await store.recordHistory({
+      mediaId: "movie-1",
+      progressSeconds: 42,
+      durationSeconds: 100,
+      completed: false,
+      lastWatched: "2026-07-24T10:00:00.000Z",
+      preview: {
+        id: "movie-1",
+        type: "movie",
+        title: "Saved film",
+        posterPath: null,
+        backdropPath: null,
+      },
+    });
+    const folder = await store.createFolder("Keep", "favorites", null);
+    await store.addToLibrary({
+      mediaId: "movie-1",
+      listType: "favorites",
+      folderId: folder.id,
+      preview: {
+        id: "movie-1",
+        type: "movie",
+        title: "Saved film",
+        posterPath: null,
+        backdropPath: null,
+      },
+    });
+
+    const conversion = portableProfileBundleFromBackup(
+      await exportPortableBackup(store),
+    );
+
+    expect(conversion.bundle).toMatchObject({
+      product: "YAWF Stream",
+      format: "yawf-profile-portable",
+      version: 1,
+      settings: [{ key: "ui_theme", value: "midnight" }],
+    });
+    expect(conversion.bundle.watchlist).toHaveLength(1);
+    expect(conversion.bundle.history).toContainEqual(
+      expect.objectContaining({
+        mediaId: "movie-1",
+        progressSeconds: 42,
+      }),
+    );
+    expect(conversion.bundle.folders).toContainEqual(
+      expect.objectContaining({ id: folder.id, name: "Keep" }),
+    );
+    expect(conversion.bundle.library).toContainEqual(
+      expect.objectContaining({
+        mediaId: "movie-1",
+        folderId: folder.id,
+      }),
+    );
+    expect(conversion.omissions.join(" ")).toContain(
+      "watchlist folder assignment",
+    );
+    expect(conversion.skippedRows).toBe(0);
+    expect(
+      parsePortableProfileBundle(JSON.stringify(conversion.bundle)),
+    ).toEqual(conversion.bundle);
+  });
+
+  it("rejects malformed and secret-bearing Server Mode profile bundles", () => {
+    expect(() => parsePortableProfileBundle("{")).toThrow("not valid JSON");
+    expect(() =>
+      parsePortableProfileBundle(
+        JSON.stringify({
+          product: "YAWF Stream",
+          format: "yawf-profile-portable",
+          version: 1,
+          createdAt: new Date().toISOString(),
+          settings: [{ key: "tmdb_api_key", value: "unsafe" }],
+          watchlist: [],
+          history: [],
+          folders: [],
+          library: [],
+        }),
+      ),
+    ).toThrow("secret-valued setting");
   });
 
   it("exports and restores every local profile without exporting profile locks", async () => {

@@ -38,6 +38,7 @@ import type { Translator } from "../services/subtitles/SubtitleTranslator";
 import { useSubtitleTracks } from "./player/useSubtitleTracks";
 import { useScrubThumbnails } from "./player/useScrubThumbnails";
 import { useWakeLock } from "./player/useWakeLock";
+import { useTVRemotePlayback } from "./player/useTVRemotePlayback";
 import { ScrubBar } from "./player/ScrubBar";
 import { CaptionsMenu } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
@@ -64,6 +65,12 @@ import {
   scrobblePlaybackStop,
   type TraktScrobbleContext,
 } from "../data/traktScrobble";
+import {
+  hasAndroidTVBridge,
+  startAndroidTVPlayback,
+  stopAndroidTVPlayback,
+  type AndroidTVPlaybackProgress,
+} from "../lib/androidTV";
 import "./VideoPlayer.css";
 
 type Playability = "webview" | "external";
@@ -482,6 +489,12 @@ export function VideoPlayer({
   const [externalActionStatus, setExternalActionStatus] = useState<string | null>(null);
   const [playbackAttempt, setPlaybackAttempt] = useState(0);
   const [activeSubtitleUrl, setActiveSubtitleUrl] = useState<string | null>(null);
+  const [androidTVError, setAndroidTVError] = useState<string | null>(null);
+  const androidTVNative = hasAndroidTVBridge();
+  const androidOnCloseRef = useRef(onClose);
+  const androidOnProgressRef = useRef(onProgress);
+  androidOnCloseRef.current = onClose;
+  androidOnProgressRef.current = onProgress;
   const [chromeHovered, setChromeHovered] = useState(false);
   const [chromeFocused, setChromeFocused] = useState(false);
   const chromeHideTimer = useRef<number | undefined>(undefined);
@@ -755,6 +768,133 @@ export function VideoPlayer({
       .catch(() => {});
   }, [castSuspended, mode, useEmbedded]);
 
+  useEffect(() => {
+    if (!androidTVNative) return;
+    setAndroidTVError(null);
+    const playbackURL = externalPlaybackUrl ?? effectiveUrl;
+    const started = startAndroidTVPlayback({
+      url: playbackURL,
+      title,
+      subtitle: subtitle ?? null,
+      startPositionSeconds: Math.max(0, startPositionSeconds ?? 0),
+      authorization: playbackAuthorization ?? null,
+      audioLanguage: playerPreferences?.defaultAudioLanguage ?? null,
+      subtitleLanguage: playerPreferences?.defaultSubtitleLanguage ?? null,
+      subtitlesEnabled:
+        playerPreferences?.defaultSubtitleBehavior === "preferred",
+    });
+    if (!started) {
+      setAndroidTVError("The Android TV player could not be opened.");
+      return;
+    }
+
+    const readProgress = (event: Event): AndroidTVPlaybackProgress | null => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (detail == null || typeof detail !== "object") return null;
+      const candidate = detail as Partial<AndroidTVPlaybackProgress>;
+      if (
+        typeof candidate.positionSeconds !== "number" ||
+        !Number.isFinite(candidate.positionSeconds) ||
+        !(
+          candidate.durationSeconds == null ||
+          (typeof candidate.durationSeconds === "number" &&
+            Number.isFinite(candidate.durationSeconds))
+        )
+      ) {
+        return null;
+      }
+      return {
+        positionSeconds: Math.max(0, candidate.positionSeconds),
+        durationSeconds:
+          candidate.durationSeconds == null
+            ? null
+            : Math.max(0, candidate.durationSeconds),
+      };
+    };
+    const handleProgress = (event: Event) => {
+      const progress = readProgress(event);
+      if (progress == null) return;
+      androidOnProgressRef.current?.(
+        progress.positionSeconds + timelineOffsetSeconds,
+        progress.durationSeconds == null
+          ? null
+          : progress.durationSeconds + timelineOffsetSeconds,
+      );
+    };
+    const handleClosed = (event: Event) => {
+      handleProgress(event);
+      androidOnCloseRef.current();
+    };
+    const handleError = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: unknown }>).detail;
+      setAndroidTVError(
+        typeof detail?.message === "string" && detail.message.length > 0
+          ? detail.message
+          : "Android TV playback stopped unexpectedly.",
+      );
+    };
+    window.addEventListener("yawf-android-tv-progress", handleProgress);
+    window.addEventListener("yawf-android-tv-closed", handleClosed);
+    window.addEventListener("yawf-android-tv-error", handleError);
+    return () => {
+      window.removeEventListener("yawf-android-tv-progress", handleProgress);
+      window.removeEventListener("yawf-android-tv-closed", handleClosed);
+      window.removeEventListener("yawf-android-tv-error", handleError);
+      stopAndroidTVPlayback();
+    };
+  }, [
+    androidTVNative,
+    effectiveUrl,
+    externalPlaybackUrl,
+    playbackAuthorization,
+    playerPreferences?.defaultAudioLanguage,
+    playerPreferences?.defaultSubtitleBehavior,
+    playerPreferences?.defaultSubtitleLanguage,
+    startPositionSeconds,
+    subtitle,
+    timelineOffsetSeconds,
+    title,
+  ]);
+
+  if (androidTVNative) {
+    return createPortal(
+      <div className="player-backdrop">
+        <div
+          className="player player-native-tv-status"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Playing ${title} on Android TV`}
+        >
+          <span className="player-title">{title}</span>
+          {androidTVError == null ? (
+            <p>Playing in the native Android TV player.</p>
+          ) : (
+            <>
+              <p role="alert">{androidTVError}</p>
+              {onTryNextSource != null && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void onTryNextSource()}
+                >
+                  Try next source
+                </button>
+              )}
+            </>
+          )}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => stopAndroidTVPlayback()}
+          >
+            Close player
+          </button>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
   // In-window native player takes over the whole window (transparent surface +
   // hidden app chrome), so render it standalone - outside the modal frame.
   if (useEmbedded) {
@@ -925,6 +1065,7 @@ export function VideoPlayer({
             scrobbleContext={scrobbleContext}
             upNext={upNext}
             onPlayNext={onPlayNext}
+            onRemoteClose={onClose}
             autoCountdown={autoCountdown}
           />
         ) : (
@@ -999,6 +1140,7 @@ function WebviewPlayer({
   scrobbleContext,
   upNext = null,
   onPlayNext,
+  onRemoteClose,
   autoCountdown = true,
 }: {
   url: string;
@@ -1043,6 +1185,7 @@ function WebviewPlayer({
   scrobbleContext: TraktScrobbleContext | null;
   upNext?: { label: string } | null;
   onPlayNext?: () => void;
+  onRemoteClose: () => void;
   autoCountdown?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1100,6 +1243,14 @@ function WebviewPlayer({
   const underTauri = isTauri();
   const mediaArtist = nowPlaying?.episodeLabel ?? subtitle ?? "";
   const mediaArtworkUrl = nowPlaying?.posterUrl ?? "";
+
+  useTVRemotePlayback({
+    videoRef,
+    title,
+    subtitle,
+    onClose: onRemoteClose,
+    onNext: onPlayNext,
+  });
 
   useEffect(() => {
     if (!detailsOpen) {

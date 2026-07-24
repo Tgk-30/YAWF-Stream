@@ -12,6 +12,7 @@ import type { OMDBRatings } from "../services/metadata/OMDBService";
 import type { StreamRow } from "../data/streams";
 import type { UpcomingEpisode } from "./metadata";
 import type { MovieRelease } from "../services/metadata/TMDBService";
+import type { PortableProfileBundle } from "../data/portableBackup";
 import { configuredServerURL } from "./serverMode";
 import { notifyUnauthorized, readCsrfToken } from "./serverSession";
 
@@ -27,8 +28,9 @@ async function serverRequest<T>(
   method: string,
   path: string,
   body?: unknown,
+  extraHeaders?: Readonly<Record<string, string>>,
 ): Promise<T> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...(extraHeaders ?? {}) };
   const unsafe = method !== "GET" && method !== "HEAD";
   if (body !== undefined) headers["content-type"] = "application/json";
   if (unsafe) {
@@ -65,6 +67,177 @@ async function serverRequest<T>(
     throw error;
   }
   return parsed as T;
+}
+
+export type RemoteCommandType =
+  | "play"
+  | "pause"
+  | "seek-relative"
+  | "seek-absolute"
+  | "volume"
+  | "mute"
+  | "fullscreen"
+  | "next"
+  | "close";
+
+export interface RemotePlaybackState {
+  title: string | null;
+  subtitle: string | null;
+  playing: boolean;
+  positionSeconds: number;
+  durationSeconds: number | null;
+  volume: number;
+  muted: boolean;
+  updatedAt: string;
+}
+
+export interface TVRemoteSession {
+  id: string;
+  pairingCode: string;
+  pairingExpiresAt: string;
+  expiresAt: string;
+}
+
+export interface PhoneRemoteSession {
+  id: string;
+  controllerToken: string;
+  expiresAt: string;
+  state: RemotePlaybackState;
+}
+
+export interface TVRemoteCommand {
+  sequence: number;
+  type: RemoteCommandType;
+  value?: number | boolean;
+  createdAt: string;
+}
+
+export async function createTVRemoteSession(): Promise<TVRemoteSession> {
+  return (
+    await serverRequest<{ session: TVRemoteSession }>(
+      "POST",
+      "/api/remote/sessions",
+    )
+  ).session;
+}
+
+export async function pairPhoneRemote(input: {
+  code: string;
+  controllerName?: string | null;
+}): Promise<PhoneRemoteSession> {
+  return (
+    await serverRequest<{ session: PhoneRemoteSession }>(
+      "POST",
+      "/api/remote/pair",
+      input,
+    )
+  ).session;
+}
+
+export async function fetchTVRemoteSession(
+  id: string,
+  afterSequence: number,
+): Promise<{
+  paired: boolean;
+  controllerName: string | null;
+  expiresAt: string;
+  state: RemotePlaybackState;
+  commands: TVRemoteCommand[];
+}> {
+  return (
+    await serverRequest<{
+      session: {
+        paired: boolean;
+        controllerName: string | null;
+        expiresAt: string;
+        state: RemotePlaybackState;
+        commands: TVRemoteCommand[];
+      };
+    }>(
+      "GET",
+      `/api/remote/sessions/${encodeURIComponent(id)}?after=${afterSequence}`,
+    )
+  ).session;
+}
+
+export async function updateTVRemoteState(
+  id: string,
+  state: Omit<RemotePlaybackState, "updatedAt">,
+): Promise<RemotePlaybackState> {
+  return (
+    await serverRequest<{ state: RemotePlaybackState }>(
+      "PUT",
+      `/api/remote/sessions/${encodeURIComponent(id)}/state`,
+      state,
+    )
+  ).state;
+}
+
+export async function fetchPhoneRemoteState(
+  session: Pick<PhoneRemoteSession, "id" | "controllerToken">,
+): Promise<RemotePlaybackState> {
+  return (
+    await serverRequest<{ session: { state: RemotePlaybackState } }>(
+      "GET",
+      `/api/remote/sessions/${encodeURIComponent(session.id)}/controller`,
+      undefined,
+      { "x-yawf-remote-token": session.controllerToken },
+    )
+  ).session.state;
+}
+
+export async function sendPhoneRemoteCommand(
+  session: Pick<PhoneRemoteSession, "id" | "controllerToken">,
+  command: { type: RemoteCommandType; value?: number | boolean },
+): Promise<TVRemoteCommand> {
+  return (
+    await serverRequest<{ command: TVRemoteCommand }>(
+      "POST",
+      `/api/remote/sessions/${encodeURIComponent(session.id)}/commands`,
+      command,
+      { "x-yawf-remote-token": session.controllerToken },
+    )
+  ).command;
+}
+
+export async function revokeTVRemoteSession(id: string): Promise<void> {
+  await serverRequest(
+    "DELETE",
+    `/api/remote/sessions/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function exportServerPortableProfile(): Promise<PortableProfileBundle> {
+  return (
+    await serverRequest<{ bundle: PortableProfileBundle }>(
+      "GET",
+      "/api/portability/export",
+    )
+  ).bundle;
+}
+
+export async function importServerPortableProfile(
+  bundle: PortableProfileBundle,
+  mode: "merge" | "replace" = "merge",
+): Promise<{
+  settings: number;
+  watchlist: number;
+  history: number;
+  folders: number;
+  library: number;
+}> {
+  return (
+    await serverRequest<{
+      ok: true;
+      counts: {
+        settings: number;
+        watchlist: number;
+        history: number;
+        folders: number;
+        library: number;
+      };
+    }>("POST", "/api/portability/import", { mode, bundle })
+  ).counts;
 }
 
 function absoluteServerURL(pathOrUrl: string): string {

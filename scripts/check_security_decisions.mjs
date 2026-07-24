@@ -21,7 +21,7 @@ function check(condition, message) {
 const decisionsPath = "docs/SECURITY_DECISIONS.md";
 check(existsSync(join(root, decisionsPath)), "Security decision log exists");
 const decisions = read(decisionsPath);
-for (let id = 1; id <= 11; id += 1) {
+for (let id = 1; id <= 13; id += 1) {
   check(decisions.includes(`SEC-${String(id).padStart(3, "0")}`), `Security decision SEC-${String(id).padStart(3, "0")} is recorded`);
 }
 check(
@@ -29,7 +29,7 @@ check(
   "Security decision SEC-008 covers NSIS and generated signing config",
 );
 check(
-  /SEC-008[^\n]*YAWF_RELEASE_WINDOWS=true[^\n]*macOS, Linux, and server v1 channels may ship/.test(
+  /SEC-008[^\n]*YAWF_RELEASE_WINDOWS=true[^\n]*macOS, Linux, Android TV, and server channels may ship/.test(
     decisions,
   ),
   "Security decision SEC-008 records the held Windows channel without weakening its signing gate",
@@ -180,6 +180,18 @@ const serverApp = read("server/src/app.ts");
 const database = read("server/src/db.ts");
 const diagnostics = read("web/src/lib/diagnostics.ts");
 const nativePlayer = read("web/src-tauri/src/render_player/core.rs");
+const androidManifest = read("android-tv/app/src/main/AndroidManifest.xml");
+const androidMain = read(
+  "android-tv/app/src/main/java/com/yawf/stream/tv/MainActivity.java",
+);
+const androidNetwork = read(
+  "android-tv/app/src/main/res/xml/network_security_config.xml",
+);
+const androidSigningDigest = read("android-tv/SIGNING_CERT_SHA256");
+const androidPlaybackHeaders = read(
+  "android-tv/app/src/main/java/com/yawf/stream/tv/PlaybackHeaders.java",
+);
+const remoteControl = read("server/src/remoteControl.ts");
 check(
   /allowRawStreamUrls:[\s\S]{0,160}process\.env\.NODE_ENV !== "production"/.test(serverConfig),
   "Production raw stream URL creation defaults off",
@@ -201,6 +213,44 @@ check(
     /_ => Err\("property is not allowed"\.to_string\(\)\)/.test(nativePlayer) &&
     /stream-lavf-o=max_redirects=0/.test(nativePlayer),
   "Native player bridge is allowlisted and keeps playback authorization file-local",
+);
+check(
+  /android\.software\.leanback/.test(androidManifest) &&
+    /android\.hardware\.touchscreen/.test(androidManifest) &&
+    /android:required="false"/.test(androidManifest) &&
+    /ServerAddress\.sameOrigin\(serverBase, url\)/.test(androidMain) &&
+    /setAllowFileAccess\(false\)/.test(androidMain) &&
+    /setAllowContentAccess\(false\)/.test(androidMain) &&
+    /setSupportMultipleWindows\(false\)/.test(androidMain) &&
+    /setAcceptThirdPartyCookies\(webView, false\)/.test(androidMain) &&
+    /!value\.startsWith\("Bearer "\)/.test(androidMain) &&
+    /PlaybackHeaders\.cloudflareCookieHeader/.test(androidMain) &&
+    /"CF_Authorization"/.test(androidPlaybackHeaders) &&
+    /"CF_Session"/.test(androidPlaybackHeaders) &&
+    /"CF_AppSession"/.test(androidPlaybackHeaders) &&
+    !/"ds_session"/.test(androidPlaybackHeaders) &&
+    /^[0-9a-f]{64}\n?$/.test(androidSigningDigest) &&
+    /SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
+    /SIGNING_CERT_SHA256/.test(cleanInstallWorkflow) &&
+    !/<certificates src="user"/.test(androidNetwork),
+  "Android TV confines its WebView and native playback bridge to the configured server",
+);
+check(
+  /Validate Android signing secrets/.test(releaseWorkflow) &&
+    /ANDROID_TV_KEYSTORE_BASE64/.test(releaseWorkflow) &&
+    /:app:lintRelease :app:assembleRelease/.test(releaseWorkflow) &&
+    /apksigner verify/.test(releaseWorkflow) &&
+    /com\.yawf\.stream\.tv/.test(cleanInstallWorkflow),
+  "Android TV releases require stable signing and verify the published package identity",
+);
+check(
+  /randomInt\(0, 1_000_000\)/.test(remoteControl) &&
+    /pairingCodeHash: digest\(pairingCode\)/.test(remoteControl) &&
+    /controllerTokenHash = digest\(controllerToken\)/.test(remoteControl) &&
+    /viewerProfileId !== viewerProfileId/.test(remoteControl) &&
+    /REMOTE_COMMAND_LIMIT/.test(remoteControl) &&
+    /REMOTE_SESSION_TTL_MS/.test(remoteControl),
+  "Phone remote capabilities are hashed, profile-bound, expiring, and queue-bounded",
 );
 
 if (failures.length > 0) {

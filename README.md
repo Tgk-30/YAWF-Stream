@@ -1,7 +1,8 @@
-# DebridStreamer
+# YAWF Stream
 
-DebridStreamer is an open-source debrid streaming app for desktop, browser/PWA,
-and self-hosted server use.
+YAWF Stream is an open-source streaming hub for the services you already use.
+It supports desktop, browser/PWA, Android TV, Google TV, and self-hosted Server
+Mode.
 
 ## What It Is
 
@@ -24,19 +25,29 @@ and self-hosted server use.
   and open the hosted PWA for other devices.
 - **PWA**: install your self-hosted server on iPhone, iPad, Android, and desktop
   browsers.
+- **Every screen**: use the ten-foot `/tv` interface in a television browser,
+  pair `/remote` on a phone without moving the stream through the phone, or use
+  the signed Android TV and Google TV app with native Media3 playback.
+- **Portable profiles**: export and restore Server Mode profiles, or migrate a
+  Local Mode backup into selected server profiles with merge or replace
+  controls.
+- **Localization**: choose interface language separately from metadata language
+  and region, with safe fallback for unknown provider language values.
+- **Host and invite recovery**: get clear host-sleep and network guidance, and
+  reissue an invite while revoking its previous active link.
 - **OTA updates**: desktop builds use signed `latest.json` metadata from GitHub
   Releases and can prompt or auto-install signed updates.
 
 ## Download
 
-Latest desktop builds are published on GitHub Releases:
+Latest desktop, server, and Android TV builds are published on GitHub Releases:
 
 ```text
 https://github.com/Tgk-30/YAWF-Stream/releases/latest
 ```
 
-The static downloader website lives in `website/` and is deployed by the
-`site` GitHub Actions workflow.
+The public product website lives in `website-app/` and is deployed under
+`https://tgk30.com/debridstreamer/`.
 
 ## Run Server Mode Locally
 

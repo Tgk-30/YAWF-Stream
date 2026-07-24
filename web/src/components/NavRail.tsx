@@ -15,6 +15,7 @@ import {
   useServerSession,
 } from "../lib/ServerSessionContext";
 import "./NavRail.css";
+import { translate } from "../lib/localization";
 
 // Screens with no working backend in Server Mode (Debrid Library is Tauri-only).
 // The AI Assistant DOES work in Server Mode - it routes to /api/ai/recommend,
@@ -177,6 +178,8 @@ interface NavRailProps {
   navHidden?: readonly ScreenId[];
   /** Followed episodes that aired since the user last visited Calendar. */
   calendarBadgeCount?: number;
+  /** Resolved interface locale used for navigation labels. */
+  interfaceLocale?: string;
 }
 
 export function shouldRenderNavGroup(
@@ -215,6 +218,7 @@ export function NavRail({
   navHidden = EMPTY_NAV_IDS,
   calendarBadgeCount = 0,
   inert = false,
+  interfaceLocale = "en",
 }: NavRailProps) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreSheetRef = useModalA11y<HTMLDivElement>(
@@ -249,14 +253,27 @@ export function NavRail({
   const session = useServerSession();
   const profiles = useServerProfiles();
   const navCustom = { order: navOrder, hidden: navHidden };
+  const localize = (item: RailItem): RailItem => ({
+    ...item,
+    label: translate(
+      interfaceLocale,
+      `nav.${item.id}` as Parameters<typeof translate>[1],
+      item.label,
+    ),
+    mobileLabel: translate(
+      interfaceLocale,
+      `nav.${item.id}` as Parameters<typeof translate>[1],
+      item.mobileLabel ?? item.label,
+    ),
+  });
   const navItems = visibleNavItems(
     applyNavCustomization(NAV_ITEMS, navCustom),
     { serverMode, simpleMode },
-  );
+  ).map(localize);
   const moreItems = visibleNavItems(
     applyNavCustomization(MOBILE_MORE_ITEMS, navCustom),
     { serverMode, simpleMode },
-  );
+  ).map(localize);
   const moreSelected = moreItems.some((item) => item.id === selected);
   // Show the switcher only in Server Mode with a handler AND more than one
   // profile - a single-profile account has no one to switch to (no forced

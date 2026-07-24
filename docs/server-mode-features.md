@@ -98,6 +98,29 @@ filters, not server-side transcoding.)
 The hosted app is installable on iPhone, iPad, Android, and desktop browsers via
 **Add to Home Screen** / the browser's install prompt.
 
+### TV mode and phone remote
+
+- `/tv` presents a ten-foot layout with D-pad spatial navigation and a
+  single-use pairing code.
+- `/remote` turns a signed-in phone into a private controller for the browser TV
+  player. Playback stays on the television.
+- The signed Android TV and Google TV app loads the same server library and uses
+  Android Media3 for native playback, resume, preferred audio and subtitle
+  languages, buffering status, and subtitle selection.
+
+### Portability, language, and family recovery
+
+- Server profiles can be exported and imported with explicit merge or replace
+  behavior. A Local Mode backup can be migrated into selected Server Mode
+  profiles, with skipped data reported instead of silently discarded.
+- Interface language, metadata language, and metadata region are separate
+  settings. Unknown or unavailable locale values fall back safely.
+- Owners can reissue an invite while preserving its role and limits. Reissuing
+  revokes the previous active link and reveals the replacement token once.
+- Server availability warnings distinguish a signed-out device from an
+  unreachable host and explain host sleep, power, network, and remote-access
+  recovery.
+
 ---
 
 ## Current limitations
@@ -116,6 +139,10 @@ The hosted app is installable on iPhone, iPad, Android, and desktop browsers via
   `h264_videotoolbox`, `h264_nvenc`, or `h264_qsv`; unsupported selections fall
   back to detected `libx264`. CPU-constrained operators can set
   `DS_SERVER_ENABLE_TRANSCODE=false`.
+- **Hardware acceleration depends on the host.** Settings reports the configured
+  and active encoder plus detected Apple VideoToolbox, NVIDIA NVENC, Intel Quick
+  Sync, or CPU software support. A missing hardware encoder falls back to
+  `libx264` rather than failing playback.
 - **A feature needs its credential configured.** Each capability requires the
   matching credential to be present (shared or per-profile): metadata needs a
   TMDB key, AI needs an AI provider key, subtitles need an OpenSubtitles key,
@@ -140,5 +167,9 @@ The hosted app is installable on iPhone, iPad, Android, and desktop browsers via
 | Subtitle search / download / AI translate | Works (needs OpenSubtitles + AI keys) |
 | Debrid streaming via single-IP proxy (Range/seek) | Works |
 | Per-profile cached-only / quality / size filters | Works |
+| TV browser mode + phone remote | Works |
+| Native Android TV / Google TV player | Works |
+| Profile export / import + Local-to-Server migration | Works |
+| Interface + metadata language and region | Works |
 | Debrid Library file browser | Desktop only |
 | Server-side transcoding (adaptive HLS) | Opt-in (operator flag + FFmpeg) |

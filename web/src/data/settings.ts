@@ -57,6 +57,11 @@ import {
 } from "../services/subtitles/SubtitleTranslator";
 import { ServerSubtitleTranslator } from "../services/subtitles/ServerSubtitleTranslator";
 import {
+  normalizeInterfaceLanguage,
+  normalizeMetadataLanguage,
+  normalizeMetadataRegion,
+} from "../lib/localization";
+import {
   type IndexerConfigRecord,
   makeIndexerConfigRecord,
   type StoredIndexerType,
@@ -124,6 +129,9 @@ const SettingsKeys = {
   userName: "user_name",
   userAvatar: "user_avatar",
   networkMode: "network_mode",
+  interfaceLanguage: "interface_language",
+  metadataLanguage: "metadata_language",
+  metadataRegion: "metadata_region",
 } as const;
 
 /** Marker written into the KV table for secret-valued keys; the real value
@@ -215,6 +223,12 @@ export interface AppSettings {
   ollamaEndpoint: string;
   /** Per-profile privacy policy for outbound network requests. */
   networkMode: NetworkMode;
+  /** Interface language. "system" follows the device with an English fallback. */
+  interfaceLanguage: string;
+  /** BCP-47 language used for TMDB titles, summaries, genres, and trailers. */
+  metadataLanguage: string;
+  /** ISO 3166-1 alpha-2 region used for release windows and certifications. */
+  metadataRegion: string;
   /** Selected UI theme id (see theme/themes.ts). */
   theme: string;
   appearanceAccent: AppearanceAccent;
@@ -530,6 +544,9 @@ export function defaultSettings(): AppSettings {
     aiModel: "",
     ollamaEndpoint: "http://localhost:11434",
     networkMode: "standard",
+    interfaceLanguage: "system",
+    metadataLanguage: "en-US",
+    metadataRegion: "US",
     theme: env("VITE_THEME") || DEFAULT_THEME_ID,
     appearanceAccent: "cyan",
     appearanceDensity: "comfortable",
@@ -651,6 +668,9 @@ export function loadSettings(): AppSettings {
         parsed.networkMode === "fullLocal" || parsed.networkMode === "offline"
           ? parsed.networkMode
           : "standard",
+      interfaceLanguage: normalizeInterfaceLanguage(parsed.interfaceLanguage),
+      metadataLanguage: normalizeMetadataLanguage(parsed.metadataLanguage),
+      metadataRegion: normalizeMetadataRegion(parsed.metadataRegion),
       // A stale/poisoned provider id would route to a host that can't serve it.
       aiProvider: AIProviderKind.allCases().includes(
         parsed.aiProvider as AIProviderKind,
@@ -850,6 +870,15 @@ function scalarSettingEntries(settings: AppSettings): Array<[string, string]> {
     [SettingsKeys.aiModel, settings.aiModel],
     [SettingsKeys.ollamaEndpoint, settings.ollamaEndpoint],
     [SettingsKeys.networkMode, settings.networkMode],
+    [
+      SettingsKeys.interfaceLanguage,
+      normalizeInterfaceLanguage(settings.interfaceLanguage),
+    ],
+    [
+      SettingsKeys.metadataLanguage,
+      normalizeMetadataLanguage(settings.metadataLanguage),
+    ],
+    [SettingsKeys.metadataRegion, normalizeMetadataRegion(settings.metadataRegion)],
     [SettingsKeys.theme, resolveThemeId(settings.theme)],
     [SettingsKeys.appearanceAccent, normalizeAppearanceAccent(settings.appearanceAccent)],
     [SettingsKeys.appearanceDensity, normalizeAppearanceDensity(settings.appearanceDensity)],
@@ -1097,6 +1126,9 @@ export async function loadSettingsFromStore(): Promise<AppSettings> {
     userAvatar,
     builtInPlayer,
     networkMode,
+    interfaceLanguage,
+    metadataLanguage,
+    metadataRegion,
   ] = [
     settingsByKey.get(SettingsKeys.aiProvider) ?? null,
     settingsByKey.get(SettingsKeys.aiModel) ?? null,
@@ -1147,6 +1179,9 @@ export async function loadSettingsFromStore(): Promise<AppSettings> {
     settingsByKey.get(SettingsKeys.userAvatar) ?? null,
     settingsByKey.get(SettingsKeys.builtInPlayer) ?? null,
     settingsByKey.get(SettingsKeys.networkMode) ?? null,
+    settingsByKey.get(SettingsKeys.interfaceLanguage) ?? null,
+    settingsByKey.get(SettingsKeys.metadataLanguage) ?? null,
+    settingsByKey.get(SettingsKeys.metadataRegion) ?? null,
   ];
 
   const debridConfigs = await store.listDebridConfigs();
@@ -1195,6 +1230,15 @@ export async function loadSettingsFromStore(): Promise<AppSettings> {
       networkMode === "fullLocal" || networkMode === "offline"
         ? networkMode
         : base.networkMode,
+    interfaceLanguage: normalizeInterfaceLanguage(
+      interfaceLanguage ?? base.interfaceLanguage,
+    ),
+    metadataLanguage: normalizeMetadataLanguage(
+      metadataLanguage ?? base.metadataLanguage,
+    ),
+    metadataRegion: normalizeMetadataRegion(
+      metadataRegion ?? base.metadataRegion,
+    ),
     theme: resolveThemeId(theme ?? base.theme),
     appearanceAccent: normalizeAppearanceAccent(
       appearanceAccent ?? base.appearanceAccent,
@@ -1545,16 +1589,28 @@ let tmdbServiceCache: { key: string; service: TMDBService } | null = null;
  * identity while the key is unchanged so an unrelated settings save (theme,
  * data-saver, debrid edit…) doesn't churn services.tmdb and force
  * useDiscover/useDetail to drop to a skeleton and refetch. Null for no key. */
-function getOrBuildTmdb(effectiveTmdbKey: string): TMDBService | null {
+function getOrBuildTmdb(
+  effectiveTmdbKey: string,
+  language: string,
+  region: string,
+): TMDBService | null {
   if (effectiveTmdbKey.length === 0) {
     tmdbServiceCache = null;
     return null;
   }
-  if (tmdbServiceCache != null && tmdbServiceCache.key === effectiveTmdbKey) {
+  const signature = JSON.stringify([
+    effectiveTmdbKey,
+    normalizeMetadataLanguage(language),
+    normalizeMetadataRegion(region),
+  ]);
+  if (tmdbServiceCache != null && tmdbServiceCache.key === signature) {
     return tmdbServiceCache.service;
   }
-  const service = new TMDBService(effectiveTmdbKey);
-  tmdbServiceCache = { key: effectiveTmdbKey, service };
+  const service = new TMDBService(effectiveTmdbKey, undefined, {
+    language: normalizeMetadataLanguage(language),
+    region: normalizeMetadataRegion(region),
+  });
+  tmdbServiceCache = { key: signature, service };
   return service;
 }
 
@@ -1740,7 +1796,11 @@ export function buildServices(settings: AppSettings): AppServices {
   // key baked in), so this changes nothing until a build sets TMDB_EMBED_KEY.
   const effectiveTmdbKey =
     tmdbKey.length > 0 ? tmdbKey : embeddedTmdbKey() || readEnvTmdbKey();
-  const tmdb = getOrBuildTmdb(effectiveTmdbKey);
+  const tmdb = getOrBuildTmdb(
+    effectiveTmdbKey,
+    settings.metadataLanguage,
+    settings.metadataRegion,
+  );
   // OMDb key precedence: the user's own key (BYOK) → a build-time embedded key
   // (the serverless limited-distribution path, Mode 3). In Server Mode leave
   // services.omdb null so ratings come from the server's /api/omdb "hidden key"

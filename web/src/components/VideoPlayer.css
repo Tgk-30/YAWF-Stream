@@ -27,6 +27,20 @@
   box-shadow: none;
 }
 
+.player-native-tv-status {
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-md);
+  padding: var(--sp-xl);
+  text-align: center;
+}
+
+.player-native-tv-status p {
+  max-width: 42rem;
+  margin: 0;
+  color: var(--text-secondary);
+}
+
 .player-bar {
   position: absolute;
   inset: 0 0 auto;

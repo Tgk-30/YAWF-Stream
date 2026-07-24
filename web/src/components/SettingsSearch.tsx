@@ -18,6 +18,7 @@ interface SearchEntry {
 /** Human labels per tab id (mirrors the Settings TABS list) for the result hint. */
 const TAB_LABEL: Record<string, string> = {
   appearance: "Appearance",
+  language: "Language & region",
   playback: "Playback",
   privacy: "Privacy",
   install: "Install & setup",
@@ -37,6 +38,9 @@ const SEARCH_INDEX: SearchEntry[] = [
   { label: "Poster size", tab: "appearance", keywords: "density grid" },
   { label: "Text size", tab: "appearance", keywords: "font" },
   { label: "Motion", tab: "appearance", keywords: "animation reduce" },
+  { label: "Interface language", tab: "language", keywords: "translation locale ui" },
+  { label: "Metadata language", tab: "language", keywords: "tmdb title summary locale" },
+  { label: "Metadata region", tab: "language", keywords: "country release rating territory" },
   { label: "Data Saver", tab: "playback", keywords: "bandwidth quality metered" },
   { label: "Built-in player", tab: "playback", keywords: "mpv embedded" },
   { label: "External player", tab: "playback", keywords: "vlc iina mpv" },

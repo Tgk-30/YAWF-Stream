@@ -70,7 +70,7 @@ identity credentials into that file. See the
 Do not enable `YAWF_RELEASE_WINDOWS` until all six secrets are provisioned. A
 true value deliberately fails closed when any signing credential, installer
 signature, or installed application signature is missing. Leaving the variable
-absent or false publishes no Windows v1 artifact and does not weaken the future
+absent or false publishes no Windows artifact and does not weaken the future
 Windows gate.
 
 GitHub Actions must be able to start hosted runners before any of those release
@@ -145,8 +145,8 @@ gh workflow run clean-install.yml -f tag=vX.Y.Z-web -f include_windows=false
 
 Use `include_windows=true` only for a release that actually contains the signed
 Windows assets. The accepted trust boundaries and remaining Windows blocker are
-recorded in `docs/SECURITY_DECISIONS.md`. macOS, Linux, and server v1 artifacts
-may ship while the Windows v1 channel remains held.
+recorded in `docs/SECURITY_DECISIONS.md`. macOS, Linux, Android TV, and server
+artifacts may ship while the Windows channel remains held.
 
 ## Verify a downloaded artifact
 
@@ -257,3 +257,27 @@ node scripts/download_tauri_node_runtime.mjs darwin-arm64 darwin-x64
 
 Local development can use the repo fallback after `cd server && npm run build`.
 Downloaded releases use the packaged resources.
+
+## Android TV Release
+
+The `vX.Y.Z-web` release workflow also builds
+`YAWF.Stream_Android.TV_X.Y.Z.apk` from `android-tv/`. The job requires the
+stable Android signing identity in the four `ANDROID_TV_*` repository secrets,
+runs unit tests and release lint, verifies the APK signature, and uploads the
+APK before checksums and attestations are finalized.
+
+The clean-install workflow downloads the published APK, verifies its signature,
+checks that the signing certificate matches `android-tv/SIGNING_CERT_SHA256`,
+and confirms that the manifest requires Leanback, does not require a touchscreen,
+and exposes the Leanback launcher activity. Never replace the production
+keystore: Android accepts updates only when the application ID and signing
+identity remain stable.
+
+The production certificate SHA-256 digest is:
+
+```text
+6d8ec5466423e10e5c751132bb0f6a6ddf95a8d9f3378772d7809fce616eec1e
+```
+
+Verify a downloaded APK with `apksigner verify --print-certs <file.apk>` and
+compare the reported signer certificate SHA-256 digest before installing it.

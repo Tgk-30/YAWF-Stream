@@ -32,7 +32,13 @@ import {
 import { notifyUnauthorized, readCsrfToken } from "../lib/serverSession";
 import { isSmartPreloadEnabled, setSmartPreloadEnabled } from "../lib/smartPreload";
 import type { AccountProfile, RequestRecord } from "../lib/serverApi";
-import { fetchAccountProfiles, setProfileMaturity } from "../lib/serverApi";
+import {
+  exportServerPortableProfile,
+  fetchAccountProfiles,
+  importServerPortableProfile,
+  setProfileMaturity,
+  testServerDebridToken,
+} from "../lib/serverApi";
 import {
   ActiveStreamsPanel,
   CREDENTIAL_OPTIONS,
@@ -66,8 +72,12 @@ import type {
   StreamMaxQuality,
 } from "../data/settings";
 import { PLAYBACK_LANGUAGE_OPTIONS } from "../lib/languagePreference";
+import {
+  INTERFACE_LANGUAGE_OPTIONS,
+  METADATA_LANGUAGE_OPTIONS,
+  METADATA_REGION_OPTIONS,
+} from "../lib/localization";
 import { DebridServiceType } from "../services/debrid/models";
-import { testServerDebridToken } from "../lib/serverApi";
 import { AIProviderKind } from "../services/ai/models";
 import { fetchAvailableModels } from "../services/ai/ModelCatalog";
 import { readModelCache, writeModelCache } from "../services/ai/ModelCache";
@@ -148,9 +158,12 @@ import { factoryReset } from "../data/factoryReset";
 import {
   exportPortableBackup,
   parsePortableBackup,
+  parsePortableProfileBundle,
   portableBackupFilename,
+  portableProfileBundleFromBackup,
   restorePortableBackup,
   type PortableBackup,
+  type PortableProfileBundle,
 } from "../data/portableBackup";
 import "./Settings.css";
 
@@ -257,6 +270,7 @@ type Tab = SettingsSection;
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "appearance", label: "Appearance" },
+  { id: "language", label: "Language & region" },
   { id: "playback", label: "Playback" },
   { id: "privacy", label: "Privacy" },
   { id: "install", label: "Install & setup" },
@@ -270,6 +284,7 @@ const TABS: { id: Tab; label: string }[] = [
 
 const TAB_DESCRIPTIONS: Record<Tab, string> = {
   appearance: "Themes, layout, and visual comfort for this profile.",
+  language: "Interface language, metadata language, and regional release context.",
   playback: "Player behavior, captions, quality, and handoff preferences.",
   privacy: "Network access, local storage, and data controls for this device.",
   install: "Install YAWF Stream and finish setup on this device.",
@@ -286,6 +301,7 @@ const TAB_DESCRIPTIONS: Record<Tab, string> = {
 // Simple-mode users can recover from failures without changing experience mode.
 const SIMPLE_TABS = new Set<Tab>([
   "appearance",
+  "language",
   "playback",
   "privacy",
   "install",
@@ -634,6 +650,7 @@ export function Settings() {
             serverMode={serverMode}
           />
         )}
+        {tab === "language" && <LanguageRegionTab draft={draft} patch={patch} />}
         {tab === "install" && <InstallTab />}
         {tab === "playback" && <PlaybackTab draft={draft} patch={patch} />}
         {tab === "privacy" && <PrivacyTab draft={draft} patch={patch} />}
@@ -1285,7 +1302,23 @@ interface TabProps {
 
 function PrivacyTab({ draft, patch }: TabProps) {
   const restoreInput = useRef<HTMLInputElement>(null);
+  const serverImportInput = useRef<HTMLInputElement>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [serverImportMode, setServerImportMode] = useState<"merge" | "replace">(
+    "merge",
+  );
+  const [migrationBackup, setMigrationBackup] =
+    useState<PortableBackup | null>(null);
+  const [migrationProfileId, setMigrationProfileId] = useState<string | null>(
+    null,
+  );
+  const [pendingServerImport, setPendingServerImport] = useState<{
+    bundle: PortableProfileBundle;
+    label: string;
+    skippedRows: number;
+    omissions: string[];
+  } | null>(null);
+  const serverMode = isServerMode();
   const modes: Array<{
     value: AppSettings["networkMode"];
     label: string;
@@ -1312,19 +1345,26 @@ function PrivacyTab({ draft, patch }: TabProps) {
     },
   ];
 
-  const downloadBackup = useCallback(
-    (backup: PortableBackup, kind: "backup" | "pre-restore") => {
-      const blob = new Blob([JSON.stringify(backup, null, 2)], {
+  const downloadJSON = useCallback(
+    (value: unknown, filename: string) => {
+      const blob = new Blob([JSON.stringify(value, null, 2)], {
         type: "application/json",
       });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = portableBackupFilename(kind);
+      link.download = filename;
       link.click();
       URL.revokeObjectURL(url);
     },
     [],
+  );
+
+  const downloadBackup = useCallback(
+    (backup: PortableBackup, kind: "backup" | "pre-restore") => {
+      downloadJSON(backup, portableBackupFilename(kind));
+    },
+    [downloadJSON],
   );
 
   const exportLocalData = useCallback(async () => {
@@ -1367,6 +1407,128 @@ function PrivacyTab({ draft, patch }: TabProps) {
     [downloadBackup],
   );
 
+  const exportServerData = useCallback(async () => {
+    setBackupStatus("Preparing server profile export…");
+    try {
+      const bundle = await exportServerPortableProfile();
+      const stamp = bundle.createdAt.replaceAll(":", "-").replaceAll(".", "-");
+      downloadJSON(bundle, `yawf-stream-server-profile-${stamp}.json`);
+      setBackupStatus(
+        `Exported ${bundle.watchlist.length} watchlist item(s), ` +
+          `${bundle.history.length} history entry or entries, and ` +
+          `${bundle.library.length} library item(s). Credentials, profile locks, ` +
+          "stream URLs, and server paths were excluded.",
+      );
+    } catch (error) {
+      setBackupStatus(error instanceof Error ? error.message : String(error));
+    }
+  }, [downloadJSON]);
+
+  const selectMigrationProfile = useCallback(
+    (backup: PortableBackup, profileId: string) => {
+      const conversion = portableProfileBundleFromBackup(backup, profileId);
+      setMigrationProfileId(profileId);
+      setPendingServerImport({
+        bundle: conversion.bundle,
+        label: conversion.profileName,
+        skippedRows: conversion.skippedRows,
+        omissions: conversion.omissions,
+      });
+      setBackupStatus(
+        `Ready to import local profile "${conversion.profileName}". Review the ` +
+          "mode below before continuing.",
+      );
+    },
+    [],
+  );
+
+  const prepareServerImport = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (file == null) return;
+      setBackupStatus("Verifying profile data…");
+      setPendingServerImport(null);
+      setMigrationBackup(null);
+      setMigrationProfileId(null);
+      try {
+        const text = await file.text();
+        let header: { format?: unknown };
+        try {
+          header = JSON.parse(text) as { format?: unknown };
+        } catch {
+          throw new Error("Import file is not valid JSON.");
+        }
+        if (header.format === "yawf-profile-portable") {
+          const bundle = parsePortableProfileBundle(text);
+          setPendingServerImport({
+            bundle,
+            label: "portable server profile",
+            skippedRows: 0,
+            omissions: [],
+          });
+          setBackupStatus(
+            "Portable server profile verified. Review the import mode below.",
+          );
+          return;
+        }
+        if (header.format === "yawf-local-backup") {
+          const backup = parsePortableBackup(text);
+          setMigrationBackup(backup);
+          selectMigrationProfile(backup, backup.activeProfileId);
+          return;
+        }
+        throw new Error(
+          "Choose a YAWF Stream local backup or portable server profile.",
+        );
+      } catch (error) {
+        setBackupStatus(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [selectMigrationProfile],
+  );
+
+  const importServerData = useCallback(async () => {
+    if (pendingServerImport == null) return;
+    if (
+      serverImportMode === "replace" &&
+      !window.confirm(
+        "Replace this server profile's portable settings, watchlist, history, folders, and library? Credentials and account security stay unchanged, but portable profile data not present in this file will be deleted.",
+      )
+    ) {
+      return;
+    }
+    setBackupStatus(
+      `${serverImportMode === "replace" ? "Replacing" : "Merging"} profile data…`,
+    );
+    try {
+      const counts = await importServerPortableProfile(
+        pendingServerImport.bundle,
+        serverImportMode,
+      );
+      const imported =
+        counts.settings +
+        counts.watchlist +
+        counts.history +
+        counts.folders +
+        counts.library;
+      const skipped =
+        pendingServerImport.skippedRows > 0
+          ? ` ${pendingServerImport.skippedRows} invalid local row(s) were skipped.`
+          : "";
+      const omissions =
+        pendingServerImport.omissions.length > 0
+          ? ` ${pendingServerImport.omissions.join(" ")}`
+          : "";
+      setBackupStatus(
+        `Imported ${imported} record(s) into this server profile.${skipped}${omissions} Reloading…`,
+      );
+      window.setTimeout(() => window.location.reload(), 500);
+    } catch (error) {
+      setBackupStatus(error instanceof Error ? error.message : String(error));
+    }
+  }, [pendingServerImport, serverImportMode]);
+
   return (
     <div className="settings-fields">
       <SettingsInfo label="Privacy mode">
@@ -1390,42 +1552,126 @@ function PrivacyTab({ draft, patch }: TabProps) {
         ))}
       </div>
       <section className="settings-section">
-        <SettingsInfo label="Local backup and restore">
-          Export every local profile's settings, watchlist, history, library,
-          taste data, and media cache. Credentials, profile password hashes,
-          temporary stream URLs, and device-specific download paths are never
-          included. Existing profile locks remain in place during restore. New
-          profiles are restored unlocked so you can set a new local password.
+        <SettingsInfo
+          label={serverMode ? "Profile portability" : "Local backup and restore"}
+        >
+          {serverMode
+            ? "Move the current profile between YAWF Stream servers, or import one profile from a Local Mode backup. Credentials, account security, profile locks, stream URLs, and server paths are never included."
+            : "Export every local profile's settings, watchlist, history, library, taste data, and media cache. Credentials, profile password hashes, temporary stream URLs, and device-specific download paths are never included. Existing profile locks remain in place during restore. New profiles are restored unlocked so you can set a new local password."}
         </SettingsInfo>
-        <div className="settings-action-row">
-          <button
-            type="button"
-            className="btn"
-            onClick={() => void exportLocalData()}
-            disabled={isServerMode()}
-          >
-            Export local backup
-          </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => restoreInput.current?.click()}
-            disabled={isServerMode()}
-          >
-            Restore local backup
-          </button>
-          <input
-            ref={restoreInput}
-            type="file"
-            accept="application/json,.json"
-            hidden
-            onChange={(event) => void restoreLocalData(event)}
-          />
-        </div>
-        {isServerMode() && (
-          <p className="settings-hint">
-            Server Mode data is protected by the server backup tools instead.
-          </p>
+        {serverMode ? (
+          <>
+            <div className="settings-action-row">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void exportServerData()}
+              >
+                Export current profile
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => serverImportInput.current?.click()}
+              >
+                Choose profile data
+              </button>
+              <input
+                ref={serverImportInput}
+                type="file"
+                accept="application/json,.json"
+                hidden
+                onChange={(event) => void prepareServerImport(event)}
+              />
+            </div>
+            {migrationBackup != null && migrationBackup.profiles.length > 1 && (
+              <label className="settings-field">
+                <span>Local profile to migrate</span>
+                <select
+                  value={migrationProfileId ?? ""}
+                  onChange={(event) =>
+                    selectMigrationProfile(
+                      migrationBackup,
+                      event.currentTarget.value,
+                    )
+                  }
+                >
+                  {migrationBackup.profiles.map(({ profile }) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {pendingServerImport != null && (
+              <div className="settings-fields">
+                <div
+                  className="settings-option-strip"
+                  role="radiogroup"
+                  aria-label="Profile import mode"
+                >
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={serverImportMode === "merge"}
+                    className={`settings-option-card${serverImportMode === "merge" ? " is-active" : ""}`}
+                    onClick={() => setServerImportMode("merge")}
+                  >
+                    <span>Merge</span>
+                    <small>
+                      Add new data and keep the newer history entry when both
+                      profiles contain the same title.
+                    </small>
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={serverImportMode === "replace"}
+                    className={`settings-option-card${serverImportMode === "replace" ? " is-active" : ""}`}
+                    onClick={() => setServerImportMode("replace")}
+                  >
+                    <span>Replace portable data</span>
+                    <small>
+                      Clear this profile's portable data first. Credentials and
+                      account security remain unchanged.
+                    </small>
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => void importServerData()}
+                >
+                  Import {pendingServerImport.label}
+                </button>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="settings-action-row">
+            <button
+              type="button"
+              className="btn"
+              onClick={() => void exportLocalData()}
+            >
+              Export local backup
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => restoreInput.current?.click()}
+            >
+              Restore local backup
+            </button>
+            <input
+              ref={restoreInput}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              onChange={(event) => void restoreLocalData(event)}
+            />
+          </div>
         )}
         <p className="settings-status" aria-live="polite">
           {backupStatus ?? ""}
@@ -1469,6 +1715,81 @@ const STREAM_SIZE_CAP_OPTIONS = [
 ] as const;
 
 const CUSTOM_STREAM_SIZE_CAP = "custom";
+
+function LanguageRegionTab({ draft, patch }: TabProps) {
+  return (
+    <div className="settings-form">
+      <div className="settings-section-heading">
+        <div>
+          <span className="settings-kicker">Language</span>
+          <h2>Language and region</h2>
+        </div>
+      </div>
+
+      <div className="settings-control-grid">
+        <Field
+          label="Interface language"
+          hint="Core navigation and TV controls are translated now. Untranslated screens fall back to English instead of showing missing text."
+        >
+          <select
+            aria-label="Interface language"
+            value={draft.interfaceLanguage}
+            onChange={(event) =>
+              patch({ interfaceLanguage: event.target.value })
+            }
+          >
+            {INTERFACE_LANGUAGE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Field
+          label="Metadata language"
+          hint="TMDB titles, summaries, genres, episodes, and trailers use this language when available."
+        >
+          <select
+            aria-label="Metadata language"
+            value={draft.metadataLanguage}
+            onChange={(event) =>
+              patch({ metadataLanguage: event.target.value })
+            }
+          >
+            {METADATA_LANGUAGE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Field
+          label="Metadata region"
+          hint="Used for regional release windows and ratings. Kid maturity limits keep their documented US safety ladder."
+        >
+          <select
+            aria-label="Metadata region"
+            value={draft.metadataRegion}
+            onChange={(event) => patch({ metadataRegion: event.target.value })}
+          >
+            {METADATA_REGION_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+
+      <p className="settings-hint t-secondary">
+        These settings are stored per profile and follow that profile in Server
+        Mode. Save to rebuild the catalog client with the new locale.
+      </p>
+    </div>
+  );
+}
 
 function PlaybackTab({ draft, patch }: TabProps) {
   // Populate the external-player picker with the players actually installed
@@ -2509,9 +2830,18 @@ function RemoteAccessPanel() {
   const [tools, setTools] = useState<TunnelTools | null>(null);
   const [checking, setChecking] = useState(false);
   const [hostStatus, setHostStatus] = useState<DesktopServerStatus | null>(null);
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const manualTrack = useRef(false);
   const desktop = isTauri();
   const localTarget = hostStatus?.url ?? "http://localhost:<server-port>";
+  const configuredRemoteBase = configuredServerURL();
+  const remoteBase =
+    configuredRemoteBase != null && configuredRemoteBase.length > 0
+      ? configuredRemoteBase
+      : hostStatus?.share_url ?? hostStatus?.url ?? window.location.origin;
+  const normalizedRemoteBase = remoteBase.replace(/\/+$/, "");
+  const tvURL = `${normalizedRemoteBase}/tv`;
+  const phoneRemoteURL = `${normalizedRemoteBase}/remote`;
   const steps = remoteAccessSteps(
     track,
     track === "tailscale" ? tools?.tailscale.installed === true : tools?.cloudflared.installed === true,
@@ -2547,6 +2877,15 @@ function RemoteAccessPanel() {
       cancelled = true;
     };
   }, [checkTools, desktop]);
+
+  const copyRemoteURL = useCallback(async (label: string, url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyStatus(`${label} copied.`);
+    } catch {
+      setCopyStatus("Clipboard unavailable. Select the URL and copy it manually.");
+    }
+  }, []);
 
   return (
     <div className="settings-source glass-rest settings-remote-access">
@@ -2630,6 +2969,40 @@ function RemoteAccessPanel() {
           </li>
         ))}
       </ol>
+
+      <div className="settings-divider" />
+      <div className="settings-sources-head">
+        <span className="settings-sources-title">TV and phone remote</span>
+        <span className="chip">Every screen</span>
+      </div>
+      <p className="settings-hint t-secondary">
+        Open the TV address in a TV browser, then open the phone remote address
+        on a signed-in phone. The video stays on the TV and the phone sends
+        private control commands only.
+      </p>
+      <div className="settings-invite-link">
+        <code>{tvURL}</code>
+        <button
+          type="button"
+          className="chip"
+          onClick={() => void copyRemoteURL("TV address", tvURL)}
+        >
+          Copy TV address
+        </button>
+      </div>
+      <div className="settings-invite-link">
+        <code>{phoneRemoteURL}</code>
+        <button
+          type="button"
+          className="chip"
+          onClick={() => void copyRemoteURL("Phone remote address", phoneRemoteURL)}
+        >
+          Copy phone remote address
+        </button>
+      </div>
+      <p className="settings-status" aria-live="polite">
+        {copyStatus ?? ""}
+      </p>
 
       <div className="settings-source-row">
         <a className="chip" href={guideURL} target="_blank" rel="noreferrer">
@@ -3091,12 +3464,48 @@ function ServerTab() {
         maxUses: inviteDraft.maxUses,
         expiresInSeconds: inviteDraft.expiresDays * 24 * 60 * 60,
       });
-      const baseURL = configuredServerURL() ?? window.location.origin;
-      const inviteURL = new URL(baseURL);
-      inviteURL.searchParams.set("invite", response.token);
-      setCreatedInviteURL(inviteURL.toString());
+      setCreatedInviteURL(inviteURLFromToken(response.token));
       setInvites((current) => [response.invite, ...current]);
       setMessage("Invite link created.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function inviteURLFromToken(token: string): string {
+    const baseURL = configuredServerURL() ?? window.location.origin;
+    const inviteURL = new URL(baseURL);
+    inviteURL.searchParams.set("invite", token);
+    return inviteURL.toString();
+  }
+
+  async function reissueInvite(invite: ServerInvite) {
+    if (
+      invite.active &&
+      !window.confirm(
+        "Reissue this invite? The current link will stop working immediately and a replacement link will be shown once.",
+      )
+    ) {
+      return;
+    }
+    setMessage(null);
+    setError(null);
+    try {
+      const response = await serverRequest<{
+        invite: ServerInvite;
+        token: string;
+      }>(
+        "POST",
+        `/api/admin/invites/${encodeURIComponent(invite.id)}/reissue`,
+      );
+      setCreatedInviteURL(inviteURLFromToken(response.token));
+      setInvites((current) => [
+        response.invite,
+        ...current.map((entry) =>
+          entry.id === invite.id ? { ...entry, active: false } : entry,
+        ),
+      ]);
+      setMessage("Invite reissued. Copy the replacement link now.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -3405,6 +3814,13 @@ function ServerTab() {
                     <span className="settings-profile-meta t-secondary">
                       <span>{invite.active ? "Active" : "Inactive"}</span>
                       <span>{invite.simpleMode ? "Simple" : "Advanced"}</span>
+                      <button
+                        type="button"
+                        className="chip"
+                        onClick={() => void reissueInvite(invite)}
+                      >
+                        Reissue
+                      </button>
                       {invite.active && (
                         <button
                           type="button"

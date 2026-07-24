@@ -1,0 +1,57 @@
+.host-availability {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-lg);
+  width: 100%;
+  padding: var(--sp-md) var(--sp-lg);
+  color: var(--text-primary);
+  background: rgba(76, 25, 32, 0.96);
+  border: 1px solid rgba(252, 165, 165, 0.58);
+  border-radius: var(--r-md);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
+}
+
+.host-availability.is-offline {
+  background: rgba(62, 45, 10, 0.96);
+  border-color: rgba(253, 230, 138, 0.54);
+}
+
+.host-availability > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.host-availability strong {
+  font-size: 0.9rem;
+}
+
+.host-availability p {
+  margin: calc(3px * var(--density-scale)) 0 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.host-availability-retry {
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: var(--r-sm);
+  padding: calc(6px * var(--density-scale)) calc(10px * var(--density-scale));
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.host-availability-retry:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+@media (max-width: 560px) {
+  .host-availability {
+    align-items: flex-start;
+    gap: var(--sp-sm);
+  }
+}

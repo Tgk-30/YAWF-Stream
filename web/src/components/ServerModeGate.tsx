@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { configuredServerURL } from "../lib/serverMode";
+import {
+  configuredServerURL,
+  configuredServerURLSource,
+  saveServerURL,
+} from "../lib/serverMode";
 import {
   clearServerSession,
   onUnauthorized,
@@ -260,11 +264,31 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
     return <GateShell title="Connecting" copy="Checking the YAWF Stream server." baseURL={state.baseURL} />;
   }
   if (state.kind === "error") {
+    const offline = navigator.onLine === false;
+    const canUseLocalMode = configuredServerURLSource() === "saved";
     return (
       <GateShell
-        title="Server unavailable"
-        copy={state.message}
+        title={offline ? "Device offline" : "Server unavailable"}
+        copy={
+          offline
+            ? "This device is offline. Reconnect to the internet or your home network, then retry."
+            : state.message
+        }
+        guidance={
+          offline
+            ? undefined
+            : "The host may be asleep, powered off, or unavailable on this network. Keep it awake for remote streaming and check Settings > Server > Remote access when it is back online."
+        }
         baseURL={state.baseURL}
+        actionLabel={canUseLocalMode ? "Use Local Mode" : undefined}
+        onAction={
+          canUseLocalMode
+            ? async () => {
+                saveServerURL(null);
+                window.location.reload();
+              }
+            : undefined
+        }
         onRetry={() => setAttempt((n) => n + 1)}
       />
     );
@@ -351,6 +375,7 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
 function GateShell({
   title,
   copy,
+  guidance,
   baseURL,
   actionLabel,
   onAction,
@@ -358,6 +383,7 @@ function GateShell({
 }: {
   title: string;
   copy: string;
+  guidance?: string;
   baseURL: string;
   actionLabel?: string;
   onAction?: () => Promise<void>;
@@ -385,6 +411,9 @@ function GateShell({
       <div className="server-gate-card">
         <h1 className="server-gate-title">{title}</h1>
         <p className="server-gate-copy">{copy}</p>
+        {guidance != null && (
+          <p className="server-gate-copy">{guidance}</p>
+        )}
         {actionError != null && <p className="server-gate-error">{actionError}</p>}
         {(onAction != null || onRetry != null) && (
           <div className="server-gate-actions">

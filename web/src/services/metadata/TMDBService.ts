@@ -66,7 +66,7 @@ interface RawExternalIds {
 }
 
 // /movie/{id}/release_dates - per-country release dates, each carrying a
-// certification (the US entry is what `getCertification` reads).
+// certification (the configured region is what `getCertification` reads).
 interface RawReleaseDates {
   results: Array<{
     iso_3166_1: string;
@@ -74,7 +74,7 @@ interface RawReleaseDates {
   }>;
 }
 
-// /tv/{id}/content_ratings - per-country TV content rating (the US `rating`).
+// /tv/{id}/content_ratings - per-country TV content rating.
 interface RawContentRatings {
   results: Array<{ iso_3166_1: string; rating?: string | null }>;
 }
@@ -90,7 +90,7 @@ const CERT_RANK: Readonly<Record<string, number>> = {
   "NC-17": 4,
 };
 
-/** The strictest certification among a title's US certs. An unrecognized cert
+/** The strictest certification among a title's regional certs. An unrecognized cert
  * outranks all known ones (returned as-is) so the server fail-closes on it;
  * an empty list yields null. */
 function strictestCertification(certs: string[]): string | null {
@@ -298,6 +298,8 @@ export class TMDBService implements MetadataProvider {
   private readonly apiKey: string;
   private readonly baseURL = "https://api.themoviedb.org/3";
   private readonly fetchImpl: FetchImpl;
+  private readonly language: string;
+  private readonly region: string;
 
   // Bounded TTL cache of already-DECODED read responses, keyed by
   // `path + sorted query params`. Only successful reads are cached - errors
@@ -313,8 +315,14 @@ export class TMDBService implements MetadataProvider {
   /** Long TTL for the effectively-static genre list. 24 hours, in ms. */
   static readonly longTTL = 60 * 60 * 24 * 1000;
 
-  constructor(apiKey: string, fetchImpl?: FetchImpl) {
+  constructor(
+    apiKey: string,
+    fetchImpl?: FetchImpl,
+    locale: { language?: string; region?: string } = {},
+  ) {
     this.apiKey = apiKey;
+    this.language = locale.language ?? "en-US";
+    this.region = locale.region ?? "US";
     // Default to the global fetch; tests inject a stub. Bind so `this` inside
     // the platform fetch stays correct.
     this.fetchImpl =
@@ -390,10 +398,9 @@ export class TMDBService implements MetadataProvider {
       query,
       page: String(page),
       include_adult: "false",
+      language: this.language,
+      region: this.region,
     };
-    if (type == null) {
-      params.language = "en-US";
-    }
 
     return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
       const response = await this.request<RawPagedResponse<RawSearchResult>>(path, params);
@@ -419,7 +426,7 @@ export class TMDBService implements MetadataProvider {
     // credits are fetched separately by getCast, so only request external_ids.
     const params = {
       append_to_response: "external_ids",
-      language: "en-US",
+      language: this.language,
     };
 
     return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
@@ -434,7 +441,7 @@ export class TMDBService implements MetadataProvider {
     page = 1,
   ): Promise<MetadataSearchResult> {
     const path = `/trending/${MediaTypeNS.tmdbPath(type)}/${timeWindow}`;
-    const params = { page: String(page), language: "en-US" };
+    const params = { page: String(page), language: this.language };
 
     return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
       const response = await this.request<RawPagedResponse<RawSearchResult>>(path, params);
@@ -448,7 +455,11 @@ export class TMDBService implements MetadataProvider {
     page = 1,
   ): Promise<MetadataSearchResult> {
     const path = `/${MediaTypeNS.tmdbPath(type)}/${category}`;
-    const params = { page: String(page), language: "en-US" };
+    const params = {
+      page: String(page),
+      language: this.language,
+      region: this.region,
+    };
 
     return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
       const response = await this.request<RawPagedResponse<RawSearchResult>>(path, params);
@@ -467,7 +478,11 @@ export class TMDBService implements MetadataProvider {
       source: MovieRelease["source"],
     ): Promise<MovieRelease[]> => {
       const path = `/movie/${source}`;
-      const params = { page: "1", language: "en-US" };
+      const params = {
+        page: "1",
+        language: this.language,
+        region: this.region,
+      };
       const response = await this.cached(
         this.cacheKey(path, params),
         TMDBService.shortTTL,
@@ -534,7 +549,8 @@ export class TMDBService implements MetadataProvider {
     const params: Record<string, string> = {
       page: String(filters.page),
       sort_by: filters.sortBy,
-      language: "en-US",
+      language: this.language,
+      region: this.region,
       include_adult: "false",
     };
     if (filters.genreId != null) {
@@ -568,15 +584,20 @@ export class TMDBService implements MetadataProvider {
     params: Record<string, string>,
   ): Promise<MetadataSearchResult> {
     const path = `/discover/${MediaTypeNS.tmdbPath(type)}`;
-    return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
-      const response = await this.request<RawPagedResponse<RawSearchResult>>(path, params);
+    const localized = {
+      language: this.language,
+      region: this.region,
+      ...params,
+    };
+    return this.cached(this.cacheKey(path, localized), TMDBService.shortTTL, async () => {
+      const response = await this.request<RawPagedResponse<RawSearchResult>>(path, localized);
       return this.pagedToResult(response);
     });
   }
 
   async getGenres(type: MediaType): Promise<Genre[]> {
     const path = `/genre/${MediaTypeNS.tmdbPath(type)}/list`;
-    const params = { language: "en-US" };
+    const params = { language: this.language };
     return this.cached(this.cacheKey(path, params), TMDBService.longTTL, async () => {
       const response = await this.request<RawGenresResponse>(path, params);
       return response.genres.map((g) => ({ id: g.id, name: g.name }));
@@ -585,7 +606,7 @@ export class TMDBService implements MetadataProvider {
 
   async getSeasons(tmdbId: number): Promise<Season[]> {
     const path = `/tv/${tmdbId}`;
-    const params = { language: "en-US" };
+    const params = { language: this.language };
     return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
       const response = await this.request<RawTVDetailResponse>(path, params);
       return (response.seasons ?? []).map((s) => ({
@@ -602,7 +623,7 @@ export class TMDBService implements MetadataProvider {
 
   async getEpisodes(tmdbId: number, season: number): Promise<Episode[]> {
     const path = `/tv/${tmdbId}/season/${season}`;
-    const params = { language: "en-US" };
+    const params = { language: this.language };
     return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
       const response = await this.request<RawSeasonResponse>(path, params);
       return response.episodes.map((ep) => ({
@@ -629,7 +650,7 @@ export class TMDBService implements MetadataProvider {
 
   async getCast(tmdbId: number, type: MediaType): Promise<CastMember[]> {
     const path = `/${MediaTypeNS.tmdbPath(type)}/${tmdbId}/credits`;
-    const params = { language: "en-US" };
+    const params = { language: this.language };
     return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
       const response = await this.request<RawCredits>(path, params);
       return response.cast.map((c) =>
@@ -643,7 +664,7 @@ export class TMDBService implements MetadataProvider {
    * Cached with the short TTL. */
   async getTrailer(tmdbId: number, type: MediaType): Promise<string | null> {
     const path = `/${MediaTypeNS.tmdbPath(type)}/${tmdbId}/videos`;
-    const params = { language: "en-US" };
+    const params = { language: this.language };
     return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
       const response = await this.request<RawVideos>(path, params);
       const yt = response.results.filter(
@@ -665,7 +686,7 @@ export class TMDBService implements MetadataProvider {
     type: MediaType,
   ): Promise<MediaPreview[]> {
     const path = `/${MediaTypeNS.tmdbPath(type)}/${tmdbId}/recommendations`;
-    const params = { language: "en-US", page: "1" };
+    const params = { language: this.language, page: "1" };
     return this.cached(this.cacheKey(path, params), TMDBService.shortTTL, async () => {
       const response = await this.request<RawPagedResponse<RawSearchResult>>(path, params);
       return response.results
@@ -674,27 +695,28 @@ export class TMDBService implements MetadataProvider {
     });
   }
 
-  /** The US maturity certification for a title, or null when TMDB has none.
+  /** The regional maturity certification for a title, or null when TMDB has none.
    * Movies read `/movie/{id}/release_dates` (the first non-empty US
-   * certification); series read `/tv/{id}/content_ratings` (the US `rating`).
+   * certification); series read `/tv/{id}/content_ratings`.
    * Cached with the long TTL - certifications effectively never change. The
    * server's kid play-block treats a null return as "unknown" → fail-closed. */
   async getCertification(
     tmdbId: number,
     type: MediaType,
+    region = this.region,
   ): Promise<string | null> {
     if (type === "movie") {
       const path = `/movie/${tmdbId}/release_dates`;
       return this.cached(this.cacheKey(path, {}), TMDBService.longTTL, async () => {
         const response = await this.request<RawReleaseDates>(path, {});
-        const us = response.results.find((r) => r.iso_3166_1 === "US");
-        if (us == null) return null;
-        // A title can carry multiple US certifications (theatrical R, edited-for-TV
+        const regional = response.results.find((r) => r.iso_3166_1 === region);
+        if (regional == null) return null;
+        // A title can carry multiple regional certifications (theatrical R, edited-for-TV
         // PG-13, an NC-17 director's cut, …) across its release_dates, in no
         // guaranteed order. Return the MOST RESTRICTIVE so the kid play-block stays
         // fail-safe - an unrecognized cert ranks highest so it blocks rather than
         // slips through.
-        const certs = us.release_dates
+        const certs = regional.release_dates
           .map((d) => d.certification)
           .filter((c): c is string => c != null && c.trim().length > 0)
           .map((c) => c.trim());
@@ -704,8 +726,8 @@ export class TMDBService implements MetadataProvider {
     const path = `/tv/${tmdbId}/content_ratings`;
     return this.cached(this.cacheKey(path, {}), TMDBService.longTTL, async () => {
       const response = await this.request<RawContentRatings>(path, {});
-      const us = response.results.find((r) => r.iso_3166_1 === "US");
-      const rating = us?.rating;
+      const regional = response.results.find((r) => r.iso_3166_1 === region);
+      const rating = regional?.rating;
       return rating != null && rating.trim().length > 0 ? rating.trim() : null;
     });
   }

@@ -235,12 +235,66 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete window.YawfAndroidTV;
   vi.clearAllMocks();
 });
 
 // ---- Top-level shell + branch selection -----------------------------------
 
 describe("VideoPlayer shell", () => {
+  it("uses the native Android TV bridge and reports native progress", async () => {
+    const play = vi.fn();
+    const stop = vi.fn();
+    const onProgress = vi.fn();
+    const onClose = vi.fn();
+    window.YawfAndroidTV = { play, stop };
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session/index.m3u8"
+        externalPlaybackUrl="https://server.example/api/external-stream/capability"
+        playbackAuthorization="Bearer short-lived"
+        title="TV film"
+        subtitle="Director's cut"
+        startPositionSeconds={42}
+        onProgress={onProgress}
+        onClose={onClose}
+      />,
+    );
+
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(play.mock.calls[0]![0])).toEqual({
+      url: "https://server.example/api/external-stream/capability",
+      title: "TV film",
+      subtitle: "Director's cut",
+      startPositionSeconds: 42,
+      authorization: "Bearer short-lived",
+      audioLanguage: null,
+      subtitleLanguage: null,
+      subtitlesEnabled: false,
+    });
+    expect(
+      screen.getByText("Playing in the native Android TV player."),
+    ).toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("yawf-android-tv-progress", {
+          detail: { positionSeconds: 50, durationSeconds: 100 },
+        }),
+      );
+    });
+    expect(onProgress).toHaveBeenCalledWith(50, 100);
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("yawf-android-tv-closed", {
+          detail: { positionSeconds: 55, durationSeconds: 100 },
+        }),
+      );
+    });
+    expect(onProgress).toHaveBeenLastCalledWith(55, 100);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the title and a close button", () => {
     render(
       <VideoPlayer url="https://x/test.mp4" title="My Movie" onClose={() => {}} />,

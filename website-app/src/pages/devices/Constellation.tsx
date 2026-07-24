@@ -25,11 +25,11 @@ interface DeviceNode {
 }
 
 const NODES: DeviceNode[] = [
-  { id: 'tv', name: 'TV', desc: 'via the PWA or any browser box', kind: 'PWA', icon: Tv, x: 500, y: 106, bend: 26, hint: 'Open server URL → Install app' },
+  { id: 'tv', name: 'TV', desc: 'native Android TV app + browser TV mode', kind: 'native', icon: Tv, x: 500, y: 106, bend: 26, hint: 'Install the TV APK → connect your server' },
   { id: 'desktop', name: 'Desktop', desc: 'macOS · Linux apps · Windows planned', kind: 'native', icon: Monitor, x: 790, y: 208, bend: -26, hint: 'Get the app → it finds your server' },
   { id: 'laptop', name: 'Laptop', desc: 'same apps, same server', kind: 'native', icon: Laptop, x: 790, y: 412, bend: 26, hint: 'Get the app → it finds your server' },
   { id: 'tablet', name: 'Tablet', desc: 'Add to Home Screen', kind: 'PWA', icon: Tablet, x: 500, y: 514, bend: -26, hint: 'Share → Add to Home Screen' },
-  { id: 'phone', name: 'Phone', desc: 'installs from your server URL', kind: 'PWA', icon: Smartphone, x: 210, y: 412, bend: 26, hint: 'Open server URL → Install app' },
+  { id: 'phone', name: 'Phone', desc: 'PWA + remote for the TV', kind: 'PWA', icon: Smartphone, x: 210, y: 412, bend: 26, hint: 'Open /remote → pair with the TV' },
   { id: 'browser', name: 'Guest browser', desc: 'point anything at your URL', kind: 'browser', icon: Globe, x: 210, y: 208, bend: -26, hint: 'Type your server URL → sign in' },
 ];
 

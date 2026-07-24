@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
-import { AppWindow, Apple, Server, Smartphone, Terminal } from 'lucide-react';
+import { AppWindow, Apple, Server, Smartphone, Terminal, Tv } from 'lucide-react';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import StreamRow from '@/components/StreamRow';
 import type { StreamRowMeta } from '@/components/StreamRow';
@@ -8,7 +8,7 @@ import { DOWNLOAD_LINKS, GITHUB_RELEASES_LATEST, VERSION } from '@/lib/site';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 interface PickerRow {
-  id: 'mac-arm' | 'mac-intel' | 'linux' | 'server' | 'pwa';
+  id: 'mac-arm' | 'mac-intel' | 'linux' | 'android-tv' | 'server' | 'pwa';
   icon: ReactNode;
   title: string;
   meta: StreamRowMeta[];
@@ -51,6 +51,17 @@ const ROWS: PickerRow[] = [
     href: DOWNLOAD_LINKS.linuxAppImage,
   },
   {
+    id: 'android-tv',
+    icon: <Tv className="h-5 w-5" />,
+    title: 'Android TV & Google TV',
+    meta: [
+      { label: 'Native Media3 player', variant: 'instant' },
+      { label: 'D-pad ready', variant: 'dim' },
+    ],
+    size: '.apk',
+    href: DOWNLOAD_LINKS.androidTV,
+  },
+  {
     id: 'server',
     icon: <Server className="h-5 w-5" />,
     title: 'Server - Debian or Ubuntu',
@@ -85,6 +96,10 @@ export default function StreamPicker() {
     let active = true;
     const detect = async () => {
       const ua = navigator.userAgent;
+      if (/Android TV|GoogleTV|AFT|BRAVIA|SMART-TV/i.test(ua)) {
+        if (active) setDetected('android-tv');
+        return;
+      }
       if (/iPhone|iPad|iPod|Android/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
         if (active) setDetected('pwa');
         return;
@@ -123,6 +138,8 @@ export default function StreamPicker() {
   const detectedLabel =
     detected === 'pwa'
       ? 'Mobile browser detected: install the PWA from your server.'
+      : detected === 'android-tv'
+        ? 'Android TV detected: install the signed TV APK.'
       : detected === 'linux'
         ? 'Linux detected: the amd64 AppImage is the desktop option shown here.'
         : detected === 'mac-arm'
@@ -232,7 +249,7 @@ export default function StreamPicker() {
         >
           <AppWindow className="mt-0.5 h-5 w-5 shrink-0 text-ink-3" />
           <div>
-            <p className="font-body text-[0.95rem] font-semibold text-ink-1">Windows v1 is held</p>
+            <p className="font-body text-[0.95rem] font-semibold text-ink-1">Windows release is held</p>
             <p className="mt-1 font-mono text-[0.75rem] leading-relaxed tracking-[0.04em] text-ink-3">
               It will ship after Authenticode signing and clean-install verification pass. No unsigned v1 installer
               will be published.

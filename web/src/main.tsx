@@ -9,6 +9,12 @@ import { installAttentionGate } from "./lib/attention";
 import { initInstallPromptCapture } from "./lib/installPrompt";
 import { installExternalLinkHandler } from "./lib/externalLinks";
 import { followServerURL } from "./lib/serverMode";
+import {
+  installTVSpatialNavigation,
+  isPhoneRemoteRoute,
+  isTVMode,
+} from "./lib/tvMode";
+import { PhoneRemote } from "./components/PhoneRemote";
 
 // A first-run "Connect to a server" hands the whole window to the server
 // origin. Follow that choice across launches: when the app boots back on its
@@ -21,6 +27,11 @@ try {
   }
 } catch {
   // A malformed stored URL must never block the normal boot.
+}
+
+if (isTVMode()) {
+  document.documentElement.dataset.tvMode = "true";
+  installTVSpatialNavigation();
 }
 
 const failureLog: string[] = [];
@@ -75,7 +86,7 @@ createRoot(document.getElementById("root")!).render(
     <ErrorBoundary label="root">
       <ServerModeGate>
         <AppStoreProvider>
-          <FirstRunHost />
+          {isPhoneRemoteRoute() ? <PhoneRemote /> : <FirstRunHost />}
         </AppStoreProvider>
       </ServerModeGate>
     </ErrorBoundary>

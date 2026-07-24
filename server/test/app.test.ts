@@ -280,6 +280,393 @@ describe("DebridStreamer server", () => {
     expect(response.rawPayload.byteLength).toBeLessThan(2_000);
   });
 
+  it("pairs a phone remote without exposing playback or session credentials", async () => {
+    const viewer = await setupOwner(app);
+    const created = await request(viewer, {
+      method: "POST",
+      url: "/api/remote/sessions",
+      csrf: true,
+    });
+    expect(created.statusCode).toBe(200);
+    const viewerSession = json<{
+      session: { id: string; pairingCode: string };
+    }>(created).session;
+    expect(viewerSession.pairingCode).toMatch(/^\d{6}$/);
+
+    const controller = await request(viewer, {
+      method: "POST",
+      url: "/api/remote/pair",
+      csrf: true,
+      payload: {
+        code: viewerSession.pairingCode,
+        controllerName: "Phone",
+      },
+    });
+    expect(controller.statusCode).toBe(200);
+    const paired = json<{
+      session: { id: string; controllerToken: string };
+    }>(controller).session;
+    expect(paired.id).toBe(viewerSession.id);
+
+    const queued = await request(viewer, {
+      method: "POST",
+      url: `/api/remote/sessions/${viewerSession.id}/commands`,
+      csrf: true,
+      headers: { "x-yawf-remote-token": paired.controllerToken },
+      payload: { type: "seek-relative", value: 10 },
+    });
+    expect(queued.statusCode).toBe(200);
+
+    const snapshot = await request(viewer, {
+      method: "GET",
+      url: `/api/remote/sessions/${viewerSession.id}?after=0`,
+    });
+    expect(snapshot.statusCode).toBe(200);
+    const body = json<{
+      session: {
+        paired: boolean;
+        commands: Array<{ type: string; value: number }>;
+        controllerToken?: string;
+      };
+    }>(snapshot).session;
+    expect(body.paired).toBe(true);
+    expect(body.commands).toEqual([
+      expect.objectContaining({ type: "seek-relative", value: 10 }),
+    ]);
+    expect(body).not.toHaveProperty("controllerToken");
+
+    const rejected = await request(viewer, {
+      method: "POST",
+      url: `/api/remote/sessions/${viewerSession.id}/commands`,
+      csrf: true,
+      headers: { "x-yawf-remote-token": "wrong" },
+      payload: { type: "play" },
+    });
+    expect(rejected.statusCode).toBe(404);
+  });
+
+  it("exports a secret-free profile bundle and imports it into another profile", async () => {
+    const owner = await setupOwner(app);
+    await request(owner, {
+      method: "PUT",
+      url: "/api/settings/profile",
+      csrf: true,
+      payload: { key: "ui_theme", value: "midnight" },
+    });
+    await request(owner, {
+      method: "PUT",
+      url: "/api/settings/profile",
+      csrf: true,
+      payload: { key: "tmdb_api_key", value: "must-not-export" },
+    });
+    await request(owner, {
+      method: "PUT",
+      url: "/api/library/watchlist/tt-portable",
+      csrf: true,
+      payload: { preview: { id: "tt-portable", title: "Portable title" } },
+    });
+    await request(owner, {
+      method: "PUT",
+      url: "/api/history/tt-portable",
+      csrf: true,
+      payload: {
+        progressSeconds: 42,
+        durationSeconds: 100,
+        completed: false,
+        lastWatched: "2026-07-24T10:00:00.000Z",
+        preview: { id: "tt-portable", title: "Portable title" },
+      },
+    });
+    const folderResponse = await request(owner, {
+      method: "POST",
+      url: "/api/library/folders",
+      csrf: true,
+      payload: { name: "Portable folder", listType: "favorites" },
+    });
+    expect(folderResponse.statusCode).toBe(200);
+    const folderId = json<{ folder: { id: string } }>(folderResponse).folder.id;
+    await request(owner, {
+      method: "PUT",
+      url: "/api/library/tt-portable",
+      csrf: true,
+      payload: {
+        listType: "favorites",
+        folderId,
+        preview: { id: "tt-portable", title: "Portable title" },
+      },
+    });
+
+    const exported = await request(owner, {
+      method: "GET",
+      url: "/api/portability/export",
+    });
+    expect(exported.statusCode).toBe(200);
+    const bundle = json<{
+      bundle: {
+        settings: Array<{ key: string; value: string }>;
+        watchlist: Array<{ mediaId: string }>;
+        history: Array<{ mediaId: string; progressSeconds: number }>;
+        folders: Array<{ id: string; name: string }>;
+        library: Array<{ mediaId: string; folderId: string | null }>;
+      };
+    }>(exported).bundle;
+    expect(bundle.settings).toContainEqual({ key: "ui_theme", value: "midnight" });
+    expect(bundle.settings.some((setting) => setting.key === "tmdb_api_key")).toBe(false);
+    expect(bundle.watchlist).toContainEqual(
+      expect.objectContaining({ mediaId: "tt-portable" }),
+    );
+    expect(bundle.history).toContainEqual(
+      expect.objectContaining({
+        mediaId: "tt-portable",
+        progressSeconds: 42,
+      }),
+    );
+
+    await createProfile(owner, "portable-member", "member-password");
+    const member = await login(app, "portable-member", "member-password");
+    const imported = await request(member, {
+      method: "POST",
+      url: "/api/portability/import",
+      csrf: true,
+      payload: { mode: "merge", bundle },
+    });
+    expect(imported.statusCode, imported.body).toBe(200);
+    expect(
+      json<{
+        counts: {
+          settings: number;
+          watchlist: number;
+          history: number;
+          folders: number;
+          library: number;
+        };
+      }>(imported).counts,
+    ).toMatchObject({
+      settings: 1,
+      watchlist: 1,
+      history: 1,
+      folders: 1,
+      library: 1,
+    });
+
+    const roundTrip = json<{
+      bundle: {
+        settings: Array<{ key: string; value: string }>;
+        watchlist: Array<{ mediaId: string }>;
+        history: Array<{ mediaId: string; progressSeconds: number }>;
+        folders: Array<{ name: string }>;
+        library: Array<{ mediaId: string }>;
+      };
+    }>(
+      await request(member, {
+        method: "GET",
+        url: "/api/portability/export",
+      }),
+    ).bundle;
+    expect(roundTrip.settings).toContainEqual({ key: "ui_theme", value: "midnight" });
+    expect(roundTrip.watchlist).toContainEqual(
+      expect.objectContaining({ mediaId: "tt-portable" }),
+    );
+    expect(roundTrip.history).toContainEqual(
+      expect.objectContaining({
+        mediaId: "tt-portable",
+        progressSeconds: 42,
+      }),
+    );
+    expect(roundTrip.folders).toContainEqual(
+      expect.objectContaining({ name: "Portable folder" }),
+    );
+    expect(roundTrip.library).toContainEqual(
+      expect.objectContaining({ mediaId: "tt-portable" }),
+    );
+  });
+
+  it("restores child-first folder trees and safely breaks imported cycles", async () => {
+    const owner = await setupOwner(app);
+    const now = new Date().toISOString();
+    const folder = (
+      id: string,
+      name: string,
+      parentId: string | null,
+    ) => ({
+      id,
+      name,
+      parentId,
+      listType: "favorites" as const,
+      folderKind: "manual" as const,
+      isSystem: false,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const bundle = {
+      product: "YAWF Stream" as const,
+      format: "yawf-profile-portable" as const,
+      version: 1 as const,
+      createdAt: now,
+      settings: [],
+      watchlist: [],
+      history: [],
+      folders: [
+        folder("child", "Child", "parent"),
+        folder("parent", "Parent", null),
+        folder("cycle-a", "Cycle A", "cycle-b"),
+        folder("cycle-b", "Cycle B", "cycle-a"),
+      ],
+      library: [
+        {
+          mediaId: "tt-nested",
+          folderId: "child",
+          listType: "favorites" as const,
+          addedAt: now,
+          customListName: null,
+          releaseDateHint: null,
+          renewalStatus: null,
+          preview: { id: "tt-nested", title: "Nested title" },
+        },
+      ],
+    };
+
+    const imported = await request(owner, {
+      method: "POST",
+      url: "/api/portability/import",
+      csrf: true,
+      payload: { mode: "merge", bundle },
+    });
+    expect(imported.statusCode, imported.body).toBe(200);
+    expect(
+      json<{ counts: { folders: number; library: number } }>(imported).counts,
+    ).toMatchObject({
+      folders: 4,
+      library: 1,
+    });
+
+    const exported = json<{
+      bundle: {
+        folders: Array<{
+          id: string;
+          name: string;
+          parentId: string | null;
+        }>;
+        library: Array<{ mediaId: string; folderId: string | null }>;
+      };
+    }>(
+      await request(owner, {
+        method: "GET",
+        url: "/api/portability/export",
+      }),
+    ).bundle;
+    const byName = new Map(exported.folders.map((entry) => [entry.name, entry]));
+    expect(byName.get("Child")?.parentId).toBe(byName.get("Parent")?.id);
+    expect(byName.get("Cycle A")?.parentId).not.toBe(byName.get("Cycle B")?.id);
+    expect(byName.get("Cycle B")?.parentId).toBe(byName.get("Cycle A")?.id);
+    expect(exported.library).toContainEqual(
+      expect.objectContaining({
+        mediaId: "tt-nested",
+        folderId: byName.get("Child")?.id,
+      }),
+    );
+
+    const duplicateFolders = await request(owner, {
+      method: "POST",
+      url: "/api/portability/import",
+      csrf: true,
+      payload: {
+        mode: "merge",
+        bundle: {
+          ...bundle,
+          library: [],
+          folders: [
+            folder("duplicate", "First", null),
+            folder("duplicate", "Second", null),
+          ],
+        },
+      },
+    });
+    expect(duplicateFolders.statusCode).toBe(400);
+  });
+
+  it("reissues an invite with the same policy and revokes the old token", async () => {
+    const owner = await setupOwner(app);
+    const created = await request(owner, {
+      method: "POST",
+      url: "/api/admin/invites",
+      csrf: true,
+      payload: {
+        label: "Living room",
+        role: "restricted",
+        simpleMode: true,
+        maxUses: 3,
+        expiresInSeconds: 86_400,
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const first = json<{
+      invite: { id: string; expiresAt: string };
+      token: string;
+    }>(created);
+
+    const reissued = await request(owner, {
+      method: "POST",
+      url: `/api/admin/invites/${first.invite.id}/reissue`,
+      csrf: true,
+    });
+    expect(reissued.statusCode).toBe(200);
+    const replacement = json<{
+      invite: {
+        id: string;
+        label: string;
+        role: string;
+        simpleMode: boolean;
+        maxUses: number;
+        usedCount: number;
+        active: boolean;
+        expiresAt: string;
+      };
+      token: string;
+    }>(reissued);
+    expect(replacement.invite).toMatchObject({
+      label: "Living room",
+      role: "restricted",
+      simpleMode: true,
+      maxUses: 3,
+      usedCount: 0,
+      active: true,
+    });
+    expect(replacement.invite.id).not.toBe(first.invite.id);
+    expect(replacement.token).not.toBe(first.token);
+    expect(
+      new Date(replacement.invite.expiresAt).getTime() - Date.now(),
+    ).toBeGreaterThan(23 * 60 * 60 * 1000);
+
+    const oldToken = await request(
+      { app, cookies: new Map() },
+      {
+        method: "POST",
+        url: "/api/auth/invite",
+        payload: {
+          token: first.token,
+          username: "old-link",
+          password: "strong-password",
+        },
+      },
+    );
+    expect(oldToken.statusCode).toBe(410);
+
+    const newToken = await request(
+      { app, cookies: new Map() },
+      {
+        method: "POST",
+        url: "/api/auth/invite",
+        payload: {
+          token: replacement.token,
+          username: "new-link",
+          password: "strong-password",
+        },
+      },
+    );
+    expect(newToken.statusCode).toBe(200);
+  });
+
   it("completes a progressive stream search when no indexer is configured", async () => {
     const owner = await setupOwner(app);
     const response = await request(owner, {
@@ -930,6 +1317,65 @@ describe("DebridStreamer server", () => {
       database?.close();
       await healthApp.close();
       rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the active hardware transcoder and playback capability matrix", async () => {
+    const hardwareApp = await buildApp({
+      config: {
+        databasePath: ":memory:",
+        dataDir: ".test-data",
+        secretKey: randomBytes(32),
+        cookieSecure: false,
+        logger: false,
+        allowRawStreamUrls: true,
+        enableTranscode: true,
+        transcodeVideoEncoder: "h264_nvenc",
+      },
+      transcoder: {
+        ...makeFakeTranscoder(),
+        async capabilities() {
+          return {
+            toneMapping: true,
+            videoEncoders: ["libx264", "h264_nvenc"],
+            subtitleSidecar: true,
+          };
+        },
+      },
+    });
+    try {
+      const owner = await setupOwner(hardwareApp);
+      const health = json<{
+        transcode: {
+          enabled: boolean;
+          ready: boolean;
+          configuredEncoder: string;
+          activeEncoder: string | null;
+          availableVideoEncoders: string[];
+          adaptive: boolean;
+          seekOffset: boolean;
+          subtitleSidecar: boolean;
+          toneMapping: boolean;
+        };
+      }>(
+        await request(owner, {
+          method: "GET",
+          url: "/api/admin/health",
+        }),
+      );
+      expect(health.transcode).toEqual({
+        enabled: true,
+        ready: true,
+        configuredEncoder: "h264_nvenc",
+        activeEncoder: "h264_nvenc",
+        availableVideoEncoders: ["libx264", "h264_nvenc"],
+        adaptive: true,
+        seekOffset: true,
+        subtitleSidecar: true,
+        toneMapping: true,
+      });
+    } finally {
+      await hardwareApp.close();
     }
   });
 

@@ -152,6 +152,34 @@ DEBRIDSTREAMER_DESKTOP_SHARE_URL=https://stream.example.com
 
 ---
 
+## TV mode, Android TV, and the phone remote
+
+Server Mode exposes two device-specific routes:
+
+```text
+https://stream.example.com/tv
+https://stream.example.com/remote
+```
+
+- Open `/tv` in a television browser for the ten-foot interface and D-pad
+  navigation. The TV shows a six-digit, single-use pairing code.
+- Open `/remote` on a signed-in phone, enter that code, and control the browser
+  TV player. The phone sends play, pause, seek, volume, fullscreen, next-source,
+  and close commands. Video bytes continue flowing to the TV, not through the
+  phone.
+- On Android TV or Google TV, install the signed YAWF Stream TV APK and enter
+  the base server URL. The app loads `/tv` and moves playback into the native
+  Android Media3 player. The phone remote currently controls browser TV mode;
+  native Android TV playback uses the physical remote.
+
+The TV and phone must reach the same YAWF Stream server and sign in to the same
+viewer profile. Pairing codes expire quickly and can be replaced from the TV.
+For a TV outside the home, Tailscale is the simplest route because it does not
+require an interactive Cloudflare Access login inside the TV app. Use HTTPS for
+any publicly reachable hostname.
+
+---
+
 ## Choosing between them
 
 | | Tailscale | Cloudflare Tunnel |

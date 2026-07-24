@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">YAWF Stream</string>
+    <string name="server_setup_title">Connect this TV</string>
+    <string name="server_setup_copy">Enter the address of your YAWF Stream server. Use HTTPS for remote access. Local HTTP addresses are supported on your home network.</string>
+    <string name="server_url_hint">https://stream.example.com</string>
+    <string name="connect">Connect</string>
+    <string name="server_url_error">Enter a valid HTTP or HTTPS server address without a username, password, query, or fragment.</string>
+    <string name="player_error">Native playback stopped. Try the next source or server transcoding.</string>
+</resources>

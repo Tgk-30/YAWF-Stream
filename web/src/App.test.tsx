@@ -63,6 +63,7 @@ vi.mock("./store/AppStore", () => ({
 let serverModeValue = false;
 vi.mock("./lib/serverMode", () => ({
   isServerMode: () => serverModeValue,
+  configuredServerURL: () => null,
 }));
 
 let smartPreloadEnabled = false;

@@ -17,7 +17,7 @@ function CascadeChars({ text }: { text: string }) {
   );
 }
 
-const PLATFORM_CHIPS = ['macOS', 'Linux', 'Windows planned', 'iPhone & iPad', 'Android', 'any browser'];
+const PLATFORM_CHIPS = ['macOS', 'Linux', 'Android TV', 'Google TV', 'iPhone & iPad', 'Android', 'any browser'];
 
 /**
  * Devices §1 - Page hero: "Every screen in the house, served."
@@ -103,8 +103,9 @@ export default function Hero() {
         </h1>
 
         <p className="dv-lede lede mx-auto mt-6 max-w-[720px]">
-          Desktop apps for macOS and Linux, with Windows held until its signing gate passes. A mobile PWA your own
-          server hosts. One library, one resume position - wherever you sit down.
+          Desktop apps for macOS and Linux, a native Android TV and Google TV app, and a mobile PWA your own server
+          hosts. Windows is held until its signing gate passes. Browser TV mode pairs with a phone remote, while every
+          screen keeps one library and resume position.
         </p>
 
         <div className="mt-8 flex flex-wrap items-center justify-center gap-2.5">
@@ -114,7 +115,7 @@ export default function Hero() {
                 className="inline-block [animation:float-y_5s_ease-in-out_infinite]"
                 style={{ animationDelay: `${1.4 + i * 0.35}s` }}
               >
-                <Chip variant={i === 3 || i === 4 ? 'instant' : 'default'}>{label}</Chip>
+                <Chip variant={i >= 2 && i <= 5 ? 'instant' : 'default'}>{label}</Chip>
               </span>
             </span>
           ))}

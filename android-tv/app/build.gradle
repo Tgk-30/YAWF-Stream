@@ -1,0 +1,56 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.yawf.stream.tv"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.yawf.stream.tv"
+        minSdk 23
+        targetSdk 36
+        versionCode 20000
+        versionName "2.0.0"
+    }
+
+    signingConfigs {
+        release {
+            def keystorePath = System.getenv("YAWF_ANDROID_KEYSTORE_FILE")
+            if (keystorePath != null && !keystorePath.isBlank()) {
+                storeFile file(keystorePath)
+                storePassword System.getenv("YAWF_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("YAWF_ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("YAWF_ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            def keystorePath = System.getenv("YAWF_ANDROID_KEYSTORE_FILE")
+            if (keystorePath != null && !keystorePath.isBlank()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+}
+
+dependencies {
+    implementation "androidx.activity:activity:1.13.0"
+    implementation "androidx.media3:media3-exoplayer:1.10.1"
+    implementation "androidx.media3:media3-exoplayer-hls:1.10.1"
+    implementation "androidx.media3:media3-ui:1.10.1"
+    testImplementation "junit:junit:4.13.2"
+}

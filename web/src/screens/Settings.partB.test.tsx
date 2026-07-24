@@ -54,10 +54,16 @@ vi.mock("../lib/tauri", () => ({
 
 const fetchAccountProfiles = vi.fn();
 const setProfileMaturity = vi.fn();
+const exportServerPortableProfile = vi.fn();
+const importServerPortableProfile = vi.fn();
 
 vi.mock("../lib/serverApi", () => ({
   fetchAccountProfiles: () => fetchAccountProfiles(),
   setProfileMaturity: (id: string, body: unknown) => setProfileMaturity(id, body),
+  exportServerPortableProfile: () => exportServerPortableProfile(),
+  importServerPortableProfile: (bundle: unknown, mode: unknown) =>
+    importServerPortableProfile(bundle, mode),
+  testServerDebridToken: vi.fn(),
 }));
 
 // AppStore - only the slice Settings reads.
@@ -156,6 +162,17 @@ function seedRefresh(role: ServerSession["role"]) {
     setupRequired: false,
     counts: { users: 3, profiles: 4, activeSessions: 2, activeStreamSessions: 1, credentials: 5, activeInvites: 1, auditEvents: 9, recentStreamErrors: 0 },
     config: { cookieSecure: true, cookieSameSite: "lax", trustProxy: false, corsConfigured: true, rawStreamUrlsEnabled: false, webDistConfigured: true, sessionTtlSeconds: 3600 },
+    transcode: {
+      enabled: true,
+      ready: true,
+      configuredEncoder: "h264_videotoolbox",
+      activeEncoder: "h264_videotoolbox",
+      availableVideoEncoders: ["libx264", "h264_videotoolbox"],
+      adaptive: true,
+      seekOffset: true,
+      subtitleSidecar: true,
+      toneMapping: true,
+    },
     warnings: ["Set a strong owner password."],
   });
   route("GET", "/api/admin/streams/active", {
@@ -212,8 +229,17 @@ beforeEach(() => {
   updateSettings.mockReset();
   fetchAccountProfiles.mockReset();
   setProfileMaturity.mockReset();
+  exportServerPortableProfile.mockReset();
+  importServerPortableProfile.mockReset();
   fetchAccountProfiles.mockResolvedValue({ profiles: [], activeProfileId: "p1" });
   setProfileMaturity.mockResolvedValue({ ok: true, profiles: [] });
+  importServerPortableProfile.mockResolvedValue({
+    settings: 0,
+    watchlist: 0,
+    history: 0,
+    folders: 0,
+    library: 0,
+  });
   installFetch();
 });
 
@@ -248,6 +274,52 @@ describe("Settings tab gating (Server Mode)", () => {
     renderSettings();
     await userEvent.click(await screen.findByRole("button", { name: "API keys" }));
     expect(screen.queryByLabelText("Trakt connection")).not.toBeInTheDocument();
+  });
+
+  it("imports a portable profile in merge mode from Privacy settings", async () => {
+    const bundle = {
+      product: "YAWF Stream",
+      format: "yawf-profile-portable",
+      version: 1,
+      createdAt: "2026-07-24T10:00:00.000Z",
+      settings: [],
+      watchlist: [],
+      history: [],
+      folders: [],
+      library: [],
+    };
+    const view = renderSettings();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Privacy" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Export current profile" }),
+    ).toBeInTheDocument();
+    const input = view.container.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    await userEvent.upload(
+      input,
+      new File([JSON.stringify(bundle)], "profile.json", {
+        type: "application/json",
+      }),
+    );
+    const realSetTimeout = window.setTimeout.bind(window);
+    const timeout = vi.spyOn(window, "setTimeout").mockImplementation(
+      ((handler: TimerHandler, delay?: number, ...args: unknown[]) =>
+        delay === 500
+          ? (0 as unknown as ReturnType<typeof window.setTimeout>)
+          : realSetTimeout(handler, delay, ...args)) as typeof window.setTimeout,
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Import portable server profile",
+      }),
+    );
+    await waitFor(() =>
+      expect(importServerPortableProfile).toHaveBeenCalledWith(bundle, "merge"),
+    );
+    timeout.mockRestore();
   });
 });
 
@@ -313,6 +385,15 @@ describe("ServerHealthPanel + admin panels", () => {
     expect(within(health as HTMLElement).getByText("Online")).toBeInTheDocument();
     expect(within(health as HTMLElement).getByText("Cookies secure")).toBeInTheDocument();
     expect(within(health as HTMLElement).getByText("Set a strong owner password.")).toBeInTheDocument();
+    expect(
+      within(health as HTMLElement).getByText("Transcoding matrix"),
+    ).toBeInTheDocument();
+    expect(
+      within(health as HTMLElement).getAllByText(/Apple VideoToolbox/).length,
+    ).toBeGreaterThan(0);
+    expect(
+      within(health as HTMLElement).getByText(/CPU software, Apple VideoToolbox/),
+    ).toBeInTheDocument();
     // owner used the admin usage endpoint
     expect(fetchCalls.some((c) => c.path === "/api/admin/usage/streams")).toBe(true);
   });
@@ -647,6 +728,51 @@ describe("Admin: create profile, shared credential, invites", () => {
       ).toBe(true),
     );
     expect(await screen.findByText("Invite revoked.")).toBeInTheDocument();
+  });
+
+  it("reissues an invite and shows its one-time replacement link", async () => {
+    seedRefresh("owner");
+    route("POST", "/api/admin/invites/inv1/reissue", {
+      invite: {
+        id: "inv-replacement",
+        label: "Family",
+        role: "member",
+        simpleMode: true,
+        maxUses: 5,
+        usedCount: 0,
+        createdAt: "2026-07-24T10:00:00Z",
+        expiresAt: "2026-08-04T10:00:00Z",
+        revokedAt: null,
+        active: true,
+      },
+      token: "replacement-token",
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderSettings();
+    await gotoServerTab();
+
+    const invitePanel = (await screen.findByText("Invite link")).closest(
+      ".settings-source",
+    )! as HTMLElement;
+    await userEvent.click(
+      within(invitePanel).getByRole("button", { name: "Reissue" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        fetchCalls.some(
+          (call) =>
+            call.method === "POST" &&
+            call.path === "/api/admin/invites/inv1/reissue",
+        ),
+      ).toBe(true),
+    );
+    expect(
+      await screen.findByText(/\?invite=replacement-token$/),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Invite reissued. Copy the replacement link now."),
+    ).toBeInTheDocument();
   });
 });
 

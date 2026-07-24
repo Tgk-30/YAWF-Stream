@@ -198,7 +198,30 @@ function tmdbService(db, config, profileId) {
       statusCode: 400,
     });
   }
-  return new TMDBService(token, cachedServerFetch(db));
+  const setting = (key) =>
+    db.sqlite
+      .prepare(
+        `SELECT value
+         FROM profile_settings
+         WHERE profile_id = ? AND key = ?
+         LIMIT 1`,
+      )
+      .get(profileId, key)?.value ?? null;
+  let language = "en-US";
+  try {
+    const configured = setting("metadata_language");
+    if (typeof configured === "string") {
+      language = new Intl.Locale(configured).toString();
+    }
+  } catch {
+    language = "en-US";
+  }
+  const configuredRegion = setting("metadata_region");
+  const region =
+    typeof configuredRegion === "string" && /^[A-Za-z]{2}$/.test(configuredRegion)
+      ? configuredRegion.toUpperCase()
+      : "US";
+  return new TMDBService(token, cachedServerFetch(db), { language, region });
 }
 
 // Base /discover/movie params for a maturity-capped (kid) profile: US cert
@@ -208,7 +231,6 @@ function tmdbService(db, config, profileId) {
 // movie-only. `extra` adds sort_by / genres / page.
 function capMovieParams(maturityMax, extra = {}) {
   const params = {
-    language: "en-US",
     include_adult: "false",
     ...extra,
   };
@@ -434,7 +456,9 @@ export async function titleCertification(db, config, profileId, mediaId, type) {
     tmdbId = await service.findByImdbId(mediaId, type);
   }
   if (tmdbId == null) return null;
-  return service.getCertification(tmdbId, type);
+  // Household maturity caps currently use the documented US ladder. Keep this
+  // safety decision independent from the viewer's metadata display region.
+  return service.getCertification(tmdbId, type, "US");
 }
 
 export async function getServerDetail(db, config, profileId, input) {

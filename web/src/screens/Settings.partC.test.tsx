@@ -258,6 +258,21 @@ describe("Settings · Remote access tunnel detection", () => {
     expect(screen.getByText("Install Tailscale on the server")).toBeInTheDocument();
   });
 
+  it("shows shareable TV and phone remote routes without moving the video to the phone", async () => {
+    mockServerURL = "https://stream.example.com";
+    renderRemoteAccess();
+
+    expect(
+      await screen.findByText("https://stream.example.com/tv"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("https://stream.example.com/remote"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/video stays on the TV and the phone sends/),
+    ).toBeInTheDocument();
+  });
+
   it("selects Cloudflare Tunnel and skips its install step when only cloudflared is installed", async () => {
     detectTunnelTools.mockResolvedValue({
       cloudflared: { installed: true, version: "cloudflared 2026.1.0", detail: null },

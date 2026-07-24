@@ -27,8 +27,10 @@ const site = read("src/lib/site.ts");
 const streamPicker = read("src/pages/download/StreamPicker.tsx");
 const deployTabs = read("src/pages/self-host/DeployTabs.tsx");
 const pwaSteps = read("src/pages/download/PwaSteps.tsx");
+const androidTVInstall = read("src/pages/download/AndroidTVInstall.tsx");
 const deviceInstallFlows = read("src/pages/devices/InstallFlows.tsx");
 const deviceHero = read("src/pages/devices/Hero.tsx");
+const deviceConstellation = read("src/pages/devices/Constellation.tsx");
 const selfHostTeaser = read("src/pages/home/SelfHostTeaser.tsx");
 const selfHostHub = read("src/pages/self-host/HubSection.tsx");
 const help = read("src/pages/Help.tsx");
@@ -70,15 +72,22 @@ for (const assetTemplate of [
   "YAWF.Stream_${APP_VERSION}_aarch64.dmg",
   "YAWF.Stream_${APP_VERSION}_x64.dmg",
   "YAWF.Stream_${APP_VERSION}_amd64.AppImage",
+  "YAWF.Stream_Android.TV_${APP_VERSION}.apk",
   "debridstreamer-server_${APP_VERSION}_all.deb",
 ]) {
   check(site.includes(assetTemplate), `direct release link missing: ${assetTemplate}`);
 }
 
-check(site.includes("WINDOWS_RELEASE_AVAILABLE = false"), "website must record that the Windows v1 channel is held");
-check(!site.includes("YAWF.Stream_${APP_VERSION}_x64_en-US.msi"), "website must not publish a broken Windows v1 installer link");
-check(!hero.includes("DOWNLOAD_LINKS.windows"), "home hero must not link to an unavailable Windows v1 asset");
-check(streamPicker.includes("Windows v1 is held"), "download picker must explain the held Windows v1 channel");
+check(site.includes("WINDOWS_RELEASE_AVAILABLE = false"), "website must record that the Windows channel is held");
+check(!site.includes("YAWF.Stream_${APP_VERSION}_x64_en-US.msi"), "website must not publish a broken Windows installer link");
+check(!hero.includes("DOWNLOAD_LINKS.windows"), "home hero must not link to an unavailable Windows asset");
+check(streamPicker.includes("Windows release is held"), "download picker must explain the held Windows channel");
+check(
+  streamPicker.includes("Android TV & Google TV") &&
+    streamPicker.includes("DOWNLOAD_LINKS.androidTV") &&
+    androidTVInstall.includes("native Media3 player"),
+  "download page must expose the signed Android TV package and native-player install guidance",
+);
 check(
   streamPicker.includes("Server - Debian or Ubuntu") &&
     streamPicker.includes("The Debian server package has no"),
@@ -105,8 +114,15 @@ check(
   "devices page must not claim that a Windows desktop release is available",
 );
 check(
-  deviceHero.includes("Windows held until its signing gate passes"),
+  deviceHero.includes("Windows is held until its signing gate passes"),
   "devices page must explain the held Windows channel",
+);
+check(
+  deviceHero.includes("Android TV") &&
+    deviceHero.includes("Google TV") &&
+    deviceHero.includes("phone remote") &&
+    deviceConstellation.includes("remote for the TV"),
+  "devices page must explain Android TV, Google TV, and the phone remote",
 );
 check(
   pwaSteps.includes("http://your-server:43110") && !pwaSteps.includes(":9696"),
