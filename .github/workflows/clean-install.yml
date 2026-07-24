@@ -150,6 +150,14 @@ jobs:
       - name: Install Android build tools
         run: sdkmanager "build-tools;36.0.0"
 
+      - name: Expose Android build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_tools="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/36.0.0"
+          test -x "$build_tools/apksigner"
+          echo "$build_tools" >> "$GITHUB_PATH"
+
       - name: Download and verify APK
         shell: bash
         env:
