@@ -229,7 +229,7 @@ check(
     /"CF_Session"/.test(androidPlaybackHeaders) &&
     /"CF_AppSession"/.test(androidPlaybackHeaders) &&
     !/"ds_session"/.test(androidPlaybackHeaders) &&
-    /^[0-9a-f]{64}\n?$/.test(androidSigningDigest) &&
+    /^[0-9a-f]{64}(?:\r?\n)?$/.test(androidSigningDigest) &&
     /SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
     /SIGNING_CERT_SHA256/.test(cleanInstallWorkflow) &&
     !/<certificates src="user"/.test(androidNetwork),
