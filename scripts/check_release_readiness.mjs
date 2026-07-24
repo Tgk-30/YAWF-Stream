@@ -138,7 +138,9 @@ check(
 check(
   "Android TV signing certificate is publicly pinned",
   existsSync(join(root, "android-tv/SIGNING_CERT_SHA256")) &&
-    /^[0-9a-f]{64}\n?$/.test(read("android-tv/SIGNING_CERT_SHA256")) &&
+    /^[0-9a-f]{64}(?:\r?\n)?$/.test(
+      read("android-tv/SIGNING_CERT_SHA256"),
+    ) &&
     /SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
     /SIGNING_CERT_SHA256/.test(cleanInstallWorkflow) &&
     /apksigner verify --print-certs/.test(releaseWorkflow) &&
