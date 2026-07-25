@@ -40,7 +40,11 @@ describe("versioned IndexedDB migrations", () => {
         expect(upgraded.tables.map((table) => table.name)).toEqual(
           expect.arrayContaining(["watchlistFolders", "downloads", "cachedResolutions"]),
         );
-        expect(upgraded.verno).toBe(6);
+        expect(upgraded.verno).toBe(7);
+        const history = await upgraded.table("watchHistory").toArray() as Array<{
+          queuedNext?: boolean;
+        }>;
+        expect(history.every((row) => row.queuedNext === false)).toBe(true);
       } finally {
         upgraded.close();
       }
@@ -48,7 +52,7 @@ describe("versioned IndexedDB migrations", () => {
       const reopened = new DexieStore(name);
       try {
         expect(await reopened.table("watchlist").count()).toBe(1);
-        expect(reopened.verno).toBe(6);
+        expect(reopened.verno).toBe(7);
       } finally {
         reopened.close();
       }

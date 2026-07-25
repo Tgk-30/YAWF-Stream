@@ -17,6 +17,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -43,6 +44,7 @@ import { ScrubBar } from "./player/ScrubBar";
 import { CaptionsMenu } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { CastControls } from "./CastControls";
+import { predictEpisodeEnd } from "../lib/endPredictor";
 import type { PlaybackPrefs } from "../storage/models";
 import {
   currentViewportPixelSize,
@@ -118,6 +120,12 @@ interface VideoPlayerProps {
   /** Reports playback progress (seconds watched + total duration) so the store
    * can persist a resume position. Called periodically and on close. */
   onProgress?: (
+    currentSeconds: number,
+    durationSeconds: number | null,
+    prefs?: PlaybackPrefs,
+  ) => void;
+  /** Terminal write hook. Fired at real EOF before the player unmounts. */
+  onEnded?: (
     currentSeconds: number,
     durationSeconds: number | null,
     prefs?: PlaybackPrefs,
@@ -415,6 +423,7 @@ export function VideoPlayer({
   externalPlaybackUrl,
   onClose,
   onProgress,
+  onEnded,
   startPositionSeconds,
   timelineOffsetSeconds = 0,
   savedPrefs,
@@ -925,6 +934,8 @@ export function VideoPlayer({
         onProgress={(current, duration, prefs) =>
           onProgress?.(current, duration, prefs)
         }
+        onEnded={onEnded}
+        autoCountdown={autoCountdown}
         scrobbleContext={scrobbleContext}
         onPlayNext={upNext != null ? onPlayNext : undefined}
         onTryNextSource={onTryNextSource}
@@ -1050,6 +1061,7 @@ export function VideoPlayer({
             onSourceSize={setSourceSize}
             onTechnicalStats={updateWebTechnicalStats}
             onProgress={onProgress}
+            onEnded={onEnded}
             savedPrefs={savedPrefs}
             playerPreferences={playerPreferences}
             startPositionSeconds={startPositionSeconds}
@@ -1125,6 +1137,7 @@ function WebviewPlayer({
   onSourceSize,
   onTechnicalStats,
   onProgress,
+  onEnded,
   savedPrefs,
   playerPreferences,
   startPositionSeconds,
@@ -1170,6 +1183,11 @@ function WebviewPlayer({
     durationSeconds: number | null,
     prefs?: PlaybackPrefs,
   ) => void;
+  onEnded?: (
+    currentSeconds: number,
+    durationSeconds: number | null,
+    prefs?: PlaybackPrefs,
+  ) => void;
   savedPrefs?: PlaybackPrefs | null;
   playerPreferences?: PlayerPreferenceDefaults | null;
   startPositionSeconds?: number;
@@ -1202,6 +1220,16 @@ function WebviewPlayer({
   const lastClockSecondRef = useRef(-1);
   const clockRef = useRef<HTMLSpanElement | null>(null);
   const [duration, setDuration] = useState(0);
+  const [currentPosition, setCurrentPosition] = useState(0);
+  const [upNextDismissed, setUpNextDismissed] = useState(false);
+  const upNextDismissedRef = useRef(false);
+  const upNextWarningShownRef = useRef(false);
+  const autoCountdownRef = useRef(autoCountdown);
+  autoCountdownRef.current = autoCountdown;
+  const autoAdvanceFiredRef = useRef(false);
+  const onPlayNextForEndRef = useRef(onPlayNext);
+  onPlayNextForEndRef.current = onPlayNext;
+  const previousPositionRef = useRef(0);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [videoFit, setVideoFit] = useState<"contain" | "cover" | "fill">("contain");
@@ -1229,6 +1257,27 @@ function WebviewPlayer({
   const [scrubbing, setScrubbing] = useState(false);
   // Set when the video reaches its natural end - drives the Up-next card.
   const [ended, setEnded] = useState(false);
+  const endPrediction = useMemo(() => predictEpisodeEnd({
+    position: currentPosition,
+    duration,
+    playing: playing && !paused && !suspended,
+    eligible: upNext != null && onPlayNext != null,
+    dismissed: upNextDismissed,
+  }), [currentPosition, duration, onPlayNext, paused, playing, suspended, upNext, upNextDismissed]);
+  useEffect(() => {
+    if (endPrediction.show) upNextWarningShownRef.current = true;
+  }, [endPrediction.show]);
+  useEffect(() => {
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && (ended || endPrediction.show)) {
+        event.preventDefault();
+        upNextDismissedRef.current = true;
+        setUpNextDismissed(true);
+      }
+    };
+    window.addEventListener("keydown", dismiss);
+    return () => window.removeEventListener("keydown", dismiss);
+  }, [endPrediction.show, ended]);
   const [fullscreenSupported, setFullscreenSupported] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [pictureInPictureSupported, setPictureInPictureSupported] = useState(false);
@@ -1637,6 +1686,8 @@ function WebviewPlayer({
   // render (onProgress identity changes every render → re-subscribe loop).
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
   const onSourceSizeRef = useRef(onSourceSize);
   onSourceSizeRef.current = onSourceSize;
   // Stable ref for the HLS-unsupported callback so the source-attach effect does
@@ -1682,6 +1733,17 @@ function WebviewPlayer({
     };
     const onTimeUpdate = () => {
       scrubberRef.current?.setCurrentTime(video.currentTime);
+      if (video.currentTime < previousPositionRef.current - 2) {
+        upNextDismissedRef.current = false;
+        setUpNextDismissed(false);
+      }
+      previousPositionRef.current = video.currentTime;
+      if (Number.isFinite(video.duration) && video.duration > 0 &&
+          video.currentTime >= video.duration - 300) {
+        setCurrentPosition((current) =>
+          Math.floor(current) === Math.floor(video.currentTime) ? current : video.currentTime,
+        );
+      }
       const wholeSecond = Math.floor(video.currentTime);
       if (wholeSecond !== lastClockSecondRef.current) {
         lastClockSecondRef.current = wholeSecond;
@@ -1749,9 +1811,31 @@ function WebviewPlayer({
         video.duration + offset,
       );
     };
-    const onEnded = () => {
+    const onVideoEnded = () => {
+      const terminalProgress = {
+        playbackSpeed: video.playbackRate,
+        subtitlePosition: subtitlePositionRef.current,
+      };
+      if (onEndedRef.current != null) {
+        onEndedRef.current(
+          video.currentTime + timelineOffsetRef.current,
+          Number.isFinite(video.duration) ? video.duration + timelineOffsetRef.current : null,
+          terminalProgress,
+        );
+      } else {
+        report();
+      }
       setEnded(true);
       setPlaying(false);
+      if (
+        autoCountdownRef.current &&
+        upNextWarningShownRef.current &&
+        !upNextDismissedRef.current &&
+        !autoAdvanceFiredRef.current
+      ) {
+        autoAdvanceFiredRef.current = true;
+        onPlayNextForEndRef.current?.();
+      }
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
     const onPause = () => {
@@ -1814,6 +1898,12 @@ function WebviewPlayer({
       }
     };
     setEnded(false); // a new URL is a new playback - clear any stale end state
+    setCurrentPosition(0);
+    previousPositionRef.current = 0;
+    upNextDismissedRef.current = false;
+    upNextWarningShownRef.current = false;
+    autoAdvanceFiredRef.current = false;
+    setUpNextDismissed(false);
     lastClockSecondRef.current = -1;
     setPaused(false);
     setPlaying(false);
@@ -1824,7 +1914,7 @@ function WebviewPlayer({
     video.addEventListener("durationchange", onDurationChange);
     video.addEventListener("canplay", applyResume);
     video.addEventListener("canplay", attemptAutoplay);
-    video.addEventListener("ended", onEnded);
+    video.addEventListener("ended", onVideoEnded);
     video.addEventListener("pause", onPause);
     video.addEventListener("play", onPlay);
     video.addEventListener("volumechange", onVolumeChange);
@@ -1835,7 +1925,7 @@ function WebviewPlayer({
       video.removeEventListener("durationchange", onDurationChange);
       video.removeEventListener("canplay", applyResume);
       video.removeEventListener("canplay", attemptAutoplay);
-      video.removeEventListener("ended", onEnded);
+      video.removeEventListener("ended", onVideoEnded);
       video.removeEventListener("pause", onPause);
       video.removeEventListener("play", onPlay);
       video.removeEventListener("volumechange", onVolumeChange);
@@ -2710,10 +2800,16 @@ function WebviewPlayer({
         </div>
       )}
 
-      {ended && upNext != null && onPlayNext != null && (
+      {!upNextDismissed && !autoAdvanceFiredRef.current && (ended || endPrediction.show) && upNext != null && onPlayNext != null && (
         <UpNextOverlay
           label={upNext.label}
-          auto={autoCountdown}
+          auto={autoCountdown && (ended || endPrediction.earlyAutoAdvance)}
+          paused={paused || suspended}
+          countdownSeconds={endPrediction.cancelWindowSeconds}
+          onDismiss={() => {
+            upNextDismissedRef.current = true;
+            setUpNextDismissed(true);
+          }}
           onPlayNext={onPlayNext}
         />
       )}
@@ -2755,26 +2851,37 @@ const WEBVIEW_SHORTCUTS: Array<[string, string]> = [
 function UpNextOverlay({
   label,
   auto,
+  paused,
+  countdownSeconds,
+  onDismiss,
   onPlayNext,
 }: {
   label: string;
   auto: boolean;
+  paused: boolean;
+  countdownSeconds: number;
+  onDismiss: () => void;
   onPlayNext: () => void;
 }) {
-  const [dismissed, setDismissed] = useState(false);
-  const [remaining, setRemaining] = useState(10);
+  const [remaining, setRemaining] = useState(countdownSeconds);
   // The countdown fires through a ref so re-renders during the countdown
   // (polls, seasons landing) always reach the LATEST handler - an interval
   // closure would capture a stale one.
   const onPlayNextRef = useRef(onPlayNext);
+  const firedRef = useRef(false);
   onPlayNextRef.current = onPlayNext;
+  const playNow = () => {
+    if (firedRef.current) return;
+    firedRef.current = true;
+    onPlayNextRef.current();
+  };
   useEffect(() => {
-    if (!auto || dismissed) return;
+    if (!auto || paused) return;
     const timer = setInterval(() => {
       setRemaining((r) => {
         if (r <= 1) {
           clearInterval(timer);
-          onPlayNextRef.current();
+          playNow();
           return 0;
         }
         return r - 1;
@@ -2783,8 +2890,8 @@ function UpNextOverlay({
     // Cleared on unmount AND on the dismiss re-run - no timer leak, and a
     // dismissed card can never fire.
     return () => clearInterval(timer);
-  }, [auto, dismissed]);
-  if (dismissed) return null;
+  }, [auto, paused]);
+  useEffect(() => setRemaining(countdownSeconds), [countdownSeconds]);
   return (
     <div className="player-shortcuts-scrim">
       <div
@@ -2796,16 +2903,16 @@ function UpNextOverlay({
         <span className="player-upnext-title t-secondary">Up next</span>
         <span className="player-upnext-label">{label}</span>
         {auto && (
-          <span className="player-upnext-count t-secondary">
+          <span className="player-upnext-count t-secondary" role="status" aria-live="polite">
             Playing in {remaining}s
           </span>
         )}
         <div className="player-upnext-actions">
-          <button type="button" className="btn btn-prominent" onClick={onPlayNext}>
+          <button type="button" className="btn btn-prominent" onClick={playNow}>
             <Icon name="play" size={14} />
             Play now
           </button>
-          <button type="button" className="btn" onClick={() => setDismissed(true)}>
+          <button type="button" className="btn" onClick={onDismiss} autoFocus>
             Dismiss
           </button>
         </div>

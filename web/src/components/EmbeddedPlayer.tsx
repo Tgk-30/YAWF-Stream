@@ -49,6 +49,7 @@ import type { SubtitleClient } from "../services/subtitles/OpenSubtitlesClient";
 import type { Translator } from "../services/subtitles/SubtitleTranslator";
 import { cuesToVTT } from "../services/subtitles/cues";
 import { Icon } from "./Icon";
+import { predictEpisodeEnd, type EndPrediction } from "../lib/endPredictor";
 import { CastControls } from "./CastControls";
 import { CaptionsMenu } from "./player/CaptionsMenu";
 import { useSubtitleTracks } from "./player/useSubtitleTracks";
@@ -94,6 +95,10 @@ interface Props {
   /** Throttled progress + the current player prefs - feeds Continue Watching and
    * persists the audio/sub/speed choices for next time. */
   onProgress?: (current: number, duration: number, prefs?: PlaybackPrefs) => void;
+  /** Terminal progress callback, before an EOF endcard can be dismissed. */
+  onEnded?: (current: number, duration: number, prefs?: PlaybackPrefs) => void;
+  /** Whether early trusted-credit playback may transition automatically. */
+  autoCountdown?: boolean;
   /** Present for a series with a next episode - shows an "Up next" affordance. */
   onPlayNext?: () => void;
   /** Continue at the current position with the next compatible instant source. */
@@ -128,6 +133,12 @@ interface Chapter {
 interface AudioDevice {
   name: string;
   description: string;
+}
+
+interface NativeUpNextState {
+  reason: EndPrediction["reason"];
+  earlyAutoAdvance: boolean;
+  cancelWindowSeconds: number;
 }
 
 const OBSERVED: readonly MpvObservableProperty[] = [
@@ -501,6 +512,8 @@ export function EmbeddedPlayer({
   season = null,
   episode = null,
   onProgress,
+  onEnded,
+  autoCountdown = true,
   onPlayNext,
   onTryNextSource,
   nextLabel,
@@ -535,6 +548,11 @@ export function EmbeddedPlayer({
   const [videoPanY, setVideoPanY] = useState(0);
   const [videoAspect, setVideoAspect] = useState("-1");
   const [ended, setEnded] = useState(false);
+  // This state is intentionally transition-only. The mpv clock can emit many
+  // events per second, so its hot path compares refs and only re-renders when
+  // the up-next card changes visibility or policy.
+  const [upNextState, setUpNextState] = useState<NativeUpNextState | null>(null);
+  const [upNextDismissed, setUpNextDismissed] = useState(false);
   const [activeChapterIndex, setActiveChapterIndex] = useState(-1);
   const [detailsSection, setDetailsSection] = useState<"info" | "shortcuts" | null>(null);
   const [scrubbing, setScrubbing] = useState(false);
@@ -582,6 +600,10 @@ export function EmbeddedPlayer({
       : 0;
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
+  const onPlayNextRef = useRef(onPlayNext);
+  onPlayNextRef.current = onPlayNext;
   const onPlaybackErrorRef = useRef(onPlaybackError);
   onPlaybackErrorRef.current = onPlaybackError;
   const playerPreferencesRef = useRef(playerPreferences);
@@ -603,6 +625,40 @@ export function EmbeddedPlayer({
     menu != null || detailsSection != null || captionsSearchOpen;
   const chaptersRef = useRef(chapters);
   chaptersRef.current = chapters;
+  const upNextStateRef = useRef<NativeUpNextState | null>(null);
+  const upNextDismissedRef = useRef(false);
+  const upNextWarningShownRef = useRef(false);
+  const autoCountdownRef = useRef(autoCountdown);
+  autoCountdownRef.current = autoCountdown;
+
+  const setPredictiveUpNext = (next: NativeUpNextState | null) => {
+    const previous = upNextStateRef.current;
+    if (
+      previous?.reason === next?.reason &&
+      previous?.earlyAutoAdvance === next?.earlyAutoAdvance &&
+      previous?.cancelWindowSeconds === next?.cancelWindowSeconds
+    ) return;
+    upNextStateRef.current = next;
+    if (next != null && next.reason !== "eof") upNextWarningShownRef.current = true;
+    setUpNextState(next);
+  };
+  const evaluatePredictiveUpNext = () => {
+    const prediction = predictEpisodeEnd({
+      position: posRef.current,
+      duration: durRef.current,
+      playing: !pausedRef.current && !endedRef.current,
+      eligible: onPlayNextRef.current != null,
+      chapters: chaptersRef.current,
+      dismissed: upNextDismissedRef.current,
+    });
+    setPredictiveUpNext(prediction.show
+      ? {
+          reason: prediction.reason,
+          earlyAutoAdvance: prediction.earlyAutoAdvance,
+          cancelWindowSeconds: prediction.cancelWindowSeconds,
+        }
+      : null);
+  };
 
   durRef.current = dur;
   pausedRef.current = paused;
@@ -796,6 +852,11 @@ export function EmbeddedPlayer({
     startedRef.current = false;
     lastReportRef.current = 0;
     endedRef.current = false;
+    autoAdvanceFiredRef.current = false;
+    upNextDismissedRef.current = false;
+    upNextWarningShownRef.current = false;
+    setUpNextDismissed(false);
+    setPredictiveUpNext(null);
     posRef.current = 0;
     durRef.current = 0;
     scrubberRef.current?.updatePlayback({ pos: 0, bufferedTo: 0 }, true);
@@ -863,6 +924,7 @@ export function EmbeddedPlayer({
             switch (ev.name) {
               case "pause":
                 setPaused(Boolean(ev.data));
+                if (ev.data === false) evaluatePredictiveUpNext();
                 if (scrobbleContext != null) {
                   if (ev.data === true && !endedRef.current) {
                     scrobblePlaybackPause(
@@ -881,7 +943,13 @@ export function EmbeddedPlayer({
                 if (typeof ev.data === "number") {
                   // Keep command/keyboard math exact at native event cadence,
                   // while NativeScrubber coalesces its React state to 5Hz.
+                  const previousPosition = posRef.current;
                   posRef.current = ev.data;
+                  if (ev.data < previousPosition - 2) {
+                    upNextDismissedRef.current = false;
+                    setUpNextDismissed(false);
+                  }
+                  evaluatePredictiveUpNext();
                   scrubberRef.current?.updatePlayback({ pos: ev.data });
                   if (chaptersRef.current.length > 0) {
                     const nextChapterIndex = chapterIndexAt(
@@ -925,6 +993,7 @@ export function EmbeddedPlayer({
                 if (typeof ev.data === "number") {
                   durRef.current = ev.data;
                   setDur(ev.data);
+                  evaluatePredictiveUpNext();
                 }
                 break;
               case "paused-for-cache":
@@ -971,7 +1040,30 @@ export function EmbeddedPlayer({
               case "eof-reached":
                 if (ev.data === true) {
                   endedRef.current = true;
+                  setPredictiveUpNext(
+                    onPlayNextRef.current == null
+                      ? null
+                      : { reason: "eof", earlyAutoAdvance: false, cancelWindowSeconds: 10 },
+                  );
+                  if (onEndedRef.current != null) {
+                    onEndedRef.current(
+                      reportedPosition(), reportedDuration(), prefsRef.current,
+                    );
+                  } else {
+                    onProgressRef.current?.(
+                      reportedPosition(), reportedDuration(), prefsRef.current,
+                    );
+                  }
                   setEnded(true);
+                  if (
+                    autoCountdownRef.current &&
+                    upNextWarningShownRef.current &&
+                    !upNextDismissedRef.current &&
+                    !autoAdvanceFiredRef.current
+                  ) {
+                    autoAdvanceFiredRef.current = true;
+                    onPlayNextRef.current?.();
+                  }
                   if (scrobbleContext != null) {
                     scrobblePlaybackStop(
                       scrobbleContext,
@@ -1477,6 +1569,30 @@ export function EmbeddedPlayer({
     [],
   );
 
+  const dismissUpNext = useCallback(() => {
+    upNextDismissedRef.current = true;
+    setUpNextDismissed(true);
+    setPredictiveUpNext(null);
+  }, []);
+
+  const autoAdvanceFiredRef = useRef(false);
+  useEffect(() => {
+    if (
+      upNextState == null ||
+      !autoCountdown ||
+      paused ||
+      upNextDismissed ||
+      onPlayNext == null ||
+      (!upNextState.earlyAutoAdvance && !ended)
+    ) return;
+    const timer = window.setTimeout(() => {
+      if (pausedRef.current || upNextDismissedRef.current || autoAdvanceFiredRef.current) return;
+      autoAdvanceFiredRef.current = true;
+      onPlayNextRef.current?.();
+    }, Math.max(10, upNextState.cancelWindowSeconds) * 1000);
+    return () => window.clearTimeout(timer);
+  }, [autoCountdown, ended, onPlayNext, paused, upNextDismissed, upNextState]);
+
   const doClose = useCallback(() => {
     if (fullscreen) {
       void getCurrentWindow().setFullscreen(false).catch((error) => {
@@ -1552,7 +1668,8 @@ export function EmbeddedPlayer({
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        if (detailsSection != null) setDetailsSection(null);
+        if (upNextStateRef.current != null) dismissUpNext();
+        else if (detailsSection != null) setDetailsSection(null);
         else if (menu != null) setMenu(null);
         else if (fullscreen) toggleFullscreen();
         else doClose();
@@ -1623,7 +1740,7 @@ export function EmbeddedPlayer({
   }, [
     togglePause, relSeek, changeVolume, volume, toggleMute, toggleFullscreen,
     applySpeed, speed, doClose, seekTo, nudgeControls, menu, fullscreen,
-    detailsSection, refreshTracks,
+    detailsSection, refreshTracks, dismissUpNext,
   ]);
 
   const nativeSourceSize = useMemo<PixelSize | null>(() => {
@@ -1787,27 +1904,28 @@ export function EmbeddedPlayer({
         </div>
       )}
 
-      {/* Up-next / replay affordance at end of file. */}
-      {ended && (
-        <div className="embed-endcard">
-          {onPlayNext != null ? (
-            <>
-              <span className="embed-endcard-eyebrow">Up next</span>
-              {nextLabel && <span className="embed-endcard-title">{nextLabel}</span>}
-              <button type="button" className="btn btn-prominent" onClick={onPlayNext}>
-                <Icon name="play" size={16} filled />
-                Play next
-              </button>
-              <button type="button" className="btn" onClick={togglePause}>
-                Replay
-              </button>
-            </>
-          ) : (
-            <button type="button" className="btn btn-prominent" onClick={togglePause}>
-              <Icon name="refresh" size={16} />
-              Replay
-            </button>
+      {/* Up-next can arm during verified credits, but generic predictions wait
+          for real EOF before any automatic transition. */}
+      {upNextState != null && onPlayNext != null && (
+        <div className="embed-endcard" role="dialog" aria-label={`Next episode: ${nextLabel ?? "Up next"}`}>
+          <span className="embed-endcard-eyebrow">Up next</span>
+          {nextLabel && <span className="embed-endcard-title">{nextLabel}</span>}
+          {autoCountdown && (upNextState.earlyAutoAdvance || ended) && (
+            <span className="embed-endcard-count">Auto-play is ready</span>
           )}
+          <button type="button" className="btn btn-prominent" onClick={onPlayNext}>
+            <Icon name="play" size={16} filled />
+            Play now
+          </button>
+          <button type="button" className="btn" onClick={dismissUpNext}>Dismiss</button>
+        </div>
+      )}
+      {ended && upNextState == null && (
+        <div className="embed-endcard">
+          <button type="button" className="btn btn-prominent" onClick={togglePause}>
+            <Icon name="refresh" size={16} />
+            Replay
+          </button>
         </div>
       )}
 

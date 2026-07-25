@@ -27,6 +27,7 @@ let mockCached: { stream: any } | null = null;
 let mockContinueWatching: any[] = [];
 let serverModeOn = false;
 let transcodeAvailable = false;
+let pickerSelection = { season: 1, episode: 3 };
 const tauriState = vi.hoisted(() => ({ on: false }));
 const downloadsFfmpegAvailable = vi.hoisted(() => vi.fn(async () => true));
 const downloadsRuntime = vi.hoisted(() => ({
@@ -257,7 +258,7 @@ vi.mock("../components/EpisodePicker", () => ({
     <>
       <button
         data-testid="pick-episode"
-        onClick={() => onSelect({ season: 1, episode: 3 })}
+        onClick={() => onSelect(pickerSelection)}
       >
         pick-ep
       </button>
@@ -314,6 +315,7 @@ vi.mock("../components/VideoPlayer", () => ({
     playerPreferences,
     onClose,
     onProgress,
+    onEnded,
   }: any) => (
     <div
       data-testid="player"
@@ -343,6 +345,9 @@ vi.mock("../components/VideoPlayer", () => ({
     >
       <button type="button" onClick={() => onProgress?.(80, 100)}>
         report-progress
+      </button>
+      <button type="button" onClick={() => onEnded?.(100, 100)}>
+        report-ended
       </button>
       <button type="button" onClick={onClose}>
         close-player
@@ -431,6 +436,7 @@ beforeEach(() => {
   serverModeOn = false;
   transcodeAvailable = false;
   tauriState.on = false;
+  pickerSelection = { season: 1, episode: 3 };
   mockServices = {
     tmdb: null,
     indexers: null,
@@ -802,6 +808,112 @@ describe("Detail play", () => {
     expect(player).toHaveAttribute("data-subtitle", "S1 E3 - The Arrival");
     expect(player).toHaveAttribute("data-up-next", "S1 E4");
     expect(player).toHaveAttribute("data-auto-countdown", "false");
+  });
+
+  async function playSeriesEpisode(
+    selection: { season: number; episode: number },
+    getSeasons: ReturnType<typeof vi.fn>,
+    getEpisodes: ReturnType<typeof vi.fn>,
+  ) {
+    pickerSelection = selection;
+    mockDetailItem = preview("s1", { type: "series", title: "Queue show", tmdbId: 200 });
+    mockDetail = detailState({
+      item: mediaItem({ id: "s1", type: "series", title: "Queue show", tmdbId: 200 }),
+    });
+    mockServices.tmdb = { getSeasons, getEpisodes };
+    render(<Detail />);
+    await waitFor(() => expect(getSeasons).toHaveBeenCalledWith(200));
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await waitFor(() => expect(getEpisodes).toHaveBeenCalledWith(200, selection.season));
+    await userEvent.click(screen.getByTestId("play-stream"));
+    return screen.findByTestId("player");
+  }
+
+  it("queues an aired next episode within the current season at terminal playback", async () => {
+    const getSeasons = vi.fn(async () => [{ seasonNumber: 1, episodeCount: 3 }]);
+    const getEpisodes = vi.fn(async () => [
+      { seasonNumber: 1, episodeNumber: 1, airDate: "2020-01-01" },
+      { seasonNumber: 1, episodeNumber: 2, airDate: "2020-01-08" },
+      { seasonNumber: 1, episodeNumber: 3, airDate: "2020-01-15" },
+    ]);
+    await playSeriesEpisode({ season: 1, episode: 1 }, getSeasons, getEpisodes);
+
+    await userEvent.click(screen.getByRole("button", { name: "report-ended" }));
+    await waitFor(() =>
+      expect(storeRecordHistory).toHaveBeenCalledWith(
+        expect.objectContaining({ episodeId: "s1e2", queuedNext: true }),
+      ),
+    );
+  });
+
+  it("queues an aired first episode of the next regular season at a boundary", async () => {
+    const getSeasons = vi.fn(async () => [
+      { seasonNumber: 1, episodeCount: 2 },
+      { seasonNumber: 2, episodeCount: 4 },
+    ]);
+    const getEpisodes = vi.fn(async (_tmdbId: number, season: number) =>
+      season === 2
+        ? [{ seasonNumber: 2, episodeNumber: 1, airDate: "2020-02-01" }]
+        : [
+            { seasonNumber: 1, episodeNumber: 1, airDate: "2020-01-01" },
+            { seasonNumber: 1, episodeNumber: 2, airDate: "2020-01-08" },
+          ],
+    );
+    await playSeriesEpisode({ season: 1, episode: 2 }, getSeasons, getEpisodes);
+
+    await userEvent.click(screen.getByRole("button", { name: "report-ended" }));
+    await waitFor(() =>
+      expect(storeRecordHistory).toHaveBeenCalledWith(
+        expect.objectContaining({ episodeId: "s2e1", queuedNext: true }),
+      ),
+    );
+  });
+
+  it("does not queue after a series finale", async () => {
+    const getSeasons = vi.fn(async () => [{ seasonNumber: 1, episodeCount: 2 }]);
+    const getEpisodes = vi.fn(async () => [
+      { seasonNumber: 1, episodeNumber: 1, airDate: "2020-01-01" },
+      { seasonNumber: 1, episodeNumber: 2, airDate: "2020-01-08" },
+    ]);
+    await playSeriesEpisode({ season: 1, episode: 2 }, getSeasons, getEpisodes);
+
+    await userEvent.click(screen.getByRole("button", { name: "report-ended" }));
+    expect(storeRecordHistory).not.toHaveBeenCalledWith(
+      expect.objectContaining({ queuedNext: true }),
+    );
+  });
+
+  it("does not queue an unaired next episode", async () => {
+    const getSeasons = vi.fn(async () => [{ seasonNumber: 1, episodeCount: 2 }]);
+    const getEpisodes = vi.fn(async () => [
+      { seasonNumber: 1, episodeNumber: 1, airDate: "2020-01-01" },
+      { seasonNumber: 1, episodeNumber: 2, airDate: "2999-01-01" },
+    ]);
+    await playSeriesEpisode({ season: 1, episode: 1 }, getSeasons, getEpisodes);
+
+    await userEvent.click(screen.getByRole("button", { name: "report-ended" }));
+    await waitFor(() => expect(getEpisodes).toHaveBeenCalledWith(200, 1));
+    await Promise.resolve();
+    expect(storeRecordHistory).not.toHaveBeenCalledWith(
+      expect.objectContaining({ queuedNext: true }),
+    );
+  });
+
+  it("does not queue when no live episode guide is available", async () => {
+    pickerSelection = { season: 1, episode: 1 };
+    mockDetailItem = preview("s1", { type: "series", title: "Queue show", tmdbId: 200 });
+    mockDetail = detailState({
+      item: mediaItem({ id: "s1", type: "series", title: "Queue show", tmdbId: 200 }),
+    });
+    mockServices.tmdb = null;
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await userEvent.click(screen.getByTestId("play-stream"));
+    await userEvent.click(screen.getByRole("button", { name: "report-ended" }));
+
+    expect(storeRecordHistory).not.toHaveBeenCalledWith(
+      expect.objectContaining({ queuedNext: true }),
+    );
   });
 
   it("requests a transcode HLS url for an MKV cached stream", async () => {

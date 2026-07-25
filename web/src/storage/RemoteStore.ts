@@ -128,6 +128,7 @@ interface ServerHistoryResponse {
     progressSeconds: number;
     durationSeconds: number | null;
     completed: boolean;
+    queuedNext?: boolean;
     lastWatched: string;
     streamQuality: string | null;
     preview: MediaPreview;
@@ -142,6 +143,7 @@ function mapHistory(row: ServerHistoryResponse["items"][number]): WatchHistoryRe
     progressSeconds: row.progressSeconds,
     durationSeconds: row.durationSeconds,
     completed: row.completed,
+    queuedNext: row.queuedNext ?? false,
     lastWatched: row.lastWatched,
     streamQuality: row.streamQuality,
     preview: row.preview,
@@ -352,6 +354,7 @@ export class RemoteStore implements Store, SecretStore {
     const progressSeconds = entry.progressSeconds ?? 0;
     const durationSeconds = entry.durationSeconds ?? null;
     const completed = entry.completed ?? false;
+    const queuedNext = entry.queuedNext ?? false;
     const streamQuality = entry.streamQuality ?? null;
     const lastWatched = entry.lastWatched ?? nowISO();
     await this.api.put(`/api/history/${encodeURIComponent(entry.mediaId)}`, {
@@ -359,6 +362,7 @@ export class RemoteStore implements Store, SecretStore {
       progressSeconds,
       durationSeconds,
       completed,
+      queuedNext,
       streamQuality,
       preview: entry.preview,
       lastWatched,
@@ -374,6 +378,7 @@ export class RemoteStore implements Store, SecretStore {
       progressSeconds,
       durationSeconds,
       completed,
+      queuedNext,
       lastWatched,
       streamQuality,
       preview: entry.preview,
@@ -430,7 +435,7 @@ export class RemoteStore implements Store, SecretStore {
     if (response.view === "continue-watching") {
       const rows = response.items.slice(0, 20).map(mapHistory);
       return rows
-        .filter((row) => !row.completed && hasResumePoint(row))
+        .filter((row) => !row.completed && (row.queuedNext || hasResumePoint(row)))
         .slice(0, normalizedLimit);
     }
 
@@ -438,7 +443,7 @@ export class RemoteStore implements Store, SecretStore {
     // that mixed-version case so recent viewed-only rows cannot hide a resume.
     const rows = await this.listHistory(500);
     return rows
-      .filter((row) => !row.completed && hasResumePoint(row))
+      .filter((row) => !row.completed && (row.queuedNext || hasResumePoint(row)))
       .slice(0, normalizedLimit);
   }
 

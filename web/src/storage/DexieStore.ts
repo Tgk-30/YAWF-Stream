@@ -163,6 +163,17 @@ export class DexieStore extends Dexie implements Store, SecretStore {
           });
       });
 
+    // v7: queued next episodes are a durable state, not a fake 0% resume.
+    this.version(7)
+      .stores({
+        watchHistory: "id, mediaId, lastWatched, completed, queuedNext",
+      })
+      .upgrade(async (tx) => {
+        await tx.table("watchHistory").toCollection().modify((row: WatchHistoryRecord) => {
+          if (row.queuedNext === undefined) row.queuedNext = false;
+        });
+      });
+
     this.on("blocked", () => {
       this.reportStorageIssue({
         kind: "blocked",
@@ -432,6 +443,21 @@ export class DexieStore extends Dexie implements Store, SecretStore {
     const prev = await this.watchHistory.get(id);
     // Upsert by the derived key → exactly one row per (mediaId, episodeId),
     // newest wins (put replaces). Mirrors WatchHistory.save in GRDB.
+    // Beginning playback turns a queued target into an ordinary history row.
+    // A real resume always wins over a later queue request for the same target.
+    const queuedTargetHasRealResume =
+      entry.queuedNext && prev != null && !prev.completed && hasResumePoint(prev);
+    if (queuedTargetHasRealResume) {
+      // A real target resume wins, but stale predictive handoffs for the same
+      // series must still be removed before returning it.
+      await this.transaction("rw", this.watchHistory, async () => {
+        const stale = await this.watchHistory.where("mediaId").equals(entry.mediaId).toArray();
+        await this.watchHistory.bulkDelete(stale
+          .filter((row) => row.queuedNext && row.id !== id)
+          .map((row) => row.id));
+      });
+      return prev;
+    }
     const record: WatchHistoryRecord = {
       id,
       mediaId: entry.mediaId,
@@ -439,6 +465,7 @@ export class DexieStore extends Dexie implements Store, SecretStore {
       progressSeconds: entry.progressSeconds ?? 0,
       durationSeconds: entry.durationSeconds ?? null,
       completed: entry.completed ?? false,
+      queuedNext: entry.queuedNext ?? false,
       lastWatched: entry.lastWatched ?? nowISO(),
       streamQuality: entry.streamQuality ?? null,
       preview: entry.preview,
@@ -450,7 +477,16 @@ export class DexieStore extends Dexie implements Store, SecretStore {
       subtitleDelay: entry.subtitleDelay ?? prev?.subtitleDelay ?? null,
       subtitlePosition: entry.subtitlePosition ?? prev?.subtitlePosition ?? null,
     };
-    await this.watchHistory.put(record);
+    await this.transaction("rw", this.watchHistory, async () => {
+      if (record.queuedNext) {
+        // A show has at most one predictive handoff. Do not erase genuine resumes.
+        const stale = await this.watchHistory.where("mediaId").equals(record.mediaId).toArray();
+        await this.watchHistory.bulkDelete(stale
+          .filter((row) => row.queuedNext && row.id !== record.id)
+          .map((row) => row.id));
+      }
+      await this.watchHistory.put(record);
+    });
     return record;
   }
 
@@ -508,7 +544,7 @@ export class DexieStore extends Dexie implements Store, SecretStore {
       // zero-progress Detail-open row in an unbounded history.
       .until(() => rows.length >= boundedLimit)
       .each((row) => {
-        if (!row.completed && hasResumePoint(row)) rows.push(row);
+        if (!row.completed && (row.queuedNext || hasResumePoint(row))) rows.push(row);
       });
     return rows;
   }

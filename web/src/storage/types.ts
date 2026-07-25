@@ -190,6 +190,8 @@ export interface WatchHistoryUpsert {
   progressSeconds?: number;
   durationSeconds?: number | null;
   completed?: boolean;
+  /** Queue a series episode as the explicit next handoff target. */
+  queuedNext?: boolean;
   streamQuality?: string | null;
   /** Display snapshot stored alongside so History renders without a join. */
   preview: MediaPreview;

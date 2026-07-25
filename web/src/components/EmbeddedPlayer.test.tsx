@@ -1273,3 +1273,67 @@ describe("EmbeddedPlayer decode-failure fallback", () => {
     }
   });
 });
+
+describe("EmbeddedPlayer predictive up next", () => {
+  async function renderPredictive(props: Partial<React.ComponentProps<typeof EmbeddedPlayer>> = {}) {
+    vi.useFakeTimers();
+    const onPlayNext = vi.fn();
+    renderPlayerMock.getProperty.mockImplementation(async (name: string) =>
+      name === "chapter-list" ? [{ title: "End Credits", time: 700 }] : [],
+    );
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/episode.mkv"
+        title="Episode"
+        nextLabel="S1 E2"
+        onPlayNext={onPlayNext}
+        onClose={() => {}}
+        {...props}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); });
+    emitProperty("duration", 800);
+    await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+    return onPlayNext;
+  }
+
+  it("arms only at a trusted late credits marker and does not play immediately", async () => {
+    const onPlayNext = await renderPredictive();
+    emitProperty("time-pos", 650);
+    expect(screen.queryByText("Up next")).toBeNull();
+    emitProperty("time-pos", 700);
+    expect(screen.getByText("Up next")).toBeTruthy();
+    expect(onPlayNext).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(9_999); });
+    expect(onPlayNext).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(onPlayNext).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps generic prediction manual until EOF and honors disabled and dismissed auto advance", async () => {
+    const onPlayNext = await renderPredictive({ autoCountdown: false });
+    renderPlayerMock.getProperty.mockImplementation(async () => []);
+    emitProperty("time-pos", 795);
+    expect(screen.getByText("Up next")).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(onPlayNext).not.toHaveBeenCalled();
+    emitProperty("eof-reached", true);
+    expect(screen.getByText("Up next")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText("Up next")).toBeNull();
+  });
+
+  it("pauses countdown and resets a dismissed prompt after a backward seek", async () => {
+    const onPlayNext = await renderPredictive();
+    emitProperty("time-pos", 700);
+    emitProperty("pause", true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(onPlayNext).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    emitProperty("time-pos", 600);
+    expect(screen.queryByText("Up next")).toBeNull();
+    emitProperty("pause", false);
+    emitProperty("time-pos", 700);
+    expect(screen.getByText("Up next")).toBeTruthy();
+  });
+});

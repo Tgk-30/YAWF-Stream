@@ -35,10 +35,11 @@ export function Discover({ onSelect }: DiscoverProps) {
   const attentionParked = useAttentionParked();
   const { data, loading, railsLoading, error, source } = useDiscover(services.tmdb);
 
-  // Continue Watching - resumable history (>2% and <95%) surfaced at the top of
-  // the home as wide banner cards. Only renders when there's something to resume,
-  // so it never clutters a fresh install.
-  const resumable = continueWatching.filter(hasResumePoint);
+  // Continue Watching surfaces real resume points and explicit queued-next
+  // handoffs. Ordinary zero-progress viewed rows remain excluded.
+  const resumable = continueWatching.filter(
+    (row) => row.queuedNext || hasResumePoint(row),
+  );
 
   // "See all" → open the full paginated Browse for a rail's exact category.
   const seeAll = (ctx: BrowseContext) => () => openBrowse(ctx);

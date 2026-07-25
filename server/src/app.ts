@@ -325,6 +325,7 @@ const historyBodySchema = z.object({
   progressSeconds: z.number().nonnegative().default(0),
   durationSeconds: z.number().positive().nullable().optional(),
   completed: z.boolean().default(false),
+  queuedNext: z.boolean().default(false),
   streamQuality: z.string().trim().max(80).nullable().optional(),
   preview: boundedPreview,
   lastWatched: z.string().datetime().optional(),
@@ -390,6 +391,7 @@ const portableHistorySchema = z.object({
   progressSeconds: z.number().finite().nonnegative(),
   durationSeconds: z.number().finite().positive().nullable(),
   completed: z.boolean(),
+  queuedNext: z.boolean().optional().default(false),
   lastWatched: z.string().datetime(),
   streamQuality: z.string().trim().max(80).nullable(),
   preview: boundedPreview,
@@ -1780,6 +1782,7 @@ function mapWatchHistoryRow(row: {
   progress_seconds: number;
   duration_seconds: number | null;
   completed: number;
+  queued_next?: number;
   last_watched: string;
   stream_quality: string | null;
   preview_json: string;
@@ -1790,6 +1793,7 @@ function mapWatchHistoryRow(row: {
     progressSeconds: row.progress_seconds,
     durationSeconds: row.duration_seconds,
     completed: row.completed === 1,
+    queuedNext: row.queued_next === 1,
     lastWatched: row.last_watched,
     streamQuality: row.stream_quality,
     preview: deserializePreview(row.preview_json),
@@ -4037,13 +4041,15 @@ function registerRoutes(
       const rows = db.sqlite
         .prepare(
           `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                  completed, last_watched, stream_quality, preview_json
+                  completed, queued_next, last_watched, stream_quality, preview_json
            FROM watch_history
            WHERE profile_id = ?
              AND completed = 0
-             AND duration_seconds > 0
-             AND progress_seconds / duration_seconds > 0.02
-             AND progress_seconds / duration_seconds < 0.95
+             AND (queued_next = 1 OR (
+               duration_seconds > 0
+               AND progress_seconds / duration_seconds > 0.02
+               AND progress_seconds / duration_seconds < 0.95
+             ))
            ORDER BY last_watched DESC
            LIMIT ?`,
         )
@@ -4070,7 +4076,7 @@ function registerRoutes(
     const rows = db.sqlite
       .prepare(
         `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                completed, last_watched, stream_quality, preview_json
+                completed, queued_next, last_watched, stream_quality, preview_json
          FROM watch_history
          WHERE profile_id = ?
          ORDER BY last_watched DESC
@@ -4090,7 +4096,7 @@ function registerRoutes(
     const rows = db.sqlite
       .prepare(
         `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                completed, last_watched, stream_quality, preview_json
+                completed, queued_next, last_watched, stream_quality, preview_json
          FROM watch_history
          WHERE profile_id = ? AND media_id = ?
          ORDER BY last_watched DESC`,
@@ -4113,7 +4119,7 @@ function registerRoutes(
     const row = db.sqlite
       .prepare(
         `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                completed, last_watched, stream_quality, preview_json
+                completed, queued_next, last_watched, stream_quality, preview_json
          FROM watch_history
          WHERE profile_id = ? AND media_id = ? AND episode_key = ?`,
       )
@@ -4132,34 +4138,66 @@ function registerRoutes(
     const body = parseBody(historyBodySchema, request.body);
     const episodeId = body.episodeId ?? null;
     const episodeKey = episodeId ?? "";
-    db.sqlite
-      .prepare(
+    db.transaction(() => {
+      if (body.queuedNext) {
+        const existing = db.sqlite
+          .prepare(
+            `SELECT progress_seconds, duration_seconds, completed FROM watch_history
+             WHERE profile_id = ? AND media_id = ? AND episode_key = ?`,
+          )
+          .get(auth.profileId, mediaId, episodeKey) as
+          | {
+              progress_seconds: number;
+              duration_seconds: number | null;
+              completed: number;
+            }
+          | undefined;
+        const hasRealResume =
+          existing != null &&
+          existing.completed === 0 &&
+          existing.duration_seconds != null &&
+          existing.duration_seconds > 0 &&
+          existing.progress_seconds / existing.duration_seconds > 0.02 &&
+          existing.progress_seconds / existing.duration_seconds < 0.95;
+        db.sqlite
+          .prepare(
+            `DELETE FROM watch_history
+             WHERE profile_id = ? AND media_id = ? AND queued_next = 1 AND episode_key <> ?`,
+          )
+          .run(auth.profileId, mediaId, episodeKey);
+        if (hasRealResume) return;
+      }
+      db.sqlite
+        .prepare(
         `INSERT INTO watch_history
          (profile_id, media_id, episode_key, episode_id, progress_seconds,
-          duration_seconds, completed, last_watched, stream_quality, preview_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          duration_seconds, completed, queued_next, last_watched, stream_quality, preview_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(profile_id, media_id, episode_key)
          DO UPDATE SET
            episode_id = excluded.episode_id,
            progress_seconds = excluded.progress_seconds,
            duration_seconds = excluded.duration_seconds,
            completed = excluded.completed,
+           queued_next = excluded.queued_next,
            last_watched = excluded.last_watched,
            stream_quality = excluded.stream_quality,
            preview_json = excluded.preview_json`,
       )
-      .run(
-        auth.profileId,
+        .run(
+          auth.profileId,
         mediaId,
         episodeKey,
         episodeId,
         body.progressSeconds,
         body.durationSeconds ?? null,
         body.completed ? 1 : 0,
+        body.queuedNext ? 1 : 0,
         body.lastWatched ?? nowISO(),
         body.streamQuality ?? null,
         serializePreview(body.preview),
       );
+    });
     return { ok: true };
   });
 
@@ -4444,7 +4482,7 @@ function registerRoutes(
       db.sqlite
         .prepare(
           `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                  completed, last_watched, stream_quality, preview_json
+                  completed, queued_next, last_watched, stream_quality, preview_json
            FROM watch_history
            WHERE profile_id = ?
            ORDER BY last_watched DESC`,
@@ -4568,21 +4606,64 @@ function registerRoutes(
         const saveHistory = db.sqlite.prepare(
           `INSERT INTO watch_history
              (profile_id, media_id, episode_key, episode_id, progress_seconds,
-              duration_seconds, completed, last_watched, stream_quality, preview_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              duration_seconds, completed, queued_next, last_watched, stream_quality, preview_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(profile_id, media_id, episode_key) DO UPDATE SET
-             episode_id = CASE WHEN excluded.last_watched >= watch_history.last_watched
+             episode_id = CASE WHEN NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
                THEN excluded.episode_id ELSE watch_history.episode_id END,
-             progress_seconds = CASE WHEN excluded.last_watched >= watch_history.last_watched
+             progress_seconds = CASE WHEN NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
                THEN excluded.progress_seconds ELSE watch_history.progress_seconds END,
-             duration_seconds = CASE WHEN excluded.last_watched >= watch_history.last_watched
+             duration_seconds = CASE WHEN NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
                THEN excluded.duration_seconds ELSE watch_history.duration_seconds END,
-             completed = CASE WHEN excluded.last_watched >= watch_history.last_watched
+             completed = CASE WHEN NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
                THEN excluded.completed ELSE watch_history.completed END,
-             last_watched = MAX(excluded.last_watched, watch_history.last_watched),
-             stream_quality = CASE WHEN excluded.last_watched >= watch_history.last_watched
+             queued_next = CASE WHEN NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
+               THEN excluded.queued_next ELSE watch_history.queued_next END,
+             last_watched = CASE WHEN NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
+               THEN excluded.last_watched ELSE watch_history.last_watched END,
+             stream_quality = CASE WHEN NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
                THEN excluded.stream_quality ELSE watch_history.stream_quality END,
-             preview_json = CASE WHEN excluded.last_watched >= watch_history.last_watched
+             preview_json = CASE WHEN NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
                THEN excluded.preview_json ELSE watch_history.preview_json END`,
         );
         for (const entry of body.bundle.history) {
@@ -4594,12 +4675,30 @@ function registerRoutes(
             entry.progressSeconds,
             entry.durationSeconds,
             entry.completed ? 1 : 0,
+            entry.queuedNext ? 1 : 0,
             entry.lastWatched,
             entry.streamQuality,
             serializePreview(entry.preview),
           );
           counts.history += 1;
         }
+
+        // Imported bundles from older clients can contain more than one queued
+        // target. Keep the newest deterministic handoff for each series.
+        db.sqlite
+          .prepare(
+            `DELETE FROM watch_history AS stale
+             WHERE profile_id = ? AND queued_next = 1
+               AND EXISTS (
+                 SELECT 1 FROM watch_history AS newer
+                 WHERE newer.profile_id = stale.profile_id
+                   AND newer.media_id = stale.media_id
+                   AND newer.queued_next = 1
+                   AND (newer.last_watched > stale.last_watched OR
+                        (newer.last_watched = stale.last_watched AND newer.episode_key > stale.episode_key))
+               )`,
+          )
+          .run(auth.profileId);
 
         const portableFolders = new Map(
           body.bundle.folders.map((folder) => [folder.id, folder]),

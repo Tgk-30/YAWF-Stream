@@ -866,3 +866,18 @@ describe("RemoteStore", () => {
     });
   });
 });
+
+describe("RemoteStore queued next", () => {
+  it("keeps queued rows from the continue-watching API while dropping ordinary zero progress", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ view: "continue-watching", items: [
+      histItem({ mediaId: "queue", episodeId: "s1e2", queuedNext: true }),
+      histItem({ mediaId: "viewed" }),
+    ] }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("document", { cookie: "" });
+    await expect(new RemoteStore("http://srv").continueWatching()).resolves.toMatchObject([
+      { mediaId: "queue", queuedNext: true },
+    ]);
+    vi.unstubAllGlobals();
+  });
+});

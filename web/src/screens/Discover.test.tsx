@@ -353,6 +353,17 @@ describe("Discover Continue Watching", () => {
     expect(within(cw).getByTestId("cw-count").textContent).toBe("1");
   });
 
+  it("surfaces an explicit queued next row without treating ordinary zero progress as resumable", () => {
+    mockContinueWatching = [
+      { ...historyRecord("next", 0, 0), episodeId: "s2e1", queuedNext: true },
+      historyRecord("viewed", 0, 0),
+    ];
+    mockDiscover = { data: fullData(), loading: false };
+    render(<Discover />);
+    expect(within(screen.getByTestId("cw-rail")).getByText("cw-next")).toBeInTheDocument();
+    expect(screen.queryByText("cw-viewed")).toBeNull();
+  });
+
   it("hides the rail entirely when nothing is resumable (hasResumePoint filter)", () => {
     mockContinueWatching = [
       historyRecord("done", 99, 100), // 99% → excluded
