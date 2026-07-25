@@ -298,9 +298,9 @@ export interface AppSettings {
   showWatchStats: boolean;
   /** Keep the TMDB score visible on poster cards while browsing a catalog. */
   showPosterRatings: boolean;
-  /** Server-Mode only: request the server's transcoded 720p HLS variant for
-   *  playback (lower bitrate, re-encoded). Only effective when the server
-   *  advertises transcodeAvailable. */
+  /** Server-Mode only: legacy opt-in for a server-transcoded HLS stream.
+   *  Data Saver maps to the 480p profile; new playback controls expose the
+   *  full server-optimized quality ladder when the server supports it. */
   transcode: boolean;
   /** Which rating control Detail shows (1–10, 0–100, or thumbs). */
   ratingScale: RatingScale;

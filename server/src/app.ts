@@ -64,6 +64,8 @@ import {
   TranscodeRegistry,
   type TranscodeClientProfile,
   type TranscodeHdrPolicy,
+  type TranscodeQuality,
+  isTranscodeQuality,
 } from "./transcodeSession.js";
 import { SERVER_VERSION } from "./version.js";
 import {
@@ -79,11 +81,18 @@ import {
   type UserRole,
 } from "./types.js";
 
-function rewriteTranscodeManifest(manifest: string, sessionId: string): string {
+function rewriteTranscodeManifest(
+  manifest: string,
+  sessionId: string,
+  generation?: string,
+): string {
   const base = `/api/stream/${encodeURIComponent(sessionId)}/`;
+  const suffix = generation == null
+    ? ""
+    : `?generation=${encodeURIComponent(generation)}`;
   return manifest.replace(
-    /^(?!#)((?:1080p|720p|480p)\.m3u8|(?:1080p|720p|480p)_seg_\d{5}\.ts|seg_\d{5}\.ts|subtitles\.vtt)$/gm,
-    (_line, asset: string) => `${base}${asset}`,
+    /^(?!#)((?:1080p|720p|480p|360p)\.m3u8|(?:1080p|720p|480p|360p)_seg_\d{5}\.ts|seg_\d{5}\.ts|subtitles\.vtt)$/gm,
+    (_line, asset: string) => `${base}${asset}${suffix}`,
   );
 }
 
@@ -1924,6 +1933,8 @@ function countedStream(
     profileId: string;
     status: number;
     body: ReadableStream<Uint8Array>;
+    /** HLS segment completion is delivery progress, not end-of-title completion. */
+    markComplete?: boolean;
   },
 ) {
   let bytes = 0;
@@ -1944,7 +1955,7 @@ function countedStream(
       profileId: input.profileId,
       bytes,
       status: input.status,
-      completed,
+      completed: completed && (input.markComplete ?? true),
       error: error?.message ?? null,
     });
   }
@@ -2451,6 +2462,9 @@ function registerRoutes(
       transcodeAvailable: transcode.ready,
       transcodeCapabilities: {
         adaptive: transcode.ready,
+        qualities: transcode.ready
+          ? ["auto", "1080p", "720p", "480p", "360p"]
+          : [],
         seekOffset: transcode.ready,
         subtitleSidecar:
           transcode.ready && transcode.subtitleSidecarAvailable,
@@ -2567,6 +2581,9 @@ function registerRoutes(
           ? transcode.availableVideoEncoders
           : [],
         adaptive: transcode.ready,
+        qualities: transcode.ready
+          ? ["auto", "1080p", "720p", "480p", "360p"]
+          : [],
         seekOffset: transcode.ready,
         subtitleSidecar:
           transcode.ready && transcode.subtitleSidecarAvailable,
@@ -5647,19 +5664,19 @@ function registerRoutes(
   /** Load + ownership-validate a stream session (same scoping as the proxy). */
   const loadTranscodeSession = (
     request: FastifyRequest,
-  ): { id: string; encrypted_upstream_url: string } | null => {
+  ): { id: string; profile_id: string; encrypted_upstream_url: string } | null => {
     const auth = requireAuth(db, request);
     const id = (request.params as { id: string }).id;
     return (
       (db.sqlite
         .prepare(
-          `SELECT id, encrypted_upstream_url
+          `SELECT id, profile_id, encrypted_upstream_url
            FROM stream_sessions
            WHERE id = ? AND profile_id = ? AND revoked_at IS NULL AND expires_at > ?
            LIMIT 1`,
         )
         .get(id, auth.profileId, nowISO()) as
-        | { id: string; encrypted_upstream_url: string }
+        | { id: string; profile_id: string; encrypted_upstream_url: string }
         | undefined) ?? null
     );
   };
@@ -5682,6 +5699,7 @@ function registerRoutes(
     await assertSafeUpstream(upstreamUrl, config.allowRawStreamUrls);
     const query = request.query as {
       profile?: string;
+      quality?: string;
       start?: string;
       hdr?: string;
       subtitles?: string;
@@ -5690,6 +5708,16 @@ function registerRoutes(
       query.profile === "high" || query.profile === "data-saver"
         ? query.profile
         : "adaptive";
+    if (query.quality != null && !isTranscodeQuality(query.quality)) {
+      throw httpError(400, "Unsupported transcode quality.");
+    }
+    const quality: TranscodeQuality = query.quality ?? (
+      profile === "high"
+        ? "1080p"
+        : profile === "data-saver"
+          ? "480p"
+          : "auto"
+    );
     const startValue = Number(query.start);
     const startSeconds =
       Number.isFinite(startValue) && startValue > 0
@@ -5710,6 +5738,7 @@ function registerRoutes(
     const preserveSubtitles = query.subtitles === "preserve";
     const dir = await transcode.registry.ensureJob(row.id, upstreamUrl, {
       profile,
+      quality,
       startSeconds,
       hdrPolicy,
       preserveSubtitles,
@@ -5719,7 +5748,10 @@ function registerRoutes(
       preserveSubtitles &&
       manifest.includes("#EXT-X-STREAM-INF")
     ) {
-      const subtitleUri = `/api/stream/${encodeURIComponent(row.id)}/subtitles.vtt`;
+      const generation = transcode.registry.generationFor(row.id, dir);
+      const subtitleUri = `/api/stream/${encodeURIComponent(row.id)}/subtitles.vtt${
+        generation == null ? "" : `?generation=${encodeURIComponent(generation)}`
+      }`;
       manifest = manifest.replace(
         /^#EXTM3U$/m,
         `#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Embedded",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,URI="${subtitleUri}"`,
@@ -5730,11 +5762,16 @@ function registerRoutes(
           `#EXT-X-STREAM-INF:${attributes},SUBTITLES="subs"`,
       );
     }
-    const rewritten = rewriteTranscodeManifest(manifest, row.id);
+    const rewritten = rewriteTranscodeManifest(
+      manifest,
+      row.id,
+      transcode.registry.generationFor(row.id, dir) ?? undefined,
+    );
     reply.header("content-type", "application/vnd.apple.mpegurl");
     reply.header("cache-control", "no-store");
     reply.header("x-yawf-playback-decision", "transcode");
     reply.header("x-yawf-transcode-profile", profile);
+    reply.header("x-yawf-transcode-quality", quality);
     reply.header("x-yawf-transcode-start", String(startSeconds));
     return reply.send(rewritten);
   });
@@ -5745,7 +5782,7 @@ function registerRoutes(
     if (!transcode.ready) throw httpError(404, "Transcoding is not available.");
     const asset = (request.params as { asset: string }).asset;
     if (
-      !/^(?:(?:1080p|720p|480p)\.m3u8|(?:1080p|720p|480p)_seg_\d{5}\.ts|seg_\d{5}\.ts|subtitles\.vtt)$/.test(
+      !/^(?:(?:1080p|720p|480p|360p)\.m3u8|(?:1080p|720p|480p|360p)_seg_\d{5}\.ts|seg_\d{5}\.ts|subtitles\.vtt)$/.test(
         asset,
       )
     ) {
@@ -5753,7 +5790,8 @@ function registerRoutes(
     }
     const row = loadTranscodeSession(request);
     if (row == null) throw httpError(404, "Stream session not found.");
-    const dir = transcode.registry.dirFor(row.id);
+    const generation = (request.query as { generation?: string }).generation;
+    const dir = transcode.registry.dirForAsset(row.id, asset, generation);
     if (dir == null) throw httpError(404, "Transcode asset not found.");
     const path = join(dir, asset);
     if (!existsSync(path)) throw httpError(404, "Transcode asset not ready.");
@@ -5761,14 +5799,25 @@ function registerRoutes(
     if (asset.endsWith(".m3u8")) {
       const manifest = await readFile(path, "utf8");
       reply.header("content-type", "application/vnd.apple.mpegurl");
-      return reply.send(rewriteTranscodeManifest(manifest, row.id));
+      return reply.send(rewriteTranscodeManifest(manifest, row.id, generation));
     }
     if (asset.endsWith(".vtt")) {
       reply.header("content-type", "text/vtt; charset=utf-8");
       return reply.send(await readFile(path, "utf8"));
     }
     reply.header("content-type", "video/mp2t");
-    return reply.send(createReadStream(path));
+    // HLS segments are served from the session-owned transcode dir, but still
+    // count against its profile. Use the proxy's counted stream path so partial
+    // client disconnects are not billed as complete transfers.
+    return reply.send(
+      countedStream(db, {
+        sessionId: row.id,
+        profileId: row.profile_id,
+        status: 200,
+        body: Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>,
+        markComplete: false,
+      }),
+    );
   });
 }
 

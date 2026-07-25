@@ -73,6 +73,10 @@ import {
   stopAndroidTVPlayback,
   type AndroidTVPlaybackProgress,
 } from "../lib/androidTV";
+import type {
+  ServerOptimizedSource,
+  ServerTranscodeQuality,
+} from "../lib/serverApi";
 import "./VideoPlayer.css";
 
 type Playability = "webview" | "external";
@@ -89,6 +93,13 @@ export interface PlayerPreferenceDefaults {
   /** 0 through 100. The web player converts this to HTMLMediaElement's 0..1. */
   defaultVolume?: number | null;
   rememberPerTitleTrackChoices?: boolean;
+}
+
+interface PlaybackHandoffState {
+  paused: boolean;
+  volume: number;
+  muted: boolean;
+  playbackRate: number;
 }
 
 interface VideoPlayerProps {
@@ -171,6 +182,18 @@ interface VideoPlayerProps {
   /** Desktop only: use the in-window libmpv player for containers the webview
    *  cannot decode. When false, use the bundled mpv or an external player. */
   useBuiltInPlayer?: boolean;
+  /** Server Mode only. Kept optional so older servers and Local Mode retain the
+   * original-device player without rendering unavailable controls. */
+  serverOptimized?: {
+    qualities: readonly ServerTranscodeQuality[];
+    /** Legacy server-transcode preference, applied only after Device Original
+     * has started and an optimized manifest is safely prepared. */
+    defaultQuality?: ServerTranscodeQuality | null;
+    request: (
+      quality: ServerTranscodeQuality,
+      absolutePositionSeconds: number,
+    ) => Promise<ServerOptimizedSource>;
+  };
 }
 
 function playbackDecisionFor(
@@ -440,22 +463,63 @@ export function VideoPlayer({
   playerPreferences = null,
   preferredPlayer,
   useBuiltInPlayer = true,
+  serverOptimized,
 }: VideoPlayerProps) {
   const requestedEngine = engine ?? inferEngine(url, kind);
+  type ScopedOptimizedSource = ServerOptimizedSource & {
+    originUrl: string;
+    originEngine: PlaybackEngine;
+  };
+  type ScopedPosition = {
+    originUrl: string;
+    originEngine: PlaybackEngine;
+    position: number;
+  };
   const [fallbackSource, setFallbackSource] = useState<{
     originUrl: string;
     originEngine: PlaybackEngine;
     url: string;
   } | null>(null);
+  const [optimizedSource, setOptimizedSource] = useState<ScopedOptimizedSource | null>(null);
+  const [sourceSwitchPosition, setSourceSwitchPosition] = useState<ScopedPosition | null>(null);
+  const [sourceSwitchState, setSourceSwitchState] = useState<PlaybackHandoffState | null>(null);
+  const [serverOptimizationError, setServerOptimizationError] = useState<string | null>(null);
+  const [serverOptimizationPending, setServerOptimizationPending] = useState(false);
+  const latestAbsolutePositionRef = useRef(0);
+  const autoOptimizationAttemptedRef = useRef<string | null>(null);
   const activeFallback =
     fallbackSource?.originUrl === url &&
     fallbackSource.originEngine === requestedEngine
       ? fallbackSource
       : null;
-  const effectiveUrl = activeFallback?.url ?? url;
+  const activeOptimized =
+    optimizedSource?.originUrl === url &&
+    optimizedSource.originEngine === requestedEngine
+      ? optimizedSource
+      : null;
+  const activeSourceSwitchPosition =
+    sourceSwitchPosition?.originUrl === url &&
+    sourceSwitchPosition.originEngine === requestedEngine
+      ? sourceSwitchPosition.position
+      : null;
+  const activeSourceSwitchState =
+    sourceSwitchState != null &&
+    sourceSwitchPosition?.originUrl === url &&
+    sourceSwitchPosition.originEngine === requestedEngine
+      ? sourceSwitchState
+      : null;
+  const effectiveUrl = activeFallback?.url ?? activeOptimized?.url ?? url;
   const effectiveEngine: PlaybackEngine = activeFallback
     ? "webview-hls-transcode"
-    : requestedEngine;
+    : activeOptimized != null
+      ? "webview-hls-transcode"
+      : requestedEngine;
+  const effectiveTimelineOffsetSeconds = activeOptimized?.timelineOffsetSeconds ?? timelineOffsetSeconds;
+  const effectiveStartPositionSeconds = activeOptimized?.startPositionSeconds ?? (
+    activeSourceSwitchPosition == null
+      ? startPositionSeconds
+      : Math.max(0, activeSourceSwitchPosition - timelineOffsetSeconds)
+  );
   const mode: Playability =
     effectiveEngine === "native-mpv" ? "external" : "webview";
   const underTauri = isTauri();
@@ -517,6 +581,23 @@ export function VideoPlayer({
     !useEmbedded,
     captionsOpen || detailsSection != null,
   );
+
+  const reportAbsolutePosition = useCallback((next: number) => {
+    if (Number.isFinite(next)) latestAbsolutePositionRef.current = Math.max(0, next);
+  }, []);
+
+  // State is scoped below for render-time safety. Reset it too, so a completed
+  // previous source cannot leave stale errors or an automatic-mode latch on the
+  // next episode.
+  useEffect(() => {
+    latestAbsolutePositionRef.current = Math.max(0, startPositionSeconds ?? 0) + timelineOffsetSeconds;
+    setFallbackSource(null);
+    setOptimizedSource(null);
+    setSourceSwitchPosition(null);
+    setSourceSwitchState(null);
+    setServerOptimizationError(null);
+    setServerOptimizationPending(false);
+  }, [requestedEngine, url]);
 
   const clearChromeTimer = useCallback(() => {
     window.clearTimeout(chromeHideTimer.current);
@@ -642,6 +723,110 @@ export function VideoPlayer({
     recordDiagnostic("player", "native.fallback_ready");
     return true;
   }, [requestWebviewFallback, requestedEngine, url]);
+
+  /** Prepare the server manifest before replacing the currently playing source.
+   * This keeps Device Original running when ffmpeg is busy, unavailable, or
+   * fails to start. HLS session cookies stay in the webview fetch path. */
+  const switchToServerOptimized = useCallback(
+    async (
+      quality: ServerTranscodeQuality,
+      absolutePositionSeconds: number,
+      handoffState?: PlaybackHandoffState,
+    ) => {
+      if (serverOptimized == null || serverOptimizationPending) return;
+      setServerOptimizationPending(true);
+      setServerOptimizationError(null);
+      try {
+        const position = Number.isFinite(absolutePositionSeconds)
+          ? Math.max(0, absolutePositionSeconds)
+          : 0;
+        latestAbsolutePositionRef.current = position;
+        // Warm at click time first. Device Original remains active while this
+        // request starts ffmpeg and verifies the server can serve HLS.
+        let next = await serverOptimized.request(quality, position);
+        let response = await fetch(next.url, {
+          credentials: "include",
+          headers: { accept: "application/vnd.apple.mpegurl" },
+        });
+        if (!response.ok) {
+          throw new Error(`The server could not prepare ${quality} playback (${response.status}).`);
+        }
+        const manifest = await response.text();
+        if (!manifest.startsWith("#EXTM3U")) {
+          throw new Error("The server did not return a playable HLS manifest.");
+        }
+        // Playback can advance while the manifest is warming. Keep the one
+        // server job and seek within its timeline at activation, rather than
+        // replacing it with a second transcode request.
+        const activationStart = Math.max(
+          0,
+          latestAbsolutePositionRef.current - next.timelineOffsetSeconds,
+        );
+        setFallbackSource(null);
+        setSourceSwitchPosition({
+          originUrl: url,
+          originEngine: requestedEngine,
+          position: latestAbsolutePositionRef.current,
+        });
+        setSourceSwitchState(handoffState ?? null);
+        setOptimizedSource({
+          ...next,
+          startPositionSeconds: activationStart,
+          originUrl: url,
+          originEngine: requestedEngine,
+        });
+        recordDiagnostic("player", "server_optimized.ready", "info", quality);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "The server could not prepare optimized playback.";
+        setServerOptimizationError(message);
+        recordDiagnostic("player", "server_optimized.failed", "warning", message);
+      } finally {
+        setServerOptimizationPending(false);
+      }
+    },
+    [requestedEngine, serverOptimizationPending, serverOptimized, url],
+  );
+
+  const switchToDeviceOriginal = useCallback((
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState,
+  ) => {
+    const position = Number.isFinite(absolutePositionSeconds)
+      ? Math.max(0, absolutePositionSeconds)
+      : 0;
+    setFallbackSource(null);
+    setOptimizedSource(null);
+    setSourceSwitchPosition({
+      originUrl: url,
+      originEngine: requestedEngine,
+      position,
+    });
+    setSourceSwitchState(handoffState ?? null);
+    setServerOptimizationError(null);
+    recordDiagnostic("player", "server_optimized.disabled");
+  }, [requestedEngine, url]);
+
+  useEffect(() => {
+    const identity = `${requestedEngine}\u0000${url}`;
+    const quality = serverOptimized?.defaultQuality ?? null;
+    if (
+      quality == null ||
+      activeOptimized != null ||
+      serverOptimizationPending ||
+      autoOptimizationAttemptedRef.current === identity
+    ) {
+      return;
+    }
+    autoOptimizationAttemptedRef.current = identity;
+    void switchToServerOptimized(quality, latestAbsolutePositionRef.current);
+  }, [
+    activeOptimized,
+    requestedEngine,
+    serverOptimizationPending,
+    serverOptimized?.defaultQuality,
+    switchToServerOptimized,
+    url,
+  ]);
 
   const recoveryPendingRef = useRef(false);
   const handleWebviewPlaybackError = useCallback(
@@ -928,8 +1113,16 @@ export function VideoPlayer({
         playbackAuthorization={playbackAuthorization}
         engine={effectiveEngine}
         onPlaybackError={recoverNativeInWebview}
-        startPositionSeconds={startPositionSeconds}
-        timelineOffsetSeconds={timelineOffsetSeconds}
+        startPositionSeconds={effectiveStartPositionSeconds}
+        sourceSwitchState={activeSourceSwitchState}
+        timelineOffsetSeconds={effectiveTimelineOffsetSeconds}
+        serverOptimized={serverOptimized}
+        activeServerOptimizedQuality={activeOptimized?.quality ?? null}
+        serverOptimizationPending={serverOptimizationPending}
+        serverOptimizationError={serverOptimizationError}
+        onSwitchServerOptimized={switchToServerOptimized}
+        onSwitchDeviceOriginal={switchToDeviceOriginal}
+        onAbsolutePositionChange={reportAbsolutePosition}
         playbackDecision={playbackDecisionFor(effectiveEngine, effectiveUrl)}
         onProgress={(current, duration, prefs) =>
           onProgress?.(current, duration, prefs)
@@ -1064,8 +1257,16 @@ export function VideoPlayer({
             onEnded={onEnded}
             savedPrefs={savedPrefs}
             playerPreferences={playerPreferences}
-            startPositionSeconds={startPositionSeconds}
-            timelineOffsetSeconds={timelineOffsetSeconds}
+            startPositionSeconds={effectiveStartPositionSeconds}
+            timelineOffsetSeconds={effectiveTimelineOffsetSeconds}
+            sourceSwitchState={activeSourceSwitchState}
+            serverOptimized={serverOptimized}
+            activeServerOptimizedQuality={activeOptimized?.quality ?? null}
+            serverOptimizationPending={serverOptimizationPending}
+            serverOptimizationError={serverOptimizationError}
+            onSwitchServerOptimized={switchToServerOptimized}
+            onSwitchDeviceOriginal={switchToDeviceOriginal}
+            onAbsolutePositionChange={reportAbsolutePosition}
             onPlaybackError={(message) => void handleWebviewPlaybackError(message)}
             onOpenExternalPlayer={() => void openExternalPlayback()}
             externalActionStatus={externalActionStatus}
@@ -1142,6 +1343,7 @@ function WebviewPlayer({
   playerPreferences,
   startPositionSeconds,
   timelineOffsetSeconds,
+  sourceSwitchState,
   onPlaybackError,
   onOpenExternalPlayer,
   externalActionStatus,
@@ -1155,6 +1357,13 @@ function WebviewPlayer({
   onPlayNext,
   onRemoteClose,
   autoCountdown = true,
+  serverOptimized,
+  activeServerOptimizedQuality,
+  serverOptimizationPending,
+  serverOptimizationError,
+  onSwitchServerOptimized,
+  onSwitchDeviceOriginal,
+  onAbsolutePositionChange,
 }: {
   url: string;
   title: string;
@@ -1192,6 +1401,7 @@ function WebviewPlayer({
   playerPreferences?: PlayerPreferenceDefaults | null;
   startPositionSeconds?: number;
   timelineOffsetSeconds: number;
+  sourceSwitchState: PlaybackHandoffState | null;
   onPlaybackError: (message: string) => void;
   onOpenExternalPlayer: () => void;
   externalActionStatus: string | null;
@@ -1205,6 +1415,20 @@ function WebviewPlayer({
   onPlayNext?: () => void;
   onRemoteClose: () => void;
   autoCountdown?: boolean;
+  serverOptimized?: VideoPlayerProps["serverOptimized"];
+  activeServerOptimizedQuality: ServerTranscodeQuality | null;
+  serverOptimizationPending: boolean;
+  serverOptimizationError: string | null;
+  onSwitchServerOptimized: (
+    quality: ServerTranscodeQuality,
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState,
+  ) => Promise<void>;
+  onSwitchDeviceOriginal: (
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState,
+  ) => void;
+  onAbsolutePositionChange: (absolutePositionSeconds: number) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<HlsInstance | null>(null);
@@ -1701,6 +1925,8 @@ function WebviewPlayer({
   // once, when metadata first loads, without re-subscribing the effect.
   const startPositionRef = useRef(startPositionSeconds);
   startPositionRef.current = startPositionSeconds;
+  const sourceSwitchStateRef = useRef(sourceSwitchState);
+  sourceSwitchStateRef.current = sourceSwitchState;
   const timelineOffsetRef = useRef(
     Number.isFinite(timelineOffsetSeconds)
       ? Math.max(0, timelineOffsetSeconds)
@@ -1732,6 +1958,7 @@ function WebviewPlayer({
       );
     };
     const onTimeUpdate = () => {
+      onAbsolutePositionChange(video.currentTime + timelineOffsetRef.current);
       scrubberRef.current?.setCurrentTime(video.currentTime);
       if (video.currentTime < previousPositionRef.current - 2) {
         upNextDismissedRef.current = false;
@@ -1864,12 +2091,19 @@ function WebviewPlayer({
       setVolume(video.volume);
     };
     const onRateChange = () => setPlaybackRate(video.playbackRate);
+    const handoff = sourceSwitchStateRef.current;
+    if (handoff != null) {
+      video.volume = Math.min(1, Math.max(0, handoff.volume));
+      video.muted = handoff.muted;
+      video.playbackRate = handoff.playbackRate;
+    }
     const preferences = playerPreferencesRef.current;
     const perTitlePrefs = preferences?.rememberPerTitleTrackChoices === false
       ? null
       : savedPrefs;
     const preferredRate = perTitlePrefs?.playbackSpeed ?? preferences?.defaultPlaybackSpeed;
     if (
+      handoff == null &&
       preferredRate != null &&
       Number.isFinite(preferredRate) &&
       preferredRate >= 0.5 &&
@@ -1878,13 +2112,13 @@ function WebviewPlayer({
       video.playbackRate = preferredRate;
     }
     const configuredVolume = preferences?.defaultVolume;
-    if (configuredVolume != null && Number.isFinite(configuredVolume)) {
+    if (handoff == null && configuredVolume != null && Number.isFinite(configuredVolume)) {
       const volumePercent = Math.round(Math.min(100, Math.max(0, configuredVolume)));
       video.volume = volumePercent / 100;
       video.muted = volumePercent === 0;
     }
     const attemptAutoplay = () => {
-      if (autoplayAttemptedRef.current || suspendedRef.current) return;
+      if (autoplayAttemptedRef.current || suspendedRef.current || sourceSwitchStateRef.current?.paused === true) return;
       autoplayAttemptedRef.current = true;
       if (!video.paused) return;
       // Stream resolution is asynchronous, so some browsers no longer treat
@@ -1905,10 +2139,10 @@ function WebviewPlayer({
     autoAdvanceFiredRef.current = false;
     setUpNextDismissed(false);
     lastClockSecondRef.current = -1;
-    setPaused(false);
-    setPlaying(false);
+    setPaused(handoff?.paused ?? false);
+    setPlaying(handoff != null && !handoff.paused);
     onVolumeChange();
-    onPausedChange(false);
+    onPausedChange(handoff?.paused ?? false);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("loadedmetadata", onLoadedMeta);
     video.addEventListener("durationchange", onDurationChange);
@@ -1933,7 +2167,7 @@ function WebviewPlayer({
       if (onProgressRef.current != null && video.currentTime > 0) report();
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
-  }, [onPausedChange, scrobbleContext, url]);
+  }, [onAbsolutePositionChange, onPausedChange, scrobbleContext, url]);
 
   // Wire hls.js for HLS streams when the browser can't play them natively.
   useEffect(() => {
@@ -1947,6 +2181,9 @@ function WebviewPlayer({
       return;
     }
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      // WKWebView/Safari owns HLS loading here. Make its manifest and segment
+      // requests use the authenticated webview cookie jar, not URL credentials.
+      video.crossOrigin = "use-credentials";
       if (video.src !== url) video.src = url;
       return;
     }
@@ -2339,6 +2576,33 @@ function WebviewPlayer({
     else video.pause();
   }, []);
 
+  const absolutePlaybackPosition = useCallback(() => {
+    const current = videoRef.current?.currentTime ?? 0;
+    return Math.max(0, current + timelineOffsetRef.current);
+  }, []);
+
+  const playbackHandoffState = useCallback((): PlaybackHandoffState => {
+    const video = videoRef.current;
+    return {
+      paused: video?.paused ?? paused,
+      volume: video?.volume ?? volume,
+      muted: video?.muted ?? muted,
+      playbackRate: video?.playbackRate ?? playbackRate,
+    };
+  }, [muted, paused, playbackRate, volume]);
+
+  const selectServerOptimizedQuality = useCallback((quality: ServerTranscodeQuality) => {
+    void onSwitchServerOptimized(
+      quality,
+      absolutePlaybackPosition(),
+      playbackHandoffState(),
+    );
+  }, [absolutePlaybackPosition, onSwitchServerOptimized, playbackHandoffState]);
+
+  const selectDeviceOriginal = useCallback(() => {
+    onSwitchDeviceOriginal(absolutePlaybackPosition(), playbackHandoffState());
+  }, [absolutePlaybackPosition, onSwitchDeviceOriginal, playbackHandoffState]);
+
   const toggleMuted = useCallback(() => {
     const video = videoRef.current;
     if (video == null) return;
@@ -2673,6 +2937,46 @@ function WebviewPlayer({
               ))}
             </div>
           </div>
+          {serverOptimized != null && (
+            <div className="player-options-section">
+              <span className="t-secondary">Streaming mode</span>
+              <div className="player-options-choice-row">
+                <button
+                  type="button"
+                  className={`chip${activeServerOptimizedQuality == null ? " is-active" : ""}`}
+                  aria-pressed={activeServerOptimizedQuality == null}
+                  disabled={serverOptimizationPending}
+                  onClick={selectDeviceOriginal}
+                >
+                  Device Original
+                </button>
+                <span className="player-options-mode-label">Server Optimized</span>
+              </div>
+              <div className="player-options-choice-row">
+                {serverOptimized.qualities.map((quality) => (
+                  <button
+                    type="button"
+                    className={`chip${activeServerOptimizedQuality === quality ? " is-active" : ""}`}
+                    aria-pressed={activeServerOptimizedQuality === quality}
+                    disabled={serverOptimizationPending}
+                    onClick={() => selectServerOptimizedQuality(quality)}
+                    key={quality}
+                  >
+                    {quality === "auto" ? "Auto" : quality}
+                  </button>
+                ))}
+              </div>
+              <small className="t-secondary">
+                Server Optimized reduces data use and needs server processing. Device Original keeps the source quality.
+              </small>
+              {serverOptimizationPending && (
+                <p className="player-options-status" role="status">Preparing optimized playback while the current stream continues…</p>
+              )}
+              {serverOptimizationError != null && (
+                <p className="player-options-status" role="alert">{serverOptimizationError}</p>
+              )}
+            </div>
+          )}
           <div className="player-options-section player-options-sliders">
             <label>
               <span className="t-secondary">Zoom</span>

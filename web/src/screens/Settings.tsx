@@ -1897,9 +1897,10 @@ function PlaybackTab({ draft, patch }: TabProps) {
           <span>
             <strong>Reduce playback bitrate (server transcode)</strong>
             <InfoTip label="About server transcode">
-              The server re-encodes playback to a 720p stream to use less
-              bandwidth and more server CPU. It complements Data Saver, which
-              only caps the source file selected.
+              The server prepares adaptive or selected 1080p, 720p, 480p, or
+              360p playback. Choose Server Optimized from the player when you
+              want to reduce data use. Data Saver only caps the source file
+              selected.
             </InfoTip>
           </span>
         </label>

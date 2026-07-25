@@ -102,6 +102,30 @@ function clearInviteFromURL(): void {
   }
 }
 
+const TRANSCODE_QUALITIES = new Set(["auto", "1080p", "720p", "480p", "360p"]);
+
+function normalizedTranscodeCapabilities(
+  input: ServerTranscodeCapabilities | undefined,
+): ServerTranscodeCapabilities {
+  const raw = input ?? {} as ServerTranscodeCapabilities;
+  const qualities = Array.isArray(raw.qualities)
+    ? [...new Set(raw.qualities.filter((quality): quality is ServerTranscodeCapabilities["qualities"][number] =>
+        typeof quality === "string" && TRANSCODE_QUALITIES.has(quality),
+      ))]
+    : [];
+  return {
+    adaptive: raw.adaptive === true,
+    qualities,
+    seekOffset: raw.seekOffset === true,
+    subtitleSidecar: raw.subtitleSidecar === true,
+    hardwareEncoder: typeof raw.hardwareEncoder === "string" ? raw.hardwareEncoder : "libx264",
+    availableVideoEncoders: Array.isArray(raw.availableVideoEncoders)
+      ? raw.availableVideoEncoders.filter((encoder): encoder is string => typeof encoder === "string")
+      : [],
+    toneMapping: raw.toneMapping === true,
+  };
+}
+
 function jsonFetch<T>(
   baseURL: string,
   path: string,
@@ -145,6 +169,7 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
   const [transcodeCapabilities, setTranscodeCapabilities] =
     useState<ServerTranscodeCapabilities>({
       adaptive: false,
+      qualities: [],
       seekOffset: false,
       subtitleSidecar: false,
       hardwareEncoder: "libx264",
@@ -201,16 +226,7 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
         // document.cookie can't see ds_csrf).
         setCsrfToken(bootstrap.csrfToken);
         setTranscodeAvailable(bootstrap.transcodeAvailable ?? false);
-        setTranscodeCapabilities(
-          bootstrap.transcodeCapabilities ?? {
-            adaptive: false,
-            seekOffset: false,
-            subtitleSidecar: false,
-            hardwareEncoder: "libx264",
-            availableVideoEncoders: [],
-            toneMapping: false,
-          },
-        );
+        setTranscodeCapabilities(normalizedTranscodeCapabilities(bootstrap.transcodeCapabilities));
         setOmdbProxy(bootstrap.omdbProxy ?? false);
         setBuildProfile(bootstrap.buildProfile ?? "public");
         if (bootstrap.setupRequired) {

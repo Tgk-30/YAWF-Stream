@@ -465,6 +465,22 @@ describe("resolveServerStream", () => {
     );
   });
 
+  it("builds a credential-free server optimized source with a bounded quality", () => {
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    expect(api.serverOptimizedSource(direct, {
+      quality: "360p",
+      startSeconds: 731.8,
+    })).toEqual({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=360p&start=731",
+      timelineOffsetSeconds: 731,
+      startPositionSeconds: 0,
+      quality: "360p",
+    });
+  });
+
   it("builds a cookie-free external-player capability URL", () => {
     const token = "A".repeat(43);
     expect(api.serverExternalPlaybackURL({

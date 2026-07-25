@@ -50,6 +50,7 @@ import type { Translator } from "../services/subtitles/SubtitleTranslator";
 import { cuesToVTT } from "../services/subtitles/cues";
 import { Icon } from "./Icon";
 import { predictEpisodeEnd, type EndPrediction } from "../lib/endPredictor";
+import type { ServerTranscodeQuality } from "../lib/serverApi";
 import { CastControls } from "./CastControls";
 import { CaptionsMenu } from "./player/CaptionsMenu";
 import { useSubtitleTracks } from "./player/useSubtitleTracks";
@@ -66,6 +67,13 @@ import {
 } from "../data/traktScrobble";
 import "./EmbeddedPlayer.css";
 
+interface PlaybackHandoffState {
+  paused: boolean;
+  volume: number;
+  muted: boolean;
+  playbackRate: number;
+}
+
 interface Props {
   url: string;
   title: string;
@@ -79,6 +87,8 @@ interface Props {
   /** Short-lived server stream capability, passed outside the media URL. */
   playbackAuthorization?: string;
   startPositionSeconds?: number;
+  /** Runtime state passed during an optimized-to-native backend switch. */
+  sourceSwitchState?: PlaybackHandoffState | null;
   /** Original-media time represented by native time zero for a seek-offset
    * server transcode. */
   timelineOffsetSeconds?: number;
@@ -110,6 +120,24 @@ interface Props {
   /** Give the parent one chance to switch to a compatible webview source when
    * native initialization or loading fails. Returning true means it recovered. */
   onPlaybackError?: (error: Error) => boolean | Promise<boolean>;
+  /** Server Mode selector. Selecting a rendition transfers this native player
+   * to credentialed webview HLS only after the manifest is ready. */
+  serverOptimized?: {
+    qualities: readonly ServerTranscodeQuality[];
+  };
+  activeServerOptimizedQuality?: ServerTranscodeQuality | null;
+  serverOptimizationPending?: boolean;
+  serverOptimizationError?: string | null;
+  onSwitchServerOptimized?: (
+    quality: ServerTranscodeQuality,
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState,
+  ) => Promise<void>;
+  onSwitchDeviceOriginal?: (
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState,
+  ) => void;
+  onAbsolutePositionChange?: (absolutePositionSeconds: number) => void;
   /** Immutable TMDB playback identity, snapshotted by Detail when Play opens. */
   scrobbleContext?: TraktScrobbleContext | null;
   onClose: () => void;
@@ -503,6 +531,7 @@ export function EmbeddedPlayer({
   sourceFileName,
   playbackAuthorization,
   startPositionSeconds = 0,
+  sourceSwitchState = null,
   timelineOffsetSeconds = 0,
   savedPrefs,
   playerPreferences = null,
@@ -520,6 +549,13 @@ export function EmbeddedPlayer({
   engine = "native-mpv",
   playbackDecision = "Direct Play",
   onPlaybackError,
+  serverOptimized,
+  activeServerOptimizedQuality = null,
+  serverOptimizationPending = false,
+  serverOptimizationError = null,
+  onSwitchServerOptimized,
+  onSwitchDeviceOriginal,
+  onAbsolutePositionChange,
   scrobbleContext = null,
   onClose,
 }: Props) {
@@ -566,6 +602,8 @@ export function EmbeddedPlayer({
   const [audioDevice, setAudioDevice] = useState("auto");
   const [audioPassthrough, setAudioPassthroughEnabled] = useState(false);
   const [hdrPolicy, setHdrPolicyValue] = useState<"auto" | "preserve" | "tone-map">("auto");
+  const onAbsolutePositionChangeRef = useRef(onAbsolutePositionChange);
+  onAbsolutePositionChangeRef.current = onAbsolutePositionChange;
   const [containerFps, setContainerFps] = useState(0);
   const [outputFps, setOutputFps] = useState(0);
   const [decoderDrops, setDecoderDrops] = useState(0);
@@ -608,6 +646,8 @@ export function EmbeddedPlayer({
   onPlaybackErrorRef.current = onPlaybackError;
   const playerPreferencesRef = useRef(playerPreferences);
   playerPreferencesRef.current = playerPreferences;
+  const sourceSwitchStateRef = useRef(sourceSwitchState);
+  sourceSwitchStateRef.current = sourceSwitchState;
   const hideTimer = useRef<number | undefined>(undefined);
   const stageClickTimer = useRef<number | undefined>(undefined);
   const scrubberRef = useRef<NativeScrubberHandle | null>(null);
@@ -672,6 +712,12 @@ export function EmbeddedPlayer({
       : durRef.current;
   const reportedProgressPct = () =>
     playbackProgressPct(reportedPosition(), reportedDuration());
+  const handoffState = (): PlaybackHandoffState => ({
+    paused: pausedRef.current,
+    volume: Math.min(1, Math.max(0, volume / 100)),
+    muted,
+    playbackRate: speed,
+  });
 
   const audioTracks = useMemo(() => tracks.filter((t) => t.type === "audio"), [tracks]);
   const volumeIsSilent = muted || volume === 0;
@@ -945,6 +991,7 @@ export function EmbeddedPlayer({
                   // while NativeScrubber coalesces its React state to 5Hz.
                   const previousPosition = posRef.current;
                   posRef.current = ev.data;
+                  onAbsolutePositionChangeRef.current?.(reportedPosition());
                   if (ev.data < previousPosition - 2) {
                     upNextDismissedRef.current = false;
                     setUpNextDismissed(false);
@@ -1199,9 +1246,29 @@ export function EmbeddedPlayer({
           setSubPosition(restoredSubPosition);
           await setProperty("sub-pos", restoredSubPosition);
         }
-        // Configure gain before unpausing so a non-default stream never emits a
-        // frame of loud audio while the volume preference is still in flight.
-        await setProperty("pause", false);
+        // A backend switch overrides saved defaults only after the native source
+        // has loaded. This preserves the viewer's in-session controls rather
+        // than resetting them while returning from optimized HLS.
+        const handoff = sourceSwitchStateRef.current;
+        if (handoff != null) {
+          const handoffVolume = Math.round(Math.min(1, Math.max(0, handoff.volume)) * 100);
+          const handoffRate = Number.isFinite(handoff.playbackRate) && handoff.playbackRate > 0
+            ? handoff.playbackRate
+            : 1;
+          setVolume(handoffVolume);
+          setMuted(handoff.muted);
+          setSpeed(handoffRate);
+          setPaused(handoff.paused);
+          if (handoffVolume > 0) lastAudibleVolume.current = handoffVolume;
+          await setProperty("volume", handoffVolume);
+          await setProperty("mute", handoff.muted);
+          await setProperty("speed", handoffRate);
+          await setProperty("pause", handoff.paused);
+        } else {
+          // Configure gain before unpausing so a non-default stream never emits a
+          // frame of loud audio while the volume preference is still in flight.
+          await setProperty("pause", false);
+        }
         if (castSuspendedRef.current) {
           await setProperty("pause", true);
         }
@@ -2278,6 +2345,48 @@ export function EmbeddedPlayer({
         {menu === "settings" && (
           <Popover onClose={() => setMenu(null)} className="embed-menu-settings">
             <div className="embed-menu-title">Playback settings</div>
+            {serverOptimized != null && onSwitchServerOptimized != null && onSwitchDeviceOriginal != null && (
+              <div className="embed-setting">
+                <span className="embed-setting-head">
+                  <span>Streaming mode</span>
+                  <span className="embed-setting-val">
+                    {activeServerOptimizedQuality == null
+                      ? "Device Original"
+                      : `Server Optimized ${activeServerOptimizedQuality === "auto" ? "Auto" : activeServerOptimizedQuality}`}
+                  </span>
+                </span>
+                <div className="embed-menu-choice-row">
+                  <button
+                    type="button"
+                    className={`chip${activeServerOptimizedQuality == null ? " is-active" : ""}`}
+                    aria-pressed={activeServerOptimizedQuality == null}
+                    disabled={serverOptimizationPending}
+                    onClick={() => onSwitchDeviceOriginal(reportedPosition(), handoffState())}
+                  >
+                    Device Original
+                  </button>
+                  {serverOptimized.qualities.map((quality) => (
+                    <button
+                      type="button"
+                      className={`chip${activeServerOptimizedQuality === quality ? " is-active" : ""}`}
+                      aria-pressed={activeServerOptimizedQuality === quality}
+                      disabled={serverOptimizationPending}
+                      onClick={() => void onSwitchServerOptimized(quality, reportedPosition(), handoffState())}
+                      key={quality}
+                    >
+                      {quality === "auto" ? "Auto" : quality}
+                    </button>
+                  ))}
+                </div>
+                <small>Server Optimized reduces data use and switches to webview HLS after the manifest is ready.</small>
+                {serverOptimizationPending && (
+                  <p className="embed-menu-error" role="status">Preparing optimized playback while the current stream continues…</p>
+                )}
+                {serverOptimizationError != null && (
+                  <p className="embed-menu-error" role="alert">{serverOptimizationError}</p>
+                )}
+              </div>
+            )}
             <Slider
               label="Subtitle size"
               value={subScale}
