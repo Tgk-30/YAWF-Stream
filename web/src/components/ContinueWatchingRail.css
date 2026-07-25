@@ -175,3 +175,8 @@
     width: clamp(220px, 72vw, 320px);
   }
 }
+
+.cw-card-action {
+  color: rgba(var(--accent-rgb), 1);
+  font-weight: 800;
+}

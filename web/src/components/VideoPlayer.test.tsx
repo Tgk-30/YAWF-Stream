@@ -1786,3 +1786,137 @@ describe("Up next overlay", () => {
     }
   });
 });
+
+describe("Up next predicted EOF handoff", () => {
+  it("fires once at EOF after a visible warning, even when the parent stays mounted", () => {
+    vi.useFakeTimers();
+    try {
+      const onPlayNext = vi.fn();
+      render(
+        <VideoPlayer url="https://x/predicted.mp4" title="T" onClose={() => {}}
+          upNext={{ label: "S1 E2" }} onPlayNext={onPlayNext} />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(video, "duration", { configurable: true, value: 120 });
+      Object.defineProperty(video, "currentTime", { configurable: true, value: 110, writable: true });
+      fireEvent(video, new Event("loadedmetadata"));
+      fireEvent(video, new Event("play"));
+      fireEvent(video, new Event("timeupdate"));
+      expect(screen.getByText("Up next")).toBeInTheDocument();
+      fireEvent(video, new Event("ended"));
+      expect(onPlayNext).toHaveBeenCalledTimes(1);
+      act(() => vi.advanceTimersByTime(20_000));
+      expect(onPlayNext).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Predictive end-of-episode behavior
+// ---------------------------------------------------------------------------
+
+describe("VideoPlayer predictive episode transitions", () => {
+  function renderPredictive(over: Partial<Parameters<typeof VideoPlayer>[0]> = {}) {
+    const onPlayNext = vi.fn();
+    const onProgress = vi.fn();
+    const onEnded = vi.fn();
+    const view = render(
+      <VideoPlayer
+        url="https://x/episode.mp4"
+        title="Episode"
+        onClose={() => {}}
+        upNext={{ label: "S1 E2" }}
+        onPlayNext={onPlayNext}
+        onProgress={onProgress}
+        onEnded={onEnded}
+        {...over}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    return { ...view, video, onPlayNext, onProgress, onEnded };
+  }
+
+  function setPlaybackPosition(video: HTMLVideoElement, currentTime: number, duration: number): void {
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, value: currentTime, writable: true },
+      duration: { configurable: true, value: duration },
+    });
+    fireEvent(video, new Event("durationchange"));
+    fireEvent(video, new Event("play"));
+    fireEvent(video, new Event("timeupdate"));
+  }
+
+  it("shows the adaptive early prompt without advancing before EOF", async () => {
+    vi.useFakeTimers();
+    try {
+      const { video, onPlayNext } = renderPredictive();
+      // A one-hour episode gets the capped 30-second early prompt window.
+      setPlaybackPosition(video, 3_575, 3_600);
+      expect(screen.getByText("Up next")).toBeInTheDocument();
+      expect(screen.queryByText(/Playing in/)).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(onPlayNext).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("immediately advances at EOF only after a generic warning was shown", async () => {
+    const { video, onPlayNext } = renderPredictive();
+    setPlaybackPosition(video, 95, 100);
+    expect(screen.getByText("Up next")).toBeInTheDocument();
+    expect(onPlayNext).not.toHaveBeenCalled();
+
+    fireEvent(video, new Event("ended"));
+    expect(onPlayNext).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the EOF countdown fallback when no early warning was possible", () => {
+    vi.useFakeTimers();
+    try {
+      const { video, onPlayNext } = renderPredictive();
+      fireEvent(video, new Event("ended"));
+      expect(screen.getByText("Playing in 10s")).toBeInTheDocument();
+      expect(onPlayNext).not.toHaveBeenCalled();
+      act(() => { vi.advanceTimersByTime(10_000); });
+      expect(onPlayNext).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never advances after disabled auto play or a dismissed warning", async () => {
+    vi.useFakeTimers();
+    try {
+      const disabled = renderPredictive({ autoCountdown: false });
+      fireEvent(disabled.video, new Event("ended"));
+      act(() => { vi.advanceTimersByTime(30_000); });
+      expect(disabled.onPlayNext).not.toHaveBeenCalled();
+
+      disabled.unmount();
+      const dismissed = renderPredictive();
+      setPlaybackPosition(dismissed.video, 95, 100);
+      expect(screen.getByText("Up next")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+      fireEvent(dismissed.video, new Event("ended"));
+      act(() => { vi.advanceTimersByTime(30_000); });
+      expect(dismissed.onPlayNext).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets the terminal callback own the final write without a duplicate progress callback", () => {
+    const calls: string[] = [];
+    const { video } = renderPredictive({
+      onProgress: () => calls.push("progress"),
+      onEnded: () => calls.push("ended"),
+    });
+    setPlaybackPosition(video, 100, 100);
+    calls.length = 0;
+    fireEvent(video, new Event("ended"));
+    expect(calls).toEqual(["ended"]);
+  });
+});

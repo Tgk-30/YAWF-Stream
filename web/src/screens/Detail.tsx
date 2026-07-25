@@ -1195,6 +1195,38 @@ export function Detail() {
     }
   }
 
+  /** Queue only a verified, aired regular episode. Metadata failures never
+   * fabricate an ordinary zero-progress resume target. */
+  async function queueVerifiedNextEpisode(): Promise<void> {
+    if (detailItem?.type !== "series" || player == null || upNextTarget == null ||
+        seasonsState.source !== "live") return;
+    const tmdbId = detail.data.item?.tmdbId ?? detailItem.tmdbId ?? null;
+    if (tmdbId == null) return;
+    try {
+      const episodes = isServerMode()
+        ? (await fetchServerEpisodes({ tmdbId, season: upNextTarget.season })).episodes
+        : await services.tmdb?.getEpisodes(tmdbId, upNextTarget.season) ?? [];
+      const target = episodes.find((episode) =>
+        episode.seasonNumber === upNextTarget.season &&
+        episode.episodeNumber === upNextTarget.episode,
+      );
+      const today = new Date().toISOString().slice(0, 10);
+      if (target == null || (target.airDate != null && target.airDate > today)) return;
+      await getStore().recordHistory({
+        mediaId: detailItem.id,
+        episodeId: episodeIdFor(upNextTarget.season, upNextTarget.episode),
+        progressSeconds: 0,
+        durationSeconds: null,
+        completed: false,
+        queuedNext: true,
+        preview: detailItem,
+      });
+      await refreshContinueWatching();
+    } catch {
+      // Guide data is a prerequisite for a queue, so leave no speculative row.
+    }
+  }
+
   /** Advance to the next episode (the Up-next card's action). Closes the
    * player, moves the (persisted) selection - which re-drives the stream
    * search - and queues the auto-play attempt for when the new rows land. */
@@ -1854,6 +1886,10 @@ export function Detail() {
               // right thing even if the picker changed mid-playback. `prefs`
               // carries the in-window player's audio/sub/speed for next time.
               recordResume(detailItem, current, duration, player.episodeId, prefs);
+            }}
+            onEnded={(current, duration, prefs) => {
+              recordResume(detailItem, current, duration, player.episodeId, prefs);
+              void queueVerifiedNextEpisode();
             }}
             // Subtitle search/translate context. The client/config are null when
             // the OpenSubtitles key / AI provider aren't configured, so the

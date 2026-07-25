@@ -30,6 +30,8 @@ export interface WatchHistoryRecord {
   progressSeconds: number;
   durationSeconds: number | null;
   completed: boolean;
+  /** A durable series handoff target, distinct from a 0% resume row. */
+  queuedNext?: boolean;
   /** ISO-8601 timestamp of the last watch. Indexed for recency ordering. */
   lastWatched: string;
   streamQuality: string | null;
@@ -82,7 +84,7 @@ export function watchProgressMap(
   const map: Record<string, number> = {};
   const newest: Record<string, string> = {};
   for (const r of records) {
-    if (r.completed || !hasResumePoint(r)) continue;
+    if (r.completed || r.queuedNext || !hasResumePoint(r)) continue;
     const prev = newest[r.preview.id];
     if (prev != null && prev.localeCompare(r.lastWatched) >= 0) continue;
     newest[r.preview.id] = r.lastWatched;
@@ -100,7 +102,7 @@ export function latestResumeByMedia(
 ): Record<string, WatchHistoryRecord> {
   const map: Record<string, WatchHistoryRecord> = {};
   for (const r of records) {
-    if (r.completed || !hasResumePoint(r)) continue;
+    if (r.completed || (!r.queuedNext && !hasResumePoint(r))) continue;
     const cur = map[r.mediaId];
     if (cur == null || cur.lastWatched.localeCompare(r.lastWatched) < 0) {
       map[r.mediaId] = r;

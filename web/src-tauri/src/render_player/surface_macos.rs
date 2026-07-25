@@ -44,9 +44,9 @@ use objc2_foundation::{
     ns_string, NSNotification, NSNotificationCenter, NSNumber, NSObject, NSPoint, NSRect, NSSize,
 };
 use objc2_open_gl::{
-    CGLChoosePixelFormat, CGLContextObj, CGLError, CGLGetCurrentContext, CGLLockContext,
-    CGLPixelFormatAttribute, CGLPixelFormatObj, CGLReleaseContext, CGLRetainContext,
-    CGLSetCurrentContext, CGLUnlockContext,
+    CGLChoosePixelFormat, CGLContextObj, CGLCreateContext, CGLError, CGLGetCurrentContext,
+    CGLLockContext, CGLPixelFormatAttribute, CGLPixelFormatObj, CGLReleaseContext,
+    CGLRetainContext, CGLSetCurrentContext, CGLUnlockContext,
 };
 use objc2_quartz_core::{CAAutoresizingMask, CALayer, CAOpenGLLayer};
 use objc2_web_kit::WKWebView;
@@ -248,9 +248,19 @@ fn should_queue_callback_redraw(
     lifecycle: CallbackLifecycle,
     update_pending: bool,
     force_render: bool,
-    redraw_queued: bool,
+    main_dispatch_queued: bool,
 ) -> bool {
-    lifecycle == CallbackLifecycle::Live && (update_pending || force_render) && !redraw_queued
+    lifecycle == CallbackLifecycle::Live
+        && (update_pending || force_render)
+        && !main_dispatch_queued
+}
+
+fn should_requeue_after_draw(
+    lifecycle: CallbackLifecycle,
+    update_pending: bool,
+    force_render: bool,
+) -> bool {
+    lifecycle == CallbackLifecycle::Live && (update_pending || force_render)
 }
 
 // ---- The layer-backed video surface -------------------------------------
@@ -286,7 +296,8 @@ struct RenderCallbackState {
     layer_ptr: AtomicUsize,
     lifecycle: AtomicU8,
     update_pending: AtomicBool,
-    redraw_queued: AtomicBool,
+    main_dispatch_queued: AtomicBool,
+    context_mismatch_logged: AtomicBool,
     force_render: AtomicBool,
 }
 
@@ -349,6 +360,10 @@ struct RawRenderContext {
 }
 
 unsafe impl Send for RawRenderContext {}
+
+fn render_context_matches_creation(creation_context: usize, draw_context: usize) -> bool {
+    creation_context == draw_context
+}
 
 impl RawRenderContext {
     fn new(
@@ -521,26 +536,34 @@ fn queue_callback_redraw(callback: Arc<RenderCallbackState>) {
     let lifecycle = callback.lifecycle();
     let update_pending = callback.update_pending.load(Ordering::Acquire);
     let force_render = callback.force_render.load(Ordering::Acquire);
-    let redraw_queued = callback.redraw_queued.load(Ordering::Acquire);
-    if !should_queue_callback_redraw(lifecycle, update_pending, force_render, redraw_queued)
-        || callback
-            .redraw_queued
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
+    let main_dispatch_queued = callback.main_dispatch_queued.load(Ordering::Acquire);
+    if !should_queue_callback_redraw(
+        lifecycle,
+        update_pending,
+        force_render,
+        main_dispatch_queued,
+    ) || callback
+        .main_dispatch_queued
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
     {
         return;
     }
 
     DispatchQueue::main().exec_async(move || {
+        // This latch represents only delivery to the main queue. Core Animation
+        // may coalesce or discard the invalidation during a drawable transition,
+        // so never keep later updates blocked until draw happens.
+        callback
+            .main_dispatch_queued
+            .store(false, Ordering::Release);
         // Teardown and this closure both serialize on the main queue. Re-check
         // the flag because the redraw may have been queued before teardown ran.
         if !callback.is_live() {
-            callback.redraw_queued.store(false, Ordering::Release);
             return;
         }
         let ptr = callback.layer_ptr.load(Ordering::Acquire);
         if ptr == 0 {
-            callback.redraw_queued.store(false, Ordering::Release);
             return;
         }
         let layer: &VideoLayer = unsafe { &*(ptr as *const VideoLayer) };
@@ -551,12 +574,13 @@ fn queue_callback_redraw(callback: Arc<RenderCallbackState>) {
 }
 
 fn finish_callback_redraw(callback: &Arc<RenderCallbackState>) {
-    callback.redraw_queued.store(false, Ordering::Release);
     // Close the race where an update or forced redraw arrived after draw consumed
-    // its flags but before the outstanding-redraw latch was released.
-    if callback.update_pending.load(Ordering::Acquire)
-        || callback.force_render.load(Ordering::Acquire)
-    {
+    // its flags. Main-queue delivery has its own shorter-lived coalescing latch.
+    if should_requeue_after_draw(
+        callback.lifecycle(),
+        callback.update_pending.load(Ordering::Acquire),
+        callback.force_render.load(Ordering::Acquire),
+    ) {
         queue_callback_redraw(callback.clone());
     }
 }
@@ -608,6 +632,7 @@ struct SurfaceState {
     wrap_needs_resize: AtomicBool,
     wrap_dispatch_queued: AtomicBool,
     wrap_reconciling: AtomicBool,
+    wrap_postcondition_attempts: AtomicU8,
     wrap_constraint_applied: AtomicBool,
     wrap_has_applied: AtomicBool,
     wrap_restore_pending: AtomicBool,
@@ -645,6 +670,7 @@ impl SurfaceState {
             wrap_needs_resize: AtomicBool::new(true),
             wrap_dispatch_queued: AtomicBool::new(false),
             wrap_reconciling: AtomicBool::new(false),
+            wrap_postcondition_attempts: AtomicU8::new(0),
             wrap_constraint_applied: AtomicBool::new(false),
             wrap_has_applied: AtomicBool::new(false),
             wrap_restore_pending: AtomicBool::new(false),
@@ -887,10 +913,38 @@ impl PostFullscreenCleanup {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LayerContextAction {
+    Create,
+    RetainExisting,
+}
+
+fn layer_context_action(context: Option<usize>) -> LayerContextAction {
+    if context.is_some() {
+        LayerContextAction::RetainExisting
+    } else {
+        LayerContextAction::Create
+    }
+}
+
+struct LayerOwnedCglContext(CGLContextObj);
+
+unsafe impl Send for LayerOwnedCglContext {}
+
+impl Drop for LayerOwnedCglContext {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { CGLReleaseContext(self.0) };
+        }
+    }
+}
+
 struct VideoLayerIvars {
     render: Mutex<Option<RawRenderContext>>,
-    // Declared after render so an unexpected ivar drop still frees the render
-    // context before releasing this layer's mpv ownership.
+    // Field order is a lifetime contract. An unexpected ivar drop first frees
+    // the mpv render context, then releases the layer's stable CGL reference,
+    // then releases mpv ownership.
+    owned_gl_context: Mutex<Option<LayerOwnedCglContext>>,
     mpv: Arc<Mpv>,
     callback: Arc<RenderCallbackState>,
     surface: Arc<SurfaceState>,
@@ -924,6 +978,59 @@ define_class!(
             pf
         }
 
+        #[unsafe(method(copyCGLContextForPixelFormat:))]
+        fn copy_cgl_context(&self, pf: CGLPixelFormatObj) -> CGLContextObj {
+            if pf.is_null() {
+                rp_log("VideoLayer.copyCGLContext: null pixel format");
+                return std::ptr::null_mut();
+            }
+            let Ok(mut owned) = self.ivars().owned_gl_context.lock() else {
+                rp_log("VideoLayer.copyCGLContext: context ownership lock poisoned");
+                return std::ptr::null_mut();
+            };
+            let context = match layer_context_action(
+                owned.as_ref().map(|context| context.0 as usize),
+            ) {
+                LayerContextAction::RetainExisting => owned
+                    .as_ref()
+                    .map(|context| context.0)
+                    .unwrap_or(std::ptr::null_mut()),
+                LayerContextAction::Create => {
+                    let mut context: CGLContextObj = std::ptr::null_mut();
+                    let status = unsafe {
+                        CGLCreateContext(
+                            pf,
+                            std::ptr::null_mut(),
+                            NonNull::new(&mut context).unwrap(),
+                        )
+                    };
+                    if status != CGLError::NoError || context.is_null() {
+                        rp_log(&format!(
+                            "VideoLayer.copyCGLContext: CGLCreateContext failed: {}",
+                            status.0
+                        ));
+                        return std::ptr::null_mut();
+                    }
+                    owned.replace(LayerOwnedCglContext(context));
+                    context
+                }
+            };
+            let retained = unsafe { CGLRetainContext(context) };
+            if retained.is_null() {
+                rp_log("VideoLayer.copyCGLContext: CGLRetainContext failed");
+            }
+            retained
+        }
+
+        #[unsafe(method(releaseCGLContext:))]
+        fn release_cgl_context(&self, ctx: CGLContextObj) {
+            if ctx.is_null() {
+                return;
+            }
+            // Balance the retained reference returned to CA by copyCGLContext.
+            unsafe { CGLReleaseContext(ctx) };
+        }
+
         #[unsafe(method(canDrawInCGLContext:pixelFormat:forLayerTime:displayTime:))]
         fn can_draw(
             &self,
@@ -952,9 +1059,19 @@ define_class!(
             t: CFTimeInterval,
             ts: *const CVTimeStamp,
         ) {
-            unsafe { CGLLockContext(ctx) };
-
             let ivars = self.ivars();
+            if ctx.is_null() {
+                rp_log("VideoLayer.draw: null CGL context; waiting for a later invalidation");
+                return;
+            }
+            let lock_status = unsafe { CGLLockContext(ctx) };
+            if lock_status != CGLError::NoError {
+                rp_log(&format!(
+                    "VideoLayer.draw: CGLLockContext failed; waiting for a later invalidation: {}",
+                    lock_status.0
+                ));
+                return;
+            }
             // Teardown has started - do not touch mpv/render at all.
             if !ivars.callback.is_live() {
                 unsafe { CGLUnlockContext(ctx) };
@@ -982,6 +1099,44 @@ define_class!(
                     }
                     Err(e) => rp_log(&format!("VideoLayer.draw: RenderContext failed: {e}")),
                 }
+            }
+
+            let context_matches = render_slot
+                .as_ref()
+                .map(|render| {
+                    render_context_matches_creation(
+                        render.gl_context as usize,
+                        ctx as usize,
+                    )
+                })
+                .unwrap_or(true);
+            if !context_matches {
+                if !ivars
+                    .callback
+                    .context_mismatch_logged
+                    .swap(true, Ordering::AcqRel)
+                {
+                    rp_log(
+                        "VideoLayer.draw: CGL context differs from render-context creation; mpv render deferred",
+                    );
+                }
+                // Keep all update and force flags pending. A later genuine layer
+                // invalidation can retry if Core Animation restores the context.
+                drop(render_slot);
+                unsafe { CGLUnlockContext(ctx) };
+                return;
+            }
+            ivars
+                .callback
+                .context_mismatch_logged
+                .store(false, Ordering::Release);
+            if render_slot.is_none() {
+                // Creation failures are retried only by the bounded attach nudge
+                // or a later genuine update/resize. Do not self-schedule a loop.
+                ivars.callback.force_render.store(true, Ordering::Release);
+                drop(render_slot);
+                unsafe { CGLUnlockContext(ctx) };
+                return;
             }
 
             let forced = ivars.callback.force_render.swap(false, Ordering::AcqRel);
@@ -1067,11 +1222,13 @@ impl VideoLayer {
             layer_ptr: AtomicUsize::new(0),
             lifecycle: AtomicU8::new(CallbackLifecycle::Live as u8),
             update_pending: AtomicBool::new(false),
-            redraw_queued: AtomicBool::new(false),
+            main_dispatch_queued: AtomicBool::new(false),
+            context_mismatch_logged: AtomicBool::new(false),
             force_render: AtomicBool::new(false),
         });
         let this = Self::alloc().set_ivars(VideoLayerIvars {
             render: Mutex::new(None),
+            owned_gl_context: Mutex::new(None),
             mpv,
             callback: callback.clone(),
             surface: surface.clone(),
@@ -1498,7 +1655,12 @@ fn verify_and_repair_geometry_on_main(
     ) {
         corrections.push("contents-scale");
     }
-    if force_display || !corrections.is_empty() {
+    if force_display {
+        // A fullscreen transition may discard a previously delivered Core
+        // Animation invalidation. Draw against the final repaired geometry now
+        // instead of relying on any asynchronous scheduling state.
+        display_layer_forced(layer);
+    } else if !corrections.is_empty() {
         queue_layer_forced_redraw(layer);
     }
     let correction = if corrections.is_empty() {
@@ -1575,6 +1737,34 @@ fn size_meets_minimum(size: NSSize, minimum: NSSize) -> bool {
         && positive_finite_size(minimum)
         && size.width >= minimum.width
         && size.height >= minimum.height
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WrapPostconditionDecision {
+    Complete,
+    Retry,
+    Pending,
+}
+
+const MAX_WRAP_POSTCONDITION_ATTEMPTS: u8 = 4;
+
+fn wrap_postcondition_decision(
+    observed: NSSize,
+    target: NSSize,
+    attempts: u8,
+) -> WrapPostconditionDecision {
+    const EPSILON: f64 = 0.25;
+    if positive_finite_size(observed)
+        && positive_finite_size(target)
+        && (observed.width - target.width).abs() <= EPSILON
+        && (observed.height - target.height).abs() <= EPSILON
+    {
+        WrapPostconditionDecision::Complete
+    } else if attempts.saturating_add(1) >= MAX_WRAP_POSTCONDITION_ATTEMPTS {
+        WrapPostconditionDecision::Pending
+    } else {
+        WrapPostconditionDecision::Retry
+    }
 }
 
 fn screen_limits(window: &NSWindow) -> (Option<NSRect>, NSSize) {
@@ -1766,6 +1956,9 @@ fn take_post_fullscreen_cleanup_on_main(
 fn discard_window_wrap_state(surface: &SurfaceState) {
     surface.wrap_needs_resize.store(false, Ordering::Release);
     surface
+        .wrap_postcondition_attempts
+        .store(0, Ordering::Release);
+    surface
         .wrap_constraint_applied
         .store(false, Ordering::Release);
     surface.wrap_has_applied.store(false, Ordering::Release);
@@ -1897,7 +2090,8 @@ fn finish_post_fullscreen_cleanup_on_main(
 }
 
 fn save_pre_wrap_frame_on_main(surface: &SurfaceState, frame: NSRect) -> bool {
-    if surface.wrap_has_applied.load(Ordering::Acquire) {
+    let first_wrap = !surface.wrap_has_applied.load(Ordering::Acquire);
+    if !first_wrap {
         return false;
     }
     if !positive_finite_rect(frame) {
@@ -1916,8 +2110,7 @@ fn save_pre_wrap_frame_on_main(surface: &SurfaceState, frame: NSRect) -> bool {
             *saved = Some(FrameSnapshot::from_rect(frame));
         }
     }
-    surface.wrap_has_applied.store(true, Ordering::Release);
-    true
+    first_wrap
 }
 
 /// AppKit owns every NSWindow property for the complete fullscreen lifecycle.
@@ -2047,7 +2240,7 @@ fn clear_window_aspect_on_main(surface: &SurfaceState, reason: &str) -> bool {
     true
 }
 
-fn reconcile_window_wrap_on_main(surface: &SurfaceState) {
+fn reconcile_window_wrap_on_main(surface: &Arc<SurfaceState>) {
     if surface.dead.load(Ordering::Acquire) {
         return;
     }
@@ -2108,12 +2301,13 @@ fn reconcile_window_wrap_on_main(surface: &SurfaceState) {
             return;
         }
         let first_wrap = save_pre_wrap_frame_on_main(surface, old_frame);
+        let resize_requested = surface.wrap_needs_resize.load(Ordering::Acquire);
         let mut resized = false;
         let mut internal_letterbox = false;
-        if surface.wrap_needs_resize.swap(false, Ordering::AcqRel) {
+        let mut fitted_target = None;
+        if resize_requested {
             let raw_minimum = window.contentMinSize();
             let Some(minimum) = validated_content_minimum(raw_minimum) else {
-                surface.wrap_needs_resize.store(true, Ordering::Release);
                 log_geometry_on_main(
                     "window-wrap",
                     surface,
@@ -2126,7 +2320,6 @@ fn reconcile_window_wrap_on_main(surface: &SurfaceState) {
             };
             let (visible_frame, maximum) = screen_limits(window);
             if !positive_finite_size(maximum) {
-                surface.wrap_needs_resize.store(true, Ordering::Release);
                 log_geometry_on_main(
                     "window-wrap",
                     surface,
@@ -2155,6 +2348,7 @@ fn reconcile_window_wrap_on_main(surface: &SurfaceState) {
                 return;
             }
             internal_letterbox = letterbox;
+            fitted_target = Some(fitted);
             if (fitted.width - before.width).abs() > 0.01
                 || (fitted.height - before.height).abs() > 0.01
             {
@@ -2186,6 +2380,45 @@ fn reconcile_window_wrap_on_main(surface: &SurfaceState) {
             }
         }
 
+        if let Some(target) = fitted_target {
+            let observed = content.bounds().size;
+            let attempts = surface.wrap_postcondition_attempts.load(Ordering::Acquire);
+            match wrap_postcondition_decision(observed, target, attempts) {
+                WrapPostconditionDecision::Complete => {
+                    surface.wrap_needs_resize.store(false, Ordering::Release);
+                    surface
+                        .wrap_postcondition_attempts
+                        .store(0, Ordering::Release);
+                }
+                WrapPostconditionDecision::Retry => {
+                    surface
+                        .wrap_postcondition_attempts
+                        .store(attempts.saturating_add(1), Ordering::Release);
+                    log_geometry_on_main(
+                        "window-wrap",
+                        surface,
+                        &format!(
+                            "action=retry-content-postcondition target={:.2}x{:.2} observed={:.2}x{:.2}",
+                            target.width, target.height, observed.width, observed.height
+                        ),
+                    );
+                    queue_window_wrap_reconcile(surface.clone());
+                    return;
+                }
+                WrapPostconditionDecision::Pending => {
+                    log_geometry_on_main(
+                        "window-wrap",
+                        surface,
+                        &format!(
+                            "action=content-postcondition-pending target={:.2}x{:.2} observed={:.2}x{:.2} retry=exhausted",
+                            target.width, target.height, observed.width, observed.height
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+
         // setFrame above can synchronously run AppKit code, so the aspect call
         // gets its own fresh transition check rather than sharing the prior one.
         if !window_property_mutation_allowed_on_main(surface, window) {
@@ -2199,6 +2432,14 @@ fn reconcile_window_wrap_on_main(surface: &SurfaceState) {
         surface
             .wrap_constraint_applied
             .store(true, Ordering::Release);
+        surface.wrap_has_applied.store(true, Ordering::Release);
+        if resize_requested {
+            let layer_ptr = surface.layer_ptr.load(Ordering::Acquire);
+            if layer_ptr != 0 {
+                let layer: &VideoLayer = unsafe { &*(layer_ptr as *const VideoLayer) };
+                display_layer_forced(layer);
+            }
+        }
         if rp_debug_enabled() {
             let after = content.bounds().size;
             let minimum = window.contentMinSize();
@@ -2270,7 +2511,7 @@ fn resume_wrap_decision(
     }
 }
 
-fn resume_window_wrap_on_main(surface: &SurfaceState) {
+fn resume_window_wrap_on_main(surface: &Arc<SurfaceState>) {
     let dead = surface.dead.load(Ordering::Acquire);
     if dead || surface.window_ptr == 0 {
         return;
@@ -2289,6 +2530,9 @@ fn resume_window_wrap_on_main(surface: &SurfaceState) {
         ResumeWrapDecision::Reconcile => {}
         ResumeWrapDecision::ResizeAndReconcile => {
             surface.wrap_needs_resize.store(true, Ordering::Release);
+            surface
+                .wrap_postcondition_attempts
+                .store(0, Ordering::Release);
         }
     }
     reconcile_window_wrap_on_main(surface);
@@ -2439,6 +2683,9 @@ impl VideoSurface for MacosSurface {
             *saved = None;
         }
         self.state.wrap_needs_resize.store(true, Ordering::Release);
+        self.state
+            .wrap_postcondition_attempts
+            .store(0, Ordering::Release);
         queue_window_wrap_reconcile(self.state.clone());
     }
 
@@ -2459,6 +2706,9 @@ impl VideoSurface for MacosSurface {
         self.state.wrap_active.store(true, Ordering::Release);
         if aspect_changed || !self.state.wrap_constraint_applied.load(Ordering::Acquire) {
             self.state.wrap_needs_resize.store(true, Ordering::Release);
+            self.state
+                .wrap_postcondition_attempts
+                .store(0, Ordering::Release);
         }
         queue_window_wrap_reconcile(self.state.clone());
     }
@@ -2751,9 +3001,11 @@ fn setup_on_main(
 mod tests {
     use super::{
         capped_render_target_dimensions, claim_webview_opacity_restore, claim_webview_transparency,
-        first_wrap_size, fullscreen_blocks_window_mutation, render_update_has_frame,
-        resume_wrap_decision, should_queue_callback_redraw, CallbackLifecycle, RenderCallbackState,
-        ResumeWrapDecision, SurfaceState,
+        first_wrap_size, fullscreen_blocks_window_mutation, layer_context_action,
+        render_context_matches_creation, render_update_has_frame, resume_wrap_decision,
+        should_queue_callback_redraw, should_requeue_after_draw, wrap_postcondition_decision,
+        CallbackLifecycle, LayerContextAction, RenderCallbackState, ResumeWrapDecision,
+        SurfaceState, WrapPostconditionDecision,
     };
     use objc2_foundation::NSSize;
     use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -2848,12 +3100,70 @@ mod tests {
     }
 
     #[test]
+    fn delivered_but_dropped_invalidation_does_not_block_forced_redraw() {
+        assert!(!should_queue_callback_redraw(
+            CallbackLifecycle::Live,
+            false,
+            true,
+            true
+        ));
+        // Main-queue delivery releases the dispatch latch. No CA draw is required
+        // before a fullscreen completion can request another forced redraw.
+        assert!(should_queue_callback_redraw(
+            CallbackLifecycle::Live,
+            false,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn update_arriving_during_draw_requeues_after_consumed_flags() {
+        assert!(should_requeue_after_draw(
+            CallbackLifecycle::Live,
+            true,
+            false
+        ));
+        assert!(should_requeue_after_draw(
+            CallbackLifecycle::Live,
+            false,
+            true
+        ));
+        assert!(!should_requeue_after_draw(
+            CallbackLifecycle::Live,
+            false,
+            false
+        ));
+        assert!(!should_requeue_after_draw(
+            CallbackLifecycle::Quiescing,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn render_context_identity_must_match_before_mpv_calls() {
+        assert!(render_context_matches_creation(0x1000, 0x1000));
+        assert!(!render_context_matches_creation(0x1000, 0x2000));
+    }
+
+    #[test]
+    fn layer_context_ownership_creates_once_then_retains_for_ca() {
+        assert_eq!(layer_context_action(None), LayerContextAction::Create);
+        assert_eq!(
+            layer_context_action(Some(0x1000)),
+            LayerContextAction::RetainExisting
+        );
+    }
+
+    #[test]
     fn callback_teardown_quiesces_before_the_context_is_marked_freed() {
         let callback = RenderCallbackState {
             layer_ptr: AtomicUsize::new(1),
             lifecycle: AtomicU8::new(CallbackLifecycle::Live as u8),
             update_pending: AtomicBool::new(true),
-            redraw_queued: AtomicBool::new(false),
+            main_dispatch_queued: AtomicBool::new(false),
+            context_mismatch_logged: AtomicBool::new(false),
             force_render: AtomicBool::new(true),
         };
 
@@ -2871,6 +3181,31 @@ mod tests {
         ));
         callback.mark_freed();
         assert_eq!(callback.lifecycle(), CallbackLifecycle::Freed);
+    }
+
+    #[test]
+    fn wrap_postcondition_completes_only_after_observed_target() {
+        let target = NSSize::new(1280.0, 720.0);
+        assert_eq!(
+            wrap_postcondition_decision(NSSize::new(1280.1, 719.9), target, 0),
+            WrapPostconditionDecision::Complete
+        );
+        assert_eq!(
+            wrap_postcondition_decision(NSSize::new(1280.0, 860.0), target, 0),
+            WrapPostconditionDecision::Retry
+        );
+        assert_eq!(
+            wrap_postcondition_decision(NSSize::new(1280.0, 860.0), target, 3),
+            WrapPostconditionDecision::Pending
+        );
+        assert_eq!(
+            wrap_postcondition_decision(NSSize::new(1280.0, 860.0), target, 2),
+            WrapPostconditionDecision::Retry
+        );
+        assert_eq!(
+            wrap_postcondition_decision(NSSize::new(1280.0, 720.0), target, 2),
+            WrapPostconditionDecision::Complete
+        );
     }
 
     #[test]

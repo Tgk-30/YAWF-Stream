@@ -261,6 +261,14 @@ ALTER TABLE users ADD COLUMN totp_pending_secret_encrypted TEXT;
 ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0;
 `;
 
+// Explicit next-episode handoffs must survive restart and sync, while remaining
+// distinguishable from ordinary zero-progress viewed rows.
+export const MIGRATION_010 = `
+ALTER TABLE watch_history ADD COLUMN queued_next INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX watch_history_continue_idx
+  ON watch_history(profile_id, queued_next, completed, last_watched DESC);
+`;
+
 /** Ordered, append-only database migrations. Never edit a released migration.
  * Add the next numbered entry so existing databases and fixture snapshots keep
  * a deterministic upgrade path. */
@@ -274,4 +282,5 @@ export const MIGRATIONS: ReadonlyArray<readonly [version: number, sql: string]> 
   [7, MIGRATION_007],
   [8, MIGRATION_008],
   [9, MIGRATION_009],
+  [10, MIGRATION_010],
 ];

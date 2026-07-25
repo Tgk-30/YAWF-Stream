@@ -45,14 +45,17 @@ export function ContinueWatchingRail({ records, onResume }: Props) {
           const ep = parseEpisodeId(r.episodeId);
           const img =
             MediaPreview.backdropThumbnailURL(r.preview) ?? MediaPreview.posterURL(r.preview);
-          const remaining = remainingLabel(r.progressSeconds, r.durationSeconds);
+          const remaining = r.queuedNext
+            ? null
+            : remainingLabel(r.progressSeconds, r.durationSeconds);
+          const action = r.queuedNext ? "Next" : "Continue";
           return (
             <button
               key={r.id}
               type="button"
               className="cw-card"
               onClick={() => onResume(r.preview)}
-              aria-label={`Resume ${r.preview.title}${
+              aria-label={`${action} ${r.preview.title}${
                 ep ? ` ${episodeLabel(ep.season, ep.episode)}` : ""
               }`}
             >
@@ -68,6 +71,7 @@ export function ContinueWatchingRail({ records, onResume }: Props) {
               <div className="cw-card-meta">
                 <span className="cw-card-name">{r.preview.title}</span>
                 <span className="cw-card-sub">
+                  <span className="cw-card-action">{action}</span>
                   {ep && (
                     <span className="cw-card-ep">
                       {episodeLabel(ep.season, ep.episode)}
@@ -76,12 +80,14 @@ export function ContinueWatchingRail({ records, onResume }: Props) {
                   {remaining && <span className="cw-card-left">{remaining}</span>}
                 </span>
               </div>
-              <div className="cw-card-progress" aria-hidden>
-                <div
-                  className="cw-card-progress-fill"
-                  style={{ width: `${Math.round(p * 100)}%` }}
-                />
-              </div>
+              {!r.queuedNext && (
+                <div className="cw-card-progress" aria-hidden>
+                  <div
+                    className="cw-card-progress-fill"
+                    style={{ width: `${Math.round(p * 100)}%` }}
+                  />
+                </div>
+              )}
             </button>
           );
         })}

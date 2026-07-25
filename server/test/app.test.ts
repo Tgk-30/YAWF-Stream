@@ -1145,6 +1145,172 @@ describe("DebridStreamer server", () => {
     expect(bobHist.items[0]).toMatchObject({ progressSeconds: 90, completed: true });
   });
 
+  it("persists queued next episodes through history, portability, and profile isolation", async () => {
+    const owner = await setupOwner(app);
+    const preview = { id: "series-queue", type: "series", title: "Queued series" };
+    const save = async (episodeId: string, lastWatched: string) => {
+      const response = await request(owner, {
+        method: "PUT",
+        url: "/api/history/series-queue",
+        csrf: true,
+        payload: {
+          episodeId,
+          progressSeconds: 0,
+          durationSeconds: null,
+          completed: false,
+          queuedNext: true,
+          lastWatched,
+          preview,
+        },
+      });
+      expect(response.statusCode).toBe(200);
+    };
+
+    await request(owner, {
+      method: "PUT",
+      url: "/api/history/opened-only",
+      csrf: true,
+      payload: {
+        progressSeconds: 0,
+        durationSeconds: null,
+        completed: false,
+        lastWatched: "2026-07-25T10:01:00.000Z",
+        preview: { id: "opened-only", type: "movie", title: "Opened only" },
+      },
+    });
+    await save("s1e2", "2026-07-25T10:02:00.000Z");
+    await save("s1e3", "2026-07-25T10:03:00.000Z");
+
+    const exact = json<{ item: { episodeId: string; queuedNext: boolean } | null }>(
+      await request(owner, { method: "GET", url: "/api/history/series-queue?episodeId=s1e3" }),
+    );
+    expect(exact.item).toMatchObject({ episodeId: "s1e3", queuedNext: true });
+    expect(
+      json<{ item: unknown | null }>(
+        await request(owner, { method: "GET", url: "/api/history/series-queue?episodeId=s1e2" }),
+      ).item,
+    ).toBeNull();
+
+    const continueWatching = json<{
+      items: Array<{ mediaId: string; episodeId: string | null; queuedNext: boolean }>;
+    }>(
+      await request(owner, { method: "GET", url: "/api/history?view=continue-watching" }),
+    );
+    expect(continueWatching.items).toEqual([
+      expect.objectContaining({ mediaId: "series-queue", episodeId: "s1e3", queuedNext: true }),
+    ]);
+
+    const listed = json<{ items: Array<{ mediaId: string; episodeId: string | null; queuedNext: boolean }> }>(
+      await request(owner, { method: "GET", url: "/api/history" }),
+    );
+    expect(listed.items).toContainEqual(
+      expect.objectContaining({ mediaId: "series-queue", episodeId: "s1e3", queuedNext: true }),
+    );
+
+    const bundle = json<{
+      bundle: { history: Array<{ mediaId: string; episodeId: string | null; queuedNext: boolean }> };
+    }>(await request(owner, { method: "GET", url: "/api/portability/export" })).bundle;
+    expect(bundle.history).toContainEqual(
+      expect.objectContaining({ mediaId: "series-queue", episodeId: "s1e3", queuedNext: true }),
+    );
+
+    await createProfile(owner, "queue-member", "queue-member-password");
+    const member = await login(app, "queue-member", "queue-member-password");
+    expect(
+      json<{ item: unknown | null }>(
+        await request(member, { method: "GET", url: "/api/history/series-queue?episodeId=s1e3" }),
+      ).item,
+    ).toBeNull();
+
+    const imported = await request(member, {
+      method: "POST",
+      url: "/api/portability/import",
+      csrf: true,
+      payload: { mode: "merge", bundle },
+    });
+    expect(imported.statusCode, imported.body).toBe(200);
+    expect(
+      json<{ item: { episodeId: string; queuedNext: boolean } | null }>(
+        await request(member, { method: "GET", url: "/api/history/series-queue?episodeId=s1e3" }),
+      ).item,
+    ).toMatchObject({ episodeId: "s1e3", queuedNext: true });
+  });
+
+  it("keeps a real resume over newer imported queues and prunes stale queue targets", async () => {
+    const owner = await setupOwner(app);
+    const preview = { id: "resume-series", type: "series", title: "Resume series" };
+    const realResume = await request(owner, {
+      method: "PUT",
+      url: "/api/history/resume-series",
+      csrf: true,
+      payload: {
+        episodeId: "s1e2",
+        progressSeconds: 120,
+        durationSeconds: 1_200,
+        completed: false,
+        lastWatched: "2026-07-20T10:00:00.000Z",
+        preview,
+      },
+    });
+    expect(realResume.statusCode).toBe(200);
+
+    const history = (mediaId: string, episodeId: string, queuedNext: boolean, lastWatched: string) => ({
+      mediaId,
+      episodeId,
+      progressSeconds: 0,
+      durationSeconds: null,
+      completed: false,
+      queuedNext,
+      lastWatched,
+      streamQuality: null,
+      preview: { id: mediaId, type: "series", title: mediaId },
+    });
+    const imported = await request(owner, {
+      method: "POST",
+      url: "/api/portability/import",
+      csrf: true,
+      payload: {
+        mode: "merge",
+        bundle: {
+          product: "YAWF Stream",
+          format: "yawf-profile-portable",
+          version: 1,
+          createdAt: "2026-07-25T10:00:00.000Z",
+          settings: [],
+          watchlist: [],
+          history: [
+            history("resume-series", "s1e2", true, "2026-07-25T10:00:00.000Z"),
+            history("stale-series", "s1e1", true, "2026-07-24T10:00:00.000Z"),
+            history("stale-series", "s1e2", true, "2026-07-25T10:00:00.000Z"),
+          ],
+          folders: [],
+          library: [],
+        },
+      },
+    });
+    expect(imported.statusCode, imported.body).toBe(200);
+
+    const resumeEntries = json<{
+      items: Array<{ episodeId: string | null; progressSeconds: number; durationSeconds: number | null; queuedNext: boolean; lastWatched: string }>;
+    }>(await request(owner, { method: "GET", url: "/api/history/resume-series/entries" }));
+    expect(resumeEntries.items).toEqual([
+      expect.objectContaining({
+        episodeId: "s1e2",
+        progressSeconds: 120,
+        durationSeconds: 1_200,
+        queuedNext: false,
+        lastWatched: "2026-07-20T10:00:00.000Z",
+      }),
+    ]);
+
+    const staleEntries = json<{ items: Array<{ episodeId: string | null; queuedNext: boolean }> }>(
+      await request(owner, { method: "GET", url: "/api/history/stale-series/entries" }),
+    );
+    expect(staleEntries.items).toEqual([
+      expect.objectContaining({ episodeId: "s1e2", queuedNext: true }),
+    ]);
+  });
+
   it("returns the newest 20 continue-watching rows at the strict resume boundaries", async () => {
     const owner = await setupOwner(app);
     const saveHistory = async (

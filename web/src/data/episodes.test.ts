@@ -85,6 +85,13 @@ describe("defaultSelectionFor", () => {
     expect(defaultSelectionFor("tv1", records)).toEqual({ season: 2, episode: 7 });
   });
 
+  it("selects the newest queued next target", () => {
+    expect(defaultSelectionFor("tv1", [
+      record({ episodeId: "s1e4", lastWatched: "2026-02-01T00:00:00Z" }),
+      record({ episodeId: "s2e1", queuedNext: true, lastWatched: "2026-03-01T00:00:00Z" }),
+    ])).toEqual({ season: 2, episode: 1 });
+  });
+
   it("ignores other titles and unparseable ids; falls back to S1E1", () => {
     const records = [
       record({ id: "a", mediaId: "OTHER", preview: { id: "OTHER", type: "series", title: "x" } as WatchHistoryRecord["preview"], episodeId: "s9e9" }),

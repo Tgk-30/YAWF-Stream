@@ -1067,3 +1067,29 @@ describe("cached resolutions", () => {
     expect(await db.listCachedResolutions()).toHaveLength(1);
   });
 });
+
+describe("queued next history", () => {
+  it("includes an explicit queue but excludes ordinary zero progress and replaces stale queues", async () => {
+    await db.recordHistory({ mediaId: "show", episodeId: "s1e2", queuedNext: true, preview: preview("show") });
+    await db.recordHistory({ mediaId: "show", episodeId: "s1e3", queuedNext: true, preview: preview("show") });
+    await db.recordHistory({ mediaId: "viewed", preview: preview("viewed") });
+    const rows = await db.continueWatching();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ episodeId: "s1e3", queuedNext: true });
+  });
+
+  it("turns queued playback progress into a real resume", async () => {
+    await db.recordHistory({ mediaId: "show", episodeId: "s1e2", queuedNext: true, preview: preview("show") });
+    const row = await db.recordHistory({
+      mediaId: "show", episodeId: "s1e2", progressSeconds: 90,
+      durationSeconds: 900, preview: preview("show"),
+    });
+    expect(row).toMatchObject({ progressSeconds: 90, durationSeconds: 900, queuedNext: false });
+  });
+
+  it("does not overwrite a real target resume with a later queue", async () => {
+    await db.recordHistory({ mediaId: "show", episodeId: "s1e2", progressSeconds: 60, durationSeconds: 600, preview: preview("show") });
+    const row = await db.recordHistory({ mediaId: "show", episodeId: "s1e2", queuedNext: true, preview: preview("show") });
+    expect(row).toMatchObject({ progressSeconds: 60, queuedNext: false });
+  });
+});
