@@ -56,6 +56,7 @@ vi.mock("../lib/ServerSessionContext", () => ({
     initialProfiles,
     initialBuildProfile,
     initialTranscodeAvailable,
+    initialTranscodeCapabilities,
     initialOmdbProxy,
   }: {
     children: React.ReactNode;
@@ -63,6 +64,7 @@ vi.mock("../lib/ServerSessionContext", () => ({
     initialProfiles: unknown[];
     initialBuildProfile: string;
     initialTranscodeAvailable: boolean;
+    initialTranscodeCapabilities: unknown;
     initialOmdbProxy: boolean;
   }) => (
     <div
@@ -71,6 +73,7 @@ vi.mock("../lib/ServerSessionContext", () => ({
       data-profiles={JSON.stringify(initialProfiles)}
       data-build={initialBuildProfile}
       data-transcode={String(initialTranscodeAvailable)}
+      data-transcode-capabilities={JSON.stringify(initialTranscodeCapabilities)}
       data-omdb={String(initialOmdbProxy)}
     >
       {children}
@@ -185,6 +188,29 @@ describe("ServerModeGate", () => {
     );
     // The 401 handler is armed in Server Mode.
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalizes malformed transcode qualities from a server bootstrap", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      setupRequired: false,
+      session: { profileId: "p1", username: "owner", displayName: "Owner", role: "owner", simpleMode: false },
+      transcodeAvailable: true,
+      transcodeCapabilities: {
+        adaptive: true,
+        qualities: ["auto", "360p", "invalid", "360p", 42],
+        seekOffset: true,
+        hardwareEncoder: "h264_videotoolbox",
+        availableVideoEncoders: "not-an-array",
+      },
+    }));
+    render(<ServerModeGate>{CHILD}</ServerModeGate>);
+    const provider = await screen.findByTestId("session-provider");
+    expect(JSON.parse(provider.dataset.transcodeCapabilities!)).toMatchObject({
+      qualities: ["auto", "360p"],
+      availableVideoEncoders: [],
+      subtitleSidecar: false,
+      toneMapping: false,
+    });
   });
 
   it("falls back to default flags when bootstrap omits optional fields", async () => {

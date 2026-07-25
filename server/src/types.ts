@@ -54,7 +54,8 @@ export interface ServerConfig {
    *  When false - or when ffmpeg is absent at boot - the transcode routes 404 and
    *  the /api/stream/:id proxy is byte-for-byte unchanged. */
   enableTranscode: boolean;
-  /** Max concurrent ffmpeg transcode jobs. Default 1 (Pi-friendly). */
+  /** Max concurrent ffmpeg transcode jobs. Default 2 so one staged switch can
+   * coexist with the active stream without exceeding the documented cap. */
   maxTranscodes: number;
   /** Bounded H.264 encoder selected by the server operator. Software is the
    * portable default; supported hardware encoders can be enabled explicitly. */

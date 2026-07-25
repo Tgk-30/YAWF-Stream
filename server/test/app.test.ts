@@ -43,29 +43,30 @@ function makeFakeTranscoder(opts: { detect?: boolean; writeOutput?: boolean } = 
             join(dir, "subtitles.vtt"),
             "WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n",
           );
-        } else if (args.includes("-master_pl_name")) {
+        }
+        const streamMap = args[args.indexOf("-var_stream_map") + 1] ?? "";
+        const renditions = [...streamMap.matchAll(/name:(1080p|720p|480p|360p)/g)]
+          .map((match) => match[1]!);
+        if (renditions.length > 0) {
+          const metadata: Record<string, [number, string]> = {
+            "1080p": [8000000, "1920x1080"],
+            "720p": [4500000, "1280x720"],
+            "480p": [1800000, "854x480"],
+            "360p": [700000, "640x360"],
+          };
           writeFileSync(
             join(dir, "stream.m3u8"),
-            [
-              "#EXTM3U",
-              "#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080",
-              "1080p.m3u8",
-              "#EXT-X-STREAM-INF:BANDWIDTH=4500000,RESOLUTION=1280x720",
-              "720p.m3u8",
-              "#EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=854x480",
-              "480p.m3u8",
-              "",
-            ].join("\n"),
+            ["#EXTM3U", ...renditions.flatMap((rendition) => [
+              `#EXT-X-STREAM-INF:BANDWIDTH=${metadata[rendition]![0]},RESOLUTION=${metadata[rendition]![1]}`,
+              `${rendition}.m3u8`,
+            ]), ""].join("\n"),
           );
-          for (const rendition of ["1080p", "720p", "480p"]) {
+          for (const rendition of renditions) {
             writeFileSync(
               join(dir, `${rendition}.m3u8`),
               FAKE_MANIFEST.replaceAll("seg_00000.ts", `${rendition}_seg_00000.ts`),
             );
-            writeFileSync(
-              join(dir, `${rendition}_seg_00000.ts`),
-              Buffer.from([0, 0, 0, 0]),
-            );
+            writeFileSync(join(dir, `${rendition}_seg_00000.ts`), Buffer.from([0, 0, 0, 0]));
           }
         } else {
           writeFileSync(join(dir, "stream.m3u8"), FAKE_MANIFEST);
@@ -1519,6 +1520,7 @@ describe("DebridStreamer server", () => {
           activeEncoder: string | null;
           availableVideoEncoders: string[];
           adaptive: boolean;
+          qualities: string[];
           seekOffset: boolean;
           subtitleSidecar: boolean;
           toneMapping: boolean;
@@ -1536,6 +1538,7 @@ describe("DebridStreamer server", () => {
         activeEncoder: "h264_nvenc",
         availableVideoEncoders: ["libx264", "h264_nvenc"],
         adaptive: true,
+        qualities: ["auto", "1080p", "720p", "480p", "360p"],
         seekOffset: true,
         subtitleSidecar: true,
         toneMapping: true,
@@ -3303,10 +3306,11 @@ describe("DebridStreamer server", () => {
       expect(manifest.statusCode).toBe(200);
       expect(String(manifest.headers["content-type"])).toContain("application/vnd.apple.mpegurl");
       expect(manifest.body).toContain("#EXTM3U");
-      // The adaptive master exposes three auth-scoped renditions.
+      // The adaptive master exposes four auth-scoped renditions.
       expect(manifest.body).toContain(`/api/stream/${session.id}/1080p.m3u8`);
       expect(manifest.body).toContain(`/api/stream/${session.id}/720p.m3u8`);
       expect(manifest.body).toContain(`/api/stream/${session.id}/480p.m3u8`);
+      expect(manifest.body).toContain(`/api/stream/${session.id}/360p.m3u8`);
 
       const variant = await request(owner, {
         method: "GET",
@@ -3345,6 +3349,150 @@ describe("DebridStreamer server", () => {
       expect(subtitles.statusCode).toBe(200);
       expect(String(subtitles.headers["content-type"])).toContain("text/vtt");
       expect(subtitles.body).toContain("WEBVTT");
+    } finally {
+      await on.close();
+    }
+  });
+
+  it("transcode: accepts only known qualities and keeps legacy profile mapping", async () => {
+    const on = await buildTranscodeApp({ enableTranscode: true, maxTranscodes: 2 });
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const bootstrap = json<{
+        transcodeCapabilities: { qualities: string[] };
+      }>(await request(owner, { method: "GET", url: "/api/bootstrap" }));
+      expect(bootstrap.transcodeCapabilities.qualities).toEqual([
+        "auto", "1080p", "720p", "480p", "360p",
+      ]);
+
+      const legacy = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?profile=data-saver`,
+      });
+      expect(legacy.statusCode).toBe(200);
+      expect(legacy.headers["x-yawf-transcode-quality"]).toBe("480p");
+
+      const fixed = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=360p`,
+      });
+      expect(fixed.statusCode).toBe(200);
+      expect(fixed.headers["x-yawf-transcode-quality"]).toBe("360p");
+      const segment = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/360p_seg_00000.ts`,
+      });
+      expect(segment.statusCode).toBe(200);
+
+      const adaptive = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=auto`,
+      });
+      expect(adaptive.statusCode).toBe(200);
+      expect(adaptive.body).toContain(`/api/stream/${session.id}/360p.m3u8`);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/360p_seg_00000.ts`,
+      })).statusCode).toBe(200);
+      const usage = json<{
+        totalBytes: number;
+        sessions: Array<{ completedAt: string | null }>;
+      }>(await request(owner, {
+        method: "GET",
+        url: "/api/usage/streams",
+      }));
+      expect(usage.totalBytes).toBeGreaterThanOrEqual(4);
+      expect(usage.sessions[0]?.completedAt).toBeNull();
+
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=4k`,
+      })).statusCode).toBe(400);
+    } finally {
+      await on.close();
+    }
+  });
+
+  it("transcode: promotes a replacement only after it is playable", async () => {
+    const on = await buildTranscodeApp({ enableTranscode: true, maxTranscodes: 2 });
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=auto`,
+      })).statusCode).toBe(200);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/1080p_seg_00000.ts`,
+      })).statusCode).toBe(200);
+
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=360p`,
+      })).statusCode).toBe(200);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/360p_seg_00000.ts`,
+      })).statusCode).toBe(200);
+      // The previous adaptive directory is cleaned only after the fixed
+      // rendition becomes active, so it is no longer exposed by the route.
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/1080p_seg_00000.ts`,
+      })).statusCode).toBe(404);
+    } finally {
+      await on.close();
+    }
+  });
+
+  it("transcode: retains the active manifest when replacement warm-up fails", async () => {
+    const base = makeFakeTranscoder();
+    const replacementFails: Transcoder = {
+      ...base,
+      spawnHls(args) {
+        if (
+          args.some((arg) => arg.includes("min(360,ih)")) &&
+          (args[args.indexOf("-var_stream_map") + 1] === "v:0,a:0,name:360p")
+        ) {
+          const child = new EventEmitter() as EventEmitter & {
+            kill: () => boolean;
+            stderr: null;
+          };
+          child.kill = () => true;
+          child.stderr = null;
+          return child as unknown as ReturnType<Transcoder["spawnHls"]>;
+        }
+        return base.spawnHls(args);
+      },
+    };
+    const on = await buildTranscodeApp(
+      { enableTranscode: true, transcodeStartTimeoutMs: 100, maxTranscodes: 2 },
+      replacementFails,
+    );
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=auto`,
+      })).statusCode).toBe(200);
+
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=360p`,
+      })).statusCode).toBe(504);
+      // The previously active job continues to serve while the staged process
+      // is removed after its timeout.
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/1080p_seg_00000.ts`,
+      })).statusCode).toBe(200);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=auto`,
+      })).statusCode).toBe(200);
     } finally {
       await on.close();
     }

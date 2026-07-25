@@ -109,7 +109,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     enableTranscode:
       overrides.enableTranscode ?? boolEnv("DS_SERVER_ENABLE_TRANSCODE", false),
     maxTranscodes:
-      overrides.maxTranscodes ?? numberEnv("DS_SERVER_MAX_TRANSCODES", 1),
+      overrides.maxTranscodes ?? numberEnv("DS_SERVER_MAX_TRANSCODES", 2),
     transcodeVideoEncoder:
       overrides.transcodeVideoEncoder ?? transcodeVideoEncoderEnv(),
     transcodeStartTimeoutMs:

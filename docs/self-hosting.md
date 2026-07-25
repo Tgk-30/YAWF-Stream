@@ -142,7 +142,7 @@ environment variables (or in your Docker `.env`).
 | `DS_SERVER_CORS_ORIGIN` | unset | Comma-separated browser origins allowed to call the API with cookies. Usually leave blank when the server also serves the web app. |
 | `DS_SERVER_ALLOW_RAW_STREAM_URLS` | off in production | Lets the server fetch raw upstream URLs, **including private/LAN/loopback addresses**. Keep **disabled** on any public deployment - see warning below. |
 | `DS_SERVER_ENABLE_TRANSCODE` | `true` in official deployments, otherwise `false` | Enables FFmpeg HLS fallback for browser-incompatible streams. FFprobe enables embedded-subtitle preservation. Set `false` on CPU-constrained hosts. |
-| `DS_SERVER_MAX_TRANSCODES` | `1` | Maximum simultaneous FFmpeg HLS jobs. |
+| `DS_SERVER_MAX_TRANSCODES` | `2` | Maximum simultaneous FFmpeg HLS jobs, including a staged quality switch. |
 | `DS_SERVER_TRANSCODE_VIDEO_ENCODER` | `libx264` | Preferred H.264 encoder: `libx264`, `h264_videotoolbox`, `h264_nvenc`, or `h264_qsv`. The server detects FFmpeg support and falls back to `libx264` when available. |
 | `DS_SERVER_TRANSCODE_START_TIMEOUT_MS` | `30000` | Maximum startup wait for the first HLS manifest and segment. |
 

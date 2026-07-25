@@ -50,11 +50,12 @@ import {
 import type { StreamRow } from "../data/streams";
 import { rankSources } from "../data/sourceIntelligence";
 import {
-  asServerTranscodeStream,
   createRequest,
   fetchServerEpisodes,
   resolveServerStream,
+  serverOptimizedSource,
   serverExternalPlaybackURL,
+  type ServerTranscodeQuality,
 } from "../lib/serverApi";
 import { isServerMode } from "../lib/serverMode";
 import { isTauri } from "../lib/tauri";
@@ -271,6 +272,9 @@ export function Detail() {
   });
   const transcodeAvailable = useTranscodeAvailable();
   const transcodeCapabilities = useTranscodeCapabilities();
+  // Older servers predate `qualities`. Their HLS compatibility fallback still
+  // works, while the selectable Server Optimized control safely stays hidden.
+  const serverOptimizedQualities = transcodeCapabilities.qualities ?? [];
   const triedSourceHashesRef = useRef<Set<string>>(new Set());
   const lastPlayerProgressRef = useRef(0);
   const playerPreferences = useMemo(
@@ -1072,7 +1076,9 @@ export function Detail() {
       return;
     }
 
-    const hlsUrl = await services.debrid?.getTranscodeHLS(stream).catch(() => null);
+    const hlsUrl = isServerMode() && transcodeAvailable
+      ? serverOptimizedSource(stream, { quality: "auto", startSeconds: 0 }).url
+      : await services.debrid?.getTranscodeHLS(stream).catch(() => null);
     if (hlsUrl != null) {
       openPlayer(
         hlsUrl,
@@ -1120,9 +1126,8 @@ export function Detail() {
         ? { season: selected.season, episode: selected.episode }
         : null);
     if (isServerMode()) {
-      // Request the server's 720p HLS transcode when the user opted in and the
-      // server actually supports it; otherwise the plain proxy URL. The title
-      // context is required for maturity gating on capped (kid) profiles.
+      // Keep Device Original by default unless the existing opt-in is enabled.
+      // The title context is required for maturity gating on capped profiles.
       const media =
         detailItem != null ? { id: detailItem.id, type: detailItem.type } : undefined;
       try {
@@ -1146,21 +1151,18 @@ export function Detail() {
               : "auto" as const,
           preserveSubtitles: transcodeCapabilities.subtitleSidecar,
         };
+        const supportsOptimizedSelector =
+          transcodeCapabilities.seekOffset && serverOptimizedQualities.length > 0;
         const stream = await resolveServerStream(row, {
-          transcode: settings.transcode && transcodeAvailable,
+          // Older servers do not advertise selector qualities. Keep their
+          // profile-based opt-in behavior until the client can request a
+          // separately warmed optimized source.
+          transcode: settings.transcode && !supportsOptimizedSelector,
           transcodeOptions,
           media,
           fileHint,
         });
-        // Hosted browsers should enter the custom player immediately, not an
-        // external-vs-browser decision. When the server has ffmpeg, route only
-        // incompatible MKV/HEVC/AV1 sources through this proxy session's HLS
-        // manifest. Compatible MP4/WebM stays direct at original quality.
-        return !isTauri() &&
-          transcodeAvailable &&
-          needsTranscodeOrExternal(stream, row.result)
-          ? asServerTranscodeStream(stream, transcodeOptions)
-          : stream;
+        return stream;
       } catch (err) {
         // A 403 here means the title is over the active profile's maturity cap.
         // Surface a friendly message (StreamPicker renders the thrown .message)
@@ -1860,9 +1862,46 @@ export function Detail() {
             engine={player.engine}
             requestWebviewFallback={
               player.fallbackStream != null &&
-              services.debrid != null &&
-              (!isServerMode() || transcodeAvailable)
-                ? () => services.debrid!.getTranscodeHLS(player.fallbackStream!)
+              (isServerMode() ? transcodeAvailable : services.debrid != null)
+                ? isServerMode()
+                  ? () => Promise.resolve(
+                      serverOptimizedSource(player.fallbackStream!, {
+                        quality: "auto",
+                        startSeconds: 0,
+                      }).url,
+                    )
+                  : () => services.debrid!.getTranscodeHLS(player.fallbackStream!)
+                : undefined
+            }
+            serverOptimized={
+              isServerMode() &&
+              player.fallbackStream != null &&
+              transcodeAvailable &&
+              transcodeCapabilities.seekOffset &&
+              serverOptimizedQualities.length > 0
+                ? {
+                    qualities: serverOptimizedQualities,
+                    defaultQuality: settings.transcode
+                      ? settings.dataSaver
+                        ? "480p"
+                        : "auto"
+                      : null,
+                    request: async (
+                      quality: ServerTranscodeQuality,
+                      absolutePositionSeconds: number,
+                    ) =>
+                      serverOptimizedSource(player.fallbackStream!, {
+                        quality,
+                        startSeconds: absolutePositionSeconds,
+                        hdrPolicy:
+                          /(?:^|[^a-z0-9])(?:dv|dovi|dolby[ ._-]?vision|hdr10\+?|hdr|hlg)(?:[^a-z0-9]|$)/i.test(
+                            player.sourceFileName ?? "",
+                          ) && transcodeCapabilities.toneMapping
+                            ? "tone-map"
+                            : "auto",
+                        preserveSubtitles: transcodeCapabilities.subtitleSidecar,
+                      }),
+                  }
                 : undefined
             }
             externalPlaybackUrl={

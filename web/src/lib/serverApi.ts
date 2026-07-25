@@ -442,9 +442,38 @@ export async function resolveServerStream(
  * transcode lazily when this URL is first requested. */
 export interface ServerTranscodeOptions {
   profile?: "adaptive" | "high" | "data-saver";
+  quality?: ServerTranscodeQuality;
   startSeconds?: number;
   hdrPolicy?: "auto" | "preserve" | "tone-map";
   preserveSubtitles?: boolean;
+}
+
+/** A bounded server-side rendition. Never forward arbitrary ffmpeg settings. */
+export type ServerTranscodeQuality = "auto" | "1080p" | "720p" | "480p" | "360p";
+
+export interface ServerOptimizedSource {
+  /** Cookie-authenticated HLS manifest. No bearer or provider credential lives in this URL. */
+  url: string;
+  /** Original-media time represented by HLS time zero. */
+  timelineOffsetSeconds: number;
+  /** Position to seek within this HLS window when it becomes active. */
+  startPositionSeconds: number;
+  quality: ServerTranscodeQuality;
+}
+
+export function serverOptimizedSource(
+  stream: StreamInfo,
+  options: Omit<ServerTranscodeOptions, "profile"> & {
+    quality: ServerTranscodeQuality;
+  },
+): ServerOptimizedSource {
+  const optimized = asServerTranscodeStream(stream, options);
+  return {
+    url: optimized.streamURL,
+    timelineOffsetSeconds: optimized.timelineOffsetSeconds ?? 0,
+    startPositionSeconds: 0,
+    quality: options.quality,
+  };
 }
 
 export function asServerTranscodeStream(
@@ -462,6 +491,7 @@ export function asServerTranscodeStream(
     suffixAt < 0 ? "" : stream.streamURL.slice(suffixAt).replace(/^[?#]/, ""),
   );
   if (options.profile != null) params.set("profile", options.profile);
+  if (options.quality != null) params.set("quality", options.quality);
   const startSeconds =
     options.startSeconds != null &&
     Number.isFinite(options.startSeconds) &&

@@ -41,6 +41,8 @@ export interface ServerProfileSummary {
 
 export interface ServerTranscodeCapabilities {
   adaptive: boolean;
+  /** Supported server-optimized playback qualities. Empty on older servers. */
+  qualities: Array<"auto" | "1080p" | "720p" | "480p" | "360p">;
   seekOffset: boolean;
   subtitleSidecar: boolean;
   hardwareEncoder: string;
@@ -50,6 +52,7 @@ export interface ServerTranscodeCapabilities {
 
 const NO_TRANSCODE_CAPABILITIES: ServerTranscodeCapabilities = {
   adaptive: false,
+  qualities: [],
   seekOffset: false,
   subtitleSidecar: false,
   hardwareEncoder: "libx264",

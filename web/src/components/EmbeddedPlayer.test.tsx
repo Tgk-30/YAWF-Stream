@@ -185,6 +185,63 @@ describe("EmbeddedPlayer control geometry", () => {
 });
 
 describe("EmbeddedPlayer playback controls", () => {
+  it("offers Server Optimized controls in native playback settings and preserves position", async () => {
+    const switchOptimized = vi.fn(async () => {});
+    const switchOriginal = vi.fn();
+    render(
+      <EmbeddedPlayer
+        url="https://server.example/api/stream/session-1"
+        title="Movie"
+        serverOptimized={{ qualities: ["auto", "720p", "480p", "360p"] }}
+        onSwitchServerOptimized={switchOptimized}
+        onSwitchDeviceOriginal={switchOriginal}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(renderPlayerMock.observeProperties).toHaveBeenCalled());
+    emitProperty("time-pos", 42);
+    emitProperty("pause", true);
+    emitProperty("volume", 64);
+    emitProperty("mute", true);
+    emitProperty("speed", 1.25);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "360p" }));
+    expect(switchOptimized).toHaveBeenCalledWith("360p", 42, {
+      paused: true,
+      volume: 0.64,
+      muted: true,
+      playbackRate: 1.25,
+    });
+  });
+
+  it("restores paused optimized playback state when returning to native", async () => {
+    render(
+      <EmbeddedPlayer
+        url="https://server.example/api/stream/session-1"
+        title="Movie"
+        startPositionSeconds={42}
+        sourceSwitchState={{
+          paused: true,
+          volume: 0.64,
+          muted: true,
+          playbackRate: 1.25,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(renderPlayerMock.command).toHaveBeenCalledWith(
+      "loadfile",
+      ["https://server.example/api/stream/session-1", "replace", "-1", "start=+42"],
+    ));
+    await waitFor(() => {
+      expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("volume", 64);
+      expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("mute", true);
+      expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("speed", 1.25);
+      expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("pause", true);
+    });
+  });
+
   it("only shows the Next episode control when a next target exists", () => {
     const { rerender } = render(
       <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,

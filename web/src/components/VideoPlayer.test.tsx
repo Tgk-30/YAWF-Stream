@@ -645,6 +645,83 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it("defaults to Device Original and exposes Server Optimized qualities only when supported", async () => {
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=360p&start=120",
+      timelineOffsetSeconds: 120,
+      startPositionSeconds: 0,
+      quality: "360p" as const,
+    }));
+    const fetchMock = vi.fn(async () => new Response("#EXTM3U\n", { status: 200 }));
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["auto", "720p", "480p", "360p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(video, "currentTime", { configurable: true, value: 120 });
+      Object.defineProperty(video, "paused", { configurable: true, value: true });
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByRole("button", { name: "360p" })).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "360p" }));
+      await waitFor(() => expect(request).toHaveBeenCalledWith("360p", 120));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(hlsInstances[0]?.loadSource).toHaveBeenCalledWith(
+        "https://server.example/api/stream/session-1/index.m3u8?quality=360p&start=120",
+      ));
+      fireEvent.canPlay(document.querySelector("video.player-video") as HTMLVideoElement);
+      expect(play).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("button", { name: "360p" })).toHaveAttribute("aria-pressed", "true");
+      await userEvent.click(screen.getByRole("button", { name: "Device Original" }));
+      await waitFor(() => expect(
+        (document.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe("https://server.example/api/stream/session-1"));
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      play.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retains Device Original when optimized manifest preparation fails", async () => {
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const fetchMock = vi.fn(async () => new Response("busy", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          externalPlaybackUrl="https://server.example/api/external-stream/session-1/capability"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["auto", "480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "480p" }));
+      await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+      expect(video.src).toContain("/api/stream/session-1");
+      expect(screen.getByRole("alert")).toHaveTextContent("could not prepare 480p playback");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("syncs Media Session metadata, transport handlers, and playback position", () => {
     const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
     const setActionHandler = vi.fn(

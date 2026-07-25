@@ -129,6 +129,12 @@ vi.mock("../lib/serverApi", () => ({
     ...stream,
     streamURL: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8`,
   }),
+  serverOptimizedSource: (stream: any) => ({
+    url: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8`,
+    timelineOffsetSeconds: 0,
+    startPositionSeconds: 0,
+    quality: "auto",
+  }),
   serverExternalPlaybackURL: (stream: any) => `${stream.streamURL}/external-test`,
   createRequest: (...a: unknown[]) => createRequest(...a),
   fetchServerEpisodes: (...a: unknown[]) => fetchServerEpisodes(...a),
@@ -958,6 +964,31 @@ describe("Detail play", () => {
       "data-engine",
       "webview-direct",
     );
+  });
+
+  it("keeps the legacy server transcode preference on servers without selector qualities", async () => {
+    serverModeOn = true;
+    transcodeAvailable = true;
+    mockSettings = { ...mockSettings, transcode: true, dataSaver: true };
+    resolveServerStream.mockResolvedValue({
+      fileName: "legacy.mp4",
+      streamURL: "https://server.example/api/stream/session-legacy/index.m3u8",
+      codec: "H.264",
+    });
+    mockDetailItem = preview("s1", { type: "series", title: "Obsession", tmdbId: 200 });
+    mockDetail = detailState({
+      item: mediaItem({ id: "s1", type: "series", title: "Obsession", tmdbId: 200 }),
+    });
+    mockServices.tmdb = { getEpisodes: vi.fn(async () => []), getSeasons: vi.fn(async () => []) };
+
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await userEvent.click(screen.getByTestId("resolve-and-play-stream"));
+    await waitFor(() => expect(resolveServerStream).toHaveBeenCalled());
+    expect(resolveServerStream.mock.calls.at(-1)?.[1]).toMatchObject({
+      transcode: true,
+      transcodeOptions: { profile: "data-saver" },
+    });
   });
 
   it("automatically uses server HLS for an incompatible source in the hosted web app", async () => {
