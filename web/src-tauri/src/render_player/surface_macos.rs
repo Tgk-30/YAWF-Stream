@@ -21,15 +21,11 @@
 // autoresizes with the content view; detach performs the ordered teardown).
 
 use std::collections::HashMap;
-use std::ffi::{c_void, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use libmpv2::render::{
-    mpv_render_update, MpvRenderUpdate, OpenGLInitParams, RenderContext, RenderParam,
-    RenderParamApiType,
-};
 use libmpv2::Mpv;
 
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -48,8 +44,9 @@ use objc2_foundation::{
     ns_string, NSNotification, NSNotificationCenter, NSNumber, NSObject, NSPoint, NSRect, NSSize,
 };
 use objc2_open_gl::{
-    CGLChoosePixelFormat, CGLContextObj, CGLLockContext, CGLPixelFormatAttribute,
-    CGLPixelFormatObj, CGLUnlockContext,
+    CGLChoosePixelFormat, CGLContextObj, CGLError, CGLGetCurrentContext, CGLLockContext,
+    CGLPixelFormatAttribute, CGLPixelFormatObj, CGLReleaseContext, CGLRetainContext,
+    CGLSetCurrentContext, CGLUnlockContext,
 };
 use objc2_quartz_core::{CAAutoresizingMask, CALayer, CAOpenGLLayer};
 use objc2_web_kit::WKWebView;
@@ -243,45 +240,289 @@ fn effective_contents_scale(
     }
 }
 
-fn render_update_has_frame(flags: MpvRenderUpdate) -> bool {
-    flags & mpv_render_update::Frame != 0
+fn render_update_has_frame(flags: u64) -> bool {
+    flags & u64::from(libmpv2_sys::mpv_render_update_flag_MPV_RENDER_UPDATE_FRAME) != 0
 }
 
 fn should_queue_callback_redraw(
-    dead: bool,
+    lifecycle: CallbackLifecycle,
     update_pending: bool,
     force_render: bool,
     redraw_queued: bool,
 ) -> bool {
-    !dead && (update_pending || force_render) && !redraw_queued
+    lifecycle == CallbackLifecycle::Live && (update_pending || force_render) && !redraw_queued
 }
 
 // ---- The layer-backed video surface -------------------------------------
-// The RenderContext is created on the CA render thread but must be FREED at
-// teardown (before mpv is destroyed) from the main thread. mpv_render_context_free
-// is thread-safe; we serialize all access with a Mutex, so the !Send wrapper is
-// sound. `dead` gates the draw callback off once teardown starts.
-struct SendRender(RenderContext);
-unsafe impl Send for SendRender {}
+// libmpv2 5.0.3 releases its Rust callback allocation before calling
+// mpv_render_context_free. libmpv can still enter that callback from its VO
+// thread during free, so that Drop order is unsafe here. Own the raw context and
+// callback allocation together and release them in the required order:
+// quiesce, unregister, free, then release the callback allocation. The layer's
+// render mutex serializes update, render, and this teardown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum CallbackLifecycle {
+    Live = 0,
+    Quiescing = 1,
+    Freed = 2,
+}
+
+impl CallbackLifecycle {
+    fn from_raw(value: u8) -> Self {
+        match value {
+            0 => Self::Live,
+            1 => Self::Quiescing,
+            _ => Self::Freed,
+        }
+    }
+}
 
 /// Send-safe state shared with mpv's render-update callback. The callback must
 /// never capture or dereference an Objective-C object off-main: it can run
 /// concurrently with `mpv_render_context_free` during teardown. Holding only this
-/// Arc (a raw layer pointer plus the `dead` flag) is what keeps it sound.
+/// Arc (a raw layer pointer plus lifecycle atomics) is what keeps it sound.
 struct RenderCallbackState {
     layer_ptr: AtomicUsize,
-    dead: AtomicBool,
+    lifecycle: AtomicU8,
     update_pending: AtomicBool,
     redraw_queued: AtomicBool,
     force_render: AtomicBool,
 }
 
+impl RenderCallbackState {
+    fn lifecycle(&self) -> CallbackLifecycle {
+        CallbackLifecycle::from_raw(self.lifecycle.load(Ordering::Acquire))
+    }
+
+    fn is_live(&self) -> bool {
+        self.lifecycle() == CallbackLifecycle::Live
+    }
+
+    fn begin_teardown(&self) {
+        self.lifecycle
+            .store(CallbackLifecycle::Quiescing as u8, Ordering::Release);
+        self.layer_ptr.store(0, Ordering::Release);
+        self.update_pending.store(false, Ordering::Release);
+        self.force_render.store(false, Ordering::Release);
+    }
+
+    fn mark_freed(&self) {
+        self.lifecycle
+            .store(CallbackLifecycle::Freed as u8, Ordering::Release);
+    }
+}
+
+struct RenderUpdateCallbackContext {
+    state: Arc<RenderCallbackState>,
+}
+
+unsafe extern "C" fn raw_gl_get_proc_address(
+    _context: *mut c_void,
+    name: *const c_char,
+) -> *mut c_void {
+    if name.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        return std::ptr::null_mut();
+    };
+    gl_get_proc_address(&(), name)
+}
+
+unsafe extern "C" fn render_update_callback(context: *mut c_void) {
+    if context.is_null() {
+        return;
+    }
+    let callback = &*(context as *const RenderUpdateCallbackContext);
+    if !callback.state.is_live() {
+        return;
+    }
+    callback.state.update_pending.store(true, Ordering::Release);
+    queue_callback_redraw(callback.state.clone());
+}
+
+struct RawRenderContext {
+    context: NonNull<libmpv2_sys::mpv_render_context>,
+    gl_context: CGLContextObj,
+    callback_context: Box<RenderUpdateCallbackContext>,
+}
+
+unsafe impl Send for RawRenderContext {}
+
+impl RawRenderContext {
+    fn new(
+        mpv: &Mpv,
+        gl_context: CGLContextObj,
+        callback: Arc<RenderCallbackState>,
+    ) -> Result<Self, i32> {
+        if gl_context.is_null() {
+            return Err(libmpv2_sys::mpv_error_MPV_ERROR_INVALID_PARAMETER);
+        }
+        let mut open_gl = libmpv2_sys::mpv_opengl_init_params {
+            get_proc_address: Some(raw_gl_get_proc_address),
+            get_proc_address_ctx: std::ptr::null_mut(),
+        };
+        let mut parameters = [
+            libmpv2_sys::mpv_render_param {
+                type_: libmpv2_sys::mpv_render_param_type_MPV_RENDER_PARAM_API_TYPE,
+                data: libmpv2_sys::MPV_RENDER_API_TYPE_OPENGL.as_ptr() as *mut c_void,
+            },
+            libmpv2_sys::mpv_render_param {
+                type_: libmpv2_sys::mpv_render_param_type_MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
+                data: (&mut open_gl as *mut libmpv2_sys::mpv_opengl_init_params).cast(),
+            },
+            libmpv2_sys::mpv_render_param {
+                type_: libmpv2_sys::mpv_render_param_type_MPV_RENDER_PARAM_INVALID,
+                data: std::ptr::null_mut(),
+            },
+        ];
+        let mut raw_context = std::ptr::null_mut();
+        let result = unsafe {
+            libmpv2_sys::mpv_render_context_create(
+                &mut raw_context,
+                mpv.ctx.as_ptr(),
+                parameters.as_mut_ptr(),
+            )
+        };
+        if result < 0 {
+            return Err(result);
+        }
+        let Some(context) = NonNull::new(raw_context) else {
+            return Err(libmpv2_sys::mpv_error_MPV_ERROR_GENERIC);
+        };
+
+        // CAOpenGLLayer owns the context passed to draw. Keep an explicit retain
+        // so the exact context used for creation remains valid through an
+        // explicit teardown or an unexpected layer ivar drop.
+        let retained_gl_context = unsafe { CGLRetainContext(gl_context) };
+        if retained_gl_context.is_null() {
+            unsafe { libmpv2_sys::mpv_render_context_free(context.as_ptr()) };
+            return Err(libmpv2_sys::mpv_error_MPV_ERROR_GENERIC);
+        }
+        let mut callback_context = Box::new(RenderUpdateCallbackContext { state: callback });
+        unsafe {
+            libmpv2_sys::mpv_render_context_set_update_callback(
+                context.as_ptr(),
+                Some(render_update_callback),
+                (&mut *callback_context as *mut RenderUpdateCallbackContext).cast(),
+            );
+        }
+        Ok(Self {
+            context,
+            gl_context: retained_gl_context,
+            callback_context,
+        })
+    }
+
+    fn update(&self) -> u64 {
+        unsafe { libmpv2_sys::mpv_render_context_update(self.context.as_ptr()) }
+    }
+
+    fn render(&self, fbo: i32, width: i32, height: i32, flip: bool) -> Result<(), i32> {
+        let mut fbo = libmpv2_sys::mpv_opengl_fbo {
+            fbo,
+            w: width,
+            h: height,
+            internal_format: 0,
+        };
+        let mut flip = i32::from(flip);
+        let mut parameters = [
+            libmpv2_sys::mpv_render_param {
+                type_: libmpv2_sys::mpv_render_param_type_MPV_RENDER_PARAM_OPENGL_FBO,
+                data: (&mut fbo as *mut libmpv2_sys::mpv_opengl_fbo).cast(),
+            },
+            libmpv2_sys::mpv_render_param {
+                type_: libmpv2_sys::mpv_render_param_type_MPV_RENDER_PARAM_FLIP_Y,
+                data: (&mut flip as *mut i32).cast(),
+            },
+            libmpv2_sys::mpv_render_param {
+                type_: libmpv2_sys::mpv_render_param_type_MPV_RENDER_PARAM_INVALID,
+                data: std::ptr::null_mut(),
+            },
+        ];
+        let result = unsafe {
+            libmpv2_sys::mpv_render_context_render(self.context.as_ptr(), parameters.as_mut_ptr())
+        };
+        if result < 0 {
+            Err(result)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for RawRenderContext {
+    fn drop(&mut self) {
+        let callback = &self.callback_context.state;
+        callback.begin_teardown();
+
+        // The OpenGL render API requires every mpv_render_* call, including
+        // free, to run with the exact creation context current. Explicit
+        // teardown takes the Option out of its mutex before this Drop runs, so
+        // taking the CGL lock here preserves draw's lock order.
+        let lock_status = unsafe { CGLLockContext(self.gl_context) };
+        if lock_status != CGLError::NoError {
+            rp_log(&format!(
+                "RawRenderContext.drop: CGLLockContext failed: {}",
+                lock_status.0
+            ));
+        }
+        let previous_context = unsafe { CGLGetCurrentContext() };
+        let needs_context_switch = previous_context != self.gl_context;
+        let set_status = if needs_context_switch {
+            unsafe { CGLSetCurrentContext(self.gl_context) }
+        } else {
+            CGLError::NoError
+        };
+        if set_status != CGLError::NoError {
+            // Free anyway so the render context cannot outlive mpv. The retained
+            // CGL context and CGL lock still provide the strongest available
+            // teardown boundary after a context-switch failure.
+            rp_log(&format!(
+                "RawRenderContext.drop: CGLSetCurrentContext failed: {}",
+                set_status.0
+            ));
+        }
+        unsafe {
+            libmpv2_sys::mpv_render_context_set_update_callback(
+                self.context.as_ptr(),
+                None,
+                std::ptr::null_mut(),
+            );
+            libmpv2_sys::mpv_render_context_free(self.context.as_ptr());
+        }
+        callback.mark_freed();
+
+        if needs_context_switch && set_status == CGLError::NoError {
+            let restore_status = unsafe { CGLSetCurrentContext(previous_context) };
+            if restore_status != CGLError::NoError {
+                rp_log(&format!(
+                    "RawRenderContext.drop: restoring CGL context failed: {}",
+                    restore_status.0
+                ));
+            }
+        }
+        if lock_status == CGLError::NoError {
+            let unlock_status = unsafe { CGLUnlockContext(self.gl_context) };
+            if unlock_status != CGLError::NoError {
+                rp_log(&format!(
+                    "RawRenderContext.drop: CGLUnlockContext failed: {}",
+                    unlock_status.0
+                ));
+            }
+        }
+        unsafe { CGLReleaseContext(self.gl_context) };
+        // callback_context drops only after this Drop implementation returns.
+    }
+}
+
 fn queue_callback_redraw(callback: Arc<RenderCallbackState>) {
-    let dead = callback.dead.load(Ordering::Acquire);
+    let lifecycle = callback.lifecycle();
     let update_pending = callback.update_pending.load(Ordering::Acquire);
     let force_render = callback.force_render.load(Ordering::Acquire);
     let redraw_queued = callback.redraw_queued.load(Ordering::Acquire);
-    if !should_queue_callback_redraw(dead, update_pending, force_render, redraw_queued)
+    if !should_queue_callback_redraw(lifecycle, update_pending, force_render, redraw_queued)
         || callback
             .redraw_queued
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -293,7 +534,7 @@ fn queue_callback_redraw(callback: Arc<RenderCallbackState>) {
     DispatchQueue::main().exec_async(move || {
         // Teardown and this closure both serialize on the main queue. Re-check
         // the flag because the redraw may have been queued before teardown ran.
-        if callback.dead.load(Ordering::Acquire) {
+        if !callback.is_live() {
             callback.redraw_queued.store(false, Ordering::Release);
             return;
         }
@@ -647,8 +888,10 @@ impl PostFullscreenCleanup {
 }
 
 struct VideoLayerIvars {
+    render: Mutex<Option<RawRenderContext>>,
+    // Declared after render so an unexpected ivar drop still frees the render
+    // context before releasing this layer's mpv ownership.
     mpv: Arc<Mpv>,
-    render: Mutex<Option<SendRender>>,
     callback: Arc<RenderCallbackState>,
     surface: Arc<SurfaceState>,
 }
@@ -713,7 +956,7 @@ define_class!(
 
             let ivars = self.ivars();
             // Teardown has started - do not touch mpv/render at all.
-            if ivars.callback.dead.load(Ordering::Acquire) {
+            if !ivars.callback.is_live() {
                 unsafe { CGLUnlockContext(ctx) };
                 unsafe {
                     let _: () = msg_send![super(self),
@@ -727,39 +970,15 @@ define_class!(
             if render_slot.is_none() {
                 // Re-check dead now that we hold the lock (teardown may have run
                 // between the check above and acquiring the lock).
-                if ivars.callback.dead.load(Ordering::Acquire) {
+                if !ivars.callback.is_live() {
                     drop(render_slot);
                     unsafe { CGLUnlockContext(ctx) };
                     return;
                 }
-                let mpv_handle = unsafe { &mut *ivars.mpv.ctx.as_ptr() };
-                match RenderContext::new(
-                    mpv_handle,
-                    [
-                        RenderParam::ApiType(RenderParamApiType::OpenGl),
-                        RenderParam::InitParams(OpenGLInitParams {
-                            get_proc_address: gl_get_proc_address,
-                            ctx: (),
-                        }),
-                    ],
-                ) {
-                    Ok(mut rc) => {
-                        // The callback itself may not call mpv APIs. Record the update
-                        // and coalesce a main-thread layer invalidation. The CA render
-                        // thread consumes update() below and renders only for FRAME.
-                        // mpv may invoke this while the render context is being freed,
-                        // so capture only send-safe state: a raw VideoLayer pointer here
-                        // caused a reproducible use-after-free during teardown.
-                        let callback = ivars.callback.clone();
-                        rc.set_update_callback(move || {
-                            if callback.dead.load(Ordering::Acquire) {
-                                return;
-                            }
-                            callback.update_pending.store(true, Ordering::Release);
-                            queue_callback_redraw(callback.clone());
-                        });
+                match RawRenderContext::new(&ivars.mpv, ctx, ivars.callback.clone()) {
+                    Ok(rc) => {
                         rp_log("VideoLayer.draw: RenderContext created");
-                        *render_slot = Some(SendRender(rc));
+                        *render_slot = Some(rc);
                     }
                     Err(e) => rp_log(&format!("VideoLayer.draw: RenderContext failed: {e}")),
                 }
@@ -770,10 +989,7 @@ define_class!(
             let mut should_render = forced;
             if had_update {
                 if let Some(sr) = render_slot.as_ref() {
-                    match sr.0.update() {
-                        Ok(flags) => should_render |= render_update_has_frame(flags),
-                        Err(e) => rp_log(&format!("VideoLayer.draw: update failed: {e}")),
-                    }
+                    should_render |= render_update_has_frame(sr.update());
                 }
             }
 
@@ -825,7 +1041,7 @@ define_class!(
                 }
                 gl_set_viewport(w, h);
                 if let Some(sr) = render_slot.as_ref() {
-                    if let Err(e) = sr.0.render::<()>(fbo, w, h, true) {
+                    if let Err(e) = sr.render(fbo, w, h, true) {
                         rp_log(&format!("VideoLayer.draw: render failed: {e}"));
                     }
                 }
@@ -849,14 +1065,14 @@ impl VideoLayer {
     fn new(mpv: Arc<Mpv>, surface: Arc<SurfaceState>) -> Retained<Self> {
         let callback = Arc::new(RenderCallbackState {
             layer_ptr: AtomicUsize::new(0),
-            dead: AtomicBool::new(false),
+            lifecycle: AtomicU8::new(CallbackLifecycle::Live as u8),
             update_pending: AtomicBool::new(false),
             redraw_queued: AtomicBool::new(false),
             force_render: AtomicBool::new(false),
         });
         let this = Self::alloc().set_ivars(VideoLayerIvars {
-            mpv,
             render: Mutex::new(None),
+            mpv,
             callback: callback.clone(),
             surface: surface.clone(),
         });
@@ -1018,9 +1234,21 @@ define_class!(
         #[unsafe(method(windowDidExitFullScreen:))]
         fn window_did_exit_full_screen(&self, _notification: &NSNotification) {
             let surface = &self.ivars().surface;
-            note_fullscreen_did_exit(surface);
+            let session_completed = note_fullscreen_did_exit(surface);
             log_fullscreen_state_on_main(surface, "did-exit");
-            resume_window_wrap_on_main(surface);
+            if surface.dead.load(Ordering::Acquire) {
+                return;
+            }
+            if session_completed {
+                // Apply dimensions deferred during the transition before the
+                // final forced frame, so mpv sees the final windowed drawable.
+                resume_window_wrap_on_main(surface);
+            }
+            verify_and_repair_geometry_on_main(
+                surface,
+                Some("did-exit-fullscreen-check"),
+                true,
+            );
         }
 
         #[unsafe(method(windowWillClose:))]
@@ -1697,11 +1925,22 @@ fn save_pre_wrap_frame_on_main(surface: &SurfaceState, frame: NSRect) -> bool {
 /// transition intervals. The session latch deliberately stays set from
 /// WillEnter through DidExit as a conservative fallback if WillExit is late or
 /// absent while AppKit has already cleared the style bit.
+fn fullscreen_blocks_window_mutation(
+    style_fullscreen: bool,
+    session_active: bool,
+    enter_in_flight: bool,
+    exit_in_flight: bool,
+) -> bool {
+    style_fullscreen || session_active || enter_in_flight || exit_in_flight
+}
+
 fn in_fullscreen_or_transition_on_main(surface: &SurfaceState, window: &NSWindow) -> bool {
-    window.styleMask().contains(NSWindowStyleMask::FullScreen)
-        || surface.fullscreen_session_active.load(Ordering::Acquire)
-        || surface.fullscreen_enter_in_flight.load(Ordering::Acquire)
-        || surface.fullscreen_exit_in_flight.load(Ordering::Acquire)
+    fullscreen_blocks_window_mutation(
+        window.styleMask().contains(NSWindowStyleMask::FullScreen),
+        surface.fullscreen_session_active.load(Ordering::Acquire),
+        surface.fullscreen_enter_in_flight.load(Ordering::Acquire),
+        surface.fullscreen_exit_in_flight.load(Ordering::Acquire),
+    )
 }
 
 fn window_property_mutation_allowed_on_main(surface: &SurfaceState, window: &NSWindow) -> bool {
@@ -1921,7 +2160,19 @@ fn reconcile_window_wrap_on_main(surface: &SurfaceState) {
             {
                 let centered =
                     centered_frame_within_visible(window, old_frame, fitted, visible_frame);
-                // The block may have been queued while windowed. Check again at
+                // Remove any ratio retained from an earlier file before applying
+                // the exact fitted content size. Otherwise AppKit can constrain
+                // setFrame with the old ratio and postpone the new ratio until
+                // the user's first manual resize.
+                if !window_property_mutation_allowed_on_main(surface, window) {
+                    surface.wrap_needs_resize.store(true, Ordering::Release);
+                    return;
+                }
+                if !clear_window_aspect_on_main(surface, "pre-video-wrap") {
+                    surface.wrap_needs_resize.store(true, Ordering::Release);
+                    return;
+                }
+                // The clear above can synchronously run AppKit code. Re-check at
                 // the exact setFrame call site in case a transition has started.
                 if !window_property_mutation_allowed_on_main(surface, window) {
                     surface.wrap_needs_resize.store(true, Ordering::Release);
@@ -1997,19 +2248,48 @@ fn queue_window_wrap_reconcile(surface: Arc<SurfaceState>) {
     });
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResumeWrapDecision {
+    Skip,
+    Reconcile,
+    ResizeAndReconcile,
+}
+
+fn resume_wrap_decision(
+    dead: bool,
+    window_available: bool,
+    fullscreen_blocked: bool,
+    wrap_active: bool,
+) -> ResumeWrapDecision {
+    if dead || !window_available || fullscreen_blocked {
+        ResumeWrapDecision::Skip
+    } else if wrap_active {
+        ResumeWrapDecision::ResizeAndReconcile
+    } else {
+        ResumeWrapDecision::Reconcile
+    }
+}
+
 fn resume_window_wrap_on_main(surface: &SurfaceState) {
-    if surface.dead.load(Ordering::Acquire) || surface.window_ptr == 0 {
+    let dead = surface.dead.load(Ordering::Acquire);
+    if dead || surface.window_ptr == 0 {
         return;
     }
     let window: &NSWindow = unsafe { &*(surface.window_ptr as *const NSWindow) };
     // DidExit is the normal resume point, but evaluate the full predicate here
     // as well. This also protects against a new transition initiated by another
     // observer before this callback runs.
-    if in_fullscreen_or_transition_on_main(surface, window) {
-        return;
-    }
-    if surface.wrap_active.load(Ordering::Acquire) {
-        surface.wrap_needs_resize.store(true, Ordering::Release);
+    match resume_wrap_decision(
+        dead,
+        true,
+        in_fullscreen_or_transition_on_main(surface, window),
+        surface.wrap_active.load(Ordering::Acquire),
+    ) {
+        ResumeWrapDecision::Skip => return,
+        ResumeWrapDecision::Reconcile => {}
+        ResumeWrapDecision::ResizeAndReconcile => {
+            surface.wrap_needs_resize.store(true, Ordering::Release);
+        }
     }
     reconcile_window_wrap_on_main(surface);
 }
@@ -2065,7 +2345,7 @@ fn teardown_surface_on_main(surface: &Arc<SurfaceState>, reason: &str, restore_w
     let layer_ptr = surface.layer_ptr.load(Ordering::Acquire);
     if layer_ptr != 0 {
         let layer: &VideoLayer = unsafe { &*(layer_ptr as *const VideoLayer) };
-        layer.ivars().callback.dead.store(true, Ordering::Release);
+        layer.ivars().callback.begin_teardown();
     }
 
     let window_cleanup_deferred = if restore_window_frame && surface.window_ptr != 0 {
@@ -2112,9 +2392,15 @@ fn teardown_surface_on_main(surface: &Arc<SurfaceState>, reason: &str, restore_w
     if layer_ptr != 0 {
         let layer: &VideoLayer = unsafe { &*(layer_ptr as *const VideoLayer) };
         // Free mpv_render_context while the host hierarchy still retains the
-        // layer. This unregisters and drains the update callback before either
-        // native view can be released.
-        drop(layer.ivars().render.lock().unwrap().take());
+        // layer. RawRenderContext keeps its callback allocation alive until
+        // after callback unregistration and mpv_render_context_free return.
+        // Release the render mutex before Drop acquires the CGL context lock:
+        // draw acquires CGL first and then the render mutex.
+        let render = {
+            let mut slot = layer.ivars().render.lock().unwrap();
+            slot.take()
+        };
+        drop(render);
     }
     if host_ptr != 0 {
         let host: &HostView = unsafe { &*(host_ptr as *const HostView) };
@@ -2465,8 +2751,12 @@ fn setup_on_main(
 mod tests {
     use super::{
         capped_render_target_dimensions, claim_webview_opacity_restore, claim_webview_transparency,
-        mpv_render_update, render_update_has_frame, should_queue_callback_redraw, SurfaceState,
+        first_wrap_size, fullscreen_blocks_window_mutation, render_update_has_frame,
+        resume_wrap_decision, should_queue_callback_redraw, CallbackLifecycle, RenderCallbackState,
+        ResumeWrapDecision, SurfaceState,
     };
+    use objc2_foundation::NSSize;
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
     #[test]
     fn render_target_pixel_budget_preserves_window_aspect() {
@@ -2499,21 +2789,128 @@ mod tests {
     #[test]
     fn render_update_flags_and_update_redraws_are_coalesced() {
         assert!(!render_update_has_frame(0));
-        assert!(render_update_has_frame(mpv_render_update::Frame));
-        assert!(render_update_has_frame(mpv_render_update::Frame | 0x80));
+        let frame = u64::from(libmpv2_sys::mpv_render_update_flag_MPV_RENDER_UPDATE_FRAME);
+        assert!(render_update_has_frame(frame));
+        assert!(render_update_has_frame(frame | 0x80));
 
-        assert!(should_queue_callback_redraw(false, true, false, false));
-        assert!(!should_queue_callback_redraw(false, true, false, true));
-        assert!(!should_queue_callback_redraw(false, false, false, false));
-        assert!(!should_queue_callback_redraw(true, true, false, false));
+        assert!(should_queue_callback_redraw(
+            CallbackLifecycle::Live,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_queue_callback_redraw(
+            CallbackLifecycle::Live,
+            true,
+            false,
+            true
+        ));
+        assert!(!should_queue_callback_redraw(
+            CallbackLifecycle::Live,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_queue_callback_redraw(
+            CallbackLifecycle::Quiescing,
+            true,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn forced_redraws_queue_without_updates_and_coalesce() {
-        assert!(should_queue_callback_redraw(false, false, true, false));
-        assert!(should_queue_callback_redraw(false, true, true, false));
-        assert!(!should_queue_callback_redraw(false, false, true, true));
-        assert!(!should_queue_callback_redraw(true, true, true, false));
+        assert!(should_queue_callback_redraw(
+            CallbackLifecycle::Live,
+            false,
+            true,
+            false
+        ));
+        assert!(should_queue_callback_redraw(
+            CallbackLifecycle::Live,
+            true,
+            true,
+            false
+        ));
+        assert!(!should_queue_callback_redraw(
+            CallbackLifecycle::Live,
+            false,
+            true,
+            true
+        ));
+        assert!(!should_queue_callback_redraw(
+            CallbackLifecycle::Freed,
+            true,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn callback_teardown_quiesces_before_the_context_is_marked_freed() {
+        let callback = RenderCallbackState {
+            layer_ptr: AtomicUsize::new(1),
+            lifecycle: AtomicU8::new(CallbackLifecycle::Live as u8),
+            update_pending: AtomicBool::new(true),
+            redraw_queued: AtomicBool::new(false),
+            force_render: AtomicBool::new(true),
+        };
+
+        assert!(callback.is_live());
+        callback.begin_teardown();
+        assert_eq!(callback.lifecycle(), CallbackLifecycle::Quiescing);
+        assert_eq!(callback.layer_ptr.load(Ordering::Acquire), 0);
+        assert!(!callback.update_pending.load(Ordering::Acquire));
+        assert!(!callback.force_render.load(Ordering::Acquire));
+        assert!(!should_queue_callback_redraw(
+            callback.lifecycle(),
+            true,
+            true,
+            false
+        ));
+        callback.mark_freed();
+        assert_eq!(callback.lifecycle(), CallbackLifecycle::Freed);
+    }
+
+    #[test]
+    fn first_wrap_actively_matches_wide_and_tall_video_aspects() {
+        let minimum = NSSize::new(320.0, 240.0);
+        let maximum = NSSize::new(1600.0, 1000.0);
+
+        let (wide, wide_letterbox) =
+            first_wrap_size(NSSize::new(1000.0, 800.0), 16.0 / 9.0, minimum, maximum);
+        assert!((wide.width - 1000.0).abs() < 0.01);
+        assert!((wide.height - 562.5).abs() < 0.01);
+        assert!(wide.width >= minimum.width && wide.height >= minimum.height);
+        assert!(!wide_letterbox);
+
+        let (tall, tall_letterbox) =
+            first_wrap_size(NSSize::new(1000.0, 800.0), 9.0 / 16.0, minimum, maximum);
+        assert!((tall.width - 450.0).abs() < 0.01);
+        assert!((tall.height - 800.0).abs() < 0.01);
+        assert!(tall.width >= minimum.width && tall.height >= minimum.height);
+        assert!(!tall_letterbox);
+    }
+
+    #[test]
+    fn fullscreen_defers_wrap_until_did_exit_then_requests_resize() {
+        assert!(fullscreen_blocks_window_mutation(false, true, false, true));
+        assert_eq!(
+            resume_wrap_decision(false, true, true, true),
+            ResumeWrapDecision::Skip
+        );
+        assert!(!fullscreen_blocks_window_mutation(
+            false, false, false, false
+        ));
+        assert_eq!(
+            resume_wrap_decision(false, true, false, true),
+            ResumeWrapDecision::ResizeAndReconcile
+        );
+        assert_eq!(
+            resume_wrap_decision(false, true, false, false),
+            ResumeWrapDecision::Reconcile
+        );
     }
 
     #[test]

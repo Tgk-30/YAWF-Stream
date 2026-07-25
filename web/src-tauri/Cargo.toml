@@ -1,6 +1,6 @@
 [package]
 name = "debridstreamer"
-version = "2.0.0"
+version = "2.0.1"
 description = "YAWF Stream - private streaming hub"
 authors = ["tgk30"]
 edition = "2021"

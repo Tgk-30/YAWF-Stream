@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const renderPlayerMock = vi.hoisted(() => ({
   callback: null as ((ev: { name: string; data: unknown }) => void) | null,
+  init: vi.fn(),
+  destroy: vi.fn(),
   command: vi.fn(),
   observeProperties: vi.fn(),
   setProperty: vi.fn(),
@@ -17,12 +19,12 @@ const openInExternalPlayerMock = vi.hoisted(() => vi.fn(async () => "opened"));
 const tauriWindowMock = vi.hoisted(() => ({
   setFullscreen: vi.fn(async (_fullscreen: boolean) => {}),
   isFullscreen: vi.fn(async () => false),
-  onResized: vi.fn(async () => () => {}),
+  onResized: vi.fn(async (_callback: () => void) => () => {}),
 }));
 
 vi.mock("../lib/renderPlayer", () => ({
-  init: vi.fn(async () => {}),
-  destroy: vi.fn(async () => {}),
+  init: renderPlayerMock.init,
+  destroy: renderPlayerMock.destroy,
   command: renderPlayerMock.command,
   setProperty: renderPlayerMock.setProperty,
   getProperty: renderPlayerMock.getProperty,
@@ -67,6 +69,10 @@ function emitProperty(name: string, data: unknown): void {
 
 beforeEach(() => {
   renderPlayerMock.callback = null;
+  renderPlayerMock.init.mockReset();
+  renderPlayerMock.init.mockResolvedValue(undefined);
+  renderPlayerMock.destroy.mockReset();
+  renderPlayerMock.destroy.mockResolvedValue(undefined);
   renderPlayerMock.command.mockReset();
   renderPlayerMock.command.mockResolvedValue(undefined);
   renderPlayerMock.observeProperties.mockImplementation(
@@ -618,6 +624,54 @@ describe("EmbeddedPlayer playback controls", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Exit fullscreen" }));
     await waitFor(() => expect(tauriWindowMock.setFullscreen).toHaveBeenCalledWith(false));
+  });
+
+  it("keeps the libmpv lifecycle alive through a native fullscreen round trip", async () => {
+    let fullscreenState = false;
+    let onResized: (() => void) | undefined;
+    tauriWindowMock.isFullscreen.mockImplementation(async () => fullscreenState);
+    tauriWindowMock.setFullscreen.mockImplementation(async (next) => {
+      fullscreenState = next;
+    });
+    tauriWindowMock.onResized.mockImplementation(async (callback) => {
+      onResized = callback;
+      return () => {};
+    });
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={onClose} />,
+    );
+
+    await waitFor(() => {
+      expect(renderPlayerMock.init).toHaveBeenCalledTimes(1);
+      expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", [
+        "https://example.test/movie.mkv",
+      ]);
+      expect(tauriWindowMock.onResized).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Fullscreen" }));
+    await screen.findByRole("button", { name: "Exit fullscreen" });
+    fullscreenState = true;
+    await act(async () => {
+      onResized?.();
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit fullscreen" }));
+    await waitFor(() => expect(tauriWindowMock.setFullscreen).toHaveBeenLastCalledWith(false));
+    fullscreenState = false;
+    await act(async () => {
+      onResized?.();
+      await Promise.resolve();
+    });
+    await screen.findByRole("button", { name: "Fullscreen" });
+
+    rerender(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={onClose} />,
+    );
+    expect(renderPlayerMock.init).toHaveBeenCalledTimes(1);
+    expect(renderPlayerMock.destroy).not.toHaveBeenCalled();
   });
 
   it("shows the paused now-playing screen and resumes immediately", async () => {
