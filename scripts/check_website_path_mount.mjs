@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const website = join(root, "website-app", "dist");
-const mount = "/debridstreamer/";
+// Must match SITE_BASE in the build that produced website-app/dist.
+const mount = `/${(process.env.SITE_BASE ?? "debridstreamer").replace(/^\/+|\/+$/g, "")}/`;
 const html = readFileSync(join(website, "index.html"), "utf8");
 const assetsDir = join(website, "assets");
 const css = existsSync(assetsDir)

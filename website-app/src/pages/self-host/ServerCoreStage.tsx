@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ServerCoreDriverRef } from '@/components/three/ServerCoreScene';
 import { hasWebGL, prefersReducedMotion } from '@/lib/motion';
 import { cn } from '@/lib/utils';
+import { asset } from '@/lib/asset';
 
 const ServerCoreScene = lazy(() => import('@/components/three/ServerCoreScene'));
 
@@ -52,7 +53,7 @@ export default function ServerCoreStage({ driver, onGlyphHover, className }: Ser
         style={{ background: 'radial-gradient(closest-side, rgba(var(--brand-rgb), 0.12), transparent), var(--bg-0)' }}
       >
         <img
-          src="/debridstreamer/server-core-poster.jpg"
+          src={asset('server-core-poster.jpg')}
           alt="Server Core - a glass cube with a glowing teal core, device icons orbiting on light trails"
           className="h-full w-full object-cover opacity-90"
           loading="lazy"

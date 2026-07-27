@@ -2,6 +2,7 @@ import { motion, useReducedMotion } from 'framer-motion';
 import { scrollToTarget } from '@/lib/scroll';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import { GhostButton, PrimaryButton } from '@/components/Buttons';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -11,7 +12,7 @@ export default function ClosingCta() {
 
   return (
     <section className="relative flex min-h-[64vh] items-center justify-center overflow-hidden py-24">
-      <BackgroundVideo src="/debridstreamer/cinema-grain-loop.mp4" poster="/debridstreamer/cinema-grain-poster.jpg" opacity={0.25} />
+      <BackgroundVideo src={asset('cinema-grain-loop.mp4')} poster={asset('cinema-grain-poster.jpg')} opacity={0.25} />
       <div aria-hidden="true" className="absolute inset-0 opacity-50" style={{ background: 'var(--grad-warm)' }} />
       <div aria-hidden="true" className="absolute inset-0" style={{ background: 'var(--grad-hero-scrim)' }} />
 

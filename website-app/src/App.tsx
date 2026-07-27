@@ -52,7 +52,7 @@ export default function App() {
   }, []);
 
   return (
-    <BrowserRouter basename="/debridstreamer">
+    <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/+$/, '')}>
       <ScrollManager />
       <Suspense fallback={<RouteLoading />}>
         <Routes>

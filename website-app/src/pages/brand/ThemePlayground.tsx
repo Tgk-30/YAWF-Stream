@@ -28,6 +28,7 @@ import Chip from '@/components/Chip';
 import { GhostButton, PrimaryButton } from '@/components/Buttons';
 import { ControlFlash } from '@/pages/brand/shared';
 import { copyWithToast, EASE_EXPO } from '@/pages/brand/utils';
+import { asset } from '@/lib/asset';
 
 export type PlaygroundKey = 'preset' | 'name' | 'radius' | 'glow' | 'fonts';
 
@@ -480,7 +481,7 @@ export default function ThemePlayground({ highlight, onHighlight }: PlaygroundPr
                       { label: 'cached', variant: 'dim' },
                     ]}
                     size="38 GB"
-                    href="/debridstreamer/download"
+                    href={asset('download')}
                     className="px-3.5 py-3"
                   />
                   <StreamRow
@@ -491,7 +492,7 @@ export default function ThemePlayground({ highlight, onHighlight }: PlaygroundPr
                       { label: 'RD', variant: 'dim' },
                     ]}
                     size="8 GB"
-                    href="/debridstreamer/download"
+                    href={asset('download')}
                     className="px-3.5 py-3"
                   />
                   <GlassCard beam={false} className="flex items-center justify-between gap-3 p-3.5 hover:-translate-y-0">

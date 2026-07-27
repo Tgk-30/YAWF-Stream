@@ -2,6 +2,7 @@ import { useRef } from 'react';
 import { gsap, useGSAP } from '@/lib/gsap';
 import { usePrefersReducedMotion } from '@/lib/motion';
 import BackgroundVideo from '@/components/BackgroundVideo';
+import { asset } from '@/lib/asset';
 
 /** Chars wrapped in overflow-hidden masks for the cascade (parent carries text styles). */
 function CascadeChars({ text }: { text: string }) {
@@ -64,7 +65,7 @@ export default function FeaturesHero() {
     >
       {/* cinema-grain band (taller than the section so the parallax never exposes edges) */}
       <div ref={videoWrapRef} className="absolute inset-x-0 -inset-y-[14%]">
-        <BackgroundVideo src="/debridstreamer/cinema-grain-loop.mp4" poster="/debridstreamer/cinema-grain-poster.jpg" opacity={0.35} />
+        <BackgroundVideo src={asset('cinema-grain-loop.mp4')} poster={asset('cinema-grain-poster.jpg')} opacity={0.35} />
       </div>
       <div className="absolute inset-0" style={{ background: 'var(--grad-hero-scrim)' }} />
 

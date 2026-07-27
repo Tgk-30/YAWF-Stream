@@ -1,3 +1,4 @@
+import { asset } from '@/lib/asset';
 /** Invented poster metadata - all titles are fictional, no real IP. */
 
 export interface PosterMeta {
@@ -11,7 +12,7 @@ export interface PosterMeta {
 
 export const POSTER_META: PosterMeta[] = [
   {
-    src: '/debridstreamer/poster-01.jpg',
+    src: asset('poster-01.jpg'),
     title: 'Night Signal',
     year: 2024,
     rating: 8.1,
@@ -19,7 +20,7 @@ export const POSTER_META: PosterMeta[] = [
     synopsis: "A late-night radio host traces a broadcast that shouldn't exist - and answers it.",
   },
   {
-    src: '/debridstreamer/poster-02.jpg',
+    src: asset('poster-02.jpg'),
     title: 'Paper Harvest',
     year: 2023,
     rating: 7.6,
@@ -27,7 +28,7 @@ export const POSTER_META: PosterMeta[] = [
     synopsis: "A small town's harvest festival hides a forty-year-old secret in the raffle drum.",
   },
   {
-    src: '/debridstreamer/poster-03.jpg',
+    src: asset('poster-03.jpg'),
     title: 'Orbital',
     year: 2025,
     rating: 8.4,
@@ -35,7 +36,7 @@ export const POSTER_META: PosterMeta[] = [
     synopsis: 'Two rival salvage crews chase the same dying station - and its last awake passenger.',
   },
   {
-    src: '/debridstreamer/poster-04.jpg',
+    src: asset('poster-04.jpg'),
     title: 'The Clockwork Sea',
     year: 2022,
     rating: 7.9,
@@ -43,7 +44,7 @@ export const POSTER_META: PosterMeta[] = [
     synopsis: 'A tide-locked inventor builds a boat that sails time instead of water.',
   },
   {
-    src: '/debridstreamer/poster-05.jpg',
+    src: asset('poster-05.jpg'),
     title: 'Ember Road',
     year: 2023,
     rating: 7.7,
@@ -51,7 +52,7 @@ export const POSTER_META: PosterMeta[] = [
     synopsis: 'Four estranged siblings, one borrowed van, three thousand miles of unfinished business.',
   },
   {
-    src: '/debridstreamer/poster-06.jpg',
+    src: asset('poster-06.jpg'),
     title: 'The Last Relay',
     year: 2024,
     rating: 8.2,
@@ -59,7 +60,7 @@ export const POSTER_META: PosterMeta[] = [
     synopsis: 'Retired con artists reunite for one final job: stealing back their own legend.',
   },
   {
-    src: '/debridstreamer/poster-07.jpg',
+    src: asset('poster-07.jpg'),
     title: 'Deep Field',
     year: 2025,
     rating: 8.8,
@@ -67,7 +68,7 @@ export const POSTER_META: PosterMeta[] = [
     synopsis: 'One valley, filmed across every season for eleven years. Worth every minute.',
   },
   {
-    src: '/debridstreamer/poster-08.jpg',
+    src: asset('poster-08.jpg'),
     title: 'Copper Noir',
     year: 2024,
     rating: 7.5,

@@ -3,6 +3,7 @@ import { gsap, useGSAP } from '@/lib/gsap';
 import { usePrefersReducedMotion } from '@/lib/motion';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import Chip from '@/components/Chip';
+import { asset } from '@/lib/asset';
 
 /** Chars wrapped in overflow-hidden masks for the cascade (parent carries text styles). */
 function CascadeChars({ text }: { text: string }) {
@@ -74,7 +75,7 @@ export default function Hero() {
 
       {/* nebula at 25% + parallax */}
       <div ref={videoWrapRef} className="absolute inset-[-50px_0]">
-        <BackgroundVideo src="/debridstreamer/nebula-drift-loop.mp4" poster="/debridstreamer/nebula-drift-poster.jpg" opacity={0.25} />
+        <BackgroundVideo src={asset('nebula-drift-loop.mp4')} poster={asset('nebula-drift-poster.jpg')} opacity={0.25} />
       </div>
       {/* warm bloom behind headline */}
       <div

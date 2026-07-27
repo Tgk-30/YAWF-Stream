@@ -11,6 +11,7 @@ import TerminalBlock from '@/components/TerminalBlock';
 import StreamRow from '@/components/StreamRow';
 import DeviceFrame from '@/components/DeviceFrame';
 import Chip from '@/components/Chip';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 const UBUNTU_GUIDE = 'https://github.com/Tgk-30/YAWF-Stream/blob/main/deploy/ubuntu/README.md';
@@ -216,7 +217,7 @@ export default function DeployTabs() {
                       </div>
                       <DeviceFrame
                         variant="phone"
-                        src="/debridstreamer/settings-mobile.png"
+                        src={asset('settings-mobile.png')}
                         alt="YAWF Stream mobile Settings - Control Center"
                         className="mx-auto w-[180px] md:w-[210px]"
                         reflect={false}

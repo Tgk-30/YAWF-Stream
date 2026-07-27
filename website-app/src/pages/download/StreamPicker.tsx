@@ -5,6 +5,7 @@ import BackgroundVideo from '@/components/BackgroundVideo';
 import StreamRow from '@/components/StreamRow';
 import type { StreamRowMeta } from '@/components/StreamRow';
 import { DOWNLOAD_LINKS, GITHUB_RELEASES_LATEST, VERSION } from '@/lib/site';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 interface PickerRow {
@@ -164,7 +165,7 @@ export default function StreamPicker() {
   return (
     <section className="relative overflow-hidden py-[clamp(88px,12vw,152px)]">
       {/* sonar stream-rings band behind the picker */}
-      <BackgroundVideo src="/debridstreamer/streamrings-loop.mp4" poster="/debridstreamer/streamrings-poster.jpg" opacity={0.2} />
+      <BackgroundVideo src={asset('streamrings-loop.mp4')} poster={asset('streamrings-poster.jpg')} opacity={0.2} />
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-0"

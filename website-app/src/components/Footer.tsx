@@ -5,6 +5,7 @@ import { GITHUB_DOCKER, GITHUB_ISSUES, GITHUB_RELEASES, GITHUB_RELEASES_LATEST, 
 import RingMark from '@/components/RingMark';
 import Chip from '@/components/Chip';
 import BackgroundVideo from '@/components/BackgroundVideo';
+import { asset } from '@/lib/asset';
 
 const COLUMNS: { heading: string; links: { label: string; to: string; external?: boolean }[] }[] = [
   {
@@ -57,7 +58,7 @@ export default function Footer() {
 
   return (
     <footer className="relative mt-auto overflow-hidden bg-bg-1">
-      <BackgroundVideo src="/debridstreamer/nebula-drift-loop.mp4" poster="/debridstreamer/nebula-drift-poster.jpg" opacity={0.2} />
+      <BackgroundVideo src={asset('nebula-drift-loop.mp4')} poster={asset('nebula-drift-poster.jpg')} opacity={0.2} />
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-0"
@@ -121,7 +122,7 @@ export default function Footer() {
         </div>
         <div className="mt-6 flex max-w-[720px] items-center gap-4 text-ink-3">
           <a href="https://www.themoviedb.org/" target="_blank" rel="noreferrer">
-            <img src="/debridstreamer/tmdb.svg" alt="The Movie Database (TMDB)" className="h-10 w-auto" />
+            <img src={asset('tmdb.svg')} alt="The Movie Database (TMDB)" className="h-10 w-auto" />
           </a>
           <p className="font-body text-xs leading-relaxed">
             This product uses the TMDB API but is not endorsed or certified by TMDB.

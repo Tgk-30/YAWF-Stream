@@ -1,6 +1,7 @@
 import { cn } from '@/lib/utils';
+import { asset } from '@/lib/asset';
 
-const POSTERS = Array.from({ length: 8 }, (_, i) => `/debridstreamer/poster-0${i + 1}.jpg`);
+const POSTERS = Array.from({ length: 8 }, (_, i) => asset(`poster-0${i + 1}.jpg`));
 
 interface PosterMarqueeProps {
   className?: string;

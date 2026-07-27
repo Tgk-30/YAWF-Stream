@@ -5,13 +5,14 @@ import { usePrefersReducedMotion } from '@/lib/motion';
 import DeviceFrame from '@/components/DeviceFrame';
 import SectionHeading from '@/components/SectionHeading';
 import { cn } from '@/lib/utils';
+import { asset } from '@/lib/asset';
 
 type FrameId = 'desktop' | 'tablet' | 'phone';
 
 const FRAMES: { id: FrameId; variant: 'desktop' | 'tablet' | 'phone'; src: string; alt: string }[] = [
-  { id: 'desktop', variant: 'desktop', src: '/debridstreamer/discover-desktop.png', alt: 'YAWF Stream Discover screen on desktop' },
-  { id: 'tablet', variant: 'tablet', src: '/debridstreamer/discover-tablet.png', alt: 'YAWF Stream Discover screen on tablet' },
-  { id: 'phone', variant: 'phone', src: '/debridstreamer/settings-mobile.png', alt: 'YAWF Stream settings on phone' },
+  { id: 'desktop', variant: 'desktop', src: asset('discover-desktop.png'), alt: 'YAWF Stream Discover screen on desktop' },
+  { id: 'tablet', variant: 'tablet', src: asset('discover-tablet.png'), alt: 'YAWF Stream Discover screen on tablet' },
+  { id: 'phone', variant: 'phone', src: asset('settings-mobile.png'), alt: 'YAWF Stream settings on phone' },
 ];
 
 /**
@@ -128,7 +129,7 @@ export default function ScreensGallery() {
                   )}
                   style={{ transform: focused === 'desktop' ? 'translateZ(80px) scale(1.02)' : undefined }}
                 >
-                  <DeviceFrame variant="desktop" src="/debridstreamer/discover-desktop.png" alt="YAWF Stream Discover screen on desktop" />
+                  <DeviceFrame variant="desktop" src={asset('discover-desktop.png')} alt="YAWF Stream Discover screen on desktop" />
                 </div>
               </div>
 
@@ -143,7 +144,7 @@ export default function ScreensGallery() {
                     )}
                     style={{ transform: focused === 'tablet' ? 'translateZ(140px) scale(1.06)' : undefined }}
                   >
-                    <DeviceFrame variant="tablet" src="/debridstreamer/discover-tablet.png" alt="YAWF Stream Discover screen on tablet" />
+                    <DeviceFrame variant="tablet" src={asset('discover-tablet.png')} alt="YAWF Stream Discover screen on tablet" />
                   </div>
                 </div>
               </div>
@@ -159,7 +160,7 @@ export default function ScreensGallery() {
                     )}
                     style={{ transform: focused === 'phone' ? 'translateZ(120px) scale(1.08)' : undefined }}
                   >
-                    <DeviceFrame variant="phone" src="/debridstreamer/settings-mobile.png" alt="YAWF Stream settings on phone" />
+                    <DeviceFrame variant="phone" src={asset('settings-mobile.png')} alt="YAWF Stream settings on phone" />
                   </div>
                 </div>
               </div>

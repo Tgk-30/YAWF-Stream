@@ -5,6 +5,7 @@ import { gsap, useGSAP } from '@/lib/gsap';
 import { THEME_PRESETS, useThemePreset } from '@/theme.config';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import Chip from '@/components/Chip';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -133,7 +134,7 @@ export default function Hero() {
       className="relative -mt-[var(--nav-offset)] flex min-h-[max(62vh,580px)] items-center overflow-hidden pt-[var(--nav-offset)]"
     >
       {/* cinema-grain video behind the room art (25%, screen blend) */}
-      <BackgroundVideo src="/debridstreamer/cinema-grain-loop.mp4" poster="/debridstreamer/cinema-grain-poster.jpg" opacity={0.25} />
+      <BackgroundVideo src={asset('cinema-grain-loop.mp4')} poster={asset('cinema-grain-poster.jpg')} opacity={0.25} />
 
       {/* right - living-room art bleeding to edge, wiped in from the right */}
       <motion.div
@@ -144,7 +145,7 @@ export default function Hero() {
         transition={{ duration: 1.1, ease: EASE_EXPO, delay: 0.2 }}
       >
         <img
-          src="/debridstreamer/living-room-glow.jpg"
+          src={asset('living-room-glow.jpg')}
           alt=""
           className="h-full w-full object-cover"
           style={{
@@ -165,7 +166,7 @@ export default function Hero() {
         animate={{ opacity: 0.5 }}
         transition={{ duration: 0.8 }}
         style={{
-          backgroundImage: 'url(/debridstreamer/living-room-glow.jpg)',
+          backgroundImage: `url(${asset('living-room-glow.jpg')})`,
           backgroundSize: 'cover',
           backgroundPosition: 'center',
           maskImage: 'linear-gradient(180deg, #000 0%, transparent 100%)',
