@@ -7,4 +7,10 @@
     <string name="connect">Connect</string>
     <string name="server_url_error">Enter a valid HTTP or HTTPS server address without a username, password, query, or fragment.</string>
     <string name="player_error">Native playback stopped. Try the next source or server transcoding.</string>
+    <string name="server_setup_hint">Press Menu on your remote at any time to come back here and change this address.</string>
+    <string name="server_unreachable_title">Cannot reach your server</string>
+    <string name="server_unreachable_copy">%1$s did not respond. Check that the server is running, that this TV is on the same network, and that the address and port are correct.</string>
+    <string name="server_unreachable_status">%1$s answered with HTTP %2$d, so it is reachable but not serving YAWF Stream. Check the port and the address path.</string>
+    <string name="try_again">Try again</string>
+    <string name="change_server">Change server</string>
 </resources>

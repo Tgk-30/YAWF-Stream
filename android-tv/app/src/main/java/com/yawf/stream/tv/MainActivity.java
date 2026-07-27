@@ -14,7 +14,9 @@ import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -47,7 +49,6 @@ import java.util.Map;
 
 @UnstableApi
 public final class MainActivity extends ComponentActivity {
-    private static final String PREFERENCES = "yawf_stream_tv";
     private static final String SERVER_URL = "server_url";
     private static final long PROGRESS_INTERVAL_MS = 5_000;
 
@@ -58,6 +59,9 @@ public final class MainActivity extends ComponentActivity {
     private ExoPlayer player;
     private String serverBase;
     private boolean closingPlayer;
+    // A single failed page load fires several callbacks. Only the first one
+    // should swap in the recovery screen.
+    private boolean showingConnectionError;
 
     private final Runnable progressReporter = new Runnable() {
         @Override
@@ -109,6 +113,7 @@ public final class MainActivity extends ComponentActivity {
     private void showWebApp() {
         releasePlayer(false);
         root.removeAllViews();
+        showingConnectionError = false;
         webView = new WebView(this);
         webView.setBackgroundColor(getColor(R.color.yawf_background));
 
@@ -122,7 +127,7 @@ public final class MainActivity extends ComponentActivity {
         settings.setSupportMultipleWindows(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setUserAgentString(
-            settings.getUserAgentString() + " YAWFStreamTV/2.0.0"
+            settings.getUserAgentString() + " YAWFStreamTV/" + BuildConfig.VERSION_NAME
         );
 
         CookieManager cookies = CookieManager.getInstance();
@@ -157,6 +162,49 @@ public final class MainActivity extends ComponentActivity {
                 }
                 return true;
             }
+
+            @Override
+            public void onReceivedError(
+                WebView view,
+                WebResourceRequest request,
+                WebResourceError error
+            ) {
+                if (
+                    !ConnectionFailure.blocksApp(
+                        request.isForMainFrame(),
+                        serverBase,
+                        request.getUrl().toString()
+                    )
+                ) {
+                    return;
+                }
+                showConnectionError(getString(R.string.server_unreachable_copy, serverBase));
+            }
+
+            @Override
+            public void onReceivedHttpError(
+                WebView view,
+                WebResourceRequest request,
+                WebResourceResponse response
+            ) {
+                if (
+                    !ConnectionFailure.blocksApp(
+                        request.isForMainFrame(),
+                        serverBase,
+                        request.getUrl().toString()
+                    ) ||
+                    !ConnectionFailure.isFatalHttpStatus(response.getStatusCode())
+                ) {
+                    return;
+                }
+                showConnectionError(
+                    getString(
+                        R.string.server_unreachable_status,
+                        serverBase,
+                        response.getStatusCode()
+                    )
+                );
+            }
         });
 
         root.addView(
@@ -170,7 +218,76 @@ public final class MainActivity extends ComponentActivity {
         webView.requestFocus();
     }
 
+    /**
+     * Replaces the WebView with a recovery screen. Without this the app sits on
+     * the WebView's own error page, Back exits because the failed load left no
+     * history to go back to, and the next launch reloads the same dead address.
+     */
+    private void showConnectionError(String message) {
+        if (showingConnectionError) return;
+        showingConnectionError = true;
+        // The WebView is mid-callback here, so tear it down on the next loop.
+        mainHandler.post(() -> {
+            releasePlayer(false);
+            if (webView != null) {
+                webView.destroy();
+                webView = null;
+            }
+            root.removeAllViews();
+
+            LinearLayout panel = new LinearLayout(this);
+            panel.setOrientation(LinearLayout.VERTICAL);
+            panel.setGravity(Gravity.CENTER_HORIZONTAL);
+            int horizontal = dp(56);
+            int vertical = dp(36);
+            panel.setPadding(horizontal, vertical, horizontal, vertical);
+            FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
+                Math.min(getResources().getDisplayMetrics().widthPixels - dp(80), dp(760)),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            );
+
+            TextView title = new TextView(this);
+            title.setText(R.string.server_unreachable_title);
+            title.setTextColor(getColor(R.color.yawf_text));
+            title.setTextSize(30);
+            title.setGravity(Gravity.CENTER);
+            panel.addView(title, matchWidth(dp(58)));
+
+            TextView copy = new TextView(this);
+            copy.setText(message);
+            copy.setTextColor(getColor(R.color.yawf_muted));
+            copy.setTextSize(18);
+            copy.setGravity(Gravity.CENTER);
+            panel.addView(copy, matchWidth(ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            Button retry = new Button(this);
+            retry.setText(R.string.try_again);
+            retry.setTextSize(20);
+            retry.setTextColor(Color.BLACK);
+            retry.setAllCaps(false);
+            retry.setOnClickListener(view -> showWebApp());
+            LinearLayout.LayoutParams retryParams = matchWidth(dp(64));
+            retryParams.topMargin = dp(24);
+            panel.addView(retry, retryParams);
+
+            Button change = new Button(this);
+            change.setText(R.string.change_server);
+            change.setTextSize(20);
+            change.setTextColor(Color.BLACK);
+            change.setAllCaps(false);
+            change.setOnClickListener(view -> showServerSetup());
+            LinearLayout.LayoutParams changeParams = matchWidth(dp(64));
+            changeParams.topMargin = dp(12);
+            panel.addView(change, changeParams);
+
+            root.addView(panel, panelParams);
+            retry.requestFocus();
+        });
+    }
+
     private void showServerSetup() {
+        showingConnectionError = false;
         releasePlayer(false);
         if (webView != null) {
             webView.destroy();
@@ -245,6 +362,17 @@ public final class MainActivity extends ComponentActivity {
         connectParams.topMargin = dp(12);
         panel.addView(connect, connectParams);
 
+        // The Menu key is the only way back here once a server is saved, and no
+        // remote advertises that, so say it on screen.
+        TextView hint = new TextView(this);
+        hint.setText(R.string.server_setup_hint);
+        hint.setTextColor(getColor(R.color.yawf_muted));
+        hint.setTextSize(14);
+        hint.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams hintParams = matchWidth(ViewGroup.LayoutParams.WRAP_CONTENT);
+        hintParams.topMargin = dp(20);
+        panel.addView(hint, hintParams);
+
         root.addView(panel, panelParams);
         address.requestFocus();
     }
@@ -317,7 +445,7 @@ public final class MainActivity extends ComponentActivity {
             }
 
             DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("YAWF Stream Android TV/2.0.0")
+                .setUserAgent("YAWF Stream Android TV/" + BuildConfig.VERSION_NAME)
                 .setConnectTimeoutMs(15_000)
                 .setReadTimeoutMs(30_000)
                 .setAllowCrossProtocolRedirects(false)
