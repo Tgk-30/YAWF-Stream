@@ -301,9 +301,10 @@ jobs:
         working-directory: web/src-tauri
         run: cargo check --locked --target aarch64-linux-android
 
-      - name: Confirm the desktop build is still intact
-        working-directory: web/src-tauri
-        run: cargo check --locked
+      # The desktop target is checked by the `rust` job on macOS. Repeating it on
+      # this Linux runner would need the GTK development headers the Tauri Linux
+      # backend links against, which are not installed here and are not what this
+      # job is for.
 
   android-tv:
     name: Android TV unit tests, lint, and APK
