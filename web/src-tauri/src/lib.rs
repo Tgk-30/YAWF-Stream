@@ -724,7 +724,6 @@ pub fn run() {
         cast::cast_set_volume,
     ]);
 
-
     builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
