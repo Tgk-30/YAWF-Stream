@@ -583,9 +583,166 @@ jobs:
             --clobber \
             --repo "$GITHUB_REPOSITORY"
 
+  android-app:
+    name: Signed Android phone APK
+    needs: release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The phone app is a different artifact from the TV app: package
+      # com.tgk30.debridstreamer against com.yawf.stream.tv, the whole Tauri
+      # application against a WebView shell. Android ties upgrades to the
+      # signing identity, so it gets its own key rather than borrowing the TV
+      # one. Until that key exists this job warns and skips, so tagging a
+      # release does not start failing before the identity is configured.
+      - name: Check phone signing secrets
+        id: gate
+        shell: bash
+        env:
+          ANDROID_APP_KEYSTORE_BASE64: ${{ secrets.ANDROID_APP_KEYSTORE_BASE64 }}
+          ANDROID_APP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_APP_KEYSTORE_PASSWORD }}
+          ANDROID_APP_KEY_ALIAS: ${{ secrets.ANDROID_APP_KEY_ALIAS }}
+          ANDROID_APP_KEY_PASSWORD: ${{ secrets.ANDROID_APP_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in ANDROID_APP_KEYSTORE_BASE64 ANDROID_APP_KEYSTORE_PASSWORD ANDROID_APP_KEY_ALIAS ANDROID_APP_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then missing=1; fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No signed phone APK was published. Create a dedicated signing key for com.tgk30.debridstreamer, store it in the ANDROID_APP_* secrets, and commit its certificate SHA-256 to web/src-tauri/SIGNING_CERT_SHA256."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Pinned like the TV app (SEC-012). Once a key exists this is mandatory:
+      # an unpinned signed APK is how a swapped identity ships unnoticed.
+      - name: Require the pinned certificate digest
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s web/src-tauri/SIGNING_CERT_SHA256 ]; then
+            echo "::error::web/src-tauri/SIGNING_CERT_SHA256 is missing. Commit the phone signing certificate SHA-256 before publishing a signed APK."
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        if: steps.gate.outputs.ready == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and NDK
+        if: steps.gate.outputs.ready == 'true'
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+
+      - name: Expose build tools and NDK
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          build_tools="$sdk/build-tools/36.0.0"
+          test -x "$build_tools/apksigner"
+          test -x "$build_tools/zipalign"
+          echo "$build_tools" >> "$GITHUB_PATH"
+          echo "NDK_HOME=$sdk/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain with Android targets
+        if: steps.gate.outputs.ready == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust build
+        if: steps.gate.outputs.ready == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "web/src-tauri -> target"
+          key: android-release
+
+      - name: Install web dependencies
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: web
+        run: npm ci
+
+      - name: Build the Android project
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: web
+        run: |
+          set -euo pipefail
+          npm run build
+          npm run tauri -- android init --ci
+          npm run tauri -- android build --apk
+
+      # Tauri's generated Gradle carries no signing config, so the release APK
+      # comes out unsigned. Align and sign it here rather than patching a
+      # generated file that the next Tauri version may reshape.
+      - name: Sign, verify, and upload the phone APK
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANDROID_APP_KEYSTORE_BASE64: ${{ secrets.ANDROID_APP_KEYSTORE_BASE64 }}
+          ANDROID_APP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_APP_KEYSTORE_PASSWORD }}
+          ANDROID_APP_KEY_ALIAS: ${{ secrets.ANDROID_APP_KEY_ALIAS }}
+          ANDROID_APP_KEY_PASSWORD: ${{ secrets.ANDROID_APP_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          version="${GITHUB_REF_NAME#v}"
+          version="${version%-web}"
+          ks="$RUNNER_TEMP/yawf-android-app.jks"
+          printf '%s' "$ANDROID_APP_KEYSTORE_BASE64" | base64 --decode > "$ks"
+
+          source="$(find web/src-tauri/gen/android/app/build/outputs/apk -name '*-release-unsigned.apk' -print -quit)"
+          test -n "$source"
+          aligned="$RUNNER_TEMP/aligned.apk"
+          asset="$RUNNER_TEMP/YAWF.Stream_Android_${version}.apk"
+          zipalign -p -f 4 "$source" "$aligned"
+          apksigner sign \
+            --ks "$ks" \
+            --ks-pass "env:ANDROID_APP_KEYSTORE_PASSWORD" \
+            --ks-key-alias "$ANDROID_APP_KEY_ALIAS" \
+            --key-pass "env:ANDROID_APP_KEY_PASSWORD" \
+            --out "$asset" \
+            "$aligned"
+          apksigner verify "$asset"
+
+          expected_digest="$(tr -d '[:space:]:' < web/src-tauri/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')"
+          actual_digest="$(
+            apksigner verify --print-certs "$asset" \
+              | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+              | head -1 \
+              | tr -d '[:space:]:' \
+              | tr '[:upper:]' '[:lower:]'
+          )"
+          if [ -z "$actual_digest" ] || [ "$actual_digest" != "$expected_digest" ]; then
+            echo "::error::Phone APK signing certificate does not match web/src-tauri/SIGNING_CERT_SHA256"
+            exit 1
+          fi
+          rm -f "$ks"
+          gh release upload "$GITHUB_REF_NAME" "$asset" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
+
   finalize-release-assets:
     name: Checksums and provenance
-    needs: [release, android-tv]
+    needs: [release, android-tv, android-app]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
