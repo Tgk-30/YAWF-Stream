@@ -43,3 +43,22 @@ export function isMobileBrowser(): boolean {
   const k = deviceKind();
   return k === "ios" || k === "android";
 }
+
+/**
+ * Whether the page can be installed at all.
+ *
+ * Chromium refuses to register a service worker or fire `beforeinstallprompt`
+ * outside a secure context, and only localhost is exempt from needing TLS. A
+ * server reached over plain HTTP at a LAN address is therefore never
+ * installable on Android, and the browser menu simply has no install entry -
+ * so telling the user to look for one sends them hunting for something that
+ * does not exist. iOS Safari's Add to Home Screen is not gated this way.
+ *
+ * Treated as secure when the browser does not expose the flag at all, so an
+ * unexpected environment degrades to the previous guidance rather than
+ * accusing a working setup of being insecure.
+ */
+export function isSecureContextForInstall(): boolean {
+  if (typeof window === "undefined") return true;
+  return window.isSecureContext !== false;
+}

@@ -1,6 +1,6 @@
 import { memo, useRef, useState } from 'react';
 import { motion, useInView, useReducedMotion } from 'framer-motion';
-import { Apple, Check, Copy, Globe, Share, Smartphone } from 'lucide-react';
+import { Apple, Check, Copy, Globe, Share, ShieldAlert, Smartphone } from 'lucide-react';
 import GlassCard from '@/components/GlassCard';
 import RingMark from '@/components/RingMark';
 import SectionHeading from '@/components/SectionHeading';
@@ -210,7 +210,7 @@ const STEPS = [
     index: '02',
     icon: Smartphone,
     title: 'Android',
-    body: 'Open your server URL in Chrome or Edge → Install app.',
+    body: 'Open your server URL over HTTPS in Chrome or Edge → Install app. Android hides the install option on a plain-HTTP address.',
     hint: 'Install app',
     kind: 'android' as const,
   },
@@ -295,6 +295,19 @@ export default function PwaSteps() {
               </motion.div>
             );
           })}
+        </div>
+
+        <div className="mt-8 rounded-row border border-line bg-[var(--surface-glass)] p-5">
+          <p className="flex items-start gap-3 text-[0.95rem] leading-[1.7] text-ink-2">
+            <ShieldAlert className="mt-1 h-4 w-4 shrink-0 text-brand" />
+            <span>
+              <span className="text-ink-1">Android needs HTTPS.</span> Chrome only offers to install a
+              site from a secure origin, and a plain <span className="font-mono text-[0.85em]">http://</span>{' '}
+              LAN address is not one. Reach your server over HTTPS through the bundled Caddy compose
+              file, a Tailscale name, or any tunnel that terminates TLS, and the install option
+              appears. iPhone and iPad are unaffected: Add to Home Screen works either way.
+            </span>
+          </p>
         </div>
       </div>
     </section>
