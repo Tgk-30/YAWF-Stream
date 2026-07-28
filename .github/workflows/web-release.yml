@@ -660,7 +660,16 @@ jobs:
           test -x "$build_tools/apksigner"
           test -x "$build_tools/zipalign"
           echo "$build_tools" >> "$GITHUB_PATH"
-          echo "NDK_HOME=$sdk/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          ndk="$sdk/ndk/27.2.12479018"
+          tc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$tc/aarch64-linux-android24-clang"
+          {
+            echo "NDK_HOME=$ndk"
+            echo "CC_aarch64_linux_android=$tc/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$tc/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$tc/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+          echo "$tc" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain with Android targets
         if: steps.gate.outputs.ready == 'true'

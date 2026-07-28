@@ -650,29 +650,10 @@ pub fn run() {
         Ok(())
     });
 
-    // generate_handler! cannot cfg individual entries, so mobile gets its own
-    // list: the desktop-only modules are not compiled in at all there.
-    #[cfg(mobile)]
-    let builder = builder.invoke_handler(tauri::generate_handler![
-        app_install_info,
-        render_player::player_init,
-        render_player::player_load,
-        render_player::player_command,
-        render_player::player_set_property,
-        render_player::player_get_property,
-        render_player::player_add_subtitle,
-        render_player::player_set_audio_passthrough,
-        render_player::player_set_hdr_policy,
-        render_player::player_set_video_margin,
-        render_player::player_set_rect,
-        render_player::player_destroy,
-        cast::cast_discover,
-        cast::cast_load,
-        cast::cast_control,
-        cast::cast_status,
-        cast::cast_set_volume,
-    ]);
-
+    // scripts/check_security_decisions.mjs reads the FIRST generate_handler!
+    // block in this file and compares it with the desktop ACL, so the desktop
+    // list has to stay ahead of the mobile one. generate_handler! cannot cfg
+    // individual entries, which is why there are two lists at all.
     #[cfg(desktop)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         open_in_external_player,
@@ -720,6 +701,29 @@ pub fn run() {
         cast::cast_status,
         cast::cast_set_volume,
     ]);
+
+    // Mobile: the desktop-only modules are not compiled in there at all.
+    #[cfg(mobile)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        app_install_info,
+        render_player::player_init,
+        render_player::player_load,
+        render_player::player_command,
+        render_player::player_set_property,
+        render_player::player_get_property,
+        render_player::player_add_subtitle,
+        render_player::player_set_audio_passthrough,
+        render_player::player_set_hdr_policy,
+        render_player::player_set_video_margin,
+        render_player::player_set_rect,
+        render_player::player_destroy,
+        cast::cast_discover,
+        cast::cast_load,
+        cast::cast_control,
+        cast::cast_status,
+        cast::cast_set_volume,
+    ]);
+
 
     builder
         .run(tauri::generate_context!())

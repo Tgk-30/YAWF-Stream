@@ -247,12 +247,25 @@ jobs:
       - name: Install Android platform and NDK
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
 
-      - name: Export NDK location
+      # `ring` compiles C, so cc-rs needs a cross compiler for the target. Without
+      # these it looks for a bare `aarch64-linux-android-clang` on PATH, which the
+      # NDK does not ship: its binaries are API-versioned, e.g.
+      # aarch64-linux-android24-clang.
+      - name: Export NDK and cross-compiler locations
         shell: bash
         run: |
+          set -euo pipefail
           ndk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/27.2.12479018"
           test -d "$ndk"
-          echo "NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          tc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$tc/aarch64-linux-android24-clang"
+          {
+            echo "NDK_HOME=$ndk"
+            echo "CC_aarch64_linux_android=$tc/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$tc/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$tc/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+          echo "$tc" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain with Android targets
         uses: dtolnay/rust-toolchain@stable
