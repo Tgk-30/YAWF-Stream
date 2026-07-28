@@ -1,10 +1,16 @@
 fn main() {
+    // A build script is compiled for the HOST, so `#[cfg(target_os = ...)]` here
+    // describes the machine doing the building, not the machine being built for.
+    // Cross-compiling from macOS to Android used to emit the OpenGL framework
+    // link and fail with "library kind `framework` is only supported on Apple
+    // targets". Cargo passes the real target through CARGO_CFG_TARGET_OS.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
     // libmpv2-sys emits `cargo:rustc-link-lib=mpv` but no search path, so the
     // linker can't find libmpv on its own. Point it at the system/Homebrew mpv
     // (dev) or the CI-fetched copy. At runtime the bundled dylib is used instead
     // (see render_player.rs / Stage 4 packaging) - this is link-time only.
-    #[cfg(target_os = "macos")]
-    {
+    if target_os == "macos" {
         emit_mpv_link_search();
         // CGL functions (CGLChoosePixelFormat/CGLLockContext/…) used by the
         // CAOpenGLLayer video surface live in the OpenGL framework.
@@ -20,8 +26,7 @@ fn main() {
     // shinchiro mpv-dev package's mpv.def and points MPV_LIB_DIR (or MPV_SOURCE)
     // at the folder holding it. At runtime the bundled `libmpv-2.dll` (shipped
     // next to the exe) is loaded.
-    #[cfg(target_os = "windows")]
-    {
+    if target_os == "windows" {
         println!("cargo:rerun-if-env-changed=MPV_LIB_DIR");
         println!("cargo:rerun-if-env-changed=MPV_SOURCE");
         for var in ["MPV_LIB_DIR", "MPV_SOURCE"] {
@@ -45,8 +50,7 @@ fn main() {
     // /usr/lib/<triple>), so `-lmpv` resolves without help - but pin the exact
     // libdir via pkg-config when available so an out-of-tree mpv (e.g. a PPA or a
     // bundled tree pointed at by MPV_LIB_DIR) is found too.
-    #[cfg(target_os = "linux")]
-    {
+    if target_os == "linux" {
         println!("cargo:rerun-if-env-changed=MPV_LIB_DIR");
         if let Ok(dir) = std::env::var("MPV_LIB_DIR") {
             if !dir.is_empty() {
@@ -68,7 +72,6 @@ fn main() {
     tauri_build::build()
 }
 
-#[cfg(target_os = "macos")]
 fn emit_mpv_link_search() {
     use std::path::Path;
 

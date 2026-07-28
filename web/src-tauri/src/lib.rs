@@ -7,12 +7,19 @@
 // native player. On macOS we try VLC, then mpv/IINA as fallbacks.
 
 use std::path::Path;
+#[cfg(desktop)]
 use std::process::{Command, Output, Stdio};
+#[cfg(desktop)]
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+// Both exist for the desktop external-player handoff: a revocable loopback
+// capability that lets VLC/mpv/IINA fetch a stream without handing them server
+// credentials. Mobile exposes no such command, so neither is reachable there.
+#[cfg(desktop)]
 mod playback_auth;
+#[cfg(desktop)]
 mod playback_proxy;
 
 // Bundled-mpv player (Phase 3 P1): spawns the mpv sidecar and drives it over
@@ -63,6 +70,7 @@ fn macos_app_installed(app: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(desktop)]
 fn cli_on_path(bin: &str) -> bool {
     Command::new(bin)
         .arg("--version")
@@ -73,6 +81,7 @@ fn cli_on_path(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(desktop)]
 /// The external media players actually installed on this machine, so the UI can
 /// offer only real choices (and pick a sensible default).
 fn list_external_players_blocking() -> Vec<String> {
@@ -98,6 +107,7 @@ fn list_external_players_blocking() -> Vec<String> {
     }
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 async fn list_external_players() -> Vec<String> {
     tokio::task::spawn_blocking(list_external_players_blocking)
@@ -105,6 +115,7 @@ async fn list_external_players() -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[cfg(desktop)]
 /// The locally-installed tunnel clients. Detection is deliberately advisory:
 /// authentication and tunnel creation remain interactive user-controlled flows.
 #[derive(Clone, Debug, Serialize)]
@@ -114,6 +125,7 @@ struct ToolInfo {
     detail: Option<String>,
 }
 
+#[cfg(desktop)]
 impl ToolInfo {
     fn absent() -> Self {
         Self {
@@ -124,6 +136,7 @@ impl ToolInfo {
     }
 }
 
+#[cfg(desktop)]
 #[derive(Clone, Debug, Serialize)]
 struct TunnelTools {
     cloudflared: ToolInfo,
@@ -218,8 +231,10 @@ fn app_install_info() -> AppInstallInfo {
     detect_app_install_info(current_os(), executable.as_deref(), appimage_path)
 }
 
+#[cfg(desktop)]
 const TUNNEL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+#[cfg(desktop)]
 /// Run a small local CLI probe without allowing an unhealthy executable to
 /// stall the Tauri command indefinitely. A missing executable is normal.
 fn probe_command(command: &str, args: &[&str]) -> Option<Output> {
@@ -246,12 +261,14 @@ fn probe_command(command: &str, args: &[&str]) -> Option<Output> {
     }
 }
 
+#[cfg(desktop)]
 fn first_version_line(output: &Output) -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     first_non_empty_line(&stdout, &stderr)
 }
 
+#[cfg(desktop)]
 fn first_non_empty_line(stdout: &str, stderr: &str) -> Option<String> {
     stdout
         .lines()
@@ -261,6 +278,7 @@ fn first_non_empty_line(stdout: &str, stderr: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+#[cfg(desktop)]
 /// `Some(None)` means the executable ran successfully but did not print a
 /// parseable version line, which is still an installed tool.
 fn probe_version(command: &str, args: &[&str]) -> Option<Option<String>> {
@@ -272,6 +290,7 @@ fn probe_version(command: &str, args: &[&str]) -> Option<Option<String>> {
     }
 }
 
+#[cfg(desktop)]
 fn tailscale_detail_from_status_json(output: &Output) -> Option<String> {
     if !output.status.success() {
         return None;
@@ -280,12 +299,14 @@ fn tailscale_detail_from_status_json(output: &Output) -> Option<String> {
     tailscale_detail_from_status_json_text(&stdout)
 }
 
+#[cfg(desktop)]
 fn tailscale_detail_from_status_json_text(status_json: &str) -> Option<String> {
     let status: serde_json::Value = serde_json::from_str(status_json).ok()?;
     let state = status.get("BackendState")?.as_str()?;
     Some(tailscale_detail_from_backend_state(state))
 }
 
+#[cfg(desktop)]
 fn tailscale_detail_from_backend_state(state: &str) -> String {
     if state.eq_ignore_ascii_case("running") {
         "connected".to_string()
@@ -294,6 +315,7 @@ fn tailscale_detail_from_backend_state(state: &str) -> String {
     }
 }
 
+#[cfg(desktop)]
 fn tailscale_detail(command: &str) -> String {
     if let Some(output) = probe_command(command, &["status", "--json"]) {
         if let Some(detail) = tailscale_detail_from_status_json(&output) {
@@ -312,6 +334,7 @@ fn tailscale_detail(command: &str) -> String {
     "installed, not logged in".to_string()
 }
 
+#[cfg(desktop)]
 fn detect_tunnel_tools_blocking() -> TunnelTools {
     let cloudflared = match probe_version("cloudflared", &["--version"]) {
         Some(version) => ToolInfo {
@@ -350,6 +373,7 @@ fn detect_tunnel_tools_blocking() -> TunnelTools {
     }
 }
 
+#[cfg(desktop)]
 /// Detect the locally-installed tunnel clients. This detects and guides only;
 /// `cloudflared tunnel login` and `tailscale up` intentionally stay interactive.
 #[tauri::command]
@@ -363,6 +387,7 @@ async fn detect_tunnel_tools() -> TunnelTools {
     }
 }
 
+#[cfg(desktop)]
 /// Hand `url` to an external player. `preferred` (a value from
 /// `list_external_players`) is tried first; otherwise the default order is used.
 fn open_in_external_player_blocking(
@@ -427,6 +452,7 @@ fn open_in_external_player_blocking(
     }
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 async fn open_in_external_player(
     window: tauri::WebviewWindow,
@@ -455,6 +481,7 @@ async fn open_in_external_player(
     Ok(status)
 }
 
+#[cfg(desktop)]
 /// Reveal a completed download without opening the media file. Every platform
 /// command receives the path as one argument, never through a shell, and any
 /// launch/status failure is returned to the webview as a normal Tauri error.
@@ -506,6 +533,7 @@ fn reveal_in_file_manager_blocking(path: String) -> Result<(), String> {
     }
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || reveal_in_file_manager_blocking(path))
@@ -538,6 +566,9 @@ fn opaque_window_background<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // `mut` is only needed on desktop, where the cfg(desktop) block below
+    // reassigns it to add the updater plugin and the desktop-only state.
+    #[cfg_attr(mobile, allow(unused_mut))]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // Native HTTP client used by the webview (`@tauri-apps/plugin-http`) to
@@ -548,9 +579,6 @@ pub fn run() {
         // Process plugin: lets the webview `relaunch()` the app after the
         // auto-updater downloads + installs a new version (see updater.ts).
         .plugin(tauri_plugin_process::init())
-        // Authenticated external-player handoffs use one revocable loopback
-        // capability at a time, without exporting server credentials.
-        .manage(playback_proxy::ExternalPlaybackState::default())
         // At-most-one in-window render-API player (v0.5). On mobile this resolves
         // to the libmpv-free stub in render_player/stub.rs.
         .manage(render_player::PlayerState::default());
@@ -559,6 +587,9 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder
+            // Authenticated external-player handoffs use one revocable loopback
+            // capability at a time, without exporting server credentials.
+            .manage(playback_proxy::ExternalPlaybackState::default())
             // At-most-one mpv instance, shared across the mpv_* commands.
             .manage(player::MpvState::default())
             // At-most-one local DebridStreamer server process.
