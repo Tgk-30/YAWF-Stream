@@ -1,14 +1,18 @@
-import { beforeEach, describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultSettings } from "../data/settings";
 import {
   buildDiagnosticsReport,
   clearDiagnostics,
   recentDiagnostics,
   recordDiagnostic,
+  downloadDiagnosticsReport,
   redactDiagnosticText,
 } from "./diagnostics";
 
 beforeEach(clearDiagnostics);
+afterEach(() => vi.restoreAllMocks());
 
 describe("diagnostics", () => {
   it("redacts bearer, query, assignment, and credential-shaped values", () => {
@@ -78,5 +82,56 @@ describe("diagnostics", () => {
     ]) {
       expect(serialized).not.toContain(secret);
     }
+  });
+
+  it("creates and tears down an in-browser diagnostics download", () => {
+    const originalCreateElement = document.createElement.bind(document);
+    const createObjectURL = vi.spyOn(URL, "createObjectURL");
+    const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL");
+    const click = vi.fn();
+    const anchor = document.createElement("a");
+
+    vi.spyOn(document, "createElement").mockImplementation((name: string) => {
+      if (name === "a") {
+        return Object.assign(anchor, {
+          click,
+        });
+      }
+      return originalCreateElement(name);
+    });
+
+    createObjectURL.mockReturnValue("blob:report");
+
+    const report = {
+      schemaVersion: 1,
+      generatedAt: "2026-07-22T00:00:00.000Z",
+      product: "YAWF Stream",
+      appVersion: "1.0.0",
+      environment: {
+        runtime: "browser",
+        platform: "MacIntel",
+        mode: "local",
+      },
+      configuration: {
+        networkMode: "auto",
+        dataSaver: false,
+        builtInPlayer: true,
+        autoAdvanceEpisodes: true,
+        configuredProviders: [],
+        activeSourceTypes: [],
+        builtInIndexersEnabled: true,
+        tmdbConfigured: false,
+        omdbConfigured: false,
+        subtitlesConfigured: false,
+        traktConfigured: false,
+      },
+      events: [],
+    };
+
+    downloadDiagnosticsReport(report);
+
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:report");
   });
 });

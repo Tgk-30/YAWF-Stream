@@ -92,6 +92,49 @@ describe("MediaCard watched badge", () => {
   });
 });
 
+describe("MediaCard play action fallback", () => {
+  it("falls back to onSelect when onPlay is absent", () => {
+    const onSelect = vi.fn();
+    const { container } = render(
+      <MediaCard
+        item={{ ...item, posterPath: "/poster.jpg" }}
+        onSelect={onSelect}
+        showPosterRatings={false}
+      />
+    );
+
+    const playButton = container.querySelector(".media-card-play");
+    if (playButton == null) {
+      throw new Error("play affordance should be present");
+    }
+    fireEvent.click(playButton);
+
+    expect(onSelect).toHaveBeenCalledWith({ ...item, posterPath: "/poster.jpg" });
+  });
+
+  it("uses onPlay directly when provided", () => {
+    const onSelect = vi.fn();
+    const onPlay = vi.fn();
+    const { container } = render(
+      <MediaCard
+        item={{ ...item, posterPath: "/poster.jpg" }}
+        onSelect={onSelect}
+        onPlay={onPlay}
+        showPosterRatings={false}
+      />
+    );
+
+    const playButton = container.querySelector(".media-card-play");
+    if (playButton == null) {
+      throw new Error("play affordance should be present");
+    }
+    fireEvent.click(playButton);
+
+    expect(onPlay).toHaveBeenCalledWith({ ...item, posterPath: "/poster.jpg" });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
 describe("MediaCard poster fallback", () => {
   it("uses the designed fallback for both a missing and failed search-result poster", () => {
     const noPoster: MediaPreview = { ...item, id: "missing", posterPath: null };
@@ -111,5 +154,85 @@ describe("MediaCard poster fallback", () => {
     fireEvent.error(screen.getByRole("img", { name: "Inception" }));
     expect(container.querySelector(".media-card-fallback")).toBeInTheDocument();
     expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("removes shimmer only after the image load event fires", () => {
+    const { container } = render(
+      <MediaCard
+        item={{ ...item, posterPath: "/poster.jpg" }}
+        onSelect={() => {}}
+        showPosterRatings={false}
+      />,
+    );
+
+    expect(container.querySelector(".media-card-shimmer")).not.toBeNull();
+
+    const img = screen.getByRole("img", { name: "Inception" });
+    fireEvent.load(img);
+
+    expect(container.querySelector(".media-card-shimmer")).toBeNull();
+  });
+
+  it("renders rank label and ranked accessible name", () => {
+    render(<MediaCard item={item} onSelect={() => {}} rank={7} showPosterRatings={false} />);
+
+    const button = screen.getByRole("button", { name: "#7: Inception" });
+    expect(button).toHaveClass("media-card");
+    expect(button).toHaveClass("is-ranked");
+    expect(button.querySelector(".media-card-rank")).toHaveTextContent("7");
+  });
+
+  it("renders ready and corner-label overlays together", () => {
+    render(
+      <MediaCard
+        item={item}
+        onSelect={() => {}}
+        ready
+        cornerLabel="S2 E4"
+        showPosterRatings={false}
+      />,
+    );
+
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("S2 E4")).toBeInTheDocument();
+  });
+
+  it("renders and clamps the continue-watching progress bar", () => {
+    const { container, rerender } = render(
+      <MediaCard
+        item={{ ...item, posterPath: null }}
+        onSelect={() => {}}
+        progress={1.25}
+        showPosterRatings={false}
+      />,
+    );
+    expect(container.querySelector(".media-card-progress-fill")).toHaveStyle({
+      width: "100%",
+    });
+
+    rerender(
+      <MediaCard
+        item={{ ...item, posterPath: null }}
+        onSelect={() => {}}
+        progress={-0.2}
+        showPosterRatings={false}
+      />,
+    );
+    expect(container.querySelector(".media-card-progress-fill")).toBeNull();
+  });
+
+  it("shows reveal-level metadata when available", () => {
+    const { container } = render(
+      <MediaCard
+        item={{ ...item, year: 2026, imdbRating: 8.4 }}
+        onSelect={() => {}}
+        showPosterRatings={false}
+      />,
+    );
+
+    const revealMeta = container.querySelector(".media-card-reveal-meta");
+    expect(revealMeta).not.toBeNull();
+    expect(revealMeta).toHaveTextContent("2026");
+    expect(revealMeta).toHaveTextContent("8.4");
   });
 });

@@ -62,5 +62,9 @@ export async function testOmdbKey(key: string): Promise<OmdbTestResult> {
 export async function testDebridToken(entry: DebridTokenEntry): Promise<boolean> {
   const service = buildDebridService(entry);
   if (service == null) return false;
-  return service.validateToken();
+  try {
+    return await service.validateToken();
+  } catch {
+    return false;
+  }
 }

@@ -54,6 +54,30 @@ describe("installExternalLinkHandler", () => {
     expect(openExternalURL).not.toHaveBeenCalled();
   });
 
+  it("ignores anchors whose click was already handled", () => {
+    const a = document.createElement("a");
+    a.href = "https://example.com/handled";
+    a.textContent = "handled";
+    document.body.append(a);
+
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    event.preventDefault();
+    a.dispatchEvent(event);
+
+    expect(openExternalURL).not.toHaveBeenCalled();
+    a.remove();
+  });
+
+  it("only installs one delegated listener even when called twice", () => {
+    clickAnchor("https://www.themoviedb.org/settings/api");
+    expect(openExternalURL).toHaveBeenCalledTimes(1);
+
+    installExternalLinkHandler();
+    openExternalURL.mockClear();
+    clickAnchor("https://www.themoviedb.org/settings/api");
+    expect(openExternalURL).toHaveBeenCalledTimes(1);
+  });
+
   it("routes modified clicks too under Tauri (no new-tab in the desktop webview)", () => {
     // In a browser Cmd/Ctrl-click opens a new tab, but the Tauri webview has no
     // such concept - the click would otherwise be swallowed and do nothing, so

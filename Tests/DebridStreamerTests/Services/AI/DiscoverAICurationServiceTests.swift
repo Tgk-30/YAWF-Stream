@@ -42,6 +42,197 @@ struct DiscoverAICurationServiceTests {
         )
     }
 
+    private func makeManager(with recommendations: [AIMovieRecommendation]) -> (AIAssistantManager, MockRecommendationProvider) {
+        let provider = MockRecommendationProvider(recommendations: recommendations)
+        let manager = AIAssistantManager(
+            providers: [.openAI: provider],
+            database: nil,
+            settings: nil,
+            metadataProvider: nil
+        )
+        return (manager, provider)
+    }
+
+    private func makeManager(with recommendations: [AIMovieRecommendation], error: Error) -> (AIAssistantManager, MockRecommendationProvider) {
+        let provider = MockRecommendationProvider(recommendations: recommendations, errorToThrow: error)
+        let manager = AIAssistantManager(
+            providers: [.openAI: provider],
+            database: nil,
+            settings: nil,
+            metadataProvider: nil
+        )
+        return (manager, provider)
+    }
+
+    // MARK: - generateRecommendations
+
+    @Test("generateRecommendations returns cached entries when available")
+    func generateRecommendationsReturnsCachedEntries() async throws {
+        let db = try makeTestDatabase()
+        let cached = AIMovieRecommendation(
+            title: "Cached One",
+            year: 2020,
+            reason: "cached",
+            score: 0.9,
+            mediaId: "cached-id",
+            mediaType: .movie,
+            posterPath: "/cache.jpg"
+        )
+        try await seedCache(db, recommendations: [cached])
+
+        let fresh = AIMovieRecommendation(
+            title: "Fresh One",
+            year: 2021,
+            reason: "fresh",
+            score: 0.8,
+            mediaId: "fresh-id",
+            mediaType: .movie,
+            posterPath: "/fresh.jpg"
+        )
+        let (manager, provider) = makeManager(with: [fresh])
+
+        let service = DiscoverAICurationService(
+            assistantManager: manager,
+            database: db,
+            settings: nil,
+            metadataProvider: nil
+        )
+
+        let result = await service.generateRecommendations()
+
+        #expect(result == [cached])
+        #expect(await provider.callCount == 0)
+    }
+
+    @Test("generateRecommendations returns empty when no assistant manager is configured")
+    func generateRecommendationsWithoutManagerReturnsEmpty() async throws {
+        let db = try makeTestDatabase()
+        let cached = AIMovieRecommendation(
+            title: "Cached",
+            year: 2020,
+            reason: "cached",
+            score: 0.9,
+            mediaId: "cached-id",
+            mediaType: .movie,
+            posterPath: "/cache.jpg"
+        )
+        try await seedCache(db, recommendations: [cached])
+
+        let service = makeService(database: db, settings: nil, metadataProvider: nil)
+        let result = await service.generateRecommendations()
+
+        #expect(result.isEmpty)
+    }
+
+    @Test("generateRecommendations bypasses cache when forced")
+    func generateRecommendationsBypassCacheWhenForceRefresh() async throws {
+        let db = try makeTestDatabase()
+        let cached = AIMovieRecommendation(
+            title: "Cached One",
+            year: 2020,
+            reason: "cached",
+            score: 0.9,
+            mediaId: "cached-id",
+            mediaType: .movie,
+            posterPath: "/cache.jpg"
+        )
+        try await seedCache(db, recommendations: [cached])
+
+        let fresh = AIMovieRecommendation(
+            title: "Fresh One",
+            year: 2021,
+            reason: "fresh",
+            score: 0.8,
+            mediaId: "fresh-id",
+            mediaType: .movie,
+            posterPath: "/fresh.jpg"
+        )
+        let (manager, provider) = makeManager(with: [fresh])
+        let service = DiscoverAICurationService(
+            assistantManager: manager,
+            database: db,
+            settings: nil,
+            metadataProvider: nil
+        )
+
+        let result = await service.generateRecommendations(forceRefresh: true)
+
+        #expect(result == [fresh])
+        #expect(await provider.callCount == 1)
+    }
+
+    @Test("generateRecommendations caches fresh results")
+    func generateRecommendationsCachesFreshResults() async throws {
+        let db = try makeTestDatabase()
+        let source = AIMovieRecommendation(
+            title: "Generated",
+            year: 2022,
+            reason: "generated",
+            score: 0.95,
+            mediaId: "generated-id",
+            mediaType: .movie,
+            posterPath: "/generated.jpg"
+        )
+        let (manager, provider) = makeManager(with: [source])
+        let service = DiscoverAICurationService(
+            assistantManager: manager,
+            database: db,
+            settings: nil,
+            metadataProvider: nil
+        )
+
+        let first = await service.generateRecommendations()
+        let second = await service.generateRecommendations()
+
+        #expect(first == [source])
+        #expect(second == [source])
+        #expect(await provider.callCount == 1)
+    }
+
+    @Test("generateRecommendations enriches with metadata search results")
+    func generateRecommendationsEnrichesFromMetadata() async throws {
+        let db = try makeTestDatabase()
+        let recommendation = AIMovieRecommendation(
+            title: "No Poster",
+            year: nil,
+            reason: "no poster yet",
+            score: 0.8
+        )
+
+        let (manager, _) = makeManager(with: [recommendation])
+
+        var metadataProvider = StubMetadataProvider()
+        metadataProvider.searchResponse = MetadataSearchResult(
+            items: [
+                MediaPreview(
+                    id: "tt-enriched",
+                    type: .movie,
+                    title: "No Poster",
+                    year: 2023,
+                    posterPath: "/enriched.jpg"
+                )
+            ],
+            page: 1,
+            totalPages: 1,
+            totalResults: 1
+        )
+
+        let service = DiscoverAICurationService(
+            assistantManager: manager,
+            database: db,
+            settings: nil,
+            metadataProvider: metadataProvider
+        )
+
+        let result = await service.generateRecommendations()
+        #expect(result.count == 1)
+        let first = try #require(result.first)
+        #expect(first.posterPath == "/enriched.jpg")
+        #expect(first.mediaId == "tt-enriched")
+        #expect(first.mediaType == .movie)
+        #expect(first.year == 2023)
+    }
+
     // MARK: - shouldGenerateOnLaunch
 
     @Test("shouldGenerateOnLaunch is false when both flags are unset")
@@ -437,5 +628,35 @@ struct DiscoverAICurationServiceTests {
         let first = try #require(result.first)
         #expect(first.mediaId == "first-postered")
         #expect(first.posterPath == "/fp.jpg")
+    }
+}
+
+private actor MockRecommendationProvider: AIAssistantProvider {
+    nonisolated let kind: AIProviderKind = .openAI
+    private var recommendationCalls = 0
+    private let recommendations: [AIMovieRecommendation]
+    private let errorToThrow: Error?
+
+    init(recommendations: [AIMovieRecommendation], errorToThrow: Error? = nil) {
+        self.recommendations = recommendations
+        self.errorToThrow = errorToThrow
+    }
+
+    var callCount: Int {
+        recommendationCalls
+    }
+
+    func recommend(prompt: String, candidateTitles: [String], maxResults: Int) async throws -> AIProviderRecommendationResult {
+        recommendationCalls += 1
+        if let errorToThrow {
+            throw errorToThrow
+        }
+
+        return AIProviderRecommendationResult(
+            model: "test",
+            recommendations: Array(recommendations.prefix(maxResults)),
+            rawText: nil,
+            usage: nil
+        )
     }
 }

@@ -35,6 +35,14 @@ const loadTraktConnection = vi.hoisted(() => vi.fn());
 const clearTraktConnection = vi.hoisted(() => vi.fn());
 const factoryReset = vi.hoisted(() => vi.fn());
 const testDebridToken = vi.hoisted(() => vi.fn());
+const fetchAvailableModels = vi.hoisted(() => vi.fn(async () => ["custom-model-1", "custom-model-2"]));
+// vi.fn now takes the whole function signature as its type argument, so pin the
+// mock to the real ModelCache signature instead of letting `async () => null`
+// narrow the resolved type to `null`.
+const readModelCache = vi.hoisted(() =>
+  vi.fn<typeof import("../services/ai/ModelCache").readModelCache>(async () => null),
+);
+const writeModelCache = vi.hoisted(() => vi.fn(async () => undefined));
 let smartPreloadOn = false;
 
 vi.mock("../store/AppStore", () => ({
@@ -94,12 +102,33 @@ vi.mock("../lib/smartPreload", () => ({
   },
 }));
 
+vi.mock("../services/ai/ModelCache", () => ({
+  readModelCache,
+  writeModelCache,
+}));
+
+vi.mock("../services/ai/ModelCatalog", () => ({ fetchAvailableModels }));
+
 vi.mock("../lib/onboardingValidation", () => ({ testDebridToken }));
 
 vi.mock("../data/traktConnection", () => ({
   isTraktConnected,
   loadTraktConnection,
   clearTraktConnection,
+}));
+
+vi.mock("../components/TraktConnectDialog", () => ({
+  TraktConnectDialog: ({ onClose, onConnected }: { onClose: () => void; onConnected: () => void }) => (
+    <div>
+      <span>Mock Trakt Connect Dialog</span>
+      <button type="button" onClick={onClose}>
+        Close Trakt dialog
+      </button>
+      <button type="button" onClick={onConnected}>
+        Simulate Trakt connection
+      </button>
+    </div>
+  ),
 }));
 
 // QRCode is only used in desktop-host (mocked tauri = not desktop), but import
@@ -135,6 +164,12 @@ beforeEach(() => {
   clearTraktConnection.mockReset();
   factoryReset.mockReset();
   testDebridToken.mockReset();
+  fetchAvailableModels.mockReset();
+  fetchAvailableModels.mockResolvedValue(["custom-model-1", "custom-model-2"]);
+  readModelCache.mockReset();
+  writeModelCache.mockReset();
+  readModelCache.mockResolvedValue(null);
+  writeModelCache.mockResolvedValue(undefined);
   factoryReset.mockResolvedValue(undefined);
   isTraktConnected.mockResolvedValue(false);
   loadTraktConnection.mockResolvedValue(null);
@@ -300,6 +335,16 @@ describe("Settings · API keys (catalog)", () => {
     expect(screen.queryByPlaceholderText("OMDB key")).toBeNull();
   });
 
+  it("captures an OMDB key in advanced mode", async () => {
+    const user = userEvent.setup();
+    renderAt("keys");
+
+    const omdb = screen.getByPlaceholderText("OMDB key");
+    await user.clear(omdb);
+    await user.type(omdb, "abc-omdb");
+    expect(omdb).toHaveValue("abc-omdb");
+  });
+
   it("reflects an existing OpenSubtitles key value from the draft", () => {
     renderAt("keys", { openSubtitlesApiKey: "os-key-123" });
     expect(screen.getByPlaceholderText("OpenSubtitles key")).toHaveValue("os-key-123");
@@ -309,6 +354,17 @@ describe("Settings · API keys (catalog)", () => {
     renderAt("keys");
     const connect = await screen.findByRole("button", { name: "Connect" });
     expect(connect).toBeDisabled();
+  });
+
+  it("updates the Trakt client ID", async () => {
+    const user = userEvent.setup();
+    renderAt("keys");
+
+    const traktId = screen.getByPlaceholderText("Client ID") as HTMLInputElement;
+    await user.clear(traktId);
+    await user.type(traktId, "client-id");
+
+    expect(traktId).toHaveValue("client-id");
   });
 
   it("disconnects an existing Trakt connection", async () => {
@@ -342,12 +398,135 @@ describe("Settings · API keys (catalog)", () => {
     expect(connectedToggle).toBeChecked();
   });
 
+  it("updates trakt secret and opens/closes the Trakt connect dialog", async () => {
+    const user = userEvent.setup();
+    isTraktConnected.mockResolvedValueOnce(false);
+    loadTraktConnection.mockResolvedValueOnce(null);
+    isTraktConnected.mockResolvedValueOnce(true);
+    loadTraktConnection.mockResolvedValueOnce({ meta: { username: "alice" } });
+
+    renderAt("keys", { traktClientId: "client", traktClientSecret: "" });
+
+    const traktSecret = screen.getByPlaceholderText("Client Secret") as HTMLInputElement;
+    await user.type(traktSecret, "token");
+    expect(traktSecret).toHaveValue("token");
+
+    const connect = screen.getByRole("button", { name: "Connect" });
+    await waitFor(() => expect(connect).toBeEnabled());
+    await user.click(connect);
+
+    expect(screen.getByText("Mock Trakt Connect Dialog")).toBeInTheDocument();
+    expect(isTraktConnected).toHaveBeenCalledTimes(1);
+    expect(loadTraktConnection).toHaveBeenCalledTimes(0);
+
+    await user.click(screen.getByRole("button", { name: "Simulate Trakt connection" }));
+    await waitFor(() => expect(isTraktConnected).toHaveBeenCalledTimes(2));
+    expect(loadTraktConnection).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Close Trakt dialog" }));
+    expect(screen.queryByText("Mock Trakt Connect Dialog")).toBeNull();
+  });
+
+  it("falls back to Not connected when Trakt probe throws", async () => {
+    isTraktConnected.mockRejectedValue(new Error("network down"));
+
+    renderAt("keys", { traktClientId: "client", traktClientSecret: "secret" });
+
+    expect(await screen.findByText("Not connected")).toBeInTheDocument();
+    expect(loadTraktConnection).not.toHaveBeenCalled();
+  });
+
   it("switches to the Assistant AI panel and shows the provider select", async () => {
     const user = userEvent.setup();
     renderAt("keys");
     await user.click(screen.getByRole("button", { name: /Assistant AI/ }));
     // Default provider is anthropic → an Anthropic API key field is shown.
     expect(screen.getByPlaceholderText("API key")).toBeInTheDocument();
+  });
+
+  it("switches credential groups using the selector", async () => {
+    const user = userEvent.setup();
+    renderAt("keys");
+
+    const panelSelect = screen.getByRole("combobox", { name: "Credential group" }) as HTMLSelectElement;
+    await user.selectOptions(panelSelect, "assistant");
+
+    expect(screen.getByRole("combobox", { name: "AI provider" })).toBeInTheDocument();
+    expect(screen.queryByText("TMDB API key")).toBeNull();
+  });
+
+  it("resets an explicit model override when provider changes", async () => {
+    const user = userEvent.setup();
+    renderAt("keys", {
+      aiProvider: "anthropic",
+      aiModel: "gpt-4o-mini",
+    });
+
+    await user.click(screen.getByRole("button", { name: /Assistant AI/ }));
+    const modelSelect = screen.getByRole("combobox", { name: "AI model" }) as HTMLSelectElement;
+    const providerSelect = screen.getByRole("combobox", { name: "AI provider" }) as HTMLSelectElement;
+
+    expect(modelSelect.value).toBe("gpt-4o-mini");
+    await user.selectOptions(providerSelect, "ollama");
+    expect(modelSelect.value).toBe("__default");
+  });
+
+  it("writes model selection from the model picker", async () => {
+    const user = userEvent.setup();
+    renderAt("keys", { aiProvider: "anthropic", aiApiKey: "test-api-key" });
+    await user.click(screen.getByRole("button", { name: /Assistant AI/ }));
+
+    const modelSelect = screen.getByRole("combobox", { name: "AI model" }) as HTMLSelectElement;
+    await user.selectOptions(modelSelect, "claude-opus-4-8");
+
+    expect(modelSelect.value).toBe("claude-opus-4-8");
+  });
+
+  it("refreshes live model catalog from the model panel", async () => {
+    const user = userEvent.setup();
+    renderAt("keys", { aiProvider: "anthropic", aiApiKey: "test-api-key" });
+    await user.click(screen.getByRole("button", { name: /Assistant AI/ }));
+
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    await user.click(refresh);
+
+    expect(fetchAvailableModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "anthropic",
+        apiKey: "test-api-key",
+      }),
+    );
+  });
+
+  it("uses cached model data when available", async () => {
+    const now = Date.now();
+    readModelCache.mockResolvedValue({
+      models: ["cached-model"],
+      fetchedAt: now,
+      stale: false,
+    });
+
+    renderAt("keys", { aiProvider: "anthropic", aiApiKey: "test-api-key" });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Assistant AI/ }));
+
+    await waitFor(() => {
+      const modelSelect = screen.getByRole("combobox", { name: "AI model" }) as HTMLSelectElement;
+      expect(within(modelSelect).getByRole("option", { name: "cached-model" })).toBeInTheDocument();
+    });
+  });
+
+  it("reports a warning when live model refresh fails", async () => {
+    const user = userEvent.setup();
+    fetchAvailableModels.mockRejectedValue(new Error("model refresh failed"));
+
+    renderAt("keys", { aiProvider: "anthropic", aiApiKey: "test-api-key" });
+    await user.click(screen.getByRole("button", { name: /Assistant AI/ }));
+
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    await user.click(refresh);
+
+    expect(await screen.findByText("model refresh failed")).toBeInTheDocument();
   });
 
   it("shows the Ollama endpoint field (not a secret) when provider is ollama", async () => {
@@ -357,6 +536,31 @@ describe("Settings · API keys (catalog)", () => {
     expect(screen.getByPlaceholderText("http://localhost:11434")).toBeInTheDocument();
     // No API-key secret field in ollama mode.
     expect(screen.queryByPlaceholderText("API key")).toBeNull();
+
+    const endpoint = screen.getByPlaceholderText("http://localhost:11434") as HTMLInputElement;
+    await user.clear(endpoint);
+    await user.type(endpoint, "http://localhost:11435");
+    expect(endpoint).toHaveValue("http://localhost:11435");
+  });
+
+  it("allows typing into the Assistant AI key field", async () => {
+    const user = userEvent.setup();
+    renderAt("keys");
+    await user.click(screen.getByRole("button", { name: /Assistant AI/ }));
+    const apiKey = screen.getByPlaceholderText("API key");
+    await user.type(apiKey, "secret-api-key");
+    expect(apiKey).toHaveValue("secret-api-key");
+  });
+
+  it("updates the OpenSubtitles API key in Advanced mode", async () => {
+    const user = userEvent.setup();
+    renderAt("keys", { openSubtitlesApiKey: "os-old" });
+
+    const openSubtitlesKey = screen.getByPlaceholderText("OpenSubtitles key") as HTMLInputElement;
+    await user.clear(openSubtitlesKey);
+    await user.type(openSubtitlesKey, "os-new");
+
+    expect(openSubtitlesKey).toHaveValue("os-new");
   });
 });
 
@@ -402,6 +606,21 @@ describe("Settings · SecretInput", () => {
     await user.click(screen.getAllByRole("button", { name: "Copy secret" })[0]);
     expect(writeText).not.toHaveBeenCalled();
     expect(await screen.findByText("Nothing to copy.")).toBeInTheDocument();
+  });
+
+  it('shows "Clipboard unavailable." when copy fails', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => {
+      throw new Error("copy blocked");
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    renderAt("keys", { tmdbKey: "k" });
+    await user.click(screen.getAllByRole("button", { name: "Copy secret" })[0]);
+    expect(await screen.findByText("Clipboard unavailable.")).toBeInTheDocument();
   });
 });
 
@@ -472,6 +691,22 @@ describe("Settings · Providers (debrid)", () => {
     expect(screen.getByRole("button", { name: /2\. TorBox/ })).toBeInTheDocument();
   });
 
+  it("switches the selected debrid provider in the dropdown", async () => {
+    const user = userEvent.setup();
+    renderAt("debrid", {
+      debridTokens: [
+        { service: "real_debrid", apiToken: "rd-token" },
+        { service: "torbox", apiToken: "tb-token" },
+      ],
+    });
+
+    const provider = screen.getByRole("combobox", { name: /Debrid provider/ });
+    await user.selectOptions(provider, "all_debrid");
+
+    expect(screen.getByRole("button", { name: /1\. Real-Debrid/ })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("API token")).toHaveValue("");
+  });
+
   it("tests the selected provider token and reports a failed connection", async () => {
     const user = userEvent.setup();
     testDebridToken.mockResolvedValue(false);
@@ -520,10 +755,11 @@ describe("Settings · Sources", () => {
   it("adds an external indexer from the selected preset", async () => {
     const user = userEvent.setup();
     renderAt("sources");
+    const preset = screen.getByRole("combobox", { name: /Source preset/ });
+    await user.selectOptions(preset, "zilean-local");
     await user.click(screen.getByRole("button", { name: /Add source/ }));
-    // The first preset is "Jackett local" → a Jackett source card appears, with
-    // the preset's display name pre-filled in the indexer-name input.
-    expect(screen.getByPlaceholderText("Display name")).toHaveValue("Jackett");
+    // The selected preset is "Zilean local" → a Zilean source card appears.
+    expect(screen.getByPlaceholderText("Display name")).toHaveValue("Zilean");
     expect(screen.queryByText(/No external sources/)).toBeNull();
   });
 
@@ -580,6 +816,21 @@ describe("Settings · Sources", () => {
     expect(after).toEqual(["Beta", "Alpha"]);
   });
 
+  it("moves a source up with the move button", async () => {
+    const user = userEvent.setup();
+    renderAt("sources", {
+      sources: [
+        { id: "a", type: "jackett", baseURL: "http://localhost:9117", apiKey: "", isActive: true, displayName: "Alpha", priority: 0 },
+        { id: "b", type: "zilean", baseURL: "http://localhost:8181", apiKey: "", isActive: true, displayName: "Beta", priority: 1 },
+      ],
+    });
+    const before = screen.getAllByPlaceholderText("Display name").map((i) => (i as HTMLInputElement).value);
+    expect(before).toEqual(["Alpha", "Beta"]);
+    await user.click(screen.getAllByRole("button", { name: "Move source up" })[1]);
+    const after = screen.getAllByPlaceholderText("Display name").map((i) => (i as HTMLInputElement).value);
+    expect(after).toEqual(["Beta", "Alpha"]);
+  });
+
   it("surfaces an off-preset baseURL as a 'Current custom URL' choice in the preset select", () => {
     renderAt("sources", {
       sources: [
@@ -603,6 +854,52 @@ describe("Settings · Sources", () => {
     const urlSelect = screen.getByRole("combobox", { name: /URL preset/ }) as HTMLSelectElement;
     await user.selectOptions(urlSelect, "http://localhost:9117");
     expect(urlSelect.value).toBe("http://localhost:9117");
+  });
+
+  it("edits an existing source display name", async () => {
+    const user = userEvent.setup();
+    renderAt("sources", {
+      sources: [
+        { id: "s1", type: "prowlarr", baseURL: "http://localhost:9696", apiKey: "", isActive: true, displayName: "My Feed", priority: 0 },
+      ],
+    });
+    const nameInput = screen.getByPlaceholderText("Display name") as HTMLInputElement;
+    await user.clear(nameInput);
+    await user.type(nameInput, "Rebranded");
+    expect(nameInput.value).toBe("Rebranded");
+  });
+
+  it("updates a source's custom URL when a custom preset is chosen", () => {
+    renderAt("sources", {
+      sources: [
+        { id: "s1", type: "jackett", baseURL: "", apiKey: "", isActive: true, displayName: "Custom", priority: 0 },
+      ],
+    });
+    const urlInput = screen.getByPlaceholderText("https://indexer.example.com") as HTMLInputElement;
+    expect(urlInput).toBeInTheDocument();
+    fireEvent.change(urlInput, { target: { value: "https://updated.example" } });
+    expect(urlInput.value).toBe("https://updated.example");
+  });
+
+  it("toggles source enabled state", async () => {
+    const user = userEvent.setup();
+    renderAt("sources", {
+      sources: [
+        {
+          id: "s1",
+          type: "prowlarr",
+          baseURL: "http://localhost:9696",
+          apiKey: "",
+          isActive: false,
+          displayName: "My Prowlarr",
+          priority: 0,
+        },
+      ],
+    });
+    const enabled = screen.getByRole("checkbox", { name: /Enabled/ }) as HTMLInputElement;
+    expect(enabled).not.toBeChecked();
+    await user.click(enabled);
+    expect(enabled).toBeChecked();
   });
 
   it("writes a typed API key onto the source's secret input", async () => {

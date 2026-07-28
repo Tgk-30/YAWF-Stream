@@ -81,4 +81,11 @@ describe("MoodStrip", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/AI key/i)).not.toBeInTheDocument();
   });
+
+  it("applies search variant class names", () => {
+    render(<MoodStrip variant="search" />);
+    const heading = screen.getByText("Describe a vibe").closest("section")!;
+
+    expect(heading).toHaveClass("mood-search");
+  });
 });

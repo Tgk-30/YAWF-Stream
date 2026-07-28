@@ -1,9 +1,18 @@
 import Testing
 import Foundation
+import GRDB
 @testable import DebridStreamer
 
 @Suite("DebridServiceType Tests")
 struct DebridServiceTypeTests {
+    @Test("Short codes")
+    func shortCodes() {
+        #expect(DebridServiceType.realDebrid.shortCode == "RD")
+        #expect(DebridServiceType.allDebrid.shortCode == "AD")
+        #expect(DebridServiceType.premiumize.shortCode == "PM")
+        #expect(DebridServiceType.torBox.shortCode == "TB")
+    }
+
     @Test("Display names")
     func displayNames() {
         #expect(DebridServiceType.realDebrid.displayName == "Real-Debrid")
@@ -52,6 +61,53 @@ struct DebridConfigTests {
         #expect(config.priority == 0)
     }
 
+    @Test("DebridConfig row init falls back when service is unknown")
+    func rowInitFallsBackForUnknownService() throws {
+        let row = Row([
+            DebridConfig.Columns.id.rawValue: "rd-legacy",
+            DebridConfig.Columns.service.rawValue: "unknown-service",
+            DebridConfig.Columns.apiToken.rawValue: "legacy-token",
+            DebridConfig.Columns.isActive.rawValue: false,
+            DebridConfig.Columns.priority.rawValue: 7
+        ])
+        let config = try DebridConfig(row: row)
+
+        #expect(config.id == "rd-legacy")
+        #expect(config.service == .realDebrid)
+        #expect(config.apiToken == "legacy-token")
+        #expect(config.isActive == false)
+        #expect(config.priority == 7)
+    }
+
+    @Test("DebridConfig can round-trip through the persistence layer")
+    func debirdConfigPersistenceRoundTrip() throws {
+        let original = DebridConfig(
+            id: "rd-persist",
+            service: .torBox,
+            apiToken: "persist-token",
+            isActive: false,
+            priority: 4
+        )
+
+        let database = try DatabaseQueue(named: "debrid-config")
+        try database.write { db in
+            try db.create(table: DebridConfig.databaseTableName) { table in
+                table.primaryKey("id", .text)
+                table.column("service", .text).notNull()
+                table.column("apiToken", .text).notNull()
+                table.column("isActive", .boolean).notNull()
+                table.column("priority", .integer).notNull()
+            }
+            try original.insert(db)
+
+            let row = try #require(try Row.fetchOne(db, sql: "SELECT * FROM \(DebridConfig.databaseTableName) WHERE id = ?", arguments: [original.id]))
+            let decoded = try DebridConfig(row: row)
+
+            #expect(decoded == original)
+            #expect(row[DebridConfig.Columns.service] as String == DebridServiceType.torBox.rawValue)
+        }
+    }
+
     @Test("DebridConfig defaults")
     func defaults() {
         let config = DebridConfig(
@@ -66,6 +122,15 @@ struct DebridConfigTests {
 
 @Suite("IndexerConfig Tests")
 struct IndexerConfigTests {
+    @Test("Provider subtype display names")
+    func providerSubtypeDisplayNames() {
+        #expect(IndexerConfig.ProviderSubtype.jackett.displayName == "Jackett")
+        #expect(IndexerConfig.ProviderSubtype.prowlarr.displayName == "Prowlarr")
+        #expect(IndexerConfig.ProviderSubtype.customTorznab.displayName == "Custom Torznab")
+        #expect(IndexerConfig.ProviderSubtype.stremioAddon.displayName == "Stremio Addon")
+        #expect(IndexerConfig.ProviderSubtype.builtIn.displayName == "Built-in")
+    }
+
     @Test("IndexerType display names")
     func indexerTypeDisplayNames() {
         #expect(IndexerConfig.IndexerType.jackett.displayName == "Jackett")
@@ -90,6 +155,52 @@ struct IndexerConfigTests {
         #expect(config.isActive == true)
         #expect(config.priority == 0)
         #expect(config.endpointPath.contains("torznab"))
+    }
+
+    @Test("IndexerConfig row init falls back to defaults for malformed rows")
+    func rowInitFallsBackToDefaults() throws {
+        let row = Row([
+            IndexerConfig.Columns.id.rawValue: "prowlarr-legacy",
+            IndexerConfig.Columns.type.rawValue: IndexerConfig.IndexerType.prowlarr.rawValue,
+            IndexerConfig.Columns.baseURL.rawValue: "https://legacy.example",
+            IndexerConfig.Columns.isActive.rawValue: true,
+            IndexerConfig.Columns.providerSubtype.rawValue: "not-real",
+            IndexerConfig.Columns.endpointPath.rawValue: NSNull()
+        ])
+
+        let config = try IndexerConfig(row: row)
+        #expect(config.id == "prowlarr-legacy")
+        #expect(config.type == .prowlarr)
+        #expect(config.providerSubtype == .prowlarr)
+        #expect(config.endpointPath == "/api/v1/search")
+        #expect(config.categoryFilter == nil)
+    }
+
+    @Test("IndexerConfig row init defaults per type and returns fallback values")
+    func rowInitAppliesDefaultProviderSubtypeForEachType() throws {
+        let rows: [(type: IndexerConfig.IndexerType, expectedSubtype: IndexerConfig.ProviderSubtype, expectedEndpoint: String)] = [
+            (.jackett, .jackett, "/api/v2.0/indexers/all/results/torznab/api"),
+            (.prowlarr, .prowlarr, "/api/v1/search"),
+            (.torznab, .customTorznab, "/api"),
+            (.zilean, .customTorznab, "/api"),
+            (.stremioAddon, .stremioAddon, ""),
+            (.builtIn, .builtIn, "")
+        ]
+
+        for item in rows {
+            let row = Row([
+                IndexerConfig.Columns.id.rawValue: "test-\(item.type.rawValue)",
+                IndexerConfig.Columns.type.rawValue: item.type.rawValue,
+                IndexerConfig.Columns.baseURL.rawValue: "https://example.com",
+                IndexerConfig.Columns.isActive.rawValue: true,
+                IndexerConfig.Columns.providerSubtype.rawValue: "",
+                IndexerConfig.Columns.endpointPath.rawValue: NSNull()
+            ])
+            let config = try IndexerConfig(row: row)
+            #expect(config.type == item.type)
+            #expect(config.providerSubtype == item.expectedSubtype)
+            #expect(config.endpointPath == item.expectedEndpoint)
+        }
     }
 }
 

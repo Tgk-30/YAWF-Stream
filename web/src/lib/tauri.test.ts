@@ -28,6 +28,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 
 import {
   isTauri,
+  listExternalPlayers,
   openInExternalPlayer,
   playWithMpv,
   mpvPause,
@@ -41,8 +42,15 @@ import {
   stopDesktopServer,
   openExternalURL,
   getAppInstallInfo,
+  revealInFileManager,
   downloadStart,
+  transcodeStart,
+  transcodeCancel,
+  downloadsFfmpegAvailable,
+  downloadsDefaultDir,
   downloadCancel,
+  downloadPause,
+  downloadResume,
   downloadForceStop,
   listenDownloadProgress,
   castDiscover,
@@ -54,6 +62,7 @@ import {
   type DesktopServerStatus,
   type MpvPlayResult,
 } from "./tauri";
+import * as networkPolicy from "./networkPolicy";
 
 /** Put a fake Tauri window in place so isTauri() returns true. */
 function enterTauri(): void {
@@ -67,6 +76,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -111,9 +121,40 @@ describe("detectTunnelTools", () => {
     await expect(detectTunnelTools()).resolves.toEqual(tools);
     expect(invokeMock).toHaveBeenCalledWith("detect_tunnel_tools");
   });
+
+  it("falls back to no tunnel tools when detect fails", async () => {
+    enterTauri();
+    invokeMock.mockRejectedValue(new Error("rust bridge missing"));
+
+    await expect(detectTunnelTools()).resolves.toEqual({
+      cloudflared: { installed: false, version: null, detail: null },
+      tailscale: { installed: false, version: null, detail: null },
+    });
+  });
+});
+
+describe("external players bridge", () => {
+  it("returns an absent list outside Tauri", async () => {
+    await expect(listExternalPlayers()).resolves.toEqual([]);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to no players when discovery fails", async () => {
+    enterTauri();
+    invokeMock.mockRejectedValue(new Error("rust bridge missing"));
+
+    await expect(listExternalPlayers()).resolves.toEqual([]);
+  });
 });
 
 describe("getAppInstallInfo", () => {
+  it("throws when not running under Tauri", async () => {
+    await expect(getAppInstallInfo()).rejects.toThrow(
+      /no desktop installation information is available\./,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
   it("returns native installation details in Tauri", async () => {
     enterTauri();
     const info = {
@@ -126,6 +167,23 @@ describe("getAppInstallInfo", () => {
 
     await expect(getAppInstallInfo()).resolves.toEqual(info);
     expect(invokeMock).toHaveBeenCalledWith("app_install_info");
+  });
+});
+
+describe("revealInFileManager", () => {
+  it("does nothing outside Tauri", async () => {
+    await revealInFileManager("/tmp/file");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("invokes reveal_in_file_manager when available", async () => {
+    enterTauri();
+    invokeMock.mockResolvedValue(undefined);
+
+    await revealInFileManager("/tmp/file");
+    expect(invokeMock).toHaveBeenCalledWith("reveal_in_file_manager", {
+      path: "/tmp/file",
+    });
   });
 });
 
@@ -171,6 +229,24 @@ describe("openInExternalPlayer", () => {
       streamAuthorization: authorization,
     });
   });
+
+  it("checks the network gate before opening remote links", async () => {
+    const spy = vi.spyOn(networkPolicy, "assertNetworkAllowed");
+    enterTauri();
+    invokeMock.mockResolvedValue("opened");
+
+    await expect(openInExternalPlayer("https://cdn.example/file.mkv")).resolves.toBe("opened");
+    expect(spy).toHaveBeenCalledWith("streaming", "external player");
+  });
+
+  it("does not check the network gate for loopback links", async () => {
+    const spy = vi.spyOn(networkPolicy, "assertNetworkAllowed");
+    enterTauri();
+    invokeMock.mockResolvedValue("opened");
+
+    await expect(openInExternalPlayer("http://127.0.0.1:8787/file.mkv")).resolves.toBe("opened");
+    expect(spy).not.toHaveBeenCalled();
+  });
 });
 
 describe("playWithMpv", () => {
@@ -201,6 +277,15 @@ describe("playWithMpv", () => {
       url: "https://x/stream",
       streamAuthorization: authorization,
     });
+  });
+
+  it("checks the network gate before mpv playback", async () => {
+    const spy = vi.spyOn(networkPolicy, "assertNetworkAllowed");
+    enterTauri();
+    invokeMock.mockResolvedValue({ embedded: true, status: "playing" });
+
+    await playWithMpv("https://cdn.example/file.mkv");
+    expect(spy).toHaveBeenCalledWith("streaming", "mpv");
   });
 });
 
@@ -307,6 +392,22 @@ describe("DLNA cast IPC bridge", () => {
       args: { device, level: 100 },
     });
   });
+
+  it("passes a null subtitleUrl when one is not provided", async () => {
+    enterTauri();
+    invokeMock.mockResolvedValueOnce(undefined).mockResolvedValue(undefined);
+
+    await castLoad(device, "https://cdn.example/movie.mkv", "No Subtitle");
+
+    expect(invokeMock).toHaveBeenCalledWith("cast_load", {
+      args: {
+        device,
+        url: "https://cdn.example/movie.mkv",
+        title: "No Subtitle",
+        subtitleUrl: null,
+      },
+    });
+  });
 });
 
 describe("download IPC bridge", () => {
@@ -331,6 +432,50 @@ describe("download IPC bridge", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(3, "download_force_stop", { jobId: "job-1" });
   });
 
+  it("starts and cancels transcodes with the contract payloads", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    await transcodeStart({
+      jobId: "job-transcode",
+      inputPath: "/tmp/input.mkv",
+      outputPath: "/tmp/output.mkv",
+      keepAudioLangs: ["eng", "spa"],
+      keepSubLangs: ["eng"],
+      profile: "h265",
+    });
+    await transcodeCancel("job-transcode");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "transcode_start", {
+      args: {
+        jobId: "job-transcode",
+        inputPath: "/tmp/input.mkv",
+        outputPath: "/tmp/output.mkv",
+        keepAudioLangs: ["eng", "spa"],
+        keepSubLangs: ["eng"],
+        profile: "h265",
+      },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "transcode_cancel", { jobId: "job-transcode" });
+  });
+
+  it("invokes pause and resume commands", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    await downloadPause("job-1");
+    await downloadResume("job-1");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "download_pause", { jobId: "job-1" });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "download_resume", { jobId: "job-1" });
+  });
+
+  it("queries ffmpeg availability and default directory", async () => {
+    invokeMock.mockResolvedValueOnce(true).mockResolvedValueOnce("/Downloads");
+
+    await expect(downloadsFfmpegAvailable()).resolves.toBe(true);
+    await expect(downloadsDefaultDir()).resolves.toBe("/Downloads");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "downloads_ffmpeg_available");
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "downloads_default_dir");
+  });
+
   it("forwards download-progress payloads and returns the native unlisten function", async () => {
     const unlisten = vi.fn();
     let nativeListener!: (event: { payload: unknown }) => void;
@@ -351,6 +496,32 @@ describe("download IPC bridge", () => {
     };
     nativeListener({ payload });
     expect(listener).toHaveBeenCalledWith(payload);
+  });
+
+  it("checks the streaming gate for remote downloads", async () => {
+    const spy = vi.spyOn(networkPolicy, "assertNetworkAllowed");
+    invokeMock.mockResolvedValue(undefined);
+
+    await downloadStart({
+      jobId: "job-remote",
+      url: "https://cdn.example/file.mkv",
+      destPath: "/Downloads/file.mkv",
+    });
+
+    expect(spy).toHaveBeenCalledWith("streaming", "download");
+  });
+
+  it("does not check the streaming gate for loopback downloads", async () => {
+    const spy = vi.spyOn(networkPolicy, "assertNetworkAllowed");
+    invokeMock.mockResolvedValue(undefined);
+
+    await downloadStart({
+      jobId: "job-loopback",
+      url: "http://127.0.0.1:8787/file.mkv",
+      destPath: "/Downloads/file.mkv",
+    });
+
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

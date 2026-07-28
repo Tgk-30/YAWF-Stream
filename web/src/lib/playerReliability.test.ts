@@ -22,6 +22,12 @@ describe("player reliability", () => {
       .toContain("stopped responding");
     expect(mediaErrorMessage({ code: 3 } as MediaError))
       .toContain("could not be decoded");
+    expect(mediaErrorMessage({ code: 1 } as MediaError))
+      .toContain("interrupted");
+    expect(mediaErrorMessage({ code: 4 } as MediaError))
+      .toContain("not supported");
+    expect(mediaErrorMessage({ code: 99 } as MediaError))
+      .toContain("could not continue");
     expect(mediaErrorMessage(null)).toContain("could not continue");
   });
 });
