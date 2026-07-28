@@ -17,6 +17,8 @@ mod playback_proxy;
 
 // Bundled-mpv player (Phase 3 P1): spawns the mpv sidecar and drives it over
 // JSON IPC. See player.rs for the `--wid` in-window-embedding caveat (macOS).
+// Desktop-only: there is no mpv sidecar to spawn on mobile.
+#[cfg(desktop)]
 mod player;
 
 // In-window mpv render-API player (v0.5): drives mpv's render API into our own
@@ -25,13 +27,21 @@ mod player;
 mod render_player;
 
 // OS-keychain SecretStore backend (keychain_get / keychain_set / keychain_delete).
+// Desktop-only: `keyring` is target-gated to the three desktop OSes in
+// Cargo.toml and ships no Android backend, so the JS SecretStore falls back to
+// its Dexie store on mobile exactly as it does in a plain browser.
+#[cfg(desktop)]
 mod keychain;
 
 // Desktop Host Mode: supervises the bundled/self-built Server Mode process so a
-// desktop app can host the PWA/API for other devices.
+// desktop app can host the PWA/API for other devices. Desktop-only: it spawns a
+// bundled Node runtime, which mobile does not ship.
+#[cfg(desktop)]
 mod server_host;
 
-// Native downloads and optional ffmpeg optimization pipeline.
+// Native downloads and optional ffmpeg optimization pipeline. Desktop-only: the
+// transcode path shells out to an ffmpeg binary that mobile does not ship.
+#[cfg(desktop)]
 mod downloads;
 
 // DLNA/UPnP discovery and transport control for LAN MediaRenderers.
@@ -538,17 +548,24 @@ pub fn run() {
         // Process plugin: lets the webview `relaunch()` the app after the
         // auto-updater downloads + installs a new version (see updater.ts).
         .plugin(tauri_plugin_process::init())
-        // At-most-one mpv instance, shared across the mpv_* commands.
-        .manage(player::MpvState::default())
         // Authenticated external-player handoffs use one revocable loopback
         // capability at a time, without exporting server credentials.
         .manage(playback_proxy::ExternalPlaybackState::default())
-        // At-most-one in-window render-API player (v0.5).
-        .manage(render_player::PlayerState::default())
-        // At-most-one local DebridStreamer server process.
-        .manage(server_host::ServerState::default())
-        // All active and paused download/transcode jobs, keyed by frontend UUID.
-        .manage(downloads::DownloadsState::default());
+        // At-most-one in-window render-API player (v0.5). On mobile this resolves
+        // to the libmpv-free stub in render_player/stub.rs.
+        .manage(render_player::PlayerState::default());
+
+    // State owned by the desktop-only modules above.
+    #[cfg(desktop)]
+    {
+        builder = builder
+            // At-most-one mpv instance, shared across the mpv_* commands.
+            .manage(player::MpvState::default())
+            // At-most-one local DebridStreamer server process.
+            .manage(server_host::ServerState::default())
+            // All active and paused download/transcode jobs, keyed by frontend UUID.
+            .manage(downloads::DownloadsState::default());
+    }
 
     // Auto-updater is desktop-only. The JS side (web/src/lib/updater.ts) calls
     // the plugin's `check()` once on launch; releases are signed with the
@@ -558,98 +575,122 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
+    let builder = builder.setup(|app| {
+        #[cfg(target_os = "macos")]
+        opaque_window_background(app.handle());
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        render_player::set_initial_webview_opaque(app.handle()).map_err(std::io::Error::other)?;
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        render_player::debug_log_startup();
+        // Dev-only player smoke: DS_PLAYER_SMOKE=<url> auto-loads a stream in
+        // the in-window player a few seconds after launch, so the surface can
+        // be exercised without configuring indexers/debrid.
+        #[cfg(all(
+            debug_assertions,
+            any(target_os = "macos", target_os = "windows", target_os = "linux")
+        ))]
+        if let Ok(url) = std::env::var("DS_PLAYER_SMOKE") {
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(4));
+                if let Err(e) = render_player::create_player(
+                    handle.clone(),
+                    std::collections::HashMap::new(),
+                    Vec::new(),
+                ) {
+                    eprintln!("DS_PLAYER_SMOKE create failed: {e}");
+                    return;
+                }
+                use tauri::Manager;
+                let state = handle.state::<render_player::PlayerState>();
+                let guard = state.0.lock().ok();
+                if let Some(p) = guard.as_ref().and_then(|g| g.as_ref()) {
+                    if let Err(e) = render_player::run_mpv_command(&p.mpv, "loadfile", &[&url]) {
+                        eprintln!("DS_PLAYER_SMOKE loadfile failed: {e}");
+                    }
+                }
+                // NOTE: the video renders BEHIND the webview; unless the page
+                // adds `mpv-active` on <html> (EmbeddedPlayer does), the page
+                // hides it. This smoke exercises the native surface + decode
+                // path; visibility is verified through the real player UI.
+            });
+        }
+        let _ = &app;
+        Ok(())
+    });
+
+    // generate_handler! cannot cfg individual entries, so mobile gets its own
+    // list: the desktop-only modules are not compiled in at all there.
+    #[cfg(mobile)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        app_install_info,
+        render_player::player_init,
+        render_player::player_load,
+        render_player::player_command,
+        render_player::player_set_property,
+        render_player::player_get_property,
+        render_player::player_add_subtitle,
+        render_player::player_set_audio_passthrough,
+        render_player::player_set_hdr_policy,
+        render_player::player_set_video_margin,
+        render_player::player_set_rect,
+        render_player::player_destroy,
+        cast::cast_discover,
+        cast::cast_load,
+        cast::cast_control,
+        cast::cast_status,
+        cast::cast_set_volume,
+    ]);
+
+    #[cfg(desktop)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        open_in_external_player,
+        list_external_players,
+        detect_tunnel_tools,
+        reveal_in_file_manager,
+        app_install_info,
+        player::mpv_play,
+        player::mpv_pause,
+        player::mpv_resume,
+        player::mpv_seek,
+        player::mpv_get_position,
+        player::mpv_stop,
+        render_player::player_init,
+        render_player::player_load,
+        render_player::player_command,
+        render_player::player_set_property,
+        render_player::player_get_property,
+        render_player::player_add_subtitle,
+        render_player::player_set_audio_passthrough,
+        render_player::player_set_hdr_policy,
+        render_player::player_set_video_margin,
+        render_player::player_set_rect,
+        render_player::player_destroy,
+        keychain::keychain_get,
+        keychain::keychain_set,
+        keychain::keychain_delete,
+        server_host::desktop_server_status,
+        server_host::desktop_server_start,
+        server_host::desktop_server_stop,
+        downloads::download_start,
+        downloads::download_pause,
+        downloads::download_resume,
+        downloads::download_cancel,
+        downloads::download_force_stop,
+        downloads::transcode_start,
+        downloads::transcode_cancel,
+        downloads::downloads_ffmpeg_available,
+        downloads::downloads_default_dir,
+        downloads::downloads_available_space,
+        downloads::download_delete_file,
+        cast::cast_discover,
+        cast::cast_load,
+        cast::cast_control,
+        cast::cast_status,
+        cast::cast_set_volume,
+    ]);
+
     builder
-        .setup(|app| {
-            #[cfg(target_os = "macos")]
-            opaque_window_background(app.handle());
-            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-            render_player::set_initial_webview_opaque(app.handle())
-                .map_err(std::io::Error::other)?;
-            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-            render_player::debug_log_startup();
-            // Dev-only player smoke: DS_PLAYER_SMOKE=<url> auto-loads a stream in
-            // the in-window player a few seconds after launch, so the surface can
-            // be exercised without configuring indexers/debrid.
-            #[cfg(all(
-                debug_assertions,
-                any(target_os = "macos", target_os = "windows", target_os = "linux")
-            ))]
-            if let Ok(url) = std::env::var("DS_PLAYER_SMOKE") {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(4));
-                    if let Err(e) = render_player::create_player(
-                        handle.clone(),
-                        std::collections::HashMap::new(),
-                        Vec::new(),
-                    ) {
-                        eprintln!("DS_PLAYER_SMOKE create failed: {e}");
-                        return;
-                    }
-                    use tauri::Manager;
-                    let state = handle.state::<render_player::PlayerState>();
-                    let guard = state.0.lock().ok();
-                    if let Some(p) = guard.as_ref().and_then(|g| g.as_ref()) {
-                        if let Err(e) = render_player::run_mpv_command(&p.mpv, "loadfile", &[&url])
-                        {
-                            eprintln!("DS_PLAYER_SMOKE loadfile failed: {e}");
-                        }
-                    }
-                    // NOTE: the video renders BEHIND the webview; unless the page
-                    // adds `mpv-active` on <html> (EmbeddedPlayer does), the page
-                    // hides it. This smoke exercises the native surface + decode
-                    // path; visibility is verified through the real player UI.
-                });
-            }
-            let _ = &app;
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            open_in_external_player,
-            list_external_players,
-            detect_tunnel_tools,
-            reveal_in_file_manager,
-            app_install_info,
-            player::mpv_play,
-            player::mpv_pause,
-            player::mpv_resume,
-            player::mpv_seek,
-            player::mpv_get_position,
-            player::mpv_stop,
-            render_player::player_init,
-            render_player::player_load,
-            render_player::player_command,
-            render_player::player_set_property,
-            render_player::player_get_property,
-            render_player::player_add_subtitle,
-            render_player::player_set_audio_passthrough,
-            render_player::player_set_hdr_policy,
-            render_player::player_set_video_margin,
-            render_player::player_set_rect,
-            render_player::player_destroy,
-            keychain::keychain_get,
-            keychain::keychain_set,
-            keychain::keychain_delete,
-            server_host::desktop_server_status,
-            server_host::desktop_server_start,
-            server_host::desktop_server_stop,
-            downloads::download_start,
-            downloads::download_pause,
-            downloads::download_resume,
-            downloads::download_cancel,
-            downloads::download_force_stop,
-            downloads::transcode_start,
-            downloads::transcode_cancel,
-            downloads::downloads_ffmpeg_available,
-            downloads::downloads_default_dir,
-            downloads::downloads_available_space,
-            downloads::download_delete_file,
-            cast::cast_discover,
-            cast::cast_load,
-            cast::cast_control,
-            cast::cast_status,
-            cast::cast_set_volume,
-        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
