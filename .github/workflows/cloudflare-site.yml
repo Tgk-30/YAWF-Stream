@@ -108,9 +108,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ZONE_ID_YAWF: ${{ secrets.CLOUDFLARE_ZONE_ID_YAWF }}
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ZONE_ID_YAWF" ]; then
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::yawf.com/streamer was not deployed. Add the CLOUDFLARE_ZONE_ID_YAWF secret (the Cloudflare zone id for yawf.com) and make sure CLOUDFLARE_API_TOKEN carries Zone:Read and Zone:Workers Routes:Edit on that zone. Until then this mount stays on whatever was published by hand."
+            echo "::warning::yawf.com/streamer was not deployed: CLOUDFLARE_API_TOKEN is missing."
           else
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
@@ -145,6 +145,10 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Optional. deploy_website_cloudflare.mjs resolves the zone by domain
+          # name when this is empty, so the mount deploys without a second zone
+          # secret as long as the token carries Zone:Read on yawf.com. Setting
+          # it just skips that lookup.
           CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID_YAWF }}
           CLOUDFLARE_DOMAIN: yawf.com
           CLOUDFLARE_PATH: /streamer
