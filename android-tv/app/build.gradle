@@ -6,6 +6,12 @@ android {
     namespace "com.yawf.stream.tv"
     compileSdk 36
 
+    // The app reports its own version in the WebView and ExoPlayer user agents,
+    // so it reads VERSION_NAME rather than repeating the literal.
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
         applicationId "com.yawf.stream.tv"
         minSdk 23
