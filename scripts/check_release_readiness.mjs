@@ -135,8 +135,25 @@ check(
     /YAWF\.Stream_Android\.TV_\$\{version\}\.apk/.test(releaseWorkflow) &&
     /apksigner verify/.test(releaseWorkflow) &&
     /SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
-    /needs:\s*\[release, android-tv\]/.test(releaseWorkflow),
+    /needs:\s*\[release, android-tv(?:,\s*[a-z][a-z0-9-]*)*\]/.test(releaseWorkflow),
   ".github/workflows/web-release.yml must test, lint, sign, verify, and upload Android TV before checksums are finalized",
+);
+check(
+  "Release workflow signs and verifies the Android phone package",
+  /android-app:/.test(releaseWorkflow) &&
+    /ANDROID_APP_KEYSTORE_BASE64/.test(releaseWorkflow) &&
+    /zipalign/.test(releaseWorkflow) &&
+    /apksigner sign/.test(releaseWorkflow) &&
+    /apksigner verify/.test(releaseWorkflow) &&
+    /web\/src-tauri\/SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
+    /YAWF\.Stream_Android_\$\{version\}\.apk/.test(releaseWorkflow) &&
+    /needs:\s*\[[^\]]*\bandroid-app\b[^\]]*\]/.test(releaseWorkflow),
+  ".github/workflows/web-release.yml must sign the phone APK with its own identity, verify it against a pinned certificate, and finalize checksums only after it",
+);
+check(
+  "Phone APK reuses no Android TV signing material",
+  !/android-app:[\s\S]*?ANDROID_TV_/.test(releaseWorkflow),
+  "the phone package has a different package id, so it must not be signed with the Android TV key",
 );
 check(
   "Android TV signing certificate is publicly pinned",

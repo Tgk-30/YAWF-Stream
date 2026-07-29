@@ -228,6 +228,84 @@ jobs:
           node scripts/download_tauri_node_runtime.mjs linux-x64
           node scripts/smoke_tauri_server_bundle.mjs web/src-tauri/resources/server
 
+  tauri-android:
+    name: Tauri Android compile check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and NDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+
+      # `ring` compiles C, so cc-rs needs a cross compiler for the target. Without
+      # these it looks for a bare `aarch64-linux-android-clang` on PATH, which the
+      # NDK does not ship: its binaries are API-versioned, e.g.
+      # aarch64-linux-android24-clang.
+      - name: Export NDK and cross-compiler locations
+        shell: bash
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/27.2.12479018"
+          test -d "$ndk"
+          tc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$tc/aarch64-linux-android24-clang"
+          {
+            echo "NDK_HOME=$ndk"
+            echo "CC_aarch64_linux_android=$tc/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$tc/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$tc/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+          echo "$tc" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "web/src-tauri -> target"
+          key: android
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      # `tauri android init` generates gen/android, which is not committed. It
+      # needs the frontend dist to exist for the asset protocol config, so build
+      # the web app first.
+      - name: Build web assets
+        working-directory: web
+        run: npm run build
+
+      - name: Generate the Android project
+        working-directory: web
+        run: npm run tauri -- android init --ci
+
+      # The real gate. Desktop-only modules (player, keychain, server_host,
+      # downloads) are cfg(desktop); this proves what remains actually compiles
+      # for a phone. Checking one ABI is enough to catch cfg mistakes and is far
+      # cheaper than linking all four.
+      - name: Compile the Rust library for Android
+        working-directory: web/src-tauri
+        run: cargo check --locked --target aarch64-linux-android
+
+      # The desktop target is checked by the `rust` job on macOS. Repeating it on
+      # this Linux runner would need the GTK development headers the Tauri Linux
+      # backend links against, which are not installed here and are not what this
+      # job is for.
+
   android-tv:
     name: Android TV unit tests, lint, and APK
     runs-on: ubuntu-24.04

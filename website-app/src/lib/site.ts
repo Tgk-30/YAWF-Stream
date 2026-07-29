@@ -17,6 +17,9 @@ export const DOWNLOAD_LINKS = {
   macosIntel: `${RELEASE_ASSET_BASE}/YAWF.Stream_${APP_VERSION}_x64.dmg`,
   linuxAppImage: `${RELEASE_ASSET_BASE}/YAWF.Stream_${APP_VERSION}_amd64.AppImage`,
   androidTV: `${RELEASE_ASSET_BASE}/YAWF.Stream_Android.TV_${APP_VERSION}.apk`,
+  // Phone/tablet build. A different package id from the TV app, so the two are
+  // separate installs and must never be presented as one "Android" download.
+  androidPhone: `${RELEASE_ASSET_BASE}/YAWF.Stream_Android_${APP_VERSION}.apk`,
   serverDeb: `${RELEASE_ASSET_BASE}/debridstreamer-server_${APP_VERSION}_all.deb`,
   macos: `${RELEASE_ASSET_BASE}/YAWF.Stream_${APP_VERSION}_aarch64.dmg`,
   linux: `${RELEASE_ASSET_BASE}/YAWF.Stream_${APP_VERSION}_amd64.AppImage`,

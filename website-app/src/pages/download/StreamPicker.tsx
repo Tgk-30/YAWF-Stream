@@ -8,7 +8,7 @@ import { DOWNLOAD_LINKS, GITHUB_RELEASES_LATEST, VERSION } from '@/lib/site';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 interface PickerRow {
-  id: 'mac-arm' | 'mac-intel' | 'linux' | 'android-tv' | 'server' | 'pwa';
+  id: 'mac-arm' | 'mac-intel' | 'linux' | 'android-tv' | 'android-app' | 'server' | 'pwa';
   icon: ReactNode;
   title: string;
   meta: StreamRowMeta[];
@@ -60,6 +60,17 @@ const ROWS: PickerRow[] = [
     ],
     size: '.apk',
     href: DOWNLOAD_LINKS.androidTV,
+  },
+  {
+    id: 'android-app',
+    icon: <Smartphone className="h-5 w-5" />,
+    title: 'Android phone & tablet',
+    meta: [
+      { label: 'Works without a server', variant: 'instant' },
+      { label: 'sideload', variant: 'dim' },
+    ],
+    size: '.apk',
+    href: DOWNLOAD_LINKS.androidPhone,
   },
   {
     id: 'server',
