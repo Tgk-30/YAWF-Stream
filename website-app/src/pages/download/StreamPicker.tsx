@@ -63,17 +63,6 @@ const ROWS: PickerRow[] = [
     href: DOWNLOAD_LINKS.androidTV,
   },
   {
-    id: 'android-app',
-    icon: <Smartphone className="h-5 w-5" />,
-    title: 'Android phone & tablet',
-    meta: [
-      { label: 'Works without a server', variant: 'instant' },
-      { label: 'sideload', variant: 'dim' },
-    ],
-    size: '.apk',
-    href: DOWNLOAD_LINKS.androidPhone,
-  },
-  {
     id: 'server',
     icon: <Server className="h-5 w-5" />,
     title: 'Server - Debian or Ubuntu',
