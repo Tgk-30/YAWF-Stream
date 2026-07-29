@@ -1,5 +1,6 @@
 // One-time keychain->local migration: move semantics (lift + delete), one-shot
-// flag (never re-prompts), and denied-key skip (user re-enters, no retry loop).
+// flag (never re-prompts), denied-key skip (user re-enters, no retry loop), and
+// the mobile case where the commands do not exist at all.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -60,6 +61,33 @@ describe("migrateKeychainSecretsOnce", () => {
     await migrateKeychainSecretsOnce(store);
     // Not a single additional keychain call - the OS can never prompt again.
     expect(invoke.mock.calls.length).toBe(callsAfterFirstRun);
+  });
+
+  // Android compiles keychain.rs out entirely (cfg(desktop) in lib.rs, and the
+  // keyring crate has no Android backend), so every keychain_* invoke rejects
+  // with an unknown-command error. That must degrade to the same local model the
+  // browser build already uses, not strand the user with no secret storage.
+  it("burns the flag when the commands do not exist at all, as on Android", async () => {
+    const { store, settings, secrets } = fakeDexie();
+    invoke.mockRejectedValue(new Error("Command keychain_get not found"));
+
+    await migrateKeychainSecretsOnce(store);
+
+    expect(settings.get("keychain_migrated_to_local_v1")).toBe("true");
+    expect(secrets.size).toBe(0);
+  });
+
+  it("does not retry the absent commands on a later launch", async () => {
+    const { store } = fakeDexie();
+    invoke.mockRejectedValue(new Error("Command keychain_get not found"));
+
+    await migrateKeychainSecretsOnce(store);
+    const firstRunCalls = invoke.mock.calls.length;
+    expect(firstRunCalls).toBeGreaterThan(0);
+
+    invoke.mockClear();
+    await migrateKeychainSecretsOnce(store);
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it("skips a denied/cancelled key but still migrates the rest and burns the flag", async () => {
