@@ -9,6 +9,7 @@
  * to localStorage.
  */
 import { useSyncExternalStore } from 'react';
+import { asset } from '@/lib/asset';
 
 export type ThemePresetName = 'stream-teal' | 'aurora-violet' | 'ember-amber';
 
@@ -17,7 +18,7 @@ const theme = {
   company: 'YAWF Group',
   brandMeaning: 'Yours. Always. Wherever. Forever.',
   tagline: 'Your Accounts. Watch Freely.',
-  logo: '/debridstreamer/brand/logo-mark.svg', // play-in-rings mark
+  logo: asset('brand/logo-mark.svg'), // play-in-rings mark
   preset: 'stream-teal' as ThemePresetName, // stream-teal | aurora-violet | ember-amber
   fonts: {
     display: "'Space Grotesk', sans-serif",

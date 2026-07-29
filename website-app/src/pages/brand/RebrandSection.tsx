@@ -32,7 +32,7 @@ const LINES: CodeLine[] = [
   },
   {
     toks: [
-      { t: '  logo', c: 'k' }, { t: ': ', c: 'p' }, { t: '"/debridstreamer/brand/logo-mark.svg"', c: 's' }, { t: ',', c: 'p' },
+      { t: '  logo', c: 'k' }, { t: ': ', c: 'p' }, { t: "asset('brand/logo-mark.svg')", c: 's' }, { t: ',', c: 'p' },
       { t: '    // play-in-rings mark', c: 'c' },
     ],
   },

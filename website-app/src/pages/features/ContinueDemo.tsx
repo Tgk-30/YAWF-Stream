@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, animate, motion, useInView, useReducedMotion } from 'framer-motion';
 import { Check, Download } from 'lucide-react';
 import { EASE_EXPO, StreamBar, Stage } from './shared';
+import { asset } from '@/lib/asset';
 
 const RESUME = [
-  { title: 'Night Signal', img: '/debridstreamer/poster-01.jpg', meta: '42 min left', progress: 0.34 },
-  { title: 'Orbital', img: '/debridstreamer/poster-03.jpg', meta: '1:08 left', progress: 0.67 },
-  { title: 'Ember Road', img: '/debridstreamer/poster-05.jpg', meta: '18 min left', progress: 0.82 },
+  { title: 'Night Signal', img: asset('poster-01.jpg'), meta: '42 min left', progress: 0.34 },
+  { title: 'Orbital', img: asset('poster-03.jpg'), meta: '1:08 left', progress: 0.67 },
+  { title: 'Ember Road', img: asset('poster-05.jpg'), meta: '18 min left', progress: 0.82 },
 ];
 
 const STATS = [

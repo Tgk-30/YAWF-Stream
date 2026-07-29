@@ -2,6 +2,7 @@ import { motion, useReducedMotion } from 'framer-motion';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import Chip from '@/components/Chip';
 import { EASE_EXPO } from '@/pages/brand/utils';
+import { asset } from '@/lib/asset';
 
 const CHIPS = ['one config file', '3 presets', 'CSS variables', 'MIT'];
 
@@ -37,7 +38,7 @@ export default function BrandHero() {
   return (
     <section className="relative -mt-[var(--nav-offset)] flex min-h-[max(55vh,460px)] items-center justify-center overflow-hidden">
       <div className="absolute inset-0 bg-bg-0" />
-      <BackgroundVideo src="/debridstreamer/nebula-drift-loop.mp4" poster="/debridstreamer/nebula-drift-poster.jpg" opacity={0.3} />
+      <BackgroundVideo src={asset('nebula-drift-loop.mp4')} poster={asset('nebula-drift-poster.jpg')} opacity={0.3} />
       <div className="absolute inset-0" style={{ background: 'var(--grad-hero-scrim)' }} />
 
       <div className="relative z-10 mx-auto max-w-[900px] px-6 pb-16 pt-[calc(var(--nav-offset)+44px)] text-center md:px-10">

@@ -4,6 +4,7 @@ import { Captions, Compass, History, ListVideo, MonitorPlay, ShieldCheck, Users,
 import { cn } from '@/lib/utils';
 import GlassCard from '@/components/GlassCard';
 import SectionHeading from '@/components/SectionHeading';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -25,7 +26,7 @@ function ResumeBar({ value, delay = 0 }: { value: number; delay?: number }) {
 
 /** Mini poster strip - continuous CSS marquee inside the Discover card. */
 function MiniMarquee() {
-  const posters = Array.from({ length: 8 }, (_, i) => `/debridstreamer/poster-0${i + 1}.jpg`);
+  const posters = Array.from({ length: 8 }, (_, i) => asset(`poster-0${i + 1}.jpg`));
   return (
     <div className="marquee mt-5" aria-hidden="true">
       <div
@@ -189,7 +190,7 @@ function Widget({ kind }: { kind?: BentoCard['widget'] }) {
       return (
         <div className="mt-4 space-y-3">
           <div className="flex gap-2.5">
-            {['/debridstreamer/poster-03.jpg', '/debridstreamer/poster-06.jpg'].map((src) => (
+            {[asset('poster-03.jpg'), asset('poster-06.jpg')].map((src) => (
               <img key={src} src={src} alt="" loading="lazy" className="aspect-[2/3] w-10 rounded-md border border-line object-cover" />
             ))}
           </div>

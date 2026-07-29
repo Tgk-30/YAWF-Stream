@@ -42,7 +42,10 @@ const pwaManifest = JSON.parse(
   readFileSync(join(root, "web/public/manifest.webmanifest"), "utf8"),
 );
 
-check(app.includes('basename="/debridstreamer"'), "BrowserRouter must use the /debridstreamer basename");
+check(
+  app.includes("basename={import.meta.env.BASE_URL"),
+  "BrowserRouter must derive its basename from the build base so every mount routes correctly",
+);
 check(app.includes('path="help"'), "website must publish the Help and FAQ route");
 check(
   help.includes("Report a bug") &&
@@ -57,7 +60,7 @@ check(footer.includes("YAWF Group. All rights reserved."), "footer must include 
 check(footer.includes("theme.brandMeaning"), "footer must include the YAWF Group brand meaning");
 check(
   footer.includes("This product uses the TMDB API but is not endorsed or certified by TMDB.") &&
-    footer.includes("/debridstreamer/tmdb.svg"),
+    footer.includes("asset('tmdb.svg')"),
   "website footer must include the required TMDB notice and approved logo",
 );
 check(
@@ -212,7 +215,8 @@ for (const file of sourceFiles) {
 check(existsSync(join(dist, "index.html")), "website-app/dist is missing; run npm run build in website-app");
 if (existsSync(join(dist, "index.html"))) {
   const html = readFileSync(join(dist, "index.html"), "utf8");
-  check(html.includes("/debridstreamer/assets/"), "built assets must stay under /debridstreamer/");
+  const siteMount = `/${(process.env.SITE_BASE ?? "debridstreamer").replace(/^\/+|\/+$/g, "")}/`;
+  check(html.includes(`${siteMount}assets/`), `built assets must stay under ${siteMount}`);
   check(html.includes("YAWF Stream"), "built metadata must use YAWF Stream");
 
   const distFiles = [];

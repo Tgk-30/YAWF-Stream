@@ -5,6 +5,7 @@ import SectionHeading from '@/components/SectionHeading';
 import StreamRow from '@/components/StreamRow';
 import { PrimaryButton } from '@/components/Buttons';
 import { DOWNLOAD_LINKS, VERSION } from '@/lib/site';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -54,7 +55,7 @@ export default function DownloadTeaser() {
   return (
     <section className="relative overflow-hidden py-[clamp(88px,12vw,152px)]">
       {/* bonus: sonar rings echoing the logo, low + scrimmed */}
-      <BackgroundVideo src="/debridstreamer/streamrings-loop.mp4" poster="/debridstreamer/streamrings-poster.jpg" opacity={0.22} />
+      <BackgroundVideo src={asset('streamrings-loop.mp4')} poster={asset('streamrings-poster.jpg')} opacity={0.22} />
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-0"

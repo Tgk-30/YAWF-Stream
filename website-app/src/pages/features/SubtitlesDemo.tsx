@@ -3,6 +3,7 @@ import { RotateCcw } from 'lucide-react';
 import { Slider } from '@/components/ui/slider';
 import { cn } from '@/lib/utils';
 import { Stage } from './shared';
+import { asset } from '@/lib/asset';
 
 const EN = 'The signal was always there.';
 
@@ -43,7 +44,7 @@ export default function SubtitlesDemo() {
     <Stage className="flex flex-col p-0">
       {/* mock player frame */}
       <div className="relative min-h-[250px] flex-1 overflow-hidden">
-        <img src="/debridstreamer/poster-03.jpg" alt="" aria-hidden="true" className="absolute inset-0 h-full w-full object-cover opacity-30 blur-[5px]" />
+        <img src={asset('poster-03.jpg')} alt="" aria-hidden="true" className="absolute inset-0 h-full w-full object-cover opacity-30 blur-[5px]" />
         <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, rgba(var(--bg-0-rgb),0.45), rgba(var(--bg-0-rgb),0.8))' }} />
 
         {/* live caption */}

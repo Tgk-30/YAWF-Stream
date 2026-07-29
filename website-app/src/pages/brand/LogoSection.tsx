@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils';
 import SectionHeading from '@/components/SectionHeading';
 import RingMark from '@/components/RingMark';
 import { EASE_EXPO } from '@/pages/brand/utils';
+import { asset } from '@/lib/asset';
 
 const S = 400 / 48; // construction-stage scale: RingMark viewBox 48 → 400 stage
 
@@ -186,11 +187,11 @@ export default function LogoSection() {
 
             {/* downloads */}
             <div className="mt-8 flex flex-wrap gap-3">
-              <a href="/debridstreamer/brand/logo-mark.svg" download="logo-mark.svg" className={GHOST_CLASSES}>
+              <a href={asset('brand/logo-mark.svg')} download="logo-mark.svg" className={GHOST_CLASSES}>
                 <Download className="h-4 w-4" />
                 logo-mark.svg
               </a>
-              <a href="/debridstreamer/icon-128.png" download="icon-128.png" className={GHOST_CLASSES}>
+              <a href={asset('icon-128.png')} download="icon-128.png" className={GHOST_CLASSES}>
                 <Download className="h-4 w-4" />
                 icon-128.png
               </a>

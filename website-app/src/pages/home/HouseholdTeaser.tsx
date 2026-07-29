@@ -1,6 +1,7 @@
 import { motion, useReducedMotion } from 'framer-motion';
 import SectionHeading from '@/components/SectionHeading';
 import { GhostButton } from '@/components/Buttons';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -27,11 +28,11 @@ export default function HouseholdTeaser() {
         >
           {/* right-half art (desktop) / top banner (mobile) */}
           <div className="relative h-[220px] md:hidden">
-            <img src="/debridstreamer/living-room-glow.jpg" alt="" className="h-full w-full object-cover" loading="lazy" />
+            <img src={asset('living-room-glow.jpg')} alt="" className="h-full w-full object-cover" loading="lazy" />
           </div>
           <div aria-hidden="true" className="absolute inset-y-0 right-0 hidden w-1/2 md:block">
             <img
-              src="/debridstreamer/living-room-glow.jpg"
+              src={asset('living-room-glow.jpg')}
               alt=""
               loading="lazy"
               className="h-full w-full object-cover"

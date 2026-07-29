@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { MonitorPlay, Play } from 'lucide-react';
 import { EASE_EXPO, Stage } from './shared';
+import { asset } from '@/lib/asset';
 
 const DURATION = 102 * 60 + 4; // 1:42:04
 const TICKS = [0.12, 0.34, 0.55, 0.78];
-const THUMBS = ['/debridstreamer/poster-02.jpg', '/debridstreamer/poster-04.jpg', '/debridstreamer/poster-06.jpg', '/debridstreamer/poster-07.jpg'];
+const THUMBS = [asset('poster-02.jpg'), asset('poster-04.jpg'), asset('poster-06.jpg'), asset('poster-07.jpg')];
 const HANDOFF = ['VLC', 'IINA'];
 
 function fmt(sec: number): string {
@@ -71,7 +72,7 @@ export default function PlayerDemo() {
     <Stage className="p-0">
       <div className="relative flex min-h-[420px] flex-col justify-between overflow-hidden rounded-stage">
         {/* scene backdrop - poster-06 blurred 40% */}
-        <img src="/debridstreamer/poster-06.jpg" alt="" aria-hidden="true" className="absolute inset-0 h-full w-full object-cover opacity-40 blur-[6px]" />
+        <img src={asset('poster-06.jpg')} alt="" aria-hidden="true" className="absolute inset-0 h-full w-full object-cover opacity-40 blur-[6px]" />
         <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, rgba(var(--bg-0-rgb),0.55), rgba(var(--bg-0-rgb),0.82))' }} />
 
         {/* top chrome: now playing + handoff chips */}

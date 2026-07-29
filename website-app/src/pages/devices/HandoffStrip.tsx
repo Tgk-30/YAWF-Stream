@@ -2,6 +2,7 @@ import { useRef } from 'react';
 import { motion, useInView, useReducedMotion } from 'framer-motion';
 import { ArrowRight } from 'lucide-react';
 import { GhostButton } from '@/components/Buttons';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -29,7 +30,7 @@ export default function HandoffStrip() {
           <div ref={qrRef} className="group shrink-0 [perspective:600px]">
             <div className="relative w-[240px] -rotate-2 overflow-hidden rounded-2xl border border-line shadow-card transition-[transform,box-shadow] duration-500 ease-expo group-hover:rotate-0 group-hover:shadow-glow-brand">
               <img
-                src="/debridstreamer/qr-handoff.jpg"
+                src={asset('qr-handoff.jpg')}
                 alt="Desktop app showing a glowing QR code that hands the setup URL to a phone"
                 loading="lazy"
                 draggable={false}

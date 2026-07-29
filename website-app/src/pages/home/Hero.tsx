@@ -11,6 +11,7 @@ import type { RingGateDriver } from '@/components/RingGate';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import Chip from '@/components/Chip';
 import { GhostButton, PrimaryButton } from '@/components/Buttons';
+import { asset } from '@/lib/asset';
 
 const QUICK_LINKS = [
   { label: 'macOS', icon: Apple, href: DOWNLOAD_LINKS.macos },
@@ -114,7 +115,7 @@ export default function Hero() {
 
       {/* 2 - streams video + legibility scrim */}
       <div ref={videoWrapRef} className="absolute inset-0">
-        <BackgroundVideo src="/debridstreamer/hero-streams-loop.mp4" poster="/debridstreamer/hero-streams-poster.jpg" opacity={0.45} />
+        <BackgroundVideo src={asset('hero-streams-loop.mp4')} poster={asset('hero-streams-poster.jpg')} opacity={0.45} />
       </div>
       <div className="absolute inset-0" style={{ background: 'var(--grad-hero-scrim)' }} />
 

@@ -4,6 +4,7 @@ import { usePrefersReducedMotion } from '@/lib/motion';
 import { GITHUB_RELEASES_LATEST, GITHUB_REPO, VERSION } from '@/lib/site';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import Chip from '@/components/Chip';
+import { asset } from '@/lib/asset';
 
 /** Chars wrapped in overflow-hidden masks for the cascade (parent carries text styles). */
 function CascadeChars({ text }: { text: string }) {
@@ -79,7 +80,7 @@ export default function Hero() {
 
       {/* streams video at 25% + parallax */}
       <div ref={videoWrapRef} className="absolute inset-[-60px_0]">
-        <BackgroundVideo src="/debridstreamer/hero-streams-loop.mp4" poster="/debridstreamer/hero-streams-poster.jpg" opacity={0.25} />
+        <BackgroundVideo src={asset('hero-streams-loop.mp4')} poster={asset('hero-streams-poster.jpg')} opacity={0.25} />
       </div>
       {/* warm bloom low-center */}
       <div

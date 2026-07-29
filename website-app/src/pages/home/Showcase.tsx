@@ -7,6 +7,7 @@ import DeviceFrame from '@/components/DeviceFrame';
 import GlassCard from '@/components/GlassCard';
 import PosterMarquee from '@/components/PosterMarquee';
 import SectionHeading from '@/components/SectionHeading';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -46,7 +47,7 @@ function ShowcaseFallback() {
         lede="The app is the hero - staged exactly as it looks on your screens."
       />
       <motion.div {...rise(0)} className="mt-12">
-        <DeviceFrame variant="desktop" src="/debridstreamer/discover-desktop.png" alt="YAWF Stream Discover screen on desktop" />
+        <DeviceFrame variant="desktop" src={asset('discover-desktop.png')} alt="YAWF Stream Discover screen on desktop" />
       </motion.div>
       <div className="mt-10 grid gap-5 sm:grid-cols-3">
         {STEPS.map((s, i) => (
@@ -62,8 +63,8 @@ function ShowcaseFallback() {
         ))}
       </div>
       <motion.div {...rise(4)} className="mt-10 grid grid-cols-2 items-end gap-6">
-        <DeviceFrame variant="tablet" src="/debridstreamer/discover-tablet.png" alt="YAWF Stream Discover on tablet" />
-        <DeviceFrame variant="phone" src="/debridstreamer/settings-mobile.png" alt="YAWF Stream settings on phone" />
+        <DeviceFrame variant="tablet" src={asset('discover-tablet.png')} alt="YAWF Stream Discover on tablet" />
+        <DeviceFrame variant="phone" src={asset('settings-mobile.png')} alt="YAWF Stream settings on phone" />
       </motion.div>
     </div>
   );
@@ -220,7 +221,7 @@ export default function Showcase() {
                 <div className="showcase-frame">
                   <DeviceFrame
                     variant="desktop"
-                    src="/debridstreamer/discover-desktop.png"
+                    src={asset('discover-desktop.png')}
                     alt="YAWF Stream Discover screen on desktop"
                     reflect={false}
                   />
@@ -234,10 +235,10 @@ export default function Showcase() {
 
               {/* foreshadowing frames */}
               <div ref={tabletRef} className="absolute -right-16 bottom-[-10%] w-[230px] rotate-[4deg]">
-                <DeviceFrame variant="tablet" src="/debridstreamer/discover-tablet.png" alt="" glow={false} reflect={false} />
+                <DeviceFrame variant="tablet" src={asset('discover-tablet.png')} alt="" glow={false} reflect={false} />
               </div>
               <div ref={phoneRef} className="absolute -left-14 bottom-[-6%] w-[140px] -rotate-6">
-                <DeviceFrame variant="phone" src="/debridstreamer/settings-mobile.png" alt="" glow={false} reflect={false} />
+                <DeviceFrame variant="phone" src={asset('settings-mobile.png')} alt="" glow={false} reflect={false} />
               </div>
             </div>
           </div>

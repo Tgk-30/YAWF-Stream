@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { RingGateDriverRef } from '@/components/three/RingGateScene';
 import { hasWebGL, prefersReducedMotion } from '@/lib/motion';
 import { cn } from '@/lib/utils';
+import { asset } from '@/lib/asset';
 
 export type { RingGateDriver, RingGateDriverRef } from '@/components/three/RingGateScene';
 
@@ -37,7 +38,7 @@ export default function RingGate({ driver, className }: RingGateProps) {
         className={cn('overflow-hidden', className)}
         style={{ background: 'radial-gradient(closest-side, rgba(var(--brand-rgb), 0.12), transparent), var(--bg-0)' }}
       >
-        <img src="/debridstreamer/ring-gate-poster.jpg" alt="" className="h-full w-full object-cover opacity-80" />
+        <img src={asset('ring-gate-poster.jpg')} alt="" className="h-full w-full object-cover opacity-80" />
       </div>
     );
   }

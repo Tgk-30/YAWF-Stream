@@ -4,6 +4,7 @@ import { ArrowRight } from 'lucide-react';
 import Chip from '@/components/Chip';
 import { POSTER_META } from './data';
 import { SPRING_UI, Stage } from './shared';
+import { asset } from '@/lib/asset';
 
 interface Peek {
   i: number;
@@ -71,7 +72,7 @@ export default function DiscoverDemo() {
             <span className="w-8" />
           </div>
           <motion.img
-            src="/debridstreamer/discover-desktop.png"
+            src={asset('discover-desktop.png')}
             alt="YAWF Stream Discover screen"
             loading="lazy"
             draggable={false}

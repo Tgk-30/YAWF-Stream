@@ -2,6 +2,7 @@ import { memo, useLayoutEffect, useRef, useState } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import { Smartphone } from 'lucide-react';
 import { GhostButton } from '@/components/Buttons';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -106,7 +107,7 @@ export default function Handoff() {
           >
             <div className="glass-panel relative overflow-hidden rounded-stage p-3 shadow-card">
               <img
-                src="/debridstreamer/qr-handoff.jpg"
+                src={asset('qr-handoff.jpg')}
                 alt="Desktop app showing a glowing QR code card with a short setup URL"
                 loading="lazy"
                 draggable={false}

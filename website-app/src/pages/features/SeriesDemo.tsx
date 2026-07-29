@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { Check, Play } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { EASE_EXPO, StreamBar, Stage } from './shared';
+import { asset } from '@/lib/asset';
 
 interface Episode {
   n: string;
@@ -15,11 +16,11 @@ interface Episode {
 }
 
 const EPISODES: Episode[] = [
-  { n: 'E01', title: 'The Signal', img: '/debridstreamer/poster-02.jpg', pos: 'center 20%', progress: 1, watched: true },
-  { n: 'E02', title: 'Static Bloom', img: '/debridstreamer/poster-04.jpg', pos: 'center 35%', progress: 1, watched: true },
-  { n: 'E03', title: 'Night Current', img: '/debridstreamer/poster-07.jpg', pos: 'center 50%', progress: 0.96 },
-  { n: 'E04', title: 'Night Relay', img: '/debridstreamer/poster-02.jpg', pos: 'center 70%', progress: 0 },
-  { n: 'E05', title: 'Relay', img: '/debridstreamer/poster-04.jpg', pos: 'center 85%', progress: 0 },
+  { n: 'E01', title: 'The Signal', img: asset('poster-02.jpg'), pos: 'center 20%', progress: 1, watched: true },
+  { n: 'E02', title: 'Static Bloom', img: asset('poster-04.jpg'), pos: 'center 35%', progress: 1, watched: true },
+  { n: 'E03', title: 'Night Current', img: asset('poster-07.jpg'), pos: 'center 50%', progress: 0.96 },
+  { n: 'E04', title: 'Night Relay', img: asset('poster-02.jpg'), pos: 'center 70%', progress: 0 },
+  { n: 'E05', title: 'Relay', img: asset('poster-04.jpg'), pos: 'center 85%', progress: 0 },
 ];
 
 const RING_R = 24;

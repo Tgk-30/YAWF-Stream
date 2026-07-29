@@ -2,6 +2,7 @@ import { memo, useRef } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import { gsap, useGSAP } from '@/lib/gsap';
 import BackgroundVideo from '@/components/BackgroundVideo';
+import { asset } from '@/lib/asset';
 
 /** Chars wrapped in overflow-hidden masks for the cascade (parent carries text styles). */
 function CascadeChars({ text }: { text: string }) {
@@ -89,7 +90,7 @@ export default function Hero() {
     >
       {/* nebula band (30% opacity, poster fallback) + parallax wrap */}
       <div ref={videoWrapRef} className="absolute -inset-y-[14%] inset-x-0">
-        <BackgroundVideo src="/debridstreamer/nebula-drift-loop.mp4" poster="/debridstreamer/nebula-drift-poster.jpg" opacity={0.3} />
+        <BackgroundVideo src={asset('nebula-drift-loop.mp4')} poster={asset('nebula-drift-poster.jpg')} opacity={0.3} />
       </div>
       <div aria-hidden="true" className="absolute inset-0" style={{ background: 'var(--grad-hero-scrim)' }} />
 

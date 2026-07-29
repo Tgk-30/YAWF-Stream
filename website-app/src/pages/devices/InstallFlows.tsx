@@ -5,6 +5,7 @@ import { Check, Copy, Share } from 'lucide-react';
 import Chip from '@/components/Chip';
 import RingMark from '@/components/RingMark';
 import { cn } from '@/lib/utils';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -157,7 +158,7 @@ const BrowserMedia = memo(function BrowserMedia({ active }: { active: boolean })
           </span>
           <img
             data-anim
-            src="/debridstreamer/discover-desktop.png"
+            src={asset('discover-desktop.png')}
             alt="YAWF Stream Discover screen loading in the browser"
             loading="lazy"
             draggable={false}
@@ -184,7 +185,7 @@ function StaticMedia({ kind }: { kind: 'ios' | 'android' | 'browser' }) {
               http://your-server
             </span>
           </div>
-          <img src="/debridstreamer/discover-desktop.png" alt="YAWF Stream Discover screen in a browser" loading="lazy" className="h-[172px] w-full object-cover" />
+          <img src={asset('discover-desktop.png')} alt="YAWF Stream Discover screen in a browser" loading="lazy" className="h-[172px] w-full object-cover" />
         </div>
       </div>
     );

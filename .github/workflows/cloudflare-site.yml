@@ -79,3 +79,75 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
         run: node scripts/deploy_website_cloudflare.mjs
+
+  # Second mount of the same source tree. yawf.com/streamer used to be deployed
+  # by hand, which is why it drifted to v1.0.0 while tgk30.com tracked main. The
+  # mount prefix is baked into the bundle at build time, so this job rebuilds
+  # with SITE_BASE rather than reusing the artifact from the job above.
+  deploy-yawf:
+    name: Deploy yawf.com/streamer
+    if: vars.YAWF_HOLD_WEBSITE_DEPLOY != 'true'
+    runs-on: ubuntu-latest
+    env:
+      SITE_BASE: streamer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Check yawf.com deployment secrets
+        id: gate
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID_YAWF: ${{ secrets.CLOUDFLARE_ZONE_ID_YAWF }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ZONE_ID_YAWF" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::yawf.com/streamer was not deployed. Add the CLOUDFLARE_ZONE_ID_YAWF secret (the Cloudflare zone id for yawf.com) and make sure CLOUDFLARE_API_TOKEN carries Zone:Read and Zone:Workers Routes:Edit on that zone. Until then this mount stays on whatever was published by hand."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Public repo preflight
+        if: steps.gate.outputs.ready == 'true'
+        run: node scripts/public_repo_preflight.mjs
+
+      - name: Build YAWF Stream website for the /streamer mount
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: website-app
+        run: npm ci && npm run lint && npm run build
+
+      - name: YAWF Stream website QA
+        if: steps.gate.outputs.ready == 'true'
+        run: node scripts/check_website_app.mjs
+
+      - name: Website download logic
+        if: steps.gate.outputs.ready == 'true'
+        run: node scripts/check_website_download_logic.mjs
+
+      - name: Website static QA
+        if: steps.gate.outputs.ready == 'true'
+        run: node scripts/check_website_static.mjs
+
+      - name: Website mounted-path QA
+        if: steps.gate.outputs.ready == 'true'
+        run: node scripts/check_website_path_mount.mjs
+
+      - name: Deploy yawf.com/streamer
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID_YAWF }}
+          CLOUDFLARE_DOMAIN: yawf.com
+          CLOUDFLARE_PATH: /streamer
+          CLOUDFLARE_PAGES_PROJECT: yawf-stream-streamer
+          CLOUDFLARE_WORKER_NAME: yawf-stream-streamer-site-path
+        run: node scripts/deploy_website_cloudflare.mjs

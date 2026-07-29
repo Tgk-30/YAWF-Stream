@@ -6,6 +6,7 @@ import { GITHUB_REPO } from '@/lib/site';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import RingMark from '@/components/RingMark';
 import { GhostButton, PrimaryButton } from '@/components/Buttons';
+import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -36,7 +37,7 @@ export default function FinalCta() {
 
   return (
     <section ref={sectionRef} className="relative flex min-h-[70vh] items-center justify-center overflow-hidden py-24">
-      <BackgroundVideo src="/debridstreamer/cinema-grain-loop.mp4" poster="/debridstreamer/cinema-grain-poster.jpg" opacity={0.35} />
+      <BackgroundVideo src={asset('cinema-grain-loop.mp4')} poster={asset('cinema-grain-poster.jpg')} opacity={0.35} />
       <div ref={bloomRef} aria-hidden="true" className="absolute inset-0 opacity-60" style={{ background: 'var(--grad-warm)' }} />
       <div aria-hidden="true" className="absolute inset-0" style={{ background: 'var(--grad-hero-scrim)' }} />
 
