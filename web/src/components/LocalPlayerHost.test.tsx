@@ -87,4 +87,11 @@ describe("LocalPlayerHost", () => {
     fireEvent.click(player);
     expect(closeLocalFilePlayer).toHaveBeenCalledOnce();
   });
+
+  it("renders nothing when no local file is selected", () => {
+    store.localFilePlayer = null;
+    render(<LocalPlayerHost />);
+
+    expect(screen.queryByTestId("local-native-player")).not.toBeInTheDocument();
+  });
 });

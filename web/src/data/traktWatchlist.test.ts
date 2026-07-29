@@ -45,6 +45,42 @@ describe("collectTraktWatchlistPushCandidates", () => {
 
     expect(result).toEqual({ imdbIDs: [], showTMDBIDs: [1399], skipped: 2 });
   });
+
+  it("skips unresolved series previews when IMDb lookup fails", async () => {
+    const findByImdbId = vi.fn(async () => {
+      throw new Error("lookup failed");
+    });
+    const getExternalIds = vi.fn(async () => ({ imdbId: null }));
+    const result = await collectTraktWatchlistPushCandidates(
+      [{ ...preview("tt0111161"), type: "series" }],
+      { findByImdbId, getExternalIds },
+    );
+
+    expect(findByImdbId).toHaveBeenCalledWith("tt0111161", "series");
+    expect(result).toEqual({ imdbIDs: [], showTMDBIDs: [], skipped: 1 });
+  });
+
+  it("skips movies with non IMDb external IDs", async () => {
+    const getExternalIds = vi.fn(async () => ({ imdbId: "nope" }));
+    const result = await collectTraktWatchlistPushCandidates(
+      [{ ...preview("tmdb-10"), type: "movie", tmdbId: 10 }],
+      { getExternalIds },
+    );
+
+    expect(result).toEqual({ imdbIDs: [], showTMDBIDs: [], skipped: 1 });
+  });
+
+  it("uses direct series IMDB resolution when available", async () => {
+    const findByImdbId = vi.fn(async () => 1399);
+    const getExternalIds = vi.fn(async () => ({ imdbId: null }));
+    const result = await collectTraktWatchlistPushCandidates(
+      [{ ...preview("tt0944947"), type: "series" }],
+      { findByImdbId, getExternalIds },
+    );
+
+    expect(findByImdbId).toHaveBeenCalledWith("tt0944947", "series");
+    expect(result).toEqual({ imdbIDs: [], showTMDBIDs: [1399], skipped: 0 });
+  });
 });
 
 describe("resolveTraktWatchlistPull", () => {
@@ -92,5 +128,97 @@ describe("resolveTraktWatchlistPull", () => {
       expect.objectContaining({ id: "tmdb-603", type: "movie" }),
       expect.objectContaining({ id: "tmdb-1399", type: "series" }),
     ]);
+  });
+
+  it("falls back to search for a movie when IMDb lookup throws", async () => {
+    const findByImdbId = vi.fn(async () => {
+      throw new Error("query failed");
+    });
+    const result = await resolveTraktWatchlistPull(
+      [{ imdbID: "tt0111161", title: "The Movie", year: 1994 }],
+      [],
+      {
+        findByImdbId,
+        getDetail: vi.fn(async () => {
+          throw new Error("should not be called");
+        }),
+        search: vi.fn(async (query, type) => ({
+          items: [
+            {
+              id: "tmdb-123",
+              type,
+              title: query,
+              year: 1994,
+            },
+          ],
+        })),
+      },
+    );
+
+    expect(findByImdbId).toHaveBeenCalledWith("tt0111161", "movie");
+    expect(result.movies).toBe(1);
+    expect(result.previews).toEqual([
+      expect.objectContaining({ id: "tmdb-123", type: "movie" }),
+    ]);
+  });
+
+  it("falls back to search for a series without a usable TMDB identifier", async () => {
+    const findByImdbId = vi.fn(async () => {
+      throw new Error("query failed");
+    });
+    const result = await resolveTraktWatchlistPull(
+      [],
+      [
+        {
+          traktID: 1,
+          imdbID: "tt0944947",
+          tmdbID: null,
+          title: "Game of Thrones",
+          year: 2011,
+        },
+      ],
+      {
+        findByImdbId,
+        getDetail: vi.fn(async () => {
+          throw new Error("should not be used");
+        }),
+        search: vi.fn(async (query, type) => ({
+          items: [
+            {
+              id: "tmdb-1399",
+              type,
+              title: query,
+              year: 2011,
+            },
+          ],
+        })),
+      },
+    );
+
+    expect(findByImdbId).toHaveBeenCalledWith("tt0944947", "series");
+    expect(result.series).toBe(1);
+    expect(result.previews).toEqual([
+      expect.objectContaining({ id: "tmdb-1399", type: "series" }),
+    ]);
+  });
+
+  it("counts unresolved movie and show items when nothing can be reconciled", async () => {
+    const findByImdbId = vi.fn(async () => null);
+    const result = await resolveTraktWatchlistPull(
+      [{ imdbID: "tt0000000", title: "Missing", year: 1990 }],
+      [{ traktID: 1, imdbID: "tt1111111", tmdbID: null, title: "Missing 2", year: 1991 }],
+      {
+        findByImdbId,
+        getDetail: vi.fn(async () => {
+          throw new Error("never");
+        }),
+        search: vi.fn(async () => ({ items: [] })),
+      },
+    );
+
+    expect(result.movies).toBe(0);
+    expect(result.series).toBe(0);
+    expect(result.notFound).toBe(2);
+    expect(result.previews).toEqual([]);
   });
 });

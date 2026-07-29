@@ -12,6 +12,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Mutable mock state the per-test modules read through the mocked modules below.
 let serverURL: string | null = null;
 let tauri = false;
+const dexieStates = {
+  instances: [] as Array<{
+    name: string;
+    close: ReturnType<typeof vi.fn>;
+    open: ReturnType<typeof vi.fn>;
+    getSecret: ReturnType<typeof vi.fn>;
+    setSecret: ReturnType<typeof vi.fn>;
+    deleteSecret: ReturnType<typeof vi.fn>;
+  }>,
+  reset() {
+    this.instances.length = 0;
+  },
+  latest() {
+    return this.instances[this.instances.length - 1];
+  },
+};
 
 vi.mock("../lib/serverMode", () => ({
   configuredServerURL: () => serverURL,
@@ -25,15 +41,23 @@ vi.mock("./DexieStore", () => ({
   DexieStore: class {
     readonly kind = "dexie";
     readonly name: string;
+    close: ReturnType<typeof vi.fn>;
+    open: ReturnType<typeof vi.fn>;
+    getSecret: ReturnType<typeof vi.fn>;
+    setSecret: ReturnType<typeof vi.fn>;
+    deleteSecret: ReturnType<typeof vi.fn>;
     // Mirror the real signature: default arg is the legacy "debridstreamer" DB.
     constructor(name = "debridstreamer") {
       this.name = name;
-    }
-    async close() {}
-    async open() {
-      return this;
+      this.close = vi.fn(async () => undefined);
+      this.open = vi.fn(async () => this);
+      this.getSecret = vi.fn(async () => `secret:${name}`);
+      this.setSecret = vi.fn(async () => undefined);
+      this.deleteSecret = vi.fn(async () => undefined);
+      dexieStates.instances.push(this);
     }
   },
+  __dexieStates: dexieStates,
 }));
 
 vi.mock("./RemoteStore", () => ({
@@ -59,6 +83,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
+  dexieStates.reset();
 });
 
 describe("getStore()", () => {
@@ -148,6 +173,35 @@ describe("getSecretStore()", () => {
     await mod.swapLocalProfileStore("debridstreamer");
     expect((mod.getSecretStore() as unknown as { kind?: string }).kind).toBeUndefined();
   });
+
+  it("runs the keychain migration gate before local secret access in default profile", async () => {
+    tauri = true;
+    const mod = await freshIndex();
+    const secretStore = mod.getSecretStore();
+
+    await secretStore.getSecret("api-token");
+
+    const state = (await import("./DexieStore")) as unknown as {
+      __dexieStates: typeof dexieStates;
+    };
+    expect(state.__dexieStates.latest()?.getSecret).toHaveBeenCalledTimes(1);
+    expect(secretStore).not.toBe(mod.getStore());
+  });
+
+  it("forwards setSecret and deleteSecret through the migration wrapper", async () => {
+    tauri = true;
+    const mod = await freshIndex();
+    const secretStore = mod.getSecretStore();
+
+    await secretStore.setSecret("api-token", "token-value");
+    await secretStore.deleteSecret("api-token");
+
+    const state = (await import("./DexieStore")) as unknown as {
+      __dexieStates: typeof dexieStates;
+    };
+    expect(state.__dexieStates.latest()?.setSecret).toHaveBeenCalledWith("api-token", "token-value");
+    expect(state.__dexieStates.latest()?.deleteSecret).toHaveBeenCalledWith("api-token");
+  });
 });
 
 describe("__setStoreForTesting()", () => {
@@ -173,5 +227,47 @@ describe("__setStoreForTesting()", () => {
     const mod = await freshIndex();
     mod.__setStoreForTesting(null);
     expect((mod.getStore() as unknown as { kind: string }).kind).toBe("dexie");
+  });
+});
+
+describe("lifecycle helpers", () => {
+  it("closes active local store and clears caches", async () => {
+    const mod = await freshIndex();
+    await mod.getStore();
+    const preCloseStore = mod.getStore();
+    const preCloseSecret = mod.getSecretStore();
+
+    await mod.closeActiveLocalStore();
+
+    expect(dexieStates.latest()?.close).toHaveBeenCalledTimes(1);
+    expect(mod.currentDexieDbName()).toBeNull();
+    const postCloseStore = mod.getStore();
+    const postCloseSecret = mod.getSecretStore();
+    expect(postCloseStore).not.toBe(preCloseStore);
+    expect(postCloseSecret).toBe(postCloseStore);
+    expect(preCloseSecret).toBe(preCloseStore);
+  });
+
+  it("swaps local profile stores and throws in server mode", async () => {
+    const mod = await freshIndex();
+    const secret = (await import("./DexieStore")) as unknown as {
+      __dexieStates: typeof dexieStates;
+    };
+    const dexieState = secret.__dexieStates;
+
+    await mod.swapLocalProfileStore("debridstreamer_profile_1");
+    const first = mod.getStore();
+    const firstDexie = dexieState.latest();
+    expect(first).toBe(firstDexie);
+    await mod.swapLocalProfileStore("debridstreamer_profile_1");
+    expect(firstDexie?.close).not.toHaveBeenCalled();
+
+    await mod.swapLocalProfileStore("debridstreamer_profile_2");
+    expect(firstDexie?.close).toHaveBeenCalledTimes(1);
+
+    serverURL = "http://srv";
+    await expect(mod.swapLocalProfileStore("fallback")).rejects.toThrow(
+      "Local profile switching is unavailable in Server Mode",
+    );
   });
 });

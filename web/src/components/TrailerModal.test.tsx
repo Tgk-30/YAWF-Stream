@@ -2,9 +2,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+
+const isNetworkAllowed = vi.hoisted(() => vi.fn());
+
+vi.mock("../lib/networkPolicy", () => ({
+  isNetworkAllowed: () => isNetworkAllowed(),
+}));
 import { TrailerModal } from "./TrailerModal";
 
 describe("TrailerModal", () => {
+  beforeEach(() => {
+    isNetworkAllowed.mockReturnValue(true);
+  });
+
   it("embeds the youtube-nocookie player for the given key with autoplay", () => {
     render(<TrailerModal videoKey="abc123" title="Dune" onClose={() => {}} />);
     const iframe = screen.getByTitle("Dune trailer") as HTMLIFrameElement;
@@ -46,5 +56,15 @@ describe("TrailerModal", () => {
     render(<TrailerModal videoKey="a/b?c" title="T" onClose={() => {}} />);
     const iframe = screen.getByTitle("T trailer") as HTMLIFrameElement;
     expect(iframe.getAttribute("src")).toContain("embed/a%2Fb%3Fc");
+  });
+
+  it("hides the trailer iframe when trailers are blocked by policy", () => {
+    isNetworkAllowed.mockReturnValue(false);
+    render(<TrailerModal videoKey="abc123" title="Dune" onClose={() => {}} />);
+
+    expect(
+      screen.getByText("Trailers are turned off in this privacy mode."),
+    ).toBeInTheDocument();
+    expect(screen.queryByTitle("Dune trailer")).not.toBeInTheDocument();
   });
 });

@@ -94,4 +94,90 @@ describe("SpotlightTour", () => {
     });
     expect(onDone).toHaveBeenCalledTimes(1);
   });
+
+  it("supports ArrowRight/ArrowLeft and Escape keyboard controls", () => {
+    anchor("discover", { top: 100, left: 12, width: 180, height: 44 });
+    anchor("settings", { top: 620, left: 12, width: 180, height: 44 });
+    const rafSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
+    const onDone = vi.fn();
+
+    act(() => {
+      render(<SpotlightTour steps={STEPS} onDone={onDone} />);
+    });
+    expect(screen.getByText("Home base")).toBeInTheDocument();
+
+    act(() => {
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+    });
+    expect(screen.getByText("Your keys")).toBeInTheDocument();
+
+    act(() => {
+      fireEvent.keyDown(window, { key: "ArrowLeft" });
+    });
+    expect(screen.getByText("Home base")).toBeInTheDocument();
+
+    act(() => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(onDone).toHaveBeenCalledTimes(1);
+    rafSpy.mockRestore();
+  });
+
+  it("respects placement preference and falls back to available room", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1000, writable: true });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 800, writable: true });
+    anchor("discover", { top: 120, left: 900, width: 40, height: 40 });
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
+    act(() => {
+      render(
+        <SpotlightTour
+          steps={[
+            {
+              target: '[data-screen="discover"]',
+              title: "Tight fit",
+              body: "Need a flip",
+              placement: "right",
+            },
+          ]}
+          onDone={() => {}}
+        />,
+      );
+    });
+
+    const tip = document.querySelector(".tour-tip");
+    expect(tip).not.toBeNull();
+    // Preferred right side does not fit near the edge, so it flips to left.
+    expect(tip).toHaveClass("tour-arrow-left");
+  });
+
+  it("traps Tab navigation inside tooltip action buttons", () => {
+    anchor("discover", { top: 100, left: 12, width: 180, height: 44 });
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
+    act(() => {
+      render(<SpotlightTour steps={STEPS} onDone={() => {}} />);
+    });
+
+    const skip = screen.getByRole("button", { name: "Skip tour" });
+    const next = screen.getByRole("button", { name: "Next" });
+    next.focus();
+    act(() => {
+      fireEvent.keyDown(next, { key: "Tab" });
+    });
+    expect(skip).toHaveFocus();
+
+    skip.focus();
+    act(() => {
+      fireEvent.keyDown(skip, { key: "Tab", shiftKey: true });
+    });
+    expect(next).toHaveFocus();
+  });
 });

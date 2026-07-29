@@ -171,7 +171,11 @@ describe("groupEpisodes (additional edge cases)", () => {
   });
 
   it("respects an injected `now` that shifts the today boundary", () => {
-    const later = Date.parse("2026-06-20T00:00:00Z");
+    // groupEpisodes buckets against the LOCAL date, so `now` has to be a local
+    // instant on the same day as the episode. A UTC-midnight instant is the
+    // previous local day at any negative offset, which put this in "week" for
+    // anyone in the Americas while passing on UTC CI runners.
+    const later = new Date(2026, 5, 20, 12, 0, 0).getTime();
     const groups = groupEpisodes([ep("2026-06-20", 1)], later);
     expect(groups[0].bucket).toBe("today");
   });

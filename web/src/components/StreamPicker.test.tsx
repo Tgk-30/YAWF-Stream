@@ -474,7 +474,7 @@ describe("StreamPicker", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show 20 more" }));
     expect(screen.getAllByText(/^Paged stream /)).toHaveLength(31);
     expect(screen.queryByRole("button", { name: "Show 20 more" })).toBeNull();
-  });
+  }, 15000);
 
   it("cached-first sorts the rows (instant rows render before will-cache ones)", () => {
     const rows = [

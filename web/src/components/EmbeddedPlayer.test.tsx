@@ -2,6 +2,7 @@
 
 import { readFileSync } from "node:fs";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const renderPlayerMock = vi.hoisted(() => ({
@@ -883,6 +884,97 @@ describe("EmbeddedPlayer popover material", () => {
     expect(css).toMatch(
       /\.player-info-popover\s*\{[^}]*background:\s*rgba\(12, 14, 22, 1\);/s,
     );
+  });
+
+  it("moves popover menu focus with arrow and home/end keys", async () => {
+    const user = userEvent.setup();
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Speed" }));
+    const menu = screen.getByRole("menu");
+    const items = screen.getAllByRole("menuitemradio");
+    expect(items).toHaveLength(9);
+
+    expect(document.activeElement).toBe(items[0]);
+
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(items[1]);
+
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(items[0]);
+
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(document.activeElement).toBe(items[items.length - 1]);
+
+    fireEvent.keyDown(menu, { key: "Home" });
+    expect(document.activeElement).toBe(items[0]);
+  });
+
+  it("updates subtitle delay settings from the slider component", async () => {
+    renderPlayerMock.setProperty.mockClear();
+
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onClose={() => {}}
+        savedPrefs={{
+          playbackSpeed: 1,
+          preferredAudioId: null,
+          preferredAudioLang: null,
+          preferredSubId: "no",
+          subtitleDelay: 0,
+        }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const subtitleSize = screen.getByRole("slider", { name: /Subtitle size/ });
+    fireEvent.change(subtitleSize, { target: { value: "1.75" } });
+
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("sub-scale", 1.75);
+  });
+
+  it("applies a playback speed selection and closes the popover", async () => {
+    const user = userEvent.setup();
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onClose={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Speed" }));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitemradio", { name: "1.25×" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("menu")).toBeNull();
+    });
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("speed", 1.25);
+  });
+
+  it("updates subtitle and audio delay settings from slider controls", async () => {
+    renderPlayerMock.setProperty.mockClear();
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const subtitleDelay = screen.getByRole("slider", { name: /Subtitle delay/ });
+    const audioDelay = screen.getByRole("slider", { name: /Audio delay/ });
+    fireEvent.change(subtitleDelay, { target: { value: "-3.4" } });
+    fireEvent.change(audioDelay, { target: { value: "1.8" } });
+
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("sub-delay", -3.4);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("audio-delay", 1.8);
   });
 });
 
