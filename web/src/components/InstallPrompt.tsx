@@ -6,7 +6,12 @@
 // manual steps - that copy is the only guidance those environments get.
 
 import { useEffect, useRef, useState } from "react";
-import { deviceKind, isMobileBrowser, isStandaloneDisplay } from "../lib/platform";
+import {
+  deviceKind,
+  isMobileBrowser,
+  isSecureContextForInstall,
+  isStandaloneDisplay,
+} from "../lib/platform";
 import { isTauri } from "../lib/tauri";
 import {
   consumeInstallPrompt,
@@ -85,6 +90,15 @@ export function InstallPrompt({ onDismiss }: { onDismiss: () => void }) {
         ) : prompt != null ? (
           <span className="t-secondary">
             Add it to your home screen - full screen, no browser bars.
+          </span>
+        ) : !isSecureContextForInstall() ? (
+          // Chromium hides the install entry entirely on a plain-HTTP origin,
+          // so the generic "open your browser menu" copy below would send the
+          // user looking for something that is not there. Name the real cause.
+          <span className="t-secondary">
+            This server is served over plain HTTP, so Android will not offer to
+            install it. Reach it over HTTPS, or through a tunnel that provides
+            one, and this card becomes a one-tap install.
           </span>
         ) : (
           <span className="t-secondary">

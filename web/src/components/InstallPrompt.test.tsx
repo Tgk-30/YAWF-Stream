@@ -3,7 +3,8 @@
 // Coverage for the mobile add-to-home-screen card: the eligibility gate
 // (never Tauri, never standalone, mobile browsers only), iOS manual steps,
 // the Android one-tap install flow via a captured beforeinstallprompt, the
-// Android no-event menu fallback, and dismissal.
+// Android no-event menu fallback, the plain-HTTP explanation that replaces it
+// when the origin is not a secure context, and dismissal.
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -13,10 +14,12 @@ import type { BeforeInstallPromptEvent } from "../lib/platform";
 const deviceKindMock = vi.fn<() => string>(() => "ios");
 const isStandaloneMock = vi.fn(() => false);
 const isMobileMock = vi.fn(() => true);
+const isSecureMock = vi.fn(() => true);
 vi.mock("../lib/platform", () => ({
   deviceKind: () => deviceKindMock(),
   isStandaloneDisplay: () => isStandaloneMock(),
   isMobileBrowser: () => isMobileMock(),
+  isSecureContextForInstall: () => isSecureMock(),
 }));
 
 const isTauriMock = vi.fn(() => false);
@@ -117,11 +120,34 @@ describe("InstallPrompt", () => {
   it("falls back to browser-menu steps on Android without a captured event", () => {
     deviceKindMock.mockReturnValue("android");
     getInstallPromptMock.mockReturnValue(null);
+    isSecureMock.mockReturnValue(true);
     render(<InstallPrompt onDismiss={() => {}} />);
     expect(screen.getByText(/Open your browser menu/)).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Install" }),
     ).not.toBeInTheDocument();
+  });
+
+  // Chromium hides the install entry outright on a plain-HTTP origin, so the
+  // menu copy above would send the user hunting for something that is absent.
+  it("explains the plain-HTTP cause on Android instead of the menu steps", () => {
+    deviceKindMock.mockReturnValue("android");
+    getInstallPromptMock.mockReturnValue(null);
+    isSecureMock.mockReturnValue(false);
+    render(<InstallPrompt onDismiss={() => {}} />);
+    expect(screen.getByText(/served over plain HTTP/)).toBeInTheDocument();
+    expect(screen.queryByText(/Open your browser menu/)).not.toBeInTheDocument();
+  });
+
+  // iOS Add to Home Screen is not gated on a secure context, so an insecure
+  // origin must not swap Safari's steps for an Android-only explanation.
+  it("keeps the iOS steps on an insecure origin", () => {
+    deviceKindMock.mockReturnValue("ios");
+    getInstallPromptMock.mockReturnValue(null);
+    isSecureMock.mockReturnValue(false);
+    render(<InstallPrompt onDismiss={() => {}} />);
+    expect(screen.getByText(/Add to Home Screen/)).toBeInTheDocument();
+    expect(screen.queryByText(/served over plain HTTP/)).not.toBeInTheDocument();
   });
 
   it("dismiss button calls onDismiss", async () => {

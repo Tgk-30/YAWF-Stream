@@ -258,8 +258,12 @@ const CHAPTERS: Chapter[] = [
   {
     id: 'android',
     title: 'Chrome or Edge, one banner.',
-    steps: ['Open your server URL', 'Tap Install app (or menu → Install)', "It's on your home screen"],
-    tip: 'same PWA, same profiles, same resume',
+    steps: [
+      'Open your server URL over HTTPS',
+      'Tap Install app (or menu → Install)',
+      "It's on your home screen",
+    ],
+    tip: 'Android only offers this from a secure origin, so plain http:// shows no install option',
     hint: 'Open server URL in Chrome/Edge → Install app',
     kind: 'android',
   },

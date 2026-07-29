@@ -35,7 +35,7 @@ const FAQ = [
   {
     question: 'How do I install the mobile app?',
     answer:
-      'Open your YAWF Stream server in Safari on iPhone or iPad, or Chrome on Android, and use Add to Home Screen or Install app. HTTPS is recommended and required for the full Android install experience outside localhost.',
+      'Open your YAWF Stream server in Safari on iPhone or iPad, or Chrome on Android, and use Add to Home Screen or Install app. On Android this requires HTTPS: Chrome hides the install option on a plain http:// address, so a LAN IP alone will not work. iPhone and iPad can add to the home screen either way.',
   },
   {
     question: 'How do I recover an owner account or restore a backup?',
