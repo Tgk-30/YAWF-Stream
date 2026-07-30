@@ -69,7 +69,7 @@ const BlockedKey = memo(function BlockedKey({ dist, vertical, active }: { dist: 
       <span className="flex h-7 w-7 items-center justify-center rounded-full border border-[rgba(var(--warm-rgb),0.5)] bg-bg-1 text-warm shadow-glow-warm">
         <KeyRound className="h-3.5 w-3.5" />
       </span>
-      <span className="pointer-events-none absolute -top-2 left-1/2 z-10 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-row border border-line bg-bg-1 px-2.5 py-1 font-mono text-[0.6875rem] tracking-[0.04em] text-ink-2 opacity-0 shadow-card transition-opacity duration-200 group-hover/key:opacity-100 group-focus-visible/key:opacity-100">
+      <span className="pointer-events-none absolute -top-2 left-1/2 z-10 -translate-x-1/2 -translate-y-full max-w-[calc(100vw-2rem)] whitespace-normal rounded-row sm:whitespace-nowrap border border-line bg-bg-1 px-2.5 py-1 font-mono text-[0.6875rem] tracking-[0.04em] text-ink-2 opacity-0 shadow-card transition-opacity duration-200 group-hover/key:opacity-100 group-focus-visible/key:opacity-100">
         encrypted at rest · never transmitted
       </span>
     </motion.div>
@@ -173,7 +173,7 @@ function Zone({ label, caption, tooltip, delay, glow = false, children }: ZonePr
         <div className="flex items-center justify-center gap-3">{children}</div>
         {caption && <p className="font-mono text-[0.6875rem] leading-[1.6] tracking-[0.04em] text-ink-3">{caption}</p>}
       </div>
-      <span className="pointer-events-none absolute -top-3 left-1/2 z-10 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-row border border-line bg-bg-1 px-3 py-1.5 font-mono text-[0.75rem] tracking-[0.04em] text-ink-2 opacity-0 shadow-card transition-opacity duration-200 group-hover/zone:opacity-100 group-focus-visible/zone:opacity-100">
+      <span className="pointer-events-none absolute -top-3 left-1/2 z-10 -translate-x-1/2 -translate-y-full max-w-[calc(100vw-2rem)] whitespace-normal rounded-row sm:whitespace-nowrap border border-line bg-bg-1 px-3 py-1.5 font-mono text-[0.75rem] tracking-[0.04em] text-ink-2 opacity-0 shadow-card transition-opacity duration-200 group-hover/zone:opacity-100 group-focus-visible/zone:opacity-100">
         {tooltip}
       </span>
     </motion.div>

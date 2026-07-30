@@ -123,7 +123,7 @@ export default function KidsDial() {
 
   return (
     <section className="py-[clamp(88px,12vw,152px)]">
-      <div className="mx-auto grid max-w-content items-center gap-12 px-6 md:px-10 lg:grid-cols-2">
+      <div className="mx-auto grid grid-cols-1 max-w-content items-center gap-12 px-6 md:px-10 lg:grid-cols-2">
         {/* left - copy */}
         <div>
           <motion.p

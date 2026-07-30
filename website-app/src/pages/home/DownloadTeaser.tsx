@@ -65,7 +65,7 @@ export default function DownloadTeaser() {
         }}
       />
 
-      <div className="relative mx-auto grid max-w-content items-center gap-12 px-6 md:px-10 lg:grid-cols-[2fr_3fr]">
+      <div className="relative mx-auto grid grid-cols-1 max-w-content items-center gap-12 px-6 md:px-10 lg:grid-cols-[2fr_3fr]">
         <SectionHeading
           eyebrow="// DOWNLOAD"
           title="Pick a stream."

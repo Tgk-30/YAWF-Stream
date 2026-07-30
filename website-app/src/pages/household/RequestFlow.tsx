@@ -95,7 +95,7 @@ export default function RequestFlow() {
 
   return (
     <section className="bg-bg-1 py-[clamp(88px,12vw,152px)]">
-      <div className="mx-auto grid max-w-content items-center gap-12 px-6 md:px-10 lg:grid-cols-2">
+      <div className="mx-auto grid grid-cols-1 max-w-content items-center gap-12 px-6 md:px-10 lg:grid-cols-2">
         {/* left - the flow demo */}
         <motion.div
           className="glass-panel rounded-stage p-4 md:p-5"

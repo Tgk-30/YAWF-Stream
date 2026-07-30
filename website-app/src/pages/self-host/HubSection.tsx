@@ -72,7 +72,7 @@ export default function HubSection() {
       onPointerMove={onPointerMove}
       className="relative overflow-hidden py-[clamp(88px,12vw,152px)]"
     >
-      <div className="mx-auto grid min-h-[90vh] max-w-content items-center gap-10 px-6 md:px-10 lg:grid-cols-[55%_45%] lg:gap-6">
+      <div className="mx-auto grid min-h-[90vh] max-w-content grid-cols-1 items-center gap-10 px-6 md:px-10 lg:grid-cols-[55%_45%] lg:gap-6">
         {/* left - Scene C */}
         <ServerCoreStage
           driver={driverRef}

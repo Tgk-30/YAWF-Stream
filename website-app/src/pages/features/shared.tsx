@@ -128,10 +128,13 @@ export function Chapter({ index, id, title, copy, chips, children }: ChapterProp
 
   return (
     <section id={id} className="scroll-mt-[150px]" aria-label={`${title} - chapter ${index}`}>
+      {/* min-w-0 on both children below: a grid track is `auto`, which means
+          max-content, so a max-content marquee or a row of shrink-0 cards
+          widens the column and scrolls the whole page sideways on a phone. */}
       <div className="grid min-h-[80vh] items-center gap-10 lg:grid-cols-2 lg:gap-16">
         {/* text block */}
         <motion.div
-          className={mediaRight ? 'lg:order-1' : 'lg:order-2'}
+          className={cn('min-w-0', mediaRight ? 'lg:order-1' : 'lg:order-2')}
           initial={reduced ? { opacity: 0 } : { opacity: 0, y: 40, filter: 'blur(8px)' }}
           whileInView={reduced ? { opacity: 1 } : { opacity: 1, y: 0, filter: 'blur(0px)' }}
           viewport={{ once: true, amount: 0.35 }}
@@ -163,7 +166,7 @@ export function Chapter({ index, id, title, copy, chips, children }: ChapterProp
 
         {/* media block */}
         <motion.div
-          className={mediaRight ? 'lg:order-2' : 'lg:order-1'}
+          className={cn('min-w-0', mediaRight ? 'lg:order-2' : 'lg:order-1')}
           initial={reduced ? { opacity: 0 } : { opacity: 0, y: 32, scale: 0.96 }}
           whileInView={{ opacity: 1, y: 0, scale: 1 }}
           viewport={{ once: true, amount: 0.25 }}
