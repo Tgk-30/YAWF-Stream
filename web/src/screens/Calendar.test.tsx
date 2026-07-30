@@ -76,7 +76,16 @@ function baseState(over: Partial<CalendarState> = {}): CalendarState {
   };
 }
 
+// The fixtures are built as today+N, and the compact month view only renders
+// the current month, so any offset that crossed a month boundary put the entry
+// on a page the assertions never look at. That made these tests fail for the
+// last few days of every month, on CI and locally alike. Pin the clock to a
+// mid-month date so the offsets always stay inside one month.
+// shouldAdvanceTime keeps real timers progressing so waitFor and user-event
+// still resolve.
 beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date(2026, 5, 15, 12, 0, 0));
   globalThis.localStorage?.clear();
   openDetail.mockClear();
   navigate.mockClear();
@@ -87,6 +96,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
