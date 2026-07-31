@@ -4,7 +4,11 @@
   z-index: 140;
   display: grid;
   place-items: center;
-  padding: calc(24px * var(--density-scale));
+  padding:
+    max(calc(24px * var(--density-scale)), var(--safe-area-top))
+    max(calc(24px * var(--density-scale)), var(--safe-area-right))
+    max(calc(24px * var(--density-scale)), var(--safe-area-bottom))
+    max(calc(24px * var(--density-scale)), var(--safe-area-left));
   background: rgba(1, 2, 7, 0.72);
   backdrop-filter: blur(14px);
 }
@@ -126,7 +130,7 @@
 .casting-bar {
   position: fixed;
   left: 50%;
-  bottom: 24px;
+  bottom: max(24px, var(--safe-area-bottom));
   z-index: 130;
   width: min(920px, calc(100vw - 32px));
   min-height: 72px;
@@ -225,8 +229,12 @@
 
 @media (max-width: 760px) {
   .casting-bar {
+    right: max(16px, var(--safe-area-right));
+    left: max(16px, var(--safe-area-left));
+    width: auto;
     grid-template-columns: 1fr auto;
     gap: calc(10px * var(--density-scale));
+    transform: none;
   }
   .casting-transport {
     grid-column: 1 / -1;

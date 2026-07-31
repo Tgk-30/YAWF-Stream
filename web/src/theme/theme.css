@@ -79,6 +79,16 @@
   --hero-mobile-min-height: 320px;
   --hero-mobile-fluid-height: 46vh;
   --hero-mobile-max-height: 400px;
+  /* iOS supplies env() directly. Android's native bridge fills the second
+     operand because its WebView leaves env() at zero in edge-to-edge mode. */
+  --native-safe-area-top: 0px;
+  --native-safe-area-right: 0px;
+  --native-safe-area-bottom: 0px;
+  --native-safe-area-left: 0px;
+  --safe-area-top: max(env(safe-area-inset-top, 0px), var(--native-safe-area-top));
+  --safe-area-right: max(env(safe-area-inset-right, 0px), var(--native-safe-area-right));
+  --safe-area-bottom: max(env(safe-area-inset-bottom, 0px), var(--native-safe-area-bottom));
+  --safe-area-left: max(env(safe-area-inset-left, 0px), var(--native-safe-area-left));
 
   /* ---- Elevation / shadow ramp (neutral depth; accent glows stay bespoke) ---- */
   --shadow-sm: 0 3px 7px rgba(0, 0, 0, 0.1);

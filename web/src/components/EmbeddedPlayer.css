@@ -151,7 +151,11 @@ html.mpv-active .embed-player * {
   display: flex;
   align-items: center;
   gap: calc(12px * var(--density-scale));
-  padding: calc(20px * var(--density-scale)) calc(28px * var(--density-scale)) calc(56px * var(--density-scale));
+  padding:
+    max(calc(20px * var(--density-scale)), var(--safe-area-top))
+    max(calc(28px * var(--density-scale)), var(--safe-area-right))
+    calc(56px * var(--density-scale))
+    max(calc(28px * var(--density-scale)), var(--safe-area-left));
   background: linear-gradient(to bottom, rgba(0, 0, 0, 0.76), transparent);
 }
 .embed-titles {
@@ -187,8 +191,8 @@ html.mpv-active .embed-player * {
 
 .embed-fullscreen-error {
   position: absolute;
-  top: 78px;
-  right: 28px;
+  top: max(78px, var(--safe-area-top));
+  right: max(28px, var(--safe-area-right));
   z-index: 7;
   max-width: min(420px, calc(100vw - 56px));
   padding: calc(9px * var(--density-scale)) calc(12px * var(--density-scale));
@@ -207,7 +211,11 @@ html.mpv-active .embed-player * {
   display: flex;
   flex-direction: column;
   gap: calc(12px * var(--density-scale));
-  padding: calc(52px * var(--density-scale)) calc(28px * var(--density-scale)) calc(24px * var(--density-scale));
+  padding:
+    calc(52px * var(--density-scale))
+    max(calc(28px * var(--density-scale)), var(--safe-area-right))
+    max(calc(24px * var(--density-scale)), var(--safe-area-bottom))
+    max(calc(28px * var(--density-scale)), var(--safe-area-left));
   /* No frosted bar: just a soft scrim that fades to fully transparent so the
      video shows through. The controls carry their own pill backgrounds and
      text shadows for legibility. */
@@ -516,8 +524,8 @@ html.mpv-active .embed-player * {
 }
 .embed-menu {
   position: absolute;
-  right: 26px;
-  bottom: 92px;
+  right: max(26px, var(--safe-area-right));
+  bottom: calc(92px + var(--safe-area-bottom));
   z-index: 6;
   min-width: 200px;
   max-width: 320px;

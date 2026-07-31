@@ -7,7 +7,11 @@
   z-index: 1400; /* above everything, incl. the command palette */
   display: grid;
   place-items: center;
-  padding: calc(24px * var(--density-scale));
+  padding:
+    max(calc(24px * var(--density-scale)), var(--safe-area-top))
+    max(calc(24px * var(--density-scale)), var(--safe-area-right))
+    max(calc(24px * var(--density-scale)), var(--safe-area-bottom))
+    max(calc(24px * var(--density-scale)), var(--safe-area-left));
   background:
     radial-gradient(circle at 18% 12%, rgba(var(--accent-rgb), 0.22), transparent 38%),
     radial-gradient(circle at 84% 88%, rgba(var(--accent-secondary-rgb), 0.16), transparent 36%),

@@ -8,6 +8,7 @@ import { installSuspendOnHidden } from "./lib/suspendOnHidden";
 import { installAttentionGate } from "./lib/attention";
 import { initInstallPromptCapture } from "./lib/installPrompt";
 import { installExternalLinkHandler } from "./lib/externalLinks";
+import { installMobileSafeAreaInsets } from "./lib/mobileSafeArea";
 import { followServerURL } from "./lib/serverMode";
 import {
   installTVSpatialNavigation,
@@ -59,6 +60,10 @@ installSuspendOnHidden();
 
 // Park unattended CSS and JavaScript work when this visible window is not attended.
 installAttentionGate();
+
+// Android WebView does not map native WindowInsets to CSS safe-area env values.
+// Mirror them before React mounts, then refresh them after rotations and resizes.
+installMobileSafeAreaInsets();
 
 // Capture beforeinstallprompt before React mounts - Chromium can fire it
 // before the first component effect runs.

@@ -4,7 +4,11 @@
   z-index: 120;
   display: grid;
   place-items: center;
-  padding: clamp(calc(12px * var(--density-scale)), 4vw, calc(48px * var(--density-scale)));
+  padding:
+    max(clamp(calc(12px * var(--density-scale)), 4vw, calc(48px * var(--density-scale))), var(--safe-area-top))
+    max(clamp(calc(12px * var(--density-scale)), 4vw, calc(48px * var(--density-scale))), var(--safe-area-right))
+    max(clamp(calc(12px * var(--density-scale)), 4vw, calc(48px * var(--density-scale))), var(--safe-area-bottom))
+    max(clamp(calc(12px * var(--density-scale)), 4vw, calc(48px * var(--density-scale))), var(--safe-area-left));
   background: rgba(4, 5, 12, 0.72);
   backdrop-filter: blur(8px) saturate(115%);
   -webkit-backdrop-filter: blur(8px) saturate(115%);

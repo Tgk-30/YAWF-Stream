@@ -16,6 +16,11 @@
 .error-boundary-overlay {
   position: fixed;
   inset: 0 0 0 var(--nav-safe-left, 78px);
+  padding:
+    max(var(--sp-xl, calc(32px * var(--density-scale))), var(--safe-area-top))
+    max(var(--sp-xl, calc(32px * var(--density-scale))), var(--safe-area-right))
+    max(var(--sp-xl, calc(32px * var(--density-scale))), var(--safe-area-bottom))
+    max(var(--sp-xl, calc(32px * var(--density-scale))), var(--safe-area-left));
   background: var(--bg-1);
 }
 

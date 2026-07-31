@@ -247,7 +247,7 @@
 @media (min-width: 700px) and (max-width: 1199px) {
   .nav-rail {
     gap: calc(10px * var(--density-scale));
-    padding: max(calc(24px * var(--density-scale)), env(safe-area-inset-top)) calc(10px * var(--density-scale)) max(calc(28px * var(--density-scale)), env(safe-area-inset-bottom));
+    padding: max(calc(24px * var(--density-scale)), var(--safe-area-top)) calc(10px * var(--density-scale)) max(calc(28px * var(--density-scale)), var(--safe-area-bottom));
   }
 
   .nav-rail-section {

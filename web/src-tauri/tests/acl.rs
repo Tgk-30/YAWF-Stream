@@ -37,3 +37,29 @@ fn follow_mode_does_not_expose_the_legacy_unvalidated_player_loader() {
     assert!(!allowed.contains(&"player_load"));
     assert!(allowed.contains(&"player_command"));
 }
+
+#[test]
+fn mobile_capability_matches_the_explicit_main_window() {
+    let capability: serde_json::Value =
+        serde_json::from_str(include_str!("../capabilities/mobile.json")).unwrap();
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+
+    assert_eq!(config["app"]["windows"][0]["label"], "main");
+    assert_eq!(capability["windows"][0], "main");
+    assert!(capability["platforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|platform| platform == "android"));
+    assert!(capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|permission| permission == "mobile-commands"));
+    assert!(capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|permission| permission["identifier"] == "http:default"));
+}

@@ -6,7 +6,11 @@
   z-index: 1200;
   display: grid;
   place-items: center;
-  padding: calc(32px * var(--density-scale));
+  padding:
+    max(calc(32px * var(--density-scale)), var(--safe-area-top))
+    max(calc(32px * var(--density-scale)), var(--safe-area-right))
+    max(calc(32px * var(--density-scale)), var(--safe-area-bottom))
+    max(calc(32px * var(--density-scale)), var(--safe-area-left));
   background:
     radial-gradient(circle at 20% 15%, rgba(82, 113, 255, 0.22), transparent 32%),
     radial-gradient(circle at 85% 20%, rgba(32, 201, 151, 0.16), transparent 28%),

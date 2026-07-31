@@ -27,6 +27,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 }));
 
 import {
+  isDesktopTauri,
   isTauri,
   listExternalPlayers,
   openInExternalPlayer,
@@ -48,6 +49,8 @@ import {
   transcodeCancel,
   downloadsFfmpegAvailable,
   downloadsDefaultDir,
+  downloadsAvailableSpace,
+  downloadDeleteFile,
   downloadCancel,
   downloadPause,
   downloadResume,
@@ -67,6 +70,13 @@ import * as networkPolicy from "./networkPolicy";
 /** Put a fake Tauri window in place so isTauri() returns true. */
 function enterTauri(): void {
   vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+}
+
+function enterAndroidTauri(): void {
+  enterTauri();
+  vi.stubGlobal("navigator", {
+    userAgent: "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36",
+  });
 }
 
 beforeEach(() => {
@@ -101,6 +111,18 @@ describe("isTauri", () => {
   });
 });
 
+describe("isDesktopTauri", () => {
+  it("is false in the Android Tauri webview", () => {
+    enterAndroidTauri();
+    expect(isDesktopTauri()).toBe(false);
+  });
+
+  it("is true in a desktop Tauri webview", () => {
+    enterTauri();
+    expect(isDesktopTauri()).toBe(true);
+  });
+});
+
 describe("detectTunnelTools", () => {
   it("returns an absent-tools result in a browser without invoking Tauri", async () => {
     await expect(detectTunnelTools()).resolves.toEqual({
@@ -131,6 +153,15 @@ describe("detectTunnelTools", () => {
       tailscale: { installed: false, version: null, detail: null },
     });
   });
+
+  it("does not invoke the desktop detector on Android", async () => {
+    enterAndroidTauri();
+    await expect(detectTunnelTools()).resolves.toEqual({
+      cloudflared: { installed: false, version: null, detail: null },
+      tailscale: { installed: false, version: null, detail: null },
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("external players bridge", () => {
@@ -144,6 +175,12 @@ describe("external players bridge", () => {
     invokeMock.mockRejectedValue(new Error("rust bridge missing"));
 
     await expect(listExternalPlayers()).resolves.toEqual([]);
+  });
+
+  it("does not invoke desktop player discovery on Android", async () => {
+    enterAndroidTauri();
+    await expect(listExternalPlayers()).resolves.toEqual([]);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 
@@ -168,6 +205,19 @@ describe("getAppInstallInfo", () => {
     await expect(getAppInstallInfo()).resolves.toEqual(info);
     expect(invokeMock).toHaveBeenCalledWith("app_install_info");
   });
+
+  it("keeps app_install_info available on Android", async () => {
+    enterAndroidTauri();
+    invokeMock.mockResolvedValue({
+      os: "linux",
+      format: "unknown",
+      appBundlePath: null,
+      appimagePath: null,
+    });
+
+    await getAppInstallInfo();
+    expect(invokeMock).toHaveBeenCalledWith("app_install_info");
+  });
 });
 
 describe("revealInFileManager", () => {
@@ -185,12 +235,26 @@ describe("revealInFileManager", () => {
       path: "/tmp/file",
     });
   });
+
+  it("does not invoke reveal_in_file_manager on Android", async () => {
+    enterAndroidTauri();
+    await revealInFileManager("/tmp/file");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("openInExternalPlayer", () => {
   it("throws when not running under Tauri (no invoke)", async () => {
     await expect(openInExternalPlayer("http://x/file.mkv")).rejects.toThrow(
-      /Not running under Tauri/,
+      /only in the desktop app/,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("does not invoke the desktop command on Android", async () => {
+    enterAndroidTauri();
+    await expect(openInExternalPlayer("http://x/file.mkv")).rejects.toThrow(
+      /only in the desktop app/,
     );
     expect(invokeMock).not.toHaveBeenCalled();
   });
@@ -252,7 +316,15 @@ describe("openInExternalPlayer", () => {
 describe("playWithMpv", () => {
   it("throws when not running under Tauri", async () => {
     await expect(playWithMpv("http://x/file.mkv")).rejects.toThrow(
-      /Not running under Tauri/,
+      /only in the desktop app/,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("does not invoke bundled mpv on Android", async () => {
+    enterAndroidTauri();
+    await expect(playWithMpv("http://x/file.mkv")).rejects.toThrow(
+      /only in the desktop app/,
     );
     expect(invokeMock).not.toHaveBeenCalled();
   });
@@ -289,7 +361,11 @@ describe("playWithMpv", () => {
   });
 });
 
-describe("mpv control commands (no isTauri gate)", () => {
+describe("mpv control commands", () => {
+  beforeEach(() => {
+    enterTauri();
+  });
+
   it("mpvPause invokes mpv_pause", async () => {
     invokeMock.mockResolvedValue(undefined);
     await mpvPause();
@@ -318,6 +394,16 @@ describe("mpv control commands (no isTauri gate)", () => {
     invokeMock.mockResolvedValue(undefined);
     await mpvStop();
     expect(invokeMock).toHaveBeenCalledWith("mpv_stop");
+  });
+
+  it("does not invoke any bundled mpv control on Android", async () => {
+    enterAndroidTauri();
+    await expect(mpvPause()).rejects.toThrow(/only in the desktop app/);
+    await expect(mpvResume()).rejects.toThrow(/only in the desktop app/);
+    await expect(mpvSeek(42)).rejects.toThrow(/only in the desktop app/);
+    await expect(mpvGetPosition()).rejects.toThrow(/only in the desktop app/);
+    await expect(mpvStop()).rejects.toThrow(/only in the desktop app/);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 
@@ -408,9 +494,34 @@ describe("DLNA cast IPC bridge", () => {
       },
     });
   });
+
+  it("keeps all cast commands available on Android", async () => {
+    enterAndroidTauri();
+    invokeMock
+      .mockResolvedValueOnce([device])
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        state: "PLAYING",
+        positionSecs: 12,
+        durationSecs: 120,
+      })
+      .mockResolvedValueOnce(undefined);
+
+    await castDiscover();
+    await castLoad(device, "https://cdn.example/movie.mkv", "Movie");
+    await castControl(device, "play");
+    await castStatus(device);
+    await castSetVolume(device, 50);
+    expect(invokeMock).toHaveBeenCalledTimes(5);
+  });
 });
 
 describe("download IPC bridge", () => {
+  beforeEach(() => {
+    enterTauri();
+  });
+
   it("invokes start, cancel, and force-stop with the contract payloads", async () => {
     invokeMock.mockResolvedValue(undefined);
     await downloadStart({
@@ -523,6 +634,44 @@ describe("download IPC bridge", () => {
 
     expect(spy).not.toHaveBeenCalled();
   });
+
+  it("does not invoke any download or transcode bridge on Android", async () => {
+    enterAndroidTauri();
+    const startArgs = {
+      jobId: "job-android",
+      url: "https://cdn.example/file",
+      destPath: "/Downloads/file.mkv",
+    };
+    const transcodeArgs = {
+      jobId: "job-android",
+      inputPath: "/tmp/input.mkv",
+      outputPath: "/tmp/output.mkv",
+      keepAudioLangs: ["eng"],
+      keepSubLangs: ["eng"],
+      profile: "remux" as const,
+    };
+
+    await expect(downloadStart(startArgs)).rejects.toThrow(/only in the desktop app/);
+    await expect(downloadPause("job-android")).rejects.toThrow(/only in the desktop app/);
+    await expect(downloadResume("job-android")).rejects.toThrow(/only in the desktop app/);
+    await expect(downloadCancel("job-android")).rejects.toThrow(/only in the desktop app/);
+    await expect(downloadForceStop("job-android")).rejects.toThrow(/only in the desktop app/);
+    await expect(transcodeStart(transcodeArgs)).rejects.toThrow(/only in the desktop app/);
+    await expect(transcodeCancel("job-android")).rejects.toThrow(/only in the desktop app/);
+    await expect(downloadsFfmpegAvailable()).rejects.toThrow(/only in the desktop app/);
+    await expect(downloadsDefaultDir()).rejects.toThrow(/only in the desktop app/);
+    await expect(downloadsAvailableSpace("/Downloads")).rejects.toThrow(
+      /only in the desktop app/,
+    );
+    await expect(downloadDeleteFile("/Downloads/file.mkv")).rejects.toThrow(
+      /only in the desktop app/,
+    );
+    await expect(listenDownloadProgress(() => {})).rejects.toThrow(
+      /only in the desktop app/,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(listenMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("desktop server supervisor commands", () => {
@@ -542,7 +691,7 @@ describe("desktop server supervisor commands", () => {
   };
 
   it("desktopServerStatus throws when not under Tauri", async () => {
-    await expect(desktopServerStatus()).rejects.toThrow(/Not running under Tauri/);
+    await expect(desktopServerStatus()).rejects.toThrow(/only in the desktop app/);
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
@@ -554,7 +703,7 @@ describe("desktop server supervisor commands", () => {
   });
 
   it("startDesktopServer throws when not under Tauri", async () => {
-    await expect(startDesktopServer()).rejects.toThrow(/Not running under Tauri/);
+    await expect(startDesktopServer()).rejects.toThrow(/only in the desktop app/);
   });
 
   it("startDesktopServer invokes desktop_server_start", async () => {
@@ -565,7 +714,7 @@ describe("desktop server supervisor commands", () => {
   });
 
   it("stopDesktopServer throws when not under Tauri", async () => {
-    await expect(stopDesktopServer()).rejects.toThrow(/Not running under Tauri/);
+    await expect(stopDesktopServer()).rejects.toThrow(/only in the desktop app/);
   });
 
   it("stopDesktopServer invokes desktop_server_stop", async () => {
@@ -573,6 +722,14 @@ describe("desktop server supervisor commands", () => {
     invokeMock.mockResolvedValue(status);
     await expect(stopDesktopServer()).resolves.toEqual(status);
     expect(invokeMock).toHaveBeenCalledWith("desktop_server_stop");
+  });
+
+  it("does not invoke desktop server supervision on Android", async () => {
+    enterAndroidTauri();
+    await expect(desktopServerStatus()).rejects.toThrow(/only in the desktop app/);
+    await expect(startDesktopServer()).rejects.toThrow(/only in the desktop app/);
+    await expect(stopDesktopServer()).rejects.toThrow(/only in the desktop app/);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 
@@ -594,5 +751,12 @@ describe("openExternalURL", () => {
       "noopener,noreferrer",
     );
     expect(openUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the opener plugin available on Android", async () => {
+    enterAndroidTauri();
+    openUrlMock.mockResolvedValue(undefined);
+    await openExternalURL("https://example.com");
+    expect(openUrlMock).toHaveBeenCalledWith("https://example.com");
   });
 });

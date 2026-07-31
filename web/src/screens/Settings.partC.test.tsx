@@ -50,6 +50,7 @@ vi.mock("../lib/serverMode", () => ({
 // Tauri is the key difference vs partA: DesktopHostPanel only renders when
 // isTauri() is true, so all four async handlers + QR effect become reachable.
 let mockIsTauri = true;
+let mockIsDesktopTauri = true;
 const desktopServerStatus = vi.fn();
 const startDesktopServer = vi.fn();
 const stopDesktopServer = vi.fn();
@@ -60,6 +61,7 @@ const revealInFileManager = vi.fn();
 
 vi.mock("../lib/tauri", () => ({
   isTauri: () => mockIsTauri,
+  isDesktopTauri: () => mockIsDesktopTauri,
   desktopServerStatus: () => desktopServerStatus(),
   startDesktopServer: () => startDesktopServer(),
   stopDesktopServer: () => stopDesktopServer(),
@@ -128,6 +130,7 @@ beforeEach(() => {
   mockSettings = defaultSettings();
   mockSimpleMode = false;
   mockIsTauri = true;
+  mockIsDesktopTauri = true;
   mockServerURL = null;
   mockServerURLSource = null;
   mockServerMode = false;
@@ -249,6 +252,14 @@ describe("Settings · Remote access tunnel detection", () => {
     mockServerMode = true;
     return renderAt("server");
   }
+
+  it("does not invoke desktop host discovery on Android Tauri", () => {
+    mockIsTauri = true;
+    mockIsDesktopTauri = false;
+    renderRemoteAccess();
+    expect(detectTunnelTools).not.toHaveBeenCalled();
+    expect(desktopServerStatus).not.toHaveBeenCalled();
+  });
 
   it("shows install guidance for both tools when neither is installed", async () => {
     renderRemoteAccess();
@@ -418,6 +429,14 @@ describe("Settings · Install (setup paths)", () => {
     expect(
       screen.getByText(/Docker Compose files for NAS/),
     ).toBeInTheDocument();
+  });
+
+  it("does not mount desktop hosting controls on Android Tauri", () => {
+    mockIsTauri = true;
+    mockIsDesktopTauri = false;
+    renderAt("install");
+    expect(screen.queryByText("Host from this desktop")).not.toBeInTheDocument();
+    expect(desktopServerStatus).not.toHaveBeenCalled();
   });
 
   it("drives the setup-path <select> too", async () => {

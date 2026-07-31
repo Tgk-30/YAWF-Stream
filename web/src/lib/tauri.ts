@@ -35,7 +35,7 @@ export function isTauri(): boolean {
 
 /** Open a direct stream URL in a native external player via the Rust command.
  * Resolves to the command's status string. Throws if not running under Tauri
- * (callers should gate on `isTauri()` first) or if the command fails. */
+ * (callers should gate on `isDesktopTauri()` first) or if the command fails. */
 export async function openInExternalPlayer(
   url: string,
   preferred?: string | null,
@@ -44,8 +44,8 @@ export async function openInExternalPlayer(
   if (/^https?:\/\//i.test(url) && !isRequestExempt(url)) {
     assertNetworkAllowed("streaming", "external player");
   }
-  if (!isTauri()) {
-    throw new Error("Not running under Tauri - no native player available.");
+  if (!isDesktopTauri()) {
+    throw new Error("External-player handoff is available only in the desktop app.");
   }
   // Imported dynamically so the browser bundle never tries to resolve the Tauri
   // runtime at module-eval time (it's only present in the desktop webview).
@@ -60,7 +60,7 @@ export async function openInExternalPlayer(
 /** Reveal a completed local download in Finder, Explorer, or the Linux file
  * manager. This is desktop-only, so browser callers safely no-op. */
 export async function revealInFileManager(path: string): Promise<void> {
-  if (!isTauri()) return;
+  if (!isDesktopTauri()) return;
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("reveal_in_file_manager", { path });
 }
@@ -85,7 +85,7 @@ export async function getAppInstallInfo(): Promise<AppInstallInfo> {
  * detector). Empty outside Tauri. Drives the Settings picker so it only offers
  * real choices. */
 export async function listExternalPlayers(): Promise<string[]> {
-  if (!isTauri()) return [];
+  if (!isDesktopTauri()) return [];
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     return await invoke<string[]>("list_external_players");
@@ -115,7 +115,7 @@ function noTunnelTools(): TunnelTools {
 /** Detect locally-installed Cloudflare Tunnel and Tailscale clients. This is
  * desktop-host-only: a browser cannot inspect the machine hosting the server. */
 export async function detectTunnelTools(): Promise<TunnelTools> {
-  if (!isTauri()) return noTunnelTools();
+  if (!isDesktopTauri()) return noTunnelTools();
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     return await invoke<TunnelTools>("detect_tunnel_tools");
@@ -218,6 +218,12 @@ export interface MpvPlayResult {
   status: string;
 }
 
+function requireDesktopTauri(feature: string): void {
+  if (!isDesktopTauri()) {
+    throw new Error(`${feature} is available only in the desktop app.`);
+  }
+}
+
 /** Play a direct stream URL with the bundled mpv sidecar (Phase 3 P1).
  *
  * This is the primary lossless / non-Real-Debrid MKV path: mpv is shipped with
@@ -232,8 +238,8 @@ export async function playWithMpv(
   if (/^https?:\/\//i.test(url) && !isRequestExempt(url)) {
     assertNetworkAllowed("streaming", "mpv");
   }
-  if (!isTauri()) {
-    throw new Error("Not running under Tauri - no bundled mpv available.");
+  if (!isDesktopTauri()) {
+    throw new Error("Bundled mpv is available only in the desktop app.");
   }
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<MpvPlayResult>("mpv_play", {
@@ -244,30 +250,35 @@ export async function playWithMpv(
 
 /** Pause the bundled-mpv playback. */
 export async function mpvPause(): Promise<void> {
+  requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("mpv_pause");
 }
 
 /** Resume the bundled-mpv playback. */
 export async function mpvResume(): Promise<void> {
+  requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("mpv_resume");
 }
 
 /** Seek the bundled-mpv playback to an absolute position (seconds). */
 export async function mpvSeek(seconds: number): Promise<void> {
+  requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("mpv_seek", { seconds });
 }
 
 /** Current bundled-mpv playback position in seconds (0 if not yet known). */
 export async function mpvGetPosition(): Promise<number> {
+  requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<number>("mpv_get_position");
 }
 
 /** Stop bundled-mpv playback and kill the process. */
 export async function mpvStop(): Promise<void> {
+  requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("mpv_stop");
 }
@@ -288,25 +299,19 @@ export interface DesktopServerStatus {
 }
 
 export async function desktopServerStatus(): Promise<DesktopServerStatus> {
-  if (!isTauri()) {
-    throw new Error("Not running under Tauri - no desktop server supervisor.");
-  }
+  requireDesktopTauri("Desktop server supervision");
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<DesktopServerStatus>("desktop_server_status");
 }
 
 export async function startDesktopServer(): Promise<DesktopServerStatus> {
-  if (!isTauri()) {
-    throw new Error("Not running under Tauri - no desktop server supervisor.");
-  }
+  requireDesktopTauri("Desktop server supervision");
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<DesktopServerStatus>("desktop_server_start");
 }
 
 export async function stopDesktopServer(): Promise<DesktopServerStatus> {
-  if (!isTauri()) {
-    throw new Error("Not running under Tauri - no desktop server supervisor.");
-  }
+  requireDesktopTauri("Desktop server supervision");
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<DesktopServerStatus>("desktop_server_stop");
 }
@@ -352,6 +357,7 @@ interface DownloadProgress {
 }
 
 export async function downloadStart(args: DownloadStartArgs): Promise<void> {
+  requireDesktopTauri("Downloads");
   if (/^https?:\/\//i.test(args.url) && !isRequestExempt(args.url)) {
     assertNetworkAllowed("streaming", "download");
   }
@@ -360,52 +366,62 @@ export async function downloadStart(args: DownloadStartArgs): Promise<void> {
 }
 
 export async function downloadPause(jobId: string): Promise<void> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("download_pause", { jobId });
 }
 
 export async function downloadResume(jobId: string): Promise<void> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("download_resume", { jobId });
 }
 
 export async function downloadCancel(jobId: string): Promise<void> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("download_cancel", { jobId });
 }
 
 /** Idempotently abort any native download or transcode registered for this id. */
 export async function downloadForceStop(jobId: string): Promise<void> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("download_force_stop", { jobId });
 }
 
 export async function transcodeStart(args: TranscodeStartArgs): Promise<void> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("transcode_start", { args });
 }
 
 export async function transcodeCancel(jobId: string): Promise<void> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("transcode_cancel", { jobId });
 }
 
 export async function downloadsFfmpegAvailable(): Promise<boolean> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<boolean>("downloads_ffmpeg_available");
 }
 
 export async function downloadsDefaultDir(): Promise<string> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<string>("downloads_default_dir");
 }
 
 export async function downloadsAvailableSpace(path: string): Promise<number> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<number>("downloads_available_space", { path });
 }
 
 export async function downloadDeleteFile(path: string): Promise<void> {
+  requireDesktopTauri("Downloads");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("download_delete_file", { path });
 }
@@ -413,6 +429,7 @@ export async function downloadDeleteFile(path: string): Promise<void> {
 export async function listenDownloadProgress(
   listener: (progress: DownloadProgress) => void,
 ): Promise<() => void> {
+  requireDesktopTauri("Downloads");
   const { listen } = await import("@tauri-apps/api/event");
   return listen<DownloadProgress>("download-progress", (event) => {
     listener(event.payload);

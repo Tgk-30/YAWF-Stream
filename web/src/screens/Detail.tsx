@@ -58,7 +58,7 @@ import {
   type ServerTranscodeQuality,
 } from "../lib/serverApi";
 import { isServerMode } from "../lib/serverMode";
-import { isTauri } from "../lib/tauri";
+import { isDesktopTauri } from "../lib/tauri";
 import { assertNetworkAllowed, getNetworkMode, isRequestExempt } from "../lib/networkPolicy";
 import type { PlaybackEngine } from "../lib/playbackEngine";
 import { getDownloadsBridge } from "../lib/downloadsBridge";
@@ -435,7 +435,7 @@ export function Detail() {
   );
 
   useEffect(() => {
-    if (!isTauri() || isServerMode()) {
+    if (!isDesktopTauri() || isServerMode()) {
       setFfmpegAvailable(false);
       return;
     }
@@ -1063,7 +1063,7 @@ export function Detail() {
       return;
     }
 
-    if (isTauri()) {
+    if (isDesktopTauri()) {
       openPlayer(
         stream.streamURL,
         sourceFileName,
@@ -1252,7 +1252,7 @@ export function Detail() {
     if (player == null) throw new Error("No active source is available to replace.");
     const runtimeMinutes =
       player.nowPlaying?.runtimeMinutes ?? item?.runtime ?? null;
-    const profile = isTauri()
+    const profile = isDesktopTauri()
       ? "native" as const
       : transcodeAvailable
         ? "browser-transcode" as const
@@ -1300,7 +1300,7 @@ export function Detail() {
   }
 
   const downloadDisabledReason =
-    !isTauri()
+    !isDesktopTauri()
       ? "Open the desktop app to download files."
       : isServerMode()
         ? "Downloads are available in Local Mode in the desktop app."
@@ -1470,7 +1470,7 @@ export function Detail() {
               : "Play"
           }
           onDownload={
-            isTauri() && !isServerMode()
+            isDesktopTauri() && !isServerMode()
               ? () => {
                   setDownloadNotice(null);
                   setDownloadMenuOpen((open) => !open);

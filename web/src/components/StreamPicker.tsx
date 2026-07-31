@@ -34,7 +34,7 @@ import {
   type RankedSource,
   type SourceAssessment,
 } from "../data/sourceIntelligence";
-import { isTauri } from "../lib/tauri";
+import { isDesktopTauri } from "../lib/tauri";
 import { Icon } from "./Icon";
 import { ErrorNote } from "./ErrorNote";
 import "./StreamPicker.css";
@@ -122,7 +122,7 @@ export function StreamPicker({
   const [visibleCount, setVisibleCount] = useState(10);
   const [resolutionStates, setResolutionStates] = useState<Record<string, ResolutionStatus>>({});
   const [resolveError, setResolveError] = useState<string | null>(null);
-  const playbackProfile = isTauri()
+  const playbackProfile = isDesktopTauri()
     ? "native" as const
     : transcodeAvailable
       ? "browser-transcode" as const

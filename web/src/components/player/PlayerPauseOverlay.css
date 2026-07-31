@@ -52,7 +52,11 @@
 .player-pause-content {
   position: relative;
   width: min(760px, calc(100vw - 96px));
-  margin: 0 0 clamp(calc(40px * var(--density-scale)), 7vh, calc(88px * var(--density-scale))) clamp(calc(40px * var(--density-scale)), 6vw, calc(88px * var(--density-scale)));
+  margin:
+    0
+    0
+    max(clamp(calc(40px * var(--density-scale)), 7vh, calc(88px * var(--density-scale))), var(--safe-area-bottom))
+    max(clamp(calc(40px * var(--density-scale)), 6vw, calc(88px * var(--density-scale))), var(--safe-area-left));
   text-align: left;
   animation: playerPauseContentIn 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.06s both;
 }
@@ -160,8 +164,16 @@
 
 @media (max-width: 640px) {
   .player-pause-content {
-    width: calc(100vw - 44px);
-    margin: 0 0 clamp(calc(28px * var(--density-scale)), 6vh, calc(56px * var(--density-scale))) calc(22px * var(--density-scale));
+    width: calc(
+      100vw
+      - max(calc(22px * var(--density-scale)), var(--safe-area-left))
+      - max(calc(22px * var(--density-scale)), var(--safe-area-right))
+    );
+    margin:
+      0
+      0
+      max(clamp(calc(28px * var(--density-scale)), 6vh, calc(56px * var(--density-scale))), var(--safe-area-bottom))
+      max(calc(22px * var(--density-scale)), var(--safe-area-left));
   }
   .player-pause-content h2 {
     font-size: clamp(1.875rem, calc(10vw * var(--text-scale)), 2.875rem);

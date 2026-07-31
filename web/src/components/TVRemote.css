@@ -1,8 +1,8 @@
 .tv-pairing-dock {
   position: fixed;
   z-index: 120;
-  right: max(1.5rem, env(safe-area-inset-right));
-  bottom: max(1.5rem, env(safe-area-inset-bottom));
+  right: max(1.5rem, var(--safe-area-right));
+  bottom: max(1.5rem, var(--safe-area-bottom));
   display: grid;
   width: min(24rem, calc(100vw - 3rem));
   gap: 0.7rem;
@@ -42,10 +42,10 @@
   display: grid;
   place-content: center;
   gap: 1.5rem;
-  padding: max(1.25rem, env(safe-area-inset-top))
-    max(1.25rem, env(safe-area-inset-right))
-    max(1.25rem, env(safe-area-inset-bottom))
-    max(1.25rem, env(safe-area-inset-left));
+  padding: max(1.25rem, var(--safe-area-top))
+    max(1.25rem, var(--safe-area-right))
+    max(1.25rem, var(--safe-area-bottom))
+    max(1.25rem, var(--safe-area-left));
 }
 
 .phone-remote > header,

@@ -3,8 +3,8 @@
 
 .update-banner {
   position: fixed;
-  right: var(--sp-xl);
-  bottom: var(--sp-xl);
+  right: max(var(--sp-xl), var(--safe-area-right));
+  bottom: max(var(--sp-xl), var(--safe-area-bottom));
   z-index: 1000;
   display: flex;
   align-items: center;
@@ -22,7 +22,11 @@
   z-index: 2000;
   display: grid;
   place-items: center;
-  padding: var(--sp-xl);
+  padding:
+    max(var(--sp-xl), var(--safe-area-top))
+    max(var(--sp-xl), var(--safe-area-right))
+    max(var(--sp-xl), var(--safe-area-bottom))
+    max(var(--sp-xl), var(--safe-area-left));
   background: rgba(4, 7, 14, 0.78);
   backdrop-filter: blur(14px);
 }

@@ -3,7 +3,7 @@
 .install-prompt {
   position: fixed;
   left: 50%;
-  bottom: calc(var(--sp-lg) + env(safe-area-inset-bottom, 0px));
+  bottom: calc(var(--sp-lg) + var(--safe-area-bottom));
   transform: translateX(-50%);
   z-index: 40;
   display: flex;
@@ -73,10 +73,13 @@
 
 @media (max-width: 699px) {
   .install-prompt {
+    right: max(var(--sp-sm), var(--safe-area-right));
+    left: max(var(--sp-sm), var(--safe-area-left));
     bottom: calc(var(--mobile-nav-bottom) + var(--mobile-nav-height) + var(--sp-sm));
-    width: calc(100% - var(--sp-md));
+    width: auto;
     gap: var(--sp-sm);
     padding: var(--sp-md);
+    transform: none;
   }
 
   .install-prompt-text {

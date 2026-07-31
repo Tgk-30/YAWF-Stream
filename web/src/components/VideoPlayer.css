@@ -50,10 +50,10 @@
   justify-content: space-between;
   gap: var(--sp-md);
   padding:
-    max(calc(18px * var(--density-scale)), env(safe-area-inset-top))
-    max(calc(24px * var(--density-scale)), env(safe-area-inset-right))
+    max(calc(18px * var(--density-scale)), var(--safe-area-top))
+    max(calc(24px * var(--density-scale)), var(--safe-area-right))
     calc(52px * var(--density-scale))
-    max(calc(24px * var(--density-scale)), env(safe-area-inset-left));
+    max(calc(24px * var(--density-scale)), var(--safe-area-left));
   border: 0;
   background:
     linear-gradient(to bottom, rgba(2, 3, 8, 0.82) 0%, rgba(3, 4, 10, 0.54) 48%, transparent 100%),
@@ -300,9 +300,9 @@
   gap: var(--sp-xs);
   padding:
     calc(46px * var(--density-scale))
-    max(calc(24px * var(--density-scale)), env(safe-area-inset-right))
-    max(calc(12px * var(--density-scale)), env(safe-area-inset-bottom))
-    max(calc(24px * var(--density-scale)), env(safe-area-inset-left));
+    max(calc(24px * var(--density-scale)), var(--safe-area-right))
+    max(calc(12px * var(--density-scale)), var(--safe-area-bottom))
+    max(calc(24px * var(--density-scale)), var(--safe-area-left));
   background:
     linear-gradient(to top, rgba(2, 3, 8, 0.82) 0%, rgba(3, 4, 10, 0.52) 48%, transparent 100%),
     linear-gradient(90deg, rgba(6, 8, 17, 0.22), transparent 64%);
@@ -368,8 +368,8 @@
 }
 .player-options-menu {
   position: absolute;
-  right: max(24px, env(safe-area-inset-right));
-  bottom: calc(76px + env(safe-area-inset-bottom));
+  right: max(24px, var(--safe-area-right));
+  bottom: calc(76px + var(--safe-area-bottom));
   z-index: 18;
   width: min(380px, calc(100% - 32px));
   max-height: min(540px, calc(100% - 120px));
@@ -613,8 +613,8 @@
 /* Captions menu popover. */
 .captions-menu {
   position: absolute;
-  left: var(--sp-md);
-  bottom: 64px;
+  left: max(var(--sp-md), var(--safe-area-left));
+  bottom: calc(64px + var(--safe-area-bottom));
   width: min(440px, calc(100% - var(--sp-xl)));
   max-height: 60vh;
   overflow-y: auto;

@@ -28,7 +28,7 @@ let mockContinueWatching: any[] = [];
 let serverModeOn = false;
 let transcodeAvailable = false;
 let pickerSelection = { season: 1, episode: 3 };
-const tauriState = vi.hoisted(() => ({ on: false }));
+const tauriState = vi.hoisted(() => ({ on: false, desktop: false }));
 const downloadsFfmpegAvailable = vi.hoisted(() => vi.fn(async () => true));
 const downloadsRuntime = vi.hoisted(() => ({
   enqueue: vi.fn(async () => {}),
@@ -100,6 +100,7 @@ vi.mock("../lib/serverMode", () => ({
 vi.mock("../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/tauri")>()),
   isTauri: () => tauriState.on,
+  isDesktopTauri: () => tauriState.desktop,
 }));
 
 vi.mock("../lib/ServerSessionContext", () => ({
@@ -442,6 +443,7 @@ beforeEach(() => {
   serverModeOn = false;
   transcodeAvailable = false;
   tauriState.on = false;
+  tauriState.desktop = false;
   pickerSelection = { season: 1, episode: 3 };
   mockServices = {
     tmdb: null,
@@ -1025,6 +1027,7 @@ describe("Detail play", () => {
 
   it("routes 2160p DV/HDR H265-in-MP4 straight to native mpv on desktop", async () => {
     tauriState.on = true;
+    tauriState.desktop = true;
     const getTranscodeHLS = vi.fn(async () => "https://cdn/lossy.m3u8");
     mockServices.debrid = { getTranscodeHLS };
     mockSettings = {
@@ -1062,6 +1065,7 @@ describe("Detail play", () => {
     // the existing webview-direct test runs in a browser session (isTauri=false);
     // this exercises the desktop branch to prove it still yields webview-direct.
     tauriState.on = true;
+    tauriState.desktop = true;
     const getTranscodeHLS = vi.fn(async () => "https://cdn/lossy.m3u8");
     mockServices.debrid = { getTranscodeHLS };
     mockSettings = {
@@ -1085,6 +1089,28 @@ describe("Detail play", () => {
     // Never routed to native and never asked RD to transcode - it just plays.
     expect(player).not.toHaveAttribute("data-engine", "native-mpv");
     expect(getTranscodeHLS).not.toHaveBeenCalled();
+  });
+
+  it("requests browser-compatible HLS for an incompatible source on Android", async () => {
+    tauriState.on = true;
+    tauriState.desktop = false;
+    const getTranscodeHLS = vi.fn(async () => "https://cdn/android.m3u8");
+    mockServices.debrid = { getTranscodeHLS };
+    mockCached = {
+      stream: {
+        fileName: "movie.mkv",
+        streamURL: "https://cdn/movie.mkv",
+        codec: "H.265",
+      },
+    };
+
+    render(<Detail />);
+    await userEvent.click(screen.getByText("play"));
+    const player = await screen.findByTestId("player");
+
+    expect(getTranscodeHLS).toHaveBeenCalled();
+    expect(player).toHaveAttribute("data-engine", "webview-hls-transcode");
+    expect(player).toHaveAttribute("data-url", "https://cdn/android.m3u8");
   });
 });
 
@@ -1141,6 +1167,7 @@ describe("Detail taste signal", () => {
 describe("Detail downloads", () => {
   it("passes the selected source size into the download queue", async () => {
     tauriState.on = true;
+    tauriState.desktop = true;
     mockServices = {
       tmdb: null,
       indexers: {},
@@ -1170,6 +1197,7 @@ describe("Detail downloads", () => {
 
   it("shows an estimate for the selected resolution and updates it for optimization", async () => {
     tauriState.on = true;
+    tauriState.desktop = true;
     mockServices = {
       tmdb: null,
       indexers: {},
@@ -1207,6 +1235,14 @@ describe("Detail downloads", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Smaller file (slow)" }));
     expect(screen.getByText("Planning estimate: about 768 MB")).toBeInTheDocument();
+  });
+
+  it("does not offer desktop downloads on Android", () => {
+    tauriState.on = true;
+    tauriState.desktop = false;
+    render(<Detail />);
+    expect(screen.queryByRole("button", { name: "download" })).toBeNull();
+    expect(downloadsFfmpegAvailable).not.toHaveBeenCalled();
   });
 });
 

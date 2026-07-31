@@ -6,7 +6,11 @@
   z-index: 80;
   display: grid;
   place-items: center;
-  padding: var(--sp-xl);
+  padding:
+    max(var(--sp-xl), var(--safe-area-top))
+    max(var(--sp-xl), var(--safe-area-right))
+    max(var(--sp-xl), var(--safe-area-bottom))
+    max(var(--sp-xl), var(--safe-area-left));
   overflow-y: auto;
   background:
     radial-gradient(120% 120% at 50% 0%, rgba(var(--accent-rgb), 0.16), transparent 60%),
@@ -91,8 +95,11 @@
 @media (max-width: 420px) {
   .first-run {
     align-items: start;
-    padding: max(var(--sp-xl), env(safe-area-inset-top)) var(--sp-lg)
-      max(var(--sp-xl), env(safe-area-inset-bottom));
+    padding:
+      max(var(--sp-xl), var(--safe-area-top))
+      max(var(--sp-lg), var(--safe-area-right))
+      max(var(--sp-xl), var(--safe-area-bottom))
+      max(var(--sp-lg), var(--safe-area-left));
   }
 
   .first-run-card {
@@ -102,7 +109,11 @@
 
 @media (max-width: 340px) {
   .first-run {
-    padding: var(--sp-lg);
+    padding:
+      max(var(--sp-lg), var(--safe-area-top))
+      max(var(--sp-lg), var(--safe-area-right))
+      max(var(--sp-lg), var(--safe-area-bottom))
+      max(var(--sp-lg), var(--safe-area-left));
   }
 
   .first-run-card {

@@ -1,6 +1,6 @@
 [package]
 name = "debridstreamer"
-version = "2.2.1"
+version = "2.2.2"
 description = "YAWF Stream - private streaming hub"
 authors = ["tgk30"]
 edition = "2021"
@@ -44,7 +44,7 @@ getrandom = "0.2"
 # Native download streaming and cancellable background jobs.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "stream"] }
 roxmltree = "0.20"
-tokio = { version = "1", features = ["fs", "io-util", "process", "rt", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "process", "rt", "sync", "time"] }
 futures-util = "0.3"
 # OS-appropriate Movies/Downloads directory discovery.
 dirs = "6"
@@ -112,6 +112,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
 ] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Read WindowInsets from the native WebView. Android WebView does not expose
+# these as CSS env(safe-area-inset-*) values, even with viewport-fit=cover.
+jni = "0.21"
 
 # Linux: Secret Service over D-Bus (sync), pure-Rust crypto (no OpenSSL system
 # dep), vendored libdbus (no system build dep) - headless-CI-friendly.

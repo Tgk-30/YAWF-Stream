@@ -193,8 +193,11 @@
   }
 
   .browse-inner {
-    padding: var(--sp-lg);
-    padding-bottom: max(var(--sp-xl), env(safe-area-inset-bottom));
+    padding:
+      max(var(--sp-lg), var(--safe-area-top))
+      max(var(--sp-lg), var(--safe-area-right))
+      max(var(--sp-xl), var(--safe-area-bottom))
+      max(var(--sp-lg), var(--safe-area-left));
   }
 
   .browse-head {

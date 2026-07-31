@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { EmptyState } from "../components/EmptyState";
 import { Icon } from "../components/Icon";
 import { getDownloadsBridge, type DownloadProgress } from "../lib/downloadsBridge";
-import { isTauri, revealInFileManager } from "../lib/tauri";
+import { isDesktopTauri, revealInFileManager } from "../lib/tauri";
 import { getStore } from "../storage";
 import { MediaItem as MediaItemNS } from "../models/media";
 import type { DownloadRecord } from "../storage/models";
@@ -216,7 +216,7 @@ export function DownloadShowBanner({ title, art }: { title: string; art?: Downlo
 
 export function Downloads() {
   const { services, navigate, activeProfile, playLocalFile } = useAppStore();
-  const tauri = isTauri();
+  const tauri = isDesktopTauri();
   const [records, setRecords] = useState<DownloadRecord[]>([]);
   const [speeds, setSpeeds] = useState<Record<string, number>>({});
   const [ffmpegAvailable, setFfmpegAvailable] = useState<boolean | null>(null);
