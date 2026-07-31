@@ -6,7 +6,7 @@ export const GITHUB_ISSUES = `${GITHUB_REPO}/issues`;
 export const GITHUB_BUG_REPORT = `${GITHUB_ISSUES}/new?template=bug_report.yml`;
 export const GITHUB_DOCKER = `${GITHUB_REPO}/tree/main/deploy/compose`;
 
-export const APP_VERSION = '2.1.0';
+export const APP_VERSION = '2.2.0';
 export const VERSION = `v${APP_VERSION}-web`;
 export const RELEASE_ASSET_BASE = `${GITHUB_RELEASES}/download/${VERSION}`;
 export const RELEASE_CHECKSUMS = `${RELEASE_ASSET_BASE}/SHA256SUMS`;
@@ -19,9 +19,6 @@ export const DOWNLOAD_LINKS = {
   androidTV: `${RELEASE_ASSET_BASE}/YAWF.Stream_Android.TV_${APP_VERSION}.apk`,
   // Phone/tablet build. A different package id from the TV app, so the two are
   // separate installs and must never be presented as one "Android" download.
-  // Not surfaced on the download page yet: the release job only publishes this
-  // asset once the phone signing identity exists, and a card pointing at a
-  // missing asset is a 404 button. Re-add the StreamPicker entry with it.
   androidPhone: `${RELEASE_ASSET_BASE}/YAWF.Stream_Android_${APP_VERSION}.apk`,
   serverDeb: `${RELEASE_ASSET_BASE}/debridstreamer-server_${APP_VERSION}_all.deb`,
   macos: `${RELEASE_ASSET_BASE}/YAWF.Stream_${APP_VERSION}_aarch64.dmg`,
