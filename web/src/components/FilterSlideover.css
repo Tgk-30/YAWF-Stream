@@ -173,11 +173,12 @@
   }
 
   .fs-panel {
-    top: var(--sp-sm);
-    right: var(--sp-sm);
-    bottom: var(--sp-sm);
+    top: max(var(--sp-sm), var(--safe-area-top));
+    right: max(var(--sp-sm), var(--safe-area-right));
+    bottom: max(var(--sp-sm), var(--safe-area-bottom));
+    left: max(var(--sp-sm), var(--safe-area-left));
     height: auto;
-    width: calc(100vw - var(--sp-lg));
+    width: auto;
     border-radius: var(--r-lg);
   }
 

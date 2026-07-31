@@ -9,6 +9,7 @@ reject with a clear message rather than an ACL error the UI cannot explain.
 """
 commands.allow = [
   "app_install_info",
+  "mobile_safe_area_insets",
   "player_init",
   "player_load",
   "player_command",

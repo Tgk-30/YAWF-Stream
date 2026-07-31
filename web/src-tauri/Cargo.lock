@@ -778,6 +778,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "getrandom 0.2.17",
+ "jni 0.21.1",
  "keyring",
  "libc",
  "libmpv2",

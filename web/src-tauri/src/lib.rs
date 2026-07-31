@@ -231,6 +231,115 @@ fn app_install_info() -> AppInstallInfo {
     detect_app_install_info(current_os(), executable.as_deref(), appimage_path)
 }
 
+/// Physical-pixel insets around the Android webview. Android's edge-to-edge
+/// WebView does not populate CSS env(safe-area-inset-*), so the frontend asks
+/// the native view for the same WindowInsets instead.
+#[cfg(mobile)]
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileSafeAreaInsets {
+    top: i32,
+    right: i32,
+    bottom: i32,
+    left: i32,
+}
+
+#[cfg(target_os = "android")]
+fn read_android_safe_area_insets(
+    env: &mut jni::JNIEnv<'_>,
+    webview: &jni::objects::JObject<'_>,
+) -> jni::errors::Result<MobileSafeAreaInsets> {
+    use jni::objects::JObject;
+
+    let window_insets = env
+        .call_method(
+            webview,
+            "getRootWindowInsets",
+            "()Landroid/view/WindowInsets;",
+            &[],
+        )?
+        .l()?;
+    if env.is_same_object(&window_insets, JObject::null())? {
+        return Ok(MobileSafeAreaInsets::default());
+    }
+
+    let mut insets = MobileSafeAreaInsets {
+        top: env
+            .call_method(&window_insets, "getSystemWindowInsetTop", "()I", &[])?
+            .i()?,
+        right: env
+            .call_method(&window_insets, "getSystemWindowInsetRight", "()I", &[])?
+            .i()?,
+        bottom: env
+            .call_method(&window_insets, "getSystemWindowInsetBottom", "()I", &[])?
+            .i()?,
+        left: env
+            .call_method(&window_insets, "getSystemWindowInsetLeft", "()I", &[])?
+            .i()?,
+    };
+
+    let sdk = env
+        .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+        .i()?;
+    if sdk >= 28 {
+        let cutout = env
+            .call_method(
+                &window_insets,
+                "getDisplayCutout",
+                "()Landroid/view/DisplayCutout;",
+                &[],
+            )?
+            .l()?;
+        if !env.is_same_object(&cutout, JObject::null())? {
+            insets.top = insets.top.max(
+                env.call_method(&cutout, "getSafeInsetTop", "()I", &[])?
+                    .i()?,
+            );
+            insets.right = insets.right.max(
+                env.call_method(&cutout, "getSafeInsetRight", "()I", &[])?
+                    .i()?,
+            );
+            insets.bottom = insets.bottom.max(
+                env.call_method(&cutout, "getSafeInsetBottom", "()I", &[])?
+                    .i()?,
+            );
+            insets.left = insets.left.max(
+                env.call_method(&cutout, "getSafeInsetLeft", "()I", &[])?
+                    .i()?,
+            );
+        }
+    }
+
+    Ok(insets)
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+async fn mobile_safe_area_insets(webview: tauri::Webview) -> MobileSafeAreaInsets {
+    #[cfg(target_os = "android")]
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        if webview
+            .with_webview(move |platform_webview| {
+                platform_webview
+                    .jni_handle()
+                    .exec(move |env, _activity, native_webview| {
+                        let insets =
+                            read_android_safe_area_insets(env, native_webview).unwrap_or_default();
+                        let _ = sender.send(insets);
+                    });
+            })
+            .is_err()
+        {
+            return MobileSafeAreaInsets::default();
+        }
+        return receiver.await.unwrap_or_default();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    MobileSafeAreaInsets::default()
+}
+
 #[cfg(desktop)]
 const TUNNEL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -650,10 +759,11 @@ pub fn run() {
         Ok(())
     });
 
-    // scripts/check_security_decisions.mjs reads the FIRST generate_handler!
-    // block in this file and compares it with the desktop ACL, so the desktop
-    // list has to stay ahead of the mobile one. generate_handler! cannot cfg
-    // individual entries, which is why there are two lists at all.
+    // generate_handler! cannot cfg individual entries, which is why there are
+    // two lists at all. scripts/check_security_decisions.mjs matches each list
+    // to the cfg attribute above it, so the order of the two is free, but a
+    // command added here without a matching entry in permissions/*.toml fails
+    // that check rather than turning into a runtime ACL denial on a device.
     #[cfg(desktop)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         open_in_external_player,
@@ -706,6 +816,7 @@ pub fn run() {
     #[cfg(mobile)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         app_install_info,
+        mobile_safe_area_insets,
         render_player::player_init,
         render_player::player_load,
         render_player::player_command,

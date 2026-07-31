@@ -174,8 +174,11 @@
 
   .detail-inner {
     gap: var(--sp-lg);
-    padding: var(--sp-lg);
-    padding-bottom: max(var(--sp-xl), env(safe-area-inset-bottom));
+    padding:
+      max(var(--sp-lg), var(--safe-area-top))
+      max(var(--sp-lg), var(--safe-area-right))
+      max(var(--sp-xl), var(--safe-area-bottom))
+      max(var(--sp-lg), var(--safe-area-left));
   }
 }
 
@@ -188,10 +191,10 @@
   display: flex;
   justify-content: center;
   padding:
-    max(clamp(calc(16px * var(--density-scale)), 4vw, calc(48px * var(--density-scale))), env(safe-area-inset-top))
-    max(calc(16px * var(--density-scale)), env(safe-area-inset-right))
-    max(clamp(calc(16px * var(--density-scale)), 4vw, calc(48px * var(--density-scale))), env(safe-area-inset-bottom))
-    max(calc(16px * var(--density-scale)), env(safe-area-inset-left));
+    max(clamp(calc(16px * var(--density-scale)), 4vw, calc(48px * var(--density-scale))), var(--safe-area-top))
+    max(calc(16px * var(--density-scale)), var(--safe-area-right))
+    max(clamp(calc(16px * var(--density-scale)), 4vw, calc(48px * var(--density-scale))), var(--safe-area-bottom))
+    max(calc(16px * var(--density-scale)), var(--safe-area-left));
   overflow-y: auto;
   overscroll-behavior: contain;
   /* Opaque base, no full-viewport filter. */

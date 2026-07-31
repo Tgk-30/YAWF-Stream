@@ -79,8 +79,8 @@ const openInExternalPlayerMock = vi.fn(
 const mpvStopMock = vi.fn(async () => {});
 vi.mock("../lib/tauri", () => ({
   isTauri: () => isTauriMock(),
-  // these suites simulate the DESKTOP app, where both are true
-  isDesktopTauri: () => isTauriMock(),
+  isDesktopTauri: () =>
+    isTauriMock() && !["android", "ios"].includes(deviceKindMock()),
   playWithMpv: (url: string, authorization?: string) =>
     playWithMpvMock(url, authorization),
   openInExternalPlayer: (
@@ -239,11 +239,31 @@ beforeEach(() => {
 afterEach(() => {
   delete window.YawfAndroidTV;
   vi.clearAllMocks();
+  isTauriMock.mockReturnValue(false);
+  deviceKindMock.mockReturnValue("mac");
 });
 
 // ---- Top-level shell + branch selection -----------------------------------
 
 describe("VideoPlayer shell", () => {
+  it("never invokes desktop players for a stale native engine on Android", () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+
+    render(
+      <VideoPlayer
+        url="https://x/movie.mkv"
+        engine="native-mpv"
+        title="T"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(document.querySelector("video.player-video")).not.toBeNull();
+    expect(playWithMpvMock).not.toHaveBeenCalled();
+    expect(openInExternalPlayerMock).not.toHaveBeenCalled();
+  });
+
   it("uses the native Android TV bridge and reports native progress", async () => {
     const play = vi.fn();
     const stop = vi.fn();

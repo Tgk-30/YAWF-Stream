@@ -2131,7 +2131,7 @@ function PlaybackTab({ draft, patch }: TabProps) {
 /** Native downloads intentionally keep their folder independent from the
  * settings draft: changing it should not rebuild every streaming service. */
 function DownloadsFolderSetting() {
-  const tauri = isTauri();
+  const tauri = isDesktopTauri();
   const [folder, setFolder] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -2373,7 +2373,7 @@ function DesktopHostPanel() {
   const [error, setError] = useState<string | null>(null);
   const [shareMessage, setShareMessage] = useState<string | null>(null);
   const [qrDataURL, setQrDataURL] = useState<string | null>(null);
-  const desktop = isTauri();
+  const desktop = isDesktopTauri();
   const shareURL =
     status?.share_url ?? status?.lan_urls[0] ?? status?.url ?? status?.urls[0] ?? null;
   const setupURL = status?.setup_url ?? null;
@@ -2835,7 +2835,7 @@ function RemoteAccessPanel() {
   const [hostStatus, setHostStatus] = useState<DesktopServerStatus | null>(null);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const manualTrack = useRef(false);
-  const desktop = isTauri();
+  const desktop = isDesktopTauri();
   const localTarget = hostStatus?.url ?? "http://localhost:<server-port>";
   const configuredRemoteBase = configuredServerURL();
   const remoteBase =

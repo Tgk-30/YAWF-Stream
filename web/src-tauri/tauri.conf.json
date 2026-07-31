@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "YAWF Stream",
         "width": 1280,
         "height": 860,

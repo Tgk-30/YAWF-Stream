@@ -29,8 +29,15 @@
 .info-tip__content {
   position: fixed;
   z-index: 1000;
-  width: min(300px, calc(100vw - 24px));
-  padding: calc(10px * var(--density-scale)) calc(12px * var(--density-scale));
+  width: min(
+    300px,
+    calc(100vw - 24px - var(--safe-area-left) - var(--safe-area-right))
+  );
+  padding:
+    max(calc(10px * var(--density-scale)), var(--safe-area-top))
+    max(calc(12px * var(--density-scale)), var(--safe-area-right))
+    max(calc(10px * var(--density-scale)), var(--safe-area-bottom))
+    max(calc(12px * var(--density-scale)), var(--safe-area-left));
   border: 1px solid var(--glass-border);
   border-radius: var(--r-sm);
   background: color-mix(in srgb, var(--bg-2) 94%, transparent);

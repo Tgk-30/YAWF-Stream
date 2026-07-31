@@ -67,10 +67,13 @@
 @media (max-width: 640px) {
   .setup-nudge {
     align-items: flex-start;
+    right: max(var(--sp-sm), var(--safe-area-right));
+    left: max(var(--sp-sm), var(--safe-area-left));
     bottom: calc(var(--mobile-nav-bottom) + var(--mobile-nav-height) + var(--sp-sm));
-    width: calc(100% - var(--sp-md));
+    width: auto;
     gap: var(--sp-sm);
     padding: var(--sp-md);
+    transform: none;
   }
 
   .setup-nudge-text span {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,12 +39,18 @@ const capability = JSON.parse(read("web/src-tauri/capabilities/default.json"));
 const remoteCapability = JSON.parse(
   read("web/src-tauri/capabilities/remote.json"),
 );
+const mobileCapability = JSON.parse(
+  read("web/src-tauri/capabilities/mobile.json"),
+);
 const permissions = capability.permissions ?? [];
 const remotePermissions = remoteCapability.permissions ?? [];
 const permissionIds = permissions.map((entry) =>
   typeof entry === "string" ? entry : entry.identifier,
 );
 const remotePermissionIds = remotePermissions.map((entry) =>
+  typeof entry === "string" ? entry : entry.identifier,
+);
+const mobilePermissionIds = (mobileCapability.permissions ?? []).map((entry) =>
   typeof entry === "string" ? entry : entry.identifier,
 );
 const remoteUrls = remoteCapability.remote?.urls ?? [];
@@ -59,9 +65,20 @@ check(
     remotePermissionIds.includes("remote-desktop-commands"),
   "Local and follow-mode desktop commands have separate app ACL permissions",
 );
+check(
+  mobileCapability.windows?.includes("main") &&
+    mobileCapability.platforms?.includes("android") &&
+    mobileCapability.platforms?.includes("iOS") &&
+    mobilePermissionIds.includes("mobile-commands") &&
+    mobilePermissionIds.includes("http:default"),
+  "Android and iOS main webviews receive the mobile command and HTTP capability",
+);
 const desktopPermission = read("web/src-tauri/permissions/desktop-commands.toml");
 const remoteDesktopPermission = read(
   "web/src-tauri/permissions/remote-desktop-commands.toml",
+);
+const mobilePermission = read(
+  "web/src-tauri/permissions/mobile-commands.toml",
 );
 const desktopCommandNames = new Set(
   [...desktopPermission.matchAll(/^\s*"([a-z][a-z0-9_]*)",?\s*$/gm)].map(
@@ -75,18 +92,42 @@ const remoteDesktopCommandNames = new Set(
     ),
   ].map((match) => match[1]),
 );
-const tauriLib = read("web/src-tauri/src/lib.rs");
-const handlerBlock = tauriLib.match(
-  /\.invoke_handler\(tauri::generate_handler!\[([\s\S]*?)\]\)/,
-)?.[1];
-const registeredDesktopCommands = new Set(
-  [
-    ...(handlerBlock ?? "").matchAll(
-      /^\s*(?:[a-z][a-z0-9_]*::)?([a-z][a-z0-9_]*),\s*$/gm,
-    ),
-  ].map((match) => match[1]),
+const mobileCommandNames = new Set(
+  [...mobilePermission.matchAll(/^\s*"([a-z][a-z0-9_]*)",?\s*$/gm)].map(
+    (match) => match[1],
+  ),
 );
-check(handlerBlock != null, "Desktop invoke handler command list is readable");
+const tauriLib = read("web/src-tauri/src/lib.rs");
+// generate_handler! cannot cfg individual entries, so lib.rs registers one list
+// per target family. Attribute each list to the cfg attribute guarding it rather
+// than to its position in the file: reading the mobile list as though it were
+// the desktop one is precisely the confusion this check exists to catch.
+function handlerBlocks(source) {
+  const blocks = new Map();
+  const pattern = /\.invoke_handler\(tauri::generate_handler!\[([\s\S]*?)\]\)/g;
+  for (const match of source.matchAll(pattern)) {
+    const preceding = source.slice(Math.max(0, match.index - 240), match.index);
+    const cfg = [...preceding.matchAll(/#\[cfg\((desktop|mobile)\)\]/g)].pop();
+    if (cfg) blocks.set(cfg[1], match[1]);
+  }
+  return blocks;
+}
+function registeredCommands(block) {
+  return new Set(
+    [
+      ...block.matchAll(/^\s*(?:[a-z][a-z0-9_]*::)?([a-z][a-z0-9_]*),\s*$/gm),
+    ].map((match) => match[1]),
+  );
+}
+const invokeHandlers = handlerBlocks(tauriLib);
+const mobileHandlerBlock = invokeHandlers.get("mobile") ?? "";
+const registeredDesktopCommands = registeredCommands(
+  invokeHandlers.get("desktop") ?? "",
+);
+check(
+  invokeHandlers.has("desktop") && invokeHandlers.has("mobile"),
+  "Desktop and mobile invoke handler command lists are both readable",
+);
 check(
   registeredDesktopCommands.size > 0 &&
     [...registeredDesktopCommands].every((command) =>
@@ -94,6 +135,23 @@ check(
     ) &&
     [...desktopCommandNames].every((command) => registeredDesktopCommands.has(command)),
   "Desktop app ACL stays in sync with every registered command",
+);
+const registeredMobileCommands = new Set(
+  [
+    ...(mobileHandlerBlock ?? "").matchAll(
+      /^\s*(?:[a-z][a-z0-9_]*::)?([a-z][a-z0-9_]*),\s*$/gm,
+    ),
+  ].map((match) => match[1]),
+);
+check(
+  registeredMobileCommands.size > 0 &&
+    [...registeredMobileCommands].every((command) =>
+      mobileCommandNames.has(command),
+    ) &&
+    [...mobileCommandNames].every((command) =>
+      registeredMobileCommands.has(command),
+    ),
+  "Mobile app ACL stays in sync with every registered command",
 );
 check(
   [
@@ -117,6 +175,63 @@ check(
   ),
   "Follow-mode pages cannot access desktop keychain commands",
 );
+
+// v2.2.0 shipped an Android build in which no capability listed a mobile
+// platform at all. Tauri denied every command including the HTTP plugin, so the
+// app could not reach any indexer or debrid host, and nothing in the build or
+// the test suite failed. The named checks above assert the mobile case that was
+// missed; this loop asserts the general property, so a target added later
+// cannot repeat it: every supported platform has a local capability, that
+// capability grants every command the platform registers, and outbound HTTP is
+// granted.
+const SUPPORTED_PLATFORMS = ["macOS", "windows", "linux", "android", "iOS"];
+const MOBILE_PLATFORMS = new Set(["android", "iOS"]);
+const appPermissionCommands = new Map([
+  ["desktop-commands", desktopCommandNames],
+  ["remote-desktop-commands", remoteDesktopCommandNames],
+  ["mobile-commands", mobileCommandNames],
+]);
+const capabilities = readdirSync(join(root, "web/src-tauri/capabilities"))
+  .filter((name) => name.endsWith(".json"))
+  .map((name) => JSON.parse(read(`web/src-tauri/capabilities/${name}`)));
+for (const platform of SUPPORTED_PLATFORMS) {
+  // An omitted platforms list means every platform, and local defaults to true.
+  const applying = capabilities.filter(
+    (entry) =>
+      entry.local !== false &&
+      (entry.platforms ?? SUPPORTED_PLATFORMS).includes(platform),
+  );
+  check(
+    applying.length > 0,
+    `Main window has a local capability on ${platform}`,
+  );
+  const grantedPermissionIds = applying.flatMap((entry) =>
+    (entry.permissions ?? []).map((permission) =>
+      typeof permission === "string" ? permission : permission.identifier,
+    ),
+  );
+  const grantedCommands = new Set(
+    grantedPermissionIds.flatMap((id) => [
+      ...(appPermissionCommands.get(id) ?? []),
+    ]),
+  );
+  const required = MOBILE_PLATFORMS.has(platform)
+    ? registeredMobileCommands
+    : registeredDesktopCommands;
+  const ungranted = [...required].filter(
+    (command) => !grantedCommands.has(command),
+  );
+  check(
+    required.size > 0 && ungranted.length === 0,
+    `Every command registered on ${platform} is granted by a capability${
+      ungranted.length > 0 ? ` (ungranted: ${ungranted.join(", ")})` : ""
+    }`,
+  );
+  check(
+    grantedPermissionIds.includes("http:default"),
+    `Outbound HTTP is granted on ${platform}`,
+  );
+}
 check(!permissionIds.includes("opener:default"), "Desktop opener does not grant the default reveal permission");
 check(!permissionIds.includes("process:default"), "Desktop process plugin does not grant exit permission");
 check(permissionIds.includes("process:allow-restart"), "Desktop process plugin is limited to updater restart");
@@ -136,6 +251,10 @@ check(
 );
 
 const tauri = JSON.parse(read("web/src-tauri/tauri.conf.json"));
+check(
+  tauri.app?.windows?.[0]?.label === "main",
+  "Configured main window label matches every capability",
+);
 const csp = tauri.app?.security?.csp ?? "";
 check(csp.includes("default-src 'self'"), "Desktop CSP defaults to self");
 check(csp.includes("object-src 'none'"), "Desktop CSP blocks objects");

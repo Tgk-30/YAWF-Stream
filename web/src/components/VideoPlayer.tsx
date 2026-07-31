@@ -521,12 +521,16 @@ export function VideoPlayer({
       ? startPositionSeconds
       : Math.max(0, activeSourceSwitchPosition - timelineOffsetSeconds)
   );
-  const mode: Playability =
-    effectiveEngine === "native-mpv" ? "external" : "webview";
   const underTauri = isTauri();
   // External hand-off and the in-window player exist only on desktop; on Android
   // those commands are not compiled in and not granted by the mobile capability.
   const desktopTauri = isDesktopTauri();
+  // A mobile source can still arrive tagged native-mpv from old persisted state
+  // or a stale caller. Never expose that desktop engine on Android or iOS.
+  // Trying it in the webview lets the normal media-error path request HLS.
+  const mobileTauri = underTauri && !desktopTauri;
+  const mode: Playability =
+    effectiveEngine === "native-mpv" && !mobileTauri ? "external" : "webview";
   // In-window native player: the DEFAULT desktop path for containers/codecs the
   // webview can't decode (MKV/HEVC). Renders libmpv on a native surface behind the
   // transparent window (see EmbeddedPlayer): macOS = CAOpenGLLayer render API,
@@ -886,7 +890,7 @@ export function VideoPlayer({
     playbackAuthorization,
     preferredPlayer,
     title,
-    underTauri,
+    desktopTauri,
   ]);
 
   // Native hand-off when running under Tauri and the in-window player is off.
@@ -950,7 +954,7 @@ export function VideoPlayer({
     };
   }, [
     mode,
-    underTauri,
+    desktopTauri,
     effectiveUrl,
     preferredPlayer,
     playbackAuthorization,
@@ -1287,7 +1291,7 @@ export function VideoPlayer({
           />
         ) : (
           <ExternalPanel
-            underTauri={underTauri}
+            underTauri={desktopTauri}
             url={effectiveUrl}
             status={externalStatus}
             error={externalError}

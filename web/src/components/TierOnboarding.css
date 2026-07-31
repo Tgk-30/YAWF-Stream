@@ -4,7 +4,11 @@
   z-index: 1000;
   display: grid;
   place-items: center;
-  padding: calc(24px * var(--density-scale));
+  padding:
+    max(calc(24px * var(--density-scale)), var(--safe-area-top))
+    max(calc(24px * var(--density-scale)), var(--safe-area-right))
+    max(calc(24px * var(--density-scale)), var(--safe-area-bottom))
+    max(calc(24px * var(--density-scale)), var(--safe-area-left));
   overflow: hidden;
   background: var(--bg-1, #0d0f1a);
 }

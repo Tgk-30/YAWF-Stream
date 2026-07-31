@@ -107,7 +107,7 @@
   .lib-screen {
     padding: var(--sp-lg);
     padding-top: var(--sp-lg);
-    padding-bottom: calc(132px * var(--density-scale) + env(safe-area-inset-bottom));
+    padding-bottom: calc(132px * var(--density-scale) + var(--safe-area-bottom));
     max-width: none;
   }
 

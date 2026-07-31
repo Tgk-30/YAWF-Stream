@@ -91,8 +91,21 @@ check(
 check(
   "bottom nav accounts for iOS safe areas",
   /bottom:\s*var\(--mobile-nav-bottom\)/.test(navCss) &&
-    /env\(safe-area-inset-bottom\)/.test(appCss),
+    /var\(--safe-area-bottom\)/.test(appCss) &&
+    ["top", "right", "bottom", "left"].every((side) =>
+      new RegExp(
+        `--safe-area-${side}:\\s*max\\(env\\(safe-area-inset-${side}`,
+      ).test(themeCss),
+    ),
   "The floating nav must use the shared safe-area-aware bottom offset.",
+);
+
+check(
+  "fixed phone surfaces inset interactive content on every edge",
+  /@media\s*\(max-width:\s*699px\)[\s\S]*\.browse-inner\s*\{[\s\S]{0,300}padding:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-top\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)[\s\S]{0,180}max\(var\(--sp-xl\),\s*var\(--safe-area-bottom\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(browseCss) &&
+    /@media\s*\(max-width:\s*699px\)[\s\S]*\.detail-inner\s*\{[\s\S]{0,300}padding:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-top\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)[\s\S]{0,180}max\(var\(--sp-xl\),\s*var\(--safe-area-bottom\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(detailCss) &&
+    /@media\s*\(max-width:\s*699px\)[\s\S]*\.fs-panel\s*\{[\s\S]{0,260}top:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-top\)\)[\s\S]{0,120}right:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-right\)\)[\s\S]{0,120}bottom:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-bottom\)\)[\s\S]{0,120}left:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-left\)\)/.test(read("web/src/components/FilterSlideover.css")),
+  "Browse, Detail, and the phone filter panel must keep interactive content clear of all native insets.",
 );
 
 check(

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { DownloadRecord } from "../storage/models";
 
-const tauriState = vi.hoisted(() => ({ on: false }));
+const tauriState = vi.hoisted(() => ({ on: false, desktop: false }));
 const desktopQueue = vi.hoisted(() => ({
   records: [] as DownloadRecord[],
   manager: {
@@ -32,6 +32,7 @@ vi.mock("../store/AppStore", () => ({
 }));
 vi.mock("../lib/tauri", () => ({
   isTauri: () => tauriState.on,
+  isDesktopTauri: () => tauriState.desktop,
   revealInFileManager,
 }));
 vi.mock("../storage", () => ({
@@ -83,6 +84,7 @@ function record(overrides: Partial<DownloadRecord>): DownloadRecord {
 
 afterEach(() => {
   tauriState.on = false;
+  tauriState.desktop = false;
   desktopQueue.records = [];
   vi.clearAllMocks();
 });
@@ -94,11 +96,19 @@ describe("Downloads honest desktop gate", () => {
     expect(screen.getByRole("link", { name: /download desktop app/i })).toBeInTheDocument();
     expect(screen.queryByText("Your download queue is empty")).not.toBeInTheDocument();
   });
+
+  it("does not show desktop queue controls on Android", () => {
+    tauriState.on = true;
+    render(<Downloads />);
+    expect(screen.getByText("Open the desktop app to download")).toBeInTheDocument();
+    expect(downloadsFfmpegAvailable).not.toHaveBeenCalled();
+  });
 });
 
 describe("Downloads desktop queue progress", () => {
   it("offers Play and Reveal only for a completed record with a local destination", async () => {
     tauriState.on = true;
+    tauriState.desktop = true;
     desktopQueue.records = [
       record({ status: "completed", destPath: "/Downloads/Movie.mkv" }),
       record({
@@ -130,6 +140,7 @@ describe("Downloads desktop queue progress", () => {
 
   it("renders the known source denominator as a determinate progress bar", async () => {
     tauriState.on = true;
+    tauriState.desktop = true;
     desktopQueue.records = [
       record({
         status: "downloading",
@@ -147,6 +158,7 @@ describe("Downloads desktop queue progress", () => {
 
   it("renders a Content-Length-less download as indeterminate", async () => {
     tauriState.on = true;
+    tauriState.desktop = true;
     desktopQueue.records = [
       record({
         status: "downloading",
@@ -165,6 +177,7 @@ describe("Downloads desktop queue progress", () => {
 
   it("renders transcode percent without a fake byte pair", async () => {
     tauriState.on = true;
+    tauriState.desktop = true;
     desktopQueue.records = [
       record({
         mode: "optimized",

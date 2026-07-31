@@ -40,7 +40,11 @@
   z-index: 1;
   pointer-events: auto;
   outline: none;
-  padding: calc(18px * var(--density-scale));
+  padding:
+    max(calc(18px * var(--density-scale)), var(--safe-area-top))
+    max(calc(18px * var(--density-scale)), var(--safe-area-right))
+    max(calc(18px * var(--density-scale)), var(--safe-area-bottom))
+    max(calc(18px * var(--density-scale)), var(--safe-area-left));
   border-radius: calc(16px * var(--radius-scale));
   background: var(--glass-strong, rgba(20, 22, 38, 0.97));
   border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.14));

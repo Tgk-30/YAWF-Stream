@@ -46,6 +46,7 @@ vi.mock("../lib/smartPreload", () => ({
 
 vi.mock("../lib/tauri", () => ({
   isTauri: () => false,
+  isDesktopTauri: () => false,
   desktopServerStatus: vi.fn(),
   startDesktopServer: vi.fn(),
   stopDesktopServer: vi.fn(),
