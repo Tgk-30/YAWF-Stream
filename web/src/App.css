@@ -12,6 +12,13 @@
   --nav-safe-left: 0px;
   --mobile-nav-height: clamp(72px, 15.5vw, 78px);
   --mobile-nav-bottom: max(12px, env(safe-area-inset-bottom));
+  /* Android draws edge-to-edge (MainActivity calls enableEdgeToEdge) and the
+     webview sets viewport-fit=cover, so the status bar and any camera cutout sit
+     ON TOP of the scrollport. The bottom inset was already reserved for the nav
+     bar; without the matching top reserve the first row of every screen renders
+     under the clock. Zero on desktop and on devices without a cutout, so nothing
+     gains a bar it did not already have. */
+  --safe-top: env(safe-area-inset-top, 0px);
   --mobile-nav-reserve: calc(var(--mobile-nav-height) + var(--mobile-nav-bottom) + 30px);
   position: relative;
   display: flex;
@@ -104,6 +111,8 @@
     height: 100dvh;
     min-height: 0;
     overflow-y: auto;
+    padding-top: var(--safe-top);
+    scroll-padding-top: var(--safe-top);
     padding-bottom: var(--mobile-nav-reserve);
     scroll-padding-bottom: var(--mobile-nav-reserve);
     overscroll-behavior-y: contain;

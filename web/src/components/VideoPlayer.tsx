@@ -29,6 +29,7 @@ type HlsInstance = InstanceType<typeof HlsType>;
 import { Icon } from "./Icon";
 import {
   isTauri,
+  isDesktopTauri,
   openInExternalPlayer,
   playWithMpv,
   mpvStop,
@@ -523,6 +524,9 @@ export function VideoPlayer({
   const mode: Playability =
     effectiveEngine === "native-mpv" ? "external" : "webview";
   const underTauri = isTauri();
+  // External hand-off and the in-window player exist only on desktop; on Android
+  // those commands are not compiled in and not granted by the mobile capability.
+  const desktopTauri = isDesktopTauri();
   // In-window native player: the DEFAULT desktop path for containers/codecs the
   // webview can't decode (MKV/HEVC). Renders libmpv on a native surface behind the
   // transparent window (see EmbeddedPlayer): macOS = CAOpenGLLayer render API,
@@ -860,7 +864,7 @@ export function VideoPlayer({
   const openExternalPlayback = useCallback(async () => {
     setExternalActionStatus(null);
     try {
-      if (underTauri) {
+      if (desktopTauri) {
         const status = await openInExternalPlayer(
           externalTarget,
           preferredPlayer,
@@ -894,7 +898,7 @@ export function VideoPlayer({
   const castSuspendedRef = useRef(castSuspended);
   castSuspendedRef.current = castSuspended;
   useEffect(() => {
-    if (mode !== "external" || !underTauri || useEmbedded) return;
+    if (mode !== "external" || !desktopTauri || useEmbedded) return;
     let cancelled = false;
     startedMpvRef.current = false;
 

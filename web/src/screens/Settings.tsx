@@ -124,6 +124,7 @@ import {
   getAppInstallInfo,
   isTauri,
   listExternalPlayers,
+  isDesktopTauri,
   openExternalURL,
   revealInFileManager,
   startDesktopServer,
@@ -1797,6 +1798,7 @@ function PlaybackTab({ draft, patch }: TabProps) {
   const [players, setPlayers] = useState<string[]>([]);
   useEffect(() => {
     let alive = true;
+    if (!isDesktopTauri()) return;
     void listExternalPlayers().then((p) => {
       if (alive) setPlayers(p);
     });

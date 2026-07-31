@@ -1,0 +1,28 @@
+[[permission]]
+identifier = "mobile-commands"
+description = """
+The commands the mobile build actually registers. lib.rs compiles player,
+keychain, server_host and downloads out on mobile, and generate_handler! there
+lists only what remains, so granting the desktop set would name commands that do
+not exist. The render_player entries resolve to the libmpv-free stubs, which
+reject with a clear message rather than an ACL error the UI cannot explain.
+"""
+commands.allow = [
+  "app_install_info",
+  "player_init",
+  "player_load",
+  "player_command",
+  "player_set_property",
+  "player_get_property",
+  "player_add_subtitle",
+  "player_set_audio_passthrough",
+  "player_set_hdr_policy",
+  "player_set_video_margin",
+  "player_set_rect",
+  "player_destroy",
+  "cast_discover",
+  "cast_load",
+  "cast_control",
+  "cast_status",
+  "cast_set_volume",
+]

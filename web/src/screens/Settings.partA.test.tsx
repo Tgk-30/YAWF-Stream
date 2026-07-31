@@ -67,6 +67,7 @@ vi.mock("../lib/appVersion", () => ({ getAppVersion }));
 
 vi.mock("../lib/tauri", () => ({
   isTauri: () => false,
+  isDesktopTauri: () => false,
   getAppInstallInfo: vi.fn(),
   revealInFileManager: vi.fn(),
   listExternalPlayers: vi.fn(async () => []),
