@@ -79,6 +79,8 @@ const openInExternalPlayerMock = vi.fn(
 const mpvStopMock = vi.fn(async () => {});
 vi.mock("../lib/tauri", () => ({
   isTauri: () => isTauriMock(),
+  // these suites simulate the DESKTOP app, where both are true
+  isDesktopTauri: () => isTauriMock(),
   playWithMpv: (url: string, authorization?: string) =>
     playWithMpvMock(url, authorization),
   openInExternalPlayer: (

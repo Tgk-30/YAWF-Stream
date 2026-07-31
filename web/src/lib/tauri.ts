@@ -13,6 +13,20 @@ import { assertNetworkAllowed, isRequestExempt } from "./networkPolicy";
 
 /** True when running inside the Tauri webview. Tauri v2 injects
  * `__TAURI_INTERNALS__` on the window; we also tolerate the older flag. */
+/**
+ * Tauri on a platform that actually registers the desktop-only commands.
+ *
+ * isTauri() is true on Android too, but lib.rs compiles player, keychain,
+ * server_host and downloads out on mobile and the mobile capability does not
+ * grant them, so calling one there fails with a bare "not allowed by ACL" that
+ * the UI cannot explain. Gate every desktop-only command on this instead.
+ */
+export function isDesktopTauri(): boolean {
+  if (!isTauri()) return false;
+  const ua = navigator.userAgent.toLowerCase();
+  return !ua.includes("android") && !/iphone|ipad|ipod/.test(ua);
+}
+
 export function isTauri(): boolean {
   if (typeof window === "undefined") return false;
   const w = window as unknown as Record<string, unknown>;
