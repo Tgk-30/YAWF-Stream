@@ -69,6 +69,7 @@ import {
 import {
   useTranscodeAvailable,
   useTranscodeCapabilities,
+  useDirectTorrentAvailable,
 } from "../lib/ServerSessionContext";
 import { getStore } from "../storage";
 import {
@@ -272,6 +273,7 @@ export function Detail() {
   });
   const transcodeAvailable = useTranscodeAvailable();
   const transcodeCapabilities = useTranscodeCapabilities();
+  const directTorrentAvailable = useDirectTorrentAvailable();
   // Older servers predate `qualities`. Their HLS compatibility fallback still
   // works, while the selectable Server Optimized control safely stays hidden.
   const serverOptimizedQualities = transcodeCapabilities.qualities ?? [];
@@ -1076,7 +1078,9 @@ export function Detail() {
       return;
     }
 
-    const hlsUrl = isServerMode() && transcodeAvailable
+    const hlsUrl = stream.backend === "direct_torrent"
+      ? null
+      : isServerMode() && transcodeAvailable
       ? serverOptimizedSource(stream, { quality: "auto", startSeconds: 0 }).url
       : await services.debrid?.getTranscodeHLS(stream).catch(() => null);
     if (hlsUrl != null) {
@@ -1114,6 +1118,7 @@ export function Detail() {
     row: StreamRow,
     hintOverride?: { season: number; episode: number } | null,
     startSecondsOverride?: number | null,
+    backend: "debrid" | "direct_torrent" = "debrid",
   ): Promise<StreamInfo> {
     // Episode context (series only): steers season-pack torrents to the exact
     // episode's file. Exact single-episode torrents either match (same pick)
@@ -1157,17 +1162,20 @@ export function Detail() {
           // Older servers do not advertise selector qualities. Keep their
           // profile-based opt-in behavior until the client can request a
           // separately warmed optimized source.
-          transcode: settings.transcode && !supportsOptimizedSelector,
+          transcode:
+            backend === "debrid" && settings.transcode && !supportsOptimizedSelector,
           transcodeOptions,
           media,
           fileHint,
+          backend,
+          directTorrentAcknowledged: backend === "direct_torrent",
         });
         return stream;
       } catch (err) {
         // A 403 here means the title is over the active profile's maturity cap.
         // Surface a friendly message (StreamPicker renders the thrown .message)
         // instead of the raw server error, and don't crash the picker.
-        if ((err as { status?: number }).status === 403) {
+        if ((err as { status?: number }).status === 403 && backend === "debrid") {
           throw new Error("This title is outside your profile's maturity settings.");
         }
         throw err;
@@ -1178,6 +1186,11 @@ export function Detail() {
     }
     return services.debrid.resolveStream(row.result.infoHash, row.cachedOn, fileHint);
   }
+
+  const resolvePickerStream = (
+    row: StreamRow,
+    backend: "debrid" | "direct_torrent" = "debrid",
+  ) => resolveSelectedStream(row, null, null, backend);
 
   /** File a Server-Mode title request for the current item. The detailItem is a
    *  MediaPreview - the same minimal shape watchlist add uses - so it's passed
@@ -1775,12 +1788,13 @@ export function Detail() {
         >
           <StreamPicker
             state={streams}
-            resolveStream={resolveSelectedStream}
+            resolveStream={resolvePickerStream}
             onPlay={handlePlay}
             episodeLabel={null}
             episodeContext={null}
             runtimeMinutes={item?.runtime ?? null}
             transcodeAvailable={transcodeAvailable}
+            directTorrentAvailable={directTorrentAvailable}
             onOpenSettings={() => {
               navigate("settings");
             }}
@@ -1827,7 +1841,7 @@ export function Detail() {
             <div className="episode-streams-body">
               <StreamPicker
                 state={streams}
-                resolveStream={resolveSelectedStream}
+                resolveStream={resolvePickerStream}
                 onPlay={handlePlay}
                 episodeLabel={episodeLabel(selected.season, selected.episode)}
                 episodeContext={selected}
@@ -1839,6 +1853,7 @@ export function Detail() {
                   )?.runtime ?? item?.runtime ?? null
                 }
                 transcodeAvailable={transcodeAvailable}
+                directTorrentAvailable={directTorrentAvailable}
                 onOpenSettings={() => {
                   navigate("settings");
                 }}
@@ -1862,6 +1877,7 @@ export function Detail() {
             engine={player.engine}
             requestWebviewFallback={
               player.fallbackStream != null &&
+              player.fallbackStream.backend !== "direct_torrent" &&
               (isServerMode() ? transcodeAvailable : services.debrid != null)
                 ? isServerMode()
                   ? () => Promise.resolve(
@@ -1876,6 +1892,7 @@ export function Detail() {
             serverOptimized={
               isServerMode() &&
               player.fallbackStream != null &&
+              player.fallbackStream.backend !== "direct_torrent" &&
               transcodeAvailable &&
               transcodeCapabilities.seekOffset &&
               serverOptimizedQualities.length > 0

@@ -412,3 +412,31 @@
   gap: var(--sp-sm);
   margin-top: var(--sp-xs);
 }
+
+.stream-direct-p2p {
+  display: block;
+  margin: 0.45rem 0 0.8rem auto;
+}
+
+.streams-direct-confirm {
+  margin: 0.75rem 0;
+  padding: 1rem;
+}
+.streams-direct-confirm h3 {
+  margin: 0 0 0.5rem;
+}
+.streams-direct-confirm p {
+  margin: 0 0 0.75rem;
+  line-height: 1.5;
+}
+.streams-direct-ack {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+}
+.streams-direct-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+}

@@ -84,6 +84,15 @@ const websiteVersion = read("website-app/src/lib/site.ts").match(
 const androidTVVersion = read("android-tv/app/build.gradle").match(
   /versionName\s+"([^"]+)"/,
 )?.[1];
+const androidTVVersionCode = Number(
+  read("android-tv/app/build.gradle").match(/versionCode\s+(\d+)/)?.[1],
+);
+const semanticVersion = /^(\d+)\.(\d+)\.(\d+)$/.exec(tauri.version);
+const expectedAndroidTVVersionCode = semanticVersion
+  ? Number(semanticVersion[1]) * 10_000 +
+    Number(semanticVersion[2]) * 100 +
+    Number(semanticVersion[3])
+  : Number.NaN;
 const releaseVersions = [
   tauri.version,
   webPackage.version,
@@ -102,6 +111,12 @@ check(
   "Release version surfaces match",
   releaseVersions.every((version) => version === tauri.version),
   `web, server, website, Tauri, Cargo, and Android TV versions must all match ${tauri.version}`,
+);
+check(
+  "Android TV version code matches release version",
+  Number.isSafeInteger(androidTVVersionCode) &&
+    androidTVVersionCode === expectedAndroidTVVersionCode,
+  `android-tv/app/build.gradle versionCode must equal major * 10000 + minor * 100 + patch for ${tauri.version}`,
 );
 check(
   "Release workflow emits updater JSON",

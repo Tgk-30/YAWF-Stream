@@ -85,7 +85,10 @@ function assertPackEpisodeMatch(
 
 interface StreamPickerProps {
   state: StreamsState;
-  resolveStream: (row: StreamRow) => Promise<StreamInfo>;
+  resolveStream: (
+    row: StreamRow,
+    backend?: "debrid" | "direct_torrent",
+  ) => Promise<StreamInfo>;
   /** Called with the resolved stream + the torrent (for codec/container info). */
   onPlay: (stream: StreamInfo, source: TorrentResult) => void;
   onOpenSettings?: () => void;
@@ -100,6 +103,8 @@ interface StreamPickerProps {
   /** True when the connected server can adapt a source the browser cannot
    * direct play. */
   transcodeAvailable?: boolean;
+  /** Server-advertised opt-in capability. No action is rendered otherwise. */
+  directTorrentAvailable?: boolean;
 }
 
 export function StreamPicker({
@@ -111,6 +116,7 @@ export function StreamPicker({
   episodeContext = null,
   runtimeMinutes = null,
   transcodeAvailable = false,
+  directTorrentAvailable = false,
 }: StreamPickerProps) {
   const { settings } = useAppStore();
   // Settings supplies the initial preference for each picker. The local state
@@ -122,6 +128,8 @@ export function StreamPicker({
   const [visibleCount, setVisibleCount] = useState(10);
   const [resolutionStates, setResolutionStates] = useState<Record<string, ResolutionStatus>>({});
   const [resolveError, setResolveError] = useState<string | null>(null);
+  const [pendingDirectRow, setPendingDirectRow] = useState<StreamRow | null>(null);
+  const [directAcknowledged, setDirectAcknowledged] = useState(false);
   const playbackProfile = isDesktopTauri()
     ? "native" as const
     : transcodeAvailable
@@ -157,6 +165,13 @@ export function StreamPicker({
     if (cacheCheckUnavailable) setCachedOnly(false);
   }, [cacheCheckUnavailable]);
 
+  // Cache status belongs to debrid. When Direct P2P is the only advertised
+  // backend, show indexed sources instead of hiding all of them behind a saved
+  // debrid-only preference.
+  useEffect(() => {
+    if (directTorrentAvailable && !state.hasDebrid) setCachedOnly(false);
+  }, [directTorrentAvailable, state.hasDebrid]);
+
   // Resolution + codec chips, shown ONLY for the values that actually appear in
   // this title's results (so we never offer a "4K" chip that filters to nothing).
   const availableQualities = useMemo(() => {
@@ -179,12 +194,13 @@ export function StreamPicker({
   // ignored rather than filtering to an empty list.
   const effRes = resFilter != null && availableQualities.includes(resFilter) ? resFilter : null;
   const effCodec = codecFilter != null && availableCodecs.includes(codecFilter) ? codecFilter : null;
+  const effectiveCachedOnly = cachedOnly && (state.hasDebrid || !directTorrentAvailable);
 
   // Cached-first sort (the underlying list is already quality/seeder sorted).
   const rows = useMemo(() => {
     const filtered = baseRows.filter(
       (r) =>
-        (!cachedOnly ||
+        (!effectiveCachedOnly ||
           state.phase === "checking_availability" ||
           r.cachedOn != null) &&
         (effRes == null || r.result.quality === effRes) &&
@@ -196,7 +212,7 @@ export function StreamPicker({
     });
   }, [
     baseRows,
-    cachedOnly,
+    effectiveCachedOnly,
     effRes,
     effCodec,
     playbackProfile,
@@ -216,8 +232,11 @@ export function StreamPicker({
     [rows, visibleCount],
   );
 
-  async function select(row: StreamRow) {
-    if (!state.hasDebrid) {
+  async function select(
+    row: StreamRow,
+    backend: "debrid" | "direct_torrent" = "debrid",
+  ) {
+    if (backend === "debrid" && !state.hasDebrid) {
       setResolveError(
         "Add a debrid service in Settings to play - it turns a match into an instant stream.",
       );
@@ -228,7 +247,12 @@ export function StreamPicker({
     setResolveError(null);
     setResolutionStates((current) => ({ ...current, [hash]: "resolving" }));
     try {
-      const stream = await resolveWithinTimeout(() => resolveStream(row));
+      // Direct P2P waits for the server's bounded metadata path. Applying the
+      // debrid-only UI timeout here would show a false failure while the server
+      // can still finish registering the session.
+      const stream = await (backend === "debrid"
+        ? resolveWithinTimeout(() => resolveStream(row))
+        : resolveStream(row, backend));
       // DebridFileSelector normally chooses the hinted file within a pack. A
       // provider can still return an untagged/default file, so never start the
       // wrong episode when a season-pack row lacks the requested episode.
@@ -267,23 +291,27 @@ export function StreamPicker({
         {state.hasIndexers && state.rows.length > 0 && (
           <div className="streams-controls">
             <span className="streams-count t-secondary">
-              {cacheCheckUnavailable
-                ? `Cache check unavailable · ${state.rows.length} total`
-                : `${cachedCount} instant · ${state.rows.length} total`}
+              {!state.hasDebrid
+                ? `${state.rows.length} source${state.rows.length === 1 ? "" : "s"} total`
+                : cacheCheckUnavailable
+                  ? `Cache check unavailable · ${state.rows.length} total`
+                  : `${cachedCount} instant · ${state.rows.length} total`}
               {visibleRows.length < rows.length ? ` · ${visibleRows.length} shown` : ""}
             </span>
-            <label className="streams-toggle">
-              <input
-                type="checkbox"
-                checked={cachedOnly}
-                disabled={
-                  cacheCheckUnavailable ||
-                  state.phase === "checking_availability"
-                }
-                onChange={(e) => setCachedOnly(e.target.checked)}
-              />
-              Cached only
-            </label>
+            {state.hasDebrid && (
+              <label className="streams-toggle">
+                <input
+                  type="checkbox"
+                  checked={cachedOnly}
+                  disabled={
+                    cacheCheckUnavailable ||
+                    state.phase === "checking_availability"
+                  }
+                  onChange={(e) => setCachedOnly(e.target.checked)}
+                />
+                Cached only
+              </label>
+            )}
           </div>
         )}
       </div>
@@ -323,6 +351,44 @@ export function StreamPicker({
         </ErrorNote>
       )}
 
+      {pendingDirectRow != null && (
+        <div className="streams-direct-confirm glass-rest" role="dialog" aria-modal="true" aria-label="Confirm Direct P2P playback">
+          <h3>Confirm Direct P2P playback</h3>
+          <p>
+            Swarm peers can see your server's public IP. Your network or ISP can identify, block, or throttle BitTorrent traffic. Playback depends on seeders and can upload data, use disk space, and use download and upload bandwidth. Continue only if you have the rights to this content.
+          </p>
+          <label className="streams-direct-ack">
+            <input
+              type="checkbox"
+              checked={directAcknowledged}
+              onChange={(event) => setDirectAcknowledged(event.target.checked)}
+            />
+            I understand these network, disk, and rights considerations for this play.
+          </label>
+          <div className="streams-direct-actions">
+            <button type="button" className="btn" onClick={() => {
+              setPendingDirectRow(null);
+              setDirectAcknowledged(false);
+            }}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-prominent"
+              disabled={!directAcknowledged}
+              onClick={() => {
+                const row = pendingDirectRow;
+                setPendingDirectRow(null);
+                setDirectAcknowledged(false);
+                void select(row, "direct_torrent");
+              }}
+            >
+              Play with Direct P2P
+            </button>
+          </div>
+        </div>
+      )}
+
       {cacheCheckUnavailable && (
         <div className="streams-cache-warning" role="status">
           <Icon name="info" size={16} />
@@ -342,11 +408,16 @@ export function StreamPicker({
         state={state}
         rows={rowValues}
         visibleRows={visibleRows}
-        cachedOnly={cachedOnly}
+        cachedOnly={effectiveCachedOnly}
         filteredCount={filteredCount}
         chipFiltersActive={effRes != null || effCodec != null}
         resolutionStates={resolutionStates}
         onSelect={select}
+        onSelectDirect={directTorrentAvailable ? (row) => {
+          setPendingDirectRow(row);
+          setDirectAcknowledged(false);
+        } : undefined}
+        directTorrentAvailable={directTorrentAvailable}
         onShowAll={() => setCachedOnly(false)}
         onClearChips={() => {
           setResFilter(null);
@@ -370,6 +441,8 @@ function StreamBody({
   chipFiltersActive,
   resolutionStates,
   onSelect,
+  onSelectDirect,
+  directTorrentAvailable,
   onShowAll,
   onClearChips,
   onShowMore,
@@ -385,6 +458,8 @@ function StreamBody({
   chipFiltersActive: boolean;
   resolutionStates: Record<string, ResolutionStatus>;
   onSelect: (row: StreamRow) => void;
+  onSelectDirect?: (row: StreamRow) => void;
+  directTorrentAvailable: boolean;
   onShowAll: () => void;
   onClearChips: () => void;
   onShowMore: () => void;
@@ -418,8 +493,10 @@ function StreamBody({
         <p className="streams-empty-title">No sources yet</p>
         <p className="t-secondary streams-empty-sub">
           A source is where the app looks for releases. Turn on the built-in
-          scrapers, or add one (Torrentio, Jackett, Prowlarr…), in Settings - 
-          then pair it with a debrid service to stream instantly.
+          scrapers, or add one (Torrentio, Jackett, Prowlarr…), in Settings.
+          {directTorrentAvailable
+            ? " Direct P2P is a separate confirmed play option; debrid remains the more private and reliable default."
+            : " Then pair it with a debrid service to stream instantly."}
         </p>
         {onOpenSettings && (
           <div className="streams-empty-actions">
@@ -477,15 +554,12 @@ function StreamBody({
     const chipsEmpty = chipFiltersActive && filteredCount > 0;
     const cachedOnlyEmpty = !chipsEmpty && cachedOnly && filteredCount > 0;
     const filtersEmpty = !chipsEmpty && state.rows.length > 0 && filteredCount === 0;
-    // With no debrid service there IS no playback path - saying "sources did
-    // not return a match" would be false (nothing was searched for playback).
-    // Tell the truth and route to the guided setup.
-    const noDebrid = !state.hasDebrid;
+    const noPlaybackBackend = !state.hasDebrid && !directTorrentAvailable;
 
     return (
       <div className="streams-empty glass-rest">
         <p className="streams-empty-title">
-          {noDebrid
+          {noPlaybackBackend
             ? "Almost there - add a debrid service"
             : chipsEmpty
               ? "No streams match those filters"
@@ -496,7 +570,7 @@ function StreamBody({
                   : "No streams found"}
         </p>
         <p className="t-secondary streams-empty-sub">
-          {noDebrid
+          {noPlaybackBackend
             ? "A debrid service turns a matched release into an instant stream. Nothing was searched for playback yet. Run the two-minute guided setup, or add one in Settings."
             : chipsEmpty
               ? "No release matches that resolution + codec combination. Clear a filter to see more."
@@ -510,7 +584,7 @@ function StreamBody({
         </p>
         {/* Empty ≠ exhaustive when some sources failed: name them so the user
             knows this result may be incomplete (network/mirror issues). */}
-        {!noDebrid && state.sourceErrors.length > 0 && (
+        {!noPlaybackBackend && state.sourceErrors.length > 0 && (
           <p className="t-secondary streams-empty-sub streams-source-errors">
             {state.sourceErrors.length === 1 ? "One source" : `${state.sourceErrors.length} sources`}{" "}
             couldn't be reached:{" "}
@@ -519,7 +593,7 @@ function StreamBody({
           </p>
         )}
         <div className="streams-empty-actions">
-          {noDebrid && (
+          {noPlaybackBackend && (
             <button
               type="button"
               className="btn btn-prominent"
@@ -542,7 +616,7 @@ function StreamBody({
           {onOpenSettings && (
             <button
               type="button"
-              className={cachedOnlyEmpty || noDebrid ? "btn" : "btn btn-prominent"}
+              className={cachedOnlyEmpty || noPlaybackBackend ? "btn" : "btn btn-prominent"}
               onClick={onOpenSettings}
             >
               <Icon name="settings" size={15} />
@@ -576,6 +650,7 @@ function StreamBody({
             recommended={recommended}
             resolutionStatus={resolutionStates[row.result.infoHash] ?? null}
             onSelect={() => onSelect(row)}
+            onSelectDirect={onSelectDirect == null ? undefined : () => onSelectDirect(row)}
             pack={
               episodeContext != null &&
               classifyRowForEpisode(row, episodeContext.season, episodeContext.episode) ===
@@ -601,6 +676,7 @@ function StreamRowItem({
   recommended,
   resolutionStatus,
   onSelect,
+  onSelectDirect,
   pack = false,
 }: {
   row: StreamRow;
@@ -608,6 +684,7 @@ function StreamRowItem({
   recommended: boolean;
   resolutionStatus: ResolutionStatus | null;
   onSelect: () => void;
+  onSelectDirect?: () => void;
   /** The release is a whole-season pack (not an exact episode file). */
   pack?: boolean;
 }) {
@@ -697,6 +774,16 @@ function StreamRowItem({
           </span>
         )}
       </button>
+      {onSelectDirect != null && (
+        <button
+          type="button"
+          className="stream-direct-p2p btn"
+          onClick={onSelectDirect}
+          disabled={resolving}
+        >
+          Direct P2P
+        </button>
+      )}
     </li>
   );
 }

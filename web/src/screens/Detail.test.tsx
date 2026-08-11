@@ -105,6 +105,7 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
 
 vi.mock("../lib/ServerSessionContext", () => ({
   useTranscodeAvailable: () => transcodeAvailable,
+  useDirectTorrentAvailable: () => false,
   useTranscodeCapabilities: () => ({
     adaptive: transcodeAvailable,
     seekOffset: transcodeAvailable,

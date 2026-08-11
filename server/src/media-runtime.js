@@ -410,25 +410,68 @@ export async function resolveServerStream(db, config, profileId, input) {
   );
 }
 
+function sourceEpisodeTag(title) {
+  if (typeof title !== "string") return null;
+  const upper = title.toUpperCase();
+  const se = upper.match(/S(\d{1,2})[ ._-]?E(\d{1,3})/);
+  if (se != null) return { season: Number(se[1]), episode: Number(se[2]) };
+  const x = upper.match(/\b(\d{1,2})X(?!26[45]\b)(\d{2,3})\b/);
+  return x == null ? null : { season: Number(x[1]), episode: Number(x[2]) };
+}
+
+function sourceMatchesEpisode(result, mediaType, season, episode) {
+  if (mediaType !== "series" || season == null || episode == null) return true;
+  const tag = sourceEpisodeTag(result?.title);
+  return tag == null || (tag.season === season && tag.episode === episode);
+}
+
 // Whether `infoHash` is genuinely one of the indexer sources for the title named
 // by `mediaId`. The kid play-block uses this to bind the cert-checked title to
 // the content actually resolved, so an over-cap infoHash cannot be smuggled in
-// under an in-cap mediaId. Resolves mediaId -> imdbId via TMDB detail, then
-// queries the indexers DIRECTLY and looks for the hash (case-insensitively).
+// under an in-cap mediaId. Resolves mediaId -> IMDb/title metadata, then queries
+// the indexers DIRECTLY and looks for the hash (case-insensitively).
 //
 // It deliberately bypasses searchServerStreams' profileStreamFilters (cachedOnly
 // / maxQuality / maxSizeGB) and the debrid cache lookup: membership is about
 // whether the hash is a real SOURCE of the title, not whether it passes the
 // profile's quality/cache preferences - filtering there would falsely block a
-// legitimate in-cap movie. Fail-closed (false) on no imdbId / no indexers / no
-// matching source.
-export async function titleHasInfoHash(db, config, profileId, mediaId, mediaType, infoHash) {
+// legitimate in-cap movie. Normal Direct P2P binding also folds in the same
+// title-query pass that discovery uses. Capped profiles leave that pass off so
+// their existing IMDb-exact, fail-closed source binding is preserved.
+export async function titleHasInfoHash(
+  db,
+  config,
+  profileId,
+  mediaId,
+  mediaType,
+  infoHash,
+  season = null,
+  episode = null,
+  includeTitleMatches = false,
+) {
   const target = String(infoHash).toLowerCase();
   const detail = await getServerDetail(db, config, profileId, { id: mediaId, type: mediaType });
   const imdbId = detail?.imdbId ?? null;
   if (imdbId == null) return false;
   const indexers = buildIndexerManager(db, profileId);
   if (indexers.activeIndexers.length === 0) return false;
-  const results = await indexers.searchAll(imdbId, mediaType, null, null);
+  const byImdb = await indexers.searchAll(imdbId, mediaType, season, episode);
+  const eligibleByImdb = byImdb.filter((result) =>
+    sourceMatchesEpisode(result, mediaType, season, episode));
+  const title = detail?.item?.title ?? null;
+  if (!includeTitleMatches || typeof title !== "string" || title.trim().length === 0) {
+    return eligibleByImdb.some((r) => String(r.infoHash).toLowerCase() === target);
+  }
+  const titleQuery = buildTitleQuery(title, season, episode);
+  const titleIndexers = buildIndexerManager(db, profileId);
+  const byTitle = await titleIndexers.searchByQuery(titleQuery, mediaType).catch(() => []);
+  const eligibleByTitle = byTitle.filter((result) =>
+    sourceMatchesEpisode(result, mediaType, season, episode));
+  const results = combineStreamResults(
+    eligibleByImdb,
+    eligibleByTitle,
+    title,
+    mediaType === "movie" ? detail.item.year ?? null : null,
+  );
   return results.some((r) => String(r.infoHash).toLowerCase() === target);
 }

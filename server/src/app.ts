@@ -73,6 +73,10 @@ import {
   type RemoteCommandType,
 } from "./remoteControl.js";
 import {
+  DirectTorrentRegistry,
+  createWebTorrentAdapter,
+} from "./directTorrent.js";
+import {
   CREDENTIAL_PROVIDERS,
   type AuthContext,
   type BuildAppOptions,
@@ -648,6 +652,8 @@ const resolveStreamSchema = z.object({
   // largest-file pick, exactly today's behavior.
   season: z.number().int().min(1).max(200).nullable().optional(),
   episode: z.number().int().min(1).max(10_000).nullable().optional(),
+  backend: z.enum(["debrid", "direct_torrent"]).default("debrid"),
+  directTorrentAcknowledged: z.boolean().default(false),
 });
 
 const profileSettingSchema = z.object({
@@ -1401,7 +1407,18 @@ const MIME_TYPES: Record<string, string> = {
   ".jpeg": "image/jpeg",
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
+  ".avi": "video/x-msvideo",
+  ".flv": "video/x-flv",
+  ".m2ts": "video/mp2t",
+  ".m4v": "video/x-m4v",
+  ".mkv": "video/x-matroska",
+  ".mov": "video/quicktime",
   ".mp4": "video/mp4",
+  ".mpeg": "video/mpeg",
+  ".mpg": "video/mpeg",
+  ".ts": "video/mp2t",
+  ".webm": "video/webm",
+  ".wmv": "video/x-ms-wmv",
   ".wasm": "application/wasm",
 };
 
@@ -1814,20 +1831,23 @@ function createStreamSession(
   config: ServerConfig,
   auth: AuthContext,
   input: {
+    id?: string;
     upstreamUrl: string;
     contentType?: string | null;
     title?: string | null;
     expiresInSeconds: number;
+    expiresAt?: string;
+    sourceKind?: "http" | "direct_torrent";
   },
 ) {
-  const id = randomId("stream");
+  const id = input.id ?? randomId("stream");
   const createdAt = nowISO();
-  const expiresAt = addSecondsISO(input.expiresInSeconds);
+  const expiresAt = input.expiresAt ?? addSecondsISO(input.expiresInSeconds);
   db.sqlite
     .prepare(
       `INSERT INTO stream_sessions
-       (id, profile_id, encrypted_upstream_url, content_type, title, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (id, profile_id, encrypted_upstream_url, content_type, title, created_at, expires_at, source_kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -1837,6 +1857,7 @@ function createStreamSession(
       input.title ?? null,
       createdAt,
       expiresAt,
+      input.sourceKind ?? "http",
     );
   return {
     id,
@@ -1965,6 +1986,75 @@ function countedStream(
   counter.once("finish", () => record(true));
   counter.once("close", () => record(false));
   return source.pipe(counter);
+}
+
+function countedNodeStream(
+  db: AppDatabase,
+  input: {
+    sessionId: string;
+    profileId: string;
+    status: number;
+    body: NodeJS.ReadableStream;
+    completed: boolean;
+    onProgress?: () => void;
+  },
+) {
+  let bytes = 0;
+  let recorded = false;
+  let lastProgressAt = 0;
+  const counter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bytes += chunk.length;
+      const now = Date.now();
+      if (now - lastProgressAt >= 10_000) {
+        lastProgressAt = now;
+        input.onProgress?.();
+      }
+      callback(null, chunk);
+    },
+  });
+  const record = (completed: boolean, error?: Error | null) => {
+    if (recorded) return;
+    recorded = true;
+    recordStreamTransfer(db, {
+      sessionId: input.sessionId,
+      profileId: input.profileId,
+      bytes,
+      status: input.status,
+      completed: completed && input.completed,
+      error: error?.message ?? null,
+    });
+  };
+  input.body.once("error", (error) => record(false, error));
+  counter.once("error", (error) => record(false, error));
+  counter.once("finish", () => record(true));
+  counter.once("close", () => record(false));
+  return input.body.pipe(counter);
+}
+
+function singleByteRange(
+  header: string | undefined,
+  length: number,
+): { start: number; end: number; status: 200 | 206 } | null {
+  if (header == null) return { start: 0, end: Math.max(0, length - 1), status: 200 };
+  if (length <= 0 || header.includes(",")) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (match == null || (match[1] === "" && match[2] === "")) return null;
+  let start: number;
+  let end: number;
+  if (match[1] === "") {
+    const suffix = Number(match[2]);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
+    start = Math.max(0, length - suffix);
+    end = length - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] === "" ? length - 1 : Number(match[2]);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) return null;
+    if (start < 0 || start >= length || end < start) return null;
+    end = Math.min(end, length - 1);
+  }
+  return { start, end, status: 206 };
 }
 
 function streamUsageSummary(db: AppDatabase, profileId: string, days: number) {
@@ -2243,6 +2333,9 @@ function adminHealthSummary(db: AppDatabase, config: ServerConfig) {
   if (config.allowRawStreamUrls) {
     warnings.push("Raw stream URL sessions are enabled. Keep this disabled for public deployments.");
   }
+  if (config.enableDirectTorrent) {
+    warnings.push("Direct P2P is enabled. Swarm peers can see this server's public IP, transfers may upload data, and temporary torrent data uses disk and bandwidth.");
+  }
   if (!config.trustProxy) {
     warnings.push("Reverse-proxy trust is disabled. Enable DS_SERVER_TRUST_PROXY=true behind a trusted HTTPS proxy.");
   }
@@ -2264,6 +2357,7 @@ function adminHealthSummary(db: AppDatabase, config: ServerConfig) {
       trustProxy: config.trustProxy,
       corsConfigured: config.corsOrigin != null && config.corsOrigin.trim().length > 0,
       rawStreamUrlsEnabled: config.allowRawStreamUrls,
+      directTorrentEnabled: config.enableDirectTorrent,
       webDistConfigured: config.webDistPath != null,
       sessionTtlSeconds: config.sessionTtlSeconds,
       bindSessionUserAgent: config.bindSessionUserAgent,
@@ -2426,6 +2520,7 @@ function registerRoutes(
     availableVideoEncoders: ServerConfig["transcodeVideoEncoder"][];
     registry: TranscodeRegistry;
   },
+  directTorrent: DirectTorrentRegistry | null,
 ): void {
   const rateLimit = createRateLimiter();
   const loginFailures = new Map<string, LoginFailureState>();
@@ -2460,6 +2555,7 @@ function registerRoutes(
       // Whether server-side transcoding is actually usable (operator flag on AND
       // ffmpeg present at boot), so the client only offers it when it'll work.
       transcodeAvailable: transcode.ready,
+      directTorrentAvailable: directTorrent != null,
       transcodeCapabilities: {
         adaptive: transcode.ready,
         qualities: transcode.ready
@@ -5360,6 +5456,84 @@ function registerRoutes(
         throw blocked("infohash_unbound", { mediaId: body.mediaId, infoHash: body.infoHash });
       }
     }
+    if (body.backend === "direct_torrent") {
+      if (directTorrent == null) {
+        throw httpError(404, "Direct P2P is not enabled on this server.");
+      }
+      if (!body.directTorrentAcknowledged) {
+        throw httpError(400, "Direct P2P requires an acknowledgement for this play.");
+      }
+      // Direct P2P is never allowed to turn an arbitrary client-supplied hash
+      // into a swarm join. Bind the normalized hash to an indexed source for
+      // the declared title, even for unrestricted adult profiles.
+      if (body.mediaId == null || body.mediaType == null) {
+        throw httpError(400, "Direct P2P requires the title identity.");
+      }
+      if (
+        body.mediaType === "series"
+        && (body.season == null || body.episode == null)
+      ) {
+        throw httpError(400, "Direct P2P series playback requires a season and episode.");
+      }
+      const belongs = await titleHasInfoHash(
+        db,
+        config,
+        auth.profileId,
+        body.mediaId,
+        body.mediaType,
+        body.infoHash,
+        body.season ?? null,
+        body.episode ?? null,
+        !auth.isKid && auth.maturityMax == null,
+      ).catch(() => false);
+      if (!belongs) {
+        throw httpError(403, "This Direct P2P source is not bound to the selected title.");
+      }
+      const sessionId = randomId("stream");
+      try {
+        const direct = await directTorrent.register({
+          sessionId,
+          profileId: auth.profileId,
+          infoHash: body.infoHash,
+          expiresInSeconds: body.expiresInSeconds,
+          fileHint:
+            body.season != null && body.episode != null
+              ? { season: body.season, episode: body.episode }
+              : null,
+        });
+        const session = createStreamSession(db, config, auth, {
+          id: sessionId,
+          upstreamUrl: `direct-torrent:${body.infoHash}`,
+          contentType: streamContentType(direct.file.name),
+          title: direct.file.name,
+          expiresInSeconds: body.expiresInSeconds,
+          expiresAt: direct.expiresAt,
+          sourceKind: "direct_torrent",
+        });
+        audit(db, auth, "stream_session.direct_torrent.create", "stream_session", session.id, {
+          infoHash: body.infoHash,
+        });
+        return {
+          stream: {
+            streamURL: session.playbackUrl,
+            playbackAuthorization: session.playbackAuthorization,
+            quality: "Unknown",
+            codec: "Unknown",
+            audio: "Unknown",
+            source: "Unknown",
+            sizeBytes: direct.file.length,
+            fileName: direct.file.name,
+            debridService: "Direct P2P",
+            backend: "direct_torrent",
+          },
+          session,
+        };
+      } catch (error) {
+        await directTorrent.release(sessionId).catch(() => {});
+        db.sqlite.prepare("DELETE FROM stream_sessions WHERE id = ?").run(sessionId);
+        throw error;
+      }
+    }
     const directStream = await resolveServerStream(db, config, auth.profileId, {
       infoHash: body.infoHash,
       preferredService: body.preferredService ?? null,
@@ -5454,6 +5628,7 @@ function registerRoutes(
     if (result.changes === 0) {
       throw httpError(404, "Active stream session not found.");
     }
+    await directTorrent?.release(id);
     audit(db, auth, "stream_session.revoke", "stream_session", id);
     return { ok: true };
   });
@@ -5470,7 +5645,7 @@ function registerRoutes(
       const id = (request.params as { id: string }).id;
       const row = db.sqlite
         .prepare(
-          `SELECT id, profile_id, encrypted_upstream_url, content_type, expires_at
+          `SELECT id, profile_id, encrypted_upstream_url, content_type, expires_at, source_kind
            FROM stream_sessions
            WHERE id = ?
              AND revoked_at IS NULL
@@ -5484,6 +5659,7 @@ function registerRoutes(
             encrypted_upstream_url: string;
             content_type: string | null;
             expires_at: string;
+            source_kind: string;
           }
         | undefined;
       if (row == null) throw httpError(404, "Stream session not found.");
@@ -5495,6 +5671,42 @@ function registerRoutes(
       );
       if (!cookieAuthorized && !bearerAuthorized) {
         throw httpError(404, "Stream session not found.");
+      }
+
+      if (row.source_kind === "direct_torrent") {
+        const direct = directTorrent?.get(row.id) ?? null;
+        if (direct == null) throw httpError(410, "Direct P2P session is no longer active.");
+        const range = singleByteRange(
+          typeof request.headers.range === "string" ? request.headers.range : undefined,
+          direct.file.length,
+        );
+        reply.header("accept-ranges", "bytes");
+        reply.header("cache-control", "private, no-store");
+        if (row.content_type != null) reply.header("content-type", row.content_type);
+        if (range == null) {
+          reply.header("content-range", `bytes */${direct.file.length}`);
+          return reply.status(416).send();
+        }
+        const length = range.end - range.start + 1;
+        reply.status(range.status).header("content-length", String(length));
+        if (range.status === 206) {
+          reply.header("content-range", `bytes ${range.start}-${range.end}/${direct.file.length}`);
+        }
+        if (request.method === "HEAD") {
+          return reply.send();
+        }
+        const body = direct.file.createReadStream({ start: range.start, end: range.end });
+        reply.raw.once("close", () => {
+          (body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+        });
+        return reply.send(countedNodeStream(db, {
+          sessionId: row.id,
+          profileId: row.profile_id,
+          status: range.status,
+          body,
+          completed: range.status === 200,
+          onProgress: () => directTorrent?.touch(row.id),
+        }));
       }
 
       const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
@@ -5574,7 +5786,7 @@ function registerRoutes(
       const bearer = z.string().trim().min(32).max(128).parse(params.token);
       const row = db.sqlite
         .prepare(
-          `SELECT id, profile_id, encrypted_upstream_url, content_type, expires_at
+          `SELECT id, profile_id, encrypted_upstream_url, content_type, expires_at, source_kind
            FROM stream_sessions
            WHERE id = ?
              AND revoked_at IS NULL
@@ -5588,6 +5800,7 @@ function registerRoutes(
             encrypted_upstream_url: string;
             content_type: string | null;
             expires_at: string;
+            source_kind: string;
           }
         | undefined;
       if (
@@ -5599,6 +5812,43 @@ function registerRoutes(
         )
       ) {
         throw httpError(404, "Stream session not found.");
+      }
+
+      if (row.source_kind === "direct_torrent") {
+        const direct = directTorrent?.get(row.id) ?? null;
+        if (direct == null) throw httpError(410, "Direct P2P session is no longer active.");
+        const range = singleByteRange(
+          typeof request.headers.range === "string" ? request.headers.range : undefined,
+          direct.file.length,
+        );
+        reply.header("accept-ranges", "bytes");
+        reply.header("cache-control", "private, no-store");
+        reply.header("referrer-policy", "no-referrer");
+        if (row.content_type != null) reply.header("content-type", row.content_type);
+        if (range == null) {
+          reply.header("content-range", `bytes */${direct.file.length}`);
+          return reply.status(416).send();
+        }
+        const length = range.end - range.start + 1;
+        reply.status(range.status).header("content-length", String(length));
+        if (range.status === 206) {
+          reply.header("content-range", `bytes ${range.start}-${range.end}/${direct.file.length}`);
+        }
+        if (request.method === "HEAD") {
+          return reply.send();
+        }
+        const body = direct.file.createReadStream({ start: range.start, end: range.end });
+        reply.raw.once("close", () => {
+          (body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+        });
+        return reply.send(countedNodeStream(db, {
+          sessionId: row.id,
+          profileId: row.profile_id,
+          status: range.status,
+          body,
+          completed: range.status === 200,
+          onProgress: () => directTorrent?.touch(row.id),
+        }));
       }
 
       const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
@@ -5664,19 +5914,19 @@ function registerRoutes(
   /** Load + ownership-validate a stream session (same scoping as the proxy). */
   const loadTranscodeSession = (
     request: FastifyRequest,
-  ): { id: string; profile_id: string; encrypted_upstream_url: string } | null => {
+  ): { id: string; profile_id: string; encrypted_upstream_url: string; source_kind: string } | null => {
     const auth = requireAuth(db, request);
     const id = (request.params as { id: string }).id;
     return (
       (db.sqlite
         .prepare(
-          `SELECT id, profile_id, encrypted_upstream_url
+          `SELECT id, profile_id, encrypted_upstream_url, source_kind
            FROM stream_sessions
            WHERE id = ? AND profile_id = ? AND revoked_at IS NULL AND expires_at > ?
            LIMIT 1`,
         )
         .get(id, auth.profileId, nowISO()) as
-        | { id: string; profile_id: string; encrypted_upstream_url: string }
+        | { id: string; profile_id: string; encrypted_upstream_url: string; source_kind: string }
         | undefined) ?? null
     );
   };
@@ -5687,6 +5937,9 @@ function registerRoutes(
     if (!transcode.ready) throw httpError(404, "Transcoding is not available.");
     const row = loadTranscodeSession(request);
     if (row == null) throw httpError(404, "Stream session not found.");
+    if (row.source_kind === "direct_torrent") {
+      throw httpError(409, "Transcoding is not available for Direct P2P playback.");
+    }
     const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
     // SSRF: validate the FIRST hop before handing the URL to ffmpeg (private
     // addresses blocked unless the operator opted into raw URLs). Residual,
@@ -5825,6 +6078,37 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   let config = loadConfig(options.config);
   const db = new AppDatabase(config.databasePath);
 
+  // Direct sessions are backed by an in-process engine and cannot survive a
+  // process restart. Revoke any unexpired crash leftovers so admin activity
+  // and session status do not claim that an unreachable stream is still live.
+  db.sqlite
+    .prepare(
+      `UPDATE stream_sessions
+       SET revoked_at = ?
+       WHERE source_kind = 'direct_torrent'
+         AND revoked_at IS NULL
+         AND expires_at > ?`,
+    )
+    .run(nowISO(), nowISO());
+
+  // Keep the disabled default inert. The dynamic WebTorrent import, client,
+  // sockets, cache directory, registry timer, and swarm engine exist only
+  // after the operator explicitly enables Direct P2P.
+  const directTorrentAdapter = config.enableDirectTorrent
+    ? options.directTorrentAdapter ?? await createWebTorrentAdapter(config)
+    : null;
+  const directTorrentRegistry = directTorrentAdapter == null
+    ? null
+    : new DirectTorrentRegistry(directTorrentAdapter, config, (sessionId) => {
+        db.sqlite
+          .prepare(
+            `UPDATE stream_sessions
+             SET revoked_at = COALESCE(revoked_at, ?)
+             WHERE id = ? AND source_kind = 'direct_torrent'`,
+          )
+          .run(nowISO(), sessionId);
+      });
+
   // Transcoding (Phase 3b): probe ffmpeg ONLY when the operator opted in (zero
   // boot cost otherwise). transcodeReady gates the routes + the bootstrap
   // capability; the registry owns ffmpeg processes + temp dirs.
@@ -5956,6 +6240,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.addHook("onClose", async () => {
+    await directTorrentRegistry?.close();
     await transcodeRegistry.stop();
     db.close();
   });
@@ -5967,7 +6252,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       transcodeCapabilities.subtitleSidecar === true,
     availableVideoEncoders,
     registry: transcodeRegistry,
-  });
+  }, directTorrentRegistry);
   registerStaticApp(app, config);
   return app;
 }

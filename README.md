@@ -11,6 +11,10 @@ Mode.
 - **Server Mode**: a self-hosted backend with login, profiles, separate history,
   invite links, shared credentials, profile credential overrides, and stream
   forwarding.
+- **Optional Direct P2P**: Server Mode operators can explicitly enable bounded
+  DHT-only torrent playback. It remains disabled by default, never replaces
+  debrid automatically, and requires a clear risk acknowledgement for every
+  play because peers can see the server IP and transfers can upload data.
 - **Account self-service**: users can change their own password and keep
   personal credential overrides without needing an admin to edit shared secrets;
   they can also review and revoke signed-in devices.

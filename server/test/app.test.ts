@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import { Readable } from "node:stream";
 import { createHmac, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { EventEmitter } from "node:events";
@@ -11,6 +12,7 @@ import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { buildApp } from "../src/app.js";
 import { AppDatabase } from "../src/db.js";
 import type { Transcoder } from "../src/transcode.js";
+import type { DirectTorrentAdapter } from "../src/directTorrent.js";
 
 // A fake ffmpeg surface so transcode tests run without a real binary: detect()
 // returns the configured availability, and spawnHls synchronously writes a stub
@@ -4156,5 +4158,348 @@ describe("DebridStreamer server", () => {
         payload: { key: "profile_gate_kind", value: "none" },
       })).statusCode,
     ).toBe(403);
+  });
+
+  it("keeps Direct P2P explicit, range-safe, accounted, and releasable", async () => {
+    await app.close();
+    const hash = "d".repeat(40);
+    const bytes = Buffer.from("0123456789");
+    let opens = 0;
+    let destroys = 0;
+    let closes = 0;
+    let delayNextOpen = false;
+    const adapter: DirectTorrentAdapter = {
+      async open(infoHash) {
+        opens += 1;
+        if (delayNextOpen) {
+          delayNextOpen = false;
+          await new Promise((resolve) => setTimeout(resolve, 1_100));
+        }
+        return {
+          infoHash,
+          files: [{
+            name: "Bound.Movie.2026.1080p.mp4",
+            length: bytes.length,
+            createReadStream(options) {
+              return Readable.from(bytes.subarray(options?.start ?? 0, (options?.end ?? bytes.length - 1) + 1));
+            },
+          }],
+          async destroy() { destroys += 1; },
+        };
+      },
+      async close() { closes += 1; },
+    };
+    app = await buildApp({
+      config: {
+        databasePath: ":memory:", dataDir: ".test-data", secretKey: randomBytes(32),
+        cookieSecure: false, logger: false, allowRawStreamUrls: true,
+        enableDirectTorrent: true,
+      },
+      directTorrentAdapter: adapter,
+    });
+    const owner = await setupOwner(app);
+    expect(json<{ directTorrentAvailable: boolean }>(
+      await request(owner, { method: "GET", url: "/api/bootstrap" }),
+    ).directTorrentAvailable).toBe(true);
+    const health = json<{
+      config: { directTorrentEnabled: boolean };
+      warnings: string[];
+    }>(await request(owner, { method: "GET", url: "/api/admin/health" }));
+    expect(health.config.directTorrentEnabled).toBe(true);
+    expect(health.warnings).toContainEqual(expect.stringContaining("Direct P2P is enabled"));
+    await request(owner, {
+      method: "PUT", url: "/api/admin/credentials", csrf: true,
+      payload: { provider: "tmdb", value: "tmdb-key", label: "TMDB" },
+    });
+    await request(owner, {
+      method: "PUT", url: "/api/settings/profile", csrf: true,
+      payload: { key: "built_in_indexers_enabled", value: "true" },
+    });
+
+    const originalFetch = globalThis.fetch;
+    const j200 = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("https://api.themoviedb.org")) {
+        const path = new URL(url).pathname;
+        if (path.includes("/find/")) return j200({ movie_results: [{ id: 600 }], tv_results: [] });
+        if (path.endsWith("/credits") || path.endsWith("/recommendations")) return j200({ cast: [], results: [] });
+        if (/\/movie\/600$/.test(path)) return j200({ id: 600, title: "Bound Movie", genres: [], external_ids: { imdb_id: "tt0000600" } });
+        return j200({ results: [] });
+      }
+      const host = new URL(url).hostname;
+      if (host === "apibay.org") {
+        return j200([{ id: "1", name: "Bound Movie 2026 1080p", info_hash: hash, leechers: "1", seeders: "5", size: String(bytes.length) }]);
+      }
+      if (host === "yts.torrentbay.st") return j200({ status: "ok", data: { movies: [] } });
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const payload = {
+        infoHash: hash.toUpperCase(), backend: "direct_torrent",
+        mediaId: "tmdb-600", mediaType: "movie",
+      };
+      expect((await request({ app, cookies: new Map() }, {
+        method: "POST", url: "/api/streams/resolve", payload,
+      })).statusCode).toBe(401);
+      expect((await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { infoHash: hash },
+      })).statusCode).toBe(400);
+      expect(opens).toBe(0);
+      expect((await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true, payload,
+      })).statusCode).toBe(400);
+      expect(opens).toBe(0);
+      expect((await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: {
+          ...payload,
+          infoHash: "e".repeat(40),
+          directTorrentAcknowledged: true,
+        },
+      })).statusCode).toBe(403);
+      expect(opens).toBe(0);
+
+      const resolved = await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { ...payload, directTorrentAcknowledged: true },
+      });
+      expect(resolved.statusCode).toBe(200);
+      const body = json<{
+        stream: { streamURL: string; backend: string; playbackAuthorization: string };
+        session: { id: string };
+      }>(resolved);
+      expect(body.stream.backend).toBe("direct_torrent");
+      expect(opens).toBe(1);
+
+      const head = await request(owner, {
+        method: "HEAD", url: body.stream.streamURL, headers: { range: "bytes=2-5" },
+      });
+      expect(head.statusCode).toBe(206);
+      expect(head.headers["content-range"]).toBe("bytes 2-5/10");
+      expect(head.headers["content-length"]).toBe("4");
+      expect(head.headers["content-type"]).toBe("video/mp4");
+      const externalHead = await request({ app, cookies: new Map() }, {
+        method: "HEAD",
+        url: `/api/external-stream/${body.session.id}/${body.stream.playbackAuthorization.slice("Bearer ".length)}`,
+      });
+      expect(externalHead.statusCode).toBe(200);
+      expect(json<{ streams: Array<{ id: string }> }>(
+        await request(owner, { method: "GET", url: "/api/admin/streams/active" }),
+      ).streams.some((stream) => stream.id === body.session.id)).toBe(true);
+      const range = await request(owner, {
+        method: "GET", url: body.stream.streamURL, headers: { range: "bytes=2-5" },
+      });
+      expect(range.statusCode).toBe(206);
+      expect(range.body).toBe("2345");
+      expect((await request(owner, {
+        method: "GET", url: body.stream.streamURL, headers: { range: "bytes=0-1,4-5" },
+      })).statusCode).toBe(416);
+      expect(json<{ totalBytes: number }>(
+        await request(owner, { method: "GET", url: "/api/usage/streams" }),
+      ).totalBytes).toBe(4);
+
+      expect((await request(owner, {
+        method: "POST", url: `/api/admin/streams/${body.session.id}/revoke`, csrf: true,
+      })).statusCode).toBe(200);
+      expect(destroys).toBe(1);
+      expect((await request(owner, { method: "GET", url: body.stream.streamURL })).statusCode).toBe(404);
+
+      delayNextOpen = true;
+      const expiring = await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { ...payload, directTorrentAcknowledged: true, expiresInSeconds: 1 },
+      });
+      expect(expiring.statusCode).toBe(200);
+      const expiringBody = json<{
+        stream: { streamURL: string };
+        session: { expiresAt: string };
+      }>(expiring);
+      expect(Date.parse(expiringBody.session.expiresAt) - Date.now()).toBeGreaterThan(500);
+      expect((await request(owner, {
+        method: "GET", url: expiringBody.stream.streamURL,
+      })).statusCode).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      expect(destroys).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    await app.close();
+    expect(closes).toBe(1);
+    app = await buildApp({
+      config: {
+        databasePath: ":memory:", dataDir: ".test-data", secretKey: randomBytes(32),
+        cookieSecure: false, logger: false, allowRawStreamUrls: true,
+      },
+    });
+  });
+
+  it("binds acknowledged Direct P2P series playback through an episode-aware Stremio source", async () => {
+    await app.close();
+    const hash = "a".repeat(40);
+    const unboundHash = "b".repeat(40);
+    const wrongTaggedHash = "d".repeat(40);
+    const missingEpisodeFileHash = "e".repeat(40);
+    const openedHashes: string[] = [];
+    const adapter: DirectTorrentAdapter = {
+      async open(infoHash) {
+        openedHashes.push(infoHash);
+        return {
+          infoHash,
+          files: [{
+            name: infoHash === missingEpisodeFileHash
+              ? "Episode.Bound.Show.S02E08.mp4"
+              : "Episode.Bound.Show.S02E07.mp4",
+            length: 10,
+            createReadStream() {
+              return Readable.from("0123456789");
+            },
+          }],
+          async destroy() {},
+        };
+      },
+      async close() {},
+    };
+    app = await buildApp({
+      config: {
+        databasePath: ":memory:", dataDir: ".test-data", secretKey: randomBytes(32),
+        cookieSecure: false, logger: false, allowRawStreamUrls: true,
+        enableDirectTorrent: true, directTorrentMaxActive: 4,
+        directTorrentMaxSessionsPerProfile: 4,
+      },
+      directTorrentAdapter: adapter,
+    });
+    const owner = await setupOwner(app);
+    await request(owner, {
+      method: "PUT", url: "/api/admin/credentials", csrf: true,
+      payload: { provider: "tmdb", value: "tmdb-key", label: "TMDB" },
+    });
+    await request(owner, {
+      method: "PUT", url: "/api/settings/profile", csrf: true,
+      payload: {
+        key: "server_indexer_configs",
+        value: JSON.stringify([{
+          id: "stremio", type: "stremio_addon", baseURL: "https://stremio.test",
+          isActive: true,
+        }]),
+      },
+    });
+    await request(owner, {
+      method: "PUT", url: "/api/settings/profile", csrf: true,
+      payload: { key: "built_in_indexers_enabled", value: "true" },
+    });
+
+    const originalFetch = globalThis.fetch;
+    const stremioURLs: string[] = [];
+    const titleOnlyHash = "c".repeat(40);
+    const j200 = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("https://api.themoviedb.org")) {
+        const path = new URL(url).pathname;
+        if (path.endsWith("/credits") || path.endsWith("/recommendations")) {
+          return j200({ cast: [], results: [] });
+        }
+        if (/\/tv\/700$/.test(path)) {
+          return j200({
+            id: 700,
+            name: "Episode Bound Show",
+            genres: [],
+            external_ids: { imdb_id: "tt0000700" },
+          });
+        }
+        return j200({ results: [] });
+      }
+      if (url.startsWith("https://stremio.test/stream/")) {
+        stremioURLs.push(url);
+        return j200(url.includes("tt0000700%3A2%3A7")
+          ? { streams: [
+              { infoHash: hash, title: "Episode Bound Show S02E07 1080p" },
+              { infoHash: wrongTaggedHash, title: "Episode Bound Show S02E08 1080p" },
+              { infoHash: missingEpisodeFileHash, title: "Episode Bound Show S02E07 2160p" },
+            ] }
+          : { streams: [] });
+      }
+      if (new URL(url).hostname === "apibay.org") {
+        return j200(new URL(url).searchParams.get("q") === "Episode Bound Show S02E07"
+          ? [{
+              id: "1",
+              name: "Episode Bound Show S02E07 1080p",
+              info_hash: titleOnlyHash,
+              leechers: "1",
+              seeders: "5",
+              size: "10",
+            }]
+          : [{ name: "No results returned", id: "0", info_hash: "", seeders: "0", leechers: "0", size: "0" }]);
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const payload = {
+        backend: "direct_torrent",
+        directTorrentAcknowledged: true,
+        mediaId: "tmdb-700",
+        mediaType: "series",
+        season: 2,
+        episode: 7,
+      };
+      const displayed = json<{ rows: Array<{ result: { infoHash: string } }> }>(
+        await request(owner, {
+          method: "GET",
+          url: "/api/streams/tt0000700?type=series&season=2&episode=7&title=Episode%20Bound%20Show",
+        }),
+      );
+      expect(displayed.rows.some((row) => row.result.infoHash === titleOnlyHash)).toBe(true);
+      expect((await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { ...payload, infoHash: hash, episode: undefined },
+      })).statusCode).toBe(400);
+      expect((await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { ...payload, infoHash: hash, season: undefined },
+      })).statusCode).toBe(400);
+      expect(openedHashes).toHaveLength(0);
+      const resolved = await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { ...payload, infoHash: hash },
+      });
+      expect(resolved.statusCode).toBe(200);
+      expect(json<{ stream: { backend: string } }>(resolved).stream.backend).toBe("direct_torrent");
+      expect(stremioURLs).toContain("https://stremio.test/stream/series/tt0000700%3A2%3A7.json");
+
+      expect((await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { ...payload, infoHash: titleOnlyHash },
+      })).statusCode).toBe(200);
+
+      expect((await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { ...payload, infoHash: wrongTaggedHash },
+      })).statusCode).toBe(403);
+      expect(openedHashes).not.toContain(wrongTaggedHash);
+
+      expect((await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { ...payload, infoHash: missingEpisodeFileHash },
+      })).statusCode).toBe(422);
+      expect(openedHashes).toContain(missingEpisodeFileHash);
+
+      expect((await request(owner, {
+        method: "POST", url: "/api/streams/resolve", csrf: true,
+        payload: { ...payload, infoHash: unboundHash },
+      })).statusCode).toBe(403);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    await app.close();
+    app = await buildApp({
+      config: {
+        databasePath: ":memory:", dataDir: ".test-data", secretKey: randomBytes(32),
+        cookieSecure: false, logger: false, allowRawStreamUrls: true,
+      },
+    });
   });
 });

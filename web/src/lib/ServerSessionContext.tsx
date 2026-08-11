@@ -70,6 +70,8 @@ interface ServerSessionContextValue {
    *  static server capability captured once at bootstrap. */
   transcodeAvailable: boolean;
   transcodeCapabilities: ServerTranscodeCapabilities;
+  /** Explicit operator capability. False for older servers and Local Mode. */
+  directTorrentAvailable: boolean;
   /** Whether the server can supply OMDb ratings for this profile (a profile,
    *  server, or env OMDb key is configured server-side). The key itself never
    *  reaches the client - this only says the /api/omdb proxy will answer. */
@@ -87,6 +89,7 @@ const ServerSessionCtx = createContext<ServerSessionContextValue>({
   setProfiles: () => {},
   transcodeAvailable: false,
   transcodeCapabilities: NO_TRANSCODE_CAPABILITIES,
+  directTorrentAvailable: false,
   omdbProxy: false,
   buildProfile: "public",
 });
@@ -96,6 +99,7 @@ export function ServerSessionProvider({
   initialProfiles = [],
   initialTranscodeAvailable = false,
   initialTranscodeCapabilities = NO_TRANSCODE_CAPABILITIES,
+  initialDirectTorrentAvailable = false,
   initialOmdbProxy = false,
   initialBuildProfile = "public",
   children,
@@ -104,6 +108,7 @@ export function ServerSessionProvider({
   initialProfiles?: ServerProfileSummary[];
   initialTranscodeAvailable?: boolean;
   initialTranscodeCapabilities?: ServerTranscodeCapabilities;
+  initialDirectTorrentAvailable?: boolean;
   initialOmdbProxy?: boolean;
   initialBuildProfile?: BuildProfile;
   children: ReactNode;
@@ -124,6 +129,7 @@ export function ServerSessionProvider({
         setProfiles: setList,
         transcodeAvailable: initialTranscodeAvailable,
         transcodeCapabilities: initialTranscodeCapabilities,
+        directTorrentAvailable: initialDirectTorrentAvailable,
         omdbProxy: initialOmdbProxy,
         buildProfile: initialBuildProfile,
       }}
@@ -140,6 +146,10 @@ export function useTranscodeAvailable(): boolean {
 
 export function useTranscodeCapabilities(): ServerTranscodeCapabilities {
   return useContext(ServerSessionCtx).transcodeCapabilities;
+}
+
+export function useDirectTorrentAvailable(): boolean {
+  return useContext(ServerSessionCtx).directTorrentAvailable;
 }
 
 /** Whether the server can supply OMDb ratings (Server Mode "hidden key" path). */

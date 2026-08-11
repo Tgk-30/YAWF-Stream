@@ -40,6 +40,7 @@ interface BootstrapResponse {
   csrfToken?: string | null;
   transcodeAvailable?: boolean;
   transcodeCapabilities?: ServerTranscodeCapabilities;
+  directTorrentAvailable?: boolean;
   omdbProxy?: boolean;
   buildProfile?: "family" | "friends" | "public";
 }
@@ -166,6 +167,7 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<ServerSession | null>(null);
   const [profiles, setProfiles] = useState<ServerProfileSummary[]>([]);
   const [transcodeAvailable, setTranscodeAvailable] = useState(false);
+  const [directTorrentAvailable, setDirectTorrentAvailable] = useState(false);
   const [transcodeCapabilities, setTranscodeCapabilities] =
     useState<ServerTranscodeCapabilities>({
       adaptive: false,
@@ -226,6 +228,7 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
         // document.cookie can't see ds_csrf).
         setCsrfToken(bootstrap.csrfToken);
         setTranscodeAvailable(bootstrap.transcodeAvailable ?? false);
+        setDirectTorrentAvailable(bootstrap.directTorrentAvailable ?? false);
         setTranscodeCapabilities(normalizedTranscodeCapabilities(bootstrap.transcodeCapabilities));
         setOmdbProxy(bootstrap.omdbProxy ?? false);
         setBuildProfile(bootstrap.buildProfile ?? "public");
@@ -269,6 +272,7 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
         initialProfiles={profiles}
         initialTranscodeAvailable={transcodeAvailable}
         initialTranscodeCapabilities={transcodeCapabilities}
+        initialDirectTorrentAvailable={directTorrentAvailable}
         initialOmdbProxy={omdbProxy}
         initialBuildProfile={buildProfile}
       >

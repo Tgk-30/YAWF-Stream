@@ -1,0 +1,7 @@
+{
+  "name": "webrtc-polyfill",
+  "version": "1.2.2+yawf-disabled",
+  "private": true,
+  "type": "module",
+  "exports": "./index.js"
+}

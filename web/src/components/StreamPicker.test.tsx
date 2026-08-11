@@ -16,6 +16,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import type { StreamRow, StreamsState } from "../data/streams";
 import type { StreamMaxQuality } from "../data/settings";
@@ -303,6 +304,122 @@ describe("StreamPicker", () => {
     // Non-cached row: grey "Will cache" badge.
     const willCache = screen.getByText("Dune.2021.720p.WEB-DL").closest("button")!;
     expect(within(willCache).getByText("Will cache")).toBeInTheDocument();
+  });
+
+  it("offers Direct P2P only when advertised and requires a complete per-play acknowledgement", async () => {
+    const user = userEvent.setup();
+    const row = makeRow({ hash: "D".repeat(40), title: "Direct.Movie.1080p.mp4" });
+    const resolveStream = vi.fn(async (_row: StreamRow, _backend?: string): Promise<StreamInfo> => ({
+      streamURL: "https://server.test/api/stream/direct",
+      quality: "1080p",
+      codec: "H.264",
+      audio: "Unknown",
+      source: "Unknown",
+      sizeBytes: 10,
+      fileName: "Direct.Movie.1080p.mp4",
+      debridService: "Direct P2P",
+      backend: "direct_torrent",
+    }));
+    const onPlay = vi.fn();
+    const { rerender } = render(
+      <StreamPicker
+        state={baseState({ rows: [row], hasDebrid: false })}
+        resolveStream={resolveStream}
+        onPlay={onPlay}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Direct P2P" })).toBeNull();
+    rerender(
+      <StreamPicker
+        state={baseState({ rows: [row], hasDebrid: false })}
+        resolveStream={resolveStream}
+        onPlay={onPlay}
+        directTorrentAvailable
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Direct P2P" }));
+    expect(screen.getByText(/swarm peers can see your server's public IP/i)).toBeInTheDocument();
+    expect(screen.getByText(/network or ISP can identify, block, or throttle/i)).toBeInTheDocument();
+    expect(screen.getByText(/playback depends on seeders/i)).toBeInTheDocument();
+    expect(screen.getByText(/upload data, use disk space/i)).toBeInTheDocument();
+    expect(screen.getByText(/rights to this content/i)).toBeInTheDocument();
+    const play = screen.getByRole("button", { name: "Play with Direct P2P" });
+    expect(play).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: /network, disk, and rights/i }));
+    await user.click(play);
+    await waitFor(() => expect(resolveStream).toHaveBeenCalledWith(row, "direct_torrent"));
+    await waitFor(() => expect(onPlay).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps Direct P2P resolving beyond the debrid timeout until the server succeeds", async () => {
+    vi.useFakeTimers();
+    const row = makeRow({ hash: "F".repeat(40), title: "Direct.Slow.1080p.mp4" });
+    let finishResolve!: (stream: StreamInfo) => void;
+    const resolveStream = vi.fn(
+      (_row: StreamRow, _backend?: "debrid" | "direct_torrent") =>
+        new Promise<StreamInfo>((resolve) => {
+          finishResolve = resolve;
+        }),
+    );
+    const onPlay = vi.fn();
+
+    render(
+      <StreamPicker
+        state={baseState({ rows: [row], hasDebrid: false })}
+        resolveStream={resolveStream}
+        onPlay={onPlay}
+        directTorrentAvailable
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Direct P2P" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /network, disk, and rights/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Play with Direct P2P" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(resolveStream).toHaveBeenCalledWith(row, "direct_torrent");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(STREAM_RESOLVE_TIMEOUT_MS);
+    });
+    expect(screen.getByText("Resolving…")).toBeInTheDocument();
+    expect(screen.queryByText(/took too long to resolve/)).toBeNull();
+    expect(onPlay).not.toHaveBeenCalled();
+
+    const directStream: StreamInfo = {
+      streamURL: "https://server.test/api/stream/direct",
+      quality: "1080p",
+      codec: "H.264",
+      audio: "Unknown",
+      source: "Unknown",
+      sizeBytes: 10,
+      fileName: "Direct.Slow.1080p.mp4",
+      debridService: "Direct P2P",
+      backend: "direct_torrent",
+    };
+    await act(async () => {
+      finishResolve(directStream);
+      await Promise.resolve();
+    });
+    expect(onPlay).toHaveBeenCalledWith(directStream, row.result);
+    expect(screen.queryByText("Resolving…")).toBeNull();
+  });
+
+  it("shows P2P sources immediately when a saved debrid cache filter is on", () => {
+    storeSettings = { ...storeSettings, streamCachedOnly: true };
+    const row = makeRow({ hash: "E".repeat(40), title: "Direct.Only.1080p.mp4" });
+    render(
+      <StreamPicker
+        state={baseState({ rows: [row], hasDebrid: false })}
+        resolveStream={neverResolve}
+        onPlay={noop}
+        directTorrentAvailable
+      />,
+    );
+    expect(screen.getByText("Direct.Only.1080p.mp4")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Cached only" })).toBeNull();
+    expect(screen.getByText("1 source total")).toBeInTheDocument();
   });
 
   it("renders the size label as a dash for zero-byte entries", () => {

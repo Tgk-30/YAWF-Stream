@@ -1,0 +1,7 @@
+{
+  "name": "utp-native",
+  "version": "2.5.3+yawf-disabled",
+  "private": true,
+  "type": "commonjs",
+  "main": "index.cjs"
+}

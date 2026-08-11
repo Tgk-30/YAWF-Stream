@@ -9,6 +9,7 @@ import { getStore } from "../storage";
 import { configuredServerURL } from "./serverMode";
 
 const ONBOARDING_KEY = "onboarding_completed";
+const QUICK_SETUP_ACK_KEY = "quick_setup_acknowledged";
 
 export function devBypassesOnboarding(): boolean {
   if (!import.meta.env.DEV) return false;
@@ -29,10 +30,26 @@ export function needsKeyOnboarding(input: {
   hasTmdb: boolean;
   omdbKey: string;
   hasDebrid: boolean;
+  quickSetupAcknowledged?: boolean;
 }): boolean {
   if (input.serverMode) return false;
+  if (input.quickSetupAcknowledged === true) return false;
   const hasCatalog = input.hasTmdb || input.omdbKey.trim().length > 0;
   return !hasCatalog || !input.hasDebrid;
+}
+
+export async function hasQuickSetupAcknowledgement(): Promise<boolean> {
+  try {
+    return (await getStore().getSetting(QUICK_SETUP_ACK_KEY)) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/** Deliberate keyless-route acknowledgement. It suppresses only the forced
+ * credential gate; Settings remains available and no credential is created. */
+export async function markQuickSetupAcknowledged(): Promise<void> {
+  await getStore().setSetting(QUICK_SETUP_ACK_KEY, "true");
 }
 
 /** True only on a genuine first run in Local Mode (no prior onboarding, no

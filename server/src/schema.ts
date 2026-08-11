@@ -269,6 +269,12 @@ CREATE INDEX watch_history_continue_idx
   ON watch_history(profile_id, queued_next, completed, last_watched DESC);
 `;
 
+// Direct P2P sessions use an in-process torrent registry instead of an HTTP
+// upstream. Existing rows migrate to http so their proxy behavior is unchanged.
+export const MIGRATION_011 = `
+ALTER TABLE stream_sessions ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'http';
+`;
+
 /** Ordered, append-only database migrations. Never edit a released migration.
  * Add the next numbered entry so existing databases and fixture snapshots keep
  * a deterministic upgrade path. */
@@ -283,4 +289,5 @@ export const MIGRATIONS: ReadonlyArray<readonly [version: number, sql: string]> 
   [8, MIGRATION_008],
   [9, MIGRATION_009],
   [10, MIGRATION_010],
+  [11, MIGRATION_011],
 ];
