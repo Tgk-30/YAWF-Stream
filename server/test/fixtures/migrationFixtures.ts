@@ -13,6 +13,7 @@ export const RELEASED_MIGRATION_HASHES = [
   "14d71b01a79d1223197e2cbe487781706b2cff14e144cc11682fd298b4315697",
   "ad4bca57ae670493d02661215daddde1e2e54ef50d772acaddb608523a91c0a9",
   "c3b5b133e1767cdb9b65a21d4c5cd57bc4fb3e63d81f50a4f43a1e7d08f7ed7a",
+  "6e8d675361c369d582239fb7c368a5b4e09ed52ba8c4d97eb8ee7e9ec995f72d",
 ] as const;
 
 export interface LegacyServerFixture {

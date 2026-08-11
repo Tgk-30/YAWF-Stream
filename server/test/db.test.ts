@@ -82,12 +82,12 @@ describe("AppDatabase", () => {
         const snapshots = readdirSync(join(path, "..", "backups"));
         expect(snapshots).toHaveLength(1);
         expect(snapshots[0]).toMatch(
-          new RegExp(`^pre-upgrade-v${fixture.version}-to-v10-.*\\.sqlite$`),
+          new RegExp(`^pre-upgrade-v${fixture.version}-to-v11-.*\\.sqlite$`),
         );
         const versions = db.sqlite
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all() as Array<{ version: number }>;
-        expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         expect(
           db.sqlite.prepare("SELECT value FROM profile_settings WHERE key = 'ui_theme'").get(),
         ).toEqual({ value: "midnight" });
@@ -97,6 +97,9 @@ describe("AppDatabase", () => {
         expect(
           db.sqlite.prepare("SELECT preview_json FROM watchlist WHERE media_id = 'tt-fixture'").get(),
         ).toEqual({ preview_json: '{"id":"tt-fixture","title":"Fixture Film"}' });
+        expect(
+          db.sqlite.prepare("SELECT source_kind FROM stream_sessions WHERE id = 'stream-fixture'").get(),
+        ).toEqual({ source_kind: "http" });
         expect(
           db.sqlite.prepare("SELECT progress_seconds FROM watch_history WHERE media_id = 'series-fixture'").get(),
         ).toEqual({ progress_seconds: 420 });
@@ -153,7 +156,7 @@ describe("AppDatabase", () => {
       sqlite.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (99, ?)")
         .run("2035-01-01T00:00:00.000Z");
       expect(() => migrateDatabase(sqlite)).toThrow(
-        "Database schema version 99 is newer than supported version 10.",
+        "Database schema version 99 is newer than supported version 11.",
       );
     } finally {
       sqlite.close();

@@ -1,7 +1,7 @@
 {
   "name": "debridstreamer-server",
   "private": true,
-  "version": "2.2.2",
+  "version": "2.3.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -14,18 +14,24 @@
   "dependencies": {
     "@fastify/compress": "^8.3.1",
     "@fastify/cookie": "^11.0.2",
+    "bittorrent-tracker": "file:vendor/bittorrent-tracker-disabled",
     "fastify": "^5.8.5",
+    "k-rpc": "5.1.0",
+    "utp-native": "file:vendor/utp-native-disabled",
+    "webtorrent": "^3.0.21",
+    "webrtc-polyfill": "file:vendor/webrtc-polyfill-disabled",
     "zod": "^4.2.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "@types/webtorrent": "^0.109.10",
     "esbuild": "^0.28.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.9"
   },
   "overrides": {
-    "fast-uri": "3.1.4",
+    "fast-uri": "3.1.5",
     "find-my-way": "9.7.0"
   }
 }

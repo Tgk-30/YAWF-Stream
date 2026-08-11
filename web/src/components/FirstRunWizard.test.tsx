@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // Component coverage for the Local-Mode persona first-run wizard. Verifies the
-// choose step renders all four personas, each persona routes correctly (device =
+// choose step renders all five personas, each persona routes correctly (device =
 // forced catalog→streaming key steps, advanced = finish + navigate to settings,
 // connect/host = sub steps), skip requires a confirm step, the connect-step
 // validation/direct-navigation flow, and the host-step desktop-vs-web copy.
@@ -24,14 +24,17 @@ const settings = {
   aiApiKey: "",
   ollamaEndpoint: "http://localhost:11434",
 };
+let tmdbService: unknown = null;
 
 vi.mock("../store/AppStore", () => ({
-  useAppStore: () => ({ settings, updateSettings, navigate }),
+  useAppStore: () => ({ settings, services: { tmdb: tmdbService }, updateSettings, navigate }),
 }));
 
 const markOnboardingComplete = vi.fn().mockResolvedValue(undefined);
+const markQuickSetupAcknowledged = vi.fn().mockResolvedValue(undefined);
 vi.mock("../lib/firstRun", () => ({
   markOnboardingComplete: () => markOnboardingComplete(),
+  markQuickSetupAcknowledged: () => markQuickSetupAcknowledged(),
 }));
 
 const saveServerURL = vi.fn();
@@ -89,18 +92,56 @@ describe("FirstRunWizard", () => {
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];
+    tmdbService = null;
   });
 
-  it("renders the choose step with all four personas and a skip button", () => {
+  it("renders the choose step with all five personas and a skip button", () => {
     render(<FirstRunWizard onDone={() => {}} />);
     expect(
       screen.getByText("How do you want to use YAWF Stream?"),
     ).toBeInTheDocument();
     expect(screen.getByText("Just watch on this device")).toBeInTheDocument();
+    expect(screen.getByText("Quick setup")).toBeInTheDocument();
     expect(screen.getByText("Connect to a server")).toBeInTheDocument();
     expect(screen.getByText("Host for my family")).toBeInTheDocument();
     expect(screen.getByText("Advanced setup")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Skip for now" })).toBeInTheDocument();
+    expect(screen.getByText("Just watch on this device").closest("button")).toHaveClass("is-recommended");
+    expect(screen.getByText("Quick setup").closest("button")).not.toHaveClass("is-recommended");
+  });
+
+  it("Quick setup requires acknowledgement, performs no validation, and persists the deliberate route", async () => {
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    render(<FirstRunWizard forced onDone={onDone} />);
+    await user.click(screen.getByText("Quick setup"));
+    expect(screen.getByText(/Only the bundled sample catalog is available/)).toBeInTheDocument();
+    expect(screen.getByText(/Public source services can see your device or server IP/)).toBeInTheDocument();
+    expect(screen.getByText(/not a safety check or a guarantee/)).toBeInTheDocument();
+    expect(screen.getByText(/playback still needs a debrid service/i)).toBeInTheDocument();
+    const continueButton = screen.getByRole("button", { name: "Continue with Quick setup" });
+    expect(continueButton).toBeDisabled();
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(continueButton);
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(testTmdbKeyMock).not.toHaveBeenCalled();
+    expect(testOmdbKeyMock).not.toHaveBeenCalled();
+    expect(testDebridTokenMock).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      simpleMode: true,
+      builtInIndexersEnabled: true,
+    }));
+    expect(markQuickSetupAcknowledged).toHaveBeenCalledTimes(1);
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("Quick setup reports an existing catalog credential truthfully", async () => {
+    tmdbService = {};
+    const user = userEvent.setup();
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Quick setup"));
+    expect(screen.getByText(/A catalog credential is already available/)).toBeInTheDocument();
+    expect(screen.queryByText(/Only the bundled sample catalog is available/)).toBeNull();
   });
 
   it("Skip requires a confirm step; Go back returns, Skip anyway completes", async () => {

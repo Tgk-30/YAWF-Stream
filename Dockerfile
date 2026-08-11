@@ -11,6 +11,7 @@ RUN npm run build
 FROM node:24-bookworm-slim AS server-build
 WORKDIR /repo
 COPY server/package*.json ./server/
+COPY server/vendor ./server/vendor
 RUN cd server && npm ci
 # The server bundles web TypeScript via esbuild - its runtime shims import from
 # web/src/{models,services/{ai,debrid,indexers,metadata,subtitles}}, and some of

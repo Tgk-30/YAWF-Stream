@@ -1,0 +1,7 @@
+{
+  "name": "bittorrent-tracker",
+  "version": "11.2.3+yawf-disabled",
+  "private": true,
+  "type": "module",
+  "exports": "./index.js"
+}

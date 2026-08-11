@@ -228,6 +228,8 @@ export interface StreamInfo {
    * to this short-lived proxy session, so native players never receive the
    * account-wide HttpOnly login cookie. Local debrid services leave it unset. */
   playbackAuthorization?: string;
+  /** Server Mode resolution backend. Omitted by local and older servers. */
+  backend?: "debrid" | "direct_torrent";
   /** Real-Debrid unrestrict id, when known. Real-Debrid returns this alongside
    * the direct `download` URL; it's the key for the `/streaming/transcode/{id}`
    * and `/streaming/mediaInfos/{id}` endpoints, which let the app transcode an

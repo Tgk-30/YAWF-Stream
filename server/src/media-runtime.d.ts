@@ -116,8 +116,9 @@ export function resolveServerStream(
 ): Promise<StreamInfo>;
 
 /** Whether `infoHash` is one of the indexer sources for the title `mediaId`.
- *  Used by the kid play-block to bind the cert-checked title to the resolved
- *  content. Fail-closed (false) when the title has no imdbId or no such source. */
+ *  Used by the kid play-block and Direct P2P source binding. When requested,
+ *  normal-profile binding also searches the title-query source pass. Tagged
+ *  series sources must match the requested season and episode. */
 export function titleHasInfoHash(
   db: AppDatabase,
   config: ServerConfig,
@@ -125,6 +126,9 @@ export function titleHasInfoHash(
   mediaId: string,
   mediaType: MediaType,
   infoHash: string,
+  season?: number | null,
+  episode?: number | null,
+  includeTitleMatches?: boolean,
 ): Promise<boolean>;
 
 /** Builds a single provider client for the server-side token check

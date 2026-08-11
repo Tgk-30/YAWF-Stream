@@ -415,6 +415,7 @@ vi.mock("./lib/firstRun", () => ({
   isFirstRun: () => Promise.resolve(firstRunValue),
   devBypassesOnboarding: () => devBypassesOnboardingValue,
   needsKeyOnboarding: () => keyGateValue,
+  hasQuickSetupAcknowledgement: () => Promise.resolve(false),
 }));
 
 let secretReadsFailedThisSessionValue = false;

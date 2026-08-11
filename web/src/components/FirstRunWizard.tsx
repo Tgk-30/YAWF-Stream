@@ -1,5 +1,5 @@
 // Persona-based first-run wizard (Local Mode only). Routes a brand-new user down
-// one of four paths, or lets them skip past an honest warning. The "device"
+// one of five paths, or lets them skip past an honest warning. The "device"
 // path is a FORCED key-collection flow: the app can't search properly without
 // a TMDB key and can't play anything without a debrid token, so both are
 // collected (with live validation) before the wizard completes - each with an
@@ -8,7 +8,10 @@
 
 import { useState, type FormEvent } from "react";
 import { useAppStore } from "../store/AppStore";
-import { markOnboardingComplete } from "../lib/firstRun";
+import {
+  markOnboardingComplete,
+  markQuickSetupAcknowledged,
+} from "../lib/firstRun";
 import { saveServerURL } from "../lib/serverMode";
 import { isTauri } from "../lib/tauri";
 import { DebridServiceType } from "../services/debrid/models";
@@ -24,15 +27,17 @@ import {
 import { testDebridToken, testOmdbKey, testTmdbKey } from "../lib/onboardingValidation";
 import { ensureDefaultProfile } from "../storage/ProfileRegistry";
 import { Icon, type IconName } from "./Icon";
+import { useDirectTorrentAvailable } from "../lib/ServerSessionContext";
 import "./FirstRunWizard.css";
 
 interface Persona {
-  id: "device" | "connect" | "host" | "advanced";
+  id: "device" | "quick" | "connect" | "host" | "advanced";
   title: string;
   copy: string;
   icon: IconName;
-  /** Optional highlight chip; also marks the card as the recommended path. */
+  /** Optional status chip. Recommendation styling is controlled separately. */
   badge?: string;
+  recommended?: boolean;
 }
 
 const PERSONAS: Persona[] = [
@@ -42,6 +47,14 @@ const PERSONAS: Persona[] = [
     copy: "Connect a catalog key and a debrid account before playback.",
     icon: "play",
     badge: "Recommended",
+    recommended: true,
+  },
+  {
+    id: "quick",
+    title: "Quick setup",
+    copy: "Start with public sources without adding your own keys now. Catalog and playback limits are explained before continuing.",
+    icon: "sparkles",
+    badge: "Not recommended",
   },
   {
     id: "connect",
@@ -116,16 +129,17 @@ export function FirstRunWizard({
   forced = false,
 }: {
   onDone: () => void;
-  /** Mandatory mode: the launch found no catalog key or no debrid token, so
-   *  skipping and the keyless escapes are hidden - the wizard only closes by
-   *  actually configuring the app (or picking the server paths, which supply
-   *  keys from a server). */
+  /** Mandatory mode: the launch found no catalog key or no debrid token.
+   * Skipping is hidden, while Quick setup remains an explicit acknowledged
+   * escape that records the user's choice not to configure credentials. */
   forced?: boolean;
 }) {
-  const { settings, updateSettings, navigate } = useAppStore();
+  const { settings, services, updateSettings, navigate } = useAppStore();
+  const directTorrentAvailable = useDirectTorrentAvailable();
   const [step, setStep] = useState<
     | "choose"
     | "connect"
+    | "quick"
     | "host"
     | "catalog"
     | "streaming"
@@ -154,6 +168,21 @@ export function FirstRunWizard({
     });
     await markOnboardingComplete();
     andThen?.();
+    onDone();
+  }
+
+  async function finishQuick() {
+    await updateSettings({
+      ...settings,
+      simpleMode: true,
+      builtInIndexersEnabled: true,
+    });
+    await ensureDefaultProfile({
+      name: settings.userName || "You",
+      avatar: settings.userAvatar || "😀",
+    });
+    await markQuickSetupAcknowledged();
+    await markOnboardingComplete();
     onDone();
   }
 
@@ -206,6 +235,7 @@ export function FirstRunWizard({
       setExitPersona("device");
       return setStep("catalog");
     }
+    if (id === "quick") return setStep("quick");
     if (id === "advanced") {
       // Forced: keys first, then the full settings they asked for - a keyless
       // finish would just re-trap them on the next launch.
@@ -231,6 +261,16 @@ export function FirstRunWizard({
 
   if (step === "connect") {
     return <ConnectStep onBack={() => setStep("choose")} />;
+  }
+  if (step === "quick") {
+    return (
+      <QuickSetupStep
+        liveMetadataAvailable={services.tmdb != null}
+        directTorrentAvailable={directTorrentAvailable}
+        onBack={() => setStep("choose")}
+        onContinue={() => void finishQuick()}
+      />
+    );
   }
   if (step === "host") {
     return (
@@ -316,7 +356,7 @@ export function FirstRunWizard({
               key={p.id}
               type="button"
               className={
-                "first-run-choice" + (p.badge != null ? " is-recommended" : "")
+                "first-run-choice" + (p.recommended ? " is-recommended" : "")
               }
               onClick={() => void choose(p.id)}
             >
@@ -344,6 +384,67 @@ export function FirstRunWizard({
             Skip for now
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+function QuickSetupStep({
+  liveMetadataAvailable,
+  directTorrentAvailable,
+  onBack,
+  onContinue,
+}: {
+  liveMetadataAvailable: boolean;
+  directTorrentAvailable: boolean;
+  onBack: () => void;
+  onContinue: () => void;
+}) {
+  const [acknowledged, setAcknowledged] = useState(false);
+  return (
+    <div className="first-run">
+      <div className="first-run-card">
+        <p className="first-run-eyebrow">Quick setup is not recommended</p>
+        <h1 className="first-run-title">Continue without adding credentials</h1>
+        <p className="first-run-sub">
+          This route makes no signup, key acquisition, or key-validation request. It turns on the existing built-in public sources and keeps the simple profile experience. You can add your own credentials later in Settings.
+        </p>
+        <div className="first-run-hint">
+          Public source services can see your device or server IP and the title identifiers being requested. They may be blocked, unavailable, incomplete, or wrong. A source result is not a safety check or a guarantee that playback will work.
+        </div>
+        <div className="first-run-hint">
+          {liveMetadataAvailable
+            ? "A catalog credential is already available, so live metadata, search, artwork, and episode details can work."
+            : "No build-supplied catalog credential is available. Only the bundled sample catalog is available, and live search, current artwork, and episode details are limited."}
+        </div>
+        <p className="first-run-hint">
+          OMDb is optional ratings enrichment. {directTorrentAvailable
+            ? "The connected server explicitly enables Direct P2P, which still requires confirmation for each play."
+            : "Direct P2P works only when a connected Server Mode server explicitly enables it. Otherwise playback still needs a debrid service."}
+        </p>
+        <label className="first-run-field first-run-quick-ack">
+          <span>
+            <input
+              type="checkbox"
+              checked={acknowledged}
+              onChange={(event) => setAcknowledged(event.target.checked)}
+            />{" "}
+            I understand the privacy, reliability, catalog, and playback limits and want to use Quick setup.
+          </span>
+        </label>
+        <div className="first-run-actions">
+          <button type="button" className="first-run-secondary" onClick={onBack}>
+            Back
+          </button>
+          <button
+            type="button"
+            className="first-run-primary"
+            disabled={!acknowledged}
+            onClick={onContinue}
+          >
+            Continue with Quick setup
+          </button>
+        </div>
       </div>
     </div>
   );

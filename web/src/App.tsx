@@ -78,7 +78,12 @@ import {
   startDownloadsRuntime,
   stopDownloadsRuntime,
 } from "./services/downloads";
-import { devBypassesOnboarding, isFirstRun, needsKeyOnboarding } from "./lib/firstRun";
+import {
+  devBypassesOnboarding,
+  hasQuickSetupAcknowledgement,
+  isFirstRun,
+  needsKeyOnboarding,
+} from "./lib/firstRun";
 import { secretReadsFailedThisSession } from "./storage/KeychainSecretStore";
 import { shouldShowServerSetup } from "./lib/serverSetup";
 import { fetchServerAdminHealth } from "./lib/serverApi";
@@ -193,16 +198,22 @@ export function FirstRunHost() {
       setKeyGate(false);
       return;
     }
-    setKeyGate(
-      needsKeyOnboarding({
+    let cancelled = false;
+    void hasQuickSetupAcknowledgement().then((quickSetupAcknowledged) => {
+      if (cancelled) return;
+      setKeyGate(needsKeyOnboarding({
         serverMode,
         // services.tmdb folds in an env-provided key; settings alone would
         // force dev builds that are actually configured.
         hasTmdb: services.tmdb != null,
         omdbKey: settings.omdbKey,
         hasDebrid: services.debrid?.hasServices === true,
-      }),
-    );
+        quickSetupAcknowledged,
+      }));
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [hydrated, keyGate, serverMode, settings.omdbKey, services]);
   // Server-Mode owner setup gate (null = undecided, false = skip/done/non-owner).
   const [serverSetup, setServerSetup] = useState<boolean | null>(null);

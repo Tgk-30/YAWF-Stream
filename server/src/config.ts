@@ -17,6 +17,16 @@ function numberEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function boundedNumber(value: number, fallback: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function boundedInteger(value: number, fallback: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.trunc(value)));
+}
+
 function sameSiteEnv(name: string, fallback: CookieSameSite): CookieSameSite {
   const value = process.env[name]?.trim().toLowerCase();
   if (value === "lax" || value === "strict" || value === "none") return value;
@@ -104,6 +114,60 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     allowRawStreamUrls:
       overrides.allowRawStreamUrls ??
       boolEnv("DS_SERVER_ALLOW_RAW_STREAM_URLS", process.env.NODE_ENV !== "production"),
+    enableDirectTorrent:
+      overrides.enableDirectTorrent ?? boolEnv("DS_SERVER_ENABLE_DIRECT_TORRENT", false),
+    directTorrentMaxActive:
+      boundedInteger(
+        overrides.directTorrentMaxActive ?? numberEnv("DS_SERVER_DIRECT_TORRENT_MAX_ACTIVE", 2),
+        2, 1, 4,
+      ),
+    directTorrentMaxSessions:
+      boundedInteger(
+        overrides.directTorrentMaxSessions ??
+          numberEnv("DS_SERVER_DIRECT_TORRENT_MAX_SESSIONS", 8),
+        8, 1, 64,
+      ),
+    directTorrentMaxSessionsPerProfile:
+      boundedInteger(
+        overrides.directTorrentMaxSessionsPerProfile ??
+          numberEnv("DS_SERVER_DIRECT_TORRENT_MAX_SESSIONS_PER_PROFILE", 2),
+        2, 1, 16,
+      ),
+    directTorrentMetadataTimeoutMs:
+      boundedNumber(
+        overrides.directTorrentMetadataTimeoutMs ??
+          numberEnv("DS_SERVER_DIRECT_TORRENT_METADATA_TIMEOUT_MS", 30_000),
+        30_000, 5_000, 120_000,
+      ),
+    directTorrentMaxPeers:
+      boundedInteger(
+        overrides.directTorrentMaxPeers ?? numberEnv("DS_SERVER_DIRECT_TORRENT_MAX_PEERS", 24),
+        24, 1, 50,
+      ),
+    directTorrentMaxTorrentBytes:
+      boundedNumber(
+        overrides.directTorrentMaxTorrentBytes ??
+          numberEnv("DS_SERVER_DIRECT_TORRENT_MAX_BYTES", 30 * 1024 * 1024 * 1024),
+        30 * 1024 * 1024 * 1024, 1024 * 1024, 100 * 1024 * 1024 * 1024,
+      ),
+    directTorrentDownloadLimitBps:
+      boundedNumber(
+        overrides.directTorrentDownloadLimitBps ??
+          numberEnv("DS_SERVER_DIRECT_TORRENT_DOWNLOAD_BPS", 25 * 1024 * 1024),
+        25 * 1024 * 1024, 64 * 1024, 100 * 1024 * 1024,
+      ),
+    directTorrentUploadLimitBps:
+      boundedNumber(
+        overrides.directTorrentUploadLimitBps ??
+          numberEnv("DS_SERVER_DIRECT_TORRENT_UPLOAD_BPS", 2 * 1024 * 1024),
+        2 * 1024 * 1024, 16 * 1024, 10 * 1024 * 1024,
+      ),
+    directTorrentIdleTimeoutMs:
+      boundedNumber(
+        overrides.directTorrentIdleTimeoutMs ??
+          numberEnv("DS_SERVER_DIRECT_TORRENT_IDLE_TIMEOUT_MS", 15 * 60_000),
+        15 * 60_000, 60_000, 60 * 60_000,
+      ),
     // Hard-default OFF in every environment (incl. dev) - transcoding is a
     // deliberate operator opt-in, not a dev convenience.
     enableTranscode:

@@ -50,6 +50,18 @@ export interface ServerConfig {
   /** Check GitHub releases for a newer server container version. */
   updateCheck: boolean;
   allowRawStreamUrls: boolean;
+  /** Explicit Direct P2P operator opt-in. False means WebTorrent is not loaded,
+   * no registry/timer is created, and no torrent socket or cache path starts. */
+  enableDirectTorrent: boolean;
+  directTorrentMaxActive: number;
+  directTorrentMaxSessions: number;
+  directTorrentMaxSessionsPerProfile: number;
+  directTorrentMetadataTimeoutMs: number;
+  directTorrentMaxPeers: number;
+  directTorrentMaxTorrentBytes: number;
+  directTorrentDownloadLimitBps: number;
+  directTorrentUploadLimitBps: number;
+  directTorrentIdleTimeoutMs: number;
   /** Operator opt-in for server-side HLS transcoding (Phase 3b). Default false.
    *  When false - or when ffmpeg is absent at boot - the transcode routes 404 and
    *  the /api/stream/:id proxy is byte-for-byte unchanged. */
@@ -127,4 +139,7 @@ export interface BuildAppOptions {
   /** Test injection seam: swap the real ffmpeg child_process surface for a fake
    *  so CI never needs a real ffmpeg binary. Defaults to realTranscoder. */
   transcoder?: import("./transcode.js").Transcoder;
+  /** Test injection seam. Used only when enableDirectTorrent is true, so a
+   * flag-off test cannot accidentally start a fake or real swarm runtime. */
+  directTorrentAdapter?: import("./directTorrent.js").DirectTorrentAdapter;
 }

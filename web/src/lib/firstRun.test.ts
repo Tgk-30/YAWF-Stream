@@ -2,7 +2,13 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DexieStore } from "../storage/DexieStore";
 import { __setStoreForTesting, getStore } from "../storage";
-import { isFirstRun, markOnboardingComplete, needsKeyOnboarding } from "./firstRun";
+import {
+  hasQuickSetupAcknowledgement,
+  isFirstRun,
+  markOnboardingComplete,
+  markQuickSetupAcknowledged,
+  needsKeyOnboarding,
+} from "./firstRun";
 
 const g = globalThis as Record<string, unknown>;
 let counter = 0;
@@ -37,6 +43,12 @@ describe("firstRun", () => {
     await getStore().setSetting("storage_port_initialized", "true");
     await expect(isFirstRun()).resolves.toBe(true);
   });
+
+  it("persists the deliberate Quick setup acknowledgement across reads", async () => {
+    await expect(hasQuickSetupAcknowledgement()).resolves.toBe(false);
+    await markQuickSetupAcknowledged();
+    await expect(hasQuickSetupAcknowledgement()).resolves.toBe(true);
+  });
 });
 
 describe("needsKeyOnboarding", () => {
@@ -70,5 +82,9 @@ describe("needsKeyOnboarding", () => {
 
   it("never forces in Server Mode (the server owns keys)", () => {
     expect(needsKeyOnboarding({ ...base, serverMode: true })).toBe(false);
+  });
+
+  it("does not force missing keys after the deliberate Quick setup route", () => {
+    expect(needsKeyOnboarding({ ...base, quickSetupAcknowledged: true })).toBe(false);
   });
 });

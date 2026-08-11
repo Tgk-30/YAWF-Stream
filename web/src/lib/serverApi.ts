@@ -407,6 +407,8 @@ export async function resolveServerStream(
     /** Episode context (series) - steers season-pack file selection on the
      *  server. Omitted for movies / older servers (unknown fields ignored). */
     fileHint?: { season: number; episode: number } | null;
+    backend?: "debrid" | "direct_torrent";
+    directTorrentAcknowledged?: boolean;
   } = {},
 ): Promise<StreamInfo> {
   const response = await serverRequest<{ stream: StreamInfo }>(
@@ -415,6 +417,12 @@ export async function resolveServerStream(
     {
       infoHash: row.result.infoHash,
       preferredService: row.cachedOn,
+      ...(opts.backend === "direct_torrent"
+        ? {
+            backend: "direct_torrent",
+            directTorrentAcknowledged: opts.directTorrentAcknowledged === true,
+          }
+        : {}),
       // The server needs the title context to enforce maturity gating on capped
       // (kid) profiles; it's ignored for normal profiles, so always send it.
       ...(opts.media != null
@@ -432,7 +440,7 @@ export async function resolveServerStream(
   // Reuse the session's HLS manifest when the user explicitly requested lower
   // data use. The hosted web compatibility path calls the same helper when the
   // original format cannot be decoded by browsers.
-  return opts.transcode
+  return opts.transcode && stream.backend !== "direct_torrent"
     ? asServerTranscodeStream(stream, opts.transcodeOptions)
     : stream;
 }

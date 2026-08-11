@@ -50,6 +50,17 @@ URL and install it to their home screen.
 Server-forwarded playback records per-profile bandwidth. Owners and admins can
 review recent usage in Settings -> Server.
 
+Direct P2P remains disabled unless `DS_SERVER_ENABLE_DIRECT_TORRENT=true` is
+set deliberately. It is not a debrid fallback. Swarm peers can see the server's
+public IP, playback depends on seeders, and transfers can upload data and use
+disk and bandwidth. Enabling it opens BitTorrent TCP and UDP sockets without
+changing router mappings, and networks may block or throttle the traffic. Users
+must confirm those risks for every Direct P2P play and must have the rights to
+the content. See `server/README.md` in the source tree for the bounded defaults
+and first-slice limitations. Pending metadata registrations and active sessions
+have global and per-profile caps. Accepted inbound TCP sockets have a global cap
+that includes both pending and established connections.
+
 Owners and admins can also create invite links in Settings -> Server. Invite
 links let a new user create their own password and isolated history without the
 admin manually sharing credentials.
