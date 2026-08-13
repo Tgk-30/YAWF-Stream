@@ -3236,7 +3236,11 @@ describe("DebridStreamer server", () => {
   async function createRawSession(
     client: TestClient,
     upstreamUrl = "http://127.0.0.1:9/video",
-  ): Promise<{ id: string; playbackUrl: string }> {
+  ): Promise<{
+    id: string;
+    playbackUrl: string;
+    playbackAuthorization: string;
+  }> {
     const created = await request(client, {
       method: "POST",
       url: "/api/streams/sessions/raw",
@@ -3244,7 +3248,13 @@ describe("DebridStreamer server", () => {
       payload: { upstreamUrl, contentType: "video/mp4" },
     });
     expect(created.statusCode).toBe(200);
-    return json<{ session: { id: string; playbackUrl: string } }>(created).session;
+    return json<{
+      session: {
+        id: string;
+        playbackUrl: string;
+        playbackAuthorization: string;
+      };
+    }>(created).session;
   }
 
   it("transcode OFF: routes 404, capability false, and the proxy is unchanged", async () => {
@@ -3345,24 +3355,69 @@ describe("DebridStreamer server", () => {
       expect(manifest.statusCode).toBe(200);
       expect(String(manifest.headers["content-type"])).toContain("application/vnd.apple.mpegurl");
       expect(manifest.body).toContain("#EXTM3U");
-      // The adaptive master exposes four auth-scoped renditions.
-      expect(manifest.body).toContain(`/api/stream/${session.id}/1080p.m3u8`);
-      expect(manifest.body).toContain(`/api/stream/${session.id}/720p.m3u8`);
-      expect(manifest.body).toContain(`/api/stream/${session.id}/480p.m3u8`);
-      expect(manifest.body).toContain(`/api/stream/${session.id}/360p.m3u8`);
+      // Relative renditions preserve a reverse proxy's mounted server prefix.
+      expect(manifest.body).toContain("1080p.m3u8");
+      expect(manifest.body).toContain("720p.m3u8");
+      expect(manifest.body).toContain("480p.m3u8");
+      expect(manifest.body).toContain("360p.m3u8");
+      expect(manifest.body).not.toContain(`/api/stream/${session.id}/1080p.m3u8`);
+      expect(
+        new URL(
+          "1080p.m3u8",
+          `https://server.example/yawf/api/stream/${session.id}/index.m3u8`,
+        ).pathname,
+      ).toBe(`/yawf/api/stream/${session.id}/1080p.m3u8`);
 
       const variant = await request(owner, {
         method: "GET",
         url: `/api/stream/${session.id}/1080p.m3u8`,
       });
       expect(variant.statusCode).toBe(200);
-      expect(variant.body).toContain(
-        `/api/stream/${session.id}/1080p_seg_00000.ts`,
-      );
+      expect(variant.body).toContain("1080p_seg_00000.ts");
 
       const seg = await request(owner, { method: "GET", url: `/api/stream/${session.id}/1080p_seg_00000.ts` });
       expect(seg.statusCode).toBe(200);
       expect(String(seg.headers["content-type"])).toContain("video/mp2t");
+    } finally {
+      await on.close();
+    }
+  });
+
+  it("transcode: accepts a stream-scoped bearer for manifests and segments only", async () => {
+    const on = await buildTranscodeApp({ enableTranscode: true });
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const native = { app: on, cookies: new Map<string, string>() };
+
+      const manifest = await request(native, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8`,
+        headers: { authorization: session.playbackAuthorization },
+      });
+      expect(manifest.statusCode).toBe(200);
+
+      const segment = await request(native, {
+        method: "GET",
+        url: `/api/stream/${session.id}/1080p_seg_00000.ts`,
+        headers: { authorization: session.playbackAuthorization },
+      });
+      expect(segment.statusCode).toBe(200);
+
+      const invalid = await request(native, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8`,
+        headers: { authorization: `Bearer ${"A".repeat(43)}` },
+      });
+      expect(invalid.statusCode).toBe(404);
+
+      const otherSession = await createRawSession(owner);
+      const crossSession = await request(native, {
+        method: "GET",
+        url: `/api/stream/${session.id}/1080p_seg_00000.ts`,
+        headers: { authorization: otherSession.playbackAuthorization },
+      });
+      expect(crossSession.statusCode).toBe(404);
     } finally {
       await on.close();
     }
@@ -3429,7 +3484,7 @@ describe("DebridStreamer server", () => {
         url: `/api/stream/${session.id}/index.m3u8?quality=auto`,
       });
       expect(adaptive.statusCode).toBe(200);
-      expect(adaptive.body).toContain(`/api/stream/${session.id}/360p.m3u8`);
+      expect(adaptive.body).toContain("360p.m3u8");
       expect((await request(owner, {
         method: "GET",
         url: `/api/stream/${session.id}/360p_seg_00000.ts`,

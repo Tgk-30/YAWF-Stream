@@ -63,6 +63,8 @@ const securityDecisionCheck = read("scripts/check_security_decisions.mjs");
 const windowsSigningConfig = read("scripts/generate_windows_signing_config.mjs");
 const linuxGtkMigration = read("docs/TAURI_LINUX_GTK_MIGRATION.md");
 const bundleBudgetCheck = read("scripts/check_bundle_budgets.mjs");
+const androidProjectPatch = read("scripts/patch_tauri_android.mjs");
+const androidProjectPatchTests = read("scripts/patch_tauri_android.test.mjs");
 const webPackage = JSON.parse(read("web/package.json"));
 const webPackageLock = JSON.parse(read("web/package-lock.json"));
 const serverPackage = JSON.parse(read("server/package.json"));
@@ -184,6 +186,33 @@ check(
     /apksigner verify --print-certs/.test(releaseWorkflow) &&
     /apksigner verify --print-certs/.test(cleanInstallWorkflow),
   "release and clean-install workflows must reject an Android APK signed by a different certificate",
+);
+check(
+  "Generated Android phone project enables release LAN playback and credentialed HLS",
+  /const cleartextPlaceholder = 'manifestPlaceholders\["usesCleartextTraffic"\]'/.test(
+    androidProjectPatch,
+  ) &&
+    /const defaultConfigTrue = `defaultConfig \{[\s\S]*?\$\{cleartextPlaceholder\} = "true"/.test(
+      androidProjectPatch,
+    ) &&
+    /setAcceptThirdPartyCookies\(webView, true\)/.test(androidProjectPatch) &&
+    /does not match the supported Tauri Android template/.test(androidProjectPatch) &&
+    /fails closed when the generated Tauri template drifts/.test(
+      androidProjectPatchTests,
+    ) &&
+    /node --test scripts\/patch_tauri_android\.test\.mjs/.test(ciWorkflow) &&
+    /patch_tauri_android\.mjs/.test(ciWorkflow) &&
+    /android init --ci[\s\S]{0,500}patch_tauri_android\.mjs[\s\S]{0,1400}cargo clean --target aarch64-linux-android -p tauri -p wry/.test(
+      ciWorkflow,
+    ) &&
+    /WRY_ANDROID_KOTLIN_FILES_OUT_DIR/.test(ciWorkflow) &&
+    /TauriActivity\.kt/.test(ciWorkflow) &&
+    /WryActivity\.kt/.test(ciWorkflow) &&
+    /:app:compileArmDebugKotlin -x :app:rustBuildArmDebug/.test(ciWorkflow) &&
+    /android init --ci[\s\S]{0,500}patch_tauri_android\.mjs[\s\S]{0,500}android build --apk/.test(
+      releaseWorkflow,
+    ),
+  "the generated Android project patch must be tested, fail closed on template drift, and run after init before Android checks, Kotlin compilation, and release builds",
 );
 check(
   "Release workflow builds macOS, Linux, and Windows",

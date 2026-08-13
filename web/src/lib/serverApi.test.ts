@@ -491,6 +491,16 @@ describe("resolveServerStream", () => {
     );
   });
 
+  it("preserves a mounted server path in the external-player capability URL", () => {
+    const token = "A".repeat(43);
+    expect(api.serverExternalPlaybackURL({
+      streamURL: "https://server.example/yawf/api/stream/session-1/index.m3u8",
+      playbackAuthorization: `Bearer ${token}`,
+    } as never)).toBe(
+      `https://server.example/yawf/api/external-stream/session-1/${token}`,
+    );
+  });
+
   it("refuses to expose an external URL without a scoped playback capability", () => {
     expect(api.serverExternalPlaybackURL({
       streamURL: "https://server.example/api/stream/session-1",

@@ -225,6 +225,34 @@ function playbackDecisionFor(
   return "Direct Play";
 }
 
+function androidTVContentType(
+  engine: PlaybackEngine,
+  url: string,
+  sourceFileName?: string | null,
+): string | null {
+  if (engine === "webview-hls-transcode") {
+    // This is Media3's HLS MIME type. application/vnd.apple.mpegurl is for
+    // browser capability probing and does not select Media3's HLS source.
+    return "application/x-mpegURL";
+  }
+  const pathname = (() => {
+    try {
+      return new URL(sourceFileName?.trim() || url).pathname;
+    } catch {
+      return sourceFileName?.trim() || url;
+    }
+  })().toLowerCase();
+  if (/\.(?:m3u8|m3u)(?:$|[?#])/.test(pathname)) {
+    return "application/x-mpegURL";
+  }
+  if (/\.(?:mp4|m4v|mov)(?:$|[?#])/.test(pathname)) return "video/mp4";
+  if (/\.mkv(?:$|[?#])/.test(pathname)) return "video/x-matroska";
+  if (/\.webm(?:$|[?#])/.test(pathname)) return "video/webm";
+  if (/\.avi(?:$|[?#])/.test(pathname)) return "video/x-msvideo";
+  if (/\.(?:ts|mts|m2ts)(?:$|[?#])/.test(pathname)) return "video/mp2t";
+  return null;
+}
+
 interface WebKitVideoElement extends HTMLVideoElement {
   webkitEnterFullscreen?: () => void;
   webkitSupportsFullscreen?: boolean;
@@ -1059,9 +1087,18 @@ export function VideoPlayer({
   useEffect(() => {
     if (!androidTVNative) return;
     setAndroidTVError(null);
-    const playbackURL = externalPlaybackUrl ?? effectiveUrl;
+    // An HLS fallback is the playable rendition. The external capability is
+    // only for direct sources, where it avoids handing the TV an app cookie.
+    const playbackURL = effectiveEngine === "webview-hls-transcode"
+      ? effectiveUrl
+      : externalPlaybackUrl?.trim() || effectiveUrl;
     const started = startAndroidTVPlayback({
       url: playbackURL,
+      contentType: androidTVContentType(
+        effectiveEngine,
+        effectiveUrl,
+        sourceFileName,
+      ),
       title,
       subtitle: subtitle ?? null,
       startPositionSeconds: Math.max(0, startPositionSeconds ?? 0),
@@ -1133,6 +1170,7 @@ export function VideoPlayer({
   }, [
     androidTVNative,
     effectiveUrl,
+    effectiveEngine,
     externalPlaybackUrl,
     playbackAuthorization,
     playerPreferences?.defaultAudioLanguage,
@@ -1140,6 +1178,7 @@ export function VideoPlayer({
     playerPreferences?.defaultSubtitleLanguage,
     startPositionSeconds,
     sourceRevision,
+    sourceFileName,
     subtitle,
     timelineOffsetSeconds,
     title,
