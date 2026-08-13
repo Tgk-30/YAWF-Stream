@@ -61,6 +61,11 @@ import { registerPlayerMount } from "../lib/attention";
 import { recordDiagnostic } from "../lib/diagnostics";
 import { mediaErrorMessage, nextHlsRecovery } from "../lib/playerReliability";
 import { findPreferredLanguageMatch } from "../lib/languagePreference";
+import {
+  PlaybackStallWatchdog,
+  type PlaybackStallState,
+  withFreshStreamResolutionTimeout,
+} from "../lib/playbackStall";
 import { useModalA11y } from "./useModalA11y";
 import {
   scrobblePlaybackPause,
@@ -96,7 +101,7 @@ export interface PlayerPreferenceDefaults {
   rememberPerTitleTrackChoices?: boolean;
 }
 
-interface PlaybackHandoffState {
+export interface PlaybackHandoffState {
   paused: boolean;
   volume: number;
   muted: boolean;
@@ -105,6 +110,8 @@ interface PlaybackHandoffState {
 
 interface VideoPlayerProps {
   url: string;
+  /** Changes when a fresh resolution returns the same URL string. */
+  sourceRevision?: number;
   /** Human-facing media metadata. Never pass the raw resolved file here when
    * metadata is available. */
   title: string;
@@ -174,6 +181,14 @@ interface VideoPlayerProps {
   /** Resolve and continue with the next compatible instant source after a
    * playback failure. */
   onTryNextSource?: () => Promise<void>;
+  /** Resolve the currently playing source again. This must mint a new provider
+   * URL and, in Server Mode, a new stream session rather than reload `url`. */
+  refreshCurrentSource?: (
+    absolutePositionSeconds: number,
+    handoffState: PlaybackHandoffState,
+  ) => Promise<void>;
+  /** Runtime controls captured before a fresh source replacement. */
+  initialHandoffState?: PlaybackHandoffState | null;
   /** Whether the card auto-plays after a countdown (false under Data Saver - 
    *  nothing plays without a click). */
   autoCountdown?: boolean;
@@ -436,6 +451,7 @@ const WebviewScrubber = memo(
 
 export function VideoPlayer({
   url,
+  sourceRevision = 0,
   title,
   subtitle,
   nowPlaying,
@@ -460,6 +476,8 @@ export function VideoPlayer({
   upNext = null,
   onPlayNext,
   onTryNextSource,
+  refreshCurrentSource,
+  initialHandoffState = null,
   autoCountdown = true,
   playerPreferences = null,
   preferredPlayer,
@@ -504,11 +522,10 @@ export function VideoPlayer({
       ? sourceSwitchPosition.position
       : null;
   const activeSourceSwitchState =
-    sourceSwitchState != null &&
     sourceSwitchPosition?.originUrl === url &&
     sourceSwitchPosition.originEngine === requestedEngine
       ? sourceSwitchState
-      : null;
+      : initialHandoffState;
   const effectiveUrl = activeFallback?.url ?? activeOptimized?.url ?? url;
   const effectiveEngine: PlaybackEngine = activeFallback
     ? "webview-hls-transcode"
@@ -567,6 +584,7 @@ export function VideoPlayer({
   const [castSuspended, setCastSuspended] = useState(false);
   const [webMenuOpen, setWebMenuOpen] = useState(false);
   const [webRecoveryPending, setWebRecoveryPending] = useState(false);
+  const [manualRecoveryPending, setManualRecoveryPending] = useState(false);
   const [externalActionStatus, setExternalActionStatus] = useState<string | null>(null);
   const [playbackAttempt, setPlaybackAttempt] = useState(0);
   const [activeSubtitleUrl, setActiveSubtitleUrl] = useState<string | null>(null);
@@ -594,6 +612,73 @@ export function VideoPlayer({
     if (Number.isFinite(next)) latestAbsolutePositionRef.current = Math.max(0, next);
   }, []);
 
+  const automaticStallRecoveryAttemptedRef = useRef(false);
+  const stallRecoveryPendingRef = useRef(false);
+  const lastStallContextRef = useRef<{
+    position: number;
+    handoff: PlaybackHandoffState;
+  } | null>(null);
+
+  const recoverPostStartStall = useCallback(async (
+    absolutePositionSeconds: number,
+    handoff: PlaybackHandoffState,
+  ): Promise<boolean> => {
+    const position = Number.isFinite(absolutePositionSeconds)
+      ? Math.max(0, absolutePositionSeconds)
+      : latestAbsolutePositionRef.current;
+    latestAbsolutePositionRef.current = position;
+    lastStallContextRef.current = { position, handoff };
+    if (
+      refreshCurrentSource == null ||
+      automaticStallRecoveryAttemptedRef.current ||
+      stallRecoveryPendingRef.current
+    ) {
+      setExternalError(
+        "Playback stopped making progress. Retry to request a fresh stream, or choose another source.",
+      );
+      return false;
+    }
+    automaticStallRecoveryAttemptedRef.current = true;
+    stallRecoveryPendingRef.current = true;
+    setWebRecoveryPending(true);
+    recordDiagnostic("player", "stall.refresh_started", "warning");
+    try {
+      await withFreshStreamResolutionTimeout(refreshCurrentSource(position, handoff));
+      recordDiagnostic("player", "stall.refresh_ready");
+      return true;
+    } catch {
+      setExternalError(
+        "A fresh stream could not be prepared. Retry, or choose another source.",
+      );
+      recordDiagnostic("player", "stall.refresh_failed", "error");
+      return false;
+    } finally {
+      stallRecoveryPendingRef.current = false;
+      setWebRecoveryPending(false);
+    }
+  }, [refreshCurrentSource]);
+
+  const retryFreshStream = useCallback(async (): Promise<void> => {
+    const context = lastStallContextRef.current;
+    if (refreshCurrentSource == null || context == null || manualRecoveryPending) return;
+    setManualRecoveryPending(true);
+    recordDiagnostic("player", "stall.manual_retry_started");
+    try {
+      await withFreshStreamResolutionTimeout(
+        refreshCurrentSource(context.position, context.handoff),
+      );
+      setExternalError(null);
+      recordDiagnostic("player", "stall.manual_retry_ready");
+    } catch {
+      setExternalError(
+        "A fresh stream could not be prepared. Retry, or choose another source.",
+      );
+      recordDiagnostic("player", "stall.manual_retry_failed", "error");
+    } finally {
+      setManualRecoveryPending(false);
+    }
+  }, [manualRecoveryPending, refreshCurrentSource]);
+
   // State is scoped below for render-time safety. Reset it too, so a completed
   // previous source cannot leave stale errors or an automatic-mode latch on the
   // next episode.
@@ -605,7 +690,7 @@ export function VideoPlayer({
     setSourceSwitchState(null);
     setServerOptimizationError(null);
     setServerOptimizationPending(false);
-  }, [requestedEngine, url]);
+  }, [requestedEngine, sourceRevision, url]);
 
   const clearChromeTimer = useCallback(() => {
     window.clearTimeout(chromeHideTimer.current);
@@ -959,6 +1044,7 @@ export function VideoPlayer({
     preferredPlayer,
     playbackAuthorization,
     useEmbedded,
+    sourceRevision,
   ]);
 
   useEffect(() => {
@@ -1053,6 +1139,7 @@ export function VideoPlayer({
     playerPreferences?.defaultSubtitleBehavior,
     playerPreferences?.defaultSubtitleLanguage,
     startPositionSeconds,
+    sourceRevision,
     subtitle,
     timelineOffsetSeconds,
     title,
@@ -1106,6 +1193,7 @@ export function VideoPlayer({
         : null;
     return (
       <EmbeddedPlayer
+        key={`${effectiveUrl}:${sourceRevision}`}
         savedPrefs={savedPrefs}
         playerPreferences={playerPreferences}
         subtitleClient={subtitleClient}
@@ -1121,6 +1209,8 @@ export function VideoPlayer({
         playbackAuthorization={playbackAuthorization}
         engine={effectiveEngine}
         onPlaybackError={recoverNativeInWebview}
+        onPlaybackStall={recoverPostStartStall}
+        onRetryFreshStream={refreshCurrentSource == null ? undefined : retryFreshStream}
         startPositionSeconds={effectiveStartPositionSeconds}
         sourceSwitchState={activeSourceSwitchState}
         timelineOffsetSeconds={effectiveTimelineOffsetSeconds}
@@ -1240,7 +1330,7 @@ export function VideoPlayer({
 
         {mode === "webview" && externalError == null ? (
           <WebviewPlayer
-            key={`${effectiveUrl}:${playbackAttempt}`}
+            key={`${effectiveUrl}:${sourceRevision}:${playbackAttempt}`}
             url={effectiveUrl}
             title={title}
             subtitle={subtitle}
@@ -1276,6 +1366,7 @@ export function VideoPlayer({
             onSwitchDeviceOriginal={switchToDeviceOriginal}
             onAbsolutePositionChange={reportAbsolutePosition}
             onPlaybackError={(message) => void handleWebviewPlaybackError(message)}
+            onPlaybackStall={recoverPostStartStall}
             onOpenExternalPlayer={() => void openExternalPlayback()}
             externalActionStatus={externalActionStatus}
             subtitleClient={subtitleClient ?? null}
@@ -1300,19 +1391,22 @@ export function VideoPlayer({
             onTryNextSource={onTryNextSource}
             onRetry={
               mode === "webview" && externalError != null
-                ? () => {
-                    recordDiagnostic("player", "webview.retry_requested");
-                    setExternalError(null);
-                    setPlaybackAttempt((attempt) => attempt + 1);
-                  }
+                ? lastStallContextRef.current != null && refreshCurrentSource != null
+                  ? retryFreshStream
+                  : () => {
+                      recordDiagnostic("player", "webview.retry_requested");
+                      setExternalError(null);
+                      setPlaybackAttempt((attempt) => attempt + 1);
+                    }
                 : undefined
             }
+            retryPending={manualRecoveryPending}
           />
         )}
         {webRecoveryPending && (
           <div className="player-compatibility-status" role="status">
             <Icon name="refresh" size={22} />
-            <span>Preparing a browser-compatible stream…</span>
+            <span>Preparing a fresh stream…</span>
           </div>
         )}
       </div>
@@ -1353,6 +1447,7 @@ function WebviewPlayer({
   timelineOffsetSeconds,
   sourceSwitchState,
   onPlaybackError,
+  onPlaybackStall,
   onOpenExternalPlayer,
   externalActionStatus,
   subtitleClient,
@@ -1411,6 +1506,10 @@ function WebviewPlayer({
   timelineOffsetSeconds: number;
   sourceSwitchState: PlaybackHandoffState | null;
   onPlaybackError: (message: string) => void;
+  onPlaybackStall: (
+    absolutePositionSeconds: number,
+    handoffState: PlaybackHandoffState,
+  ) => Promise<boolean>;
   onOpenExternalPlayer: () => void;
   externalActionStatus: string | null;
   subtitleClient: SubtitleClient | null;
@@ -1448,6 +1547,15 @@ function WebviewPlayer({
   const pausedForCastRef = useRef(false);
   const suspendedRef = useRef(suspended);
   suspendedRef.current = suspended;
+  const stallWatchdogRef = useRef<PlaybackStallWatchdog | null>(null);
+  const stallStateRef = useRef<PlaybackStallState>({
+    started: false,
+    paused: true,
+    seeking: false,
+    suspended,
+    ended: false,
+    tearingDown: false,
+  });
   const scrubberRef = useRef<WebviewScrubberHandle | null>(null);
   const lastClockSecondRef = useRef(-1);
   const clockRef = useRef<HTMLSpanElement | null>(null);
@@ -1487,6 +1595,8 @@ function WebviewPlayer({
       : 1;
   });
   const [scrubbing, setScrubbing] = useState(false);
+  const rendererSeekingRef = useRef(false);
+  const scrubbingRef = useRef(false);
   // Set when the video reaches its natural end - drives the Up-next card.
   const [ended, setEnded] = useState(false);
   const endPrediction = useMemo(() => predictEpisodeEnd({
@@ -1499,6 +1609,15 @@ function WebviewPlayer({
   useEffect(() => {
     if (endPrediction.show) upNextWarningShownRef.current = true;
   }, [endPrediction.show]);
+  useEffect(() => {
+    scrubbingRef.current = scrubbing;
+    stallStateRef.current = {
+      ...stallStateRef.current,
+      suspended,
+      seeking: scrubbing || rendererSeekingRef.current,
+    };
+    stallWatchdogRef.current?.update(stallStateRef.current);
+  }, [scrubbing, suspended]);
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
       if (event.key === "Escape" && (ended || endPrediction.show)) {
@@ -1929,6 +2048,8 @@ function WebviewPlayer({
   // playback from 0 every few seconds.
   const onPlaybackErrorRef = useRef(onPlaybackError);
   onPlaybackErrorRef.current = onPlaybackError;
+  const onPlaybackStallRef = useRef(onPlaybackStall);
+  onPlaybackStallRef.current = onPlaybackStall;
   // Resume position is captured in a ref + a one-shot guard so we seek exactly
   // once, when metadata first loads, without re-subscribing the effect.
   const startPositionRef = useRef(startPositionSeconds);
@@ -1944,6 +2065,111 @@ function WebviewPlayer({
     ? Math.max(0, timelineOffsetSeconds)
     : 0;
   const didSeekRef = useRef(false);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video == null) return;
+    let lastPosition = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+    let lastBufferedFrontier = Number.NaN;
+    const watchdog = new PlaybackStallWatchdog(() => {
+      const position = Math.max(0, video.currentTime + timelineOffsetRef.current);
+      const handoff: PlaybackHandoffState = {
+        paused: false,
+        volume: video.volume,
+        muted: video.muted,
+        playbackRate:
+          Number.isFinite(video.playbackRate) && video.playbackRate > 0
+            ? video.playbackRate
+            : 1,
+      };
+      void onPlaybackStallRef.current(position, handoff);
+    });
+    stallWatchdogRef.current = watchdog;
+    stallStateRef.current = {
+      started: false,
+      paused: true,
+      seeking: false,
+      suspended: suspendedRef.current,
+      ended: false,
+      tearingDown: false,
+    };
+
+    const sync = (patch: Partial<PlaybackStallState> = {}) => {
+      stallStateRef.current = { ...stallStateRef.current, ...patch };
+      watchdog.update(stallStateRef.current);
+    };
+    const bufferedFrontier = () => {
+      const position = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      for (let index = 0; index < video.buffered.length; index += 1) {
+        const start = video.buffered.start(index);
+        const end = video.buffered.end(index);
+        if (start <= position + 0.25 && end >= position - 0.25) return end;
+      }
+      return Number.NaN;
+    };
+    const onPlaying = () => sync({ started: true, paused: false });
+    const onPause = () => sync({ paused: true });
+    const onEndedForWatchdog = () => sync({ ended: true, paused: true });
+    const onSeeking = () => {
+      rendererSeekingRef.current = true;
+      sync({ seeking: true });
+    };
+    const onSeeked = () => {
+      lastPosition = Number.isFinite(video.currentTime) ? video.currentTime : lastPosition;
+      const frontier = bufferedFrontier();
+      lastBufferedFrontier = Number.isFinite(frontier) ? frontier : lastPosition;
+      rendererSeekingRef.current = false;
+      sync({ seeking: scrubbingRef.current });
+    };
+    const onBufferProgress = () => {
+      const next = bufferedFrontier();
+      if (!Number.isFinite(next)) {
+        lastBufferedFrontier = Number.NaN;
+        return;
+      }
+      if (!Number.isFinite(lastBufferedFrontier)) {
+        lastBufferedFrontier = next;
+        if (next > video.currentTime + 0.05) watchdog.noteProgress();
+        return;
+      }
+      if (next < lastBufferedFrontier - 0.05) {
+        lastBufferedFrontier = next;
+        return;
+      }
+      if (next > lastBufferedFrontier + 0.05) {
+        lastBufferedFrontier = next;
+        watchdog.noteProgress();
+      }
+    };
+    const onClockProgress = () => {
+      const next = video.currentTime;
+      if (Number.isFinite(next) && Math.abs(next - lastPosition) >= 0.05) {
+        lastPosition = next;
+        sync({ started: true });
+        watchdog.noteProgress();
+      }
+    };
+
+    video.addEventListener("playing", onPlaying);
+    video.addEventListener("pause", onPause);
+    video.addEventListener("ended", onEndedForWatchdog);
+    video.addEventListener("seeking", onSeeking);
+    video.addEventListener("seeked", onSeeked);
+    video.addEventListener("timeupdate", onClockProgress);
+    video.addEventListener("progress", onBufferProgress);
+    return () => {
+      sync({ tearingDown: true });
+      watchdog.stop();
+      if (stallWatchdogRef.current === watchdog) stallWatchdogRef.current = null;
+      video.removeEventListener("playing", onPlaying);
+      video.removeEventListener("pause", onPause);
+      video.removeEventListener("ended", onEndedForWatchdog);
+      video.removeEventListener("seeking", onSeeking);
+      video.removeEventListener("seeked", onSeeked);
+      video.removeEventListener("timeupdate", onClockProgress);
+      video.removeEventListener("progress", onBufferProgress);
+    };
+  }, [url]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (video == null) return;
@@ -2002,13 +2228,14 @@ function WebviewPlayer({
     const applyResume = () => {
       if (didSeekRef.current) return;
       const start = startPositionRef.current ?? 0;
-      if (start <= 5) {
+      const recoveryHandoff = sourceSwitchStateRef.current != null;
+      if (!recoveryHandoff && start <= 5) {
         didSeekRef.current = true; // nothing meaningful to resume to
         return;
       }
       const d = Number.isFinite(video.duration) ? video.duration : 0;
       if (d <= 0) return; // duration unknown yet (HLS) - retry on durationchange
-      if (start >= d - 10) {
+      if (!recoveryHandoff && start >= d - 10) {
         didSeekRef.current = true; // basically finished - don't resume
         return;
       }
@@ -3242,6 +3469,7 @@ function ExternalPanel({
   onOpenExternal,
   onTryNextSource,
   onRetry,
+  retryPending = false,
 }: {
   underTauri: boolean;
   url: string;
@@ -3250,7 +3478,8 @@ function ExternalPanel({
   externalStatus: string | null;
   onOpenExternal: () => void;
   onTryNextSource?: () => Promise<void>;
-  onRetry?: () => void;
+  onRetry?: () => void | Promise<void>;
+  retryPending?: boolean;
 }) {
   const [tryNextState, setTryNextState] = useState<
     { kind: "idle" } | { kind: "loading" } | { kind: "error"; message: string }
@@ -3287,8 +3516,13 @@ function ExternalPanel({
                 : "Try next source"}
             </button>
           )}
-          <button type="button" className="btn btn-prominent" onClick={onRetry}>
-            Retry playback
+          <button
+            type="button"
+            className="btn btn-prominent"
+            disabled={retryPending}
+            onClick={() => void onRetry()}
+          >
+            {retryPending ? "Preparing fresh stream" : "Retry playback"}
           </button>
           <button type="button" className="btn" onClick={onOpenExternal}>
             Open in external player

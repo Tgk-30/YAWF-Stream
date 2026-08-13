@@ -47,6 +47,7 @@ vi.mock("./Icon", () => ({
 }));
 
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
+import { POST_START_STALL_TIMEOUT_MS } from "../lib/playbackStall";
 
 const initialViewport = {
   width: window.innerWidth,
@@ -1089,6 +1090,27 @@ describe("EmbeddedPlayer decode-failure fallback", () => {
     );
   });
 
+  it.each([3, 3595])("forces exact native recovery resume at %s seconds", async (start) => {
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/recovered.mkv"
+        title="Recovered"
+        startPositionSeconds={start}
+        sourceSwitchState={{ paused: false, volume: 1, muted: false, playbackRate: 1 }}
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", [
+        "https://example.test/recovered.mkv",
+        "replace",
+        "-1",
+        `start=+${start}`,
+      ]),
+    );
+  });
+
   it("passes the stream-scoped bearer separately from the playback URL", async () => {
     const authorization = `Bearer ${"A".repeat(43)}`;
     render(
@@ -1303,6 +1325,139 @@ describe("EmbeddedPlayer decode-failure fallback", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("EmbeddedPlayer post-start stall recovery", () => {
+  it("requests a fresh resolution when cache playback stops after the first frame", async () => {
+    vi.useFakeTimers();
+    const onPlaybackStall = vi.fn(async () => true);
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        timelineOffsetSeconds={10}
+        onPlaybackStall={onPlaybackStall}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    emitProperty("time-pos", 42);
+    emitProperty("paused-for-cache", true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS);
+    });
+    expect(onPlaybackStall).toHaveBeenCalledWith(
+      52,
+      expect.objectContaining({ paused: false, playbackRate: 1 }),
+    );
+  });
+
+  it("resets the post-start window on cache progress", async () => {
+    vi.useFakeTimers();
+    const onPlaybackStall = vi.fn(async () => true);
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onPlaybackStall={onPlaybackStall}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    emitProperty("time-pos", 5);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1_000);
+    });
+    emitProperty("demuxer-cache-time", 90);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(onPlaybackStall).not.toHaveBeenCalled();
+  });
+
+  it("does not let repeated cache-frontier noise mask a stall", async () => {
+    vi.useFakeTimers();
+    const onPlaybackStall = vi.fn(async () => true);
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onPlaybackStall={onPlaybackStall}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    emitProperty("time-pos", 5);
+    emitProperty("demuxer-cache-time", 90);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1_000);
+    });
+    emitProperty("demuxer-cache-time", 90);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(onPlaybackStall).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not recover while the viewer has paused", async () => {
+    vi.useFakeTimers();
+    const onPlaybackStall = vi.fn(async () => true);
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onPlaybackStall={onPlaybackStall}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    emitProperty("time-pos", 5);
+    emitProperty("pause", true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS * 2);
+    });
+    expect(onPlaybackStall).not.toHaveBeenCalled();
+  });
+
+  it("does not recover while mpv is seeking", async () => {
+    vi.useFakeTimers();
+    const onPlaybackStall = vi.fn(async () => true);
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onPlaybackStall={onPlaybackStall}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    emitProperty("time-pos", 5);
+    emitProperty("seeking", true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS * 2);
+    });
+    expect(onPlaybackStall).not.toHaveBeenCalled();
+  });
+
+  it("keeps the watchdog disabled when scrubbing ends before mpv seeking", async () => {
+    vi.useFakeTimers();
+    const onPlaybackStall = vi.fn(async () => true);
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onPlaybackStall={onPlaybackStall}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    emitProperty("duration", 100);
+    emitProperty("time-pos", 5);
+    emitProperty("seeking", true);
+    const scrubber = screen.getByRole("slider", { name: "Seek" });
+    fireEvent.pointerDown(scrubber, { pointerId: 1, clientX: 10 });
+    fireEvent.pointerUp(scrubber, { pointerId: 1 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS * 2);
+    });
+    expect(onPlaybackStall).not.toHaveBeenCalled();
   });
 });
 
