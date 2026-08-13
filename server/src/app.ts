@@ -92,16 +92,16 @@ import {
 
 function rewriteTranscodeManifest(
   manifest: string,
-  sessionId: string,
   generation?: string,
 ): string {
-  const base = `/api/stream/${encodeURIComponent(sessionId)}/`;
   const suffix = generation == null
     ? ""
     : `?generation=${encodeURIComponent(generation)}`;
   return manifest.replace(
     /^(?!#)((?:1080p|720p|480p|360p)\.m3u8|(?:1080p|720p|480p|360p)_seg_\d{5}\.ts|seg_\d{5}\.ts|subtitles\.vtt)$/gm,
-    (_line, asset: string) => `${base}${asset}${suffix}`,
+    // Keep assets relative to the manifest. A reverse proxy can mount the
+    // server below a path prefix, while a root-relative URI would drop it.
+    (_line, asset: string) => `${asset}${suffix}`,
   );
 }
 
@@ -5960,25 +5960,49 @@ function registerRoutes(
   /** Load + ownership-validate a stream session (same scoping as the proxy). */
   const loadTranscodeSession = (
     request: FastifyRequest,
-  ): { id: string; profile_id: string; encrypted_upstream_url: string; source_kind: string } | null => {
-    const auth = requireAuth(db, request);
-    const id = (request.params as { id: string }).id;
-    return (
-      (db.sqlite
-        .prepare(
-          `SELECT id, profile_id, encrypted_upstream_url, source_kind
-           FROM stream_sessions
-           WHERE id = ? AND profile_id = ? AND revoked_at IS NULL AND expires_at > ?
-           LIMIT 1`,
-        )
-        .get(id, auth.profileId, nowISO()) as
-        | { id: string; profile_id: string; encrypted_upstream_url: string; source_kind: string }
-        | undefined) ?? null
+  ): {
+    id: string;
+    profile_id: string;
+    encrypted_upstream_url: string;
+    expires_at: string;
+    source_kind: string;
+  } | null => {
+    const auth = readAuth(db, request);
+    const bearer = readBearerToken(request);
+    if (auth == null && bearer == null) {
+      throw httpError(401, "Authentication required.");
+    }
+    const id = sessionIdParamSchema.parse((request.params as { id: string }).id);
+    const row = db.sqlite
+      .prepare(
+        `SELECT id, profile_id, encrypted_upstream_url, expires_at, source_kind
+         FROM stream_sessions
+         WHERE id = ?
+           AND revoked_at IS NULL
+           AND expires_at > ?
+         LIMIT 1`,
+      )
+      .get(id, nowISO()) as
+      | {
+          id: string;
+          profile_id: string;
+          encrypted_upstream_url: string;
+          expires_at: string;
+          source_kind: string;
+        }
+      | undefined;
+    if (row == null) return null;
+    const cookieAuthorized = auth?.profileId === row.profile_id;
+    const bearerAuthorized = streamPlaybackTokenMatches(
+      config,
+      { id: row.id, profileId: row.profile_id, expiresAt: row.expires_at },
+      bearer,
     );
+    return cookieAuthorized || bearerAuthorized ? row : null;
   };
 
-  // HLS manifest: starts/reuses an ffmpeg job and returns the playlist with each
-  // segment URI rewritten to an absolute, auth'd API path.
+  // HLS manifest: starts/reuses an ffmpeg job and returns the playlist with
+  // session-scoped asset URIs relative to the manifest URL.
   app.get("/api/stream/:id/index.m3u8", async (request, reply) => {
     if (!transcode.ready) throw httpError(404, "Transcoding is not available.");
     const row = loadTranscodeSession(request);
@@ -6048,7 +6072,7 @@ function registerRoutes(
       manifest.includes("#EXT-X-STREAM-INF")
     ) {
       const generation = transcode.registry.generationFor(row.id, dir);
-      const subtitleUri = `/api/stream/${encodeURIComponent(row.id)}/subtitles.vtt${
+      const subtitleUri = `subtitles.vtt${
         generation == null ? "" : `?generation=${encodeURIComponent(generation)}`
       }`;
       manifest = manifest.replace(
@@ -6063,7 +6087,6 @@ function registerRoutes(
     }
     const rewritten = rewriteTranscodeManifest(
       manifest,
-      row.id,
       transcode.registry.generationFor(row.id, dir) ?? undefined,
     );
     reply.header("content-type", "application/vnd.apple.mpegurl");
@@ -6098,7 +6121,7 @@ function registerRoutes(
     if (asset.endsWith(".m3u8")) {
       const manifest = await readFile(path, "utf8");
       reply.header("content-type", "application/vnd.apple.mpegurl");
-      return reply.send(rewriteTranscodeManifest(manifest, row.id, generation));
+      return reply.send(rewriteTranscodeManifest(manifest, generation));
     }
     if (asset.endsWith(".vtt")) {
       reply.header("content-type", "text/vtt; charset=utf-8");

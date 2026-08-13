@@ -277,7 +277,7 @@ describe("VideoPlayer shell", () => {
     expect(openInExternalPlayerMock).not.toHaveBeenCalled();
   });
 
-  it("uses the native Android TV bridge and reports native progress", async () => {
+  it("hands native Android TV an HLS fallback URL and explicit MIME type", async () => {
     const play = vi.fn();
     const stop = vi.fn();
     const onProgress = vi.fn();
@@ -287,7 +287,8 @@ describe("VideoPlayer shell", () => {
       <VideoPlayer
         url="https://server.example/api/stream/session/index.m3u8"
         externalPlaybackUrl="https://server.example/api/external-stream/capability"
-        playbackAuthorization="Bearer short-lived"
+        playbackAuthorization={`Bearer ${"A".repeat(43)}`}
+        engine="webview-hls-transcode"
         title="TV film"
         subtitle="Director's cut"
         startPositionSeconds={42}
@@ -298,11 +299,12 @@ describe("VideoPlayer shell", () => {
 
     await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
     expect(JSON.parse(play.mock.calls[0]![0])).toEqual({
-      url: "https://server.example/api/external-stream/capability",
+      url: "https://server.example/api/stream/session/index.m3u8",
+      contentType: "application/x-mpegURL",
       title: "TV film",
       subtitle: "Director's cut",
       startPositionSeconds: 42,
-      authorization: "Bearer short-lived",
+      authorization: `Bearer ${"A".repeat(43)}`,
       audioLanguage: null,
       subtitleLanguage: null,
       subtitlesEnabled: false,
@@ -328,6 +330,30 @@ describe("VideoPlayer shell", () => {
     });
     expect(onProgress).toHaveBeenLastCalledWith(55, 100);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the external capability for a direct Android TV source", async () => {
+    const play = vi.fn();
+    const stop = vi.fn();
+    window.YawfAndroidTV = { play, stop };
+
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session"
+        externalPlaybackUrl="https://server.example/api/external-stream/capability"
+        playbackAuthorization={`Bearer ${"A".repeat(43)}`}
+        sourceFileName="Film.mkv"
+        engine="webview-direct"
+        title="TV film"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(play.mock.calls[0]![0])).toMatchObject({
+      url: "https://server.example/api/external-stream/capability",
+      contentType: "video/x-matroska",
+    });
   });
 
   it("renders the title and a close button", () => {

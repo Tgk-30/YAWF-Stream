@@ -552,7 +552,8 @@ export function serverExternalPlaybackURL(stream: StreamInfo): string | null {
   } catch {
     return null;
   }
-  return `${streamUrl.origin}/api/external-stream/${encodeURIComponent(sessionId)}/${encodeURIComponent(match[1])}`;
+  const mountPrefix = streamUrl.pathname.slice(0, pathMatch.index);
+  return `${streamUrl.origin}${mountPrefix}/api/external-stream/${encodeURIComponent(sessionId)}/${encodeURIComponent(match[1])}`;
 }
 
 export async function searchServerMedia(input: {

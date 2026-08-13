@@ -397,6 +397,11 @@ public final class MainActivity extends ComponentActivity {
             if (!ServerAddress.sameOrigin(serverBase, url)) {
                 throw new JSONException("Playback URL is outside the configured server.");
             }
+            String contentType = nullableContentType(
+                request.isNull("contentType")
+                    ? null
+                    : request.optString("contentType", null)
+            );
             String title = boundedString(request.optString("title", ""), 240);
             String authorization = nullableHeader(
                 request.isNull("authorization")
@@ -496,7 +501,12 @@ public final class MainActivity extends ComponentActivity {
             playerView.bringToFront();
             playerView.requestFocus();
 
-            player.setMediaItem(MediaItem.fromUri(Uri.parse(url)));
+            MediaItem.Builder mediaItem = new MediaItem.Builder()
+                .setUri(Uri.parse(url));
+            if (contentType != null) {
+                mediaItem.setMimeType(contentType);
+            }
+            player.setMediaItem(mediaItem.build());
             if (startSeconds > 0 && Double.isFinite(startSeconds)) {
                 player.seekTo(Math.round(startSeconds * 1_000));
             }
@@ -534,6 +544,18 @@ public final class MainActivity extends ComponentActivity {
             throw new JSONException("Invalid playback authorization.");
         }
         return value;
+    }
+
+    private static String nullableContentType(String value) throws JSONException {
+        if (value == null || value.isEmpty()) return null;
+        String trimmed = value.trim();
+        if (
+            trimmed.length() > 120 ||
+            !trimmed.matches("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
+        ) {
+            throw new JSONException("Invalid playback content type.");
+        }
+        return trimmed;
     }
 
     private JSONObject playbackProgress() {

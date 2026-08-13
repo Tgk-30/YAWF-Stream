@@ -18,10 +18,11 @@ describe("Android TV bridge", () => {
     window.YawfAndroidTV = { play, stop };
     const request = {
       url: "https://server.example/api/stream/session/index.m3u8",
+      contentType: "application/x-mpegURL",
       title: "Film",
       subtitle: null,
       startPositionSeconds: 42,
-      authorization: "Bearer short-lived",
+      authorization: `Bearer ${"A".repeat(43)}`,
       audioLanguage: "en",
       subtitleLanguage: "ar",
       subtitlesEnabled: true,
@@ -37,6 +38,7 @@ describe("Android TV bridge", () => {
   it("degrades safely when the bridge is absent or rejects the request", () => {
     expect(startAndroidTVPlayback({
       url: "https://server.example/video",
+      contentType: null,
       title: "Film",
       subtitle: null,
       startPositionSeconds: 0,
@@ -53,6 +55,7 @@ describe("Android TV bridge", () => {
     };
     expect(startAndroidTVPlayback({
       url: "https://server.example/video",
+      contentType: null,
       title: "Film",
       subtitle: null,
       startPositionSeconds: 0,

@@ -1,5 +1,7 @@
 export interface AndroidTVPlaybackRequest {
   url: string;
+  /** Explicit media type so Media3 does not infer HLS from a capability URL. */
+  contentType: string | null;
   title: string;
   subtitle: string | null;
   startPositionSeconds: number;

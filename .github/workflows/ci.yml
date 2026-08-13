@@ -178,6 +178,9 @@ jobs:
       - name: Bundle budget verifier tests
         run: node --test scripts/check_bundle_budgets.test.mjs
 
+      - name: Generated Android project patch tests
+        run: node --test scripts/patch_tauri_android.test.mjs
+
       - name: Release readiness
         run: node scripts/check_release_readiness.mjs
 
@@ -293,13 +296,36 @@ jobs:
         working-directory: web
         run: npm run tauri -- android init --ci
 
+      - name: Patch generated Android playback support
+        run: node scripts/patch_tauri_android.mjs
+
       # The real gate. Desktop-only modules (player, keychain, server_host,
       # downloads) are cfg(desktop); this proves what remains actually compiles
       # for a phone. Checking one ABI is enough to catch cfg mistakes and is far
-      # cheaper than linking all four.
-      - name: Compile the Rust library for Android
+      # cheaper than linking all four. Tauri and Wry generate the Kotlin bridge
+      # during this cargo invocation, so force their build scripts after init.
+      - name: Generate the Android Rust bridge
         working-directory: web/src-tauri
-        run: cargo check --locked --target aarch64-linux-android
+        env:
+          TAURI_ANDROID_PROJECT_PATH: ${{ github.workspace }}/web/src-tauri/gen/android
+          TAURI_ANDROID_PACKAGE_UNESCAPED: com.tgk30.debridstreamer
+          WRY_ANDROID_PACKAGE: com.tgk30.debridstreamer
+          WRY_ANDROID_LIBRARY: debridstreamer_lib
+          WRY_ANDROID_KOTLIN_FILES_OUT_DIR: ${{ github.workspace }}/web/src-tauri/gen/android/app/src/main/java/com/tgk30/debridstreamer/generated
+        run: |
+          set -euo pipefail
+          mkdir -p "$WRY_ANDROID_KOTLIN_FILES_OUT_DIR"
+          cargo clean --target aarch64-linux-android -p tauri -p wry
+          cargo check --locked --target aarch64-linux-android
+          test -f "$WRY_ANDROID_KOTLIN_FILES_OUT_DIR/TauriActivity.kt"
+          test -f "$WRY_ANDROID_KOTLIN_FILES_OUT_DIR/WryActivity.kt"
+
+      # Compile the generated activity and Kotlin bridge. Rust was already
+      # compiled above to generate the sources, so skip only Gradle's duplicate
+      # rustBuild task rather than relying on a full APK build for this check.
+      - name: Compile generated Android Kotlin
+        working-directory: web/src-tauri/gen/android
+        run: ./gradlew --no-daemon :app:compileArmDebugKotlin -x :app:rustBuildArmDebug
 
       # The desktop target is checked by the `rust` job on macOS. Repeating it on
       # this Linux runner would need the GTK development headers the Tauri Linux
