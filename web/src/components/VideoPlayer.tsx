@@ -1018,6 +1018,8 @@ export function VideoPlayer({
     if (mode !== "external" || !desktopTauri || useEmbedded) return;
     let cancelled = false;
     startedMpvRef.current = false;
+    setExternalStatus(null);
+    setExternalError(null);
 
     playWithMpv(effectiveUrl, playbackAuthorization)
       .then((res) => {
@@ -3581,14 +3583,23 @@ function ExternalPanel({
     <div className="player-external">
       <Icon name="play" size={36} className="t-accent" />
       {underTauri ? (
-        <>
-          <h3 className="player-external-title">Opening in the bundled player</h3>
-          <p className="player-external-sub t-secondary">
-            {status ??
-              "This file (MKV/HEVC) plays in the bundled mpv player. Starting…"}
-          </p>
-          {error && <p className="player-external-err" role="alert">{error}</p>}
-        </>
+        error ? (
+          <>
+            <h3 className="player-external-title">Could not open a player</h3>
+            <p className="player-external-err" role="alert">{error}</p>
+            <button type="button" className="btn" onClick={onOpenExternal}>
+              Try external player again
+            </button>
+          </>
+        ) : (
+          <>
+            <h3 className="player-external-title">Opening in the bundled player</h3>
+            <p className="player-external-sub t-secondary">
+              {status ??
+                "This file (MKV/HEVC) plays in the bundled mpv player. Starting…"}
+            </p>
+          </>
+        )
       ) : (
         <>
           <h3 className="player-external-title">Open externally</h3>

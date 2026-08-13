@@ -10,6 +10,7 @@
 // player falls back to an "open externally" note instead of invoking.
 
 import { assertNetworkAllowed, isRequestExempt } from "./networkPolicy";
+import { deviceKind } from "./platform";
 
 /** True when running inside the Tauri webview. Tauri v2 injects
  * `__TAURI_INTERNALS__` on the window; we also tolerate the older flag. */
@@ -23,8 +24,15 @@ import { assertNetworkAllowed, isRequestExempt } from "./networkPolicy";
  */
 export function isDesktopTauri(): boolean {
   if (!isTauri()) return false;
+  const w = window as unknown as Record<string, unknown>;
+  if (w.__YAWF_TAURI_MOBILE__ === true) return false;
+
+  // The marker above is authoritative for current mobile packages. Keep the
+  // user-agent fallback for already-installed mobile builds while using the
+  // shared platform classifier as a positive desktop allowlist.
   const ua = navigator.userAgent.toLowerCase();
-  return !ua.includes("android") && !/iphone|ipad|ipod/.test(ua);
+  if (/android|iphone|ipad|ipod|; wv\)/.test(ua)) return false;
+  return ["mac", "windows", "linux", "desktop"].includes(deviceKind());
 }
 
 export function isTauri(): boolean {

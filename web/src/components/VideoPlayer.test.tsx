@@ -1997,6 +1997,9 @@ describe("ExternalPanel (Tauri)", () => {
         "VLC missing",
       ),
     );
+    expect(screen.getByText("Could not open a player")).toBeInTheDocument();
+    expect(screen.queryByText("Opening in the bundled player")).toBeNull();
+    expect(screen.getByRole("button", { name: "Try external player again" })).toBeInTheDocument();
   });
 
   it("stops the bundled mpv on unmount once it has started", async () => {
