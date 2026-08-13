@@ -63,3 +63,27 @@ fn mobile_capability_matches_the_explicit_main_window() {
         .iter()
         .any(|permission| permission["identifier"] == "http:default"));
 }
+
+#[test]
+fn mobile_capability_does_not_grant_desktop_player_handoffs() {
+    let permissions = include_str!("../permissions/mobile-commands.toml");
+    let allowed = permissions
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix('"')?.strip_suffix("\","))
+        .collect::<Vec<_>>();
+
+    assert!(!allowed.contains(&"open_in_external_player"));
+    assert!(!allowed.contains(&"mpv_play"));
+}
+
+#[test]
+fn mobile_build_injects_an_authoritative_webview_marker() {
+    let source = include_str!("../src/lib.rs");
+
+    assert!(source.contains(
+        "#[cfg(mobile)]\n    let builder = builder.append_invoke_initialization_script("
+    ));
+    assert!(source
+        .contains(";Object.defineProperty(window, '__YAWF_TAURI_MOBILE__', { value: true });"));
+}

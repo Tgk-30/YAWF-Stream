@@ -75,7 +75,9 @@ function enterTauri(): void {
 function enterAndroidTauri(): void {
   enterTauri();
   vi.stubGlobal("navigator", {
-    userAgent: "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36",
+    userAgent: "Mozilla/5.0 (Linux; Android 16; Pixel 8 Pro Build/BP2A.250605.031.A2; wv) AppleWebKit/537.36",
+    platform: "Linux aarch64",
+    maxTouchPoints: 5,
   });
 }
 
@@ -112,6 +114,20 @@ describe("isTauri", () => {
 });
 
 describe("isDesktopTauri", () => {
+  it("rejects the synchronous mobile marker even if the user agent looks desktop", () => {
+    vi.stubGlobal("window", {
+      __TAURI_INTERNALS__: {},
+      __YAWF_TAURI_MOBILE__: true,
+    });
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
+      platform: "Linux x86_64",
+      maxTouchPoints: 0,
+    });
+
+    expect(isDesktopTauri()).toBe(false);
+  });
+
   it("is false in the Android Tauri webview", () => {
     enterAndroidTauri();
     expect(isDesktopTauri()).toBe(false);
@@ -244,6 +260,23 @@ describe("revealInFileManager", () => {
 });
 
 describe("openInExternalPlayer", () => {
+  it("fails closed on the mobile marker without invoking a desktop command", async () => {
+    vi.stubGlobal("window", {
+      __TAURI_INTERNALS__: {},
+      __YAWF_TAURI_MOBILE__: true,
+    });
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
+      platform: "Linux x86_64",
+      maxTouchPoints: 0,
+    });
+
+    await expect(openInExternalPlayer("http://x/file.mkv")).rejects.toThrow(
+      /only in the desktop app/,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
   it("throws when not running under Tauri (no invoke)", async () => {
     await expect(openInExternalPlayer("http://x/file.mkv")).rejects.toThrow(
       /only in the desktop app/,
@@ -314,6 +347,23 @@ describe("openInExternalPlayer", () => {
 });
 
 describe("playWithMpv", () => {
+  it("fails closed on the mobile marker without invoking bundled mpv", async () => {
+    vi.stubGlobal("window", {
+      __TAURI_INTERNALS__: {},
+      __YAWF_TAURI_MOBILE__: true,
+    });
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
+      platform: "Linux x86_64",
+      maxTouchPoints: 0,
+    });
+
+    await expect(playWithMpv("http://x/file.mkv")).rejects.toThrow(
+      /only in the desktop app/,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
   it("throws when not running under Tauri", async () => {
     await expect(playWithMpv("http://x/file.mkv")).rejects.toThrow(
       /only in the desktop app/,

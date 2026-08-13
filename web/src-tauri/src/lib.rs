@@ -715,6 +715,14 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
+    // Android and iOS do not register the desktop player commands. Mark the
+    // webview during Tauri's synchronous invoke initialization so frontend
+    // routing never has to infer the target from a user agent.
+    #[cfg(mobile)]
+    let builder = builder.append_invoke_initialization_script(
+        ";Object.defineProperty(window, '__YAWF_TAURI_MOBILE__', { value: true });",
+    );
+
     let builder = builder.setup(|app| {
         #[cfg(target_os = "macos")]
         opaque_window_background(app.handle());
