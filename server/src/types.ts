@@ -50,6 +50,10 @@ export interface ServerConfig {
   /** Check GitHub releases for a newer server container version. */
   updateCheck: boolean;
   allowRawStreamUrls: boolean;
+  /** Maximum wait for upstream response headers. No total transfer timeout. */
+  streamUpstreamResponseTimeoutMs: number;
+  /** Maximum gap between upstream response-body chunks. */
+  streamUpstreamIdleTimeoutMs: number;
   /** Explicit Direct P2P operator opt-in. False means WebTorrent is not loaded,
    * no registry/timer is created, and no torrent socket or cache path starts. */
   enableDirectTorrent: boolean;

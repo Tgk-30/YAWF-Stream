@@ -38,6 +38,10 @@ import {
   findPreferredLanguageMatch,
   normalizeLanguagePreference,
 } from "../lib/languagePreference";
+import {
+  PlaybackStallWatchdog,
+  type PlaybackStallState,
+} from "../lib/playbackStall";
 import type { PlayerPreferenceDefaults } from "./VideoPlayer";
 import {
   currentViewportPixelSize,
@@ -120,6 +124,11 @@ interface Props {
   /** Give the parent one chance to switch to a compatible webview source when
    * native initialization or loading fails. Returning true means it recovered. */
   onPlaybackError?: (error: Error) => boolean | Promise<boolean>;
+  onPlaybackStall?: (
+    absolutePositionSeconds: number,
+    handoffState: PlaybackHandoffState,
+  ) => boolean | Promise<boolean>;
+  onRetryFreshStream?: () => Promise<void>;
   /** Server Mode selector. Selecting a rendition transfers this native player
    * to credentialed webview HLS only after the manifest is ready. */
   serverOptimized?: {
@@ -178,6 +187,7 @@ const OBSERVED: readonly MpvObservableProperty[] = [
   // core-idle: it's also true on every user pause + at EOF, which made the
   // buffering spinner appear over paused frames.
   ["paused-for-cache", "flag"],
+  ["seeking", "flag"],
   ["volume", "double", "none"],
   ["mute", "flag"],
   ["speed", "double", "none"],
@@ -549,6 +559,8 @@ export function EmbeddedPlayer({
   engine = "native-mpv",
   playbackDecision = "Direct Play",
   onPlaybackError,
+  onPlaybackStall,
+  onRetryFreshStream,
   serverOptimized,
   activeServerOptimizedQuality = null,
   serverOptimizationPending = false,
@@ -560,6 +572,7 @@ export function EmbeddedPlayer({
   onClose,
 }: Props) {
   const [error, setError] = useState<string | null>(null);
+  const [manualRetryPending, setManualRetryPending] = useState(false);
   const [paused, setPaused] = useState(false);
   const [dur, setDur] = useState(0);
   const [buffering, setBuffering] = useState(true);
@@ -644,6 +657,8 @@ export function EmbeddedPlayer({
   onPlayNextRef.current = onPlayNext;
   const onPlaybackErrorRef = useRef(onPlaybackError);
   onPlaybackErrorRef.current = onPlaybackError;
+  const onPlaybackStallRef = useRef(onPlaybackStall);
+  onPlaybackStallRef.current = onPlaybackStall;
   const playerPreferencesRef = useRef(playerPreferences);
   playerPreferencesRef.current = playerPreferences;
   const sourceSwitchStateRef = useRef(sourceSwitchState);
@@ -653,6 +668,22 @@ export function EmbeddedPlayer({
   const scrubberRef = useRef<NativeScrubberHandle | null>(null);
   const activeChapterIndexRef = useRef(-1);
   const pausedRef = useRef(paused);
+  const volumeRef = useRef(volume);
+  const mutedRef = useRef(muted);
+  const speedRef = useRef(speed);
+  const stallWatchdogRef = useRef<PlaybackStallWatchdog | null>(null);
+  const rendererSeekingRef = useRef(false);
+  const scrubbingRef = useRef(false);
+  const watchdogPositionRef = useRef(Number.NaN);
+  const cacheFrontierRef = useRef(0);
+  const stallStateRef = useRef<PlaybackStallState>({
+    started: false,
+    paused: false,
+    seeking: false,
+    suspended: false,
+    ended: false,
+    tearingDown: false,
+  });
   const endedRef = useRef(false);
   const lastAudibleVolume = useRef(100);
   const menuOpenRef = useRef(false);
@@ -702,6 +733,9 @@ export function EmbeddedPlayer({
 
   durRef.current = dur;
   pausedRef.current = paused;
+  volumeRef.current = volume;
+  mutedRef.current = muted;
+  speedRef.current = speed;
   castSuspendedRef.current = castSuspended;
 
   const reportedPosition = () =>
@@ -718,6 +752,18 @@ export function EmbeddedPlayer({
     muted,
     playbackRate: speed,
   });
+
+  useEffect(() => {
+    scrubbingRef.current = scrubbing;
+    stallStateRef.current = {
+      ...stallStateRef.current,
+      paused,
+      seeking: scrubbing || rendererSeekingRef.current,
+      suspended: castSuspended,
+      ended,
+    };
+    stallWatchdogRef.current?.update(stallStateRef.current);
+  }, [castSuspended, ended, paused, scrubbing]);
 
   const audioTracks = useMemo(() => tracks.filter((t) => t.type === "audio"), [tracks]);
   const volumeIsSilent = muted || volume === 0;
@@ -920,6 +966,45 @@ export function EmbeddedPlayer({
     setColorPrimaries("");
     setTransferFunction("");
     let unlisten: (() => void) | undefined;
+    const postStartWatchdog = new PlaybackStallWatchdog(() => {
+      const onStall = onPlaybackStallRef.current;
+      postStartWatchdog.stop();
+      if (onStall == null) {
+        setError("Playback stopped making progress. Retry with a fresh stream.");
+        return;
+      }
+      void Promise.resolve(onStall(reportedPosition(), {
+        paused: false,
+        volume: Math.min(1, Math.max(0, volumeRef.current / 100)),
+        muted: mutedRef.current,
+        playbackRate: speedRef.current,
+      })).then((recovered) => {
+        if (!cancelled && recovered !== true) {
+          setError("Playback stopped making progress. Retry with a fresh stream.");
+        }
+      }).catch(() => {
+        if (!cancelled) {
+          setError("A fresh stream could not be prepared. Retry, or choose another source.");
+        }
+      });
+    });
+    stallWatchdogRef.current = postStartWatchdog;
+    stallStateRef.current = {
+      started: false,
+      paused: false,
+      seeking: false,
+      suspended: castSuspendedRef.current,
+      ended: false,
+      tearingDown: false,
+    };
+    rendererSeekingRef.current = false;
+    scrubbingRef.current = false;
+    watchdogPositionRef.current = Number.NaN;
+    cacheFrontierRef.current = 0;
+    const syncPostStartWatchdog = (patch: Partial<PlaybackStallState> = {}) => {
+      stallStateRef.current = { ...stallStateRef.current, ...patch };
+      postStartWatchdog.update(stallStateRef.current);
+    };
 
     // Route every native-failure signal through one place: ask the parent to
     // switch to a compatible webview source (the HLS transcode, which is handed
@@ -970,6 +1055,7 @@ export function EmbeddedPlayer({
             switch (ev.name) {
               case "pause":
                 setPaused(Boolean(ev.data));
+                syncPostStartWatchdog({ paused: Boolean(ev.data) });
                 if (ev.data === false) evaluatePredictiveUpNext();
                 if (scrobbleContext != null) {
                   if (ev.data === true && !endedRef.current) {
@@ -1010,16 +1096,28 @@ export function EmbeddedPlayer({
                   }
                   // First position report ≈ first frame shown → drop the
                   // initial-load spinner and stand the watchdog down.
-                  if (!firstFrameRef.current) {
+                  const hadFirstFrame = firstFrameRef.current;
+                  if (!hadFirstFrame) {
                     firstFrameRef.current = true;
                     setBuffering(false);
                     window.clearTimeout(watchdog);
+                    syncPostStartWatchdog({ started: true });
                     if (scrobbleContext != null) {
                       scrobblePlaybackStart({
                         ...scrobbleContext,
                         progressPct: reportedProgressPct(),
                       });
                     }
+                  }
+                  const lastWatchdogPosition = watchdogPositionRef.current;
+                  watchdogPositionRef.current = ev.data;
+                  if (
+                    hadFirstFrame &&
+                    !rendererSeekingRef.current &&
+                    !scrubbingRef.current &&
+                    (!Number.isFinite(lastWatchdogPosition) || ev.data > lastWatchdogPosition + 0.05)
+                  ) {
+                    postStartWatchdog.noteProgress();
                   }
                   const now = Date.now();
                   if (
@@ -1048,6 +1146,16 @@ export function EmbeddedPlayer({
                 // spinner; before the first frame the initial spinner owns it.
                 if (firstFrameRef.current) setBuffering(Boolean(ev.data));
                 break;
+              case "seeking":
+                rendererSeekingRef.current = Boolean(ev.data);
+                if (!rendererSeekingRef.current) {
+                  watchdogPositionRef.current = posRef.current;
+                  cacheFrontierRef.current = posRef.current;
+                }
+                syncPostStartWatchdog({
+                  seeking: rendererSeekingRef.current || scrubbingRef.current,
+                });
+                break;
               case "volume":
                 if (typeof ev.data === "number") {
                   const nextVolume = Math.round(ev.data);
@@ -1072,7 +1180,15 @@ export function EmbeddedPlayer({
                   // Data is still flowing: the stream is alive, just slow.
                   // Re-arm the first-frame watchdog so big debrid remuxes get
                   // their full probe time instead of a false failure.
-                  if (!firstFrameRef.current) armWatchdog();
+                  const previousFrontier = cacheFrontierRef.current;
+                  const seeking = rendererSeekingRef.current || scrubbingRef.current;
+                  if (!Number.isFinite(previousFrontier) || ev.data < previousFrontier - 0.05) {
+                    cacheFrontierRef.current = ev.data;
+                  } else if (ev.data > previousFrontier + 0.05) {
+                    cacheFrontierRef.current = ev.data;
+                    if (!firstFrameRef.current) armWatchdog();
+                    else if (!seeking) postStartWatchdog.noteProgress();
+                  }
                 }
                 break;
               case "aid":
@@ -1087,6 +1203,7 @@ export function EmbeddedPlayer({
               case "eof-reached":
                 if (ev.data === true) {
                   endedRef.current = true;
+                  syncPostStartWatchdog({ ended: true });
                   setPredictiveUpNext(
                     onPlayNextRef.current == null
                       ? null
@@ -1184,9 +1301,13 @@ export function EmbeddedPlayer({
           return;
         }
         unlisten = observedUnlisten;
+        const recoveryHandoff = sourceSwitchStateRef.current != null;
         const resumeSeconds =
-          Number.isFinite(startPositionSeconds) && startPositionSeconds > 5
-            ? Math.floor(startPositionSeconds)
+          Number.isFinite(startPositionSeconds) &&
+          (recoveryHandoff ? startPositionSeconds >= 0 : startPositionSeconds > 5)
+            ? recoveryHandoff
+              ? Math.max(0, startPositionSeconds)
+              : Math.floor(startPositionSeconds)
             : null;
         setEnded(false);
         // mpv 0.38 inserted a playlist-index argument before the per-file options
@@ -1294,6 +1415,11 @@ export function EmbeddedPlayer({
     })();
     return () => {
       cancelled = true;
+      syncPostStartWatchdog({ tearingDown: true });
+      postStartWatchdog.stop();
+      if (stallWatchdogRef.current === postStartWatchdog) {
+        stallWatchdogRef.current = null;
+      }
       window.clearTimeout(watchdog);
       window.clearTimeout(retryTimer);
       window.clearTimeout(trackRefreshTimer);
@@ -1868,6 +1994,23 @@ export function EmbeddedPlayer({
           <p>Couldn’t play this stream in the built-in player.</p>
           <p className="embed-error-detail">{error}</p>
           <div className="embed-error-actions">
+            {onRetryFreshStream != null && (
+              <button
+                type="button"
+                className="btn btn-prominent"
+                disabled={manualRetryPending}
+                onClick={() => {
+                  setManualRetryPending(true);
+                  void onRetryFreshStream()
+                    .catch(() => {
+                      setError("A fresh stream could not be prepared. Retry, or choose another source.");
+                    })
+                    .finally(() => setManualRetryPending(false));
+                }}
+              >
+                {manualRetryPending ? "Preparing fresh stream" : "Retry playback"}
+              </button>
+            )}
             {onTryNextSource != null && (
               <button
                 type="button"

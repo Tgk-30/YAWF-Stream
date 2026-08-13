@@ -40,11 +40,15 @@ import { Rail } from "../components/Rail";
 import { Spinner } from "../components/Spinner";
 import { Icon } from "../components/Icon";
 import { isInWatchlist } from "../data/library";
-import { VideoCodec, type StreamInfo } from "../services/debrid/models";
+import {
+  VideoCodec,
+  type DebridServiceType,
+  type StreamInfo,
+} from "../services/debrid/models";
 import { MediaItem as MediaItemNS } from "../models/media";
 import {
+  TorrentResult,
   VideoQuality,
-  type TorrentResult,
   type VideoQuality as VideoQualityValue,
 } from "../services/indexers/models";
 import type { StreamRow } from "../data/streams";
@@ -61,6 +65,10 @@ import { isServerMode } from "../lib/serverMode";
 import { isDesktopTauri } from "../lib/tauri";
 import { assertNetworkAllowed, getNetworkMode, isRequestExempt } from "../lib/networkPolicy";
 import type { PlaybackEngine } from "../lib/playbackEngine";
+import {
+  playbackRecoverySessionIdentity,
+  withFreshStreamResolutionTimeout,
+} from "../lib/playbackStall";
 import { getDownloadsBridge } from "../lib/downloadsBridge";
 import {
   startDownloadsRuntime,
@@ -126,6 +134,8 @@ function loadEpisodeOverrides(): Record<string, { season: number; episode: numbe
 
 interface ActivePlayer {
   url: string;
+  /** Forces the renderer to reload even when a provider renews in place. */
+  sourceRevision: number;
   title: string;
   /** Episode context belongs under the show title, never in the media source
    * filename. Null for movies and when metadata is unavailable. */
@@ -155,8 +165,17 @@ interface ActivePlayer {
   scrobbleContext: TraktScrobbleContext | null;
   /** Torrent identity used by one-click source recovery. */
   sourceHash: string | null;
+  /** Source provenance retained even when the live source list is empty. */
+  recoverySource: StreamRow | null;
   /** Original timeline position represented by HLS time zero. */
   timelineOffsetSeconds: number;
+  /** In-session controls preserved across a fresh source resolution. */
+  playbackHandoff: {
+    paused: boolean;
+    volume: number;
+    muted: boolean;
+    playbackRate: number;
+  } | null;
 }
 
 /** True when the resolved file is a container/codec the webview can't decode
@@ -394,6 +413,12 @@ export function Detail() {
   }, [detailItem, continueWatching]);
 
   const [player, setPlayer] = useState<ActivePlayer | null>(null);
+  const playerRef = useRef<ActivePlayer | null>(null);
+  const playerSourceRevisionRef = useRef(0);
+  const playbackEpochRef = useRef(0);
+  const refreshGenerationRef = useRef(0);
+  const detailIdRef = useRef(detailItem?.id ?? null);
+  detailIdRef.current = detailItem?.id ?? null;
   const [scrollToStreams, setScrollToStreams] = useState(false);
   // Series show their streams on a dedicated page (opened by picking an
   // episode) instead of inline at the bottom of Detail; movies keep the inline
@@ -819,6 +844,8 @@ export function Detail() {
     sourceHash: string | null = null,
     startPositionOverride: number | null = null,
     timelineOffsetSeconds = 0,
+    playbackHandoff: ActivePlayer["playbackHandoff"] = null,
+    recoverySource: StreamRow | null = null,
   ): void {
     // The series stream picker is a body-level portal above Detail. Close it
     // before mounting the player portal so playback and error states cannot
@@ -870,8 +897,9 @@ export function Detail() {
                 episode: selected.episode,
               }
           : { tmdbId, type: "movie" };
-    setPlayer({
+    const nextPlayer: ActivePlayer = {
       url,
+      sourceRevision: playerSourceRevisionRef.current++,
       title,
       subtitle: detailItem?.type === "series" ? episodeContext : null,
       nowPlaying: {
@@ -897,12 +925,20 @@ export function Detail() {
       episode: selected?.episode ?? null,
       scrobbleContext,
       sourceHash,
+      recoverySource,
       timelineOffsetSeconds,
-    });
+      playbackHandoff,
+    };
+    playbackEpochRef.current += 1;
+    playerRef.current = nextPlayer;
+    setPlayer(nextPlayer);
     openDetailPlayer();
   }
 
   function finishClosingPlayer(): void {
+    playbackEpochRef.current += 1;
+    refreshGenerationRef.current += 1;
+    playerRef.current = null;
     setPlayer(null);
     // WebviewPlayer emits its final progress report from unmount cleanup. Run
     // the one-per-session slice refresh on the next task so that write is
@@ -1032,8 +1068,17 @@ export function Detail() {
     sourceFileName: string | null = stream.fileName,
     source?: TorrentResult,
     startPositionOverride: number | null = null,
+    playbackHandoff: ActivePlayer["playbackHandoff"] = null,
+    recoverySource: StreamRow | null = null,
   ): Promise<void> {
     const sourceHash = source?.infoHash ?? null;
+    const retainedRecoverySource = recoverySource ?? (
+      source == null
+        ? null
+        : streams.rows.find(
+            (candidate) => candidate.result.infoHash.toLowerCase() === source.infoHash.toLowerCase(),
+          ) ?? null
+    );
     const timelineOffsetSeconds = stream.timelineOffsetSeconds ?? 0;
     if (/^https?:\/\//i.test(stream.streamURL) && !isRequestExempt(stream.streamURL)) {
       try {
@@ -1061,6 +1106,8 @@ export function Detail() {
         sourceHash,
         startPositionOverride,
         timelineOffsetSeconds,
+        playbackHandoff,
+        retainedRecoverySource,
       );
       return;
     }
@@ -1074,6 +1121,8 @@ export function Detail() {
         sourceHash,
         startPositionOverride,
         timelineOffsetSeconds,
+        playbackHandoff,
+        retainedRecoverySource,
       );
       return;
     }
@@ -1092,6 +1141,8 @@ export function Detail() {
         sourceHash,
         startPositionOverride,
         timelineOffsetSeconds,
+        playbackHandoff,
+        retainedRecoverySource,
       );
       return;
     }
@@ -1106,12 +1157,52 @@ export function Detail() {
       sourceHash,
       startPositionOverride,
       timelineOffsetSeconds,
+      playbackHandoff,
+      retainedRecoverySource,
     );
   }
 
-  /** Play an already-resolved StreamInfo (the instant-play path). */
-  async function playStream(stream: StreamInfo) {
-    await playResolvedStream(stream, stream.fileName);
+  function cachedProvider(value: string): DebridServiceType | null {
+    switch (value.trim().toLowerCase()) {
+      case "rd":
+      case "real_debrid": return "real_debrid";
+      case "ad":
+      case "all_debrid": return "all_debrid";
+      case "pm":
+      case "premiumize": return "premiumize";
+      case "tb":
+      case "torbox": return "torbox";
+      default: return null;
+    }
+  }
+
+  /** Play an already-resolved stream while retaining its resolution provenance. */
+  async function playStream(cachedResolution: typeof cached) {
+    if (cachedResolution == null) return;
+    const { stream, infoHash } = cachedResolution;
+    if (typeof infoHash !== "string" || infoHash.trim().length === 0) {
+      await playResolvedStream(stream, stream.fileName);
+      return;
+    }
+    const cachedOn = cachedProvider(cachedResolution.debridService ?? stream.debridService ?? "");
+    const source = TorrentResult.fromSearch({
+      infoHash,
+      title: stream.fileName,
+      sizeBytes: stream.sizeBytes,
+      seeders: 0,
+      leechers: 0,
+      indexerName: "cached resolution",
+    });
+    source.isCached = true;
+    source.cachedOn = cachedOn;
+    await playResolvedStream(
+      stream,
+      stream.fileName,
+      source,
+      null,
+      null,
+      { result: source, cachedOn },
+    );
   }
 
   async function resolveSelectedStream(
@@ -1259,6 +1350,60 @@ export function Detail() {
     );
     lastPlayerProgressRef.current = resumeSecondsFor();
     await playResolvedStream(stream, stream.fileName || source.title, source);
+  }
+
+  async function handleRefreshCurrentSource(
+    absolutePositionSeconds: number,
+    playbackHandoff: NonNullable<ActivePlayer["playbackHandoff"]>,
+  ): Promise<void> {
+    if (player?.sourceHash == null) {
+      throw new Error("The current source cannot be resolved again.");
+    }
+    const sourceHash = player.sourceHash.toLowerCase();
+    const activePlayer = player;
+    const capturedEpoch = playbackEpochRef.current;
+    const capturedDetailId = detailItem?.id ?? null;
+    const requestGeneration = ++refreshGenerationRef.current;
+    const row = streams.rows.find(
+      (candidate) => candidate.result.infoHash.toLowerCase() === sourceHash,
+    ) ?? activePlayer.recoverySource;
+    if (row == null) {
+      throw new Error("The current source is no longer in the source list.");
+    }
+    const position = Number.isFinite(absolutePositionSeconds)
+      ? Math.max(0, absolutePositionSeconds)
+      : Math.max(0, lastPlayerProgressRef.current);
+    const episodeHint =
+      player.season != null && player.episode != null
+        ? { season: player.season, episode: player.episode }
+        : null;
+    const backend = player.fallbackStream?.backend === "direct_torrent"
+      ? "direct_torrent" as const
+      : "debrid" as const;
+    lastPlayerProgressRef.current = position;
+    try {
+      const stream = await withFreshStreamResolutionTimeout(
+        resolveSelectedStream(row, episodeHint, position, backend),
+      );
+      if (
+        refreshGenerationRef.current !== requestGeneration ||
+        playbackEpochRef.current !== capturedEpoch ||
+        playerRef.current !== activePlayer ||
+        detailIdRef.current !== capturedDetailId
+      ) return;
+      await playResolvedStream(
+        stream,
+        stream.fileName || row.result.title,
+        row.result,
+        position,
+        playbackHandoff,
+        row,
+      );
+    } catch (error) {
+      throw new Error(
+        `The current source could not be refreshed. ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async function handleTryNextSource(): Promise<void> {
@@ -1516,7 +1661,7 @@ export function Detail() {
             // for this title, play it immediately instead of re-walking the
             // indexers + debrid.
             if (cached != null) {
-              void playStream(cached.stream);
+              void playStream(cached);
               return;
             }
             // Series open the dedicated streams page; movies scroll the inline
@@ -1867,8 +2012,14 @@ export function Detail() {
       {player && (
         <Suspense fallback={<Spinner variant="overlay" label="Loading player…" />}>
           <VideoPlayer
-            key={player.sourceHash ?? player.url}
+            key={playbackRecoverySessionIdentity(
+              detailItem.id,
+              player.episodeId,
+              player.sourceHash,
+              player.url,
+            )}
             url={player.url}
+            sourceRevision={player.sourceRevision}
             title={player.title}
             subtitle={player.subtitle}
             nowPlaying={player.nowPlaying}
@@ -1930,6 +2081,8 @@ export function Detail() {
             useBuiltInPlayer={settings.builtInPlayer}
             timelineOffsetSeconds={player.timelineOffsetSeconds}
             onTryNextSource={handleTryNextSource}
+            refreshCurrentSource={handleRefreshCurrentSource}
+            initialHandoffState={player.playbackHandoff}
             startPositionSeconds={player.startPositionSeconds}
             savedPrefs={player.savedPrefs}
             playerPreferences={playerPreferences}

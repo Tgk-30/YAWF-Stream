@@ -23,7 +23,7 @@ let mockDetail: DetailState;
 let mockStreams: StreamsState;
 let mockWatchlist: MediaPreview[] = [];
 let inWatchlistResult = false;
-let mockCached: { stream: any } | null = null;
+let mockCached: any = null;
 let mockContinueWatching: any[] = [];
 let serverModeOn = false;
 let transcodeAvailable = false;
@@ -324,6 +324,9 @@ vi.mock("../components/VideoPlayer", () => ({
     onClose,
     onProgress,
     onEnded,
+    refreshCurrentSource,
+    startPositionSeconds,
+    initialHandoffState,
   }: any) => (
     <div
       data-testid="player"
@@ -350,6 +353,8 @@ vi.mock("../components/VideoPlayer", () => ({
       data-remember-per-title-track-choices={String(
         playerPreferences?.rememberPerTitleTrackChoices ?? "",
       )}
+      data-start-position={String(startPositionSeconds ?? 0)}
+      data-handoff-rate={String(initialHandoffState?.playbackRate ?? "")}
     >
       <button type="button" onClick={() => onProgress?.(80, 100)}>
         report-progress
@@ -359,6 +364,17 @@ vi.mock("../components/VideoPlayer", () => ({
       </button>
       <button type="button" onClick={onClose}>
         close-player
+      </button>
+      <button
+        type="button"
+        onClick={() => refreshCurrentSource?.(88, {
+          paused: false,
+          volume: 0.35,
+          muted: false,
+          playbackRate: 1.5,
+        })}
+      >
+        refresh-current-source
       </button>
     </div>
   ),
@@ -945,6 +961,140 @@ describe("Detail play", () => {
       "data-engine",
       "webview-hls-transcode",
     );
+  });
+
+  it("re-resolves the same source and preserves position and handoff state", async () => {
+    const resolveStream = vi
+      .fn()
+      .mockResolvedValueOnce({
+        fileName: "show.mkv",
+        streamURL: "https://cdn.example/temporary-1.mkv",
+        codec: "H.265",
+      })
+      .mockResolvedValueOnce({
+        fileName: "show.mkv",
+        streamURL: "https://cdn.example/temporary-2.mkv",
+        codec: "H.265",
+      });
+    mockServices.debrid = {
+      hasServices: true,
+      resolveStream,
+      getTranscodeHLS: vi.fn(async () => null),
+    };
+    mockStreams.rows = [{
+      result: TorrentResult.fromSearch({
+        infoHash: "HASH",
+        title: "show.mkv",
+        sizeBytes: 1_000,
+        seeders: 1,
+        leechers: 0,
+        indexerName: "test",
+      }),
+      cachedOn: "real_debrid",
+    }];
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("resolve-and-play-stream"));
+    await waitFor(() => expect(screen.getByTestId("player")).toHaveAttribute(
+      "data-url",
+      "https://cdn.example/temporary-1.mkv",
+    ));
+
+    await userEvent.click(screen.getByRole("button", { name: "refresh-current-source" }));
+    await waitFor(() => expect(screen.getByTestId("player")).toHaveAttribute(
+      "data-url",
+      "https://cdn.example/temporary-2.mkv",
+    ));
+    expect(resolveStream).toHaveBeenCalledTimes(2);
+    expect(resolveStream.mock.calls[1]?.[0]).toBe("hash");
+    expect(screen.getByTestId("player")).toHaveAttribute("data-start-position", "88");
+    expect(screen.getByTestId("player")).toHaveAttribute("data-handoff-rate", "1.5");
+  });
+
+  it("re-resolves cached instant play from provenance when the source list is empty", async () => {
+    const resolveStream = vi.fn(async () => ({
+      fileName: "movie.mp4",
+      streamURL: "https://cdn.example/cached-fresh.mp4",
+      codec: "H.264",
+      sizeBytes: 1_000,
+      debridService: "RD",
+    }));
+    mockServices.debrid = {
+      hasServices: true,
+      resolveStream,
+      getTranscodeHLS: vi.fn(async () => null),
+    };
+    mockStreams.rows = [];
+    mockCached = {
+      mediaId: "m1",
+      infoHash: "CACHED-HASH",
+      debridService: "RD",
+      resolvedAt: new Date().toISOString(),
+      stream: {
+        fileName: "movie.mp4",
+        streamURL: "https://cdn.example/cached-old.mp4",
+        codec: "H.264",
+        sizeBytes: 1_000,
+        debridService: "RD",
+      },
+    };
+    render(<Detail />);
+    await userEvent.click(screen.getByText("play"));
+    expect(screen.getByTestId("player")).toHaveAttribute(
+      "data-url",
+      "https://cdn.example/cached-old.mp4",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "refresh-current-source" }));
+    await waitFor(() => expect(screen.getByTestId("player")).toHaveAttribute(
+      "data-url",
+      "https://cdn.example/cached-fresh.mp4",
+    ));
+    expect(resolveStream).toHaveBeenCalledWith("cached-hash", "real_debrid", null);
+    expect(screen.getByTestId("player")).toHaveAttribute("data-start-position", "88");
+    expect(screen.getByTestId("player")).toHaveAttribute("data-handoff-rate", "1.5");
+  });
+
+  it("does not reopen playback when a pending refresh resolves after close", async () => {
+    let resolveRefresh!: (stream: any) => void;
+    const resolveStream = vi
+      .fn()
+      .mockResolvedValueOnce({
+        fileName: "show.mp4",
+        streamURL: "https://cdn.example/first.mp4",
+        codec: "H.264",
+      })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRefresh = resolve; }));
+    mockServices.debrid = {
+      hasServices: true,
+      resolveStream,
+      getTranscodeHLS: vi.fn(async () => null),
+    };
+    mockStreams.rows = [{
+      result: TorrentResult.fromSearch({
+        infoHash: "HASH",
+        title: "show.mp4",
+        sizeBytes: 1_000,
+        seeders: 1,
+        leechers: 0,
+        indexerName: "test",
+      }),
+      cachedOn: "real_debrid",
+    }];
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("resolve-and-play-stream"));
+    await waitFor(() => expect(screen.getByTestId("player")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "refresh-current-source" }));
+    await userEvent.click(screen.getByRole("button", { name: "close-player" }));
+    expect(screen.queryByTestId("player")).not.toBeInTheDocument();
+
+    resolveRefresh({
+      fileName: "show.mp4",
+      streamURL: "https://cdn.example/stale.mp4",
+      codec: "H.264",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.queryByTestId("player")).not.toBeInTheDocument();
   });
 
   it("still attempts the custom web player when HLS transcode is unavailable", async () => {

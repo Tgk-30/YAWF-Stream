@@ -6,7 +6,7 @@ export const GITHUB_ISSUES = `${GITHUB_REPO}/issues`;
 export const GITHUB_BUG_REPORT = `${GITHUB_ISSUES}/new?template=bug_report.yml`;
 export const GITHUB_DOCKER = `${GITHUB_REPO}/tree/main/deploy/compose`;
 
-export const APP_VERSION = '2.3.0';
+export const APP_VERSION = '2.3.1';
 export const VERSION = `v${APP_VERSION}-web`;
 export const RELEASE_ASSET_BASE = `${GITHUB_RELEASES}/download/${VERSION}`;
 export const RELEASE_CHECKSUMS = `${RELEASE_ASSET_BASE}/SHA256SUMS`;

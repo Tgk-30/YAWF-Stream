@@ -935,7 +935,7 @@ fn validate_mpv_property(name: &str, value: &str) -> Result<(), String> {
 
 fn validate_mpv_observation(spec: &ObserveSpec) -> Result<(), String> {
     let expected = match spec.name.as_str() {
-        "pause" | "paused-for-cache" | "mute" | "eof-reached" => "flag",
+        "pause" | "paused-for-cache" | "seeking" | "mute" | "eof-reached" => "flag",
         "time-pos" | "duration" | "volume" | "speed" | "demuxer-cache-time" | "container-fps"
         | "estimated-vf-fps" => "double",
         "aid"
@@ -1874,6 +1874,13 @@ mod tests {
             validate_mpv_observation(&ObserveSpec {
                 name: "track-list/count".to_string(),
                 format: "int64".to_string(),
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            validate_mpv_observation(&ObserveSpec {
+                name: "seeking".to_string(),
+                format: "flag".to_string(),
             }),
             Ok(())
         );

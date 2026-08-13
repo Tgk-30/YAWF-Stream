@@ -254,6 +254,8 @@ describe("DebridStreamer server", () => {
         cookieSecure: false,
         logger: false,
         allowRawStreamUrls: true,
+        streamUpstreamResponseTimeoutMs: 100,
+        streamUpstreamIdleTimeoutMs: 100,
       },
     });
   });
@@ -3082,6 +3084,41 @@ describe("DebridStreamer server", () => {
       url: playbackUrl,
     });
     expect(bobStream.statusCode).toBe(404);
+  });
+
+  it("bounds missing upstream response headers on authenticated and capability proxy paths", async () => {
+    upstream = createServer((_req, res) => {
+      const timer = setTimeout(() => res.end("late"), 1_000);
+      res.once("close", () => clearTimeout(timer));
+    });
+    await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", () => resolve()));
+    const address = upstream.address();
+    if (address == null || typeof address === "string") throw new Error("Expected TCP test server.");
+    upstreamUrl = `http://127.0.0.1:${address.port}/never-headers`;
+    const owner = await setupOwner(app);
+    const created = await request(owner, {
+      method: "POST",
+      url: "/api/streams/sessions/raw",
+      csrf: true,
+      payload: { upstreamUrl, contentType: "text/plain" },
+    });
+    const session = json<{
+      session: { playbackUrl: string; playbackAuthorization: string };
+    }>(created).session;
+    const capability = session.playbackAuthorization.slice("Bearer ".length);
+    const id = session.playbackUrl.split("/").pop();
+
+    const authenticated = await request(owner, {
+      method: "GET",
+      url: session.playbackUrl,
+    });
+    expect(authenticated.statusCode).toBe(504);
+
+    const external = await request({ app, cookies: new Map() }, {
+      method: "GET",
+      url: `/api/external-stream/${id}/${capability}`,
+    });
+    expect(external.statusCode).toBe(504);
   });
 
   it("kill-switch: admin revokes a stream session and the proxy then refuses it", async () => {

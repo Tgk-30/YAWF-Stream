@@ -54,6 +54,11 @@ import {
   verifyPassword,
 } from "./crypto.js";
 import { assertSafeUpstream, fetchUpstreamSafely } from "./ssrf.js";
+import {
+  demandAwareNodeReadable,
+  streamWithIdleTimeout,
+  waitForUpstreamResponse,
+} from "./streamTimeout.js";
 import { fetchOmdbRatings, fetchOmdbViaBroker, type OMDBRatings } from "./omdb.js";
 import { embeddedSecret } from "./embeddedSecrets.js";
 import { bandwidthCapStatus, type BandwidthCapStatus } from "./bandwidth.js";
@@ -1960,12 +1965,8 @@ function countedStream(
 ) {
   let bytes = 0;
   let recorded = false;
-  const source = Readable.fromWeb(input.body);
-  const counter = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      bytes += chunk.length;
-      callback(null, chunk);
-    },
+  const source = demandAwareNodeReadable(input.body, (chunkBytes) => {
+    bytes += chunkBytes;
   });
 
   function record(completed: boolean, error?: Error | null) {
@@ -1982,10 +1983,23 @@ function countedStream(
   }
 
   source.once("error", (error) => record(false, error));
-  counter.once("error", (error) => record(false, error));
-  counter.once("finish", () => record(true));
-  counter.once("close", () => record(false));
-  return source.pipe(counter);
+  source.once("end", () => record(true));
+  source.once("close", () => record(false));
+  return source;
+}
+
+function bindProxyDisconnect(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  controller: AbortController,
+): () => void {
+  const abort = () => controller.abort();
+  request.raw.once("aborted", abort);
+  reply.raw.once("close", abort);
+  return () => {
+    request.raw.removeListener("aborted", abort);
+    reply.raw.removeListener("close", abort);
+  };
 }
 
 function countedNodeStream(
@@ -5715,21 +5729,31 @@ function registerRoutes(
       if (typeof range === "string") headers.range = range;
 
       const controller = new AbortController();
-      request.raw.once("close", () => controller.abort());
+      const cleanupAbortListener = bindProxyDisconnect(request, reply, controller);
 
       // SSRF guard: validate the URL (and every redirect hop) is http(s) and
       // resolves only to public addresses before the server fetches it. Private
       // addresses are allowed only when the operator opted into raw/local URLs
       // (dev default); production blocks them.
-      const upstream = await fetchUpstreamSafely(
-        upstreamUrl,
-        {
-          method: request.method,
-          headers,
-          signal: controller.signal,
-        },
-        config.allowRawStreamUrls,
-      );
+      let upstream: Response;
+      try {
+        upstream = await waitForUpstreamResponse(
+          () => fetchUpstreamSafely(
+            upstreamUrl,
+            {
+              method: request.method,
+              headers,
+              signal: controller.signal,
+            },
+            config.allowRawStreamUrls,
+          ),
+          controller,
+          config.streamUpstreamResponseTimeoutMs,
+        );
+      } catch (error) {
+        cleanupAbortListener();
+        throw error;
+      }
 
       reply.status(upstream.status);
       for (const header of [
@@ -5748,6 +5772,7 @@ function registerRoutes(
       }
 
       if (request.method === "HEAD" || upstream.body == null) {
+        cleanupAbortListener();
         recordStreamTransfer(db, {
           sessionId: row.id,
           profileId: row.profile_id,
@@ -5763,7 +5788,12 @@ function registerRoutes(
           sessionId: row.id,
           profileId: row.profile_id,
           status: upstream.status,
-          body: upstream.body as ReadableStream<Uint8Array>,
+          body: streamWithIdleTimeout(
+            upstream.body as ReadableStream<Uint8Array>,
+            controller,
+            config.streamUpstreamIdleTimeoutMs,
+            cleanupAbortListener,
+          ),
         }),
       );
     },
@@ -5857,16 +5887,26 @@ function registerRoutes(
       if (typeof range === "string") headers.range = range;
 
       const controller = new AbortController();
-      request.raw.once("close", () => controller.abort());
-      const upstream = await fetchUpstreamSafely(
-        upstreamUrl,
-        {
-          method: request.method,
-          headers,
-          signal: controller.signal,
-        },
-        config.allowRawStreamUrls,
-      );
+      const cleanupAbortListener = bindProxyDisconnect(request, reply, controller);
+      let upstream: Response;
+      try {
+        upstream = await waitForUpstreamResponse(
+          () => fetchUpstreamSafely(
+            upstreamUrl,
+            {
+              method: request.method,
+              headers,
+              signal: controller.signal,
+            },
+            config.allowRawStreamUrls,
+          ),
+          controller,
+          config.streamUpstreamResponseTimeoutMs,
+        );
+      } catch (error) {
+        cleanupAbortListener();
+        throw error;
+      }
 
       reply.header("cache-control", "private, no-store");
       reply.header("referrer-policy", "no-referrer");
@@ -5887,6 +5927,7 @@ function registerRoutes(
       }
 
       if (request.method === "HEAD" || upstream.body == null) {
+        cleanupAbortListener();
         recordStreamTransfer(db, {
           sessionId: row.id,
           profileId: row.profile_id,
@@ -5901,7 +5942,12 @@ function registerRoutes(
           sessionId: row.id,
           profileId: row.profile_id,
           status: upstream.status,
-          body: upstream.body as ReadableStream<Uint8Array>,
+          body: streamWithIdleTimeout(
+            upstream.body as ReadableStream<Uint8Array>,
+            controller,
+            config.streamUpstreamIdleTimeoutMs,
+            cleanupAbortListener,
+          ),
         }),
       );
     },

@@ -3,6 +3,10 @@ import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { normalizeSecretKey } from "./crypto.js";
 import type { CookieSameSite, ServerConfig } from "./types.js";
+import {
+  DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_UPSTREAM_RESPONSE_TIMEOUT_MS,
+} from "./streamTimeout.js";
 
 function boolEnv(name: string, fallback: boolean): boolean {
   const value = process.env[name];
@@ -114,6 +118,26 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     allowRawStreamUrls:
       overrides.allowRawStreamUrls ??
       boolEnv("DS_SERVER_ALLOW_RAW_STREAM_URLS", process.env.NODE_ENV !== "production"),
+    streamUpstreamResponseTimeoutMs: boundedNumber(
+      overrides.streamUpstreamResponseTimeoutMs ??
+        numberEnv(
+          "DS_SERVER_STREAM_RESPONSE_TIMEOUT_MS",
+          DEFAULT_UPSTREAM_RESPONSE_TIMEOUT_MS,
+        ),
+      DEFAULT_UPSTREAM_RESPONSE_TIMEOUT_MS,
+      100,
+      120_000,
+    ),
+    streamUpstreamIdleTimeoutMs: boundedNumber(
+      overrides.streamUpstreamIdleTimeoutMs ??
+        numberEnv(
+          "DS_SERVER_STREAM_IDLE_TIMEOUT_MS",
+          DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS,
+        ),
+      DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS,
+      100,
+      120_000,
+    ),
     enableDirectTorrent:
       overrides.enableDirectTorrent ?? boolEnv("DS_SERVER_ENABLE_DIRECT_TORRENT", false),
     directTorrentMaxActive:

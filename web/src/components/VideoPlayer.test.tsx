@@ -31,8 +31,16 @@ const { hlsInstances, hlsIsSupported } = vi.hoisted(() => ({
   }>,
   hlsIsSupported: vi.fn(() => true),
 }));
-const scrubBarMock = vi.hoisted(() => vi.fn((props: { currentTime: number }) => (
-  <div data-testid="scrub-bar" data-current-time={props.currentTime} />
+const scrubBarMock = vi.hoisted(() => vi.fn((props: {
+  currentTime: number;
+  onScrubbingChange?: (scrubbing: boolean) => void;
+}) => (
+  <div
+    data-testid="scrub-bar"
+    data-current-time={props.currentTime}
+    onPointerDown={() => props.onScrubbingChange?.(true)}
+    onPointerUp={() => props.onScrubbingChange?.(false)}
+  />
 )));
 const iconMock = vi.hoisted(() => vi.fn(({ name }: { name: string }) => <span data-icon={name} />));
 vi.mock("hls.js", () => {
@@ -191,6 +199,10 @@ vi.mock("./EmbeddedPlayer", () => ({
 }));
 
 import { VideoPlayer } from "./VideoPlayer";
+import {
+  FRESH_STREAM_RESOLUTION_TIMEOUT_MS,
+  POST_START_STALL_TIMEOUT_MS,
+} from "../lib/playbackStall";
 
 function replaceProperty<T extends object, K extends PropertyKey>(
   target: T,
@@ -241,6 +253,7 @@ afterEach(() => {
   vi.clearAllMocks();
   isTauriMock.mockReturnValue(false);
   deviceKindMock.mockReturnValue("mac");
+  vi.useRealTimers();
 });
 
 // ---- Top-level shell + branch selection -----------------------------------
@@ -1154,6 +1167,22 @@ describe("WebviewPlayer", () => {
     expect(probe.currentTime()).toBe(0);
   });
 
+  it.each([3, 3595])("forces an exact recovery handoff at %s seconds", (start) => {
+    render(
+      <VideoPlayer
+        url="https://x/recovered.mp4"
+        title="T"
+        onClose={() => {}}
+        startPositionSeconds={start}
+        initialHandoffState={{ paused: false, volume: 1, muted: false, playbackRate: 1 }}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const probe = instrumentVideo(video, 3600);
+    video.dispatchEvent(new Event("loadedmetadata"));
+    expect(probe.currentTime()).toBe(start);
+  });
+
   // Keyboard shortcuts (invisible power-user nicety).
   describe("keyboard shortcuts", () => {
     function setup(startPaused = true) {
@@ -1328,6 +1357,171 @@ describe("WebviewPlayer", () => {
     const cc = screen.getByRole("button", { name: "Subtitles" });
     expect(cc.className).toContain("is-active");
     expect(document.querySelector(".captions-active-dot")).not.toBeNull();
+  });
+});
+
+describe("post-start webview stall recovery", () => {
+  it("freshly resolves once, resumes at the absolute position, then requires manual Retry", async () => {
+    vi.useFakeTimers();
+    let bumpRevision: (() => void) | null = null;
+    const refreshCurrentSource = vi.fn(async () => {
+      bumpRevision?.();
+    });
+    function Harness() {
+      const [sourceRevision, setSourceRevision] = React.useState(0);
+      bumpRevision = () => setSourceRevision((current) => current + 1);
+      return (
+        <VideoPlayer
+          url="https://x/original.mp4"
+          sourceRevision={sourceRevision}
+          title="T"
+          timelineOffsetSeconds={10}
+          refreshCurrentSource={refreshCurrentSource}
+          onClose={() => {}}
+        />
+      );
+    }
+    const React = await import("react");
+    render(<Harness />);
+    let video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const originalVideo = video;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 40, writable: true });
+    Object.defineProperty(video, "volume", { configurable: true, value: 0.4, writable: true });
+    fireEvent.playing(video);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS);
+    });
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(1);
+    expect(refreshCurrentSource).toHaveBeenLastCalledWith(
+      50,
+      expect.objectContaining({ volume: 0.4, paused: false }),
+    );
+
+    video = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(video).not.toBe(originalVideo);
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 65, writable: true });
+    fireEvent.playing(video);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS);
+    });
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("Retry to request a fresh stream");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(2);
+    expect(refreshCurrentSource).toHaveBeenLastCalledWith(
+      75,
+      expect.objectContaining({ paused: false }),
+    );
+  });
+
+  it("treats media progress as activity and never trips during a user pause", async () => {
+    vi.useFakeTimers();
+    const refreshCurrentSource = vi.fn(async () => {});
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="T"
+        refreshCurrentSource={refreshCurrentSource}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    let bufferedEnd = 50;
+    Object.defineProperty(video, "buffered", {
+      configurable: true,
+      value: {
+        length: 1,
+        start: () => 0,
+        end: () => bufferedEnd,
+      },
+    });
+    fireEvent.playing(video);
+    fireEvent.progress(video);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1_000);
+    });
+    bufferedEnd = 60;
+    fireEvent.progress(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+    fireEvent.pause(video);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS * 2);
+    });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+  });
+
+  it("does not let unchanged progress noise mask a stall", async () => {
+    vi.useFakeTimers();
+    const refreshCurrentSource = vi.fn(async () => {});
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="T"
+        refreshCurrentSource={refreshCurrentSource}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "buffered", {
+      configurable: true,
+      value: { length: 1, start: () => 0, end: () => 50 },
+    });
+    fireEvent.playing(video);
+    fireEvent.progress(video);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1_000);
+    });
+    fireEvent.progress(video);
+    fireEvent.canPlay(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays disabled when scrubbing ends before the media seek completes", async () => {
+    vi.useFakeTimers();
+    const refreshCurrentSource = vi.fn(async () => {});
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="T"
+        refreshCurrentSource={refreshCurrentSource}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireEvent.playing(video);
+    fireEvent.seeking(video);
+    const scrubber = screen.getByTestId("scrub-bar");
+    fireEvent.pointerDown(scrubber);
+    fireEvent.pointerUp(scrubber);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS * 2);
+    });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+  });
+
+  it("bounds a never-settling fresh resolution and exposes Retry", async () => {
+    vi.useFakeTimers();
+    const refreshCurrentSource = vi.fn(() => new Promise<void>(() => {}));
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="T"
+        refreshCurrentSource={refreshCurrentSource}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.playing(document.querySelector("video.player-video") as HTMLVideoElement);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        POST_START_STALL_TIMEOUT_MS + FRESH_STREAM_RESOLUTION_TIMEOUT_MS,
+      );
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("Retry");
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(1);
   });
 });
 
