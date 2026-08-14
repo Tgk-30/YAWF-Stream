@@ -19,6 +19,8 @@ describe("HLS transcode arguments", () => {
     expect(valueAfter(args, "-var_stream_map")).toContain("name:480p");
     expect(valueAfter(args, "-var_stream_map")).toContain("name:360p");
     expect(valueAfter(args, "-hls_segment_filename")).toContain("%v_seg_%05d.ts");
+    expect(valueAfter(args, "-hls_playlist_type")).toBe("event");
+    expect(valueAfter(args, "-hls_list_size")).toBe("0");
   });
 
   it("uses a bounded low-bandwidth profile without upscaling", () => {
@@ -30,6 +32,7 @@ describe("HLS transcode arguments", () => {
     expect(valueAfter(args, "-b:a")).toBe("96k");
     expect(valueAfter(args, "-b:v:0")).toBe("1800k");
     expect(valueAfter(args, "-maxrate:v:0")).toBe("1800k");
+    expect(valueAfter(args, "-hls_playlist_type")).toBe("event");
   });
 
   it("maps legacy profiles and explicit qualities to bounded fixed renditions", () => {

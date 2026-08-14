@@ -3373,6 +3373,9 @@ describe("DebridStreamer server", () => {
         url: `/api/stream/${session.id}/1080p.m3u8`,
       });
       expect(variant.statusCode).toBe(200);
+      expect(variant.body).toContain(
+        "#EXT-X-START:TIME-OFFSET=0,PRECISE=YES",
+      );
       expect(variant.body).toContain("1080p_seg_00000.ts");
 
       const seg = await request(owner, { method: "GET", url: `/api/stream/${session.id}/1080p_seg_00000.ts` });
