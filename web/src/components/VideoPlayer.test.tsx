@@ -250,6 +250,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete window.YawfAndroidTV;
+  delete (window as unknown as Record<string, unknown>).__YAWF_TAURI_MOBILE__;
   vi.clearAllMocks();
   isTauriMock.mockReturnValue(false);
   deviceKindMock.mockReturnValue("mac");
@@ -1708,6 +1709,62 @@ describe("HLS source attach", () => {
     render(
       <VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />,
     );
+    expect(hlsInstances).toHaveLength(0);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(video.src).toBe("https://x/stream.m3u8");
+  });
+
+  it("uses hls.js on Android when WebView falsely reports native HLS support", async () => {
+    deviceKindMock.mockReturnValue("android");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "maybe",
+    );
+
+    render(
+      <VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />,
+    );
+
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(
+      "https://x/stream.m3u8",
+    );
+    expect(hlsInstances[0].attachMedia).toHaveBeenCalled();
+  });
+
+  it("uses hls.js in the Android APK when its user agent looks like desktop", async () => {
+    deviceKindMock.mockReturnValue("mac");
+    Object.defineProperty(window, "__YAWF_TAURI_MOBILE__", {
+      configurable: true,
+      value: true,
+    });
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+
+    render(
+      <VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />,
+    );
+
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(
+      "https://x/stream.m3u8",
+    );
+  });
+
+  it("keeps native HLS in the iOS app", () => {
+    deviceKindMock.mockReturnValue("ios");
+    Object.defineProperty(window, "__YAWF_TAURI_MOBILE__", {
+      configurable: true,
+      value: true,
+    });
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+
+    render(
+      <VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />,
+    );
+
     expect(hlsInstances).toHaveLength(0);
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
     expect(video.src).toBe("https://x/stream.m3u8");

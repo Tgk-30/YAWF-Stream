@@ -267,6 +267,22 @@ interface WebKitDocument extends Document {
   webkitFullscreenElement?: Element | null;
 }
 
+function shouldUseNativeHls(video: HTMLVideoElement): boolean {
+  // Some Android WebViews report HLS support here, then reject the manifest
+  // with MEDIA_ERR_SRC_NOT_SUPPORTED. hls.js is the reliable Android path.
+  // The native marker covers APK webviews whose user agent looks like desktop;
+  // iOS remains on native HLS because WebKit does not expose MSE there.
+  const kind = deviceKind();
+  const mobileTauri =
+    (window as unknown as Record<string, unknown>).__YAWF_TAURI_MOBILE__ === true;
+  const requiresHlsJs =
+    kind === "android" || (mobileTauri && kind !== "ios");
+  return (
+    !requiresHlsJs &&
+    video.canPlayType("application/vnd.apple.mpegurl") !== ""
+  );
+}
+
 interface WebKitPlaybackTargetAvailabilityEvent extends Event {
   availability?: "available" | "not-available";
 }
@@ -2456,7 +2472,7 @@ function WebviewPlayer({
       if (video.src !== url) video.src = url;
       return;
     }
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    if (shouldUseNativeHls(video)) {
       // WKWebView/Safari owns HLS loading here. Make its manifest and segment
       // requests use the authenticated webview cookie jar, not URL credentials.
       video.crossOrigin = "use-credentials";
@@ -2959,10 +2975,7 @@ function WebviewPlayer({
           onError={(event) => {
             // hls.js owns its media errors and bounded recovery. Native HLS and
             // direct files still surface the media element's error here.
-            if (
-              isHls &&
-              !event.currentTarget.canPlayType("application/vnd.apple.mpegurl")
-            ) {
+            if (isHls && !shouldUseNativeHls(event.currentTarget)) {
               return;
             }
             onPlaybackErrorRef.current(mediaErrorMessage(event.currentTarget.error));
