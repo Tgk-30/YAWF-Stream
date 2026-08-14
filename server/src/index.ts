@@ -2,6 +2,7 @@ import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { randomToken } from "./crypto.js";
 import { runRecoveryCli } from "./recovery.js";
+import { installGracefulShutdown } from "./shutdown.js";
 
 async function main(): Promise<void> {
   const recoveryExitCode = await runRecoveryCli(process.argv.slice(2));
@@ -39,12 +40,17 @@ async function main(): Promise<void> {
     }
   }
 
+  const removeShutdownHandlers = installGracefulShutdown(app);
   try {
     await app.listen({ host: config.host, port: config.port });
     app.log.info(`DebridStreamer server listening on http://${config.host}:${config.port}`);
   } catch (error) {
     app.log.error(error);
-    process.exit(1);
+    process.exitCode = 1;
+    removeShutdownHandlers();
+    await app.close().catch((closeError: unknown) => {
+      app.log.error(closeError);
+    });
   }
 }
 

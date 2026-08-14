@@ -97,12 +97,25 @@ function rewriteTranscodeManifest(
   const suffix = generation == null
     ? ""
     : `?generation=${encodeURIComponent(generation)}`;
-  return manifest.replace(
+  const rewritten = manifest.replace(
     /^(?!#)((?:1080p|720p|480p|360p)\.m3u8|(?:1080p|720p|480p|360p)_seg_\d{5}\.ts|seg_\d{5}\.ts|subtitles\.vtt)$/gm,
     // Keep assets relative to the manifest. A reverse proxy can mount the
     // server below a path prefix, while a root-relative URI would drop it.
     (_line, asset: string) => `${asset}${suffix}`,
   );
+  if (
+    rewritten.includes("#EXTINF:") &&
+    !rewritten.includes("#EXT-X-START:")
+  ) {
+    // FFmpeg must publish an EVENT playlist while it is still encoding so the
+    // first segment can play immediately. Pin its initial position to the
+    // beginning rather than letting live-HLS clients jump to the newest segment.
+    return rewritten.replace(
+      /^#EXTM3U$/m,
+      "#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES",
+    );
+  }
+  return rewritten;
 }
 
 const SESSION_COOKIE = "ds_session";
