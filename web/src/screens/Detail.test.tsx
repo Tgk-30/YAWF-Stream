@@ -126,17 +126,19 @@ vi.mock("../services/downloads", () => ({
 const createRequest = vi.fn<(...a: any[]) => any>();
 const resolveServerStream = vi.fn<(...a: any[]) => any>();
 const fetchServerEpisodes = vi.fn<(...a: any[]) => any>();
+const serverOptimizedSource = vi.fn((stream: any, options: any) => ({
+  url: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8`,
+  timelineOffsetSeconds: 0,
+  startPositionSeconds: 0,
+  quality: options.quality,
+}));
 vi.mock("../lib/serverApi", () => ({
   asServerTranscodeStream: (stream: any) => ({
     ...stream,
     streamURL: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8`,
   }),
-  serverOptimizedSource: (stream: any) => ({
-    url: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8`,
-    timelineOffsetSeconds: 0,
-    startPositionSeconds: 0,
-    quality: "auto",
-  }),
+  serverOptimizedSource: (stream: any, options: any) =>
+    serverOptimizedSource(stream, options),
   serverExternalPlaybackURL: (stream: any) => `${stream.streamURL}/external-test`,
   createRequest: (...a: unknown[]) => createRequest(...a),
   fetchServerEpisodes: (...a: unknown[]) => fetchServerEpisodes(...a),
@@ -1172,6 +1174,12 @@ describe("Detail play", () => {
     expect(player).toHaveAttribute(
       "data-source-file",
       "show.mkv",
+    );
+    expect(serverOptimizedSource).toHaveBeenCalledWith(
+      expect.objectContaining({
+        streamURL: "https://server.example/api/stream/session-1",
+      }),
+      { quality: "480p", startSeconds: 0 },
     );
     expect(document.querySelector(".episode-streams")).toBeNull();
   });

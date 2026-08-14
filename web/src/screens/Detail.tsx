@@ -1130,7 +1130,12 @@ export function Detail() {
     const hlsUrl = stream.backend === "direct_torrent"
       ? null
       : isServerMode() && transcodeAvailable
-      ? serverOptimizedSource(stream, { quality: "auto", startSeconds: 0 }).url
+      // Compatibility playback must become usable before the browser gives up
+      // on the original MKV/HEVC source. Starting the four-rendition adaptive
+      // ladder here made modest home servers sit at 0:00 until the transcode
+      // startup deadline. Warm one lightweight rendition first; the player can
+      // still switch to a higher Server Optimized quality after playback starts.
+      ? serverOptimizedSource(stream, { quality: "480p", startSeconds: 0 }).url
       : await services.debrid?.getTranscodeHLS(stream).catch(() => null);
     if (hlsUrl != null) {
       openPlayer(
@@ -2033,7 +2038,7 @@ export function Detail() {
                 ? isServerMode()
                   ? () => Promise.resolve(
                       serverOptimizedSource(player.fallbackStream!, {
-                        quality: "auto",
+                        quality: "480p",
                         startSeconds: 0,
                       }).url,
                     )
