@@ -4,7 +4,15 @@ import { AppWindow, Apple, Server, Smartphone, Terminal, Tv } from 'lucide-react
 import BackgroundVideo from '@/components/BackgroundVideo';
 import StreamRow from '@/components/StreamRow';
 import type { StreamRowMeta } from '@/components/StreamRow';
-import { DOWNLOAD_LINKS, GITHUB_RELEASES_LATEST, VERSION } from '@/lib/site';
+import {
+  ANDROID_PHONE_RELEASE,
+  ANDROID_TV_RELEASE,
+  DESKTOP_RELEASE,
+  DOWNLOAD_LINKS,
+  GITHUB_RELEASES,
+  SERVER_RELEASE,
+  VERSION,
+} from '@/lib/site';
 import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
@@ -24,6 +32,7 @@ const ROWS: PickerRow[] = [
     title: 'macOS - Apple Silicon',
     meta: [
       { label: 'Direct download', variant: 'instant' },
+      { label: DESKTOP_RELEASE.tag, variant: 'dim' },
       { label: 'notarized', variant: 'dim' },
     ],
     size: '.dmg',
@@ -35,6 +44,7 @@ const ROWS: PickerRow[] = [
     title: 'macOS - Intel',
     meta: [
       { label: 'Direct download', variant: 'instant' },
+      { label: DESKTOP_RELEASE.tag, variant: 'dim' },
       { label: 'notarized', variant: 'dim' },
     ],
     size: '.dmg',
@@ -46,6 +56,7 @@ const ROWS: PickerRow[] = [
     title: 'Linux - AppImage',
     meta: [
       { label: 'Direct download', variant: 'instant' },
+      { label: DESKTOP_RELEASE.tag, variant: 'dim' },
       { label: 'portable', variant: 'dim' },
     ],
     size: 'amd64',
@@ -57,6 +68,7 @@ const ROWS: PickerRow[] = [
     title: 'Android TV & Google TV',
     meta: [
       { label: 'Native Media3 player', variant: 'instant' },
+      { label: ANDROID_TV_RELEASE.tag, variant: 'dim' },
       { label: 'D-pad ready', variant: 'dim' },
     ],
     size: '.apk',
@@ -67,7 +79,8 @@ const ROWS: PickerRow[] = [
     icon: <Smartphone className="h-5 w-5" />,
     title: 'Android phone & tablet',
     meta: [
-      { label: 'Works without a server', variant: 'instant' },
+      { label: 'Native Android app', variant: 'instant' },
+      { label: ANDROID_PHONE_RELEASE.tag, variant: 'dim' },
       { label: 'sideload', variant: 'dim' },
     ],
     size: '.apk',
@@ -79,6 +92,7 @@ const ROWS: PickerRow[] = [
     title: 'Server - Debian or Ubuntu',
     meta: [
       { label: 'Manual package update', variant: 'dim' },
+      { label: SERVER_RELEASE.tag, variant: 'dim' },
       { label: 'amd64 + arm64', variant: 'dim' },
     ],
     size: '.deb',
@@ -89,8 +103,8 @@ const ROWS: PickerRow[] = [
     icon: <Smartphone className="h-5 w-5" />,
     title: 'iPhone · iPad · Android - PWA',
     meta: [
-      { label: 'served by your server', variant: 'dim' },
-      { label: 'no app store', variant: 'dim' },
+      { label: 'running server required', variant: 'dim' },
+      { label: 'no published iOS package', variant: 'dim' },
     ],
     size: 'install',
     href: '/devices',
@@ -149,7 +163,7 @@ export default function StreamPicker() {
 
   const detectedLabel =
     detected === 'pwa'
-      ? 'Mobile browser detected: install the PWA from your server.'
+      ? 'Mobile browser detected: open the PWA from a running server. No standalone iOS package is published.'
       : detected === 'android-tv'
         ? 'Android TV detected: install the signed TV APK.'
       : detected === 'linux'
@@ -196,10 +210,10 @@ export default function StreamPicker() {
           className="glass-panel flex flex-col items-start justify-between gap-2 rounded-row px-4 py-3 sm:flex-row sm:items-center sm:gap-3"
         >
           <p className="font-mono text-[0.8125rem] tracking-[0.04em] text-ink-2">
-            Choose your platform <span className="text-brand">{VERSION}</span>
+            Choose your platform. Desktop release <span className="text-brand">{VERSION}</span>
           </p>
           <a
-            href={GITHUB_RELEASES_LATEST}
+            href={GITHUB_RELEASES}
             target="_blank"
             rel="noreferrer"
             className="shrink-0 font-mono text-[0.75rem] tracking-[0.04em] text-ink-3 transition-colors hover:text-brand"
@@ -278,12 +292,12 @@ export default function StreamPicker() {
         >
           Builds are published on GitHub Releases. View the{' '}
           <a
-            href={GITHUB_RELEASES_LATEST}
+            href={GITHUB_RELEASES}
             target="_blank"
             rel="noreferrer"
             className="rounded border border-line bg-[var(--surface-glass)] px-1.5 py-0.5 text-brand transition-colors hover:border-line-strong"
           >
-            latest release
+            release catalog
           </a>
           .
         </motion.p>

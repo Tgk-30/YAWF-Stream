@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { gsap, useGSAP } from '@/lib/gsap';
 import { usePrefersReducedMotion } from '@/lib/motion';
-import { GITHUB_RELEASES_LATEST, GITHUB_REPO, VERSION } from '@/lib/site';
+import { GITHUB_DESKTOP_RELEASE, GITHUB_REPO, VERSION } from '@/lib/site';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import Chip from '@/components/Chip';
 import { asset } from '@/lib/asset';
@@ -20,10 +20,10 @@ function CascadeChars({ text }: { text: string }) {
 }
 
 const META_CHIPS: { label: string; href?: string }[] = [
-  { label: VERSION, href: GITHUB_RELEASES_LATEST },
+  { label: `Desktop ${VERSION}`, href: GITHUB_DESKTOP_RELEASE },
   { label: 'MIT', href: `${GITHUB_REPO}/blob/main/LICENSE` },
   { label: 'multi-arch' },
-  { label: 'GitHub Releases', href: GITHUB_RELEASES_LATEST },
+  { label: 'Desktop release', href: GITHUB_DESKTOP_RELEASE },
 ];
 
 /**

@@ -58,7 +58,7 @@ export default function TypographySection() {
     {
       key: 'caption',
       shorthand: 'font: 400 0.8125rem/1.5 var(--font-mono); letter-spacing: 0.04em; color: var(--ink-3);',
-      node: <p className="font-mono text-[0.8125rem] tracking-[0.04em] text-ink-3">{VERSION} · MIT</p>,
+      node: <p className="font-mono text-[0.8125rem] tracking-[0.04em] text-ink-3">Desktop {VERSION} · MIT</p>,
     },
   ];
 

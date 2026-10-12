@@ -104,9 +104,9 @@ export default function Hero() {
         </h1>
 
         <p className="dv-lede lede mx-auto mt-6 max-w-[720px]">
-          Desktop apps for macOS and Linux, a native Android TV and Google TV app, and a mobile PWA your own server
-          hosts. Windows is held until its signing gate passes. Browser TV mode pairs with a phone remote, while every
-          screen keeps one library and resume position.
+          Desktop apps for macOS and Linux, a native Android TV and Google TV app, and a mobile PWA your running server
+          hosts. No standalone iOS package is published. Windows is held until its signing gate passes. Browser TV mode
+          pairs with a phone remote, while every screen keeps one library and resume position.
         </p>
 
         <div className="mt-8 flex flex-wrap items-center justify-center gap-2.5">

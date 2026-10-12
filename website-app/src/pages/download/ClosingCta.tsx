@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from 'framer-motion';
-import { GITHUB_RELEASES_LATEST, GITHUB_REPO, VERSION } from '@/lib/site';
+import { GITHUB_DESKTOP_RELEASE, GITHUB_REPO, VERSION } from '@/lib/site';
 import RingMark from '@/components/RingMark';
 import { GhostButton, PrimaryButton } from '@/components/Buttons';
 
@@ -51,9 +51,9 @@ export default function ClosingCta() {
           viewport={{ once: true, amount: 0.75 }}
           transition={{ duration: reduced ? 0.2 : 0.5, ease: EASE_EXPO, delay: 0.35 }}
         >
-          <PrimaryButton href={GITHUB_RELEASES_LATEST}>
+          <PrimaryButton href={GITHUB_DESKTOP_RELEASE}>
             <RingMark size={15} static className="transition-transform duration-500 ease-expo group-hover:rotate-[360deg]" />
-            Get {VERSION}
+            Get desktop {VERSION}
           </PrimaryButton>
           <GhostButton to="/self-host">Self-host instead</GhostButton>
         </motion.div>

@@ -244,14 +244,14 @@ interface Chapter {
 const CHAPTERS: Chapter[] = [
   {
     id: 'ios',
-    title: 'Safari does the honors.',
+    title: 'Safari connects to your server.',
     steps: [
-      'Open your server URL in Safari',
+      'Open your running server URL in Safari',
       'Tap Share',
       'Add to Home Screen',
       'Launch YAWF Stream from the icon',
     ],
-    tip: 'full-screen, offline shell, your server does the work',
+    tip: 'your server does the work; no standalone iOS package is published',
     hint: 'Open server URL in Safari → Share → Add to Home Screen',
     kind: 'ios',
   },

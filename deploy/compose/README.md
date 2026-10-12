@@ -9,12 +9,41 @@ This runs Server Mode and serves the built PWA from the same container.
 Pulls the published multi-arch image (linux/amd64 + linux/arm64) from GHCR, so
 an Ubuntu VPS / home server just needs Docker. Uses `docker-compose.ghcr.yml`.
 
+For the guided updater flow, create the Compose deployment in a protected
+root-owned directory before its first start. The installer never creates,
+prints, or changes `.env` values for you.
+
 ```sh
-cp .env.example .env
-openssl rand -base64 32
-# paste that value into DS_SERVER_SECRET_KEY in .env
-docker compose -f docker-compose.ghcr.yml up -d
+sudo install -d -o root -g root -m 0755 /srv/yawf
+sudo install -o root -g root -m 0644 docker-compose.ghcr.yml /srv/yawf/docker-compose.ghcr.yml
+sudo install -o root -g root -m 0600 .env.example /srv/yawf/.env
+sudoedit /srv/yawf/.env
+# Set DS_SERVER_SECRET_KEY in the protected .env, then:
+cd /srv/yawf
+sudo docker compose -f docker-compose.ghcr.yml up -d --no-deps debridstreamer
 ```
+
+This starts only `debridstreamer`; it does not operate any unrelated Compose
+services. If you already run a user-owned Compose project, leave it unchanged
+until you intentionally move it to a protected deployment path and preserve the
+project and data-volume identity.
+
+Then install the matching verified updater bundle as part of the normal guided
+Docker setup. From the same server release assets, verify the downloaded
+bundle before extracting it:
+
+```sh
+grep 'yawf-server-updater_X.Y.Z.tar.gz' SHA256SUMS | sha256sum -c -
+tar -xzf yawf-server-updater_X.Y.Z.tar.gz
+cd yawf-server-updater_X.Y.Z
+sudo ./install.sh
+```
+
+That installer offers the host updater only when it has an interactive terminal.
+Its default, decline, EOF, and non-interactive paths leave automatic updates
+off. The installer does not directly invoke an update check or transaction. Enabling activates the systemd timer; any timer service run is scheduled independently by systemd and remains subject to the updater policy and maintenance-window gates. Plain
+`docker compose` cannot display this consent prompt. For scripted opt-in, use
+`sudo ./install.sh --unattended --enable --compose-file /absolute/docker-compose.ghcr.yml`.
 
 Update later with:
 
@@ -25,20 +54,12 @@ docker compose -f docker-compose.ghcr.yml up -d
 
 ### Optional unattended stable updates
 
-The application container never controls Docker. A separately installed,
-root-owned host helper can update one explicitly registered Compose service by
-immutable release digest, with a stopped-volume snapshot and automatic
-rollback. It is off by default and never follows the floating `latest` tag.
-
-Download `yawf-server-updater_X.Y.Z.tar.gz` and `SHA256SUMS` from the matching
-server release, verify the checksum, then follow the bundled README:
-
-```sh
-sudo ./install.sh
-sudo yawf-server-update register /absolute/path/docker-compose.ghcr.yml
-sudo yawf-server-update check
-sudo yawf-server-update enable
-```
+The application container never controls Docker. The root-owned host helper
+can update one explicitly registered Compose service by immutable release
+digest, with a stopped-volume snapshot and automatic rollback. It never follows
+the floating `latest` tag. The matching bundle's `sudo ./install.sh` entrypoint
+above is the only guided installation flow that can offer consent. Plain
+`docker compose` does not register or enable the helper.
 
 Registration requires the Compose file, its `.env`, and every parent directory
 through `/` to be root-owned, free of symlinks, and not writable by group or

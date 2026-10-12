@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateWebsiteReleaseCatalog } from "./check_website_release_catalog.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const checks = [];
@@ -115,9 +117,7 @@ const cargoTomlVersion = read("web/src-tauri/Cargo.toml").match(
 const cargoLockVersion = read("web/src-tauri/Cargo.lock").match(
   /\[\[package\]\]\s*\nname = "debridstreamer"\s*\nversion = "([^"]+)"/,
 )?.[1];
-const websiteVersion = read("website-app/src/lib/site.ts").match(
-  /APP_VERSION\s*=\s*'([^']+)'/,
-)?.[1];
+const websiteReleaseCatalog = read("website-app/src/lib/site.ts");
 const androidTVVersion = read("android-tv/app/build.gradle").match(
   /versionName\s+"([^"]+)"/,
 )?.[1];
@@ -130,7 +130,7 @@ const expectedAndroidTVVersionCode = semanticVersion
     Number(semanticVersion[2]) * 100 +
     Number(semanticVersion[3])
   : Number.NaN;
-const releaseVersions = [
+const sourceVersions = [
   tauri.version,
   webPackage.version,
   webPackageLock.version,
@@ -139,15 +139,33 @@ const releaseVersions = [
   serverVersion,
   websitePackage.version,
   websitePackageLock.version,
-  websiteVersion,
   cargoTomlVersion,
   cargoLockVersion,
   androidTVVersion,
 ];
 check(
-  "Release version surfaces match",
-  releaseVersions.every((version) => version === tauri.version),
-  `web, server, website, Tauri, Cargo, and Android TV versions must all match ${tauri.version}`,
+  "Source version surfaces match",
+  sourceVersions.every((version) => version === tauri.version),
+  `web, server, website package, Tauri, Cargo, and Android TV source versions must all match ${tauri.version}`,
+);
+const websiteReleaseCatalogFailures = validateWebsiteReleaseCatalog(websiteReleaseCatalog);
+check(
+  "Website shipping release catalog is valid",
+  websiteReleaseCatalogFailures.length === 0,
+  websiteReleaseCatalogFailures.join("; ") || "website platform shipping channels must remain explicit",
+);
+let websiteReleaseCatalogMutationTestsPass = true;
+try {
+  execFileSync(process.execPath, ["--test", join(root, "scripts/check_website_release_catalog.test.mjs")], {
+    stdio: "pipe",
+  });
+} catch {
+  websiteReleaseCatalogMutationTestsPass = false;
+}
+check(
+  "Website shipping release catalog mutation tests pass",
+  websiteReleaseCatalogMutationTestsPass,
+  "scripts/check_website_release_catalog.test.mjs must reject independent version, tag, filename, and checksum-channel mutations",
 );
 check(
   "Android TV version code matches release version",

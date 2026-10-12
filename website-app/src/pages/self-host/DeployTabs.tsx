@@ -5,7 +5,13 @@ import { ArrowUpRight, Package, Power } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
-import { APP_VERSION, DOWNLOAD_LINKS, VERSION } from '@/lib/site';
+import {
+  DOWNLOAD_LINKS,
+  GITHUB_UBUNTU_GUIDE,
+  RELEASE_LINKS,
+  SERVER_RELEASE,
+  SERVER_SOURCE_FILES,
+} from '@/lib/site';
 import SectionHeading from '@/components/SectionHeading';
 import TerminalBlock from '@/components/TerminalBlock';
 import StreamRow from '@/components/StreamRow';
@@ -14,24 +20,23 @@ import Chip from '@/components/Chip';
 import { asset } from '@/lib/asset';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
-const UBUNTU_GUIDE = 'https://github.com/Tgk-30/YAWF-Stream/blob/main/deploy/ubuntu/README.md';
-
 const DOCKER_LINES = [
-  { text: 'mkdir debridstreamer && cd debridstreamer' },
-  { text: 'curl -fsSLO https://raw.githubusercontent.com/Tgk-30/YAWF-Stream/main/deploy/compose/docker-compose.ghcr.yml' },
-  { text: 'curl -fsSL https://raw.githubusercontent.com/Tgk-30/YAWF-Stream/main/deploy/compose/.env.example -o .env' },
-  { text: 'docker compose -f docker-compose.ghcr.yml up -d' },
+  {
+    text: `( set -eu; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' 0; curl -fsSL ${SERVER_SOURCE_FILES.dockerCompose} -o "$tmp/docker-compose.ghcr.yml"; curl -fsSL ${SERVER_SOURCE_FILES.envExample} -o "$tmp/.env"; sudo mkdir -m 0755 /srv/yawf; sudo install -o root -g root -m 0644 "$tmp/docker-compose.ghcr.yml" /srv/yawf/docker-compose.ghcr.yml; sudo install -o root -g root -m 0600 "$tmp/.env" /srv/yawf/.env )`,
+  },
+  { text: 'sudo chmod 600 /srv/yawf/.env && sudoedit /srv/yawf/.env' },
+  { text: 'cd /srv/yawf && sudo docker compose -f docker-compose.ghcr.yml up -d --no-deps debridstreamer' },
   { text: '[+] Running 1/1  ✓ Container debridstreamer  Started', output: true },
-  { text: '→ serving on http://localhost:7878', output: true },
+  { text: '→ serving on http://localhost:43110', output: true },
 ];
 
 const NATIVE_LINES = [
-  { text: 'git clone https://github.com/Tgk-30/YAWF-Stream.git && cd YAWF-Stream' },
-  { text: 'npm ci && npm run build' },
-  { text: 'sudo cp deploy/systemd/debridstreamer.service /etc/systemd/system/' },
-  { text: 'sudo systemctl enable --now debridstreamer' },
+  { text: 'curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -' },
+  { text: 'sudo apt-get install -y nodejs git' },
+  { text: `git clone --branch ${SERVER_RELEASE.tag} --depth 1 https://github.com/Tgk-30/YAWF-Stream.git && cd YAWF-Stream` },
+  { text: 'sudo bash deploy/ubuntu/install.sh' },
   { text: '● debridstreamer.service - YAWF Stream server', output: true },
-  { text: '  Active: active (running) · listening on :7878', output: true },
+  { text: '  Active: active (running) · listening on :43110', output: true },
 ];
 
 const TABS = [
@@ -50,7 +55,7 @@ function isDeployId(v: string | null): v is DeployId {
 function GuideLink() {
   return (
     <a
-      href={UBUNTU_GUIDE}
+      href={GITHUB_UBUNTU_GUIDE}
       target="_blank"
       rel="noreferrer"
       className="group mt-5 inline-flex items-center gap-2 font-mono text-[0.8125rem] tracking-[0.04em] text-brand transition-colors hover:text-accent2"
@@ -169,6 +174,39 @@ export default function DeployTabs() {
                         <span className="font-mono text-[0.9rem] text-ink-1">arm64</span>.
                       </p>
                       <TerminalBlock title="docker - quickstart" lines={DOCKER_LINES} />
+                      <p className="mt-4 max-w-[720px] font-body text-[0.95rem] leading-[1.7] text-ink-2">
+                        Fresh install only. The first command refuses any existing <span className="font-mono text-[0.85em] text-ink-1">/srv/yawf</span>{' '}
+                        entry before it writes configuration. For an existing deployment, keep its project and volume identity, then use its own
+                        <span className="font-mono text-[0.85em] text-ink-1"> docker compose pull</span> and{' '}
+                        <span className="font-mono text-[0.85em] text-ink-1">up -d</span> update path instead of
+                        downloading replacement files.
+                      </p>
+                      <div className="mt-5 max-w-[720px] rounded-row border border-line bg-[var(--surface-glass)] p-5">
+                        <p className="font-body text-[0.95rem] leading-[1.7] text-ink-2">
+                          Optional automatic updates use the matching {SERVER_RELEASE.tag} host helper for this protected
+                          Docker deployment only. In a fresh terminal, verify and extract its bundle, then run{' '}
+                          <span className="font-mono text-[0.85em] text-ink-1">sudo ./install.sh</span>. Choose Yes,
+                          enter the protected absolute Compose path, then choose Yes again. Enter, No, EOF, and
+                          non-interactive or unattended installation without explicit enable leave updates off. It requires
+                          Docker Compose, flock, and Node.js 24 or newer at <span className="font-mono text-[0.85em] text-ink-1">/usr/bin/node</span>.
+                          The installer itself never invokes a release check or update transaction; enabling opts into
+                          scheduled updates.
+                        </p>
+                        <div className="mt-4 flex flex-wrap gap-3 font-mono text-[0.75rem] tracking-[0.04em]">
+                          <a href={RELEASE_LINKS.serverUpdaterBundle} className="text-brand hover:text-accent2">
+                            updater bundle
+                          </a>
+                          <a href={RELEASE_LINKS.serverChecksums} className="text-brand hover:text-accent2">
+                            SHA256SUMS
+                          </a>
+                          <a href={RELEASE_LINKS.serverVerification} className="text-brand hover:text-accent2">
+                            verification record
+                          </a>
+                          <a href={RELEASE_LINKS.serverUpdateManifest} className="text-brand hover:text-accent2">
+                            update manifest
+                          </a>
+                        </div>
+                      </div>
                       <GuideLink />
                     </div>
                   )}
@@ -176,7 +214,9 @@ export default function DeployTabs() {
                   {t.id === 'native' && (
                     <div>
                       <p className="mb-5 max-w-[640px] font-body text-[1rem] leading-[1.7] text-ink-2">
-                        Prefer bare metal? Run the Node server directly under systemd for auto-start on boot.
+                        Prefer bare metal? Node.js 24 or newer at <span className="font-mono text-[0.85em] text-ink-1">/usr/bin/node</span>{' '}
+                        is required. The versioned source checkout uses its supported Ubuntu installer to build and
+                        register systemd.
                       </p>
                       <TerminalBlock title="native - node + systemd" lines={NATIVE_LINES} />
                       <GuideLink />
@@ -190,17 +230,16 @@ export default function DeployTabs() {
                       </p>
                       <StreamRow
                         icon={<Package className="h-5 w-5" strokeWidth={1.75} />}
-                        title={`debridstreamer-server_${APP_VERSION}_all.deb`}
+                        title={`debridstreamer-server_${SERVER_RELEASE.version}_all.deb`}
                         meta={[
-                          { label: 'latest', variant: 'instant' },
-                          { label: 'signed updater', variant: 'dim' },
-                          { label: VERSION, variant: 'dim' },
+                          { label: 'manual .deb update', variant: 'instant' },
+                          { label: SERVER_RELEASE.tag, variant: 'dim' },
                         ]}
-                        size="3.8 MB"
+                        size=".deb"
                         href={DOWNLOAD_LINKS.serverDeb}
                       />
                       <div className="mt-4 flex flex-wrap gap-2.5">
-                        <Chip variant="outline">apt install ./debridstreamer-server_{APP_VERSION}_all.deb</Chip>
+                        <Chip variant="outline">{`apt install ./debridstreamer-server_${SERVER_RELEASE.version}_all.deb`}</Chip>
                         <Chip variant="outline">systemd service ready</Chip>
                       </div>
                     </div>

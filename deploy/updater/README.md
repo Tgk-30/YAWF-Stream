@@ -1,9 +1,10 @@
 # YAWF Stream Docker Compose host updater
 
 This optional host helper installs stable Server Mode updates for one explicitly
-registered Docker Compose `debridstreamer` service. It is disabled after
-installation. It never runs in the application container and never mounts the
-Docker socket into YAWF Stream.
+registered Docker Compose `debridstreamer` service. It is disabled by default
+unless an operator confirms the interactive prompt or uses the explicit
+unattended flags. It never runs in the application container and never mounts
+the Docker socket into YAWF Stream.
 
 Requirements:
 
@@ -18,16 +19,40 @@ Requirements:
   and free of symlinks; `/tmp` and user-home deployments are intentionally
   rejected
 
-Install and opt in:
+Install from the updater bundle:
 
 ```sh
 tar -xzf yawf-server-updater_X.Y.Z.tar.gz
 cd yawf-server-updater_X.Y.Z
 sudo ./install.sh
-sudo yawf-server-update register /absolute/path/docker-compose.ghcr.yml
-sudo yawf-server-update check
-sudo yawf-server-update enable
 ```
+
+In an interactive terminal, `install.sh` describes the host-level behavior and
+asks before it registers a Compose file and enables the timer. Answering `N`,
+pressing Enter, or reaching EOF leaves automatic updates off. It never opens
+`/dev/tty` itself, so redirected or non-interactive installations also leave
+new registrations off. The installer does not directly invoke an update check or transaction. Enabling activates the systemd timer; any timer service run is scheduled independently by systemd and remains subject to the updater policy and maintenance-window gates.
+
+For an unattended, explicitly authorized opt-in, provide both the intent and
+one exact target:
+
+```sh
+sudo ./install.sh --unattended --enable \
+  --compose-file /srv/yawf/docker-compose.ghcr.yml
+```
+
+The same flags do not replace an existing registration. A replacement must be
+explicit and the existing root-owned policy must be a safe regular file:
+
+```sh
+sudo ./install.sh --unattended --enable --replace-registration \
+  --compose-file /srv/yawf/docker-compose.ghcr.yml
+```
+
+Without `--replace-registration`, reinstalling preserves the existing policy
+and timer, including an enabled timer. If enabling the new registration fails,
+the installer invokes the helper's disable operation and reports the observed
+systemd timer state instead of claiming it is off.
 
 The timer checks hourly but installs only from 03:00 through 05:00 UTC. It
 defers while an unexpired stream session is active. `disable` stops the timer;

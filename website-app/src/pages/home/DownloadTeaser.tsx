@@ -43,7 +43,7 @@ const ROWS = [
   {
     icon: <Smartphone className="h-5 w-5" />,
     title: 'Phone & tablet PWA',
-    meta: [{ label: 'from your server', variant: 'dim' as const }],
+    meta: [{ label: 'running server required', variant: 'dim' as const }],
     href: '/devices',
   },
 ];
@@ -75,7 +75,7 @@ export default function DownloadTeaser() {
             <PrimaryButton to="/download">All downloads</PrimaryButton>
           </div>
           <p className="mt-5 font-mono text-[0.8125rem] tracking-[0.04em] text-ink-3">
-            Latest: {VERSION} · GitHub Releases
+            Desktop release: {VERSION} · GitHub Releases
           </p>
         </SectionHeading>
 

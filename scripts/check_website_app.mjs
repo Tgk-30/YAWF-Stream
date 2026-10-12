@@ -3,6 +3,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateWebsiteReleaseCatalog } from "./check_website_release_catalog.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const source = join(root, "website-app");
@@ -69,20 +70,12 @@ check(
 );
 check(styles.includes(".char-space") && styles.includes("white-space: pre"), "animated headlines must preserve word spacing");
 check(packageJson.version === tauri.version, "website package version must match the Tauri release version");
-check(site.includes(`APP_VERSION = '${tauri.version}'`), "website release constants must match the Tauri release version");
-
-for (const assetTemplate of [
-  "YAWF.Stream_${APP_VERSION}_aarch64.dmg",
-  "YAWF.Stream_${APP_VERSION}_x64.dmg",
-  "YAWF.Stream_${APP_VERSION}_amd64.AppImage",
-  "YAWF.Stream_Android.TV_${APP_VERSION}.apk",
-  "debridstreamer-server_${APP_VERSION}_all.deb",
-]) {
-  check(site.includes(assetTemplate), `direct release link missing: ${assetTemplate}`);
+for (const failure of validateWebsiteReleaseCatalog(site)) {
+  check(false, `website release catalog: ${failure}`);
 }
 
 check(site.includes("WINDOWS_RELEASE_AVAILABLE = false"), "website must record that the Windows channel is held");
-check(!site.includes("YAWF.Stream_${APP_VERSION}_x64_en-US.msi"), "website must not publish a broken Windows installer link");
+check(!site.includes("_x64_en-US.msi"), "website must not publish a broken Windows installer link");
 check(!hero.includes("DOWNLOAD_LINKS.windows"), "home hero must not link to an unavailable Windows asset");
 check(streamPicker.includes("Windows release is held"), "download picker must explain the held Windows channel");
 check(
@@ -132,6 +125,12 @@ check(
   "PWA instructions must use the server port 43110",
 );
 check(
+  pwaSteps.includes("running YAWF Stream server is required") &&
+    deviceInstallFlows.includes("no standalone iOS package is published") &&
+    help.includes("No standalone iOS package is published"),
+  "iOS and iPad PWA copy must require a running server and avoid a standalone package claim",
+);
+check(
   deviceInstallFlows.includes("192.168.1.20:43110") &&
     !deviceInstallFlows.includes(":9696"),
   "device install example must use the server port 43110",
@@ -152,7 +151,35 @@ check(
 
 check(!/checking caches|sources found|sort: instant/i.test(streamPicker), "download picker must not simulate cache or source status");
 check(streamPicker.includes("Choose your platform"), "download picker must explain the platform choice directly");
-check(deployTabs.includes("debridstreamer-server_${APP_VERSION}_all.deb"), "self-host page must use the published server package name");
+const freshDockerSources = [deployTabs, selfHostTeaser];
+const usesSafeFreshDockerInstall = freshDockerSources.every(
+  (copy) =>
+    copy.includes('tmp="$(mktemp -d)"') &&
+    copy.includes(`trap 'rm -rf "$tmp"' 0`) &&
+    copy.includes('curl -fsSL ${SERVER_SOURCE_FILES.dockerCompose} -o "$tmp/docker-compose.ghcr.yml"') &&
+    copy.includes('curl -fsSL ${SERVER_SOURCE_FILES.envExample} -o "$tmp/.env"') &&
+    copy.includes("sudo mkdir -m 0755 /srv/yawf") &&
+    !copy.includes("sudo mkdir -p") &&
+    copy.includes('sudo install -o root -g root -m 0644 "$tmp/docker-compose.ghcr.yml" /srv/yawf/docker-compose.ghcr.yml') &&
+    copy.includes('sudo install -o root -g root -m 0600 "$tmp/.env" /srv/yawf/.env') &&
+    !copy.includes("sudo curl -fsSL") &&
+    !copy.includes("sudo install -d") &&
+    !copy.includes("sudo sh -c"),
+);
+check(
+  deployTabs.includes("debridstreamer-server_${SERVER_RELEASE.version}_all.deb") &&
+    deployTabs.includes("RELEASE_LINKS.serverUpdaterBundle") &&
+    deployTabs.includes("protected absolute Compose path") &&
+    deployTabs.includes("Docker Compose, flock, and Node.js 24") &&
+    deployTabs.includes("never invokes a release check or update transaction") &&
+    usesSafeFreshDockerInstall &&
+    deployTabs.includes("sudo bash deploy/ubuntu/install.sh") &&
+    deployTabs.includes("listening on :43110") &&
+    !deployTabs.includes(":7878") &&
+    !deployTabs.includes("3.8 MB") &&
+    !selfHostTeaser.includes(":7878"),
+  "self-host page must preserve existing deployments, use port 43110, and distinguish native, Debian, and optional Docker updater paths",
+);
 
 for (const asset of [
   "hero-streams-loop.mp4",

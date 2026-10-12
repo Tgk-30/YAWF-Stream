@@ -202,7 +202,7 @@ const STEPS = [
     index: '01',
     icon: Apple,
     title: 'iPhone / iPad',
-    body: 'Open your server URL in Safari → Share → Add to Home Screen.',
+    body: 'Open your running server URL in Safari → Share → Add to Home Screen. No standalone iOS package is published.',
     hint: 'Share → Add to Home Screen',
     kind: 'ios' as const,
   },
@@ -240,7 +240,7 @@ export default function PwaSteps() {
         <SectionHeading
           eyebrow="// PHONE & TABLET"
           title="No app store. Your server is the store."
-          lede="The PWA is served by your own YAWF Stream server - install it straight from the browser."
+          lede="A running YAWF Stream server is required. Install its PWA straight from the browser; no standalone iOS package is published."
         />
 
         <div ref={stageRef} className="mt-12 grid gap-5 md:grid-cols-3">

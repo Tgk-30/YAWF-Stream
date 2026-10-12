@@ -1,7 +1,7 @@
 import { Link } from 'react-router';
 import { cn } from '@/lib/utils';
 import theme, { applyPreset, THEME_PRESETS, THEME_PRESET_NAMES, useThemePreset } from '@/theme.config';
-import { GITHUB_DOCKER, GITHUB_ISSUES, GITHUB_RELEASES, GITHUB_RELEASES_LATEST, GITHUB_REPO, VERSION } from '@/lib/site';
+import { GITHUB_DESKTOP_RELEASE, GITHUB_DOCKER, GITHUB_ISSUES, GITHUB_RELEASES, GITHUB_REPO, VERSION } from '@/lib/site';
 import RingMark from '@/components/RingMark';
 import Chip from '@/components/Chip';
 import BackgroundVideo from '@/components/BackgroundVideo';
@@ -31,7 +31,7 @@ const COLUMNS: { heading: string; links: { label: string; to: string; external?:
     links: [
       { label: 'Source', to: GITHUB_REPO, external: true },
       { label: 'Issues', to: GITHUB_ISSUES, external: true },
-      { label: 'Latest release', to: GITHUB_RELEASES_LATEST, external: true },
+      { label: 'Desktop release', to: GITHUB_DESKTOP_RELEASE, external: true },
     ],
   },
 ];
@@ -80,7 +80,7 @@ export default function Footer() {
               MIT licensed open-source project. {theme.tagline}
             </p>
             <Chip className="mt-5" variant="outline">
-              {VERSION}
+              Desktop {VERSION}
             </Chip>
           </div>
 

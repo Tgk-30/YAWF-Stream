@@ -341,8 +341,49 @@ jobs:
         with:
           node-version: 24
 
+      - name: Link Node 24 for updater checks
+        shell: bash
+        run: sudo ln -sf "$(command -v node)" /usr/bin/node
+
       - name: Test updater policy and release guards
-        run: node --test scripts/server_updater.test.mjs scripts/server_updater_ci_guards.test.mjs
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          node --test scripts/server_updater.test.mjs scripts/server_updater_ci_guards.test.mjs
+          timeout 240s env YAWF_REQUIRE_DOCKER=1 node --test scripts/server_updater_install.test.mjs
+          driver_log="$RUNNER_TEMP/server-updater-install-runtime-driver.log"
+          timeout 420s sudo env \
+            YAWF_INSTALLER_RUNTIME_DISPOSABLE=1 \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_OS="$RUNNER_OS" \
+            bash scripts/server_updater_install_runtime.sh 2>&1 | tee "$driver_log"
+          runtime_raw="$(sed -n 's/^INSTALLER_RUNTIME_RAW=//p' "$driver_log" | tail -n 1)"
+          runtime_receipt="$(sed -n 's/^INSTALLER_RUNTIME_RECEIPT=//p' "$driver_log" | tail -n 1)"
+          test -n "$runtime_raw"
+          test -n "$runtime_receipt"
+          test -s "$runtime_raw"
+          test -s "$runtime_receipt"
+          expected_source_hash="$(sha256sum deploy/updater/install.sh | awk '{print $1}')"
+          node --input-type=module - "$runtime_raw" "$runtime_receipt" "$expected_source_hash" <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          const [rawPath, receiptPath, expectedSourceHash] = process.argv.slice(2);
+          const raw = readFileSync(rawPath, "utf8");
+          const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+          assert.ok(raw.length > 0 && raw.length <= 32 * 1024, "installer runtime raw output is empty or unbounded");
+          assert.doesNotMatch(raw, /DS_SERVER_SECRET_KEY=/, "installer runtime output exposed an environment value");
+          assert.equal(receipt.ok, true);
+          assert.equal(receipt.mode, "installer-pty-runtime");
+          assert.match(receipt.sourceSha256, /^[a-f0-9]{64}$/);
+          assert.equal(receipt.sourceSha256, expectedSourceHash, "PTY test did not execute the checked-out installer bytes");
+          assert.equal(receipt.cases, 13);
+          for (const key of ["freshDefaultOff", "declinedOff", "eofOff", "nonTtyOff", "unattendedOff", "stubbedDockerRegistrationPolicySystemd", "explicitResetScopeRequired", "safeExplicitReplacement", "existingEnabledPolicyPreserved", "unsafeRegistrationRejected", "enableFailureDisableObserved", "partialRegistrationCleanupObserved", "runtimeLockCleanupObserved", "continuedCleanupAfterErrorObserved"]) {
+            assert.equal(receipt[key], true, `installer receipt did not prove ${key}`);
+          }
+          assert.equal(receipt.installerIssuedUpdateTransaction, false);
+          NODE
 
       - name: Install disabled updater helper and verify kernel lock exclusion
         shell: bash
@@ -470,4 +511,7 @@ jobs:
             ${{ runner.temp }}/server-updater-compose.json
             ${{ runner.temp }}/server-updater-compose-actual.log
             ${{ runner.temp }}/server-updater-compose-actual.json
+            ${{ runner.temp }}/server-updater-install-runtime-driver.log
+            ${{ runner.temp }}/yawf-updater-install-runtime.*/installer.raw.log
+            ${{ runner.temp }}/yawf-updater-install-runtime.*/installer.receipt.json
           if-no-files-found: error
