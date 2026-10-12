@@ -163,6 +163,69 @@ test("patches release cleartext and third-party WebView cookies idempotently", (
     assert.match(activity, /setAcceptThirdPartyCookies\(webView, true\)/);
     assert.match(activity, /statusBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/);
     assert.match(activity, /navigationBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/);
+    assert.equal(activity.match(/@JavascriptInterface/g)?.length, 1);
+    assert.equal(activity.match(/addJavascriptInterface/g)?.length, 1);
+    assert.match(
+      activity,
+      /private const val SAFE_AREA_BRIDGE_NAME = "__YAWF_NATIVE_SAFE_AREA__"/,
+    );
+    assert.match(activity, /@Keep\nclass YawfSafeAreaBridge\(/);
+    assert.match(activity, /fun getInsets\(\): String = snapshot\.get\(\)/);
+    const bridgeClass = activity.slice(
+      activity.indexOf("@Keep\nclass YawfSafeAreaBridge"),
+      activity.indexOf("\n\nclass MainActivity"),
+    );
+    assert.doesNotMatch(bridgeClass, /WebView|Activity|Context|Intent/);
+    assert.match(activity, /private val safeAreaSnapshot = AtomicReference\(EMPTY_SAFE_AREA\)/);
+    assert.match(activity, /webView\.addJavascriptInterface\(safeAreaBridge, SAFE_AREA_BRIDGE_NAME\)/);
+    assert.ok(
+      activity.indexOf("webView.addJavascriptInterface") <
+        activity.indexOf("super.onWebViewCreate(webView)"),
+    );
+    assert.match(activity, /val windowInsets = webView\.rootWindowInsets \?: return/);
+    for (const side of ["Top", "Right", "Bottom", "Left"]) {
+      assert.match(activity, new RegExp(`systemWindowInset${side}\\.coerceAtLeast\\(0\\)`));
+      assert.match(activity, new RegExp(`safeInset${side}\\.coerceAtLeast\\(0\\)`));
+    }
+    assert.match(activity, /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.P/);
+    assert.match(activity, /addOnLayoutChangeListener\(layoutListener\)/);
+    assert.match(activity, /addOnGlobalLayoutListener\(globalLayoutListener\)/);
+    assert.match(activity, /override fun onConfigurationChanged\(newConfig: Configuration\)/);
+    assert.match(activity, /removeOnLayoutChangeListener/);
+    assert.match(activity, /removeOnGlobalLayoutListener/);
+    assert.match(activity, /removeJavascriptInterface\(SAFE_AREA_BRIDGE_NAME\)/);
+    assert.match(
+      activity,
+      /private const val SAFE_AREA_CHANGE_SCRIPT = "window\.dispatchEvent\(new Event\('yawf-native-safe-area-change'\)\)"/,
+    );
+    assert.match(activity, /safeAreaSnapshot\.getAndSet\(nextSnapshot\) != nextSnapshot/);
+    assert.match(activity, /webView\.evaluateJavascript\(SAFE_AREA_CHANGE_SCRIPT, null\)/);
+    assert.match(activity, /if \(safeAreaWebView !== webView\) return/);
+    const detachStart = activity.indexOf("  private fun detachSafeAreaBridge()");
+    assert.ok(detachStart >= 0, "detachSafeAreaBridge must exist");
+    const detachBody = activity.slice(detachStart);
+    const resetSnapshotIndex = detachBody.indexOf("safeAreaSnapshot.set(EMPTY_SAFE_AREA)");
+    const nullableWebViewIndex = detachBody.indexOf("val webView = safeAreaWebView ?: return");
+    assert.ok(resetSnapshotIndex >= 0, "detach must reset the cached snapshot");
+    assert.ok(nullableWebViewIndex >= 0, "detach must retain its nullable WebView guard");
+    assert.ok(
+      resetSnapshotIndex < nullableWebViewIndex,
+      "detach must reset the cached snapshot before its nullable WebView guard",
+    );
+    const createStart = activity.indexOf("  override fun onWebViewCreate");
+    const createEnd = activity.indexOf("  override fun onConfigurationChanged");
+    assert.ok(createStart >= 0, "onWebViewCreate must exist");
+    assert.ok(createEnd > createStart, "onWebViewCreate must end before configuration handling");
+    const createBody = activity.slice(createStart, createEnd);
+    const detachPreviousIndex = createBody.indexOf("detachSafeAreaBridge()");
+    const attachNewIndex = createBody.indexOf("safeAreaWebView = webView");
+    assert.ok(detachPreviousIndex >= 0, "replacement must detach the prior bridge");
+    assert.ok(attachNewIndex >= 0, "replacement must retain the new WebView identity");
+    assert.ok(
+      detachPreviousIndex < attachNewIndex,
+      "replacement must detach the prior bridge before retaining the new WebView",
+    );
+    assert.doesNotMatch(activity, /setWebViewClient|setOnApplyWindowInsetsListener/);
     assert.doesNotMatch(manifest, /android\.software\.leanback/);
     assert.doesNotMatch(manifest, /LEANBACK_LAUNCHER/);
     assert.match(manifest, /android\.intent\.category\.LAUNCHER/);
@@ -180,30 +243,35 @@ test("patches release cleartext and third-party WebView cookies idempotently", (
   });
 });
 
-test("migrates the exact legacy cookie activity to explicit dark transparent system bars", () => {
-  withFixture(({ root, mainActivity }) => {
-    patchTauriAndroidProject({ root });
-    writeFileSync(mainActivity, legacyCookieActivity);
+test("migrates the exact dark-system-bar activity to the cached inset bridge", () => {
+  for (const previousActivity of [legacyCookieActivity, darkSystemBarCookieActivity]) {
+    withFixture(({ root, mainActivity }) => {
+      patchTauriAndroidProject({ root });
+      writeFileSync(mainActivity, previousActivity);
 
-    const migrated = patchTauriAndroidProject({ root });
-    assert.equal(migrated.activityChanged, true);
-    assert.equal(migrated.gradleChanged, false);
-    assert.equal(migrated.manifestChanged, false);
-    const migratedActivity = readFileSync(mainActivity, "utf8");
-    assert.equal(migratedActivity, darkSystemBarCookieActivity);
-    assert.match(
-      migratedActivity,
-      /statusBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/,
-    );
-    assert.match(
-      migratedActivity,
-      /navigationBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/,
-    );
+      const migrated = patchTauriAndroidProject({ root });
+      assert.equal(migrated.activityChanged, true);
+      assert.equal(migrated.gradleChanged, false);
+      assert.equal(migrated.manifestChanged, false);
+      const migratedActivity = readFileSync(mainActivity, "utf8");
+      assert.notEqual(migratedActivity, previousActivity);
+      assert.match(
+        migratedActivity,
+        /statusBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/,
+      );
+      assert.match(
+        migratedActivity,
+        /navigationBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/,
+      );
+      assert.match(migratedActivity, /@Keep\nclass YawfSafeAreaBridge/);
+      assert.match(migratedActivity, /AtomicReference\(EMPTY_SAFE_AREA\)/);
+      assert.equal(migratedActivity.match(/@JavascriptInterface/g)?.length, 1);
 
-    const repeat = patchTauriAndroidProject({ root });
-    assert.equal(repeat.changed, false);
-    assert.equal(readFileSync(mainActivity, "utf8"), darkSystemBarCookieActivity);
-  });
+      const repeat = patchTauriAndroidProject({ root });
+      assert.equal(repeat.changed, false);
+      assert.equal(readFileSync(mainActivity, "utf8"), migratedActivity);
+    });
+  }
 });
 
 test("fails closed when the generated Tauri template drifts", () => {
@@ -234,6 +302,24 @@ test("fails closed when the generated Tauri template drifts", () => {
       () => patchTauriAndroidProject({ root }),
       /does not match the supported Tauri Android template/,
     );
+  });
+
+  withFixture(({ root, app, mainActivity }) => {
+    patchTauriAndroidProject({ root });
+    const gradlePath = join(app, "build.gradle.kts");
+    const initialGradle = readFileSync(gradlePath, "utf8");
+    writeFileSync(
+      mainActivity,
+      readFileSync(mainActivity, "utf8").replace(
+        "  fun getInsets(): String = snapshot.get()",
+        "  fun getInsets(): String = snapshot.get()\n\n  @JavascriptInterface\n  fun extra(): String = snapshot.get()",
+      ),
+    );
+    assert.throws(
+      () => patchTauriAndroidProject({ root }),
+      /does not match the supported Tauri Android template/,
+    );
+    assert.equal(readFileSync(gradlePath, "utf8"), initialGradle);
   });
 
   withFixture(({ root, app }) => {

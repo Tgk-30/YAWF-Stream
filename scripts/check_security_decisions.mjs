@@ -107,6 +107,8 @@ const androidRemoteSafeAreaCapability = JSON.parse(
 const androidRemoteSafeAreaPermission = read(
   "web/src-tauri/permissions/android-remote-safe-area.toml",
 );
+const androidProjectPatcher = read("scripts/patch_tauri_android.mjs");
+const mobileSafeAreaSource = read("web/src/lib/mobileSafeArea.ts");
 const androidRemoteSafeAreaCommands = new Set(
   [...androidRemoteSafeAreaPermission.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
     .flatMap((match) => [...match[1].matchAll(/"([a-z][a-z0-9_]*)"/g)])
@@ -120,8 +122,55 @@ check(
     JSON.stringify(androidRemoteSafeAreaCapability.permissions) === '["android-remote-safe-area-command"]' &&
     androidRemoteSafeAreaCommands.size === 1 &&
     androidRemoteSafeAreaCommands.has("mobile_safe_area_insets") &&
-    /SEC-014[^\n]*four numeric safe-area insets[^\n]*no external-player, file, credential or native-network access/.test(decisions),
+    /SEC-014[^\n]*four nonnegative integer safe-area insets[^\n]*no origin attestation[^\n]*no external-player, file, credential, native-network or other native access/.test(decisions),
   "Remote Android main pages receive only read-only numeric safe-area insets",
+);
+const generatedInsetBridge = /@Keep\nclass YawfSafeAreaBridge\([\s\S]*?\n}\n\nclass MainActivity/.exec(
+  androidProjectPatcher,
+)?.[0];
+const expectedGeneratedInsetBridge = `@Keep
+class YawfSafeAreaBridge(
+  private val snapshot: AtomicReference<String>,
+) {
+  @JavascriptInterface
+  fun getInsets(): String = snapshot.get()
+}
+
+class MainActivity`;
+check(
+  generatedInsetBridge === expectedGeneratedInsetBridge &&
+    (androidProjectPatcher.match(/@JavascriptInterface/g)?.length ?? 0) === 1 &&
+    /private const val SAFE_AREA_BRIDGE_NAME = "__YAWF_NATIVE_SAFE_AREA__"/.test(
+      androidProjectPatcher,
+    ) &&
+    /__YAWF_NATIVE_SAFE_AREA__/.test(mobileSafeAreaSource) &&
+    /webView\.addJavascriptInterface\(safeAreaBridge, SAFE_AREA_BRIDGE_NAME\)/.test(
+      androidProjectPatcher,
+    ) &&
+    /webView\.removeJavascriptInterface\(SAFE_AREA_BRIDGE_NAME\)/.test(
+      androidProjectPatcher,
+    ) &&
+    /private const val SAFE_AREA_CHANGE_SCRIPT = "window\.dispatchEvent\(new Event\('yawf-native-safe-area-change'\)\)"/.test(
+      androidProjectPatcher,
+    ) &&
+    /safeAreaSnapshot\.getAndSet\(nextSnapshot\) != nextSnapshot/.test(
+      androidProjectPatcher,
+    ) &&
+    /webView\.evaluateJavascript\(SAFE_AREA_CHANGE_SCRIPT, null\)/.test(
+      androidProjectPatcher,
+    ) &&
+    /const NATIVE_SAFE_AREA_CHANGE_EVENT = "yawf-native-safe-area-change"/.test(
+      mobileSafeAreaSource,
+    ) &&
+    /addEventListener\(NATIVE_SAFE_AREA_CHANGE_EVENT, schedule\)/.test(
+      mobileSafeAreaSource,
+    ) &&
+    /removeEventListener\(NATIVE_SAFE_AREA_CHANGE_EVENT, schedule\)/.test(
+      mobileSafeAreaSource,
+    ) &&
+    !/__TAURI_INTERNALS__|__TAURI__/.test(androidProjectPatcher) &&
+    !/setWebViewClient|setOnApplyWindowInsetsListener/.test(androidProjectPatcher),
+  "Legacy Android inset transport exposes one cached getter and a fixed no-payload change event",
 );
 const desktopCommandNames = new Set(
   [...desktopPermission.matchAll(/^\s*"([a-z][a-z0-9_]*)",?\s*$/gm)].map(

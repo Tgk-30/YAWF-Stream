@@ -64,7 +64,7 @@ class MainActivity : TauriActivity() {
 `;
 }
 
-function patchedMainActivity(packageName) {
+function darkSystemBarPatchedMainActivity(packageName) {
   return `package ${packageName}
 
 import android.graphics.Color
@@ -86,6 +86,127 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
     super.onWebViewCreate(webView)
+  }
+}
+`;
+}
+
+function patchedMainActivity(packageName) {
+  return `package ${packageName}
+
+import android.content.res.Configuration
+import android.graphics.Color
+import android.os.Build
+import android.os.Bundle
+import android.os.Looper
+import android.view.View
+import android.view.ViewTreeObserver
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
+import androidx.annotation.Keep
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.max
+
+private const val SAFE_AREA_BRIDGE_NAME = "__YAWF_NATIVE_SAFE_AREA__"
+private const val SAFE_AREA_CHANGE_SCRIPT = "window.dispatchEvent(new Event('yawf-native-safe-area-change'))"
+private const val EMPTY_SAFE_AREA = "{\\"top\\":0,\\"right\\":0,\\"bottom\\":0,\\"left\\":0}"
+
+@Keep
+class YawfSafeAreaBridge(
+  private val snapshot: AtomicReference<String>,
+) {
+  @JavascriptInterface
+  fun getInsets(): String = snapshot.get()
+}
+
+class MainActivity : TauriActivity() {
+  private val safeAreaSnapshot = AtomicReference(EMPTY_SAFE_AREA)
+  private val safeAreaBridge = YawfSafeAreaBridge(safeAreaSnapshot)
+  private var safeAreaWebView: WebView? = null
+  private var safeAreaLayoutListener: View.OnLayoutChangeListener? = null
+  private var safeAreaGlobalLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    enableEdgeToEdge(
+      statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+      navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+    )
+    super.onCreate(savedInstanceState)
+  }
+
+  override fun onWebViewCreate(webView: WebView) {
+    detachSafeAreaBridge()
+    safeAreaWebView = webView
+    webView.addJavascriptInterface(safeAreaBridge, SAFE_AREA_BRIDGE_NAME)
+
+    val layoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+      refreshSafeAreaInsets(webView)
+    }
+    val globalLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+      refreshSafeAreaInsets(webView)
+    }
+    safeAreaLayoutListener = layoutListener
+    safeAreaGlobalLayoutListener = globalLayoutListener
+    webView.addOnLayoutChangeListener(layoutListener)
+    webView.viewTreeObserver.addOnGlobalLayoutListener(globalLayoutListener)
+    webView.post { refreshSafeAreaInsets(webView) }
+
+    CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+    super.onWebViewCreate(webView)
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    safeAreaWebView?.post { safeAreaWebView?.let(::refreshSafeAreaInsets) }
+  }
+
+  override fun onDestroy() {
+    detachSafeAreaBridge()
+    super.onDestroy()
+  }
+
+  private fun refreshSafeAreaInsets(webView: WebView) {
+    if (safeAreaWebView !== webView) return
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+      webView.post { refreshSafeAreaInsets(webView) }
+      return
+    }
+    val windowInsets = webView.rootWindowInsets ?: return
+    var top = windowInsets.systemWindowInsetTop.coerceAtLeast(0)
+    var right = windowInsets.systemWindowInsetRight.coerceAtLeast(0)
+    var bottom = windowInsets.systemWindowInsetBottom.coerceAtLeast(0)
+    var left = windowInsets.systemWindowInsetLeft.coerceAtLeast(0)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      windowInsets.displayCutout?.let { cutout ->
+        top = max(top, cutout.safeInsetTop.coerceAtLeast(0))
+        right = max(right, cutout.safeInsetRight.coerceAtLeast(0))
+        bottom = max(bottom, cutout.safeInsetBottom.coerceAtLeast(0))
+        left = max(left, cutout.safeInsetLeft.coerceAtLeast(0))
+      }
+    }
+    val nextSnapshot =
+      "{\\"top\\":$top,\\"right\\":$right,\\"bottom\\":$bottom,\\"left\\":$left}"
+    if (safeAreaSnapshot.getAndSet(nextSnapshot) != nextSnapshot && safeAreaWebView === webView) {
+      webView.evaluateJavascript(SAFE_AREA_CHANGE_SCRIPT, null)
+    }
+  }
+
+  private fun detachSafeAreaBridge() {
+    safeAreaSnapshot.set(EMPTY_SAFE_AREA)
+    val webView = safeAreaWebView ?: return
+    safeAreaLayoutListener?.let(webView::removeOnLayoutChangeListener)
+    safeAreaGlobalLayoutListener?.let { listener ->
+      if (webView.viewTreeObserver.isAlive) {
+        webView.viewTreeObserver.removeOnGlobalLayoutListener(listener)
+      }
+    }
+    webView.removeJavascriptInterface(SAFE_AREA_BRIDGE_NAME)
+    safeAreaLayoutListener = null
+    safeAreaGlobalLayoutListener = null
+    safeAreaWebView = null
   }
 }
 `;
@@ -162,8 +283,12 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
   }
   const originalActivity = expectedMainActivity(packageName);
   const legacyActivity = legacyPatchedMainActivity(packageName);
+  const darkSystemBarActivity = darkSystemBarPatchedMainActivity(packageName);
   const replacementActivity = patchedMainActivity(packageName);
-  const activityChanged = activity === originalActivity || activity === legacyActivity;
+  const activityChanged =
+    activity === originalActivity ||
+    activity === legacyActivity ||
+    activity === darkSystemBarActivity;
   if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",
@@ -206,7 +331,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const result = patchTauriAndroidProject();
   console.log(
     result.changed
-      ? "Patched generated Android phone manifest, cleartext, and WebView cookie settings."
-      : "Generated Android phone manifest, cleartext, and WebView cookie settings are already patched.",
+      ? "Patched generated Android phone manifest, cleartext, cookies, and safe-area bridge."
+      : "Generated Android phone manifest, cleartext, cookies, and safe-area bridge are already patched.",
   );
 }
