@@ -201,7 +201,7 @@ jobs:
           cp "$GITHUB_WORKSPACE/scripts/smoke_server_artifact.mjs" "$smoke_dir/smoke_server_artifact.mjs"
           chmod 0755 "$smoke_dir"
           chmod 0644 "$smoke_dir/smoke_server_artifact.mjs"
-          sudo -u debridstreamer node "$smoke_dir/smoke_server_artifact.mjs" \
+          sudo -u debridstreamer /usr/bin/node "$smoke_dir/smoke_server_artifact.mjs" \
             --expected-version "$SERVER_VERSION" \
             --server-entry /opt/debridstreamer/server/dist/index.cjs \
             --web-dist /opt/debridstreamer/web-dist \

@@ -28,6 +28,7 @@ const playerPauseCss = read("web/src/components/player/PlayerPauseOverlay.css");
 const playerInfoCss = read("web/src/components/player/PlayerInfoPopover.css");
 const setupNudgeCss = read("web/src/components/SetupNudge.css");
 const installPromptCss = read("web/src/components/InstallPrompt.css");
+const profileMenuCss = read("web/src/components/ProfileMenu.css");
 const appSource = read("web/src/App.tsx");
 const setupCredentials = read("web/src/lib/serverSetupCredentials.ts");
 const setupInvite = read("web/src/lib/serverSetupInvite.ts");
@@ -126,6 +127,12 @@ check(
       ).test(themeCss),
     ),
   "The floating nav must use the shared safe-area-aware bottom offset.",
+);
+
+check(
+  "profile control clears native top and right insets",
+  /\.profile-menu\s*\{[\s\S]{0,160}top:\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)[\s\S]{0,100}right:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)/.test(profileMenuCss),
+  "ProfileMenu.css must preserve its normal spacing while keeping the avatar and popover clear of native top and right insets.",
 );
 
 check(

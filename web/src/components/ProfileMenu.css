@@ -2,8 +2,8 @@
 
 .profile-menu {
   position: absolute;
-  top: var(--sp-md);
-  right: var(--sp-lg);
+  top: max(var(--sp-md), var(--safe-area-top));
+  right: max(var(--sp-lg), var(--safe-area-right));
   z-index: 6;
 }
 

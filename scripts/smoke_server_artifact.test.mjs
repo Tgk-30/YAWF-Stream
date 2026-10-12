@@ -270,7 +270,7 @@ test("Debian install checks exercise the same candidate on Ubuntu 22 and 24", ()
   assert.match(debWorkflow, /sha256sum --check SHA256SUMS/);
   assert.match(debWorkflow, /sudo apt-get install -y "\$candidate"/);
   assert.match(debWorkflow, /chmod 0755 "\$smoke_dir"/);
-  assert.match(debWorkflow, /sudo -u debridstreamer node "\$smoke_dir\/smoke_server_artifact\.mjs"/);
+  assert.match(debWorkflow, /sudo -u debridstreamer \/usr\/bin\/node "\$smoke_dir\/smoke_server_artifact\.mjs"/);
   assert.match(debWorkflow, /sudo systemctl start debridstreamer/);
   assert.match(debWorkflow, /sudo systemctl restart debridstreamer/);
   assert.match(debWorkflow, /Environment=HOST=127\.0\.0\.1/);
