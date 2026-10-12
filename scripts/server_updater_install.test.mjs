@@ -4,6 +4,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 
 const repository = resolve(new URL("..", import.meta.url).pathname);
 const updaterDirectory = resolve(repository, "deploy/updater");
@@ -58,12 +59,13 @@ chmod 0755 /usr/local/bin/docker
 cat > /usr/local/bin/systemctl <<'SYSTEMCTL'
 #!/bin/sh
 set -eu
-printf '%s\\n' "$*" >> "\${YAWF_TEST_LOG:?}"
+printf '%s\\n' "$*" >> /test/commands.log
+mode="$(cat /test/systemctl-mode 2>/dev/null || printf '%s\\n' ok)"
 state=/run/yawf-updater-test-timer-state
 case "$1" in
   daemon-reload) ;;
   enable)
-    if [ "\${YAWF_TEST_SYSTEMCTL_MODE:-ok}" = fail-enable ]; then
+    if [ "$mode" = fail-enable ]; then
       echo "synthetic enable failure" >&2
       exit 1
     fi
@@ -85,9 +87,9 @@ reset_case() {
     /usr/local/sbin/yawf-server-update /etc/systemd/system/yawf-server-update.service \
     /etc/systemd/system/yawf-server-update.timer /srv/yawf /srv/yawf-with-spaces
   : > /test/commands.log
+  : > /test/output.log
+  printf '%s\\n' ok > /test/systemctl-mode
   echo disabled > /run/yawf-updater-test-timer-state
-  export YAWF_TEST_LOG=/test/commands.log
-  export YAWF_TEST_SYSTEMCTL_MODE=ok
 }
 
 create_compose() {
@@ -108,14 +110,13 @@ ENV
 }
 
 run_noninteractive() {
-  env YAWF_TEST_LOG=/test/commands.log YAWF_TEST_SYSTEMCTL_MODE="$YAWF_TEST_SYSTEMCTL_MODE" \
-    PATH="$PATH" bash /bundle/install.sh "$@" < /dev/null > /test/output.log 2>&1
+  bash /bundle/install.sh "$@" < /dev/null > /test/output.log 2>&1
 }
 
 run_interactive() {
   input="$1"
   set +e
-  printf '%b' "$input" | script -q -e -c "env YAWF_TEST_LOG=/test/commands.log YAWF_TEST_SYSTEMCTL_MODE=$YAWF_TEST_SYSTEMCTL_MODE PATH=$PATH bash /bundle/install.sh" /dev/null > /test/output.log 2>&1
+  printf '%b' "$input" | script -q -e -c "bash /bundle/install.sh" /dev/null > /test/output.log 2>&1
   status=\${PIPESTATUS[1]}
   set -e
   return "$status"
@@ -152,7 +153,7 @@ case_decline_default_eof_and_non_tty() {
   done
   reset_case
   set +e
-  script -q -e -c "env YAWF_TEST_LOG=/test/commands.log PATH=$PATH bash /bundle/install.sh" /dev/null < /dev/null > /test/output.log 2>&1
+  script -q -e -c "bash /bundle/install.sh" /dev/null < /dev/null > /test/output.log 2>&1
   status=$?
   set -e
   test "$status" -eq 0
@@ -239,7 +240,7 @@ case_registration_and_enable_failures() {
   reset_case
   path=/srv/yawf/docker-compose.ghcr.yml
   create_compose "$path"
-  export YAWF_TEST_SYSTEMCTL_MODE=fail-enable
+  printf '%s\\n' fail-enable > /test/systemctl-mode
   set +e
   run_interactive "Y\\n$path\\nY\\n"
   status=$?
@@ -251,11 +252,37 @@ case_registration_and_enable_failures() {
   grep -q 'Automatic updates are confirmed disabled' /test/output.log
 }
 
+current_case=initialization
+report_synthetic_failure() {
+  exit_status=$?
+  trap - EXIT
+  set +e
+  if [ "$exit_status" -ne 0 ]; then
+    printf 'installer synthetic diagnostic: case=%s status=%s\\n' "$current_case" "$exit_status" >&2
+    if [ -f /test/commands.log ]; then
+      printf '%s\\n' 'synthetic /test/commands.log:' >&2
+      cat /test/commands.log >&2
+    fi
+    if [ -f /test/output.log ]; then
+      printf '%s\\n' 'synthetic /test/output.log:' >&2
+      cat /test/output.log >&2
+    fi
+  fi
+  exit "$exit_status"
+}
+trap report_synthetic_failure EXIT
+
+current_case=case_fresh_yes
 case_fresh_yes
+current_case=case_decline_default_eof_and_non_tty
 case_decline_default_eof_and_non_tty
+current_case=case_explicit_unattended_and_path_safety
 case_explicit_unattended_and_path_safety
+current_case=case_explicit_replacement_uses_second_protected_target
 case_explicit_replacement_uses_second_protected_target
+current_case=case_reinstall_and_unsafe_existing_policy
 case_reinstall_and_unsafe_existing_policy
+current_case=case_registration_and_enable_failures
 case_registration_and_enable_failures
 printf '%s\\n' 'installer runtime cases passed: 11'
 `;
@@ -272,6 +299,41 @@ function runContainerBundle(bundleDirectory) {
     rmSync(fixture, { recursive: true, force: true });
   }
 }
+
+function evaluateContainerRunner() {
+  const source = readFileSync(new URL(import.meta.url), "utf8");
+  const start = source.indexOf("const containerRunner = `");
+  const end = source.indexOf("\n`;\n\nfunction runContainerBundle", start);
+  assert.notEqual(start, -1, "container runner source must be present");
+  assert.notEqual(end, -1, "container runner source must terminate before its Docker wrapper");
+  return vm.runInNewContext(`${source.slice(start, end + 3)}\ncontainerRunner`, {}, { filename: "server_updater_install.container_runner.mjs" });
+}
+
+test("generated container runner has self-contained systemctl controls and bounded failure diagnostics", () => {
+  const fixture = mkdtempSync(resolve(tmpdir(), "yawf-updater-install-runner-source-"));
+  const runner = resolve(fixture, "run-installer-cases.sh");
+  try {
+    const generatedRunner = evaluateContainerRunner();
+    assert.equal(generatedRunner, containerRunner, "VM extraction must evaluate the checked-in runner bytes");
+    writeFileSync(runner, generatedRunner, { mode: 0o700 });
+    const syntax = spawnSync("bash", ["-n", runner], { encoding: "utf8" });
+    assert.equal(syntax.status, 0, `${syntax.stdout}\n${syntax.stderr}`);
+    assert.ok(generatedRunner.includes(String.raw`printf '%s\n' "$*" >> /test/commands.log`));
+    assert.ok(!generatedRunner.includes(String.raw`printf '%s\\n' "$*" >> /test/commands.log`));
+    assert.doesNotMatch(generatedRunner, /YAWF_TEST_(?:LOG|SYSTEMCTL_MODE)/);
+    assert.ok(generatedRunner.includes(String.raw`cat /test/systemctl-mode 2>/dev/null || printf '%s\n' ok`));
+    assert.ok(generatedRunner.includes(String.raw`printf '%s\n' ok > /test/systemctl-mode`));
+    assert.ok(generatedRunner.includes(String.raw`printf '%s\n' fail-enable > /test/systemctl-mode`));
+    const diagnostic = generatedRunner.match(/report_synthetic_failure\(\) \{[\s\S]*?\n}\ntrap report_synthetic_failure EXIT/)?.[0] ?? "";
+    assert.match(diagnostic, /trap - EXIT/);
+    assert.match(diagnostic, /set \+e/);
+    assert.match(diagnostic, /cat \/test\/commands\.log/);
+    assert.match(diagnostic, /cat \/test\/output\.log/);
+    assert.doesNotMatch(diagnostic, /\.env/);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
 
 test("exact installer bytes handle opt-in, decline, EOF, non-TTY, replacement, reinstall, and failure paths in an isolated Linux container", { skip: !dockerAvailable }, () => {
   const { result, output } = runContainerBundle(updaterDirectory);
