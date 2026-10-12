@@ -53,7 +53,7 @@ permissions:
 
 jobs:
   release:
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     strategy:
       fail-fast: false
       matrix:
@@ -485,7 +485,7 @@ jobs:
   android-tv:
     name: Signed Android TV APK
     needs: release
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -590,10 +590,10 @@ jobs:
   android-app:
     name: Signed Android phone APK
     needs: release
-    if: always() && ((github.ref_type == 'tag' && needs.release.result == 'success') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'))
+    if: always() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.release.result == 'success') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'))
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -714,11 +714,10 @@ jobs:
       # Tauri's generated Gradle carries no signing config, so the release APK
       # comes out unsigned. Align and sign it here rather than patching a
       # generated file that the next Tauri version may reshape.
-      - name: Sign, verify, and upload the phone APK
+      - name: Sign and verify the phone APK
         if: steps.gate.outputs.ready == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           ANDROID_APP_KEYSTORE_BASE64: ${{ secrets.ANDROID_APP_KEYSTORE_BASE64 }}
           ANDROID_APP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_APP_KEYSTORE_PASSWORD }}
           ANDROID_APP_KEY_ALIAS: ${{ secrets.ANDROID_APP_KEY_ALIAS }}
@@ -767,14 +766,8 @@ jobs:
             --certificate-pin web/src-tauri/SIGNING_CERT_SHA256 \
             --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           rm -f "$ks"
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            gh release upload "$GITHUB_REF_NAME" "$asset" \
-              --clobber \
-              --repo "$GITHUB_REPOSITORY"
-          else
-            mkdir -p "$RUNNER_TEMP/phone-candidate"
-            cp "$asset" "$RUNNER_TEMP/phone-candidate/"
-          fi
+          mkdir -p "$RUNNER_TEMP/phone-candidate"
+          cp "$asset" "$RUNNER_TEMP/phone-candidate/"
 
       - name: Upload Android verification candidate
         if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
@@ -785,10 +778,79 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+      - name: Upload Android release candidate
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone-release-candidate
+          path: ${{ runner.temp }}/phone-candidate/*.apk
+          if-no-files-found: error
+          retention-days: 3
+
+  # The phone publisher receives no signing material. Only a pushed tag can
+  # give this job release-write permission and publish a verified candidate.
+  android-app-publish:
+    name: Publish signed Android phone APK
+    needs: android-app
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android build tools
+        run: sdkmanager "build-tools;36.0.0"
+
+      - name: Download verified Android release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: android-phone-release-candidate
+          path: ${{ runner.temp }}/phone-release-candidate
+
+      - name: Re-verify and publish Android phone APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          version="${version%-web}"
+          test "$version" = "$(node -p "require('./web/package.json').version")"
+          asset="$RUNNER_TEMP/phone-release-candidate/YAWF.Stream_Android_${version}.apk"
+          test -f "$asset"
+          python3 scripts/verify_android_apk.py \
+            --apk "$asset" \
+            --version "$version" \
+            --certificate-pin web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          gh release upload "$GITHUB_REF_NAME" "$asset" \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
+
   finalize-release-assets:
     name: Checksums and provenance
-    needs: [release, android-tv, android-app]
-    if: github.ref_type == 'tag'
+    needs: [release, android-tv, android-app-publish]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -832,7 +894,7 @@ jobs:
   clean-install:
     name: Verify clean installs
     needs: finalize-release-assets
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     permissions:
       # The reusable workflow must download assets from the draft release.
       contents: write

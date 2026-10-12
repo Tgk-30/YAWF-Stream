@@ -38,6 +38,10 @@ function workflowJob(workflow, jobId) {
   )?.[0] ?? "";
 }
 
+function jobRequiresPushTag(job) {
+  return /^    if: github\.event_name == 'push' && github\.ref_type == 'tag'$/m.test(job);
+}
+
 const tauri = JSON.parse(read("web/src-tauri/tauri.conf.json"));
 const updater = tauri.plugins?.updater;
 check(
@@ -66,6 +70,7 @@ check(
 const releaseWorkflow = read(".github/workflows/web-release.yml");
 const cleanInstallWorkflow = read(".github/workflows/clean-install.yml");
 const releaseAndroidPhoneJob = workflowJob(releaseWorkflow, "android-app");
+const releaseAndroidPhonePublisherJob = workflowJob(releaseWorkflow, "android-app-publish");
 const cleanInstallAndroidPhoneJob = workflowJob(cleanInstallWorkflow, "android-phone");
 const dockerWorkflow = read(".github/workflows/docker-image.yml");
 const ciWorkflow = read(".github/workflows/ci.yml");
@@ -194,8 +199,25 @@ check(
     /apksigner verify/.test(releaseWorkflow) &&
     /web\/src-tauri\/SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
     /YAWF\.Stream_Android_\$\{version\}\.apk/.test(releaseWorkflow) &&
-    /needs:\s*\[[^\]]*\bandroid-app\b[^\]]*\]/.test(releaseWorkflow),
+    /needs:\s*\[[^\]]*\bandroid-app-publish\b[^\]]*\]/.test(releaseWorkflow),
   ".github/workflows/web-release.yml must sign the phone APK with its own identity, verify it against a pinned certificate, and finalize checksums only after it",
+);
+check(
+  "Manual Android verification cannot enter a publication job",
+  ["release", "android-tv", "android-app-publish", "finalize-release-assets", "clean-install"]
+    .every((name) => jobRequiresPushTag(workflowJob(releaseWorkflow, name))) &&
+    /if: always\(\) && \(\(github\.event_name == 'push' && github\.ref_type == 'tag' && needs\.release\.result == 'success'\) \|\| \(github\.event_name == 'workflow_dispatch' && github\.ref_type == 'branch'\)\)/.test(releaseAndroidPhoneJob) &&
+    !/gh release (?:create|upload|edit)/.test(releaseAndroidPhoneJob),
+  "manual branch dispatch may build a signed verification artifact, but every release-writing job must require a pushed tag",
+);
+check(
+  "Android phone build and publisher keep least-privilege boundaries",
+  /permissions:\s*\n\s*contents:\s*read/.test(releaseAndroidPhoneJob) &&
+    /name:\s*android-phone-verification-candidate/.test(releaseAndroidPhoneJob) &&
+    /name:\s*android-phone-release-candidate/.test(releaseAndroidPhoneJob) &&
+    /permissions:\s*\n\s*contents:\s*write/.test(releaseAndroidPhonePublisherJob) &&
+    !/ANDROID_APP_KEYSTORE_|ANDROID_APP_KEY_PASSWORD|ANDROID_APP_KEY_ALIAS/.test(releaseAndroidPhonePublisherJob),
+  "the signing job must be read-only to repository contents, while only the pushed-tag publisher may write assets and it must receive no signing secrets",
 );
 check(
   "Android phone signing certificate is publicly pinned",
@@ -228,8 +250,11 @@ check(
     /python3 scripts\/verify_android_apk\.py[\s\S]{0,260}--apk "\$asset"[\s\S]{0,260}--certificate-pin web\/src-tauri\/SIGNING_CERT_SHA256/.test(
       releaseAndroidPhoneJob,
     ) &&
-    releaseAndroidPhoneJob.indexOf("python3 scripts/verify_android_apk.py") <
-      releaseAndroidPhoneJob.indexOf("gh release upload"),
+    /uses:\s*actions\/upload-artifact@v4[\s\S]{0,220}name:\s*android-phone-release-candidate/.test(releaseAndroidPhoneJob) &&
+    /uses:\s*actions\/download-artifact@v4[\s\S]{0,220}name:\s*android-phone-release-candidate/.test(releaseAndroidPhonePublisherJob) &&
+    /python3 scripts\/verify_android_apk\.py[\s\S]{0,260}--apk "\$asset"[\s\S]{0,260}--certificate-pin web\/src-tauri\/SIGNING_CERT_SHA256/.test(releaseAndroidPhonePublisherJob) &&
+    releaseAndroidPhonePublisherJob.indexOf("python3 scripts/verify_android_apk.py") <
+      releaseAndroidPhonePublisherJob.indexOf("gh release upload"),
   "the release must select the universal unsigned APK exactly, align native libraries for 16 KiB pages, verify the signed production APK, and only then upload its versioned asset",
 );
 check(
