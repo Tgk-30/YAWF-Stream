@@ -12,6 +12,15 @@ on:
     tags:
       - "v*-web"
   workflow_dispatch:
+    inputs:
+      updater_candidate_digest:
+        description: "Optional published 2.3.9 image index digest for real Compose updater verification"
+        required: false
+        type: string
+      updater_source_revision:
+        description: "Exact 40-character source revision in that published image"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -101,6 +110,7 @@ jobs:
             sha256sum \
               "debridstreamer-server_${VERSION}_all.deb" \
               debridstreamer-server_all.deb \
+              "yawf-server-updater_${VERSION}.tar.gz" \
               "debridstreamer-server_${VERSION}_all.smoke.json" \
               > SHA256SUMS
           )
@@ -112,6 +122,7 @@ jobs:
           path: |
             dist-deb/*.deb
             dist-deb/*.smoke.json
+            dist-deb/*.tar.gz
             dist-deb/SHA256SUMS
 
       - name: Attach to the release (tag builds only)
@@ -120,7 +131,10 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           draft: true
-          files: dist-deb/*.deb
+          files: |
+            dist-deb/*.deb
+            dist-deb/*.tar.gz
+            dist-deb/SHA256SUMS
 
   install-check:
     name: Installed server package (${{ matrix.runner }})
@@ -306,3 +320,79 @@ jobs:
             ${{ runner.temp }}/installed-server-smoke.json
             ${{ runner.temp }}/systemd-index.headers
             ${{ runner.temp }}/systemd-shim.headers
+
+  compose-updater-check:
+    name: Docker Compose updater transaction (${{ matrix.runner }})
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout candidate source
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Test updater policy and release guards
+        run: node --test scripts/server_updater.test.mjs
+
+      - name: Install disabled updater helper and verify kernel lock exclusion
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo ln -sf "$(command -v node)" /usr/bin/node
+          sudo bash deploy/updater/install.sh
+          sudo sh -c 'mkdir -p /run/yawf-server-updater; exec 9>/run/yawf-server-updater/operation.lock; flock 9; sleep 3' &
+          holder=$!
+          sleep 0.5
+          set +e
+          sudo /usr/local/sbin/yawf-server-update status
+          result=$?
+          set -e
+          wait "$holder"
+          test "$result" -eq 75
+          timer_state="$(systemctl is-enabled yawf-server-update.timer 2>/dev/null || true)"
+          test "$timer_state" = "disabled"
+
+      - name: Verify isolated Compose upgrade and rollback
+        run: node scripts/server_updater_compose_integration.mjs | tee "$RUNNER_TEMP/server-updater-compose.json"
+
+      - name: Validate optional real updater image inputs
+        if: inputs.updater_candidate_digest != '' || inputs.updater_source_revision != ''
+        shell: bash
+        env:
+          CANDIDATE_DIGEST: ${{ inputs.updater_candidate_digest }}
+          SOURCE_REVISION: ${{ inputs.updater_source_revision }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$SOURCE_REVISION" =~ ^[a-f0-9]{40}$ ]]
+
+      - name: Verify actual published image upgrade and rollback
+        if: inputs.updater_candidate_digest != '' && inputs.updater_source_revision != ''
+        env:
+          CANDIDATE_DIGEST: ${{ inputs.updater_candidate_digest }}
+          SOURCE_REVISION: ${{ inputs.updater_source_revision }}
+        run: |
+          sudo /usr/bin/node scripts/server_updater_compose_integration.mjs \
+            --candidate-digest "$CANDIDATE_DIGEST" \
+            --source-revision "$SOURCE_REVISION" \
+            | tee "$RUNNER_TEMP/server-updater-compose-actual.json"
+
+      - name: Retain updater transaction evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-updater-compose-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/server-updater-compose.json
+            ${{ runner.temp }}/server-updater-compose-actual.json
+          if-no-files-found: error

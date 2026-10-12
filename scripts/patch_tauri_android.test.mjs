@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { patchTauriAndroidProject } from "./patch_tauri_android.mjs";
+import {
+  patchTauriAndroidProject,
+  previousSafeAreaMainActivityForTest,
+} from "./patch_tauri_android.mjs";
 
 const androidRoot = "web/src-tauri/gen/android/app";
 const packageName = "com.tgk30.debridstreamer";
@@ -72,6 +75,11 @@ function createFixture() {
             isMinifyEnabled = true
         }
     }
+}
+
+dependencies {
+    implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.activity:activity-ktx:1.10.1")
 }
 `,
   );
@@ -143,7 +151,7 @@ function withFixture(run) {
   }
 }
 
-test("patches release cleartext and third-party WebView cookies idempotently", () => {
+test("patches the origin-attested Server Mode player bridge idempotently", () => {
   withFixture(({ root, app, mainActivity }) => {
     const initial = patchTauriAndroidProject({ root });
     assert.equal(initial.changed, true);
@@ -159,12 +167,61 @@ test("patches release cleartext and third-party WebView cookies idempotently", (
       /defaultConfig \{\n        manifestPlaceholders\["usesCleartextTraffic"\] = "true"/,
     );
     assert.doesNotMatch(gradle, /usesCleartextTraffic"\] = "false"/);
+    assert.equal(
+      gradle.match(/implementation\("androidx\.webkit:webkit:1\.14\.0"\)/g)?.length,
+      1,
+    );
     assert.match(activity, /override fun onWebViewCreate\(webView: WebView\)/);
     assert.match(activity, /setAcceptThirdPartyCookies\(webView, true\)/);
     assert.match(activity, /statusBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/);
     assert.match(activity, /navigationBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/);
     assert.equal(activity.match(/@JavascriptInterface/g)?.length, 1);
     assert.equal(activity.match(/addJavascriptInterface/g)?.length, 1);
+    assert.match(activity, /private const val SERVER_PLAYER_BRIDGE_NAME = "__YAWF_SERVER_PLAYER__"/);
+    assert.match(activity, /WebViewFeature\.WEB_MESSAGE_LISTENER/);
+    assert.match(activity, /WebViewCompat\.addWebMessageListener\(/);
+    assert.match(activity, /setOf\("\*"\)/);
+    assert.match(activity, /message\.type == WebMessageCompat\.TYPE_STRING/);
+    const messageListener = activity.slice(
+      activity.indexOf("WebViewCompat.addWebMessageListener"),
+      activity.indexOf("private fun handleServerPlayerMessage"),
+    );
+    assert.ok(messageListener.indexOf("isMainFrame &&") < messageListener.indexOf("message.data"));
+    assert.ok(
+      messageListener.indexOf("safeAreaWebView === view") < messageListener.indexOf("message.data"),
+    );
+    assert.ok(
+      messageListener.indexOf("message.type == WebMessageCompat.TYPE_STRING") <
+        messageListener.indexOf("message.data"),
+    );
+    assert.match(activity, /!isMainFrame/);
+    assert.match(activity, /currentTopOrigin\(webView\) != sourceOrigin/);
+    assert.match(activity, /sourceOriginUri: Uri/);
+    assert.match(activity, /pending\.replyProxy !== replyProxy/);
+    assert.match(activity, /pending\.challenge != challenge/);
+    assert.match(activity, /SERVER_PLAYER_TIMEOUT_MS = 30_000L/);
+    assert.match(activity, /SERVER_PLAYER_RATE_LIMIT = 4/);
+    assert.match(activity, /serverPlayerPending != null/);
+    assert.match(activity, /keys == setOf\("action", "requestId"\)/);
+    assert.match(activity, /keys == setOf\("action", "requestId", "challenge"\)/);
+    assert.match(activity, /keys != setOf\("action", "requestId", "url"\)/);
+    assert.match(activity, /segments\[routeIndex\] != "api"/);
+    assert.match(activity, /segments\[routeIndex \+ 1\] != "external-stream"/);
+    assert.match(activity, /path\.contains\('%'\)/);
+    assert.match(activity, /targetOrigin != sourceOrigin/);
+    assert.match(activity, /uri\.encodedQuery != null/);
+    assert.match(activity, /uri\.encodedFragment != null/);
+    assert.match(activity, /parsedHost\.removePrefix\("\["\)\.removeSuffix\("\]"\)/);
+    assert.match(activity, /if \(host\.isEmpty\(\) \|\| host\.contains\('\['\) \|\| host\.contains\('\]'\)\) return null/);
+    assert.match(activity, /setTitle\("Open external player\?"\)/);
+    assert.match(activity, /setPositiveButton\("Open player"\)/);
+    assert.match(activity, /setNegativeButton\("Cancel"\)/);
+    assert.match(activity, /pending\.origin\.display\(\)/);
+    assert.doesNotMatch(activity, /setMessage\([^)]*pending\.url/s);
+    assert.match(activity, /Intent\(Intent\.ACTION_VIEW\)/);
+    assert.match(activity, /setDataAndType\(Uri\.parse\(pending\.url\), "video\/\*"\)/);
+    assert.match(activity, /WebViewCompat\.removeWebMessageListener/);
+    assert.doesNotMatch(activity, /mobile_open_external_player/);
     assert.match(
       activity,
       /private const val SAFE_AREA_BRIDGE_NAME = "__YAWF_NATIVE_SAFE_AREA__"/,
@@ -243,8 +300,12 @@ test("patches release cleartext and third-party WebView cookies idempotently", (
   });
 });
 
-test("migrates the exact dark-system-bar activity to the cached inset bridge", () => {
-  for (const previousActivity of [legacyCookieActivity, darkSystemBarCookieActivity]) {
+test("migrates every exact earlier activity including the safe-area template", () => {
+  for (const previousActivity of [
+    legacyCookieActivity,
+    darkSystemBarCookieActivity,
+    previousSafeAreaMainActivityForTest(packageName),
+  ]) {
     withFixture(({ root, mainActivity }) => {
       patchTauriAndroidProject({ root });
       writeFileSync(mainActivity, previousActivity);
@@ -265,6 +326,8 @@ test("migrates the exact dark-system-bar activity to the cached inset bridge", (
       );
       assert.match(migratedActivity, /@Keep\nclass YawfSafeAreaBridge/);
       assert.match(migratedActivity, /AtomicReference\(EMPTY_SAFE_AREA\)/);
+      assert.match(migratedActivity, /WebViewCompat\.addWebMessageListener/);
+      assert.match(migratedActivity, /pending\.replyProxy !== replyProxy/);
       assert.equal(migratedActivity.match(/@JavascriptInterface/g)?.length, 1);
 
       const repeat = patchTauriAndroidProject({ root });
@@ -313,6 +376,24 @@ test("fails closed when the generated Tauri template drifts", () => {
       readFileSync(mainActivity, "utf8").replace(
         "  fun getInsets(): String = snapshot.get()",
         "  fun getInsets(): String = snapshot.get()\n\n  @JavascriptInterface\n  fun extra(): String = snapshot.get()",
+      ),
+    );
+    assert.throws(
+      () => patchTauriAndroidProject({ root }),
+      /does not match the supported Tauri Android template/,
+    );
+    assert.equal(readFileSync(gradlePath, "utf8"), initialGradle);
+  });
+
+  withFixture(({ root, app, mainActivity }) => {
+    patchTauriAndroidProject({ root });
+    const gradlePath = join(app, "build.gradle.kts");
+    const initialGradle = readFileSync(gradlePath, "utf8");
+    writeFileSync(
+      mainActivity,
+      readFileSync(mainActivity, "utf8").replace(
+        "private const val SERVER_PLAYER_TIMEOUT_MS = 30_000L",
+        "private const val SERVER_PLAYER_TIMEOUT_MS = 60_000L",
       ),
     );
     assert.throws(

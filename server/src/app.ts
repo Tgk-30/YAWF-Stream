@@ -73,6 +73,8 @@ import {
   isTranscodeQuality,
 } from "./transcodeSession.js";
 import { SERVER_VERSION } from "./version.js";
+import { fetchLatestServerRelease, serverReleaseStatus } from "./serverRelease.js";
+import { readServerUpdaterStatus } from "./serverUpdaterStatus.js";
 import {
   RemoteControlRegistry,
   type RemoteCommandType,
@@ -2505,54 +2507,23 @@ function nextLoginBackoffMs(failures: number): number {
   return Math.min(15 * 60_000, 2_000 * 2 ** Math.min(9, failures - 5));
 }
 
-let releaseCache:
-  | { expiresAt: number; value: { currentVersion: string; latestVersion: string | null; available: boolean; url: string } }
-  | null = null;
-
-function versionParts(version: string): number[] {
-  return version.replace(/^v/, "").split(/[.-]/).slice(0, 3).map((part) => Number(part) || 0);
-}
-
-function newerVersion(latest: string, current: string): boolean {
-  const left = versionParts(latest);
-  const right = versionParts(current);
-  for (let index = 0; index < 3; index += 1) {
-    if (left[index]! > right[index]!) return true;
-    if (left[index]! < right[index]!) return false;
-  }
-  return false;
-}
+let releaseCache: { expiresAt: number; value: ReturnType<typeof serverReleaseStatus> } | null = null;
 
 async function serverUpdateStatus(enabled: boolean) {
-  const url = "https://github.com/Tgk-30/YAWF-Stream/releases/latest";
   if (!enabled) {
-    return { currentVersion: SERVER_VERSION, latestVersion: null, available: false, url };
+    return serverReleaseStatus(SERVER_VERSION, null, "disabled");
   }
   if (releaseCache != null && releaseCache.expiresAt > Date.now()) return releaseCache.value;
-  let latestVersion: string | null = null;
   try {
-    const response = await fetch(
-      "https://api.github.com/repos/Tgk-30/YAWF-Stream/releases/latest",
-      {
-        headers: { accept: "application/vnd.github+json", "user-agent": "YAWF-Stream-Server" },
-        signal: AbortSignal.timeout(3_000),
-      },
-    );
-    if (response.ok) {
-      const body = await response.json() as { tag_name?: unknown };
-      if (typeof body.tag_name === "string") latestVersion = body.tag_name.replace(/^v/, "").replace(/-web$/, "");
-    }
+    const value = serverReleaseStatus(SERVER_VERSION, await fetchLatestServerRelease());
+    releaseCache = { expiresAt: Date.now() + 6 * 60 * 60_000, value };
+    return value;
   } catch {
-    latestVersion = null;
+    // Update discovery is advisory and must never make admin health unavailable.
+    const value = serverReleaseStatus(SERVER_VERSION, null, "unavailable");
+    releaseCache = { expiresAt: Date.now() + 5 * 60_000, value };
+    return value;
   }
-  const value = {
-    currentVersion: SERVER_VERSION,
-    latestVersion,
-    available: latestVersion != null && newerVersion(latestVersion, SERVER_VERSION),
-    url,
-  };
-  releaseCache = { expiresAt: Date.now() + 6 * 60 * 60_000, value };
-  return value;
 }
 
 function streamContentType(fileName: string): string | null {
@@ -2585,6 +2556,8 @@ function registerRoutes(
 
   app.get("/api/health", async () => ({
     ok: true,
+    ready: usableWebDist(config.webDistPath),
+    version: SERVER_VERSION,
     setupRequired: userCount(db) === 0,
     setupTokenRequired: userCount(db) === 0 && config.setupToken != null,
   }));
@@ -2737,6 +2710,7 @@ function registerRoutes(
         toneMapping: transcode.ready && transcode.toneMappingAvailable,
       },
       update: await serverUpdateStatus(config.updateCheck),
+      updater: readServerUpdaterStatus(),
     };
   });
 

@@ -3,6 +3,18 @@ import { deviceKind } from "./platform";
 import { isTauri } from "./tauri";
 
 const MAX_EXTERNAL_PLAYER_URL_BYTES = 8 * 1024;
+const SERVER_PLAYER_BRIDGE_NAME = "__YAWF_SERVER_PLAYER__";
+const SERVER_CAPABILITY_PATH = /^(?:\/[A-Za-z0-9._~-]{1,64})*\/api\/external-stream\/[A-Za-z0-9_-]{1,120}\/[A-Za-z0-9_-]{32,128}$/;
+
+export interface ServerPlayerMessageEvent {
+  data?: unknown;
+}
+
+export interface AndroidServerPlayerBridge {
+  postMessage(message: string): void;
+  addEventListener(type: "message", listener: (event: ServerPlayerMessageEvent) => void): void;
+  removeEventListener(type: "message", listener: (event: ServerPlayerMessageEvent) => void): void;
+}
 
 function isAndroidTauriRuntime(): boolean {
   const runtime = globalThis as typeof globalThis & {
@@ -11,13 +23,27 @@ function isAndroidTauriRuntime(): boolean {
   return runtime.__YAWF_TAURI_ANDROID__ === true || deviceKind() === "android";
 }
 
+export function serverPlayerBridge(): AndroidServerPlayerBridge | null {
+  const runtime = globalThis as typeof globalThis & {
+    __YAWF_SERVER_PLAYER__?: unknown;
+  };
+  const candidate = runtime[SERVER_PLAYER_BRIDGE_NAME as "__YAWF_SERVER_PLAYER__"];
+  if (candidate == null || (typeof candidate !== "object" && typeof candidate !== "function")) {
+    return null;
+  }
+  const bridge = candidate as Partial<AndroidServerPlayerBridge>;
+  return typeof bridge.postMessage === "function" &&
+    typeof bridge.addEventListener === "function" &&
+    typeof bridge.removeEventListener === "function"
+    ? bridge as AndroidServerPlayerBridge
+    : null;
+}
+
 /** Identify the Android app's WebView for UI-only routing decisions.
  *
- * Remote Server Mode documents cannot use local-only Tauri commands, but the
- * native read-only safe-area provider is still injected into their owned
- * WebView. Checking for its zero-argument getter lets those documents retain
- * mobile copy and webview-player behavior without invoking the getter or
- * widening any command eligibility.
+ * Remote Server Mode documents cannot use local-only Tauri commands. They can
+ * use the origin-attested WebMessageListener provider when present. The
+ * read-only safe-area provider remains a UI marker and is never invoked here.
  */
 export function isAndroidAppUiContext(): boolean {
   const runtime = globalThis as typeof globalThis & {
@@ -29,7 +55,9 @@ export function isAndroidAppUiContext(): boolean {
     (typeof provider === "object" || typeof provider === "function") &&
     typeof (provider as { getInsets?: unknown }).getInsets === "function";
 
-  return hasNativeSafeAreaGetter || (isTauri() && isAndroidTauriRuntime());
+  return serverPlayerBridge() != null ||
+    hasNativeSafeAreaGetter ||
+    (isTauri() && isAndroidTauriRuntime());
 }
 
 function isTrustedBundledDocumentOrigin(): boolean {
@@ -50,9 +78,8 @@ function isTrustedBundledDocumentOrigin(): boolean {
   );
 }
 
-/** The Android chooser command is local-only. A remote Server Mode document
- * can retain Tauri runtime markers, but its origin is intentionally outside
- * the command ACL and must receive only the manual copy fallback. */
+/** The existing Tauri command remains local-only. Remote Server Mode never
+ * receives command eligibility even if partial Tauri globals survive. */
 export function isAndroidExternalPlayerEligible(): boolean {
   return isTauri() && isAndroidTauriRuntime() && isTrustedBundledDocumentOrigin();
 }
@@ -84,10 +111,67 @@ function canonicalHttpUrl(raw: string): string {
   return parsed.href;
 }
 
+export function canonicalServerCapability(raw: string): string {
+  const canonical = canonicalHttpUrl(raw);
+  let page: URL;
+  let target: URL;
+  try {
+    page = new URL(globalThis.location.href);
+    target = new URL(canonical);
+  } catch {
+    throw new Error("The external stream capability is unavailable.");
+  }
+  if (
+    !["http:", "https:"].includes(page.protocol) ||
+    page.username.length > 0 ||
+    page.password.length > 0 ||
+    target.origin !== page.origin ||
+    target.search !== "" ||
+    target.hash !== "" ||
+    canonical !== raw ||
+    target.pathname.includes("%") ||
+    target.pathname.includes("\\") ||
+    target.pathname.includes("//") ||
+    !SERVER_CAPABILITY_PATH.test(target.pathname)
+  ) {
+    throw new Error("The external stream capability is unavailable.");
+  }
+  return canonical;
+}
+
+/** A remote handoff is available only when Android injected the
+ * origin-attested WebMessageListener object and the current same-origin target
+ * is the existing cookie-free external-stream capability route. */
+export function isAndroidServerExternalPlayerEligible(rawUrl: string | null): boolean {
+  if (rawUrl == null || isTrustedBundledDocumentOrigin() || serverPlayerBridge() == null) {
+    return false;
+  }
+  try {
+    canonicalServerCapability(rawUrl);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Ask the native WebView host to confirm and launch a same-origin Server Mode
+ * capability. Aborting posts a fixed cancel action and removes the document's
+ * listener. The handoff callback runs only at the native challenge boundary,
+ * immediately before the acknowledgement that permits ACTION_VIEW.
+ */
+export async function openAndroidServerExternalPlayer(
+  rawUrl: string,
+  ownsRequest: () => boolean,
+  signal: AbortSignal,
+  onHandoff: () => void,
+): Promise<string | null> {
+  const remote = await import("./androidServerExternalPlayer");
+  return remote.openAndroidServerExternalPlayer(rawUrl, ownsRequest, signal, onHandoff);
+}
+
 /** Open Android's ACTION_VIEW chooser for a cookie-free stream capability.
- * The ownership callback is checked immediately before the native invoke and
- * after it settles so a replaced or unmounted player cannot launch or update
- * UI for an older source. A null result means ownership was lost. */
+ * This is the existing local-only Tauri command path. Remote documents use the
+ * separately origin-attested WebMessageListener bridge above. */
 export async function openAndroidExternalPlayer(
   rawUrl: string,
   ownsRequest: () => boolean,
@@ -105,10 +189,6 @@ export async function openAndroidExternalPlayer(
   const { invoke } = await import("@tauri-apps/api/core");
   if (!ownsRequest()) return null;
   try {
-    // Rust owns the only cancellable deadline, immediately before Android's
-    // irreversible startActivity boundary. A JS timer cannot cancel an invoke
-    // delayed before Rust begins and could falsely report failure before a late
-    // chooser appears.
     const status = await invoke<string>("mobile_open_external_player", { url });
     return ownsRequest() ? status : null;
   } catch {

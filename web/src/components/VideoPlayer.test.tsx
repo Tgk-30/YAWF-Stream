@@ -132,6 +132,19 @@ const openAndroidExternalPlayerMock = vi.fn<
   async (_url: string, _ownsRequest: () => boolean) =>
     "Player chooser opened. Select a video app to continue.",
 );
+const openAndroidServerExternalPlayerMock = vi.fn<
+  (
+    url: string,
+    ownsRequest: () => boolean,
+    signal: AbortSignal,
+    onHandoff: () => void,
+  ) => Promise<string | null>
+>(
+  async (_url, _ownsRequest, _signal, onHandoff) => {
+    onHandoff();
+    return "External player opened.";
+  },
+);
 const isAndroidExternalPlayerEligibleOverride = vi.fn<() => boolean | undefined>(
   () => undefined,
 );
@@ -162,6 +175,12 @@ vi.mock("../lib/androidExternalPlayer", async (orig) => {
       actual.isAndroidExternalPlayerEligible(),
     openAndroidExternalPlayer: (url: string, ownsRequest: () => boolean) =>
       openAndroidExternalPlayerMock(url, ownsRequest),
+    openAndroidServerExternalPlayer: (
+      url: string,
+      ownsRequest: () => boolean,
+      signal: AbortSignal,
+      onHandoff: () => void,
+    ) => openAndroidServerExternalPlayerMock(url, ownsRequest, signal, onHandoff),
   };
 });
 
@@ -293,6 +312,17 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function installRemoteServerPlayerProvider(): void {
+  Object.defineProperty(window, "__YAWF_SERVER_PLAYER__", {
+    configurable: true,
+    value: {
+      postMessage: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    },
+  });
+}
+
 function fireMediaError(video: HTMLMediaElement, code = 3): void {
   Object.defineProperty(video, "error", {
     configurable: true,
@@ -313,6 +343,12 @@ beforeEach(() => {
   openInExternalPlayerMock.mockResolvedValue("VLC hand-off");
   openAndroidExternalPlayerMock.mockResolvedValue(
     "Player chooser opened. Select a video app to continue.",
+  );
+  openAndroidServerExternalPlayerMock.mockImplementation(
+    async (_url, _ownsRequest, _signal, onHandoff) => {
+      onHandoff();
+      return "External player opened.";
+    },
   );
   isAndroidExternalPlayerEligibleOverride.mockReturnValue(undefined);
   subsState.tracks = [];
@@ -345,6 +381,7 @@ afterEach(() => {
   delete (window as unknown as Record<string, unknown>).__YAWF_TAURI_MOBILE__;
   delete (window as unknown as Record<string, unknown>).__YAWF_TAURI_ANDROID__;
   delete (window as unknown as Record<string, unknown>).__YAWF_NATIVE_SAFE_AREA__;
+  delete (window as unknown as Record<string, unknown>).__YAWF_SERVER_PLAYER__;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   isTauriMock.mockReturnValue(false);
@@ -1058,6 +1095,7 @@ describe("WebviewPlayer", () => {
       await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
 
       expect(screen.queryByRole("button", { name: /Open in external player/ })).toBeNull();
+      expect(screen.getByText("Paste into VLC or another player")).toBeInTheDocument();
       await userEvent.click(screen.getByRole("button", { name: /^Copy stream link/ }));
 
       expect(writeText).toHaveBeenCalledWith(
@@ -1078,6 +1116,131 @@ describe("WebviewPlayer", () => {
     } finally {
       restoreClipboard();
     }
+  });
+
+  it("opens remote Server Mode in Android with provider-only detection and pauses at confirmation", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/yawf/watch"));
+    installRemoteServerPlayerProvider();
+    const native = deferred<string | null>();
+    const captured: { handoff?: () => void; signal?: AbortSignal } = {};
+    openAndroidServerExternalPlayerMock.mockImplementation(
+      async (_url, _ownsRequest, signal, onHandoff) => {
+        captured.handoff = onHandoff;
+        captured.signal = signal;
+        return native.promise;
+      },
+    );
+    render(
+      <VideoPlayer
+        url="https://server.example/yawf/api/stream/session-1"
+        externalPlaybackUrl={`https://server.example/yawf/api/external-stream/session-1/${"A".repeat(43)}`}
+        engine="native-mpv"
+        title="T"
+        onClose={() => {}}
+      />,
+    );
+    const pause = vi.mocked(HTMLMediaElement.prototype.pause);
+    pause.mockClear();
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: /Open in external player/ }));
+
+    expect(openAndroidServerExternalPlayerMock).toHaveBeenCalledWith(
+      `https://server.example/yawf/api/external-stream/session-1/${"A".repeat(43)}`,
+      expect.any(Function),
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
+    expect(openInExternalPlayerMock).not.toHaveBeenCalled();
+    expect(screen.getByText("Waiting for Android confirmation…")).toBeInTheDocument();
+    expect(pause).not.toHaveBeenCalled();
+    expect(captured.signal?.aborted).toBe(false);
+
+    act(() => captured.handoff?.());
+    expect(pause).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      native.resolve("External player opened.");
+      await native.promise;
+    });
+    expect(screen.getByText("External player opened.")).toBeInTheDocument();
+    expect(recordDiagnosticMock).toHaveBeenCalledWith(
+      "player",
+      "external.chooser_opened",
+    );
+  });
+
+  it("cancels a remote Server Mode request when the source is replaced", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    installRemoteServerPlayerProvider();
+    const never = new Promise<string | null>(() => {});
+    const captured: { signal?: AbortSignal } = {};
+    openAndroidServerExternalPlayerMock.mockImplementation(
+      async (_url, _ownsRequest, signal) => {
+        captured.signal = signal;
+        return never;
+      },
+    );
+    const token = "B".repeat(43);
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/a"
+        externalPlaybackUrl={`https://server.example/api/external-stream/a/${token}`}
+        title="T"
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: /Open in external player/ }));
+    expect(captured.signal?.aborted).toBe(false);
+
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/b"
+        externalPlaybackUrl={`https://server.example/api/external-stream/b/${token}`}
+        title="T"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(captured.signal?.aborted).toBe(true);
+    expect(screen.queryByText("Waiting for Android confirmation…")).toBeNull();
+  });
+
+  it("reports a remote native cancellation without treating it as a launch failure", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    installRemoteServerPlayerProvider();
+    openAndroidServerExternalPlayerMock.mockResolvedValue(
+      "External player request canceled.",
+    );
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1"
+        externalPlaybackUrl={`https://server.example/api/external-stream/session-1/${"C".repeat(43)}`}
+        title="T"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: /Open in external player/ }));
+
+    expect(screen.getByText("External player request canceled.")).toBeInTheDocument();
+    expect(recordDiagnosticMock).toHaveBeenCalledWith(
+      "player",
+      "external.chooser_cancelled",
+    );
+    expect(recordDiagnosticMock).not.toHaveBeenCalledWith(
+      "player",
+      "external.start_failed",
+      "error",
+    );
   });
 
   it("uses mobile copy UI for a remote provider-only Android WebView", async () => {
@@ -1174,6 +1337,7 @@ describe("WebviewPlayer", () => {
       configurable: true,
       value: { getInsets: vi.fn(() => '{"top":0,"right":0,"bottom":0,"left":0}') },
     });
+    installRemoteServerPlayerProvider();
 
     render(
       <VideoPlayer
@@ -1193,6 +1357,7 @@ describe("WebviewPlayer", () => {
     expect(screen.queryByRole("button", { name: /Copy stream link/ })).toBeNull();
     expect(screen.queryByRole("link", { name: "Selectable stream link" })).toBeNull();
     expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
+    expect(openAndroidServerExternalPlayerMock).not.toHaveBeenCalled();
     expect(openInExternalPlayerMock).not.toHaveBeenCalled();
   });
 
@@ -1413,7 +1578,7 @@ describe("WebviewPlayer", () => {
         "https://server.example/api/external-stream/capability-1",
       );
 
-      await userEvent.click(screen.getByRole("button", { name: "Open in external player" }));
+      await userEvent.click(screen.getByRole("button", { name: /Open in external player/ }));
       expect(openAndroidExternalPlayerMock).toHaveBeenCalledWith(
         "https://server.example/api/external-stream/capability-1",
         expect.any(Function),
@@ -2643,7 +2808,7 @@ describe("WebviewPlayer", () => {
       expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
       expect(screen.getByText(/Playback did not become ready/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Open in external player" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Open in external player/ })).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }

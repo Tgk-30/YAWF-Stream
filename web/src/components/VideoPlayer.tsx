@@ -44,7 +44,9 @@ import { deviceKind } from "../lib/platform";
 import {
   isAndroidAppUiContext,
   isAndroidExternalPlayerEligible,
+  isAndroidServerExternalPlayerEligible,
   openAndroidExternalPlayer,
+  openAndroidServerExternalPlayer,
 } from "../lib/androidExternalPlayer";
 import type { SubtitleClient } from "../services/subtitles/OpenSubtitlesClient";
 import type { Translator } from "../services/subtitles/SubtitleTranslator";
@@ -728,6 +730,8 @@ export function VideoPlayer({
   const mobileTauri = androidAppUi || (underTauri && !desktopTauri);
   const dk = deviceKind();
   const androidTauri = isAndroidExternalPlayerEligible();
+  const androidServerPlayer = isAndroidServerExternalPlayerEligible(externalTarget);
+  const androidNativeChooser = androidTauri || androidServerPlayer;
   const mode: Playability =
     effectiveEngine === "native-mpv" && !mobileTauri ? "external" : "webview";
   // In-window native player: the DEFAULT desktop path for containers/codecs the
@@ -1364,10 +1368,15 @@ export function VideoPlayer({
   const externalActionOwnerRef = useRef(playbackOwner);
   externalActionOwnerRef.current = playbackOwner;
   const externalActionRequestRef = useRef(0);
+  const serverExternalRequestRef = useRef<AbortController | null>(null);
   useLayoutEffect(() => {
+    serverExternalRequestRef.current?.abort();
+    serverExternalRequestRef.current = null;
     externalActionRequestRef.current += 1;
     setExternalActionStatus(null);
     return () => {
+      serverExternalRequestRef.current?.abort();
+      serverExternalRequestRef.current = null;
       externalActionRequestRef.current += 1;
     };
   }, [externalTarget, playbackOwner, setExternalActionStatus]);
@@ -1376,6 +1385,8 @@ export function VideoPlayer({
     const request = ++externalActionRequestRef.current;
     const target = externalTarget;
     const owner = playbackOwner;
+    serverExternalRequestRef.current?.abort();
+    serverExternalRequestRef.current = null;
     const ownsRequest = () =>
       playerMountedRef.current &&
       playbackOwnerRef.current === owner &&
@@ -1403,6 +1414,31 @@ export function VideoPlayer({
         setExternalActionStatus(status);
         recordDiagnostic("player", "external.chooser_opened");
         return;
+      } else if (androidServerPlayer) {
+        if (!ownsRequest()) return;
+        const controller = new AbortController();
+        serverExternalRequestRef.current = controller;
+        setExternalActionStatus("Waiting for Android confirmation…");
+        const status = await openAndroidServerExternalPlayer(
+          target,
+          ownsRequest,
+          controller.signal,
+          () => {
+            if (ownsRequest()) externalHandoffVideoRef.current?.pause();
+          },
+        );
+        if (serverExternalRequestRef.current === controller) {
+          serverExternalRequestRef.current = null;
+        }
+        if (status == null || !ownsRequest()) return;
+        setExternalActionStatus(status);
+        recordDiagnostic(
+          "player",
+          status === "External player opened."
+            ? "external.chooser_opened"
+            : "external.chooser_cancelled",
+        );
+        return;
       } else if (mobileTauri) {
         if (navigator.clipboard == null) {
           if (!ownsRequest()) return;
@@ -1425,7 +1461,7 @@ export function VideoPlayer({
     } catch {
       if (!ownsRequest()) return;
       setExternalActionStatus(
-        androidTauri
+        androidNativeChooser
           ? "The Android player chooser could not be opened. Copy the stream link or use the selectable link below."
           : mobileTauri
             ? "The stream link could not be copied. Use the selectable link below."
@@ -1441,12 +1477,16 @@ export function VideoPlayer({
     title,
     desktopTauri,
     androidTauri,
+    androidServerPlayer,
+    androidNativeChooser,
     mobileTauri,
     setExternalActionStatus,
   ]);
 
   const copyExternalPlaybackLink = useCallback(async () => {
     if (externalTarget == null) return;
+    serverExternalRequestRef.current?.abort();
+    serverExternalRequestRef.current = null;
     const request = ++externalActionRequestRef.current;
     const target = externalTarget;
     const owner = playbackOwner;
@@ -1898,7 +1938,7 @@ export function VideoPlayer({
             onPlaybackStall={recoverPostStartStall}
             onOpenExternalPlayer={() => void openExternalPlayback()}
             onCopyExternalLink={mobileTauri ? () => void copyExternalPlaybackLink() : undefined}
-            nativeExternalChooser={androidTauri}
+            nativeExternalChooser={androidNativeChooser}
             externalPlaybackAvailable={externalTarget != null}
             externalActionStatus={externalActionStatus}
             manualExternalUrl={mobileTauri ? externalTarget : null}
@@ -1923,7 +1963,7 @@ export function VideoPlayer({
             externalStatus={externalActionStatus}
             onOpenExternal={() => void openExternalPlayback()}
             onCopyExternal={mobileTauri ? () => void copyExternalPlaybackLink() : undefined}
-            nativeExternalChooser={androidTauri}
+            nativeExternalChooser={androidNativeChooser}
             manualExternalUrl={mobileTauri ? externalTarget : null}
             onTryNextSource={onTryNextSource}
             onRetry={

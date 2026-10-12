@@ -31,6 +31,9 @@ services:
       - "${PORT:-43110}:43110"
     volumes:
       - debridstreamer-data:/data
+      # Optional host updater status. The application can only read this
+      # redacted file and never receives the Docker socket or update policy.
+      - /var/lib/yawf-server-updater/public:/run/yawf-server-updater:ro
 
 volumes:
   debridstreamer-data:

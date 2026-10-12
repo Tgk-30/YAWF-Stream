@@ -22,13 +22,16 @@ vi.mock("./networkPolicy", () => ({
 import {
   isAndroidAppUiContext,
   isAndroidExternalPlayerEligible,
+  isAndroidServerExternalPlayerEligible,
   openAndroidExternalPlayer,
+  openAndroidServerExternalPlayer,
 } from "./androidExternalPlayer";
 
 type RuntimeMarkers = typeof globalThis & {
   __YAWF_TAURI_ANDROID__?: boolean;
   __YAWF_TAURI_MOBILE__?: boolean;
   __YAWF_NATIVE_SAFE_AREA__?: unknown;
+  __YAWF_SERVER_PLAYER__?: unknown;
 };
 
 const runtimeMarkers = globalThis as RuntimeMarkers;
@@ -46,6 +49,7 @@ describe("Android external player bridge", () => {
     delete runtimeMarkers.__YAWF_TAURI_ANDROID__;
     delete runtimeMarkers.__YAWF_TAURI_MOBILE__;
     delete runtimeMarkers.__YAWF_NATIVE_SAFE_AREA__;
+    delete runtimeMarkers.__YAWF_SERVER_PLAYER__;
   });
 
   afterEach(() => {
@@ -54,6 +58,7 @@ describe("Android external player bridge", () => {
     delete runtimeMarkers.__YAWF_TAURI_ANDROID__;
     delete runtimeMarkers.__YAWF_TAURI_MOBILE__;
     delete runtimeMarkers.__YAWF_NATIVE_SAFE_AREA__;
+    delete runtimeMarkers.__YAWF_SERVER_PLAYER__;
   });
 
   it("detects the read-only Android provider without invoking its inset getter", () => {
@@ -238,5 +243,277 @@ describe("Android external player bridge", () => {
     if (!(error instanceof Error)) throw new Error("Expected chooser failure");
     expect(error.message).toBe("The Android player chooser could not be opened.");
     expect(error.message).not.toContain("private-stream-marker");
+  });
+
+  function installServerPlayerBridge() {
+    const listeners = new Set<(event: { data: unknown }) => void>();
+    const bridge = {
+      postMessage: vi.fn(),
+      addEventListener: vi.fn((type: string, listener: (event: { data: unknown }) => void) => {
+        if (type === "message") listeners.add(listener);
+      }),
+      removeEventListener: vi.fn((type: string, listener: (event: { data: unknown }) => void) => {
+        if (type === "message") listeners.delete(listener);
+      }),
+    };
+    runtimeMarkers.__YAWF_SERVER_PLAYER__ = bridge;
+    return {
+      bridge,
+      deliver(message: Record<string, string>) {
+        for (const listener of [...listeners]) {
+          listener({ data: JSON.stringify(message) });
+        }
+      },
+      listenerCount: () => listeners.size,
+    };
+  }
+
+  it("enables the origin-attested Server Mode bridge without Tauri or a mobile user agent", () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    vi.stubGlobal("location", new URL("https://server.example/yawf/watch"));
+    installServerPlayerBridge();
+    const token = "A".repeat(43);
+
+    expect(isAndroidAppUiContext()).toBe(true);
+    expect(isAndroidExternalPlayerEligible()).toBe(false);
+    expect(isAndroidServerExternalPlayerEligible(
+      `https://server.example/yawf/api/external-stream/session-1/${token}`,
+    )).toBe(true);
+  });
+
+  it("accepts canonical IPv6 origins with default and explicit nondefault ports", () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    installServerPlayerBridge();
+    const token = "V".repeat(43);
+    for (const [page, target] of [
+      [
+        "https://[2001:db8::1]/watch",
+        `https://[2001:db8::1]/api/external-stream/session-1/${token}`,
+      ],
+      [
+        "http://[::1]:8080/yawf/watch",
+        `http://[::1]:8080/yawf/api/external-stream/session-1/${token}`,
+      ],
+    ]) {
+      vi.stubGlobal("location", new URL(page));
+      expect(isAndroidServerExternalPlayerEligible(target), target).toBe(true);
+    }
+  });
+
+  it("rejects remote capability confusion before posting to the native bridge", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    vi.stubGlobal("location", new URL("https://server.example/yawf/watch"));
+    const { bridge } = installServerPlayerBridge();
+    const token = "A".repeat(43);
+    const invalid = [
+      `https://other.example/yawf/api/external-stream/session-1/${token}`,
+      `https://server.example/yawf/api/external-stream/session-1/${token}?download=1`,
+      `https://server.example/yawf/api/external-stream/session-1/${token}#fragment`,
+      `https://user:password@server.example/yawf/api/external-stream/session-1/${token}`,
+      `https://server.example/yawf/api/external-stream/%2e%2e/${token}`,
+      `https://server.example/yawf/api/external-stream/session-1/short`,
+      `http://server.example/yawf/api/external-stream/session-1/${token}`,
+    ];
+
+    for (const candidate of invalid) {
+      expect(isAndroidServerExternalPlayerEligible(candidate), candidate).toBe(false);
+      await expect(openAndroidServerExternalPlayer(
+        candidate,
+        () => true,
+        new AbortController().signal,
+        vi.fn(),
+      )).rejects.toThrow("chooser is unavailable");
+    }
+    expect(bridge.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("applies the existing network policy before posting a remote request", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const { bridge } = installServerPlayerBridge();
+    assertNetworkAllowedMock.mockImplementation(() => {
+      throw new Error("blocked by network policy");
+    });
+
+    await expect(openAndroidServerExternalPlayer(
+      `https://server.example/api/external-stream/session-1/${"P".repeat(43)}`,
+      () => true,
+      new AbortController().signal,
+      vi.fn(),
+    )).rejects.toThrow("blocked by network policy");
+    expect(assertNetworkAllowedMock).toHaveBeenCalledWith(
+      "streaming",
+      "Android external player",
+    );
+    expect(bridge.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("completes the native challenge on the original provider before reporting success", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    vi.stubGlobal("location", new URL("https://server.example/yawf/watch"));
+    const { bridge, deliver, listenerCount } = installServerPlayerBridge();
+    const token = "B".repeat(43);
+    const controller = new AbortController();
+    const onHandoff = vi.fn();
+    const pending = openAndroidServerExternalPlayer(
+      `https://server.example/yawf/api/external-stream/session-1/${token}`,
+      () => true,
+      controller.signal,
+      onHandoff,
+    );
+    await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledTimes(1));
+    const first = JSON.parse(bridge.postMessage.mock.calls[0][0] as string) as {
+      action: string;
+      requestId: string;
+      url: string;
+    };
+    expect(first).toMatchObject({
+      action: "open",
+      url: `https://server.example/yawf/api/external-stream/session-1/${token}`,
+    });
+    expect(listenerCount()).toBe(1);
+
+    deliver({ type: "pending", requestId: first.requestId });
+    expect(onHandoff).not.toHaveBeenCalled();
+    const challenge = "ab".repeat(32);
+    deliver({ type: "confirm", requestId: first.requestId, challenge });
+    expect(onHandoff).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(bridge.postMessage.mock.calls[1][0] as string)).toEqual({
+      action: "open",
+      requestId: first.requestId,
+      challenge,
+    });
+    deliver({ type: "success", requestId: first.requestId });
+
+    await expect(pending).resolves.toBe("External player opened.");
+    expect(listenerCount()).toBe(0);
+  });
+
+  it("cancels the owned native request when its source lifetime ends", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const { bridge, listenerCount } = installServerPlayerBridge();
+    const controller = new AbortController();
+    const pending = openAndroidServerExternalPlayer(
+      `https://server.example/api/external-stream/session-1/${"C".repeat(43)}`,
+      () => true,
+      controller.signal,
+      vi.fn(),
+    );
+    await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledTimes(1));
+    const first = JSON.parse(bridge.postMessage.mock.calls[0][0] as string) as {
+      requestId: string;
+    };
+
+    controller.abort();
+
+    await expect(pending).resolves.toBeNull();
+    expect(JSON.parse(bridge.postMessage.mock.calls[1][0] as string)).toEqual({
+      action: "cancel",
+      requestId: first.requestId,
+    });
+    expect(listenerCount()).toBe(0);
+  });
+
+  it("does not acknowledge a confirmation after JavaScript ownership is lost", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const { bridge, deliver } = installServerPlayerBridge();
+    let owned = true;
+    const onHandoff = vi.fn();
+    const pending = openAndroidServerExternalPlayer(
+      `https://server.example/api/external-stream/session-1/${"D".repeat(43)}`,
+      () => owned,
+      new AbortController().signal,
+      onHandoff,
+    );
+    await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledTimes(1));
+    const first = JSON.parse(bridge.postMessage.mock.calls[0][0] as string) as {
+      requestId: string;
+    };
+    owned = false;
+    deliver({
+      type: "confirm",
+      requestId: first.requestId,
+      challenge: "ef".repeat(32),
+    });
+
+    await expect(pending).resolves.toBeNull();
+    expect(onHandoff).not.toHaveBeenCalled();
+    expect(JSON.parse(bridge.postMessage.mock.calls[1][0] as string)).toEqual({
+      action: "cancel",
+      requestId: first.requestId,
+    });
+  });
+
+  it("rechecks ownership after the handoff callback before acknowledging", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const { bridge, deliver } = installServerPlayerBridge();
+    let owned = true;
+    const pending = openAndroidServerExternalPlayer(
+      `https://server.example/api/external-stream/session-1/${"F".repeat(43)}`,
+      () => owned,
+      new AbortController().signal,
+      () => { owned = false; },
+    );
+    await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledTimes(1));
+    const first = JSON.parse(bridge.postMessage.mock.calls[0][0] as string) as {
+      requestId: string;
+    };
+    deliver({
+      type: "confirm",
+      requestId: first.requestId,
+      challenge: "12".repeat(32),
+    });
+
+    await expect(pending).resolves.toBeNull();
+    expect(JSON.parse(bridge.postMessage.mock.calls[1][0] as string)).toEqual({
+      action: "cancel",
+      requestId: first.requestId,
+    });
+  });
+
+  it("reports native cancel separately and sanitizes native errors", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const installed = installServerPlayerBridge();
+    const target = `https://server.example/api/external-stream/session-1/${"E".repeat(43)}`;
+    const cancelled = openAndroidServerExternalPlayer(
+      target,
+      () => true,
+      new AbortController().signal,
+      vi.fn(),
+    );
+    await vi.waitFor(() => expect(installed.bridge.postMessage).toHaveBeenCalledTimes(1));
+    const cancelId = JSON.parse(installed.bridge.postMessage.mock.calls[0][0] as string)
+      .requestId as string;
+    installed.deliver({ type: "cancelled", requestId: cancelId });
+    await expect(cancelled).resolves.toBe("External player request canceled.");
+
+    const failed = openAndroidServerExternalPlayer(
+      target,
+      () => true,
+      new AbortController().signal,
+      vi.fn(),
+    );
+    await vi.waitFor(() => expect(installed.bridge.postMessage).toHaveBeenCalledTimes(2));
+    const errorId = JSON.parse(installed.bridge.postMessage.mock.calls.at(-1)![0] as string)
+      .requestId as string;
+    installed.deliver({
+      type: "error",
+      requestId: errorId,
+      detail: "private-capability-marker",
+    });
+    await expect(failed).rejects.toThrow("Android player chooser could not be opened");
   });
 });

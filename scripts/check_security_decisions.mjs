@@ -109,6 +109,13 @@ const androidRemoteSafeAreaPermission = read(
 );
 const androidProjectPatcher = read("scripts/patch_tauri_android.mjs");
 const mobileSafeAreaSource = read("web/src/lib/mobileSafeArea.ts");
+// Inspect the current generated activity, not recognized historical templates.
+const currentActivityStart = androidProjectPatcher.indexOf("function patchedMainActivity(packageName) {");
+const currentActivityEnd = androidProjectPatcher.indexOf("\nfunction replacementState(", currentActivityStart);
+const currentActivityTemplate = currentActivityStart >= 0 && currentActivityEnd > currentActivityStart
+  ? androidProjectPatcher.slice(currentActivityStart, currentActivityEnd)
+  : "";
+
 const androidRemoteSafeAreaCommands = new Set(
   [...androidRemoteSafeAreaPermission.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
     .flatMap((match) => [...match[1].matchAll(/"([a-z][a-z0-9_]*)"/g)])
@@ -126,7 +133,7 @@ check(
   "Remote Android main pages receive only read-only numeric safe-area insets",
 );
 const generatedInsetBridge = /@Keep\nclass YawfSafeAreaBridge\([\s\S]*?\n}\n\nclass MainActivity/.exec(
-  androidProjectPatcher,
+  currentActivityTemplate,
 )?.[0];
 const expectedGeneratedInsetBridge = `@Keep
 class YawfSafeAreaBridge(
@@ -139,7 +146,7 @@ class YawfSafeAreaBridge(
 class MainActivity`;
 check(
   generatedInsetBridge === expectedGeneratedInsetBridge &&
-    (androidProjectPatcher.match(/@JavascriptInterface/g)?.length ?? 0) === 1 &&
+    (currentActivityTemplate.match(/@JavascriptInterface/g)?.length ?? 0) === 1 &&
     /private const val SAFE_AREA_BRIDGE_NAME = "__YAWF_NATIVE_SAFE_AREA__"/.test(
       androidProjectPatcher,
     ) &&
@@ -447,6 +454,11 @@ const androidPlaybackHeaders = read(
   "android-tv/app/src/main/java/com/yawf/stream/tv/PlaybackHeaders.java",
 );
 const remoteControl = read("server/src/remoteControl.ts");
+const serverUpdater = read("deploy/updater/yawf-server-update.mjs");
+const serverUpdaterCopy = read("deploy/updater/volume-copy.mjs");
+const serverUpdaterStatus = read("server/src/serverUpdaterStatus.ts");
+const serverCompose = read("deploy/compose/docker-compose.ghcr.yml");
+const serverUpdaterWrapper = read("deploy/updater/yawf-server-update");
 check(
   /allowRawStreamUrls:[\s\S]{0,160}process\.env\.NODE_ENV !== "production"/.test(serverConfig),
   "Production raw stream URL creation defaults off",
@@ -506,6 +518,24 @@ check(
     /REMOTE_COMMAND_LIMIT/.test(remoteControl) &&
     /REMOTE_SESSION_TTL_MS/.test(remoteControl),
   "Phone remote capabilities are hashed, profile-bound, expiring, and queue-bounded",
+);
+check(
+  /REPOSITORY = "ghcr\.io\/tgk-30\/yawf-stream"/.test(serverUpdater) &&
+    /server-update\.json/.test(serverUpdater) &&
+    /candidate\.image\.digest/.test(serverUpdater) &&
+    /"--no-deps", "debridstreamer"/.test(serverUpdater) &&
+    /Active playback is in progress/.test(serverUpdater) &&
+    /snapshotVolume/.test(serverUpdater) &&
+    /rollback\(policy, journal\)/.test(serverUpdater) &&
+    /stopAndConfirm/.test(serverUpdater) &&
+    /registrationIdentity/.test(serverUpdater) &&
+    /"--cap-add", "DAC_OVERRIDE", "--cap-add", "CHOWN"/.test(serverUpdater) &&
+    /flock -n 9/.test(serverUpdaterWrapper) &&
+    /isSymbolicLink\(\)/.test(serverUpdaterCopy) &&
+    /O_NOFOLLOW/.test(serverUpdaterStatus) &&
+    /readServerUpdaterStatus/.test(serverUpdaterStatus) &&
+    !/docker\.sock/.test(serverCompose),
+  "Server auto-update stays in the root host helper with immutable provenance, backup rollback, and read-only app status",
 );
 
 if (failures.length > 0) {

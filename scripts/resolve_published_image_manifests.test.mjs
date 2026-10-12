@@ -219,8 +219,10 @@ test("manual published verification is read-only and runs both pinned children h
   assert.match(manual, /IMAGE_NAME: ghcr\.io\/tgk-30\/yawf-stream/);
   assert.match(manual, /SOURCE_PACKAGE_VERSION: \$\{\{ inputs\.source_package_version \}\}/);
   assert.match(manual, /EXPECTED_SOURCE_REVISION: \$\{\{ inputs\.expected_source_revision \}\}/);
-  assert.match(manual, /test "\$SOURCE_PACKAGE_VERSION" = "2\.3\.8"/);
-  assert.match(manual, /test "\$EXPECTED_SOURCE_REVISION" = "4387873fd7df8ef894c7424a30abb31f8ec06526"/);
+  assert.match(manual, /test "\$SOURCE_PACKAGE_VERSION" = "\$recorded_version"/);
+  assert.match(manual, /git cat-file -e "\$\{EXPECTED_SOURCE_REVISION\}\^\{commit\}"/);
+  assert.match(manual, /git show "\$\{EXPECTED_SOURCE_REVISION\}:server\/package\.json"/);
+  assert.match(manual, /fetch-depth: 0/);
   assert.match(manual, /id: manual-children/);
   assert.match(manual, /for architecture in amd64 arm64; do/);
   assert.match(manual, /amd64\) child_reference="\$AMD64_REFERENCE"/);

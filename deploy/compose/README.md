@@ -23,6 +23,33 @@ docker compose -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.ghcr.yml up -d
 ```
 
+### Optional unattended stable updates
+
+The application container never controls Docker. A separately installed,
+root-owned host helper can update one explicitly registered Compose service by
+immutable release digest, with a stopped-volume snapshot and automatic
+rollback. It is off by default and never follows the floating `latest` tag.
+
+Download `yawf-server-updater_X.Y.Z.tar.gz` and `SHA256SUMS` from the matching
+server release, verify the checksum, then follow the bundled README:
+
+```sh
+sudo ./install.sh
+sudo yawf-server-update register /absolute/path/docker-compose.ghcr.yml
+sudo yawf-server-update check
+sudo yawf-server-update enable
+```
+
+Registration requires the Compose file, its `.env`, and every parent directory
+through `/` to be root-owned, free of symlinks, and not writable by group or
+other users. Use a protected deployment directory such as `/srv/yawf`, not a
+user-owned home directory. Preserve the existing Compose project name when
+relocating configuration so registration finds the same running service. The
+helper updates only the `debridstreamer` service with `--no-deps`, defers active
+playback, and uses the 03:00-05:00 UTC maintenance window. The read-only status
+mount in the published Compose file exposes redacted state to Settings. It does
+not expose update policy, backups, credentials, or `/var/run/docker.sock`.
+
 ### Alternative - build from source
 
 Uses `docker-compose.yml` to build the image locally from this checkout.
@@ -33,6 +60,9 @@ openssl rand -base64 32
 # paste that value into DS_SERVER_SECRET_KEY in .env
 docker compose up -d --build
 ```
+
+Source-built Compose deployments update manually. The host updater accepts only
+the fixed published `ghcr.io/tgk-30/yawf-stream` repository.
 
 Open:
 

@@ -133,6 +133,37 @@ bypass policy for the exact path `/api/external-stream/*` so the selected
 player can fetch it. Do not bypass `/api/*` or the whole site. The capability is
 tied to the current profile and session expiry and can be revoked server-side.
 
+### Android Server Mode external players
+
+The Android app can hand a Server Mode stream to VLC or another installed
+video app even when the remote page has no Tauri IPC. The playback menu shows
+**Open in external player** only when all of these conditions hold:
+
+- Android injected its `__YAWF_SERVER_PLAYER__` WebMessage listener provider.
+- The requested URL is the current page's exact origin.
+- The URL is the existing cookie-free
+  `/api/external-stream/<session>/<capability>` route, including an optional
+  safe mount prefix.
+- The native host receives the request from the current top-level document.
+
+Android shows a native **Open external player?** confirmation that names only
+the requesting origin. It never displays the capability URL. Confirming starts
+a per-document challenge before Android opens its `video/*` app chooser. A
+navigation, source replacement, cancellation, timeout, subframe request, or
+origin change invalidates the pending handoff.
+
+**Copy stream link** remains a separate fallback and does not pause playback.
+If the native provider is unavailable, the remote page keeps the clearly
+labeled copy/selectable-link fallback instead of claiming that a player chooser
+opened. Protected streams with no external capability expose neither action nor
+the protected playback URL.
+
+The bridge uses AndroidX
+[`WebViewCompat.addWebMessageListener`](https://developer.android.com/reference/androidx/webkit/WebViewCompat#addWebMessageListener(android.webkit.WebView,java.lang.String,java.util.Set%3Cjava.lang.String%3E,androidx.webkit.WebViewCompat.WebMessageListener))
+so native code receives the source origin, main-frame flag, and original
+per-document reply proxy. It does not widen Tauri command permissions or add a
+general JavaScript invocation surface.
+
 > **Important:** Cloudflare Access and Tailscale are *outer* protection layers.
 > They control who can reach the server. They do **not** replace DebridStreamer's
 > own logins and profiles, which keep each person's history, credentials, and

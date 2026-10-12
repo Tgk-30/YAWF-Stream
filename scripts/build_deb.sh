@@ -98,3 +98,8 @@ install -d "${OUT}"
 DEB="${OUT}/${PKG}_${VERSION}_all.deb"
 dpkg-deb --root-owner-group --build "${STAGE}" "${DEB}"
 echo "Built ${DEB}"
+
+# The Docker host updater is a separate, default-off host artifact. Building it
+# beside the deb keeps release checksums and publication on one server channel
+# without granting the application container any host privilege.
+bash "${ROOT}/scripts/build_server_updater_bundle.sh" "${VERSION}"

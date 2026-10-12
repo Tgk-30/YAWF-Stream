@@ -41,6 +41,14 @@ docker compose -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.ghcr.yml up -d
 ```
 
+For opt-in unattended stable updates, use the separately published
+`yawf-server-updater_X.Y.Z.tar.gz` host bundle. It registers this exact Compose
+service, pins immutable release digests, snapshots the stopped named data
+volume and opaque `.env`, and rolls both back on failure. See
+[`../updater/README.md`](../updater/README.md). It is disabled until the host
+operator runs `sudo yawf-server-update enable`; the application never receives
+the Docker socket.
+
 To build the image from source instead of pulling it, use
 `deploy/compose/docker-compose.yml` (`docker compose up -d --build`).
 
@@ -119,6 +127,11 @@ sudo systemctl restart debridstreamer
 Server-only releases use explicit versioned downloads. GitHub
 `releases/latest` remains reserved for the multi-platform desktop release, so it
 can contain an older server package.
+
+Automatic installation currently supports the published Docker Compose path.
+Native systemd and `.deb` operators continue to install a newer package
+manually; Settings reports that distinction instead of presenting desktop OTA
+controls as a server updater.
 
 ---
 

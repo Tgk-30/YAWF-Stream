@@ -289,6 +289,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -308,10 +310,10 @@ jobs:
           set -euo pipefail
           [[ "$PUBLISHED_IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
           [[ "$EXPECTED_SOURCE_REVISION" =~ ^[a-f0-9]{40}$ ]]
-          test "$EXPECTED_SOURCE_REVISION" = "4387873fd7df8ef894c7424a30abb31f8ec06526"
           [[ "$SOURCE_PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test "$SOURCE_PACKAGE_VERSION" = "2.3.8"
-          test "$SOURCE_PACKAGE_VERSION" = "$(node -p "require('./server/package.json').version")"
+          git cat-file -e "${EXPECTED_SOURCE_REVISION}^{commit}"
+          recorded_version="$(git show "${EXPECTED_SOURCE_REVISION}:server/package.json" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).version))')"
+          test "$SOURCE_PACKAGE_VERSION" = "$recorded_version"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

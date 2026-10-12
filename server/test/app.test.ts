@@ -692,7 +692,11 @@ describe("DebridStreamer server", () => {
   it("creates the first owner, starts a session, and rejects unsafe writes without CSRF", async () => {
     const health = await app.inject({ method: "GET", url: "/api/health" });
     expect(health.statusCode).toBe(200);
-    expect(json<{ setupRequired: boolean }>(health).setupRequired).toBe(true);
+    expect(json<{ setupRequired: boolean; ready: boolean; version: string }>(health)).toMatchObject({
+      setupRequired: true,
+      ready: false,
+      version: "2.3.9",
+    });
 
     const owner = await setupOwner(app);
     const session = await request(owner, { method: "GET", url: "/api/auth/session" });

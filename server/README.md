@@ -10,6 +10,8 @@ Self-hosted Server Mode foundation for DebridStreamer.
 - In-memory abuse limits for login/setup/invite and stream-session mutations.
 - Admin health diagnostics for sessions, streams, credentials, invites, and
   deployment flags.
+- Read-only reporting for the separate Docker host updater. The server cannot
+  enable updates, execute host commands, or access the Docker socket.
 - Admin active-stream dashboard data with profile, bytes, status, and expiry.
 - User/profile creation.
 - Profile-scoped watchlist and watch history.
