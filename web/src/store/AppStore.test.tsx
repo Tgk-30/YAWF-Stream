@@ -46,17 +46,23 @@ const fakeServices: AppServices = {
 const buildServices = vi.fn((_s: AppSettings): AppServices => ({ ...fakeServices }));
 const loadSettings = vi.fn<() => AppSettings>();
 const loadSettingsFromStore = vi.fn<() => Promise<AppSettings>>();
-const saveSettingsToStore = vi.fn<(s: AppSettings) => Promise<void>>();
+type SettingsSaveOptions = { previous?: AppSettings };
+const saveSettingsToStore = vi.fn<
+  (s: AppSettings, options?: SettingsSaveOptions) => Promise<void>
+>();
+const applyDesignRefresh = vi.fn<(s: AppSettings) => AppSettings>();
+const markDesignRefreshApplied = vi.fn();
 
 vi.mock("../data/settings", () => ({
   buildServices: (s: AppSettings) => buildServices(s),
   loadSettings: () => loadSettings(),
   loadSettingsFromStore: () => loadSettingsFromStore(),
-  saveSettingsToStore: (s: AppSettings) => saveSettingsToStore(s),
+  saveSettingsToStore: (s: AppSettings, options?: SettingsSaveOptions) =>
+    saveSettingsToStore(s, options),
   // Identity in tests: the one-time design refresh is exercised in its own
   // unit suite; here it must not mutate the hydrated fixture.
-  applyDesignRefresh: (s: AppSettings) => s,
-  markDesignRefreshApplied: () => {},
+  applyDesignRefresh: (s: AppSettings) => applyDesignRefresh(s),
+  markDesignRefreshApplied: () => markDesignRefreshApplied(),
 }));
 
 const loadWatchlist = vi.fn<() => Promise<MediaPreview[]>>();
@@ -299,6 +305,7 @@ beforeEach(() => {
   loadSettings.mockReturnValue(settings());
   loadSettingsFromStore.mockResolvedValue(settings());
   saveSettingsToStore.mockResolvedValue(undefined);
+  applyDesignRefresh.mockImplementation((loaded) => loaded);
   loadWatchlist.mockResolvedValue([]);
   loadHistory.mockResolvedValue([]);
   loadContinueWatching.mockResolvedValue([]);
@@ -761,6 +768,56 @@ describe("initial load / hydration", () => {
   });
 });
 
+describe("design refresh persistence", () => {
+  it("passes the owned loaded snapshot as previous and marks only after persistence succeeds", async () => {
+    const loaded = settings({
+      appearanceDensity: "compact",
+      tmdbKey: "existing-tmdb",
+      debridTokens: [{ service: "real_debrid", apiToken: "existing-rd" }],
+    });
+    const refreshed = { ...loaded, appearanceDensity: "comfortable" as const };
+    const persistPending = deferred<void>();
+    loadSettingsFromStore.mockResolvedValue(loaded);
+    applyDesignRefresh.mockReturnValue(refreshed);
+    saveSettingsToStore.mockReturnValue(persistPending.promise);
+
+    await renderStore();
+
+    await waitFor(() =>
+      expect(saveSettingsToStore).toHaveBeenCalledWith(refreshed, {
+        previous: loaded,
+      }),
+    );
+    expect(markDesignRefreshApplied).not.toHaveBeenCalled();
+
+    await act(async () => {
+      persistPending.resolve();
+      await persistPending.promise;
+    });
+    await waitFor(() => expect(markDesignRefreshApplied).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not mark the design refresh applied when its delta persistence fails", async () => {
+    const loaded = settings({ appearanceDensity: "compact" });
+    const refreshed = { ...loaded, appearanceDensity: "comfortable" as const };
+    loadSettingsFromStore.mockResolvedValue(loaded);
+    applyDesignRefresh.mockReturnValue(refreshed);
+    saveSettingsToStore.mockRejectedValue(new Error("store unavailable"));
+
+    await renderStore();
+
+    await waitFor(() =>
+      expect(saveSettingsToStore).toHaveBeenCalledWith(refreshed, {
+        previous: loaded,
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(markDesignRefreshApplied).not.toHaveBeenCalled();
+  });
+});
+
 describe("navigate", () => {
   it("changes the route and dismisses open overlays", async () => {
     const { result } = await renderStore();
@@ -992,7 +1049,11 @@ describe("updateSettings", () => {
     // Theme/data-saver are not service inputs, so service identities and the
     // download runtime dependency remain stable through this settings save.
     expect(buildServices).not.toHaveBeenCalled();
-    await waitFor(() => expect(saveSettingsToStore).toHaveBeenCalledWith(next));
+    await waitFor(() =>
+      expect(saveSettingsToStore).toHaveBeenCalledWith(next, {
+        previous: settings(),
+      }),
+    );
   });
 
   it("rebuilds services when a service configuration input changes", async () => {

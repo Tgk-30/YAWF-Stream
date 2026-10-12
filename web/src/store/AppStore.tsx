@@ -680,7 +680,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       setNetworkMode(refreshedSettings.networkMode);
       setSettings(refreshedSettings);
       if (refreshedSettings !== loadedSettings) {
-        void saveSettingsToStore(refreshedSettings)
+        void saveSettingsToStore(refreshedSettings, { previous: loadedSettings })
           .then(() => markDesignRefreshApplied())
           .catch(() => {
             /* leave the marker unset so the refresh retries next load */
