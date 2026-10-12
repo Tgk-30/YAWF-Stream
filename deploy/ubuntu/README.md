@@ -99,9 +99,9 @@ amd64 and arm64). It installs the built server + web app to
 
 ```bash
 # Requires Node.js 24+ (see Option B step 1 for NodeSource) - the package
-# depends on `nodejs (>= 22)`.
-curl -fsSLO https://github.com/Tgk-30/YAWF-Stream/releases/latest/download/debridstreamer-server_all.deb
-sudo apt-get install -y ./debridstreamer-server_all.deb
+# depends on `nodejs (>= 24)`.
+curl -fsSLO https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.7/debridstreamer-server_2.3.7_all.deb
+sudo apt-get install -y ./debridstreamer-server_2.3.7_all.deb
 
 # Set the secret key, then start.
 sudo nano /etc/debridstreamer/debridstreamer.env
@@ -109,7 +109,16 @@ sudo systemctl enable --now debridstreamer
 ```
 
 Upgrade by installing a newer `.deb`; your `/etc/debridstreamer/debridstreamer.env`
-and `/var/lib/debridstreamer` data are preserved.
+and `/var/lib/debridstreamer` data are preserved. After installation, restart the
+existing service and reload the app once online to load the updated Server Mode UI:
+
+```sh
+sudo systemctl restart debridstreamer
+```
+
+Server-only releases use explicit versioned downloads. GitHub
+`releases/latest` remains reserved for the multi-platform desktop release, so it
+can contain an older server package.
 
 ---
 

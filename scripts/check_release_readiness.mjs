@@ -803,11 +803,12 @@ check(
   ".github/workflows/docker-image.yml must turn vX.Y.Z-web into X.Y.Z and X.Y server image tags",
 );
 check(
-  "Pull requests build Docker images without publishing",
+  "Pull requests and manual dispatch verify Docker without publishing",
   /pull_request:\s*[\s\S]{0,80}branches:\s*\n\s*- main/.test(dockerWorkflow) &&
-    /if: github\.event_name != 'pull_request'/.test(dockerWorkflow) &&
-    /push: \$\{\{ github\.event_name != 'pull_request' \}\}/.test(dockerWorkflow),
-  ".github/workflows/docker-image.yml must build changed images on pull requests and publish only outside pull requests",
+    (dockerWorkflow.match(/if: github\.event_name == 'push'/g)?.length ?? 0) >= 2 &&
+    /push: \$\{\{ github\.event_name == 'push' \}\}/.test(dockerWorkflow) &&
+    !/github\.event_name != 'pull_request'/.test(dockerWorkflow),
+  ".github/workflows/docker-image.yml must verify pull requests and dispatches while login, publication and post-publication checks run only on pushes",
 );
 check(
   "Docker workflow runs public preflight",

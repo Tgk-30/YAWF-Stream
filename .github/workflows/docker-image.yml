@@ -92,8 +92,68 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Build and load amd64 smoke image
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --tag yawf-server-smoke:amd64 \
+            --cache-from type=gha \
+            .
+
+      - name: Smoke amd64 production image
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_version="$(node -p "require('./server/package.json').version")"
+          docker run --rm \
+            --platform linux/amd64 \
+            --network none \
+            --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --entrypoint node \
+            --mount type=bind,source="$PWD/scripts/smoke_server_artifact.mjs",target=/smoke/smoke_server_artifact.mjs,readonly \
+            yawf-server-smoke:amd64 \
+            /smoke/smoke_server_artifact.mjs \
+            --expected-version "$expected_version" \
+            --server-entry /app/server/dist/index.cjs \
+            --web-dist /app/web-dist \
+            | tee "$RUNNER_TEMP/yawf-server-smoke-linux-amd64.json"
+
+      - name: Build and load arm64 smoke image
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --load \
+            --tag yawf-server-smoke:arm64 \
+            --cache-from type=gha \
+            .
+
+      - name: Smoke arm64 production image
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_version="$(node -p "require('./server/package.json').version")"
+          docker run --rm \
+            --platform linux/arm64 \
+            --network none \
+            --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --entrypoint node \
+            --mount type=bind,source="$PWD/scripts/smoke_server_artifact.mjs",target=/smoke/smoke_server_artifact.mjs,readonly \
+            yawf-server-smoke:arm64 \
+            /smoke/smoke_server_artifact.mjs \
+            --expected-version "$expected_version" \
+            --server-entry /app/server/dist/index.cjs \
+            --web-dist /app/web-dist \
+            | tee "$RUNNER_TEMP/yawf-server-smoke-linux-arm64.json"
+
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -115,13 +175,56 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and publish multi-arch image
+        id: publish
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify published images by immutable digest
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$IMAGE_NAME"
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          expected_version="$(node -p "require('./server/package.json').version")"
+          image="$IMAGE_NAME@$IMAGE_DIGEST"
+          for architecture in amd64 arm64; do
+            docker pull --platform "linux/$architecture" "$image"
+            docker run --rm \
+              --platform "linux/$architecture" \
+              --network none \
+              --read-only \
+              --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+              --cap-drop ALL \
+              --security-opt no-new-privileges \
+              --entrypoint node \
+              --mount type=bind,source="$PWD/scripts/smoke_server_artifact.mjs",target=/smoke/smoke_server_artifact.mjs,readonly \
+              "$image" \
+              /smoke/smoke_server_artifact.mjs \
+              --expected-version "$expected_version" \
+              --server-entry /app/server/dist/index.cjs \
+              --web-dist /app/web-dist \
+              | tee "$RUNNER_TEMP/yawf-published-smoke-linux-$architecture.jsonl"
+          done
+
+      - name: Retain server image verification receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-image-smoke-receipts
+          path: |
+            ${{ runner.temp }}/yawf-server-smoke-linux-*.json
+            ${{ runner.temp }}/yawf-published-smoke-linux-*.jsonl
+          if-no-files-found: ignore
+          retention-days: 7

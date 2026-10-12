@@ -41,7 +41,7 @@ Package: ${PKG}
 Version: ${VERSION}
 Architecture: all
 Maintainer: DebridStreamer <noreply@users.noreply.github.com>
-Depends: nodejs (>= 22), ffmpeg
+Depends: nodejs (>= 24), ffmpeg
 Section: web
 Priority: optional
 Installed-Size: ${INSTALLED_KB}

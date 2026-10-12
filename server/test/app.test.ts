@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { createHmac, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -755,6 +755,92 @@ describe("DebridStreamer server", () => {
       url: "/api/auth/session",
     });
     expect(revoked.statusCode).toBe(401);
+  });
+
+  it("serves only hashed assets immutably and returns real missing-resource 404s", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yawf-static-contract-"));
+    const assets = join(root, "assets");
+    const icons = join(root, "icons");
+    mkdirSync(assets);
+    mkdirSync(icons);
+    writeFileSync(
+      join(root, "index.html"),
+      '<!doctype html><script src="/assets/index-AbCdEf12.js"></script><link rel="manifest" href="/manifest.webmanifest">',
+    );
+    writeFileSync(join(assets, "index-AbCdEf12.js"), "console.log('built');");
+    writeFileSync(join(root, "sw.js"), "self.addEventListener('fetch', () => {});");
+    writeFileSync(join(root, "manifest.webmanifest"), "{}");
+    writeFileSync(join(icons, "icon-192.png"), Buffer.from([1, 2, 3]));
+
+    const staticApp = await buildApp({
+      config: {
+        databasePath: ":memory:", dataDir: ".test-data", secretKey: randomBytes(32),
+        cookieSecure: false, logger: false, updateCheck: false, webDistPath: root,
+      },
+    });
+    try {
+      const index = await staticApp.inject({ method: "GET", url: "/" });
+      expect(index.statusCode).toBe(200);
+      expect(index.headers["content-type"]).toContain("text/html");
+      expect(index.headers["cache-control"]).toBe("no-store");
+
+      const hashed = await staticApp.inject({ method: "GET", url: "/assets/index-AbCdEf12.js" });
+      expect(hashed.statusCode).toBe(200);
+      expect(hashed.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+
+      for (const stablePath of ["/sw.js", "/manifest.webmanifest", "/icons/icon-192.png"]) {
+        const stable = await staticApp.inject({ method: "GET", url: stablePath });
+        expect(stable.statusCode).toBe(200);
+        expect(stable.headers["cache-control"]).toBe("no-cache");
+      }
+
+      const route = await staticApp.inject({ method: "GET", url: "/discover" });
+      expect(route.statusCode).toBe(200);
+      expect(route.headers["content-type"]).toContain("text/html");
+      expect(route.headers["cache-control"]).toBe("no-store");
+
+      for (const missingPath of ["/assets/missing.js", "/icons/missing.png", "/missing.webmanifest"]) {
+        const missing = await staticApp.inject({ method: "GET", url: missingPath });
+        expect(missing.statusCode).toBe(404);
+        expect(missing.headers["cache-control"]).toBe("no-store");
+        expect(missing.headers["content-type"]).not.toContain("text/html");
+      }
+    } finally {
+      await staticApp.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports hosted PWA readiness only for a usable web distribution", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yawf-static-readiness-"));
+    const readinessApp = await buildApp({
+      config: {
+        databasePath: ":memory:", dataDir: ".test-data", secretKey: randomBytes(32),
+        cookieSecure: false, logger: false, updateCheck: false, webDistPath: root,
+      },
+    });
+    try {
+      const owner = await setupOwner(readinessApp);
+      const missingIndex = await request(owner, { method: "GET", url: "/api/admin/health" });
+      expect(missingIndex.statusCode).toBe(200);
+      expect(json<{ config: { webDistConfigured: boolean }; warnings: string[] }>(missingIndex)).toMatchObject({
+        config: { webDistConfigured: false },
+        warnings: expect.arrayContaining([expect.stringContaining("Hosted PWA assets are not ready")]),
+      });
+
+      writeFileSync(join(root, "index.html"), "<!doctype html><title>ready</title>");
+      const ready = await request(owner, { method: "GET", url: "/api/admin/health" });
+      expect(ready.statusCode).toBe(200);
+      expect(json<{ config: { webDistConfigured: boolean }; warnings: string[] }>(ready)).toMatchObject({
+        config: { webDistConfigured: true },
+      });
+      expect(json<{ warnings: string[] }>(ready).warnings).not.toContain(
+        expect.stringContaining("Hosted PWA assets are not ready"),
+      );
+    } finally {
+      await readinessApp.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("sets hardened session cookies while keeping only the CSRF token readable", async () => {

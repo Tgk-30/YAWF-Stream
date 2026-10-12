@@ -1457,9 +1457,20 @@ function safeStaticPath(root: string, urlPath: string): string | null {
   return candidate;
 }
 
+function usableWebDist(webDistPath: string | null): webDistPath is string {
+  if (webDistPath == null) return false;
+  try {
+    const root = resolve(webDistPath);
+    return statSync(root).isDirectory() && statSync(join(root, "index.html")).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function registerStaticApp(app: FastifyInstance, config: ServerConfig): void {
-  if (config.webDistPath == null || !existsSync(config.webDistPath)) return;
-  const root = resolve(config.webDistPath);
+  const webDistPath = config.webDistPath;
+  if (!usableWebDist(webDistPath)) return;
+  const root = resolve(webDistPath);
 
   app.get("/server-mode.js", async (_request, reply) => {
     reply.header("content-type", "text/javascript; charset=utf-8");
@@ -1474,17 +1485,29 @@ function registerStaticApp(app: FastifyInstance, config: ServerConfig): void {
     if (path.startsWith("api/")) throw httpError(404, "Not found.");
 
     const candidate = safeStaticPath(root, `/${path}`);
-    const file =
-      candidate != null && existsSync(candidate) && statSync(candidate).isFile()
-        ? candidate
-        : join(root, "index.html");
+    let file: string;
+    if (candidate != null && existsSync(candidate) && statSync(candidate).isFile()) {
+      file = candidate;
+    } else if (candidate != null && (path.startsWith("assets/") || extname(candidate) !== "")) {
+      reply.code(404);
+      reply.header("content-type", "text/plain; charset=utf-8");
+      reply.header("cache-control", "no-store");
+      return reply.send("Not found.");
+    } else {
+      file = join(root, "index.html");
+    }
 
     const ext = extname(file);
     reply.header("content-type", MIME_TYPES[ext] ?? "application/octet-stream");
     if (ext === ".html") {
       reply.header("cache-control", "no-store");
-    } else {
+    } else if (
+      path.startsWith("assets/") &&
+      /-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/.test(path)
+    ) {
       reply.header("cache-control", "public, max-age=31536000, immutable");
+    } else {
+      reply.header("cache-control", "no-cache");
     }
     return reply.send(createReadStream(file));
   });
@@ -2366,8 +2389,9 @@ function adminHealthSummary(db: AppDatabase, config: ServerConfig) {
   if (!config.trustProxy) {
     warnings.push("Reverse-proxy trust is disabled. Enable DS_SERVER_TRUST_PROXY=true behind a trusted HTTPS proxy.");
   }
-  if (config.webDistPath == null) {
-    warnings.push("Hosted PWA assets are not configured; API-only mode is active.");
+  const webDistReady = usableWebDist(config.webDistPath);
+  if (!webDistReady) {
+    warnings.push("Hosted PWA assets are not ready; API-only mode is active.");
   }
   if (config.publicMode && counts.passwordlessProfiles > 0) {
     warnings.push(`${counts.passwordlessProfiles} active viewer profile(s) do not have a password. Public mode requires every profile to be protected.`);
@@ -2385,7 +2409,7 @@ function adminHealthSummary(db: AppDatabase, config: ServerConfig) {
       corsConfigured: config.corsOrigin != null && config.corsOrigin.trim().length > 0,
       rawStreamUrlsEnabled: config.allowRawStreamUrls,
       directTorrentEnabled: config.enableDirectTorrent,
-      webDistConfigured: config.webDistPath != null,
+      webDistConfigured: webDistReady,
       sessionTtlSeconds: config.sessionTtlSeconds,
       bindSessionUserAgent: config.bindSessionUserAgent,
       publicMode: config.publicMode,

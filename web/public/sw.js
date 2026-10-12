@@ -1,12 +1,14 @@
 // DebridStreamer service worker - app-shell offline support.
 //
 // Strategy:
-//  - Hashed, immutable build assets (/assets/*) and icons: cache-first (instant,
+//  - Hashed, immutable build assets (/assets/*): cache-first (instant,
 //    offline-safe; the hash in the filename guarantees freshness).
+//  - Stable resources such as icons: network-first so a release can replace
+//    bytes without changing a public URL.
 //  - Navigations: network-first, falling back to the cached shell when offline.
 //  - Everything else same-origin: network-first with runtime caching.
 //  - NEVER touch the API or the stream proxy, or the server-mode shim.
-const CACHE_NAME = "debridstreamer-shell-v2";
+const CACHE_NAME = "debridstreamer-shell-v3";
 const SHELL_ASSETS = [
   "/",
   "/manifest.webmanifest",
@@ -55,8 +57,8 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/stream/")) return;
   if (url.pathname === "/server-mode.js") return;
 
-  // Hashed immutable assets + icons → cache-first.
-  if (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/icons/")) {
+  // Hashed immutable assets are safe to retain cache-first.
+  if (url.pathname.startsWith("/assets/")) {
     event.respondWith(
       caches.match(request).then(
         (cached) =>
@@ -73,7 +75,7 @@ self.addEventListener("fetch", (event) => {
   // Navigations → network-first, fall back to the cached shell offline.
   if (request.mode === "navigate") {
     event.respondWith(
-      fetch(request)
+      fetch(request, { cache: "no-cache" })
         .then((response) => {
           cachePut(request, response);
           return response;
@@ -85,7 +87,7 @@ self.addEventListener("fetch", (event) => {
 
   // Everything else same-origin → network-first with runtime caching.
   event.respondWith(
-    fetch(request)
+    fetch(request, { cache: "no-cache" })
       .then((response) => {
         cachePut(request, response);
         return response;

@@ -219,8 +219,8 @@ The root `Dockerfile` builds:
 - A single runtime image that serves both.
 
 `.github/workflows/docker-image.yml` publishes multi-arch images for
-`linux/amd64` and `linux/arm64` to GHCR on `main`, version tags, and manual
-runs. Compose examples live in `deploy/compose/`, and the Docker user guide is
+`linux/amd64` and `linux/arm64` to GHCR on `main` and version-tag pushes.
+Manual runs verify the candidate and do not publish an image. Compose examples live in `deploy/compose/`, and the Docker user guide is
 `docs/DOCKER.md`.
 
 The image name is derived from the repository in lowercase. A desktop release
