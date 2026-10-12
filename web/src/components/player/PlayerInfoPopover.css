@@ -1,9 +1,12 @@
 .player-info-popover {
   position: absolute;
-  top: 66px;
-  right: 24px;
+  top: max(66px, var(--safe-area-top));
+  right: max(24px, var(--safe-area-right));
   z-index: 14;
   width: min(330px, calc(100vw - 48px));
+  max-height: calc(100vh - max(66px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+  max-height: calc(100dvh - max(66px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+  overflow-y: auto;
   padding: calc(14px * var(--density-scale));
   border-radius: var(--r-lg, calc(16px * var(--radius-scale)));
   color: #fff;
@@ -138,8 +141,30 @@
 
 @media (max-width: 640px) {
   .player-info-popover {
-    top: 58px;
-    right: 12px;
-    width: min(330px, calc(100vw - 24px));
+    top: max(58px, var(--safe-area-top));
+    right: max(12px, var(--safe-area-right));
+    left: max(12px, var(--safe-area-left));
+    width: auto;
+    max-height: calc(100vh - max(58px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+    max-height: calc(100dvh - max(58px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+  }
+}
+
+@media (min-width: 641px) and (max-width: 950px) and (max-height: 500px) {
+  .player-info-popover {
+    top: max(12px, var(--safe-area-top));
+    right: max(12px, var(--safe-area-right));
+    bottom: max(12px, var(--safe-area-bottom));
+    left: max(12px, var(--safe-area-left));
+    width: auto;
+    max-height: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .player-info-tabs button,
+  .player-info-close {
+    min-width: 44px;
+    min-height: 44px;
   }
 }

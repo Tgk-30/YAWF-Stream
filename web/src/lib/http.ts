@@ -90,14 +90,18 @@ export const appFetch: FetchImpl = async (url, init) => {
   }
   const requestInit = init as RequestInit | undefined;
   if (isTauri()) {
+    let tauriFetch: TauriFetch;
     try {
-      const tauriFetch = await loadTauriFetch();
-      return await tauriFetch(url, requestInit);
+      tauriFetch = await loadTauriFetch();
     } catch {
       // Plugin unavailable - degrade to the global fetch (which may CORS-fail,
       // but that's the same behavior as a non-Tauri browser).
       return fetch(url, requestInit);
     }
+    // Once the native transport is available, its request result is
+    // authoritative. Replaying a rejected write through browser fetch can
+    // duplicate a request whose remote outcome is unknown.
+    return tauriFetch(url, requestInit);
   }
   return fetch(url, requestInit);
 };

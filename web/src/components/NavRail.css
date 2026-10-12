@@ -373,6 +373,7 @@
     z-index: 31;
     display: block;
     width: 100vw;
+    height: 100vh;
     height: 100dvh;
     border: 0;
     background: linear-gradient(180deg, rgba(0, 0, 0, 0.58), rgba(0, 0, 0, 0.74));
@@ -488,6 +489,7 @@
     grid-template-columns: minmax(0, 1fr);
     gap: clamp(calc(7px * var(--density-scale)), 1.45vw, calc(10px * var(--density-scale)));
     width: min(428px, calc(100vw - 20px));
+    max-height: min(430px, calc(100vh - var(--mobile-nav-height) - var(--mobile-nav-bottom) - 42px));
     max-height: min(430px, calc(100dvh - var(--mobile-nav-height) - var(--mobile-nav-bottom) - 42px));
     overflow-y: auto;
     padding: clamp(calc(11px * var(--density-scale)), 2vw, calc(16px * var(--density-scale)));

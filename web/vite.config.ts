@@ -38,6 +38,13 @@ export default defineConfig({
     __TMDB_EMBED__: JSON.stringify(obfuscateTmdbKey(process.env.TMDB_EMBED_KEY ?? "")),
     __APP_VERSION__: JSON.stringify(packageJson.version),
   },
+  build: {
+    // Android 11's WebView 91 does not understand CSS media feature range
+    // syntax. Keep both JS and CSS transforms on the five-year support floor
+    // so the production minifier retains legacy min/max-width queries.
+    target: "chrome90",
+    cssTarget: "chrome90",
+  },
   test: {
     globals: true,
     // Default env stays node (fast; Node's experimental localStorage). Component

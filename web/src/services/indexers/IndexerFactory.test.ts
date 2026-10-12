@@ -689,6 +689,30 @@ describe("IndexerFactory.testConnection", () => {
     expect(mock.hits()).toBe(1);
   });
 
+  it("validates a Stremio manifest when Object.hasOwn is unavailable", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Object, "hasOwn");
+    Object.defineProperty(Object, "hasOwn", {
+      configurable: true,
+      value: undefined,
+    });
+    const mock = makeMockFetch(() => ok(JSON.stringify({ id: "legacy-webview-addon" })));
+    try {
+      const result = await IndexerFactory.testConnection(
+        makeIndexerConfig({
+          id: "stremio-legacy-webview",
+          type: "stremio_addon",
+          baseURL: "http://h/stream",
+        }),
+        mock.fetchImpl,
+      );
+      expect(result).toBe(true);
+      expect(mock.hits()).toBe(1);
+    } finally {
+      if (descriptor == null) delete (Object as { hasOwn?: unknown }).hasOwn;
+      else Object.defineProperty(Object, "hasOwn", descriptor);
+    }
+  });
+
   it("returns false for stremio addons with a whitespace-only base URL", async () => {
     const mock = makeMockFetch(() => ok("{}"));
     const config = makeIndexerConfig({

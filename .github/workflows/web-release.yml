@@ -5,7 +5,8 @@
 # notarizes with a Developer ID, and uploads everything to a DRAFT GitHub Release
 # plus the `latest.json` the in-app updater reads.
 #
-# Trigger: push a tag matching `v*-web` (e.g. `v0.5.0-web`), or run manually.
+# Trigger: a v*-web tag builds the coordinated draft release. Manual branch
+# dispatch builds only a signed Android verification artifact, never a release.
 #
 # ──────────────────────────────────────────────────────────────────────────
 # REQUIRED REPO SECRETS (Settings → Secrets and variables → Actions)
@@ -52,6 +53,7 @@ permissions:
 
 jobs:
   release:
+    if: github.ref_type == 'tag'
     strategy:
       fail-fast: false
       matrix:
@@ -411,9 +413,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ vars.YAWF_RELEASE_WINDOWS }}" = "true" ]; then
-            echo "RELEASE_BODY=Signed macOS, Linux, and Windows desktop builds, plus self-hosted server packages. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
+            echo "RELEASE_BODY=Signed macOS, Linux, and Windows desktop builds, Android phone and TV apps, plus self-hosted server packages. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
           else
-            echo "RELEASE_BODY=Signed macOS and Linux desktop builds, Android TV, and self-hosted server packages. Windows is held until Authenticode signing is proven. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
+            echo "RELEASE_BODY=Signed macOS and Linux desktop builds, Android phone and TV apps, and self-hosted server packages. Windows is held until Authenticode signing is proven. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
           fi
 
       - name: Build, bundle, sign & release
@@ -586,7 +588,7 @@ jobs:
   android-app:
     name: Signed Android phone APK
     needs: release
-    if: github.ref_type == 'tag'
+    if: always() && ((github.ref_type == 'tag' && needs.release.result == 'success') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -600,8 +602,8 @@ jobs:
       # com.tgk30.debridstreamer against com.yawf.stream.tv, the whole Tauri
       # application against a WebView shell. Android ties upgrades to the
       # signing identity, so it gets its own key rather than borrowing the TV
-      # one. Until that key exists this job warns and skips, so tagging a
-      # release does not start failing before the identity is configured.
+      # one. A release requires the phone signing identity and artifact;
+      # missing signing material must fail rather than silently omit Android.
       - name: Check phone signing secrets
         id: gate
         shell: bash
@@ -617,8 +619,8 @@ jobs:
             if [ -z "${!name}" ]; then missing=1; fi
           done
           if [ "$missing" = "1" ]; then
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::No signed phone APK was published. Create a dedicated signing key for com.tgk30.debridstreamer, store it in the ANDROID_APP_* secrets, and commit its certificate SHA-256 to web/src-tauri/SIGNING_CERT_SHA256."
+            echo "::error::The mandatory Android phone signing material is missing."
+            exit 1
           else
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
@@ -684,6 +686,12 @@ jobs:
           workspaces: "web/src-tauri -> target"
           key: android-release
 
+      - name: Install Node for phone build
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Install web dependencies
         if: steps.gate.outputs.ready == 'true'
         working-directory: web
@@ -714,16 +722,20 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          version="${GITHUB_REF_NAME#v}"
-          version="${version%-web}"
+          version="$(node -p "require('./web/package.json').version")"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            tag_version="${tag_version%-web}"
+            test "$tag_version" = "$version"
+          fi
           ks="$RUNNER_TEMP/yawf-android-app.jks"
           printf '%s' "$ANDROID_APP_KEYSTORE_BASE64" | base64 --decode > "$ks"
 
-          source="$(find web/src-tauri/gen/android/app/build/outputs/apk -name '*-release-unsigned.apk' -print -quit)"
-          test -n "$source"
+          source="web/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk"
+          test -f "$source"
           aligned="$RUNNER_TEMP/aligned.apk"
           asset="$RUNNER_TEMP/YAWF.Stream_Android_${version}.apk"
-          zipalign -p -f 4 "$source" "$aligned"
+          zipalign -P 16 -f 4 "$source" "$aligned"
           apksigner sign \
             --ks "$ks" \
             --ks-pass "env:ANDROID_APP_KEYSTORE_PASSWORD" \
@@ -745,10 +757,29 @@ jobs:
             echo "::error::Phone APK signing certificate does not match web/src-tauri/SIGNING_CERT_SHA256"
             exit 1
           fi
+          python3 scripts/verify_android_apk.py \
+            --apk "$asset" \
+            --version "$version" \
+            --certificate-pin web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           rm -f "$ks"
-          gh release upload "$GITHUB_REF_NAME" "$asset" \
-            --clobber \
-            --repo "$GITHUB_REPOSITORY"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            gh release upload "$GITHUB_REF_NAME" "$asset" \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            mkdir -p "$RUNNER_TEMP/phone-candidate"
+            cp "$asset" "$RUNNER_TEMP/phone-candidate/"
+          fi
+
+      - name: Upload Android verification candidate
+        if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone-verification-candidate
+          path: ${{ runner.temp }}/phone-candidate/*.apk
+          if-no-files-found: error
+          retention-days: 3
 
   finalize-release-assets:
     name: Checksums and provenance

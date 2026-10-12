@@ -78,6 +78,50 @@ fn mobile_capability_does_not_grant_desktop_player_handoffs() {
 }
 
 #[test]
+fn android_external_player_capability_is_local_main_window_only() {
+    let capability: serde_json::Value =
+        serde_json::from_str(include_str!("../capabilities/android-external-player.json")).unwrap();
+
+    assert_eq!(capability["identifier"], "android-external-player");
+    assert_eq!(capability["local"], true);
+    assert_eq!(capability["windows"], serde_json::json!(["main"]));
+    assert_eq!(capability["platforms"], serde_json::json!(["android"]));
+    assert_eq!(
+        capability["permissions"],
+        serde_json::json!(["android-external-player-command"])
+    );
+    assert!(capability.get("remote").is_none());
+}
+
+#[test]
+fn android_external_player_permission_grants_only_the_validated_chooser() {
+    let permission = include_str!("../permissions/android-external-player.toml");
+    let allowed = permission
+        .lines()
+        .map(str::trim)
+        .find_map(|line| {
+            line.strip_prefix("commands.allow = [\"")?
+                .strip_suffix("\"]")
+        })
+        .unwrap();
+
+    assert_eq!(allowed, "mobile_open_external_player");
+    assert!(!include_str!("../permissions/mobile-commands.toml")
+        .contains("mobile_open_external_player"));
+    assert!(!include_str!("../permissions/remote-desktop-commands.toml")
+        .contains("mobile_open_external_player"));
+}
+
+#[test]
+fn android_chooser_clears_pending_java_exceptions_without_exposing_details() {
+    let source = include_str!("../src/mobile_external_player.rs");
+
+    assert!(source.contains("env.exception_check()"));
+    assert!(source.contains("env.exception_clear()"));
+    assert!(!source.contains("exception_describe"));
+}
+
+#[test]
 fn mobile_build_injects_an_authoritative_webview_marker() {
     let source = include_str!("../src/lib.rs");
 
@@ -86,4 +130,21 @@ fn mobile_build_injects_an_authoritative_webview_marker() {
     ));
     assert!(source
         .contains(";Object.defineProperty(window, '__YAWF_TAURI_MOBILE__', { value: true });"));
+}
+
+#[test]
+fn android_build_injects_a_platform_specific_webview_marker() {
+    let source = include_str!("../src/lib.rs");
+    let marker = ";Object.defineProperty(window, '__YAWF_TAURI_ANDROID__', { value: true });";
+    let marker_offset = source.find(marker).expect("Android marker is missing");
+    let marker_prefix = &source[..marker_offset];
+    let cfg_offset = marker_prefix
+        .rfind("#[cfg(")
+        .expect("Android marker has no target guard");
+
+    assert_eq!(
+        marker_prefix[cfg_offset..].lines().next(),
+        Some("#[cfg(target_os = \"android\")]")
+    );
+    assert_eq!(source.matches(marker).count(), 1);
 }

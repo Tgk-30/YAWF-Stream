@@ -208,32 +208,37 @@ describe("appFetch - Tauri path", () => {
     expect(pluginFetch).toHaveBeenCalledWith("https://nobody.example.com", undefined);
   });
 
-  it("propagates a rejection thrown by the plugin fetch itself (not the import)", async () => {
-    // The try/catch only guards the dynamic import + the awaited call; a rejection
-    // from the plugin fetch IS inside the try, so it falls back to global fetch.
+  it("does not replay a rejected native request through global fetch", async () => {
     isTauri.mockReturnValue(true);
     pluginFetch.mockRejectedValue(new Error("native request failed"));
-    globalFetch.mockResolvedValue(fakeResponse(200, "fallback"));
     const { appFetch } = await loadHttp();
 
-    const out = await appFetch("https://flaky.example.com");
+    await expect(appFetch("https://flaky.example.com")).rejects.toThrow(
+      "native request failed",
+    );
 
-    // Plugin fetch was attempted, then the catch degraded to the global fetch.
     expect(pluginFetch).toHaveBeenCalledTimes(1);
-    expect(globalFetch).toHaveBeenCalledTimes(1);
-    expect(globalFetch).toHaveBeenCalledWith("https://flaky.example.com", undefined);
-    await expect(out.text()).resolves.toBe("fallback");
+    expect(globalFetch).not.toHaveBeenCalled();
   });
 
-  it("falls back to the global fetch and propagates its rejection if BOTH fail", async () => {
+  it("falls back to global fetch only when the native transport import fails", async () => {
     isTauri.mockReturnValue(true);
-    pluginFetch.mockRejectedValue(new Error("native down"));
-    globalFetch.mockRejectedValue(new TypeError("Failed to fetch"));
-    const { appFetch } = await loadHttp();
+    globalFetch.mockResolvedValue(fakeResponse(200, "browser fallback"));
+    vi.doMock("@tauri-apps/plugin-http", () => {
+      throw new Error("plugin module unavailable");
+    });
+    try {
+      const { appFetch } = await loadHttp();
+      const response = await appFetch("https://fallback.example.com");
 
-    await expect(appFetch("https://double-down.example.com")).rejects.toThrow("Failed to fetch");
-    expect(pluginFetch).toHaveBeenCalledTimes(1);
-    expect(globalFetch).toHaveBeenCalledTimes(1);
+      expect(pluginFetch).not.toHaveBeenCalled();
+      expect(globalFetch).toHaveBeenCalledTimes(1);
+      await expect(response.text()).resolves.toBe("browser fallback");
+    } finally {
+      vi.doMock("@tauri-apps/plugin-http", () => ({
+        fetch: (...args: unknown[]) => pluginFetch(...args),
+      }));
+    }
   });
 });
 

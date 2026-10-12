@@ -80,6 +80,27 @@ const remoteDesktopPermission = read(
 const mobilePermission = read(
   "web/src-tauri/permissions/mobile-commands.toml",
 );
+const androidExternalPlayerCapability = JSON.parse(
+  read("web/src-tauri/capabilities/android-external-player.json"),
+);
+const androidExternalPlayerPermission = read(
+  "web/src-tauri/permissions/android-external-player.toml",
+);
+const androidExternalPlayerCommands = new Set(
+  [...androidExternalPlayerPermission.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
+    .flatMap((match) => [...match[1].matchAll(/"([a-z][a-z0-9_]*)"/g)])
+    .map((match) => match[1]),
+);
+check(
+  androidExternalPlayerCapability.local === true &&
+    androidExternalPlayerCapability.remote == null &&
+    JSON.stringify(androidExternalPlayerCapability.windows) === '["main"]' &&
+    JSON.stringify(androidExternalPlayerCapability.platforms) === '["android"]' &&
+    JSON.stringify(androidExternalPlayerCapability.permissions) === '["android-external-player-command"]' &&
+    androidExternalPlayerCommands.size === 1 &&
+    androidExternalPlayerCommands.has("mobile_open_external_player"),
+  "Android video chooser is restricted to the local main webview and its one command",
+);
 const desktopCommandNames = new Set(
   [...desktopPermission.matchAll(/^\s*"([a-z][a-z0-9_]*)",?\s*$/gm)].map(
     (match) => match[1],
@@ -97,6 +118,16 @@ const mobileCommandNames = new Set(
     (match) => match[1],
   ),
 );
+const allMobileCommandNames = new Set([
+  ...mobileCommandNames,
+  ...androidExternalPlayerCommands,
+]);
+check(
+  !mobileCommandNames.has("mobile_open_external_player") &&
+    !desktopCommandNames.has("mobile_open_external_player") &&
+    !remoteDesktopCommandNames.has("mobile_open_external_player"),
+  "The chooser command is not granted by broader mobile, desktop or remote permissions",
+);
 const tauriLib = read("web/src-tauri/src/lib.rs");
 // generate_handler! cannot cfg individual entries, so lib.rs registers one list
 // per target family. Attribute each list to the cfg attribute guarding it rather
@@ -107,8 +138,15 @@ function handlerBlocks(source) {
   const pattern = /\.invoke_handler\(tauri::generate_handler!\[([\s\S]*?)\]\)/g;
   for (const match of source.matchAll(pattern)) {
     const preceding = source.slice(Math.max(0, match.index - 240), match.index);
-    const cfg = [...preceding.matchAll(/#\[cfg\((desktop|mobile)\)\]/g)].pop();
-    if (cfg) blocks.set(cfg[1], match[1]);
+    const cfg = [...preceding.matchAll(/#\[cfg\((desktop|mobile|target_os\s*=\s*"(?:android|ios)")\)\]/g)].pop();
+    if (cfg) {
+      const target = cfg[1].includes('"android"')
+        ? "android"
+        : cfg[1].includes('"ios"')
+          ? "iOS"
+          : cfg[1];
+      blocks.set(target, match[1]);
+    }
   }
   return blocks;
 }
@@ -120,13 +158,14 @@ function registeredCommands(block) {
   );
 }
 const invokeHandlers = handlerBlocks(tauriLib);
-const mobileHandlerBlock = invokeHandlers.get("mobile") ?? "";
+const registeredAndroidCommands = registeredCommands(invokeHandlers.get("android") ?? "");
+const registeredIOSCommands = registeredCommands(invokeHandlers.get("iOS") ?? "");
 const registeredDesktopCommands = registeredCommands(
   invokeHandlers.get("desktop") ?? "",
 );
 check(
-  invokeHandlers.has("desktop") && invokeHandlers.has("mobile"),
-  "Desktop and mobile invoke handler command lists are both readable",
+  invokeHandlers.has("desktop") && invokeHandlers.has("android") && invokeHandlers.has("iOS"),
+  "Desktop, Android and iOS invoke handler command lists are readable",
 );
 check(
   registeredDesktopCommands.size > 0 &&
@@ -137,18 +176,23 @@ check(
   "Desktop app ACL stays in sync with every registered command",
 );
 const registeredMobileCommands = new Set(
-  [
-    ...(mobileHandlerBlock ?? "").matchAll(
-      /^\s*(?:[a-z][a-z0-9_]*::)?([a-z][a-z0-9_]*),\s*$/gm,
-    ),
-  ].map((match) => match[1]),
+  [...registeredAndroidCommands, ...registeredIOSCommands],
+);
+check(
+  registeredAndroidCommands.has("mobile_open_external_player") &&
+    !registeredIOSCommands.has("mobile_open_external_player") &&
+    [...allMobileCommandNames].every((command) => registeredAndroidCommands.has(command)) &&
+    [...registeredAndroidCommands].every((command) => allMobileCommandNames.has(command)) &&
+    [...mobileCommandNames].every((command) => registeredIOSCommands.has(command)) &&
+    [...registeredIOSCommands].every((command) => mobileCommandNames.has(command)),
+  "Only Android registers the chooser; iOS retains exactly its mobile command surface",
 );
 check(
   registeredMobileCommands.size > 0 &&
     [...registeredMobileCommands].every((command) =>
-      mobileCommandNames.has(command),
+      allMobileCommandNames.has(command),
     ) &&
-    [...mobileCommandNames].every((command) =>
+    [...allMobileCommandNames].every((command) =>
       registeredMobileCommands.has(command),
     ),
   "Mobile app ACL stays in sync with every registered command",
@@ -185,11 +229,11 @@ check(
 // capability grants every command the platform registers, and outbound HTTP is
 // granted.
 const SUPPORTED_PLATFORMS = ["macOS", "windows", "linux", "android", "iOS"];
-const MOBILE_PLATFORMS = new Set(["android", "iOS"]);
 const appPermissionCommands = new Map([
   ["desktop-commands", desktopCommandNames],
   ["remote-desktop-commands", remoteDesktopCommandNames],
   ["mobile-commands", mobileCommandNames],
+  ["android-external-player-command", androidExternalPlayerCommands],
 ]);
 const capabilities = readdirSync(join(root, "web/src-tauri/capabilities"))
   .filter((name) => name.endsWith(".json"))
@@ -215,9 +259,11 @@ for (const platform of SUPPORTED_PLATFORMS) {
       ...(appPermissionCommands.get(id) ?? []),
     ]),
   );
-  const required = MOBILE_PLATFORMS.has(platform)
-    ? registeredMobileCommands
-    : registeredDesktopCommands;
+  const required = platform === "android"
+    ? registeredAndroidCommands
+    : platform === "iOS"
+      ? registeredIOSCommands
+      : registeredDesktopCommands;
   const ungranted = [...required].filter(
     (command) => !grantedCommands.has(command),
   );

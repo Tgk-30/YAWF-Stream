@@ -181,6 +181,12 @@ jobs:
       - name: Generated Android project patch tests
         run: node --test scripts/patch_tauri_android.test.mjs
 
+      - name: Android artifact compatibility checker tests
+        run: node --test scripts/check_android_elf_alignment.test.mjs scripts/check_android_webview_compat.test.mjs
+
+      - name: Android production APK verifier tests
+        run: python3 scripts/verify_android_apk.test.py
+
       - name: Release readiness
         run: node scripts/check_release_readiness.mjs
 

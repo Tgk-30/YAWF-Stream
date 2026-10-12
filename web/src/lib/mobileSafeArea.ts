@@ -36,25 +36,52 @@ export function installMobileSafeAreaInsets(): () => void {
 
   let stopped = false;
   let frame: number | null = null;
+  let refreshRevision = 0;
+  let refreshRunning = false;
+  let refreshQueued = false;
   const timers = new Set<number>();
 
   const update = async () => {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const insets = await invoke<PhysicalSafeAreaInsets>(
-        "mobile_safe_area_insets",
-      );
-      if (!stopped) applyPhysicalSafeAreaInsets(insets);
-    } catch {
-      console.warn("[YAWF Stream] Could not refresh native safe-area insets.");
+    if (refreshRunning || stopped) return;
+    refreshRunning = true;
+    do {
+      refreshQueued = false;
+      const requestRevision = refreshRevision;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const insets = await invoke<PhysicalSafeAreaInsets>(
+          "mobile_safe_area_insets",
+        );
+        if (!stopped && requestRevision === refreshRevision) {
+          applyPhysicalSafeAreaInsets(insets);
+        }
+      } catch {
+        if (!stopped && requestRevision === refreshRevision) {
+          console.warn("[YAWF Stream] Could not refresh native safe-area insets.");
+        }
+      }
+    } while (!stopped && refreshQueued);
+    refreshRunning = false;
+  };
+
+  const queueRefresh = () => {
+    refreshRevision += 1;
+    refreshQueued = true;
+    if (!refreshRunning) {
+      void update();
     }
   };
 
   const schedule = () => {
-    if (frame != null) return;
+    if (stopped) return;
+    // Every viewport signal invalidates an older native response immediately,
+    // even when several signals coalesce into one animation-frame refresh.
+    refreshRevision += 1;
+    refreshQueued = true;
+    if (frame != null || refreshRunning) return;
     frame = window.requestAnimationFrame(() => {
       frame = null;
-      void update();
+      queueRefresh();
     });
   };
 
@@ -72,6 +99,8 @@ export function installMobileSafeAreaInsets(): () => void {
 
   return () => {
     stopped = true;
+    refreshRevision += 1;
+    refreshQueued = false;
     window.removeEventListener("resize", schedule);
     window.removeEventListener("orientationchange", schedule);
     window.visualViewport?.removeEventListener("resize", schedule);

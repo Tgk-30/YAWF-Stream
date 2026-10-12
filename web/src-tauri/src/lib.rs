@@ -33,6 +33,12 @@ mod player;
 // in-window path is implemented in render_player.rs on macOS.
 mod render_player;
 
+// Android ACTION_VIEW chooser for cookie-free HTTP(S) stream capabilities.
+// The command is registered only by the Android handler and receives its grant
+// from a separate Android-only local capability.
+#[cfg(any(target_os = "android", test))]
+mod mobile_external_player;
+
 // OS-keychain SecretStore backend (keychain_get / keychain_set / keychain_delete).
 // Desktop-only: `keyring` is target-gated to the three desktop OSes in
 // Cargo.toml and ships no Android backend, so the JS SecretStore falls back to
@@ -723,6 +729,13 @@ pub fn run() {
         ";Object.defineProperty(window, '__YAWF_TAURI_MOBILE__', { value: true });",
     );
 
+    // The user agent can look like desktop Chrome on some Android WebViews.
+    // Keep this marker Android-only so iOS retains its copy-link fallback.
+    #[cfg(target_os = "android")]
+    let builder = builder.append_invoke_initialization_script(
+        ";Object.defineProperty(window, '__YAWF_TAURI_ANDROID__', { value: true });",
+    );
+
     let builder = builder.setup(|app| {
         #[cfg(target_os = "macos")]
         opaque_window_background(app.handle());
@@ -768,8 +781,8 @@ pub fn run() {
     });
 
     // generate_handler! cannot cfg individual entries, which is why there are
-    // two lists at all. scripts/check_security_decisions.mjs matches each list
-    // to the cfg attribute above it, so the order of the two is free, but a
+    // target-specific lists at all. scripts/check_security_decisions.mjs
+    // matches each list to the cfg attribute above it, but a
     // command added here without a matching entry in permissions/*.toml fails
     // that check rather than turning into a runtime ACL denial on a device.
     #[cfg(desktop)]
@@ -820,8 +833,34 @@ pub fn run() {
         cast::cast_set_volume,
     ]);
 
-    // Mobile: the desktop-only modules are not compiled in there at all.
-    #[cfg(mobile)]
+    // Android: the desktop-only modules are not compiled in there at all.
+    #[cfg(target_os = "android")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        app_install_info,
+        mobile_safe_area_insets,
+        mobile_external_player::mobile_open_external_player,
+        render_player::player_init,
+        render_player::player_load,
+        render_player::player_command,
+        render_player::player_set_property,
+        render_player::player_get_property,
+        render_player::player_add_subtitle,
+        render_player::player_set_audio_passthrough,
+        render_player::player_set_hdr_policy,
+        render_player::player_set_video_margin,
+        render_player::player_set_rect,
+        render_player::player_destroy,
+        cast::cast_discover,
+        cast::cast_load,
+        cast::cast_control,
+        cast::cast_status,
+        cast::cast_set_volume,
+    ]);
+
+    // iOS uses the shared mobile commands but does not register Android's
+    // ACTION_VIEW chooser. Its Android-only capability therefore has no iOS
+    // grant and no dormant iOS handler.
+    #[cfg(target_os = "ios")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         app_install_info,
         mobile_safe_area_insets,

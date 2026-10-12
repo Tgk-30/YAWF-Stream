@@ -6,6 +6,13 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const generatedAndroidRelativePath = "web/src-tauri/gen/android";
 const cleartextPlaceholder = 'manifestPlaceholders["usesCleartextTraffic"]';
+const leanbackFeatureTemplate = `    <!-- AndroidTV support -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+`;
+const leanbackCategoryTemplate = `                <!-- AndroidTV support -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+`;
 
 function findMainActivity(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -35,7 +42,7 @@ class MainActivity : TauriActivity() {
 `;
 }
 
-function patchedMainActivity(packageName) {
+function legacyPatchedMainActivity(packageName) {
   return `package ${packageName}
 
 import android.os.Bundle
@@ -57,16 +64,41 @@ class MainActivity : TauriActivity() {
 `;
 }
 
-function patchFile(path, original, replacement, description) {
-  const source = readFileSync(path, "utf8");
-  if (source.includes(replacement)) return false;
+function patchedMainActivity(packageName) {
+  return `package ${packageName}
+
+import android.graphics.Color
+import android.os.Bundle
+import android.webkit.CookieManager
+import android.webkit.WebView
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
+
+class MainActivity : TauriActivity() {
+  override fun onCreate(savedInstanceState: Bundle?) {
+    enableEdgeToEdge(
+      statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+      navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+    )
+    super.onCreate(savedInstanceState)
+  }
+
+  override fun onWebViewCreate(webView: WebView) {
+    CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+    super.onWebViewCreate(webView)
+  }
+}
+`;
+}
+
+function replacementState(source, original, replacement, description) {
+  if (source.includes(replacement)) return { changed: false, output: source };
   if (!source.includes(original)) {
     throw new Error(
       `${description} does not match the supported Tauri Android template. Refusing to patch generated sources.`,
     );
   }
-  writeFileSync(path, source.replace(original, replacement));
-  return true;
+  return { changed: true, output: source.replace(original, replacement) };
 }
 
 export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
@@ -83,6 +115,7 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     }
   }
 
+  const gradle = readFileSync(gradlePath, "utf8");
   const manifest = readFileSync(manifestPath, "utf8");
   if (!manifest.includes('android:usesCleartextTraffic="${usesCleartextTraffic}"')) {
     throw new Error(
@@ -96,13 +129,13 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
   const defaultConfigTrue = `defaultConfig {
         ${cleartextPlaceholder} = "true"
         applicationId = `;
-  const gradleChanged = patchFile(
-    gradlePath,
+  const gradleState = replacementState(
+    gradle,
     defaultConfigFalse,
     defaultConfigTrue,
     "app/build.gradle.kts",
   );
-  const patchedGradle = readFileSync(gradlePath, "utf8");
+  const patchedGradle = gradleState.output;
   if (
     !patchedGradle.includes(defaultConfigTrue) ||
     !patchedGradle.includes(`getByName("debug") {
@@ -128,22 +161,44 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     );
   }
   const originalActivity = expectedMainActivity(packageName);
+  const legacyActivity = legacyPatchedMainActivity(packageName);
   const replacementActivity = patchedMainActivity(packageName);
-  let activityChanged = false;
-  if (activity === originalActivity) {
-    writeFileSync(mainActivityPath, replacementActivity);
-    activityChanged = true;
-  } else if (activity !== replacementActivity) {
+  const activityChanged = activity === originalActivity || activity === legacyActivity;
+  if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",
     );
   }
 
+  const hasLeanbackFeature = manifest.includes(leanbackFeatureTemplate);
+  const hasLeanbackCategory = manifest.includes(leanbackCategoryTemplate);
+  const hasAnyLeanback =
+    manifest.includes("android.software.leanback") ||
+    manifest.includes("android.intent.category.LEANBACK_LAUNCHER");
+  if (hasLeanbackFeature !== hasLeanbackCategory || (!hasLeanbackFeature && hasAnyLeanback)) {
+    throw new Error(
+      "AndroidManifest.xml does not match the supported Tauri Android phone template. Refusing to patch generated sources.",
+    );
+  }
+  const manifestChanged = hasLeanbackFeature && hasLeanbackCategory;
+  const patchedManifest = manifestChanged
+    ? manifest
+        .replace(leanbackFeatureTemplate, "")
+        .replace(leanbackCategoryTemplate, "")
+    : manifest;
+
+  // Validate every generated template before the first write. A drifted
+  // MainActivity or manifest must not leave a half-patched Gradle file behind.
+  if (gradleState.changed) writeFileSync(gradlePath, patchedGradle);
+  if (activityChanged) writeFileSync(mainActivityPath, replacementActivity);
+  if (manifestChanged) writeFileSync(manifestPath, patchedManifest);
+
   return {
     androidRoot,
-    changed: gradleChanged || activityChanged,
-    gradleChanged,
+    changed: gradleState.changed || activityChanged || manifestChanged,
+    gradleChanged: gradleState.changed,
     activityChanged,
+    manifestChanged,
   };
 }
 
@@ -151,7 +206,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const result = patchTauriAndroidProject();
   console.log(
     result.changed
-      ? "Patched generated Android cleartext and WebView cookie settings."
-      : "Generated Android cleartext and WebView cookie settings are already patched.",
+      ? "Patched generated Android phone manifest, cleartext, and WebView cookie settings."
+      : "Generated Android phone manifest, cleartext, and WebView cookie settings are already patched.",
   );
 }

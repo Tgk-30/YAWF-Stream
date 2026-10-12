@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "android-external-player-command"
+description = "Show the Android video chooser for a validated HTTP(S) URL, without credentials, arbitrary intents or file access."
+commands.allow = ["mobile_open_external_player"]

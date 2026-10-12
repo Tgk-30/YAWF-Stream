@@ -52,6 +52,16 @@ async function flushPromises(): Promise<void> {
   await vi.dynamicImportSettled();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 afterEach(() => {
   document.documentElement.removeAttribute("style");
   invoke.mockReset();
@@ -112,6 +122,55 @@ describe("Android safe-area bridge", () => {
     await flushPromises();
     expect(invoke).toHaveBeenCalledTimes(2);
     uninstall();
+  });
+
+  it("serializes rotation refreshes and ignores the stale in-flight response", async () => {
+    const first = deferred<{ top: number; right: number; bottom: number; left: number }>();
+    const second = deferred<{ top: number; right: number; bottom: number; left: number }>();
+    invoke.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const frames = mockAnimationFrames();
+    const uninstall = installMobileSafeAreaInsets();
+
+    frames.flush();
+    await vi.dynamicImportSettled();
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event("orientationchange"));
+    window.dispatchEvent(new Event("resize"));
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    first.resolve({ top: 96, right: 0, bottom: 48, left: 0 });
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("");
+
+    second.resolve({ top: 42, right: 0, bottom: 21, left: 0 });
+    await flushPromises();
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("42px");
+    uninstall();
+  });
+
+  it("does not apply or warn from a native response that settles after teardown", async () => {
+    const pending = deferred<{ top: number; right: number; bottom: number; left: number }>();
+    invoke.mockReturnValue(pending.promise);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const frames = mockAnimationFrames();
+    const uninstall = installMobileSafeAreaInsets();
+
+    frames.flush();
+    await vi.dynamicImportSettled();
+    uninstall();
+    pending.resolve({ top: 99, right: 0, bottom: 0, left: 0 });
+    await flushPromises();
+
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("");
+    expect(warning).not.toHaveBeenCalled();
   });
 
   it("retries after 250 ms and 1000 ms", async () => {

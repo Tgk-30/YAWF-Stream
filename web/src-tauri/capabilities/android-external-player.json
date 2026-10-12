@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "android-external-player",
+  "description": "Local Android main app may show the system video player chooser for validated HTTP(S) stream URLs. Remote pages and other platforms receive no grant.",
+  "local": true,
+  "windows": ["main"],
+  "platforms": ["android"],
+  "permissions": ["android-external-player-command"]
+}

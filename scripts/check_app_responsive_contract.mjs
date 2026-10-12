@@ -23,6 +23,9 @@ const moodCss = read("web/src/components/MoodStrip.css");
 const settingsCss = read("web/src/screens/Settings.css");
 const detailCss = read("web/src/screens/Detail.css");
 const browseCss = read("web/src/screens/Browse.css");
+const playerCss = read("web/src/components/VideoPlayer.css");
+const playerPauseCss = read("web/src/components/player/PlayerPauseOverlay.css");
+const playerInfoCss = read("web/src/components/player/PlayerInfoPopover.css");
 const setupNudgeCss = read("web/src/components/SetupNudge.css");
 const installPromptCss = read("web/src/components/InstallPrompt.css");
 const appSource = read("web/src/App.tsx");
@@ -30,6 +33,31 @@ const setupCredentials = read("web/src/lib/serverSetupCredentials.ts");
 const setupInvite = read("web/src/lib/serverSetupInvite.ts");
 const serverSetupWizard = read("web/src/components/ServerSetupWizard.tsx");
 const ciWorkflow = read(".github/workflows/ci.yml");
+const viteConfig = read("web/vite.config.ts");
+const intermediatePlayerStart = playerCss.indexOf(
+  "@media (min-width: 561px) and (max-width: 950px) {",
+);
+const intermediatePlayerEnd = playerCss.indexOf(
+  "@media (max-width: 560px)",
+  intermediatePlayerStart,
+);
+const intermediatePlayerCss = intermediatePlayerStart >= 0 && intermediatePlayerEnd > intermediatePlayerStart
+  ? playerCss.slice(intermediatePlayerStart, intermediatePlayerEnd)
+  : "";
+const compactPlayerStart = playerCss.indexOf("@media (max-width: 560px) {");
+const compactPlayerEnd = playerCss.indexOf(
+  "@media (pointer: coarse)",
+  compactPlayerStart,
+);
+const compactPlayerCss = compactPlayerStart >= 0 && compactPlayerEnd > compactPlayerStart
+  ? playerCss.slice(compactPlayerStart, compactPlayerEnd)
+  : "";
+const shortLandscapePlayerStart = playerCss.indexOf(
+  "@media (min-width: 561px) and (max-width: 950px) and (max-height: 500px)",
+);
+const shortLandscapePlayerCss = shortLandscapePlayerStart >= 0
+  ? playerCss.slice(shortLandscapePlayerStart)
+  : "";
 
 check(
   "mobile app viewport reserves bottom navigation space exactly once",
@@ -102,10 +130,66 @@ check(
 
 check(
   "fixed phone surfaces inset interactive content on every edge",
-  /@media\s*\(max-width:\s*699px\)[\s\S]*\.browse-inner\s*\{[\s\S]{0,300}padding:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-top\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)[\s\S]{0,180}max\(var\(--sp-xl\),\s*var\(--safe-area-bottom\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(browseCss) &&
-    /@media\s*\(max-width:\s*699px\)[\s\S]*\.detail-inner\s*\{[\s\S]{0,300}padding:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-top\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)[\s\S]{0,180}max\(var\(--sp-xl\),\s*var\(--safe-area-bottom\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(detailCss) &&
+  /@media\s*\(max-width:\s*699px\)[\s\S]{0,160}\(min-width:\s*700px\)\s*and\s*\(max-width:\s*950px\)\s*and\s*\(max-height:\s*500px\)[\s\S]*\.browse-inner\s*\{[\s\S]{0,300}padding:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-top\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)[\s\S]{0,180}max\(var\(--sp-xl\),\s*var\(--safe-area-bottom\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(browseCss) &&
+    /@media\s*\(max-width:\s*699px\)[\s\S]{0,160}\(min-width:\s*700px\)\s*and\s*\(max-width:\s*950px\)\s*and\s*\(max-height:\s*500px\)[\s\S]*\.detail-inner\s*\{[\s\S]{0,300}padding:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-top\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)[\s\S]{0,180}max\(var\(--sp-xl\),\s*var\(--safe-area-bottom\)\)[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(detailCss) &&
     /@media\s*\(max-width:\s*699px\)[\s\S]*\.fs-panel\s*\{[\s\S]{0,260}top:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-top\)\)[\s\S]{0,120}right:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-right\)\)[\s\S]{0,120}bottom:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-bottom\)\)[\s\S]{0,120}left:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-left\)\)/.test(read("web/src/components/FilterSlideover.css")),
   "Browse, Detail, and the phone filter panel must keep interactive content clear of all native insets.",
+);
+
+check(
+  "phone player keeps touch controls reachable without one overflowing row",
+  /@media\s*\(max-width:\s*560px\)[\s\S]*\.player-osd-row\s*\{[\s\S]{0,260}display:\s*grid[\s\S]{0,260}grid-template-areas:[\s\S]{0,180}"transport transport"[\s\S]{0,120}"audio actions"/.test(playerCss) &&
+    /padding-left:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-left\)\)/.test(playerCss) &&
+    /padding-right:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-right\)\)/.test(playerCss) &&
+    /\.player-osd \.chip\s*\{[\s\S]{0,120}min-height:\s*44px/.test(playerCss) &&
+    /@media\s*\(pointer:\s*coarse\)[\s\S]*\.player-close[\s\S]{0,260}min-height:\s*44px/.test(playerCss) &&
+    /@media\s*\(pointer:\s*coarse\)[\s\S]*\.player-options-sliders input[\s\S]{0,180}min-height:\s*44px/.test(playerCss) &&
+    /@media\s*\(max-width:\s*560px\)[\s\S]*\.player-options-menu,[\s\S]{0,120}\.captions-menu\s*\{[\s\S]{0,420}overflow-y:\s*auto/.test(playerCss) &&
+    /\.player-osd \.player-mobile-optional\s*\{[\s\S]{0,80}display:\s*none/.test(compactPlayerCss) &&
+    /\.player-playback-status\s*\{[\s\S]{0,500}pointer-events:\s*none/.test(playerCss) &&
+    playerCss.lastIndexOf("@media (max-width: 560px)") > playerCss.indexOf(".player-osd .chip {") &&
+    playerCss.lastIndexOf("@media (pointer: coarse)") > playerCss.indexOf(".player-close,"),
+  "VideoPlayer.css must use grouped phone rows and at least 44px coarse-pointer targets.",
+);
+
+check(
+  "intermediate player controls keep three non-overlapping columns",
+  /\.player-osd-row\s*\{[\s\S]{0,180}display:\s*grid[\s\S]{0,180}grid-template-columns:\s*minmax\(44px,\s*1fr\)\s+auto\s+max-content[\s\S]{0,160}column-gap:\s*calc\(4px \* var\(--density-scale\)\)/.test(intermediatePlayerCss) &&
+    /\.player-osd-audio\s*\{[\s\S]{0,100}grid-column:\s*1/.test(intermediatePlayerCss) &&
+    /\.player-osd-transport\s*\{[\s\S]{0,100}grid-column:\s*2/.test(intermediatePlayerCss) &&
+    /\.player-osd-actions\s*\{[\s\S]{0,100}grid-column:\s*3/.test(intermediatePlayerCss) &&
+    !/\.player-osd \.player-mobile-optional\s*\{[\s\S]{0,80}display:\s*none/.test(intermediatePlayerCss) &&
+    /\.player-osd \.player-osd-icon-button\s*\{[\s\S]{0,120}width:\s*44px[\s\S]{0,80}min-width:\s*44px/.test(shortLandscapePlayerCss) &&
+    /\.player-speed-control select\s*\{[\s\S]{0,120}width:\s*64px[\s\S]{0,80}min-width:\s*64px/.test(shortLandscapePlayerCss) &&
+    /\.player-osd \.chip,[\s\S]{0,80}\.player-speed-control select\s*\{[\s\S]{0,80}min-height:\s*44px/.test(shortLandscapePlayerCss) &&
+    /\.player-osd \.player-mobile-optional\s*\{[\s\S]{0,80}display:\s*none/.test(shortLandscapePlayerCss),
+  "Intermediate widths must reserve independent audio, transport, and action columns; short landscape keeps 44px controls while hiding only optional cast and picture-in-picture actions.",
+);
+
+check(
+  "compact paused title reserves the visible player controls",
+  /@media\s*\(max-width:\s*560px\)[\s\S]*--player-compact-osd-reserve:\s*calc\([\s\S]{0,260}\+\s*92px[\s\S]{0,180}var\(--safe-area-bottom\)/.test(playerCss) &&
+    /@media\s*\(min-width:\s*561px\)\s*and\s*\(max-width:\s*950px\)\s*and\s*\(max-height:\s*500px\)[\s\S]*--player-compact-osd-reserve:\s*calc\([\s\S]{0,260}\+\s*44px[\s\S]{0,180}var\(--safe-area-bottom\)/.test(playerCss) &&
+    (playerPauseCss.match(/calc\(\s*var\(--player-compact-osd-reserve\)\s*\+\s*calc\(10px \* var\(--density-scale\)\)\s*\)/g)?.length ?? 0) === 2 &&
+    /max-height:\s*calc\([\s\S]{0,220}var\(--safe-area-top\)/.test(playerPauseCss),
+  "The paused title must share the compact OSD reserve, keep a 10px gap, and stay below the safe-area-aware top bar.",
+);
+
+check(
+  "legacy WebViews receive viewport fallbacks before dynamic viewport units",
+  /\.full-viewport-boot\s*\{[\s\S]{0,180}min-height:\s*100vh;\s*min-height:\s*100dvh;/.test(appCss) &&
+    /@media\s*\(max-width:\s*699px\),\s*\(max-width:\s*950px\)\s*and\s*\(max-height:\s*500px\)[\s\S]{0,320}\.app-content\s*\{[\s\S]{0,260}height:\s*100vh;\s*height:\s*100dvh;/.test(appCss) &&
+    (playerPauseCss.match(/max-height:\s*calc\(\s*100vh[\s\S]{0,360}max-height:\s*calc\(\s*100dvh/g)?.length ?? 0) === 2 &&
+    (playerInfoCss.match(/max-height:\s*calc\(100vh[\s\S]{0,240}max-height:\s*calc\(100dvh/g)?.length ?? 0) === 2 &&
+    /\.nav-rail-more-scrim\s*\{[\s\S]{0,220}height:\s*100vh;\s*height:\s*100dvh;/.test(navCss) &&
+    /\.nav-rail-more-sheet\s*\{[\s\S]{0,360}max-height:\s*min\(430px,\s*calc\(100vh[\s\S]{0,180}max-height:\s*min\(430px,\s*calc\(100dvh/.test(navCss),
+  "App boot and mobile scrollport, paused/player information surfaces, and the mobile More menu must declare 100vh before 100dvh for Android WebView 91.",
+);
+
+check(
+  "production transforms target the five-year Android WebView floor",
+  /build:\s*\{[\s\S]{0,320}target:\s*["']chrome90["'][\s\S]{0,160}cssTarget:\s*["']chrome90["']/.test(viteConfig),
+  "Vite must target Chrome 90 for both JavaScript and CSS so WebView 91 keeps legacy media-query syntax.",
 );
 
 check(
