@@ -114,11 +114,13 @@ run_noninteractive() {
 }
 
 run_interactive() {
-  input="$1"
-  set +e
-  printf '%b' "$input" | script -q -e -c "bash /bundle/install.sh" /dev/null > /test/output.log 2>&1
-  status=\${PIPESTATUS[1]}
-  set -e
+  local input="$1"
+  local status
+  if printf '%b' "$input" | script -q -e -c "bash /bundle/install.sh" /dev/null > /test/output.log 2>&1; then
+    status=\${PIPESTATUS[1]}
+  else
+    status=\${PIPESTATUS[1]}
+  fi
   return "$status"
 }
 
@@ -330,6 +332,91 @@ test("generated container runner has self-contained systemctl controls and bound
     assert.match(diagnostic, /cat \/test\/commands\.log/);
     assert.match(diagnostic, /cat \/test\/output\.log/);
     assert.doesNotMatch(diagnostic, /\.env/);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("generated run_interactive preserves caller errexit and returns the script status", () => {
+  const generatedRunner = evaluateContainerRunner();
+  const interactive = generatedRunner.match(/run_interactive\(\) \{\n[\s\S]*?\n}\n\n(?=expect_no_registration\(\) \{)/)?.[0] ?? "";
+  assert.match(interactive, /^run_interactive\(\) \{/);
+  assert.match(interactive, /if printf '%b' "\$input" \| script -q -e -c "bash \/bundle\/install\.sh" \/dev\/null > \/test\/output\.log 2>&1; then/);
+  assert.equal((interactive.match(/\/test\/output\.log/g) ?? []).length, 1, "the checked-in function must have one fixed synthetic output path");
+  assert.doesNotMatch(interactive, /set [+-]e/);
+
+  const executableInteractive = interactive.replace("/test/output.log", '"$RUN_INTERACTIVE_OUTPUT"');
+  const fixture = mkdtempSync(resolve(tmpdir(), "yawf-updater-install-interactive-runner-"));
+  const probe = resolve(fixture, "probe-run-interactive.sh");
+  try {
+    writeFileSync(probe, `#!/usr/bin/env bash
+set -euo pipefail
+${executableInteractive}
+script() {
+  cat >/dev/null
+  return "$SCRIPT_STUB_STATUS"
+}
+assert_errexit() {
+  case "$-" in
+    *e*) ;;
+    *) echo 'caller errexit unexpectedly disabled' >&2; exit 1 ;;
+  esac
+}
+assert_no_errexit() {
+  case "$-" in
+    *e*) echo 'caller errexit unexpectedly enabled' >&2; exit 1 ;;
+    *) ;;
+  esac
+}
+case "$1" in
+  disabled-success)
+    set +e
+    run_interactive 'probe\\n'
+    result=$?
+    test "$result" -eq 0
+    assert_no_errexit
+    ;;
+  disabled-failure)
+    set +e
+    run_interactive 'probe\\n'
+    result=$?
+    test "$result" -eq 23
+    assert_no_errexit
+    ;;
+  enabled-success)
+    set -e
+    run_interactive 'probe\\n'
+    result=$?
+    test "$result" -eq 0
+    assert_errexit
+    ;;
+  conditional-failure)
+    set -e
+    if run_interactive 'probe\\n'; then
+      echo 'conditional failure unexpectedly succeeded' >&2
+      exit 1
+    else
+      result=$?
+    fi
+    test "$result" -eq 29
+    assert_errexit
+    ;;
+  *) echo "unknown probe: $1" >&2; exit 1 ;;
+esac
+`, { mode: 0o700 });
+    const probes = [
+      ["disabled-success", "0"],
+      ["disabled-failure", "23"],
+      ["enabled-success", "0"],
+      ["conditional-failure", "29"],
+    ];
+    for (const [name, scriptStatus] of probes) {
+      const result = spawnSync("bash", [probe, name], {
+        encoding: "utf8",
+        env: { ...process.env, RUN_INTERACTIVE_OUTPUT: resolve(fixture, `${name}.output`), SCRIPT_STUB_STATUS: scriptStatus },
+      });
+      assert.equal(result.status, 0, `${name}: ${result.stdout}\n${result.stderr}`);
+    }
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
