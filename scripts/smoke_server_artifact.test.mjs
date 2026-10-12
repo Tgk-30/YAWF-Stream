@@ -273,8 +273,42 @@ test("Debian install checks exercise the same candidate on Ubuntu 22 and 24", ()
   assert.match(debWorkflow, /sudo -u debridstreamer \/usr\/bin\/node "\$smoke_dir\/smoke_server_artifact\.mjs"/);
   assert.match(debWorkflow, /sudo systemctl start debridstreamer/);
   assert.match(debWorkflow, /sudo systemctl restart debridstreamer/);
-  assert.match(debWorkflow, /Environment=HOST=127\.0\.0\.1/);
-  assert.match(debWorkflow, /Environment=DS_SERVER_UPDATE_CHECK=false/);
   assert.match(debWorkflow, /chmod 0600 \/etc\/systemd\/system\/debridstreamer\.service\.d\/10-ci-smoke\.conf/);
   assert.match(debWorkflow, /systemctl show debridstreamer --property=MainPID/);
+});
+
+test("Debian systemd smoke appends one private controlled environment file", () => {
+  const step = workflowStep(debWorkflow, "Start, restart, and inspect the systemd service");
+
+  assert.match(step, /sudo install -m 0600 \/dev\/null \/etc\/debridstreamer\/ci-smoke\.env/);
+  assert.match(step, /sudo chmod 0600 \/etc\/debridstreamer\/ci-smoke\.env/);
+  assert.match(
+    step,
+    /printf '%s\\n' '\[Service\]' 'EnvironmentFile=\/etc\/debridstreamer\/ci-smoke\.env'/,
+  );
+  for (const setting of [
+    "'HOST=127.0.0.1'",
+    '"PORT=$port"',
+    "'DS_SERVER_UPDATE_CHECK=false'",
+    "'DS_SERVER_ENABLE_DIRECT_TORRENT=false'",
+    "'DS_SERVER_ENABLE_TRANSCODE=false'",
+    "'DS_SERVER_LOGGER=false'",
+  ]) {
+    assert.ok(step.includes(setting), `missing controlled systemd setting: ${setting}`);
+  }
+  assert.doesNotMatch(step, /['"]Environment=/);
+  assert.doesNotMatch(step, /\/etc\/debridstreamer\/debridstreamer\.env|\/lib\/systemd\/system\/debridstreamer\.service/);
+});
+
+test("Debian systemd failure diagnostics exclude secret-bearing sources", () => {
+  const step = workflowStep(debWorkflow, "Start, restart, and inspect the systemd service");
+
+  assert.match(
+    step,
+    /systemctl show debridstreamer \\\n\s+--property=ActiveState,SubState,Result,ExecMainStatus >&2/,
+  );
+  assert.doesNotMatch(
+    step,
+    /journalctl|systemctl cat|--property=[^\n]*(?:Environment|EnvironmentFiles)|\bprintenv\b|\bset -x\b|cat [^\n]*ci-smoke\.env/,
+  );
 });

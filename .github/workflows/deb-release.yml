@@ -213,18 +213,23 @@ jobs:
           set -euo pipefail
           port="$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")"
           setup_token="$(openssl rand -base64 32 | tr -d '\n')"
+          # Append a test env file after the packaged configuration. Systemd
+          # EnvironmentFile values override Environment directives in drop-ins.
+          sudo install -m 0600 /dev/null /etc/debridstreamer/ci-smoke.env
+          printf '%s\n' \
+            'HOST=127.0.0.1' \
+            "PORT=$port" \
+            "DS_SERVER_SETUP_TOKEN=$setup_token" \
+            'DS_SERVER_COOKIE_SECURE=false' \
+            'DS_SERVER_UPDATE_CHECK=false' \
+            'DS_SERVER_ENABLE_DIRECT_TORRENT=false' \
+            'DS_SERVER_ENABLE_TRANSCODE=false' \
+            'DS_SERVER_LOGGER=false' \
+            | sudo tee /etc/debridstreamer/ci-smoke.env >/dev/null
+          sudo chmod 0600 /etc/debridstreamer/ci-smoke.env
           sudo install -d -m 0755 /etc/systemd/system/debridstreamer.service.d
           sudo install -m 0600 /dev/null /etc/systemd/system/debridstreamer.service.d/10-ci-smoke.conf
-          printf '%s\n' \
-            '[Service]' \
-            'Environment=HOST=127.0.0.1' \
-            "Environment=PORT=$port" \
-            "Environment=DS_SERVER_SETUP_TOKEN=$setup_token" \
-            'Environment=DS_SERVER_COOKIE_SECURE=false' \
-            'Environment=DS_SERVER_UPDATE_CHECK=false' \
-            'Environment=DS_SERVER_ENABLE_DIRECT_TORRENT=false' \
-            'Environment=DS_SERVER_ENABLE_TRANSCODE=false' \
-            'Environment=DS_SERVER_LOGGER=false' \
+          printf '%s\n' '[Service]' 'EnvironmentFile=/etc/debridstreamer/ci-smoke.env' \
             | sudo tee /etc/systemd/system/debridstreamer.service.d/10-ci-smoke.conf >/dev/null
           sudo chmod 0600 /etc/systemd/system/debridstreamer.service.d/10-ci-smoke.conf
           unset setup_token
@@ -239,6 +244,8 @@ jobs:
               fi
               if [ "$attempt" -eq 80 ]; then
                 echo "Installed systemd service did not become healthy" >&2
+                systemctl show debridstreamer \
+                  --property=ActiveState,SubState,Result,ExecMainStatus >&2
                 return 1
               fi
               sleep 0.25
