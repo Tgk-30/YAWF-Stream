@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -182,21 +182,60 @@ function copyPrivateFile(source, destination, exclusive) {
   }
 }
 
-function atomicJson(path, value, mode = 0o600) {
-  mkdirSync(dirname(path), { recursive: true, mode: dirname(path) === PATHS.publicDir ? 0o755 : 0o700 });
+const DEFAULT_STATE_FS = Object.freeze({ closeSync, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync,
+  readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync });
+function ensurePublicStatusDirectory(fsOps = DEFAULT_STATE_FS) {
+  fsOps.mkdirSync(PATHS.root, { recursive: true, mode: 0o700 });
+  assertProtectedRootPath(PATHS.root, "directory", fsOps);
+  if (!fsOps.existsSync(PATHS.publicDir)) fsOps.mkdirSync(PATHS.publicDir, { mode: 0o755 });
+  assertProtectedRootPath(PATHS.publicDir, "directory", fsOps);
+  const fd = fsOps.openSync(PATHS.publicDir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const before = fsOps.fstatSync(fd);
+    if (!before.isDirectory() || before.uid !== 0 || (before.mode & 0o022) !== 0) throw new Error("The public updater status directory is unsafe.");
+    fsOps.fchmodSync(fd, 0o755);
+    const after = fsOps.fstatSync(fd);
+    if (!after.isDirectory() || after.uid !== 0 || (after.mode & 0o777) !== 0o755) throw new Error("The public updater status directory permissions could not be established.");
+  } finally { fsOps.closeSync(fd); }
+}
+function atomicJson(path, value, fsOps = DEFAULT_STATE_FS) {
+  if (![PATHS.policy, PATHS.journal, PATHS.status].includes(path)) throw new Error("Refusing to write an unknown updater state path.");
+  const mode = path === PATHS.status ? 0o644 : 0o600;
+  const directory = dirname(path);
+  if (path === PATHS.status) ensurePublicStatusDirectory(fsOps);
+  else {
+    fsOps.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    assertProtectedRootPath(directory, "directory", fsOps);
+  }
+  if (fsOps.existsSync(path)) assertProtectedRootPath(path, "file", fsOps);
   const temporary = `${path}.tmp-${process.pid}`;
-  const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
-  try { writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); } finally { closeSync(fd); }
-  renameSync(temporary, path);
+  let fd = fsOps.openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
+  let renamed = false;
+  try {
+    fsOps.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`);
+    fsOps.fchmodSync(fd, mode);
+    const written = fsOps.fstatSync(fd);
+    if (!written.isFile() || written.uid !== 0 || (written.mode & 0o777) !== mode) throw new Error("Updater state file permissions could not be established.");
+    fsOps.closeSync(fd); fd = null;
+    fsOps.renameSync(temporary, path); renamed = true;
+  } finally {
+    if (fd != null) fsOps.closeSync(fd);
+    if (!renamed) { try { fsOps.unlinkSync(temporary); } catch {} }
+  }
 }
 function readJson(path, max = 64 * 1024) {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > max) throw new Error(`Unsafe state file: ${path}`);
   return JSON.parse(readFileSync(path, "utf8"));
 }
-function writeStatus(policy, state, detail, extra = {}) {
+function writeStatus(policy, state, detail, extra = {}, fsOps = DEFAULT_STATE_FS) {
   atomicJson(PATHS.status, { schemaVersion: 1, supported: true, installType: "docker-compose", enabled: policy.enabled, state,
-    currentVersion: policy.currentVersion ?? null, candidateVersion: null, lastCheckedAt: null, lastChangedAt: new Date().toISOString(), detail, ...extra }, 0o644);
+    currentVersion: policy.currentVersion ?? null, candidateVersion: null, lastCheckedAt: null, lastChangedAt: new Date().toISOString(), detail, ...extra }, fsOps);
+}
+
+// This test seam has no path input and can only exercise the fixed public status destination.
+export function writePublicStatusForTest(fsOps) {
+  writeStatus({ enabled: false, currentVersion: null }, "disabled", "test", {}, fsOps);
 }
 
 async function run(command, args, options = {}) {

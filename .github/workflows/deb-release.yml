@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       updater_candidate_digest:
-        description: "Optional published 2.3.9 image index digest for real Compose updater verification"
+        description: "Optional published candidate image index digest for real Compose updater verification"
         required: false
         type: string
       updater_source_revision:
@@ -342,7 +342,7 @@ jobs:
           node-version: 24
 
       - name: Test updater policy and release guards
-        run: node --test scripts/server_updater.test.mjs
+        run: node --test scripts/server_updater.test.mjs scripts/server_updater_ci_guards.test.mjs
 
       - name: Install disabled updater helper and verify kernel lock exclusion
         shell: bash
@@ -363,7 +363,36 @@ jobs:
           test "$timer_state" = "disabled"
 
       - name: Verify isolated Compose upgrade and rollback
-        run: node scripts/server_updater_compose_integration.mjs | tee "$RUNNER_TEMP/server-updater-compose.json"
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$RUNNER_TEMP/server-updater-compose.log"
+          receipt="$RUNNER_TEMP/server-updater-compose.json"
+          expected_version="$(node -p "require('./server/package.json').version")"
+          failure_version="$(node -e "const [a,b,c]=require('./server/package.json').version.split('.').map(Number);process.stdout.write([a,b,c+1].join('.'))")"
+          sudo /usr/bin/node scripts/server_updater_compose_integration.mjs 2>&1 | tee "$raw"
+          /usr/bin/node --input-type=module - "$raw" "$receipt" "$expected_version" "$failure_version" <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync, writeFileSync } from "node:fs";
+          const [raw, receipt, expectedVersion, failureVersion] = process.argv.slice(2);
+          const records = readFileSync(raw, "utf8").split(/\r?\n/).filter(Boolean).flatMap((line) => {
+            try { return [JSON.parse(line)]; } catch { return []; }
+          });
+          const result = records.findLast((record) => record?.mode === "transaction-primitive");
+          assert.ok(result, "synthetic updater receipt is missing");
+          assert.equal(result.ok, true);
+          assert.equal(result.mode, "transaction-primitive");
+          assert.equal(result.version, expectedVersion);
+          assert.match(result.digest, /^sha256:[a-f0-9]{64}$/);
+          assert.equal(result.source, "generated-user-node-fixtures");
+          assert.equal(result.upgraded, expectedVersion);
+          assert.equal(result.rollbackFrom, failureVersion);
+          for (const key of ["fixtureDigestVerified", "fixtureSourceVerified", "ownershipPreserved", "otherServicePreserved"]) {
+            assert.equal(result[key], true, `synthetic receipt did not verify ${key}`);
+          }
+          writeFileSync(receipt, `${JSON.stringify(result)}\n`, { mode: 0o600 });
+          NODE
+          test -s "$receipt"
 
       - name: Validate optional real updater image inputs
         if: inputs.updater_candidate_digest != '' || inputs.updater_source_revision != ''
@@ -378,14 +407,58 @@ jobs:
 
       - name: Verify actual published image upgrade and rollback
         if: inputs.updater_candidate_digest != '' && inputs.updater_source_revision != ''
+        shell: bash
         env:
           CANDIDATE_DIGEST: ${{ inputs.updater_candidate_digest }}
           SOURCE_REVISION: ${{ inputs.updater_source_revision }}
         run: |
+          set -euo pipefail
+          raw="$RUNNER_TEMP/server-updater-compose-actual.log"
+          receipt="$RUNNER_TEMP/server-updater-compose-actual.json"
+          expected_version="$(node -p "require('./server/package.json').version")"
           sudo /usr/bin/node scripts/server_updater_compose_integration.mjs \
             --candidate-digest "$CANDIDATE_DIGEST" \
             --source-revision "$SOURCE_REVISION" \
-            | tee "$RUNNER_TEMP/server-updater-compose-actual.json"
+            2>&1 | tee "$raw"
+          /usr/bin/node --input-type=module - "$raw" "$receipt" "$CANDIDATE_DIGEST" "$SOURCE_REVISION" "$expected_version" <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync, writeFileSync } from "node:fs";
+          const [raw, receipt, expectedDigest, expectedSource, expectedVersion] = process.argv.slice(2);
+          const records = readFileSync(raw, "utf8").split(/\r?\n/).filter(Boolean).flatMap((line) => {
+            try { return [JSON.parse(line)]; } catch { return []; }
+          });
+          const result = records.findLast((record) => record?.mode === "actual-published-images");
+          assert.ok(result, "actual updater receipt is missing");
+          assert.equal(result.ok, true);
+          assert.equal(result.mode, "actual-published-images");
+          assert.equal(result.version, expectedVersion);
+          assert.equal(result.digest, expectedDigest);
+          assert.equal(result.source, expectedSource);
+          assert.equal(result.candidateDigest, expectedDigest);
+          assert.equal(result.sourceRevision, expectedSource);
+          assert.match(result.baselineDigest, /^sha256:[a-f0-9]{64}$/);
+          for (const key of ["digestVerified", "sourceVerified", "candidateHealthVerified", "injectedRollbackVerified",
+            "activePlaybackDeferred", "successfulUpdateVerified", "stopFailureVerified", "snapshotFailureVerified",
+            "interruptedRecoveryVerified", "registrationDriftPreserved", "ownershipAndDatabaseWriteVerified", "otherServicePreserved",
+            "umask077PublicStatusVerified", "nonRootReadOnlyStatusVerified"]) {
+            assert.equal(result[key], true, `actual receipt did not verify ${key}`);
+          }
+          const interrupt = records.findLast((record) => record?.diagnostic === "interrupted-transaction");
+          assert.ok(interrupt, "interrupted transaction diagnostic is missing");
+          assert.equal(interrupt.phase, "snapshotted");
+          assert.equal(interrupt.running, false);
+          assert.equal(interrupt.registrationMatches, true);
+          assert.equal(interrupt.containerStatus, "exited");
+          const preSnapshot = records.filter((record) => record?.diagnostic === "pre-snapshot-fault");
+          assert.deepEqual(preSnapshot.map((record) => record.fault).sort(), ["snapshot", "stop"]);
+          for (const record of preSnapshot) {
+            assert.equal(record.state, "failed");
+            assert.equal(record.inhibited, true);
+            assert.equal(record.journalPending, false);
+          }
+          writeFileSync(receipt, `${JSON.stringify(result)}\n`, { mode: 0o600 });
+          NODE
+          test -s "$receipt"
 
       - name: Retain updater transaction evidence
         if: always()
@@ -393,6 +466,8 @@ jobs:
         with:
           name: server-updater-compose-${{ matrix.runner }}
           path: |
+            ${{ runner.temp }}/server-updater-compose.log
             ${{ runner.temp }}/server-updater-compose.json
+            ${{ runner.temp }}/server-updater-compose-actual.log
             ${{ runner.temp }}/server-updater-compose-actual.json
           if-no-files-found: error

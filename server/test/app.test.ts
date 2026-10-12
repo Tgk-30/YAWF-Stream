@@ -695,7 +695,7 @@ describe("DebridStreamer server", () => {
     expect(json<{ setupRequired: boolean; ready: boolean; version: string }>(health)).toMatchObject({
       setupRequired: true,
       ready: false,
-      version: "2.3.9",
+      version: "2.3.10",
     });
 
     const owner = await setupOwner(app);

@@ -2,12 +2,17 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseUpdateManifest } from "../deploy/updater/yawf-server-update.mjs";
 
 const repo = resolve(new URL("..", import.meta.url).pathname);
+const candidateVersion = JSON.parse(readFileSync(join(repo, "server/package.json"), "utf8")).version;
+assert.match(candidateVersion, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+const candidateParts = candidateVersion.split(".").map(Number);
+const failureVersion = `${candidateParts[0]}.${candidateParts[1]}.${candidateParts[2] + 1}`;
+process.umask(0o077);
 const args = process.argv.slice(2);
 const digestIndex = args.indexOf("--candidate-digest");
 const revisionIndex = args.indexOf("--source-revision");
@@ -46,6 +51,12 @@ http.createServer((q,r)=>{if(q.url==="/api/health"){r.setHeader("content-type","
 }
 function writeOverride(imageId) { writeFileSync(override, `services:\n  debridstreamer:\n    image: ${imageId}\n`); }
 function container(service) { return composeRun("ps", "--quiet", service); }
+function retainedContainer(service) {
+  const ids = composeRun("ps", "--all", "--quiet", service).split(/\s+/).filter(Boolean);
+  assert.equal(ids.length, 1, `expected exactly one retained ${service} container`);
+  assert.match(ids[0], /^[a-f0-9]{12,64}$/);
+  return ids[0];
+}
 function health() { return JSON.parse(docker("exec", container("debridstreamer"), "node", "-e", "fetch('http://127.0.0.1:43110/api/health').then(r=>r.text()).then(process.stdout.write.bind(process.stdout))")); }
 async function waitHealth() {
   for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -71,9 +82,9 @@ try {
     const baselineDigest = "sha256:53db8ee061db988ff7aa8cdf69a71da92ee74b908aed2bcb367d78818218ba21";
     const baseline = `ghcr.io/tgk-30/yawf-stream@${baselineDigest}`;
     const candidate = `ghcr.io/tgk-30/yawf-stream@${actualCandidateDigest}`;
-    parseUpdateManifest({ schemaVersion: 1, version: "2.3.9", sourceRevision: actualSourceRevision,
+    parseUpdateManifest({ schemaVersion: 1, version: candidateVersion, sourceRevision: actualSourceRevision,
       image: { repository: "ghcr.io/tgk-30/yawf-stream", digest: actualCandidateDigest },
-      debian: { name: "debridstreamer-server_2.3.9_all.deb", sha256: "0".repeat(64), size: 1 } }, "2.3.9");
+      debian: { name: `debridstreamer-server_${candidateVersion}_all.deb`, sha256: "0".repeat(64), size: 1 } }, candidateVersion);
     docker("pull", baseline); docker("pull", candidate);
     const publishedRevision = docker("image", "inspect", "--format", "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}", candidate);
     assert.equal(publishedRevision, actualSourceRevision, "candidate source label does not match the requested revision");
@@ -103,6 +114,12 @@ try {
     assert.match(readFileSync(environment, "utf8"), /fixture-setup-token/);
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "let s=require('fs').statSync('/data/debridstreamer.sqlite');process.stdout.write(`${s.uid}:${s.gid}`)"), originalOwner);
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite',{readOnly:true});process.stdout.write(String(d.prepare('PRAGMA user_version').get().user_version));d.close()"), originalSchemaVersion);
+    const rollbackPolicy = JSON.parse(readFileSync("/etc/yawf-server-updater/config.json", "utf8"));
+    const rollbackStatus = JSON.parse(readFileSync("/var/lib/yawf-server-updater/public/status.json", "utf8"));
+    assert.equal(rollbackPolicy.inhibitedVersion, candidateVersion, "post-health rollback did not inhibit the failed candidate");
+    assert.equal(rollbackStatus.state, "rolled_back", "post-health fault did not complete a production rollback");
+    assert.equal(rollbackStatus.candidateVersion, candidateVersion);
+    assert.equal(existsSync("/var/lib/yawf-server-updater/journal.json"), false, "post-health rollback retained its journal");
     docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite');d.exec('CREATE TABLE updater_rollback_probe(value TEXT)');d.prepare('INSERT INTO updater_rollback_probe VALUES (?)').run('writable');d.close()");
     composeRun("restart", "debridstreamer"); await waitHealth();
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite',{readOnly:true});process.stdout.write(d.prepare('SELECT value FROM updater_rollback_probe').get().value);d.close()"), "writable");
@@ -129,13 +146,42 @@ try {
       assert.equal(docker("inspect", "--format", "{{.Config.Image}}", container("debridstreamer")), baseline);
       assert.equal(docker("exec", container("debridstreamer"), "cat", `/data/${fault}-failure-marker`), "untouched");
       assert.equal(container("sentinel"), sentinel);
+      const failedPolicy = JSON.parse(readFileSync("/etc/yawf-server-updater/config.json", "utf8"));
+      const failedStatus = JSON.parse(readFileSync("/var/lib/yawf-server-updater/public/status.json", "utf8"));
+      const journalPending = existsSync("/var/lib/yawf-server-updater/journal.json");
+      process.stdout.write(JSON.stringify({ diagnostic: "pre-snapshot-fault", fault, state: failedStatus.state,
+        inhibited: failedPolicy.inhibitedVersion === candidateVersion, journalPending }) + "\n");
+      assert.equal(failedStatus.state, "failed", `${fault} fault did not report pre-snapshot failure`);
+      assert.equal(failedStatus.candidateVersion, candidateVersion);
+      assert.equal(failedPolicy.inhibitedVersion, candidateVersion, `${fault} fault did not inhibit the candidate`);
+      assert.equal(journalPending, false, `${fault} fault retained a pending journal`);
     }
     run("/usr/local/sbin/yawf-server-update", ["register", compose]);
     docker("exec", container("debridstreamer"), "node", "-e", "require('fs').writeFileSync('/data/interrupted-marker','recover-me')");
     productionTransaction(actualCandidateDigest, actualSourceRevision, "interrupt");
-    assert.equal(container("debridstreamer"), "", "interrupted fixture did not leave the snapshotted service stopped");
+    const interruptedContainer = retainedContainer("debridstreamer");
+    const interruptedRunning = docker("inspect", "--format", "{{.State.Running}}", interruptedContainer);
+    const interruptedStatus = docker("inspect", "--format", "{{.State.Status}}", interruptedContainer);
+    const journalPath = "/var/lib/yawf-server-updater/journal.json";
+    const policyPath = "/etc/yawf-server-updater/config.json";
+    const interruptedJournal = JSON.parse(readFileSync(journalPath, "utf8"));
+    const interruptedPolicy = JSON.parse(readFileSync(policyPath, "utf8"));
+    const expectedRegistration = {
+      composeFile: interruptedPolicy.composeFile,
+      projectName: interruptedPolicy.projectName,
+      volumeName: interruptedPolicy.volumeName,
+      envPath: interruptedPolicy.envPath,
+    };
+    const registrationMatches = JSON.stringify(interruptedJournal.registration) === JSON.stringify(expectedRegistration);
+    process.stdout.write(JSON.stringify({ diagnostic: "interrupted-transaction", phase: interruptedJournal.phase,
+      containerStatus: interruptedStatus, running: interruptedRunning === "true", registrationMatches }) + "\n");
+    assert.equal(interruptedRunning, "false", "interrupted fixture retained a running service container");
+    assert.equal(interruptedStatus, "exited", "interrupted fixture did not retain an exited service container");
+    assert.equal(interruptedJournal.phase, "snapshotted", "interrupted fixture did not retain a snapshotted journal");
+    assert.deepEqual(interruptedJournal.registration, expectedRegistration, "interrupted journal was not bound to the current registration");
     assert.throws(() => run("/usr/local/sbin/yawf-server-update", ["register", compose]), /pending update journal/);
     productionTransaction(actualCandidateDigest, actualSourceRevision, "recover");
+    assert.equal(existsSync(journalPath), false, "successful interrupted recovery retained the update journal");
     await waitHealth();
     assert.equal(docker("exec", container("debridstreamer"), "cat", "/data/interrupted-marker"), "recover-me");
     assert.equal(docker("inspect", "--format", "{{.Config.Image}}", container("debridstreamer")), baseline);
@@ -152,15 +198,27 @@ try {
     run("/usr/local/sbin/yawf-server-update", ["register", compose]);
     productionTransaction(actualCandidateDigest, actualSourceRevision, "none");
     const successfulHealth = await waitHealth();
-    assert.deepEqual({ ok: successfulHealth.ok, ready: successfulHealth.ready, version: successfulHealth.version }, { ok: true, ready: true, version: "2.3.9" });
+    assert.deepEqual({ ok: successfulHealth.ok, ready: successfulHealth.ready, version: successfulHealth.version }, { ok: true, ready: true, version: candidateVersion });
     const successfulPolicy = JSON.parse(readFileSync("/etc/yawf-server-updater/config.json", "utf8"));
     const successfulStatus = JSON.parse(readFileSync("/var/lib/yawf-server-updater/public/status.json", "utf8"));
     assert.equal(successfulPolicy.currentDigest, actualCandidateDigest);
-    assert.equal(successfulPolicy.currentVersion, "2.3.9");
+    assert.equal(successfulPolicy.currentVersion, candidateVersion);
     assert.equal(successfulStatus.state, "updated");
-    assert.equal(successfulStatus.currentVersion, "2.3.9");
+    assert.equal(successfulStatus.currentVersion, candidateVersion);
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite',{readOnly:true});process.stdout.write(d.prepare('SELECT value FROM updater_rollback_probe').get().value);d.close()"), "writable");
     assert.equal(container("sentinel"), sentinel);
+    const publicDirectory = lstatSync("/var/lib/yawf-server-updater/public");
+    const publicStatus = lstatSync("/var/lib/yawf-server-updater/public/status.json");
+    assert.equal(`${publicDirectory.uid}:${(publicDirectory.mode & 0o777).toString(8)}`, "0:755", "public status directory is not root-owned mode 0755");
+    assert.equal(`${publicStatus.uid}:${(publicStatus.mode & 0o777).toString(8)}`, "0:644", "public status file is not root-owned mode 0644");
+    const nonRootStatus = JSON.parse(docker("run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+      "--security-opt", "no-new-privileges:true", "--user", "node",
+      "--mount", "type=bind,source=/var/lib/yawf-server-updater/public,target=/updater-status,readonly",
+      "--entrypoint", "node", candidate, "-e",
+      "const f=require('fs');let value=JSON.parse(f.readFileSync('/updater-status/status.json','utf8'));let writeBlocked=false;try{f.writeFileSync('/updater-status/probe','no')}catch{writeBlocked=true}process.stdout.write(JSON.stringify({uid:process.getuid(),state:value.state,currentVersion:value.currentVersion,writeBlocked}))"));
+    assert.ok(nonRootStatus.uid > 0, "status readability probe unexpectedly ran as root");
+    assert.deepEqual({ state: nonRootStatus.state, currentVersion: nonRootStatus.currentVersion, writeBlocked: nonRootStatus.writeBlocked },
+      { state: "updated", currentVersion: candidateVersion, writeBlocked: true });
 
     // Test-fixture reset only: deliberately return the isolated stack to the
     // immutable baseline and its stopped pre-success data/environment snapshot,
@@ -185,14 +243,17 @@ try {
     assert.equal(docker("inspect", "--format", "{{.Config.Image}}", manualContainer), candidate);
     assert.equal(docker("exec", manualContainer, "cat", "/data/manual-redeploy-marker"), "preserve-newer");
     assert.equal(container("sentinel"), sentinel);
-    process.stdout.write(JSON.stringify({ ok: true, mode: "actual-published-images", baselineDigest, candidateDigest: actualCandidateDigest,
-      sourceRevision: actualSourceRevision, candidateHealthVerified: true, injectedRollbackVerified: true,
+    process.stdout.write(JSON.stringify({ ok: true, mode: "actual-published-images", version: candidateVersion, digest: actualCandidateDigest,
+      source: actualSourceRevision, baselineDigest, candidateDigest: actualCandidateDigest,
+      sourceRevision: actualSourceRevision, digestVerified: true, sourceVerified: true,
+      candidateHealthVerified: true, injectedRollbackVerified: true,
       activePlaybackDeferred: true, successfulUpdateVerified: true, stopFailureVerified: true,
       snapshotFailureVerified: true, interruptedRecoveryVerified: true,
-      registrationDriftPreserved: true, ownershipAndDatabaseWriteVerified: true, otherServicePreserved: true }) + "\n");
+      registrationDriftPreserved: true, ownershipAndDatabaseWriteVerified: true, otherServicePreserved: true,
+      umask077PublicStatusVerified: true, nonRootReadOnlyStatusVerified: true }) + "\n");
     process.exitCode = 0;
   } else {
-  const oldImage = image("old", "2.3.8"); const newImage = image("new", "2.3.9"); const badImage = image("bad", "2.3.10", false);
+  const oldImage = image("old", "2.3.8"); const newImage = image("new", candidateVersion); const badImage = image("bad", failureVersion, false);
   writeFileSync(compose, `services:\n  debridstreamer:\n    image: ${oldImage}\n    env_file: [.env]\n    volumes: [data:/data]\n  sentinel:\n    image: ${oldImage}\n    command: [\"node\",\"-e\",\"setInterval(()=>{},100000)\"]\nvolumes:\n  data:\n`);
   writeFileSync(environment, "OPAQUE_SECRET=not-printed\n"); chmodSync(environment, 0o600); writeOverride(oldImage);
   composeRun("up", "--detach");
@@ -203,7 +264,7 @@ try {
 
   composeRun("stop", "debridstreamer"); copyFileSync(environment, join(backup, "environment")); volumeCopy(oldImage, "copy");
   writeOverride(newImage); composeRun("up", "--detach", "--no-deps", "debridstreamer");
-  assert.deepEqual(health(), { ok: true, ready: true, version: "2.3.9" });
+  assert.deepEqual(health(), { ok: true, ready: true, version: candidateVersion });
   assert.equal(container("sentinel"), sentinel, "service-only upgrade replaced another stack service");
   assert.match(docker("exec", container("debridstreamer"), "cat", "/data/account.json"), /midnight/);
 
@@ -213,12 +274,14 @@ try {
   assert.equal(health().ready, false, "failure fixture unexpectedly passed readiness");
   composeRun("stop", "debridstreamer"); writeOverride(newImage); volumeCopy(newImage, "restore"); copyFileSync(join(backup, "environment"), environment);
   composeRun("up", "--detach", "--no-deps", "debridstreamer");
-  assert.deepEqual(health(), { ok: true, ready: true, version: "2.3.9" });
+  assert.deepEqual(health(), { ok: true, ready: true, version: candidateVersion });
   assert.equal(container("sentinel"), sentinel);
   assert.match(readFileSync(environment, "utf8"), /OPAQUE_SECRET/);
   assert.match(docker("exec", container("debridstreamer"), "cat", "/data/account.json"), /"owner":"kept"/);
   assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "let s=require('fs').statSync('/data/private-key');process.stdout.write(`${s.uid}:${s.gid}:${(s.mode&0o777).toString(8)}`)"), `${syntheticOwner}:600`);
-  process.stdout.write(JSON.stringify({ ok: true, mode: "transaction-primitive", upgraded: "2.3.9", rollbackFrom: "2.3.10", ownershipPreserved: true, otherServicePreserved: true }) + "\n");
+  process.stdout.write(JSON.stringify({ ok: true, mode: "transaction-primitive", version: candidateVersion, digest: newImage,
+    source: "generated-user-node-fixtures", upgraded: candidateVersion, rollbackFrom: failureVersion,
+    fixtureDigestVerified: true, fixtureSourceVerified: true, ownershipPreserved: true, otherServicePreserved: true }) + "\n");
   }
 } finally {
   try { composeRun("down", "--volumes", "--remove-orphans"); } catch {}
