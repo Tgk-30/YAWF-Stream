@@ -18,6 +18,19 @@ function workflowHasFullHistoryCheckout(workflow) {
   return /uses:\s*actions\/checkout@v4[\s\S]{0,240}fetch-depth:\s*0/.test(workflow);
 }
 
+function everyAndroidSetupInstallsPlatformTools(workflow) {
+  const setupActions =
+    workflow.match(/uses:\s*android-actions\/setup-android@v3\b/g) ?? [];
+  const explicitPlatformTools =
+    workflow.match(
+      /uses:\s*android-actions\/setup-android@v3\s*\n\s*with:\s*\n\s*packages:\s*platform-tools\b/g,
+    ) ?? [];
+  return (
+    setupActions.length > 0 &&
+    explicitPlatformTools.length === setupActions.length
+  );
+}
+
 function workflowJob(workflow, jobId) {
   const escaped = jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return workflow.match(
@@ -74,6 +87,10 @@ const linuxGtkMigration = read("docs/TAURI_LINUX_GTK_MIGRATION.md");
 const bundleBudgetCheck = read("scripts/check_bundle_budgets.mjs");
 const androidProjectPatch = read("scripts/patch_tauri_android.mjs");
 const androidProjectPatchTests = read("scripts/patch_tauri_android.test.mjs");
+const dockerWebBuild = dockerfile.indexOf("RUN npm run build");
+const dockerWebViewCompatibilityCopy = dockerfile.indexOf(
+  "COPY scripts/check_android_webview_compat.mjs /repo/scripts/check_android_webview_compat.mjs",
+);
 const phoneCertificatePinPath = join(root, "web/src-tauri/SIGNING_CERT_SHA256");
 const phoneCertificatePin = existsSync(phoneCertificatePinPath)
   ? read("web/src-tauri/SIGNING_CERT_SHA256")
@@ -724,6 +741,20 @@ check(
     dockerfile,
   ) && /RUN npm run build/.test(dockerfile),
   "Dockerfile must copy the production bundle-budget verifier before the web build invokes it",
+);
+check(
+  "Docker web build includes Android WebView compatibility gate",
+  dockerWebViewCompatibilityCopy >= 0 &&
+    dockerWebBuild >= 0 &&
+    dockerWebViewCompatibilityCopy < dockerWebBuild,
+  "Dockerfile must copy the transformed-CSS Android WebView compatibility verifier before the web build invokes it",
+);
+check(
+  "Android SDK setup explicitly installs platform tools",
+  [ciWorkflow, releaseWorkflow, cleanInstallWorkflow].every(
+    everyAndroidSetupInstallsPlatformTools,
+  ),
+  "CI, release, and clean-install setup-android steps must explicitly install platform-tools",
 );
 check(
   "Docker user guide exists",
