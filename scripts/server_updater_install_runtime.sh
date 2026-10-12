@@ -303,7 +303,7 @@ EOF_FILES
     cleanup_error "could not remove fixture updater installation directory"
     result=1
   fi
-  if ! systemctl daemon-reload >>"$raw" 2>&1; then
+  if ! /usr/bin/systemctl daemon-reload >>"$raw" 2>&1; then
     cleanup_error "could not reload systemd after fixture asset cleanup"
     result=1
   fi

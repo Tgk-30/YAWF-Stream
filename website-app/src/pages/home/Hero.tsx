@@ -145,7 +145,7 @@ export default function Hero() {
           </span>
         </div>
 
-        <h1 aria-label="Your Accounts. Watch Freely." className="display-xl mt-9 font-display">
+        <h1 aria-label="Your Accounts. Watch Freely." className="display-xl mt-9 font-display max-[360px]:text-[clamp(2.4rem,12vw,2.7rem)]">
           <span className="hero-line-1 block" aria-hidden="true">
             <CascadeChars text="Your Accounts." />
           </span>

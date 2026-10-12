@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("../.github/workflows/deb-release.yml", import.meta.url), "utf8");
@@ -75,6 +78,12 @@ function assertCleanupDispatch(source) {
   ]);
 }
 
+function assertOwnedInstallationReload(source) {
+  const installation = uniqueShellFunction(source, "remove_owned_installation").text;
+  const reloads = installation.match(/(?:\/usr\/bin\/)?systemctl daemon-reload/g) ?? [];
+  assert.deepEqual(reloads, ["/usr/bin/systemctl daemon-reload"]);
+}
+
 test("initial preflight and cleanup guards cannot be satisfied by later duplicate substrings", () => {
   assertInitialPreflight(installerRuntime);
   assertCleanupDispatch(installerRuntime);
@@ -98,6 +107,56 @@ test("unique EXIT cleanup preserves failure status and cannot return a false suc
     "final_status=1", "fi", 'exit "$final_status"', "}",
   ]);
   assert.ok(installerRuntime.slice(cleanup.end).startsWith("trap cleanup EXIT\n"));
+});
+
+test("owned installation cleanup reloads systemd through the real absolute path", () => {
+  assertOwnedInstallationReload(installerRuntime);
+  const installation = uniqueShellFunction(installerRuntime, "remove_owned_installation").text;
+  const unqualified = installation.replace("/usr/bin/systemctl daemon-reload", "systemctl daemon-reload");
+  assert.notEqual(unqualified, installation);
+  assert.throws(() => assertOwnedInstallationReload(installerRuntime.replace(installation, unqualified)));
+});
+
+test("a cached deleted fake systemctl cannot intercept the absolute cleanup reload", () => {
+  const fixture = mkdtempSync(resolve(tmpdir(), "yawf-systemctl-path-cache-"));
+  const fakeDirectory = resolve(fixture, "fake");
+  const realDirectory = resolve(fixture, "real");
+  const fakeMarker = resolve(fixture, "fake.marker");
+  const realMarker = resolve(fixture, "real.marker");
+  const probe = resolve(fixture, "probe.sh");
+  try {
+    mkdirSync(fakeDirectory);
+    mkdirSync(realDirectory);
+    writeFileSync(resolve(fakeDirectory, "systemctl"), `#!/usr/bin/env bash
+printf '%s\\n' fake >> "$FAKE_MARKER"
+`, { mode: 0o700 });
+    writeFileSync(resolve(realDirectory, "systemctl"), `#!/usr/bin/env bash
+printf '%s\\n' real >> "$REAL_MARKER"
+`, { mode: 0o700 });
+    writeFileSync(probe, `#!/usr/bin/env bash
+set -euo pipefail
+shopt -u checkhash
+PATH="$FAKE_DIR:$REAL_DIR:/usr/bin:/bin"
+export PATH
+systemctl daemon-reload
+unlink "$FAKE_DIR/systemctl"
+set +e
+systemctl daemon-reload
+cached_status=$?
+set -e
+test "$cached_status" -eq 127
+"$REAL_DIR/systemctl" daemon-reload
+`, { mode: 0o700 });
+    const result = spawnSync("bash", [probe], {
+      encoding: "utf8",
+      env: { ...process.env, FAKE_DIR: fakeDirectory, REAL_DIR: realDirectory, FAKE_MARKER: fakeMarker, REAL_MARKER: realMarker },
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(readFileSync(fakeMarker, "utf8"), "fake\n");
+    assert.equal(readFileSync(realMarker, "utf8"), "real\n");
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("installer PTY runtime proof remains an exact-byte, bounded Ubuntu CI gate", () => {
