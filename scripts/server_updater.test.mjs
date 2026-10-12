@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { assertProtectedRootPath, parseUpdateManifest, resolveUpdateCandidate, selectManifestReleases, writePublicStatusForTest } from "../deploy/updater/yawf-server-update.mjs";
+import { RELEASE_DISCOVERY_MAX_BYTES, RELEASE_DISCOVERY_TIMEOUT_MS, RELEASE_PAGE_LIMIT, RELEASE_PAGE_MAX_BYTES, RELEASE_REQUEST_TIMEOUT_MS, RELEASES_PER_PAGE, assertProtectedRootPath, parseUpdateManifest,
+  resolveUpdateCandidate, selectManifestReleases, writePublicStatusForTest } from "../deploy/updater/yawf-server-update.mjs";
 import { copyTree } from "../deploy/updater/volume-copy.mjs";
 
 const digest = `sha256:${"a".repeat(64)}`;
@@ -17,6 +18,21 @@ const manifest = {
   image: { repository: "ghcr.io/tgk-30/yawf-stream", digest },
   debian: { name: `debridstreamer-server_${releaseVersion}_all.deb`, sha256: "c".repeat(64), size: 123 },
 };
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+
+function candidateFixture() {
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  const sums = Buffer.from(`${sha256(manifestBytes)}  server-update.json\n${manifest.debian.sha256}  ${manifest.debian.name}\n`);
+  const tag = `v${releaseVersion}`;
+  const asset = (name, bytes) => ({ name, size: name === manifest.debian.name ? manifest.debian.size : bytes.length,
+    digest: `sha256:${name === manifest.debian.name ? manifest.debian.sha256 : sha256(bytes)}`,
+    browser_download_url: `https://github.com/Tgk-30/YAWF-Stream/releases/download/${tag}/${name}` });
+  const release = { tag_name: tag, draft: false, prerelease: false, published_at: "2026-10-12T00:00:00Z",
+    assets: [asset("server-update.json", manifestBytes), asset(manifest.debian.name, Buffer.alloc(0)), asset("SHA256SUMS", sums)] };
+  const assetResponse = (url) => new Response(String(url).endsWith("server-update.json") ? manifestBytes : sums,
+    { status: 200, headers: { "content-length": String(String(url).endsWith("server-update.json") ? manifestBytes.length : sums.length) } });
+  return { manifestBytes, release, sums, assetResponse };
+}
 
 test("manifest schema is exact and pins every privileged artifact", () => {
   assert.deepEqual(parseUpdateManifest(manifest, releaseVersion), manifest);
@@ -41,23 +57,111 @@ test("only published strict releases with all exact assets are updater candidate
 });
 
 test("candidate resolution requires GitHub digests and exact checksum lines", async () => {
-  const manifestBytes = Buffer.from(JSON.stringify(manifest));
-  const hash = (value) => createHash("sha256").update(value).digest("hex");
-  const sums = Buffer.from(`${hash(manifestBytes)}  server-update.json\n${manifest.debian.sha256}  ${manifest.debian.name}\n`);
-  const tag = `v${releaseVersion}`;
-  const asset = (name, bytes) => ({ name, size: name === manifest.debian.name ? manifest.debian.size : bytes.length,
-    digest: `sha256:${name === manifest.debian.name ? manifest.debian.sha256 : hash(bytes)}`,
-    browser_download_url: `https://github.com/Tgk-30/YAWF-Stream/releases/download/${tag}/${name}` });
-  const releases = Buffer.from(JSON.stringify([{ tag_name: tag, draft: false, prerelease: false, published_at: "2026-10-12T00:00:00Z",
-    assets: [asset("server-update.json", manifestBytes), asset(manifest.debian.name, Buffer.alloc(0)), asset("SHA256SUMS", sums)] }]));
+  const fixture = candidateFixture();
+  const releases = Buffer.from(JSON.stringify([fixture.release]));
   const fetchImpl = async (url) => {
     const value = String(url);
-    const bytes = value.includes("api.github.com") ? releases : value.endsWith("server-update.json") ? manifestBytes : sums;
-    return new Response(bytes, { status: 200, headers: { "content-length": String(bytes.length) } });
+    if (!value.includes("api.github.com")) return fixture.assetResponse(url);
+    return new Response(releases, { status: 200, headers: { "content-length": String(releases.length) } });
   };
   assert.equal((await resolveUpdateCandidate(previousVersion, fetchImpl)).version, releaseVersion);
   const badFetch = async (url) => String(url).endsWith("SHA256SUMS") ? new Response("bad\n") : fetchImpl(url);
   await assert.rejects(resolveUpdateCandidate("2.3.8", badFetch), /digest|SHA256SUMS/);
+});
+
+test("release discovery budgets remain fixed independently of pagination fixtures", () => {
+  assert.deepEqual({ perPage: RELEASES_PER_PAGE, pages: RELEASE_PAGE_LIMIT, pageBytes: RELEASE_PAGE_MAX_BYTES,
+    aggregateBytes: RELEASE_DISCOVERY_MAX_BYTES, requestTimeoutMs: RELEASE_REQUEST_TIMEOUT_MS,
+    discoveryTimeoutMs: RELEASE_DISCOVERY_TIMEOUT_MS },
+  { perPage: 20, pages: 10, pageBytes: 1_000_000, aggregateBytes: 8_000_000, requestTimeoutMs: 10_000,
+    discoveryTimeoutMs: 15_000 });
+});
+
+test("release discovery scans bounded pages and selects the greatest eligible numeric version", async () => {
+  const fixture = candidateFixture();
+  const filler = (page, index) => ({ tag_name: `not-a-release-${page}-${index}`, draft: false, prerelease: false,
+    published_at: "2026-10-12T00:00:00Z", assets: [], padding: "x".repeat(40_000) });
+  const olderTag = `v${previousVersion}`;
+  const older = { tag_name: olderTag, draft: false, prerelease: false, published_at: "2026-10-11T00:00:00Z",
+    assets: ["server-update.json", `debridstreamer-server_${previousVersion}_all.deb`, "SHA256SUMS"].map((name) => ({
+      name, digest, size: 10, browser_download_url: `https://github.com/Tgk-30/YAWF-Stream/releases/download/${olderTag}/${name}`,
+    })) };
+  const pages = [
+    [older, ...Array.from({ length: 19 }, (_, index) => filler(1, index))],
+    Array.from({ length: 20 }, (_, index) => filler(2, index)),
+    Array.from({ length: 20 }, (_, index) => filler(3, index)),
+    [fixture.release],
+  ].map((page) => Buffer.from(JSON.stringify(page)));
+  assert.ok(pages.slice(0, 3).every((page) => page.length < RELEASE_PAGE_MAX_BYTES));
+  const aggregateBytes = pages.reduce((total, page) => total + page.length, 0);
+  assert.ok(aggregateBytes > 2_000_000 && aggregateBytes < 8_000_000);
+  const requestedPages = []; const discoverySignals = [];
+  const fetchImpl = async (url, init) => {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "api.github.com") return fixture.assetResponse(url);
+    const page = Number(parsed.searchParams.get("page")); requestedPages.push(page); discoverySignals.push(init.signal);
+    const bytes = pages[page - 1] ?? Buffer.from("[]");
+    return new Response(bytes, { status: 200, headers: { "content-length": String(bytes.length) } });
+  };
+  const candidate = await resolveUpdateCandidate("0.0.0", fetchImpl);
+  assert.equal(candidate?.version, releaseVersion);
+  assert.deepEqual(requestedPages, [1, 2, 3, 4]);
+  assert.ok(discoverySignals.every((signal) => signal === discoverySignals[0]), "release pages reset the whole-discovery deadline");
+});
+
+test("release discovery stops on short or empty pages and fails closed at its page limit", async () => {
+  const fullPage = Buffer.from(JSON.stringify(Array.from({ length: 20 }, (_, index) => ({ tag_name: `invalid-${index}` }))));
+  for (const ending of [[Buffer.from("[]")], [Buffer.from("[]"), Buffer.from("[]")]]) {
+    let calls = 0;
+    const fetchImpl = async () => {
+      const bytes = ending.length === 1 ? ending[0] : calls === 0 ? fullPage : ending[1];
+      calls += 1;
+      return new Response(bytes, { status: 200, headers: { "content-length": String(bytes.length) } });
+    };
+    assert.equal(await resolveUpdateCandidate("0.0.0", fetchImpl), null);
+    assert.equal(calls, ending.length === 1 ? 1 : 2);
+  }
+
+  const pages = [];
+  const loopingFetch = async (url) => {
+    pages.push(Number(new URL(url).searchParams.get("page")));
+    return new Response(fullPage, { status: 200, headers: { "content-length": String(fullPage.length) } });
+  };
+  await assert.rejects(resolveUpdateCandidate("0.0.0", loopingFetch), /page limit/);
+  assert.deepEqual(pages, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+  const largeFullPage = Buffer.from(JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
+    tag_name: `large-invalid-${index}`, padding: "x".repeat(45_000),
+  }))));
+  assert.ok(largeFullPage.length < RELEASE_PAGE_MAX_BYTES);
+  let largeCalls = 0;
+  const largeFetch = async () => { largeCalls += 1; return new Response(largeFullPage, { status: 200 }); };
+  await assert.rejects(resolveUpdateCandidate("0.0.0", largeFetch), /aggregate size limit/);
+  assert.ok(largeCalls < 10);
+});
+
+test("release discovery cancels an oversized individual response", async () => {
+  let cancelled = false; let sent = false;
+  const response = { status: 200, ok: true, headers: { get: () => null }, body: { getReader: () => ({
+    read: async () => { if (sent) return { done: true }; sent = true; return { done: false, value: new Uint8Array(1_000_001) }; },
+    cancel: async () => { cancelled = true; },
+    releaseLock: () => {},
+  }) } };
+  await assert.rejects(resolveUpdateCandidate("0.0.0", async () => response), /size limit/);
+  assert.equal(cancelled, true);
+});
+
+test("release discovery ignores external pagination links", async () => {
+  const fullPage = Buffer.from(JSON.stringify(Array.from({ length: 20 }, (_, index) => ({ tag_name: `invalid-link-${index}` }))));
+  const requested = [];
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url); requested.push(parsed.href);
+    const bytes = requested.length === 1 ? fullPage : Buffer.from("[]");
+    return new Response(bytes, { status: 200, headers: { link: '<https://evil.invalid/releases?page=2>; rel="next"' } });
+  };
+  assert.equal(await resolveUpdateCandidate("0.0.0", fetchImpl), null);
+  assert.deepEqual(requested.map((url) => new URL(url).hostname), ["api.github.com", "api.github.com"]);
+  assert.deepEqual(requested.map((url) => new URL(url).searchParams.get("page")), ["1", "2"]);
 });
 
 test("volume copier streams protected files with exact numeric metadata and rejects unsafe trees", () => {

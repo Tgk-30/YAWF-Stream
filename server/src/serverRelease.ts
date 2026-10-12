@@ -1,5 +1,10 @@
 const RELEASES_API = "https://api.github.com/repos/Tgk-30/YAWF-Stream/releases";
 const RELEASES_URL = "https://github.com/Tgk-30/YAWF-Stream/releases";
+export const SERVER_RELEASES_PER_PAGE = 20;
+export const SERVER_RELEASE_PAGE_LIMIT = 10;
+export const SERVER_RELEASE_PAGE_MAX_BYTES = 1_000_000;
+export const SERVER_RELEASE_DISCOVERY_MAX_BYTES = 8_000_000;
+export const SERVER_RELEASE_DISCOVERY_TIMEOUT_MS = 10_000;
 const TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-web)?$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 
@@ -99,27 +104,58 @@ export function selectServerRelease(input: unknown): ServerRelease | null {
   return candidates[0] ?? null;
 }
 
-export async function fetchLatestServerRelease(fetchImpl: typeof fetch = fetch): Promise<ServerRelease | null> {
-  const response = await fetchImpl(`${RELEASES_API}?per_page=100&page=1`, {
-    headers: { accept: "application/vnd.github+json", "user-agent": "YAWF-Stream-Server" },
-    signal: AbortSignal.timeout(5_000),
-  });
-  if (!response.ok) throw new Error(`GitHub release lookup failed (${response.status}).`);
+async function cancelResponseBody(response: Response): Promise<void> {
+  try { await response.body?.cancel(); } catch {}
+}
+
+async function readReleasePage(response: Response, signal: AbortSignal): Promise<{ value: unknown; bytes: number }> {
+  if (!response.ok) { await cancelResponseBody(response); throw new Error(`GitHub release lookup failed (${response.status}).`); }
   const declared = Number(response.headers.get("content-length") ?? 0);
-  if (declared > 2_000_000) throw new Error("GitHub release response was too large.");
+  if (declared > SERVER_RELEASE_PAGE_MAX_BYTES) {
+    await cancelResponseBody(response);
+    throw new Error("GitHub release response was too large.");
+  }
   if (response.body == null) throw new Error("GitHub release response was empty.");
-  const reader = response.body.getReader(); const chunks: Buffer[] = []; let total = 0;
+  const reader = response.body.getReader(); const chunks: Buffer[] = []; let total = 0; let complete = false;
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > 2_000_000) throw new Error("GitHub release response was too large.");
+      if (total > SERVER_RELEASE_PAGE_MAX_BYTES) throw new Error("GitHub release response was too large.");
       chunks.push(Buffer.from(value));
     }
-  } finally { reader.releaseLock(); }
-  const text = Buffer.concat(chunks, total).toString("utf8");
-  return selectServerRelease(JSON.parse(text));
+    complete = true;
+  } finally {
+    if (!complete) { try { await reader.cancel(); } catch {} }
+    reader.releaseLock();
+  }
+  signal.throwIfAborted();
+  return { value: JSON.parse(Buffer.concat(chunks, total).toString("utf8")), bytes: total };
+}
+
+export async function fetchLatestServerRelease(fetchImpl: typeof fetch = fetch): Promise<ServerRelease | null> {
+  let latest: ServerRelease | null = null; let aggregateBytes = 0;
+  const signal = AbortSignal.timeout(SERVER_RELEASE_DISCOVERY_TIMEOUT_MS);
+  for (let page = 1; page <= SERVER_RELEASE_PAGE_LIMIT; page += 1) {
+    signal.throwIfAborted();
+    const response = await fetchImpl(`${RELEASES_API}?per_page=${SERVER_RELEASES_PER_PAGE}&page=${page}`, {
+      redirect: "error",
+      headers: { accept: "application/vnd.github+json", "user-agent": "YAWF-Stream-Server" },
+      signal,
+    });
+    const { value: releases, bytes } = await readReleasePage(response, signal);
+    aggregateBytes += bytes;
+    if (aggregateBytes > SERVER_RELEASE_DISCOVERY_MAX_BYTES) throw new Error("GitHub release discovery exceeded its aggregate size limit.");
+    if (!Array.isArray(releases) || releases.length > SERVER_RELEASES_PER_PAGE) {
+      throw new Error("GitHub returned invalid paginated release metadata.");
+    }
+    const candidate = selectServerRelease(releases);
+    if (candidate != null && (latest == null || compareVersions(candidate.version, latest.version) > 0 ||
+        (candidate.version === latest.version && latest.tag.endsWith("-web") && !candidate.tag.endsWith("-web")))) latest = candidate;
+    if (releases.length < SERVER_RELEASES_PER_PAGE) return latest;
+  }
+  throw new Error("GitHub release discovery exceeded its page limit.");
 }
 
 export function serverReleaseStatus(currentVersion: string, release: ServerRelease | null, state?: ServerReleaseCheckState) {

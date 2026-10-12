@@ -7,7 +7,13 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 export const REPOSITORY = "ghcr.io/tgk-30/yawf-stream";
-export const RELEASES_API = "https://api.github.com/repos/Tgk-30/YAWF-Stream/releases?per_page=100&page=1";
+export const RELEASES_PER_PAGE = 20;
+export const RELEASE_PAGE_LIMIT = 10;
+export const RELEASE_PAGE_MAX_BYTES = 1_000_000;
+export const RELEASE_DISCOVERY_MAX_BYTES = 8_000_000;
+export const RELEASES_API = `https://api.github.com/repos/Tgk-30/YAWF-Stream/releases?per_page=${RELEASES_PER_PAGE}&page=1`;
+export const RELEASE_REQUEST_TIMEOUT_MS = 10_000;
+export const RELEASE_DISCOVERY_TIMEOUT_MS = 15_000;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const TAG = /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(-web)?$/;
 const SHA = /^[a-f0-9]{40}$/;
@@ -79,24 +85,30 @@ function checksumFor(text, name) {
 
 function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
 
-async function boundedFetch(url, { fetchImpl = fetch, maxBytes = 2_000_000 } = {}) {
+async function cancelBody(response) {
+  try { await response.body?.cancel(); } catch {}
+}
+
+async function boundedFetch(url, { fetchImpl = fetch, maxBytes = 2_000_000, signal = AbortSignal.timeout(RELEASE_REQUEST_TIMEOUT_MS) } = {}) {
   let current = new URL(url);
   for (let redirects = 0; redirects < 6; redirects += 1) {
+    signal.throwIfAborted();
     if (current.protocol !== "https:" || !["api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"].includes(current.hostname)) {
       throw new Error("Update download left the trusted GitHub hosts.");
     }
-    const response = await fetchImpl(current, { redirect: "manual", headers: { accept: "application/vnd.github+json", "user-agent": "YAWF-Server-Updater" }, signal: AbortSignal.timeout(10_000) });
+    const response = await fetchImpl(current, { redirect: "manual", headers: { accept: "application/vnd.github+json", "user-agent": "YAWF-Server-Updater" }, signal });
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
-      if (location == null) throw new Error("GitHub returned an invalid redirect.");
+      if (location == null) { await cancelBody(response); throw new Error("GitHub returned an invalid redirect."); }
+      await cancelBody(response);
       current = new URL(location, current);
       continue;
     }
-    if (!response.ok) throw new Error(`GitHub request failed (${response.status}).`);
+    if (!response.ok) { await cancelBody(response); throw new Error(`GitHub request failed (${response.status}).`); }
     const declared = Number(response.headers.get("content-length") ?? 0);
-    if (declared > maxBytes) throw new Error("Update response exceeded its size limit.");
+    if (declared > maxBytes) { await cancelBody(response); throw new Error("Update response exceeded its size limit."); }
     if (response.body == null) throw new Error("GitHub returned an empty response.");
-    const chunks = []; let total = 0; const reader = response.body.getReader();
+    const chunks = []; let total = 0; let complete = false; const reader = response.body.getReader();
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -105,15 +117,38 @@ async function boundedFetch(url, { fetchImpl = fetch, maxBytes = 2_000_000 } = {
         if (total > maxBytes) throw new Error("Update response exceeded its size limit.");
         chunks.push(Buffer.from(value));
       }
-    } finally { reader.releaseLock(); }
+      complete = true;
+    } finally {
+      if (!complete) { try { await reader.cancel(); } catch {} }
+      reader.releaseLock();
+    }
+    signal.throwIfAborted();
     return Buffer.concat(chunks, total);
   }
   throw new Error("GitHub returned too many redirects.");
 }
 
+async function discoverManifestReleases(fetchImpl) {
+  const selected = []; let aggregateBytes = 0;
+  const signal = AbortSignal.timeout(RELEASE_DISCOVERY_TIMEOUT_MS);
+  for (let page = 1; page <= RELEASE_PAGE_LIMIT; page += 1) {
+    const url = new URL(RELEASES_API);
+    url.searchParams.set("page", String(page));
+    const bytes = await boundedFetch(url, { fetchImpl, maxBytes: RELEASE_PAGE_MAX_BYTES, signal });
+    aggregateBytes += bytes.length;
+    if (aggregateBytes > RELEASE_DISCOVERY_MAX_BYTES) throw new Error("GitHub release discovery exceeded its aggregate size limit.");
+    const releases = JSON.parse(bytes.toString("utf8"));
+    if (!Array.isArray(releases) || releases.length > RELEASES_PER_PAGE) throw new Error("GitHub returned invalid paginated release metadata.");
+    selected.push(...selectManifestReleases(releases));
+    if (releases.length < RELEASES_PER_PAGE) {
+      return selected.sort((a, b) => semverCompare(b.version, a.version) || Number(a.tag.endsWith("-web")) - Number(b.tag.endsWith("-web")));
+    }
+  }
+  throw new Error("GitHub release discovery exceeded its page limit.");
+}
+
 export async function resolveUpdateCandidate(currentVersion, fetchImpl = fetch) {
-  const releasesBytes = await boundedFetch(RELEASES_API, { fetchImpl });
-  const releases = selectManifestReleases(JSON.parse(releasesBytes.toString("utf8")));
+  const releases = await discoverManifestReleases(fetchImpl);
   for (const release of releases) {
     if (semverCompare(release.version, currentVersion) <= 0) continue;
     const bytes = await boundedFetch(release.manifest.browser_download_url, { fetchImpl, maxBytes: 64 * 1024 });
