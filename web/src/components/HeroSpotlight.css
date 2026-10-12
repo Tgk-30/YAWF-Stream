@@ -538,3 +538,46 @@
     );
   }
 }
+
+/* Short landscape has only the strip above the fixed bottom navigation for
+   interactive hero content. Reflow the title and actions into one row instead
+   of merely translating the bottom-anchored column, which would clip the
+   badges above the hero. The dots retain their own top row and the artwork
+   remains full bleed. This block intentionally follows the compact overrides. */
+@media (max-height: 500px) and (max-width: 950px) {
+  .hero-content {
+    inset: 0 0 auto 0;
+    display: grid;
+    grid-template-areas:
+      "badges badges"
+      "title actions";
+    grid-template-columns: minmax(0, 1fr) max-content;
+    row-gap: calc(4px * var(--density-scale));
+    column-gap: calc(8px * var(--density-scale));
+    max-width: none;
+    padding-top: calc(34px + calc(4px * var(--density-scale)));
+    padding-bottom: 0;
+  }
+
+  .hero-badges {
+    grid-area: badges;
+  }
+
+  .hero-title {
+    grid-area: title;
+    min-width: 0;
+    align-self: center;
+  }
+
+  .hero-actions {
+    grid-area: actions;
+    align-self: end;
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  .hero-play,
+  .hero-info {
+    flex: 0 1 auto;
+  }
+}

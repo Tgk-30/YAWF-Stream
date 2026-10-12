@@ -171,6 +171,10 @@ const safeHeroCss = atRuleBlock(
   heroCss,
   "@media (max-width: 767px), (max-width: 950px) and (max-height: 500px) {",
 );
+const shortLandscapeHeroControlsCss = atRuleBlock(
+  heroCss,
+  "@media (max-height: 500px) and (max-width: 950px) {",
+);
 const phoneSettingsCss = atRuleBlock(settingsCss, "@media (max-width: 699px) {");
 const compactSettingsCss = atRuleBlock(settingsCss, "@media (max-width: 560px) {");
 const shortLandscapeSettingsCss = atRuleBlock(
@@ -215,6 +219,13 @@ check(
     /\.hero-content\s*\{[\s\S]{0,260}padding-left:\s*max\([\s\S]{0,200}var\(--safe-area-left\)\s*-\s*var\(--hero-viewport-left,[\s\S]{0,260}padding-right:\s*max\([\s\S]{0,200}var\(--safe-area-right\)\s*-\s*var\(--hero-viewport-right,/.test(safeHeroCss) &&
     /\.hero-dots\s*\{[\s\S]{0,220}right:\s*max\([\s\S]{0,180}var\(--safe-area-right\)\s*-\s*var\(--hero-viewport-right,/.test(safeHeroCss),
   "Discover and HeroSpotlight must compose card margins with native side insets for actions and carousel controls without insetting the artwork.",
+);
+
+check(
+  "short landscape hero actions clear the fixed bottom navigation",
+  /\.hero-content\s*\{[\s\S]{0,480}inset:\s*0\s+0\s+auto\s+0[\s\S]{0,220}grid-template-areas:\s*[\s\S]{0,100}"badges badges"[\s\S]{0,80}"title actions"[\s\S]{0,260}padding-top:\s*calc\(34px\s*\+\s*calc\(4px\s*\*\s*var\(--density-scale\)\)\)[\s\S]{0,80}padding-bottom:\s*0/.test(shortLandscapeHeroControlsCss) &&
+    /\.hero-actions\s*\{[\s\S]{0,160}grid-area:\s*actions[\s\S]{0,120}flex-wrap:\s*nowrap/.test(shortLandscapeHeroControlsCss),
+  "HeroSpotlight.css must reflow the complete short-landscape hero above the fixed nav without clipping badges or removing either action.",
 );
 
 check(
