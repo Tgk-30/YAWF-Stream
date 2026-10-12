@@ -13,7 +13,7 @@ from verify_android_apk import (
     MAX_TOTAL_NATIVE_BYTES, PACKAGE, VerificationError, checked_output,
     locate_sdk_tools, normalize_pin, parse_manifest, scan_forbidden_chunks,
     stream_chunks, validate_inventory, validate_signature, version_code,
-    validate_native_header, ELF_ARCHITECTURES,
+    validate_native_header, ELF_ARCHITECTURES, is_signature_protection_level,
 )
 
 def accepts(function, *args):
@@ -125,9 +125,51 @@ class ManifestTests(unittest.TestCase):
         request = f'<uses-permission android:name="{DYNAMIC_PERMISSION}" />'
         declaration = f'<permission android:name="{DYNAMIC_PERMISSION}" android:protectionLevel="signature" />'
         accepts(parse_manifest, manifest(permissions=request, extra=declaration), "2.3.7")
-        for extra in ("", declaration.replace("signature", "normal")):
+        for extra in (
+            "",
+            declaration.replace("signature", "normal"),
+            declaration + declaration,
+        ):
             with self.subTest(extra=extra), self.assertRaises(VerificationError):
                 parse_manifest(manifest(permissions=request, extra=extra), "2.3.7")
+
+    def test_apkanalyzer_hex_signature_permission(self):
+        request = f'<uses-permission android:name="{DYNAMIC_PERMISSION}" />'
+        declaration = (
+            f'<permission android:name="{DYNAMIC_PERMISSION}" '
+            'android:protectionLevel="0x2" />'
+        )
+        accepts(parse_manifest, manifest(permissions=request, extra=declaration), "2.3.7")
+
+    def test_numeric_signature_permission_variants(self):
+        for value in ("2", "02", "0x02", "0X2"):
+            with self.subTest(value=value):
+                self.assertTrue(is_signature_protection_level(value))
+                request = f'<uses-permission android:name="{DYNAMIC_PERMISSION}" />'
+                declaration = (
+                    f'<permission android:name="{DYNAMIC_PERMISSION}" '
+                    f'android:protectionLevel="{value}" />'
+                )
+                accepts(
+                    parse_manifest,
+                    manifest(permissions=request, extra=declaration),
+                    "2.3.7",
+                )
+
+    def test_non_signature_numeric_flags_and_ambiguous_levels_are_rejected(self):
+        request = f'<uses-permission android:name="{DYNAMIC_PERMISSION}" />'
+        for value in (
+            "0", "1", "3", "18", "0x0", "0x1", "0x3", "0x12",
+            "signature|privileged", "0x2|0x10", "signature ", "SIGNATURE", "unknown",
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(is_signature_protection_level(value))
+                declaration = (
+                    f'<permission android:name="{DYNAMIC_PERMISSION}" '
+                    f'android:protectionLevel="{value}" />'
+                )
+                with self.assertRaisesRegex(VerificationError, "signature protected"):
+                    parse_manifest(manifest(permissions=request, extra=declaration), "2.3.7")
 
     def test_application_count_and_custom_permission(self):
         for xml in (manifest().replace('<application  />', ""), manifest(extra="<application />"), manifest(extra='<permission android:name="unexpected.PERMISSION" />')):

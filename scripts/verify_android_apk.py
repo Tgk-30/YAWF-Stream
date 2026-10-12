@@ -49,6 +49,18 @@ def normalize_pin(text):
     return value
 
 
+def is_signature_protection_level(value):
+    if value == "signature":
+        return True
+    if not isinstance(value, str):
+        return False
+    if re.fullmatch(r"[0-9]+", value):
+        return int(value, 10) == 2
+    if re.fullmatch(r"0[xX][0-9A-Fa-f]+", value):
+        return int(value, 16) == 2
+    return False
+
+
 def checked_output(command, label):
     try:
         result = subprocess.run(command, capture_output=True, check=False, timeout=300)
@@ -114,7 +126,9 @@ def parse_manifest(xml, expected_version):
     allowed = {INTERNET}
     if DYNAMIC_PERMISSION in requested:
         declarations = [node for node in root.findall("permission") if node.attrib.get(f"{ANDROID}name") == DYNAMIC_PERMISSION]
-        if len(declarations) != 1 or declarations[0].attrib.get(f"{ANDROID}protectionLevel") != "signature":
+        if len(declarations) != 1 or not is_signature_protection_level(
+            declarations[0].attrib.get(f"{ANDROID}protectionLevel")
+        ):
             raise VerificationError("AndroidX receiver permission is not signature protected")
         allowed.add(DYNAMIC_PERMISSION)
     if set(requested) != allowed:
