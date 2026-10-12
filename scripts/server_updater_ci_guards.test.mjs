@@ -5,6 +5,8 @@ import test from "node:test";
 const workflow = readFileSync(new URL("../.github/workflows/deb-release.yml", import.meta.url), "utf8");
 const integration = readFileSync(new URL("./server_updater_compose_integration.mjs", import.meta.url), "utf8");
 const transactionDriver = readFileSync(new URL("./server_updater_transaction_driver.mjs", import.meta.url), "utf8");
+const updater = readFileSync(new URL("../deploy/updater/yawf-server-update.mjs", import.meta.url), "utf8");
+const volumeCopy = readFileSync(new URL("../deploy/updater/volume-copy.mjs", import.meta.url), "utf8");
 const syntheticStep = workflow.match(/- name: Verify isolated Compose upgrade and rollback[\s\S]*?(?=\n\s+- name: Validate optional)/)?.[0] ?? "";
 const actualStep = workflow.match(/- name: Verify actual published image upgrade and rollback[\s\S]*?(?=\n\s+- name: Retain updater)/)?.[0] ?? "";
 
@@ -25,7 +27,7 @@ test("separate receipt validators require identity and every transaction claim",
   for (const claim of ["digestVerified", "sourceVerified", "candidateHealthVerified", "injectedRollbackVerified",
     "activePlaybackDeferred", "successfulUpdateVerified", "stopFailureVerified", "snapshotFailureVerified",
     "interruptedRecoveryVerified", "registrationDriftPreserved", "ownershipAndDatabaseWriteVerified", "otherServicePreserved",
-    "umask077PublicStatusVerified", "nonRootReadOnlyStatusVerified"]) {
+    "protectedFilesPreserved", "umask077PublicStatusVerified", "nonRootReadOnlyStatusVerified"]) {
     assert.ok(actualStep.includes(`\"${claim}\"`), `actual receipt validator omits ${claim}`);
   }
   assert.match(actualStep, /assert\.equal\(result\.digest, expectedDigest\)/);
@@ -36,6 +38,7 @@ test("separate receipt validators require identity and every transaction claim",
   assert.match(syntheticStep, /assert\.match\(result\.digest, \/\^sha256:/);
   assert.match(syntheticStep, /assert\.equal\(result\.source, "generated-user-node-fixtures"\)/);
   assert.match(syntheticStep, /assert\.equal\(result\.version, expectedVersion\)/);
+  assert.match(syntheticStep, /"protectedFilesPreserved"/);
   assert.match(syntheticStep, /writeFileSync\(receipt,[\s\S]*mode: 0o600/);
 });
 
@@ -89,4 +92,33 @@ test("actual transaction proves umask-safe nonroot read-only status access", () 
   assert.match(integration, /source=\/var\/lib\/yawf-server-updater\/public,target=\/updater-status,readonly/);
   assert.match(integration, /writeBlocked=true/);
   assert.match(integration, /umask077PublicStatusVerified: true, nonRootReadOnlyStatusVerified: true/);
+});
+
+test("volume copier uses bounded no-follow descriptor streaming and explicit metadata order", () => {
+  assert.doesNotMatch(volumeCopy, /copyFileSync/);
+  assert.match(volumeCopy, /const COPY_BUFFER_BYTES = 64 \* 1024/);
+  assert.match(volumeCopy, /openSync\(from, constants\.O_RDONLY \| constants\.O_NOFOLLOW\)/);
+  assert.match(volumeCopy, /constants\.O_WRONLY \| constants\.O_CREAT \| constants\.O_EXCL \| constants\.O_NOFOLLOW/);
+  assert.match(volumeCopy, /while \(written < count\)[\s\S]*writeSync\(destinationFd, buffer, written, count - written/);
+  assert.match(volumeCopy, /fstatSync\(sourceFd\)[\s\S]*sameSource\(expected, after\)/);
+  assert.match(volumeCopy, /finally \{[\s\S]*closeSync\(destinationFd\)[\s\S]*finally \{[\s\S]*closeSync\(sourceFd\)/);
+  assert.match(volumeCopy, /fchmodSync\(fd, desiredMode\)[\s\S]*fchownSync\(fd, stat\.uid, stat\.gid\)/,
+    "the copier must set ordinary mode bits before giving ownership away without FOWNER");
+  assert.match(volumeCopy, /mode === "copy" \? \["\/data", "\/backup\/data"\][\s\S]*mode === "restore" \? \["\/backup\/data", "\/data"\]/);
+  assert.match(volumeCopy, /Snapshot root must be a directory/);
+  assert.match(volumeCopy, /Snapshot destination root must be a directory/);
+});
+
+test("Compose copier proof retains minimal capabilities and protected multi-chunk fixtures", () => {
+  const capabilityContract = /"--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--cap-add", "CHOWN"/;
+  assert.match(updater, capabilityContract);
+  assert.match(integration, capabilityContract);
+  assert.doesNotMatch(updater, /FOWNER/);
+  assert.doesNotMatch(integration, /FOWNER/);
+  assert.match(integration, /updater-private-fixture','private',\{mode:0o600\}/);
+  assert.match(integration, /updater-readonly-fixture',Buffer\.alloc\(\(64\*1024\*3\)\+17,0x5a\),\{mode:0o400\}/);
+  assert.match(integration, /private-key','secret',\{mode:0o600\}/);
+  assert.match(integration, /protected-payload',Buffer\.alloc\(\(64\*1024\*3\)\+17,0x5a\),\{mode:0o400\}/);
+  assert.match(integration, /createHash\('sha256'\)\.update\(f\.readFileSync\(p\)\)\.digest\('hex'\)/);
+  assert.match(integration, /protectedFilesPreserved: true/);
 });

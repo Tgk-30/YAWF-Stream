@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { assertProtectedRootPath, parseUpdateManifest, resolveUpdateCandidate, selectManifestReleases, writePublicStatusForTest } from "../deploy/updater/yawf-server-update.mjs";
+import { copyTree } from "../deploy/updater/volume-copy.mjs";
 
 const digest = `sha256:${"a".repeat(64)}`;
 const releaseVersion = JSON.parse(readFileSync(new URL("../server/package.json", import.meta.url), "utf8")).version;
@@ -59,15 +60,33 @@ test("candidate resolution requires GitHub digests and exact checksum lines", as
   await assert.rejects(resolveUpdateCandidate("2.3.8", badFetch), /digest|SHA256SUMS/);
 });
 
-test("volume copier preserves regular files and rejects symlinks", () => {
+test("volume copier streams protected files with exact numeric metadata and rejects unsafe trees", () => {
   const root = mkdtempSync(join(tmpdir(), "yawf-updater-copy-"));
   const source = join(root, "source"); const backup = join(root, "backup");
-  mkdirSync(source); writeFileSync(join(source, "database"), "account-settings");
-  let result = spawnSync(process.execPath, ["deploy/updater/volume-copy.mjs", "copy", source, backup], { cwd: new URL("..", import.meta.url), encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr); assert.equal(readFileSync(join(backup, "database"), "utf8"), "account-settings");
-  symlinkSync("database", join(source, "link"));
-  result = spawnSync(process.execPath, ["deploy/updater/volume-copy.mjs", "copy", source, backup], { cwd: new URL("..", import.meta.url), encoding: "utf8" });
-  assert.notEqual(result.status, 0); assert.match(result.stderr, /symlinks/);
+  const multiChunk = Buffer.alloc((64 * 1024 * 3) + 17, 0x5a);
+  mkdirSync(source); writeFileSync(join(source, "protected"), multiChunk); chmodSync(join(source, "protected"), 0o400);
+  writeFileSync(join(source, "private"), "account-settings"); chmodSync(join(source, "private"), 0o600);
+  mkdirSync(backup); writeFileSync(join(backup, "stale"), "remove-me");
+  copyTree(source, backup);
+  assert.deepEqual(readFileSync(join(backup, "protected")), multiChunk);
+  assert.equal(readFileSync(join(backup, "private"), "utf8"), "account-settings");
+  for (const [name, mode] of [["protected", 0o400], ["private", 0o600]]) {
+    const before = lstatSync(join(source, name)); const after = lstatSync(join(backup, name));
+    assert.deepEqual({ uid: after.uid, gid: after.gid, mode: after.mode & 0o7777 }, { uid: before.uid, gid: before.gid, mode });
+  }
+  assert.throws(() => lstatSync(join(backup, "stale")));
+  symlinkSync("private", join(source, "link"));
+  assert.throws(() => copyTree(source, backup), /symlinks/);
+  assert.equal(readFileSync(join(backup, "private"), "utf8"), "account-settings", "invalid source cleared the last valid snapshot");
+  unlinkSync(join(source, "link"));
+
+  const sourceLink = join(root, "source-link"); symlinkSync(source, sourceLink);
+  assert.throws(() => copyTree(sourceLink, join(root, "source-link-backup")), /Snapshot root/);
+  const destinationLink = join(root, "backup-link"); symlinkSync(backup, destinationLink);
+  assert.throws(() => copyTree(source, destinationLink), /destination root/);
+
+  const result = spawnSync(process.execPath, ["deploy/updater/volume-copy.mjs", "copy", source, backup], { cwd: new URL("..", import.meta.url), encoding: "utf8" });
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /Invalid volume copy invocation/);
 });
 
 test("Compose registration requires a canonical root-protected ancestor chain", () => {

@@ -97,7 +97,9 @@ try {
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", setup), "created");
     docker("exec", container("debridstreamer"), "node", "-e", "require('fs').writeFileSync('/data/updater-account-settings-marker','owner:midnight')");
     docker("exec", container("debridstreamer"), "node", "-e", "require('fs').writeFileSync('/data/updater-private-fixture','private',{mode:0o600})");
+    docker("exec", container("debridstreamer"), "node", "-e", "require('fs').writeFileSync('/data/updater-readonly-fixture',Buffer.alloc((64*1024*3)+17,0x5a),{mode:0o400})");
     const originalOwner = docker("exec", container("debridstreamer"), "node", "-e", "let s=require('fs').statSync('/data/debridstreamer.sqlite');process.stdout.write(`${s.uid}:${s.gid}`)");
+    const originalReadonly = docker("exec", container("debridstreamer"), "node", "-e", "const f=require('fs'),c=require('crypto'),p='/data/updater-readonly-fixture',s=f.statSync(p);process.stdout.write(`${s.uid}:${s.gid}:${(s.mode&0o777).toString(8)}:${c.createHash('sha256').update(f.readFileSync(p)).digest('hex')}`)");
     const originalSchemaVersion = docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite',{readOnly:true});process.stdout.write(String(d.prepare('PRAGMA user_version').get().user_version));d.close()");
     const originalEnvironmentHash = fileHash(environment);
 
@@ -107,6 +109,7 @@ try {
     assert.equal(docker("inspect", "--format", "{{.Config.Image}}", container("debridstreamer")), baseline);
     assert.match(docker("exec", container("debridstreamer"), "cat", "/data/updater-account-settings-marker"), /owner:midnight/);
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "let s=require('fs').statSync('/data/updater-private-fixture');process.stdout.write(`${s.uid}:${s.gid}:${(s.mode&0o777).toString(8)}`)"), `${originalOwner}:600`);
+    assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "const f=require('fs'),c=require('crypto'),p='/data/updater-readonly-fixture',s=f.statSync(p);process.stdout.write(`${s.uid}:${s.gid}:${(s.mode&0o777).toString(8)}:${c.createHash('sha256').update(f.readFileSync(p)).digest('hex')}`)"), originalReadonly);
     const mutation = spawnSync("docker", ["exec", container("debridstreamer"), "test", "-e", "/data/injected-post-install-mutation"]);
     assert.notEqual(mutation.status, 0, "post-install data mutation survived rollback");
     assert.equal(container("sentinel"), sentinel);
@@ -250,7 +253,7 @@ try {
       activePlaybackDeferred: true, successfulUpdateVerified: true, stopFailureVerified: true,
       snapshotFailureVerified: true, interruptedRecoveryVerified: true,
       registrationDriftPreserved: true, ownershipAndDatabaseWriteVerified: true, otherServicePreserved: true,
-      umask077PublicStatusVerified: true, nonRootReadOnlyStatusVerified: true }) + "\n");
+      protectedFilesPreserved: true, umask077PublicStatusVerified: true, nonRootReadOnlyStatusVerified: true }) + "\n");
     process.exitCode = 0;
   } else {
   const oldImage = image("old", "2.3.8"); const newImage = image("new", candidateVersion); const badImage = image("bad", failureVersion, false);
@@ -260,7 +263,9 @@ try {
   assert.equal(health().version, "2.3.8");
   const sentinel = container("sentinel");
   docker("exec", container("debridstreamer"), "node", "-e", "require('fs').writeFileSync('/data/private-key','secret',{mode:0o600})");
+  docker("exec", container("debridstreamer"), "node", "-e", "require('fs').writeFileSync('/data/protected-payload',Buffer.alloc((64*1024*3)+17,0x5a),{mode:0o400})");
   const syntheticOwner = docker("exec", container("debridstreamer"), "node", "-e", "let s=require('fs').statSync('/data/private-key');process.stdout.write(`${s.uid}:${s.gid}`)");
+  const syntheticProtected = docker("exec", container("debridstreamer"), "node", "-e", "const f=require('fs'),c=require('crypto'),p='/data/protected-payload',s=f.statSync(p);process.stdout.write(`${s.uid}:${s.gid}:${(s.mode&0o777).toString(8)}:${c.createHash('sha256').update(f.readFileSync(p)).digest('hex')}`)");
 
   composeRun("stop", "debridstreamer"); copyFileSync(environment, join(backup, "environment")); volumeCopy(oldImage, "copy");
   writeOverride(newImage); composeRun("up", "--detach", "--no-deps", "debridstreamer");
@@ -279,9 +284,11 @@ try {
   assert.match(readFileSync(environment, "utf8"), /OPAQUE_SECRET/);
   assert.match(docker("exec", container("debridstreamer"), "cat", "/data/account.json"), /"owner":"kept"/);
   assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "let s=require('fs').statSync('/data/private-key');process.stdout.write(`${s.uid}:${s.gid}:${(s.mode&0o777).toString(8)}`)"), `${syntheticOwner}:600`);
+  assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "const f=require('fs'),c=require('crypto'),p='/data/protected-payload',s=f.statSync(p);process.stdout.write(`${s.uid}:${s.gid}:${(s.mode&0o777).toString(8)}:${c.createHash('sha256').update(f.readFileSync(p)).digest('hex')}`)"), syntheticProtected);
   process.stdout.write(JSON.stringify({ ok: true, mode: "transaction-primitive", version: candidateVersion, digest: newImage,
     source: "generated-user-node-fixtures", upgraded: candidateVersion, rollbackFrom: failureVersion,
-    fixtureDigestVerified: true, fixtureSourceVerified: true, ownershipPreserved: true, otherServicePreserved: true }) + "\n");
+    fixtureDigestVerified: true, fixtureSourceVerified: true, ownershipPreserved: true,
+    protectedFilesPreserved: true, otherServicePreserved: true }) + "\n");
   }
 } finally {
   try { composeRun("down", "--volumes", "--remove-orphans"); } catch {}

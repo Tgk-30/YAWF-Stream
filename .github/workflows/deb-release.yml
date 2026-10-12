@@ -387,7 +387,7 @@ jobs:
           assert.equal(result.source, "generated-user-node-fixtures");
           assert.equal(result.upgraded, expectedVersion);
           assert.equal(result.rollbackFrom, failureVersion);
-          for (const key of ["fixtureDigestVerified", "fixtureSourceVerified", "ownershipPreserved", "otherServicePreserved"]) {
+          for (const key of ["fixtureDigestVerified", "fixtureSourceVerified", "ownershipPreserved", "protectedFilesPreserved", "otherServicePreserved"]) {
             assert.equal(result[key], true, `synthetic receipt did not verify ${key}`);
           }
           writeFileSync(receipt, `${JSON.stringify(result)}\n`, { mode: 0o600 });
@@ -439,7 +439,7 @@ jobs:
           assert.match(result.baselineDigest, /^sha256:[a-f0-9]{64}$/);
           for (const key of ["digestVerified", "sourceVerified", "candidateHealthVerified", "injectedRollbackVerified",
             "activePlaybackDeferred", "successfulUpdateVerified", "stopFailureVerified", "snapshotFailureVerified",
-            "interruptedRecoveryVerified", "registrationDriftPreserved", "ownershipAndDatabaseWriteVerified", "otherServicePreserved",
+            "interruptedRecoveryVerified", "registrationDriftPreserved", "ownershipAndDatabaseWriteVerified", "protectedFilesPreserved", "otherServicePreserved",
             "umask077PublicStatusVerified", "nonRootReadOnlyStatusVerified"]) {
             assert.equal(result[key], true, `actual receipt did not verify ${key}`);
           }
