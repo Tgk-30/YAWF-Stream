@@ -264,6 +264,8 @@ test("Debian install checks exercise the same candidate on Ubuntu 22 and 24", ()
   assert.match(debWorkflow, /install-check:\n[\s\S]*?needs: deb/);
   assert.match(debWorkflow, /runner:\n\s+- ubuntu-22\.04\n\s+- ubuntu-24\.04/);
   assert.match(debWorkflow, /https:\/\/deb\.nodesource\.com\/setup_24\.x/);
+  assert.match(debWorkflow, /\/usr\/bin\/node --version \| grep -Eq '\^v24\\\.'/);
+  assert.match(debWorkflow, /echo \/usr\/bin >> "\$GITHUB_PATH"/);
   assert.match(debWorkflow, /actions\/download-artifact@v4/);
   assert.match(debWorkflow, /sha256sum --check SHA256SUMS/);
   assert.match(debWorkflow, /sudo apt-get install -y "\$candidate"/);

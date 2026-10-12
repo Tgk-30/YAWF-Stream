@@ -10,6 +10,13 @@ interface PhysicalSafeAreaInsets {
 
 const CSS_SIDES = ["top", "right", "bottom", "left"] as const;
 
+function isNativeAndroidWebView(): boolean {
+  const runtime = globalThis as typeof globalThis & {
+    __YAWF_TAURI_ANDROID__?: unknown;
+  };
+  return runtime.__YAWF_TAURI_ANDROID__ === true || deviceKind() === "android";
+}
+
 export function applyPhysicalSafeAreaInsets(
   insets: PhysicalSafeAreaInsets,
   pixelRatio = window.devicePixelRatio,
@@ -32,7 +39,7 @@ export function applyPhysicalSafeAreaInsets(
  * alone cannot keep content out from under the status bar and display cutout.
  */
 export function installMobileSafeAreaInsets(): () => void {
-  if (!isTauri() || deviceKind() !== "android") return () => {};
+  if (!isTauri() || !isNativeAndroidWebView()) return () => {};
 
   let stopped = false;
   let frame: number | null = null;

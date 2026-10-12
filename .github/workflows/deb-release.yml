@@ -144,8 +144,9 @@ jobs:
           set -euo pipefail
           curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
           sudo apt-get install -y nodejs ffmpeg
-          node --version | grep -Eq '^v24\.'
-          ffmpeg -version | head -1
+          /usr/bin/node --version | grep -Eq '^v24\.'
+          echo /usr/bin >> "$GITHUB_PATH"
+          ffmpeg -version | sed -n '1p'
 
       - name: Download exact candidate artifact
         uses: actions/download-artifact@v4

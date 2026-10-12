@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "android-remote-safe-area",
+  "description": "Remote HTTP(S) pages in the Android main window may read only viewport safe-area inset numbers. No player, file, credential or native-network access is granted.",
+  "local": false,
+  "windows": [
+    "main"
+  ],
+  "platforms": [
+    "android"
+  ],
+  "remote": {
+    "urls": [
+      "https://*:*",
+      "http://*:*"
+    ]
+  },
+  "permissions": [
+    "android-remote-safe-area-command"
+  ]
+}

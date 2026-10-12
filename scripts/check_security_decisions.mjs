@@ -101,6 +101,28 @@ check(
     androidExternalPlayerCommands.has("mobile_open_external_player"),
   "Android video chooser is restricted to the local main webview and its one command",
 );
+const androidRemoteSafeAreaCapability = JSON.parse(
+  read("web/src-tauri/capabilities/android-remote-safe-area.json"),
+);
+const androidRemoteSafeAreaPermission = read(
+  "web/src-tauri/permissions/android-remote-safe-area.toml",
+);
+const androidRemoteSafeAreaCommands = new Set(
+  [...androidRemoteSafeAreaPermission.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
+    .flatMap((match) => [...match[1].matchAll(/"([a-z][a-z0-9_]*)"/g)])
+    .map((match) => match[1]),
+);
+check(
+  androidRemoteSafeAreaCapability.local === false &&
+    JSON.stringify(androidRemoteSafeAreaCapability.windows) === '["main"]' &&
+    JSON.stringify(androidRemoteSafeAreaCapability.platforms) === '["android"]' &&
+    JSON.stringify(androidRemoteSafeAreaCapability.remote?.urls) === '["https://*:*","http://*:*"]' &&
+    JSON.stringify(androidRemoteSafeAreaCapability.permissions) === '["android-remote-safe-area-command"]' &&
+    androidRemoteSafeAreaCommands.size === 1 &&
+    androidRemoteSafeAreaCommands.has("mobile_safe_area_insets") &&
+    /SEC-014[^\n]*four numeric safe-area insets[^\n]*no external-player, file, credential or native-network access/.test(decisions),
+  "Remote Android main pages receive only read-only numeric safe-area insets",
+);
 const desktopCommandNames = new Set(
   [...desktopPermission.matchAll(/^\s*"([a-z][a-z0-9_]*)",?\s*$/gm)].map(
     (match) => match[1],
@@ -234,10 +256,29 @@ const appPermissionCommands = new Map([
   ["remote-desktop-commands", remoteDesktopCommandNames],
   ["mobile-commands", mobileCommandNames],
   ["android-external-player-command", androidExternalPlayerCommands],
+  ["android-remote-safe-area-command", androidRemoteSafeAreaCommands],
 ]);
 const capabilities = readdirSync(join(root, "web/src-tauri/capabilities"))
   .filter((name) => name.endsWith(".json"))
-  .map((name) => JSON.parse(read(`web/src-tauri/capabilities/${name}`)));
+  .flatMap((name) => {
+    const parsed = JSON.parse(read(`web/src-tauri/capabilities/${name}`));
+    return Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed.capabilities)
+        ? parsed.capabilities
+        : [parsed];
+  });
+const androidRemoteCapabilities = capabilities.filter(
+  (entry) =>
+    (entry.platforms ?? SUPPORTED_PLATFORMS).includes("android") &&
+    (entry.remote?.urls?.length ?? 0) > 0,
+);
+check(
+  androidRemoteCapabilities.length === 1 &&
+    androidRemoteCapabilities[0].identifier === "android-remote-safe-area" &&
+    JSON.stringify(androidRemoteCapabilities[0].permissions) === '["android-remote-safe-area-command"]',
+  "All Android remote capabilities together expose only the numeric inset getter",
+);
 for (const platform of SUPPORTED_PLATFORMS) {
   // An omitted platforms list means every platform, and local defaults to true.
   const applying = capabilities.filter(

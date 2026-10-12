@@ -100,8 +100,8 @@ amd64 and arm64). It installs the built server + web app to
 ```bash
 # Requires Node.js 24+ (see Option B step 1 for NodeSource) - the package
 # depends on `nodejs (>= 24)`.
-curl -fsSLO https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.7/debridstreamer-server_2.3.7_all.deb
-sudo apt-get install -y ./debridstreamer-server_2.3.7_all.deb
+curl -fsSLO https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.8/debridstreamer-server_2.3.8_all.deb
+sudo apt-get install -y ./debridstreamer-server_2.3.8_all.deb
 
 # Set the secret key, then start.
 sudo nano /etc/debridstreamer/debridstreamer.env

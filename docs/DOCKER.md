@@ -17,7 +17,7 @@ ghcr.io/tgk-30/yawf-stream:latest
 Tags are created from `main` and Git tags by `.github/workflows/docker-image.yml`.
 
 To pin the Server Mode UI and API to this server release, use
-`ghcr.io/tgk-30/yawf-stream:2.3.7`. The server release updates the Docker `latest`
+`ghcr.io/tgk-30/yawf-stream:2.3.8`. The server release updates the Docker `latest`
 tag independently of the multi-platform desktop release.
 
 ## Quick Start

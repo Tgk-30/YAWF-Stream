@@ -7,8 +7,9 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invoke(...args),
 }));
 
+const isTauri = vi.fn(() => true);
 vi.mock("./tauri", () => ({
-  isTauri: () => true,
+  isTauri: () => isTauri(),
 }));
 
 const deviceKind = vi.fn(() => "android");
@@ -65,7 +66,11 @@ function deferred<T>() {
 afterEach(() => {
   document.documentElement.removeAttribute("style");
   invoke.mockReset();
+  isTauri.mockReturnValue(true);
   deviceKind.mockReturnValue("android");
+  delete (
+    globalThis as typeof globalThis & { __YAWF_TAURI_ANDROID__?: unknown }
+  ).__YAWF_TAURI_ANDROID__;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -98,13 +103,43 @@ describe("Android safe-area bridge", () => {
     uninstall();
   });
 
-  it("does not invoke the Android command on desktop", () => {
+  it("uses the authoritative Android marker with a desktop user agent", async () => {
+    deviceKind.mockReturnValue("linux");
+    (
+      globalThis as typeof globalThis & { __YAWF_TAURI_ANDROID__?: unknown }
+    ).__YAWF_TAURI_ANDROID__ = true;
+    invoke.mockResolvedValue({ top: 54, right: 3, bottom: 27, left: 0 });
+    const frames = mockAnimationFrames();
+
+    const uninstall = installMobileSafeAreaInsets();
+    frames.flush();
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("mobile_safe_area_insets");
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("54px");
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-right"),
+    ).toBe("3px");
+    uninstall();
+  });
+
+  it("does not invoke the Android command outside a native Android webview", () => {
     const frames = mockAnimationFrames();
     deviceKind.mockReturnValue("mac");
-    const uninstall = installMobileSafeAreaInsets();
+    const uninstallDesktop = installMobileSafeAreaInsets();
+    deviceKind.mockReturnValue("ios");
+    const uninstallIos = installMobileSafeAreaInsets();
+    deviceKind.mockReturnValue("android");
+    isTauri.mockReturnValue(false);
+    const uninstallBrowser = installMobileSafeAreaInsets();
+
     expect(frames.request).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
-    uninstall();
+    uninstallDesktop();
+    uninstallIos();
+    uninstallBrowser();
   });
 
   it("refreshes native insets after rotation", async () => {
