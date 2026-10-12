@@ -11,6 +11,8 @@ on:
       - "scripts/check_release_readiness.mjs"
       - "scripts/check_security_decisions.mjs"
       - "scripts/public_repo_preflight.mjs"
+      - "scripts/resolve_published_image_manifests.mjs"
+      - "scripts/resolve_published_image_manifests.test.mjs"
       - "server/**"
       - "web/**"
   push:
@@ -25,9 +27,24 @@ on:
       - "scripts/check_release_readiness.mjs"
       - "scripts/check_security_decisions.mjs"
       - "scripts/public_repo_preflight.mjs"
+      - "scripts/resolve_published_image_manifests.mjs"
+      - "scripts/resolve_published_image_manifests.test.mjs"
       - "server/**"
       - "web/**"
   workflow_dispatch:
+    inputs:
+      published_image_digest:
+        description: "Optional immutable image index digest to verify without rebuilding"
+        required: false
+        type: string
+      expected_source_revision:
+        description: "Expected 40-character source revision for published-image verification"
+        required: false
+        type: string
+      source_package_version:
+        description: "Expected server package version for published-image verification"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -35,6 +52,7 @@ permissions:
 
 jobs:
   docker:
+    if: github.event_name != 'workflow_dispatch' || inputs.published_image_digest == ''
     runs-on: ubuntu-22.04
 
     steps:
@@ -47,6 +65,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - name: Test published image manifest resolver
+        run: node --test scripts/resolve_published_image_manifests.test.mjs
 
       - name: Public repo preflight
         run: node scripts/public_repo_preflight.mjs
@@ -187,8 +208,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify published images by immutable digest
+      - name: Resolve published child manifests
         if: github.event_name == 'push'
+        id: published-children
         shell: bash
         env:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
@@ -197,9 +219,37 @@ jobs:
           set -euo pipefail
           test -n "$IMAGE_NAME"
           [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
-          expected_version="$(node -p "require('./server/package.json').version")"
+          index_reference="$IMAGE_NAME@$IMAGE_DIGEST"
+          docker buildx imagetools inspect --raw "$index_reference" > "$RUNNER_TEMP/published-image-index.json"
+          node scripts/resolve_published_image_manifests.mjs \
+            --image "$IMAGE_NAME" \
+            --index-digest "$IMAGE_DIGEST" \
+            --input "$RUNNER_TEMP/published-image-index.json" \
+            --github-output "$GITHUB_OUTPUT" \
+            > "$RUNNER_TEMP/yawf-published-image-manifests.json"
+
+      - name: Verify published images by immutable digest
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          INDEX_REFERENCE: ${{ steps.published-children.outputs.index_reference }}
+          AMD64_REFERENCE: ${{ steps.published-children.outputs.amd64_reference }}
+          ARM64_REFERENCE: ${{ steps.published-children.outputs.arm64_reference }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
           image="$IMAGE_NAME@$IMAGE_DIGEST"
+          test "$image" = "$INDEX_REFERENCE"
+          expected_version="$(node -p "require('./server/package.json').version")"
           for architecture in amd64 arm64; do
+            case "$architecture" in
+              amd64) child_reference="$AMD64_REFERENCE" ;;
+              arm64) child_reference="$ARM64_REFERENCE" ;;
+            esac
+            [[ "$child_reference" =~ ^ghcr\.io/tgk-30/yawf-stream@sha256:[a-f0-9]{64}$ ]]
+            image="$child_reference"
             docker pull --platform "linux/$architecture" "$image"
             docker run --rm \
               --platform "linux/$architecture" \
@@ -227,4 +277,108 @@ jobs:
             ${{ runner.temp }}/yawf-server-smoke-linux-*.json
             ${{ runner.temp }}/yawf-published-smoke-linux-*.jsonl
           if-no-files-found: ignore
+          retention-days: 7
+
+  verify-published:
+    if: github.event_name == 'workflow_dispatch' && inputs.published_image_digest != ''
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Test published image manifest resolver
+        run: node --test scripts/resolve_published_image_manifests.test.mjs
+
+      - name: Validate immutable verification inputs
+        shell: bash
+        env:
+          PUBLISHED_IMAGE_DIGEST: ${{ inputs.published_image_digest }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_source_revision }}
+          SOURCE_PACKAGE_VERSION: ${{ inputs.source_package_version }}
+        run: |
+          set -euo pipefail
+          [[ "$PUBLISHED_IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$EXPECTED_SOURCE_REVISION" =~ ^[a-f0-9]{40}$ ]]
+          test "$EXPECTED_SOURCE_REVISION" = "4387873fd7df8ef894c7424a30abb31f8ec06526"
+          [[ "$SOURCE_PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$SOURCE_PACKAGE_VERSION" = "2.3.8"
+          test "$SOURCE_PACKAGE_VERSION" = "$(node -p "require('./server/package.json').version")"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve immutable published child manifests
+        id: manual-children
+        shell: bash
+        env:
+          IMAGE_NAME: ghcr.io/tgk-30/yawf-stream
+          IMAGE_DIGEST: ${{ inputs.published_image_digest }}
+        run: |
+          set -euo pipefail
+          index_reference="$IMAGE_NAME@$IMAGE_DIGEST"
+          docker buildx imagetools inspect --raw "$index_reference" > "$RUNNER_TEMP/published-image-index.json"
+          node scripts/resolve_published_image_manifests.mjs \
+            --image "$IMAGE_NAME" \
+            --index-digest "$IMAGE_DIGEST" \
+            --input "$RUNNER_TEMP/published-image-index.json" \
+            --github-output "$GITHUB_OUTPUT" \
+            > "$RUNNER_TEMP/yawf-published-image-manifests.json"
+
+      - name: Verify immutable published children
+        shell: bash
+        env:
+          AMD64_REFERENCE: ${{ steps.manual-children.outputs.amd64_reference }}
+          ARM64_REFERENCE: ${{ steps.manual-children.outputs.arm64_reference }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_source_revision }}
+          SOURCE_PACKAGE_VERSION: ${{ inputs.source_package_version }}
+        run: |
+          set -euo pipefail
+          for architecture in amd64 arm64; do
+            case "$architecture" in
+              amd64) child_reference="$AMD64_REFERENCE" ;;
+              arm64) child_reference="$ARM64_REFERENCE" ;;
+            esac
+            [[ "$child_reference" =~ ^ghcr\.io/tgk-30/yawf-stream@sha256:[a-f0-9]{64}$ ]]
+            docker pull --platform "linux/$architecture" "$child_reference"
+            test "$(docker image inspect --format '{{.Config.User}}' "$child_reference")" = "node"
+            test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$child_reference")" = "$SOURCE_PACKAGE_VERSION"
+            test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$child_reference")" = "$EXPECTED_SOURCE_REVISION"
+            docker run --rm \
+              --platform "linux/$architecture" \
+              --network none \
+              --read-only \
+              --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+              --cap-drop ALL \
+              --security-opt no-new-privileges \
+              --entrypoint node \
+              --mount type=bind,source="$PWD/scripts/smoke_server_artifact.mjs",target=/smoke/smoke_server_artifact.mjs,readonly \
+              "$child_reference" \
+              /smoke/smoke_server_artifact.mjs \
+              --expected-version "$SOURCE_PACKAGE_VERSION" \
+              --server-entry /app/server/dist/index.cjs \
+              --web-dist /app/web-dist \
+              | tee "$RUNNER_TEMP/yawf-published-smoke-linux-$architecture.jsonl"
+          done
+
+      - name: Retain immutable published image receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-published-image-verification-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/yawf-published-image-manifests.json
+            ${{ runner.temp }}/yawf-published-smoke-linux-*.jsonl
+          if-no-files-found: error
           retention-days: 7
