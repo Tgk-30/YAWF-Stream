@@ -11,6 +11,27 @@ function isAndroidTauriRuntime(): boolean {
   return runtime.__YAWF_TAURI_ANDROID__ === true || deviceKind() === "android";
 }
 
+/** Identify the Android app's WebView for UI-only routing decisions.
+ *
+ * Remote Server Mode documents cannot use local-only Tauri commands, but the
+ * native read-only safe-area provider is still injected into their owned
+ * WebView. Checking for its zero-argument getter lets those documents retain
+ * mobile copy and webview-player behavior without invoking the getter or
+ * widening any command eligibility.
+ */
+export function isAndroidAppUiContext(): boolean {
+  const runtime = globalThis as typeof globalThis & {
+    __YAWF_NATIVE_SAFE_AREA__?: unknown;
+  };
+  const provider = runtime.__YAWF_NATIVE_SAFE_AREA__;
+  const hasNativeSafeAreaGetter =
+    provider != null &&
+    (typeof provider === "object" || typeof provider === "function") &&
+    typeof (provider as { getInsets?: unknown }).getInsets === "function";
+
+  return hasNativeSafeAreaGetter || (isTauri() && isAndroidTauriRuntime());
+}
+
 function isTrustedBundledDocumentOrigin(): boolean {
   let page: URL;
   try {

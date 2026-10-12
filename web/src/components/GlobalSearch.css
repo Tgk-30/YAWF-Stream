@@ -40,7 +40,7 @@
   color: var(--text-primary);
 }
 
-@media (max-width: 699px) {
+@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {
   .global-search {
     position: sticky;
     top: var(--sp-sm);
@@ -51,13 +51,13 @@
        the search input covers the avatar and captures every tap. */
     margin:
       var(--sp-md)
-      calc(var(--sp-lg) + calc(44px * var(--density-scale)) + var(--sp-sm))
+      calc(max(var(--sp-lg), var(--safe-area-right)) + calc(44px * var(--density-scale)) + var(--sp-sm))
       0
-      var(--sp-lg);
+      max(var(--sp-lg), var(--safe-area-left));
   }
 }
 
-@media (min-width: 700px) and (max-width: 1199px) {
+@media (min-width: 700px) and (max-width: 1199px) and (min-height: 501px) {
   .global-search {
     width: min(520px, calc(100% - 48px));
   }

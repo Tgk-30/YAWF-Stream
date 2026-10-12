@@ -279,6 +279,8 @@
 
 @media (max-width: 767px) {
   .hero {
+    --hero-content-gutter: var(--sp-lg);
+    --hero-dot-gutter: var(--sp-md);
     height: clamp(
       var(--hero-mobile-min-height, 320px),
       var(--hero-mobile-fluid-height, 46vh),
@@ -368,6 +370,8 @@
 
 @media (max-width: 767px) and (max-height: 820px) {
   .hero {
+    --hero-content-gutter: var(--sp-md);
+    --hero-dot-gutter: var(--sp-sm);
     height: clamp(
       min(292px, var(--hero-mobile-min-height, 320px)),
       40vh,
@@ -387,6 +391,7 @@
 
 @media (max-width: 767px) and (max-height: 620px) {
   .hero {
+    --hero-content-gutter: calc(14px * var(--density-scale));
     height: clamp(198px, 40vh, 226px);
   }
 
@@ -420,6 +425,8 @@
 
 @media (max-width: 950px) and (max-height: 500px) {
   .hero {
+    --hero-content-gutter: calc(14px * var(--density-scale));
+    --hero-dot-gutter: calc(10px * var(--density-scale));
     height: clamp(178px, 48vh, 220px);
     min-height: 0;
   }
@@ -483,6 +490,7 @@
 
 @media (max-width: 380px) and (max-height: 620px) {
   .hero {
+    --hero-content-gutter: calc(12px * var(--density-scale));
     height: clamp(174px, 33vh, 194px);
   }
 
@@ -506,5 +514,27 @@
     min-height: 39px;
     padding: calc(8px * var(--density-scale)) calc(10px * var(--density-scale));
     font-size: 0.78125rem;
+  }
+}
+
+/* The hero artwork remains full-bleed inside its card. Only the interactive
+   foreground composes the card margin with native side insets. */
+@media (max-width: 767px), (max-width: 950px) and (max-height: 500px) {
+  .hero-content {
+    padding-left: max(
+      var(--hero-content-gutter),
+      calc(var(--safe-area-left) - var(--hero-viewport-left, 0))
+    );
+    padding-right: max(
+      var(--hero-content-gutter),
+      calc(var(--safe-area-right) - var(--hero-viewport-right, 0))
+    );
+  }
+
+  .hero-dots {
+    right: max(
+      var(--hero-dot-gutter),
+      calc(var(--safe-area-right) - var(--hero-viewport-right, 0))
+    );
   }
 }

@@ -42,6 +42,7 @@ import {
 } from "../lib/tauri";
 import { deviceKind } from "../lib/platform";
 import {
+  isAndroidAppUiContext,
   isAndroidExternalPlayerEligible,
   openAndroidExternalPlayer,
 } from "../lib/androidExternalPlayer";
@@ -717,13 +718,14 @@ export function VideoPlayer({
       : Math.max(0, activeSourceSwitchPosition - timelineOffsetSeconds)
   );
   const underTauri = isTauri();
+  const androidAppUi = isAndroidAppUiContext();
   // The in-window native player and desktop hand-off exist only on desktop.
   // Android uses a separate, narrowly granted system video chooser.
-  const desktopTauri = isDesktopTauri();
+  const desktopTauri = !androidAppUi && isDesktopTauri();
   // A mobile source can still arrive tagged native-mpv from old persisted state
   // or a stale caller. Never expose that desktop engine on Android or iOS.
   // Trying it in the webview lets the normal media-error path request HLS.
-  const mobileTauri = underTauri && !desktopTauri;
+  const mobileTauri = androidAppUi || (underTauri && !desktopTauri);
   const dk = deviceKind();
   const androidTauri = isAndroidExternalPlayerEligible();
   const mode: Playability =

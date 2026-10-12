@@ -20,6 +20,7 @@ vi.mock("./networkPolicy", () => ({
 }));
 
 import {
+  isAndroidAppUiContext,
   isAndroidExternalPlayerEligible,
   openAndroidExternalPlayer,
 } from "./androidExternalPlayer";
@@ -27,6 +28,7 @@ import {
 type RuntimeMarkers = typeof globalThis & {
   __YAWF_TAURI_ANDROID__?: boolean;
   __YAWF_TAURI_MOBILE__?: boolean;
+  __YAWF_NATIVE_SAFE_AREA__?: unknown;
 };
 
 const runtimeMarkers = globalThis as RuntimeMarkers;
@@ -43,6 +45,7 @@ describe("Android external player bridge", () => {
     isRequestExemptMock.mockReset().mockReturnValue(false);
     delete runtimeMarkers.__YAWF_TAURI_ANDROID__;
     delete runtimeMarkers.__YAWF_TAURI_MOBILE__;
+    delete runtimeMarkers.__YAWF_NATIVE_SAFE_AREA__;
   });
 
   afterEach(() => {
@@ -50,6 +53,33 @@ describe("Android external player bridge", () => {
     vi.unstubAllGlobals();
     delete runtimeMarkers.__YAWF_TAURI_ANDROID__;
     delete runtimeMarkers.__YAWF_TAURI_MOBILE__;
+    delete runtimeMarkers.__YAWF_NATIVE_SAFE_AREA__;
+  });
+
+  it("detects the read-only Android provider without invoking its inset getter", () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    const getInsets = vi.fn(() => '{"top":0,"right":0,"bottom":0,"left":0}');
+    runtimeMarkers.__YAWF_NATIVE_SAFE_AREA__ = { getInsets };
+
+    expect(isAndroidAppUiContext()).toBe(true);
+    expect(getInsets).not.toHaveBeenCalled();
+    expect(isAndroidExternalPlayerEligible()).toBe(false);
+  });
+
+  it("does not classify an ordinary desktop page as Android app UI", () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("desktop");
+    runtimeMarkers.__YAWF_NATIVE_SAFE_AREA__ = { getInsets: "not a function" };
+
+    expect(isAndroidAppUiContext()).toBe(false);
+  });
+
+  it("retains the existing native Tauri Android UI context", () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+
+    expect(isAndroidAppUiContext()).toBe(true);
   });
 
   it("invokes the Android chooser with a canonical HTTP(S) stream URL", async () => {

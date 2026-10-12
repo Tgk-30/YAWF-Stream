@@ -132,11 +132,8 @@ const openAndroidExternalPlayerMock = vi.fn<
   async (_url: string, _ownsRequest: () => boolean) =>
     "Player chooser opened. Select a video app to continue.",
 );
-const isAndroidExternalPlayerEligibleMock = vi.fn(
-  () =>
-    isTauriMock() &&
-    (deviceKindMock() === "android" ||
-      (window as unknown as Record<string, unknown>).__YAWF_TAURI_ANDROID__ === true),
+const isAndroidExternalPlayerEligibleOverride = vi.fn<() => boolean | undefined>(
+  () => undefined,
 );
 const mpvStopMock = vi.fn(async () => {});
 vi.mock("../lib/tauri", () => ({
@@ -156,11 +153,17 @@ vi.mock("../lib/tauri", () => ({
   ) => openInExternalPlayerMock(url, preferred, authorization),
   mpvStop: () => mpvStopMock(),
 }));
-vi.mock("../lib/androidExternalPlayer", () => ({
-  isAndroidExternalPlayerEligible: () => isAndroidExternalPlayerEligibleMock(),
-  openAndroidExternalPlayer: (url: string, ownsRequest: () => boolean) =>
-    openAndroidExternalPlayerMock(url, ownsRequest),
-}));
+vi.mock("../lib/androidExternalPlayer", async (orig) => {
+  const actual = await orig<typeof import("../lib/androidExternalPlayer")>();
+  return {
+    ...actual,
+    isAndroidExternalPlayerEligible: () =>
+      isAndroidExternalPlayerEligibleOverride() ??
+      actual.isAndroidExternalPlayerEligible(),
+    openAndroidExternalPlayer: (url: string, ownsRequest: () => boolean) =>
+      openAndroidExternalPlayerMock(url, ownsRequest),
+  };
+});
 
 // Platform - the in-window player is macOS-gated; report mac so the built-in
 // player tests exercise it (external-handoff tests pass useBuiltInPlayer=false).
@@ -300,6 +303,7 @@ function fireMediaError(video: HTMLMediaElement, code = 3): void {
 
 // jsdom's <video> has no play/pause/load/canPlayType implementations.
 beforeEach(() => {
+  vi.stubGlobal("location", new URL("tauri://localhost/"));
   recordDiagnosticMock.mockClear();
   globalThis.__DEBRIDSTREAMER_SERVER_URL__ = undefined;
   hlsInstances.length = 0;
@@ -310,12 +314,7 @@ beforeEach(() => {
   openAndroidExternalPlayerMock.mockResolvedValue(
     "Player chooser opened. Select a video app to continue.",
   );
-  isAndroidExternalPlayerEligibleMock.mockImplementation(
-    () =>
-      isTauriMock() &&
-      (deviceKindMock() === "android" ||
-        (window as unknown as Record<string, unknown>).__YAWF_TAURI_ANDROID__ === true),
-  );
+  isAndroidExternalPlayerEligibleOverride.mockReturnValue(undefined);
   subsState.tracks = [];
   subsState.activeTrackId = null;
   scrubBarMock.mockClear();
@@ -345,6 +344,8 @@ afterEach(() => {
   delete window.YawfAndroidTV;
   delete (window as unknown as Record<string, unknown>).__YAWF_TAURI_MOBILE__;
   delete (window as unknown as Record<string, unknown>).__YAWF_TAURI_ANDROID__;
+  delete (window as unknown as Record<string, unknown>).__YAWF_NATIVE_SAFE_AREA__;
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
   isTauriMock.mockReturnValue(false);
   deviceKindMock.mockReturnValue("mac");
@@ -1040,7 +1041,7 @@ describe("WebviewPlayer", () => {
   it("offers copy without invoking or pausing when the Android page origin is remote", async () => {
     isTauriMock.mockReturnValue(true);
     deviceKindMock.mockReturnValue("android");
-    isAndroidExternalPlayerEligibleMock.mockReturnValue(false);
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
     const writeText = vi.fn().mockResolvedValue(undefined);
     const restoreClipboard = replaceProperty(navigator, "clipboard", { writeText });
     try {
@@ -1077,6 +1078,122 @@ describe("WebviewPlayer", () => {
     } finally {
       restoreClipboard();
     }
+  });
+
+  it("uses mobile copy UI for a remote provider-only Android WebView", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const getInsets = vi.fn(() => '{"top":0,"right":0,"bottom":0,"left":0}');
+    Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+      configurable: true,
+      value: { getInsets },
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const restoreClipboard = replaceProperty(navigator, "clipboard", { writeText });
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/protected-session"
+          externalPlaybackUrl="https://server.example/api/external-stream/capability"
+          engine="native-mpv"
+          title="T"
+          onClose={() => {}}
+        />,
+      );
+      const pause = vi.mocked(HTMLMediaElement.prototype.pause);
+      pause.mockClear();
+
+      expect(document.querySelector("video.player-video")).not.toBeNull();
+      expect(getInsets).not.toHaveBeenCalled();
+      expect(playWithMpvMock).not.toHaveBeenCalled();
+      expect(openInExternalPlayerMock).not.toHaveBeenCalled();
+
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.queryByRole("button", { name: /Open in external player/ })).toBeNull();
+      await userEvent.click(screen.getByRole("button", { name: /^Copy stream link/ }));
+
+      expect(writeText).toHaveBeenCalledWith(
+        "https://server.example/api/external-stream/capability",
+      );
+      expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
+      expect(openInExternalPlayerMock).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+      expect(screen.getByRole("link", { name: "Selectable stream link" })).toHaveAttribute(
+        "href",
+        "https://server.example/api/external-stream/capability",
+      );
+    } finally {
+      restoreClipboard();
+    }
+  });
+
+  it("keeps partial desktop Tauri globals on the provider-backed webview path", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+      configurable: true,
+      value: { getInsets: vi.fn(() => '{"top":0,"right":0,"bottom":0,"left":0}') },
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const restoreClipboard = replaceProperty(navigator, "clipboard", { writeText });
+
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/protected-session"
+          externalPlaybackUrl="https://server.example/api/external-stream/capability"
+          engine="native-mpv"
+          title="T"
+          onClose={() => {}}
+        />,
+      );
+
+      expect(document.querySelector("video.player-video")).not.toBeNull();
+      expect(screen.queryByTestId("embedded-player")).toBeNull();
+      expect(playWithMpvMock).not.toHaveBeenCalled();
+      expect(openInExternalPlayerMock).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: /^Copy stream link/ }));
+      expect(writeText).toHaveBeenCalledWith(
+        "https://server.example/api/external-stream/capability",
+      );
+      expect(openInExternalPlayerMock).not.toHaveBeenCalled();
+      expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
+    } finally {
+      restoreClipboard();
+    }
+  });
+
+  it("withholds protected proxy URLs in a provider-only Android WebView", async () => {
+    isTauriMock.mockReturnValue(false);
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+      configurable: true,
+      value: { getInsets: vi.fn(() => '{"top":0,"right":0,"bottom":0,"left":0}') },
+    });
+
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/protected-session"
+        externalPlaybackUrl={null}
+        engine="native-mpv"
+        title="T"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByText(
+      "External playback is not available for this protected stream",
+      { exact: false },
+    )).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Copy stream link/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Selectable stream link" })).toBeNull();
+    expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
+    expect(openInExternalPlayerMock).not.toHaveBeenCalled();
   });
 
   it("shows and invokes the Android chooser for a desktop-looking marked WebView", async () => {

@@ -49,6 +49,11 @@ function fakePromptEvent(outcome: "accepted" | "dismissed") {
 describe("isInstallPromptEligible", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete (
+      globalThis as typeof globalThis & {
+        __YAWF_NATIVE_SAFE_AREA__?: unknown;
+      }
+    ).__YAWF_NATIVE_SAFE_AREA__;
     isTauriMock.mockReturnValue(false);
     isStandaloneMock.mockReturnValue(false);
     isMobileMock.mockReturnValue(true);
@@ -61,6 +66,27 @@ describe("isInstallPromptEligible", () => {
   it("is never eligible inside Tauri", () => {
     isTauriMock.mockReturnValue(true);
     expect(isInstallPromptEligible()).toBe(false);
+  });
+
+  it("suppresses the install card in a provider-backed Android WebView without reading insets", () => {
+    const getInsets = vi.fn(() =>
+      JSON.stringify({ top: 0, right: 0, bottom: 0, left: 0 }),
+    );
+    (
+      globalThis as typeof globalThis & {
+        __YAWF_NATIVE_SAFE_AREA__?: unknown;
+      }
+    ).__YAWF_NATIVE_SAFE_AREA__ = { getInsets };
+
+    const { container } = render(
+      isInstallPromptEligible() ? (
+        <InstallPrompt onDismiss={() => {}} />
+      ) : null,
+    );
+
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByText("Install YAWF Stream")).not.toBeInTheDocument();
+    expect(getInsets).not.toHaveBeenCalled();
   });
 
   it("is never eligible once running standalone (already installed)", () => {
