@@ -358,6 +358,7 @@ jobs:
             GITHUB_ACTIONS="$GITHUB_ACTIONS" \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             RUNNER_OS="$RUNNER_OS" \
+            RUNNER_TEMP="$RUNNER_TEMP" \
             bash scripts/server_updater_install_runtime.sh 2>&1 | tee "$driver_log"
           runtime_raw="$(sed -n 's/^INSTALLER_RUNTIME_RAW=//p' "$driver_log" | tail -n 1)"
           runtime_receipt="$(sed -n 's/^INSTALLER_RUNTIME_RECEIPT=//p' "$driver_log" | tail -n 1)"

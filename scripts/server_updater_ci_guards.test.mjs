@@ -78,6 +78,18 @@ function assertCleanupDispatch(source) {
   ]);
 }
 
+function installerRuntimeSudoEnv(step) {
+  const command = step.match(/timeout 420s sudo env[\s\S]*?\n\s*bash scripts\/server_updater_install_runtime\.sh/);
+  assert.ok(command, "installer runtime sudo environment command missing");
+  return command[0];
+}
+
+function assertInstallerRuntimeTempForwarding(step) {
+  const forwarded = installerRuntimeSudoEnv(step).match(/^[ \t]*RUNNER_TEMP="\$RUNNER_TEMP" \\$/gm) ?? [];
+  assert.equal(forwarded.length, 1, "installer runtime sudo environment must forward RUNNER_TEMP exactly once");
+  return forwarded[0];
+}
+
 function assertOwnedInstallationReload(source) {
   const installation = uniqueShellFunction(source, "remove_owned_installation").text;
   const reloads = installation.match(/(?:\/usr\/bin\/)?systemctl daemon-reload/g) ?? [];
@@ -162,6 +174,10 @@ test "$cached_status" -eq 127
 test("installer PTY runtime proof remains an exact-byte, bounded Ubuntu CI gate", () => {
   assert.match(installerStep, /set -euo pipefail/);
   assert.match(installerStep, /timeout 420s sudo env[\s\S]*bash scripts\/server_updater_install_runtime\.sh 2>&1 \| tee "\$driver_log"/);
+  const forwardedTempLine = assertInstallerRuntimeTempForwarding(installerStep);
+  const omittedTemp = installerStep.replace(forwardedTempLine, "");
+  assert.notEqual(omittedTemp, installerStep);
+  assert.throws(() => assertInstallerRuntimeTempForwarding(omittedTemp));
   assert.match(installerStep, /test -s "\$runtime_raw"/);
   assert.match(installerStep, /test -s "\$runtime_receipt"/);
   assert.match(installerStep, /assert\.equal\(receipt\.sourceSha256, expectedSourceHash/);
