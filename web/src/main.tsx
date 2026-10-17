@@ -62,7 +62,8 @@ installSuspendOnHidden();
 installAttentionGate();
 
 // Android WebView does not map native WindowInsets to CSS safe-area env values.
-// Mirror them before React mounts, then refresh them after rotations and resizes.
+// Start mirroring before React mounts; the first native result arrives
+// asynchronously, then refreshes are serialized across rotations and resizes.
 installMobileSafeAreaInsets();
 
 // Capture beforeinstallprompt before React mounts - Chromium can fire it

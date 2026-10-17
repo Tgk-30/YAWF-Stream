@@ -1,9 +1,10 @@
+import { SERVER_VERSION } from "../src/version.js";
 import { createServer, type Server } from "node:http";
 import { Readable } from "node:stream";
 import { createHmac, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -692,7 +693,11 @@ describe("DebridStreamer server", () => {
   it("creates the first owner, starts a session, and rejects unsafe writes without CSRF", async () => {
     const health = await app.inject({ method: "GET", url: "/api/health" });
     expect(health.statusCode).toBe(200);
-    expect(json<{ setupRequired: boolean }>(health).setupRequired).toBe(true);
+    expect(json<{ setupRequired: boolean; ready: boolean; version: string }>(health)).toMatchObject({
+      setupRequired: true,
+      ready: false,
+      version: SERVER_VERSION,
+    });
 
     const owner = await setupOwner(app);
     const session = await request(owner, { method: "GET", url: "/api/auth/session" });
@@ -755,6 +760,92 @@ describe("DebridStreamer server", () => {
       url: "/api/auth/session",
     });
     expect(revoked.statusCode).toBe(401);
+  });
+
+  it("serves only hashed assets immutably and returns real missing-resource 404s", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yawf-static-contract-"));
+    const assets = join(root, "assets");
+    const icons = join(root, "icons");
+    mkdirSync(assets);
+    mkdirSync(icons);
+    writeFileSync(
+      join(root, "index.html"),
+      '<!doctype html><script src="/assets/index-AbCdEf12.js"></script><link rel="manifest" href="/manifest.webmanifest">',
+    );
+    writeFileSync(join(assets, "index-AbCdEf12.js"), "console.log('built');");
+    writeFileSync(join(root, "sw.js"), "self.addEventListener('fetch', () => {});");
+    writeFileSync(join(root, "manifest.webmanifest"), "{}");
+    writeFileSync(join(icons, "icon-192.png"), Buffer.from([1, 2, 3]));
+
+    const staticApp = await buildApp({
+      config: {
+        databasePath: ":memory:", dataDir: ".test-data", secretKey: randomBytes(32),
+        cookieSecure: false, logger: false, updateCheck: false, webDistPath: root,
+      },
+    });
+    try {
+      const index = await staticApp.inject({ method: "GET", url: "/" });
+      expect(index.statusCode).toBe(200);
+      expect(index.headers["content-type"]).toContain("text/html");
+      expect(index.headers["cache-control"]).toBe("no-store");
+
+      const hashed = await staticApp.inject({ method: "GET", url: "/assets/index-AbCdEf12.js" });
+      expect(hashed.statusCode).toBe(200);
+      expect(hashed.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+
+      for (const stablePath of ["/sw.js", "/manifest.webmanifest", "/icons/icon-192.png"]) {
+        const stable = await staticApp.inject({ method: "GET", url: stablePath });
+        expect(stable.statusCode).toBe(200);
+        expect(stable.headers["cache-control"]).toBe("no-cache");
+      }
+
+      const route = await staticApp.inject({ method: "GET", url: "/discover" });
+      expect(route.statusCode).toBe(200);
+      expect(route.headers["content-type"]).toContain("text/html");
+      expect(route.headers["cache-control"]).toBe("no-store");
+
+      for (const missingPath of ["/assets/missing.js", "/icons/missing.png", "/missing.webmanifest"]) {
+        const missing = await staticApp.inject({ method: "GET", url: missingPath });
+        expect(missing.statusCode).toBe(404);
+        expect(missing.headers["cache-control"]).toBe("no-store");
+        expect(missing.headers["content-type"]).not.toContain("text/html");
+      }
+    } finally {
+      await staticApp.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports hosted PWA readiness only for a usable web distribution", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yawf-static-readiness-"));
+    const readinessApp = await buildApp({
+      config: {
+        databasePath: ":memory:", dataDir: ".test-data", secretKey: randomBytes(32),
+        cookieSecure: false, logger: false, updateCheck: false, webDistPath: root,
+      },
+    });
+    try {
+      const owner = await setupOwner(readinessApp);
+      const missingIndex = await request(owner, { method: "GET", url: "/api/admin/health" });
+      expect(missingIndex.statusCode).toBe(200);
+      expect(json<{ config: { webDistConfigured: boolean }; warnings: string[] }>(missingIndex)).toMatchObject({
+        config: { webDistConfigured: false },
+        warnings: expect.arrayContaining([expect.stringContaining("Hosted PWA assets are not ready")]),
+      });
+
+      writeFileSync(join(root, "index.html"), "<!doctype html><title>ready</title>");
+      const ready = await request(owner, { method: "GET", url: "/api/admin/health" });
+      expect(ready.statusCode).toBe(200);
+      expect(json<{ config: { webDistConfigured: boolean }; warnings: string[] }>(ready)).toMatchObject({
+        config: { webDistConfigured: true },
+      });
+      expect(json<{ warnings: string[] }>(ready).warnings).not.toContain(
+        expect.stringContaining("Hosted PWA assets are not ready"),
+      );
+    } finally {
+      await readinessApp.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("sets hardened session cookies while keeping only the CSRF token readable", async () => {
@@ -1527,6 +1618,7 @@ describe("DebridStreamer server", () => {
           qualities: string[];
           seekOffset: boolean;
           subtitleSidecar: boolean;
+          audioTrackSelection: boolean;
           toneMapping: boolean;
         };
       }>(
@@ -1545,6 +1637,7 @@ describe("DebridStreamer server", () => {
         qualities: ["auto", "1080p", "720p", "480p", "360p"],
         seekOffset: true,
         subtitleSidecar: true,
+        audioTrackSelection: false,
         toneMapping: true,
       });
     } finally {
@@ -3505,6 +3598,113 @@ describe("DebridStreamer server", () => {
       expect((await request(owner, {
         method: "GET",
         url: `/api/stream/${session.id}/index.m3u8?quality=4k`,
+      })).statusCode).toBe(400);
+    } finally {
+      await on.close();
+    }
+  });
+
+  it("transcode: exposes a cached same-session audio inventory and maps the selected source track", async () => {
+    const base = makeFakeTranscoder();
+    const spawned: string[][] = [];
+    let probes = 0;
+    const audioTranscoder: Transcoder = {
+      ...base,
+      async capabilities() {
+        return {
+          toneMapping: false,
+          videoEncoders: ["libx264"],
+          subtitleSidecar: false,
+          audioTrackSelection: true,
+        };
+      },
+      async probeStreams() {
+        probes += 1;
+        return {
+          audio: true,
+          subtitle: false,
+          audioTracks: [
+            { index: 0, language: "eng", label: "English", default: false },
+            { index: 1, language: "fra", label: "French", default: true },
+          ],
+        };
+      },
+      spawnHls(args) {
+        spawned.push(args);
+        return base.spawnHls(args);
+      },
+    };
+    const on = await buildTranscodeApp({ enableTranscode: true }, audioTranscoder);
+    try {
+      const owner = await setupOwner(on);
+      const health = json<{ transcode: { audioTrackSelection: boolean } }>(
+        await request(owner, {
+          method: "GET",
+          url: "/api/admin/health",
+        }),
+      );
+      expect(health.transcode.audioTrackSelection).toBe(true);
+      const session = await createRawSession(owner);
+      await createProfile(owner, "audio-other", "audio-other-password");
+      const other = await login(on, "audio-other", "audio-other-password");
+      expect((await request(other, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      })).statusCode).toBe(404);
+      expect((await request({ app: on, cookies: new Map() }, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+        headers: { authorization: `Bearer ${"Z".repeat(43)}` },
+      })).statusCode).toBe(404);
+      expect(probes).toBe(0);
+      const bearerInventory = await request({ app: on, cookies: new Map() }, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+        headers: { authorization: session.playbackAuthorization },
+      });
+      expect(bearerInventory.statusCode).toBe(200);
+      expect(bearerInventory.headers["cache-control"]).toBe("private, no-store");
+      expect(probes).toBe(1);
+      const inventory = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      });
+      expect(inventory.statusCode).toBe(200);
+      expect(inventory.headers["cache-control"]).toBe("private, no-store");
+      expect(json<{ tracks: unknown[] }>(inventory).tracks).toEqual([
+        { index: 0, language: "eng", label: "English", default: false },
+        { index: 1, language: "fra", label: "French", default: true },
+      ]);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      })).statusCode).toBe(200);
+      expect(probes).toBe(1);
+
+      const sourceDefault = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p`,
+      });
+      expect(sourceDefault.statusCode).toBe(200);
+      expect(sourceDefault.headers["x-yawf-transcode-audio"]).toBe("1");
+      expect(spawned.at(-1)).toContain("0:a:1");
+
+      const selected = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p&audio=1`,
+      });
+      expect(selected.statusCode).toBe(200);
+      expect(selected.headers["x-yawf-transcode-audio"]).toBe("1");
+      expect(spawned.at(-1)).toContain("0:a:1");
+      expect(probes).toBe(1);
+
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p&audio=2`,
+      })).statusCode).toBe(400);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?audio=../../etc/passwd`,
       })).statusCode).toBe(400);
     } finally {
       await on.close();

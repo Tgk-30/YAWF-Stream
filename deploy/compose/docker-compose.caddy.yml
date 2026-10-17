@@ -18,6 +18,7 @@ services:
       - "43110"
     volumes:
       - debridstreamer-data:/data
+      - /var/lib/yawf-server-updater/public:/run/yawf-server-updater:ro
     read_only: true
     cap_drop:
       - ALL

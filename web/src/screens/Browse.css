@@ -185,7 +185,8 @@
   margin: 0 0 var(--sp-md);
 }
 
-@media (max-width: 699px) {
+@media (max-width: 699px),
+  (min-width: 700px) and (max-width: 950px) and (max-height: 500px) {
   .browse {
     /* The bottom nav is hidden under overlays, so Browse must cover the space
        it occupied rather than reveal an interactive strip of the route below. */

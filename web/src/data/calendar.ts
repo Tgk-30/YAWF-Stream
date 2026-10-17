@@ -4,7 +4,7 @@
 // NavRail indicator. The Calendar screen additionally loads TMDB's now-playing
 // and upcoming movie pages only when that route is mounted.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { MediaPreview } from "../models/media";
 import type { UpcomingEpisode } from "../lib/metadata";
 import {
@@ -196,20 +196,37 @@ export function useCalendar(
   tmdb: TMDBService | null,
   seriesWatchlistSignature: string = EMPTY_SERIES_SIGNATURE,
   refreshKey = 0,
+  enabled = true,
 ): CalendarState {
   const serverMode = isServerMode();
+  const hasTMDB = tmdb != null || serverMode;
+  const disabledState = useMemo<CalendarState>(() => ({
+    entries: [],
+    episodes: [],
+    groups: [],
+    loading: false,
+    error: null,
+    hasSeries: false,
+    hasTMDB,
+  }), [hasTMDB]);
   const [state, setState] = useState<CalendarState>({
     entries: [],
     episodes: [],
     groups: [],
-    loading: true,
+    loading: enabled,
     error: null,
     hasSeries: false,
-    hasTMDB: tmdb != null || serverMode,
+    hasTMDB,
   });
 
   useEffect(() => {
     let cancelled = false;
+    if (!enabled) {
+      setState(disabledState);
+      return () => {
+        cancelled = true;
+      };
+    }
     void (async () => {
       setState((current) => ({
         ...current,
@@ -268,9 +285,11 @@ export function useCalendar(
     return () => {
       cancelled = true;
     };
-  }, [tmdb, serverMode, seriesWatchlistSignature, refreshKey]);
+  }, [disabledState, enabled, tmdb, serverMode, seriesWatchlistSignature, refreshKey]);
 
-  return state;
+  // Effects run after commit. Project the disabled contract during render so a
+  // profile boundary cannot expose the previous profile's calendar for a frame.
+  return enabled ? state : disabledState;
 }
 
 /** Load TMDB movie releases only while the Calendar route is mounted. */

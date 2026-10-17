@@ -61,10 +61,9 @@ import { BandwidthWarningBanner } from "./components/BandwidthWarningBanner";
 import { HostAvailabilityBanner } from "./components/HostAvailabilityBanner";
 import { InstallPrompt, isInstallPromptEligible } from "./components/InstallPrompt";
 import { LocalPlayerHost } from "./components/LocalPlayerHost";
-import { TVPairingDock } from "./components/TVPairingDock";
 // Eager (not lazy): the lock screen must paint in the SAME commit as the app
 // shell, or a code-split chunk load would flash a protected profile's content
-// behind a null Suspense fallback before the gate appears.
+// while an asynchronous gate chunk is still loading.
 import { LocalProfilePicker } from "./components/LocalProfilePicker";
 import { isSmartPreloadEnabled, whenIdle } from "./lib/smartPreload";
 import { setIdleGateSuppressed, usePlayerMounted } from "./lib/attention";
@@ -86,7 +85,6 @@ import {
 } from "./lib/firstRun";
 import { secretReadsFailedThisSession } from "./storage/KeychainSecretStore";
 import { shouldShowServerSetup } from "./lib/serverSetup";
-import { fetchServerAdminHealth } from "./lib/serverApi";
 import { isTVMode } from "./lib/tvMode";
 import {
   applyDocumentLocale,
@@ -96,11 +94,9 @@ import {
 import { useTheme } from "./theme/useTheme";
 import "./App.css";
 
-// First-paint + light screens stay eager (Discover is the landing screen; the
-// rest are small structural lists that read already-loaded store state).
+// First-paint screens stay eager. Discover is the landing screen; Watchlist and
+// History are small structural lists that read already-loaded store state.
 import { Discover } from "./screens/Discover";
-import { Search } from "./screens/Search";
-import { Library } from "./screens/Library";
 import { Watchlist } from "./screens/Watchlist";
 import { History } from "./screens/History";
 
@@ -111,6 +107,12 @@ import { History } from "./screens/History";
 // inside a <Suspense> with a glass Spinner fallback while its chunk downloads.
 const Calendar = lazy(() =>
   import("./screens/Calendar").then((m) => ({ default: m.Calendar })),
+);
+const Search = lazy(() =>
+  import("./screens/Search").then((m) => ({ default: m.Search })),
+);
+const Library = lazy(() =>
+  import("./screens/Library").then((m) => ({ default: m.Library })),
 );
 const DebridLibrary = lazy(() =>
   import("./screens/DebridLibrary").then((m) => ({ default: m.DebridLibrary })),
@@ -130,13 +132,16 @@ const Assistant = lazy(() =>
 const Detail = lazy(() =>
   import("./screens/Detail").then((m) => ({ default: m.Detail })),
 );
+const TVPairingDock = lazy(() =>
+  import("./components/TVPairingDock").then((m) => ({ default: m.TVPairingDock })),
+);
 
 // Modal/overlay flows most returning users never open (onboarding wizards, the
 // command palette, the guide, the shortcuts sheet) are code-split too, so their
 // bytes - and ServerSetupWizard's QRCode dependency - stay out of first paint.
-// Each render site sits inside a <Suspense fallback={null}> (a modal appearing a
-// frame late is invisible). InstallPrompt stays eager: it shares a module with
-// the isInstallPromptEligible predicate used during render.
+// Full-app onboarding gates use a labeled viewport boot shell while their chunks
+// load. Optional overlays lower in App retain an empty modal fallback. InstallPrompt
+// stays eager: it shares a module with the eligibility predicate used during render.
 const FirstRunWizard = lazy(() =>
   import("./components/FirstRunWizard").then((m) => ({ default: m.FirstRunWizard })),
 );
@@ -164,6 +169,17 @@ const SpotlightTour = lazy(() =>
 const CommandPalette = lazy(() =>
   import("./components/CommandPalette").then((m) => ({ default: m.CommandPalette })),
 );
+
+function FullViewportBoot({ label }: { label: string }) {
+  return (
+    <div
+      aria-busy="true"
+      className="full-viewport-boot"
+    >
+      <Spinner label={label} />
+    </div>
+  );
+}
 
 /** Gates a genuine first-run behind the right wizard, then the app:
  *   • Local Mode  → the persona FirstRunWizard (isFirstRun).
@@ -235,8 +251,18 @@ export function FirstRunHost() {
   };
 
   useEffect(() => {
-    void isFirstRun().then(setFirstRun);
-  }, []);
+    if (!hydrated) {
+      setFirstRun(null);
+      return;
+    }
+    let cancelled = false;
+    void isFirstRun().then((value) => {
+      if (!cancelled) setFirstRun(value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated]);
 
   // Decide the Server-Mode setup gate once a session is known. Non-owners and
   // Local Mode resolve to false immediately; owners need the live credential
@@ -251,7 +277,8 @@ export function FirstRunHost() {
       return;
     }
     let cancelled = false;
-    void fetchServerAdminHealth()
+    void import("./lib/serverApi")
+      .then(({ fetchServerAdminHealth }) => fetchServerAdminHealth())
       .then((health) =>
         shouldShowServerSetup({
           role: session.role,
@@ -274,32 +301,20 @@ export function FirstRunHost() {
   // ensures the wizard's choice (e.g. Advanced → simpleMode false) is applied
   // AFTER hydration's setSettings, so a late hydration can't revert it.
   if (firstRun == null || serverSetup == null || keyGate == null || !hydrated) {
-    return (
-      <div
-        aria-busy="true"
-        style={{
-          minHeight: "100vh",
-          display: "grid",
-          placeItems: "center",
-          background: "var(--bg-1, #0a0b16)",
-        }}
-      >
-        <Spinner label="Starting YAWF Stream" />
-      </div>
-    );
+    return <FullViewportBoot label="Starting YAWF Stream" />;
   }
   // Tier-tailored welcome first, on a genuine fresh start (then the existing
   // mode-specific setup wizard collects the actual config).
   if (!welcomed && (firstRun || keyGate || serverSetup)) {
     return (
-      <Suspense fallback={null}>
+      <Suspense fallback={<FullViewportBoot label="Preparing your welcome…" />}>
         <TierOnboarding onDone={markWelcomed} />
       </Suspense>
     );
   }
   if (firstRun || keyGate) {
     return (
-      <Suspense fallback={null}>
+      <Suspense fallback={<FullViewportBoot label="Preparing setup…" />}>
         <FirstRunWizard
           forced={keyGate}
           onDone={() => {
@@ -312,7 +327,7 @@ export function FirstRunHost() {
   }
   if (serverSetup)
     return (
-      <Suspense fallback={null}>
+      <Suspense fallback={<FullViewportBoot label="Preparing server setup…" />}>
         <ServerSetupWizard onDone={() => setServerSetup(false)} />
       </Suspense>
     );
@@ -744,7 +759,11 @@ export function App() {
       {/* Completed downloads can launch playback without opening a Detail
           overlay. The host owns the app-wide native-mpv mount. */}
       <LocalPlayerHost />
-      {isTVMode() && <TVPairingDock />}
+      {isTVMode() && (
+        <Suspense fallback={<Spinner variant="inline" label="Loading phone remote…" />}>
+          <TVPairingDock />
+        </Suspense>
+      )}
 
       {/* Lazily-loaded overlays - each chunk downloads only when first opened.
           A null Suspense fallback is correct here: these are modals, so "nothing

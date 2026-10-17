@@ -279,6 +279,8 @@
 
 @media (max-width: 767px) {
   .hero {
+    --hero-content-gutter: var(--sp-lg);
+    --hero-dot-gutter: var(--sp-md);
     height: clamp(
       var(--hero-mobile-min-height, 320px),
       var(--hero-mobile-fluid-height, 46vh),
@@ -368,6 +370,8 @@
 
 @media (max-width: 767px) and (max-height: 820px) {
   .hero {
+    --hero-content-gutter: var(--sp-md);
+    --hero-dot-gutter: var(--sp-sm);
     height: clamp(
       min(292px, var(--hero-mobile-min-height, 320px)),
       40vh,
@@ -387,6 +391,7 @@
 
 @media (max-width: 767px) and (max-height: 620px) {
   .hero {
+    --hero-content-gutter: calc(14px * var(--density-scale));
     height: clamp(198px, 40vh, 226px);
   }
 
@@ -420,6 +425,8 @@
 
 @media (max-width: 950px) and (max-height: 500px) {
   .hero {
+    --hero-content-gutter: calc(14px * var(--density-scale));
+    --hero-dot-gutter: calc(10px * var(--density-scale));
     height: clamp(178px, 48vh, 220px);
     min-height: 0;
   }
@@ -483,6 +490,7 @@
 
 @media (max-width: 380px) and (max-height: 620px) {
   .hero {
+    --hero-content-gutter: calc(12px * var(--density-scale));
     height: clamp(174px, 33vh, 194px);
   }
 
@@ -506,5 +514,70 @@
     min-height: 39px;
     padding: calc(8px * var(--density-scale)) calc(10px * var(--density-scale));
     font-size: 0.78125rem;
+  }
+}
+
+/* The hero artwork remains full-bleed inside its card. Only the interactive
+   foreground composes the card margin with native side insets. */
+@media (max-width: 767px), (max-width: 950px) and (max-height: 500px) {
+  .hero-content {
+    padding-left: max(
+      var(--hero-content-gutter),
+      calc(var(--safe-area-left) - var(--hero-viewport-left, 0))
+    );
+    padding-right: max(
+      var(--hero-content-gutter),
+      calc(var(--safe-area-right) - var(--hero-viewport-right, 0))
+    );
+  }
+
+  .hero-dots {
+    right: max(
+      var(--hero-dot-gutter),
+      calc(var(--safe-area-right) - var(--hero-viewport-right, 0))
+    );
+  }
+}
+
+/* Short landscape has only the strip above the fixed bottom navigation for
+   interactive hero content. Reflow the title and actions into one row instead
+   of merely translating the bottom-anchored column, which would clip the
+   badges above the hero. The dots retain their own top row and the artwork
+   remains full bleed. This block intentionally follows the compact overrides. */
+@media (max-height: 500px) and (max-width: 950px) {
+  .hero-content {
+    inset: 0 0 auto 0;
+    display: grid;
+    grid-template-areas:
+      "badges badges"
+      "title actions";
+    grid-template-columns: minmax(0, 1fr) max-content;
+    row-gap: calc(4px * var(--density-scale));
+    column-gap: calc(8px * var(--density-scale));
+    max-width: none;
+    padding-top: calc(34px + calc(4px * var(--density-scale)));
+    padding-bottom: 0;
+  }
+
+  .hero-badges {
+    grid-area: badges;
+  }
+
+  .hero-title {
+    grid-area: title;
+    min-width: 0;
+    align-self: center;
+  }
+
+  .hero-actions {
+    grid-area: actions;
+    align-self: end;
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  .hero-play,
+  .hero-info {
+    flex: 0 1 auto;
   }
 }

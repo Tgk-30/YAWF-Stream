@@ -20,6 +20,13 @@ type ParsedAppVersion = {
   prerelease: string[] | null;
 };
 
+/**
+ * Oldest desktop package whose audited native command ABI can host the current
+ * web bundle. This is deliberately independent from __APP_VERSION__: server and
+ * Android-only releases do not require a new desktop package.
+ */
+export const DESKTOP_NATIVE_COMPATIBILITY_FLOOR = "2.3.6";
+
 function parseAppVersion(value: string): ParsedAppVersion | null {
   const match = value
     .trim()
@@ -66,6 +73,14 @@ export function compareAppVersions(left: string, right: string): number {
     }
   }
   return 0;
+}
+
+/** Whether a native desktop package is below the separately audited ABI floor. */
+export function requiresDesktopNativeUpdate(
+  nativeVersion: string,
+  compatibilityFloor = DESKTOP_NATIVE_COMPATIBILITY_FLOOR,
+): boolean {
+  return compareAppVersions(nativeVersion, compatibilityFloor) < 0;
 }
 
 /** Read only the native package version. Unlike getAppVersion, this returns

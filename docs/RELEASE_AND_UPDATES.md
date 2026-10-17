@@ -1,9 +1,10 @@
 # Release, Downloads, and OTA Updates
 
-DebridStreamer ships three public-facing artifacts:
+DebridStreamer publishes platform-specific artifacts:
 
 - Desktop app bundles from the Tauri project in `web/`, including the local
   Server Mode supervisor resources.
+- Signed Android phone/tablet APKs, separate from the Android TV APK.
 - Server Mode Docker image from the root `Dockerfile`.
 - Static download website from `website/`, deployed at
   `https://tgk30.com/debridstreamer/` through Cloudflare.
@@ -219,8 +220,8 @@ The root `Dockerfile` builds:
 - A single runtime image that serves both.
 
 `.github/workflows/docker-image.yml` publishes multi-arch images for
-`linux/amd64` and `linux/arm64` to GHCR on `main`, version tags, and manual
-runs. Compose examples live in `deploy/compose/`, and the Docker user guide is
+`linux/amd64` and `linux/arm64` to GHCR on `main` and version-tag pushes.
+Manual runs verify the candidate and do not publish an image. Compose examples live in `deploy/compose/`, and the Docker user guide is
 `docs/DOCKER.md`.
 
 The image name is derived from the repository in lowercase. A desktop release
@@ -281,3 +282,54 @@ The production certificate SHA-256 digest is:
 
 Verify a downloaded APK with `apksigner verify --print-certs <file.apk>` and
 compare the reported signer certificate SHA-256 digest before installing it.
+
+
+## Native Android Phone Updates
+
+The phone/tablet APK uses an Activity-owned Kotlin updater, not the desktop
+Tauri updater. Android updates do not depend on the connected server version.
+The native consent prompt enables weekly checks; every foreground reevaluates
+the persisted cadence and failure backoff. Automatic results are deferred to
+the next foreground so a completed check does not interrupt current playback.
+A local-only no-argument Settings command can open a manual check. Remote
+Server Mode pages receive no updater, file, URL or native-network privilege.
+
+Older APKs without this updater require one manual same-signer installation
+over the existing app. Do not uninstall first. Subsequent updates require the
+native download confirmation, Android's per-app install permission if needed,
+and the system package installer confirmation. Silent installation is not
+supported or claimed.
+
+The fixed channel accepts only stable `android-vX.Y.Z` GitHub releases in
+`Tgk-30/YAWF-Stream`, containing both `YAWF.Stream_Android_X.Y.Z.apk` and
+`android-update.json`. The manifest binds package name, version, version code,
+byte count and SHA-256. Before any installer URI grant, private internal staged
+bytes must also match the installed APK signing certificate. The dedicated
+non-exported FileProvider exposes only `filesDir/updates/`. DownloadManager
+shows download progress but no completion notification that could open the
+unverified external download.
+
+### Phone candidate and publication checks
+
+1. Run the full web and Rust gates, fresh dependency audit, security decisions,
+   Android patcher tests, Kotlin behavior/SDK compilation tests and APK verifier
+   fixtures. Do not classify source-only tests as device proof.
+2. The independent `android-release.yml` tag build signs all four ABIs with the
+   existing phone identity. It verifies the pin, permissions, package/version,
+   compiled FileProvider resource binding and 16 KiB ZIP/ELF alignment. It
+   uploads a private candidate, never publishes a GitHub release itself.
+3. Inspect the exact signed APK and generated `android-update.json` and
+   `SHA256SUMS`. Compiled XML can use `@ref/0x...` and renamed resource files;
+   resolve the ID through the actual resource table, then inspect that XML.
+   Do not accept an arbitrary reference or a named but unused safe XML file.
+4. Exercise a same-signer bootstrap and an actual native download/install on
+   fresh isolated emulators, including permission denial, installer cancel,
+   process restart and retained synthetic app data. Record exact APK hashes,
+   OS/API and page sizes. A signed artifact alone is not runtime proof.
+5. Publish Android releases with `latest=false`. Never replace the desktop
+   `latest.json` channel. Use a controlled public canary before updating the
+   website when validating fixed-channel discovery against real release assets.
+6. Only after native install verification, update `ANDROID_PHONE_RELEASE` and
+   its catalog guard, deploy both mounted sites, and verify the live APK button,
+   versioned URL and downloaded bytes. Keep desktop, TV and server channel
+   constants on their separately published versions.

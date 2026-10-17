@@ -11,7 +11,7 @@
 // no-key fallback that still shows the hero. Streams need configured indexers +
 // debrid; without them the picker shows a clear empty state.
 
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useAppStore, useCachedResolutions } from "../store/AppStore";
 import { useDetail } from "../data/detail";
@@ -58,6 +58,7 @@ import {
   fetchServerEpisodes,
   resolveServerStream,
   serverOptimizedSource,
+  serverStreamAudioTracks,
   serverExternalPlaybackURL,
   type ServerTranscodeQuality,
 } from "../lib/serverApi";
@@ -78,6 +79,7 @@ import {
   useTranscodeAvailable,
   useTranscodeCapabilities,
   useDirectTorrentAvailable,
+  useServerSession,
 } from "../lib/ServerSessionContext";
 import { getStore } from "../storage";
 import {
@@ -105,6 +107,43 @@ const VideoPlayer = lazy(() =>
 
 // Persisted per-title episode selection (see selectEpisode below).
 const EPISODE_OVERRIDES_KEY = "ds_episode_overrides";
+export const MOBILE_TRANSCODE_LOOKUP_TIMEOUT_MS = 8_000;
+
+function transcodeLookupWithinTimeout(
+  lookup: Promise<string | null>,
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const timer = globalThis.setTimeout(
+      () => resolve(null),
+      MOBILE_TRANSCODE_LOOKUP_TIMEOUT_MS,
+    );
+    lookup
+      .then(resolve, () => resolve(null))
+      .finally(() => globalThis.clearTimeout(timer));
+  });
+}
+
+type PlaybackPreparationOwner = {
+  detailId: string | null;
+  season: number | null;
+  episode: number | null;
+  debrid: object | null;
+  localProfileId: string | null;
+  serverProfileId: string | null;
+};
+
+function samePlaybackPreparationOwner(
+  left: PlaybackPreparationOwner,
+  right: PlaybackPreparationOwner,
+): boolean {
+  return left.detailId === right.detailId &&
+    left.season === right.season &&
+    left.episode === right.episode &&
+    left.debrid === right.debrid &&
+    left.localProfileId === right.localProfileId &&
+    left.serverProfileId === right.serverProfileId;
+}
+
 function loadEpisodeOverrides(): Record<string, { season: number; episode: number }> {
   try {
     const raw = globalThis.localStorage?.getItem(EPISODE_OVERRIDES_KEY);
@@ -283,7 +322,9 @@ export function Detail() {
     detailPlayerOpen,
     openDetailPlayer,
     closeDetailPlayer,
+    activeProfile,
   } = useAppStore();
+  const serverSession = useServerSession();
   const cachedResolutions = useCachedResolutions();
   configureTraktScrobble({
     enabled: settings.traktScrobbleEnabled,
@@ -416,9 +457,38 @@ export function Detail() {
   const playerRef = useRef<ActivePlayer | null>(null);
   const playerSourceRevisionRef = useRef(0);
   const playbackEpochRef = useRef(0);
+  const playbackPreparationGenerationRef = useRef(0);
+  const [playbackPreparationPending, setPlaybackPreparationPending] = useState(false);
   const refreshGenerationRef = useRef(0);
   const detailIdRef = useRef(detailItem?.id ?? null);
   detailIdRef.current = detailItem?.id ?? null;
+  const playbackPreparationOwner: PlaybackPreparationOwner = {
+    detailId: detailItem?.id ?? null,
+    season: selected?.season ?? null,
+    episode: selected?.episode ?? null,
+    debrid: services.debrid,
+    localProfileId: activeProfile?.id ?? null,
+    serverProfileId: serverSession?.profileId ?? null,
+  };
+  const playbackPreparationOwnerRef = useRef(playbackPreparationOwner);
+  // This assignment deliberately happens during render. A promise continuation
+  // queued between render and layout effects must already see that ownership
+  // changed and refuse to commit the previous title, episode, service, or profile.
+  playbackPreparationOwnerRef.current = playbackPreparationOwner;
+  useLayoutEffect(() => {
+    playbackPreparationGenerationRef.current += 1;
+    setPlaybackPreparationPending(false);
+    return () => {
+      playbackPreparationGenerationRef.current += 1;
+    };
+  }, [
+    playbackPreparationOwner.detailId,
+    playbackPreparationOwner.season,
+    playbackPreparationOwner.episode,
+    playbackPreparationOwner.debrid,
+    playbackPreparationOwner.localProfileId,
+    playbackPreparationOwner.serverProfileId,
+  ]);
   const [scrollToStreams, setScrollToStreams] = useState(false);
   // Series show their streams on a dedicated page (opened by picking an
   // episode) instead of inline at the bottom of Detail; movies keep the inline
@@ -937,6 +1007,8 @@ export function Detail() {
 
   function finishClosingPlayer(): void {
     playbackEpochRef.current += 1;
+    playbackPreparationGenerationRef.current += 1;
+    setPlaybackPreparationPending(false);
     refreshGenerationRef.current += 1;
     playerRef.current = null;
     setPlayer(null);
@@ -946,6 +1018,12 @@ export function Detail() {
     window.setTimeout(() => {
       void refreshContinueWatching();
     }, 0);
+  }
+
+  function closeDetailScreen(): void {
+    playbackPreparationGenerationRef.current += 1;
+    setPlaybackPreparationPending(false);
+    closeDetail();
   }
 
   function closePlayer(): void {
@@ -1071,6 +1149,15 @@ export function Detail() {
     playbackHandoff: ActivePlayer["playbackHandoff"] = null,
     recoverySource: StreamRow | null = null,
   ): Promise<void> {
+    const preparationOwner = playbackPreparationOwner;
+    if (!samePlaybackPreparationOwner(
+      playbackPreparationOwnerRef.current,
+      preparationOwner,
+    )) {
+      return;
+    }
+    const preparationGeneration = ++playbackPreparationGenerationRef.current;
+    setPlaybackPreparationPending(false);
     const sourceHash = source?.infoHash ?? null;
     const retainedRecoverySource = recoverySource ?? (
       source == null
@@ -1127,16 +1214,50 @@ export function Detail() {
       return;
     }
 
+    const needsRemoteTranscodeLookup =
+      stream.backend !== "direct_torrent" &&
+      !(isServerMode() && transcodeAvailable) &&
+      services.debrid?.getTranscodeHLS != null;
+    if (needsRemoteTranscodeLookup) setPlaybackPreparationPending(true);
+    const requestedAbsolutePosition = Math.max(
+      0,
+      startPositionOverride ?? resumeSecondsFor(),
+    );
+    const initialServerOptimizedSource =
+      stream.backend !== "direct_torrent" &&
+      isServerMode() &&
+      transcodeAvailable
+        ? serverOptimizedSource(stream, {
+            quality: "480p",
+            startSeconds: transcodeCapabilities.seekOffset
+              ? requestedAbsolutePosition
+              : 0,
+          })
+        : null;
     const hlsUrl = stream.backend === "direct_torrent"
       ? null
-      : isServerMode() && transcodeAvailable
+      : initialServerOptimizedSource != null
       // Compatibility playback must become usable before the browser gives up
       // on the original MKV/HEVC source. Starting the four-rendition adaptive
       // ladder here made modest home servers sit at 0:00 until the transcode
       // startup deadline. Warm one lightweight rendition first; the player can
       // still switch to a higher Server Optimized quality after playback starts.
-      ? serverOptimizedSource(stream, { quality: "480p", startSeconds: 0 }).url
-      : await services.debrid?.getTranscodeHLS(stream).catch(() => null);
+      ? initialServerOptimizedSource.url
+      : services.debrid?.getTranscodeHLS == null
+        ? null
+        : await transcodeLookupWithinTimeout(
+            services.debrid.getTranscodeHLS(stream),
+          );
+    if (
+      playbackPreparationGenerationRef.current !== preparationGeneration ||
+      !samePlaybackPreparationOwner(
+        playbackPreparationOwnerRef.current,
+        preparationOwner,
+      )
+    ) {
+      return;
+    }
+    setPlaybackPreparationPending(false);
     if (hlsUrl != null) {
       openPlayer(
         hlsUrl,
@@ -1144,8 +1265,11 @@ export function Detail() {
         "webview-hls-transcode",
         serverSource,
         sourceHash,
-        startPositionOverride,
-        timelineOffsetSeconds,
+        initialServerOptimizedSource != null && transcodeCapabilities.seekOffset
+          ? initialServerOptimizedSource.timelineOffsetSeconds +
+            initialServerOptimizedSource.startPositionSeconds
+          : startPositionOverride ?? requestedAbsolutePosition,
+        initialServerOptimizedSource?.timelineOffsetSeconds ?? timelineOffsetSeconds,
         playbackHandoff,
         retainedRecoverySource,
       );
@@ -1614,7 +1738,7 @@ export function Detail() {
         <DetailHero
           item={item}
           inWatchlist={inWatchlist}
-          onClose={closeDetail}
+          onClose={closeDetailScreen}
           onToggleWatchlist={() => toggleWatchlist(detailItem)}
           onRequest={isServerMode() ? () => void requestTitle() : undefined}
           requestState={requestState}
@@ -2054,6 +2178,7 @@ export function Detail() {
               serverOptimizedQualities.length > 0
                 ? {
                     qualities: serverOptimizedQualities,
+                    loadAudioTracks: () => serverStreamAudioTracks(player.fallbackStream!),
                     defaultQuality: settings.transcode
                       ? settings.dataSaver
                         ? "480p"
@@ -2062,10 +2187,12 @@ export function Detail() {
                     request: async (
                       quality: ServerTranscodeQuality,
                       absolutePositionSeconds: number,
+                      audioTrack?: number,
                     ) =>
                       serverOptimizedSource(player.fallbackStream!, {
                         quality,
                         startSeconds: absolutePositionSeconds,
+                        ...(audioTrack == null ? {} : { audioTrack }),
                         hdrPolicy:
                           /(?:^|[^a-z0-9])(?:dv|dovi|dolby[ ._-]?vision|hdr10\+?|hdr|hlg)(?:[^a-z0-9]|$)/i.test(
                             player.sourceFileName ?? "",
@@ -2079,7 +2206,9 @@ export function Detail() {
             }
             externalPlaybackUrl={
               player.fallbackStream != null
-                ? serverExternalPlaybackURL(player.fallbackStream) ?? player.url
+                ? isServerMode()
+                  ? serverExternalPlaybackURL(player.fallbackStream)
+                  : player.url
                 : player.url
             }
             preferredPlayer={settings.preferredExternalPlayer}
@@ -2122,6 +2251,13 @@ export function Detail() {
             autoCountdown={Boolean(settings.autoAdvanceEpisodes) && !settings.dataSaver}
           />
         </Suspense>
+      )}
+
+      {playbackPreparationPending && player == null && createPortal(
+        <div className="player-backdrop">
+          <Spinner variant="overlay" label="Preparing browser-compatible playback…" />
+        </div>,
+        document.body,
       )}
 
       {trailerOpen && trailer.key != null && (

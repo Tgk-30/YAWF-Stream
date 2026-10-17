@@ -97,7 +97,7 @@ export default function Hero() {
       <div className="relative z-10 mx-auto w-full max-w-[1080px] px-6 py-24 text-center">
         <p className="hero-eyebrow eyebrow">{'// SELF-HOST'}</p>
 
-        <h1 aria-label="One server. Every screen." className="display-xl mt-6 font-display">
+        <h1 aria-label="One server. Every screen." className="display-xl mt-6 font-display max-[360px]:text-[2.7rem]">
           <span className="hero-line-1 block" aria-hidden="true">
             <CascadeChars text="One server." />
           </span>

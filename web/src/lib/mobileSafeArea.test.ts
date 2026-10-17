@@ -7,8 +7,9 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invoke(...args),
 }));
 
+const isTauri = vi.fn(() => true);
 vi.mock("./tauri", () => ({
-  isTauri: () => true,
+  isTauri: () => isTauri(),
 }));
 
 const deviceKind = vi.fn(() => "android");
@@ -52,10 +53,35 @@ async function flushPromises(): Promise<void> {
   await vi.dynamicImportSettled();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function installSnapshotBridge(getInsets: () => unknown): void {
+  (
+    globalThis as typeof globalThis & {
+      __YAWF_NATIVE_SAFE_AREA__?: { getInsets: () => unknown };
+    }
+  ).__YAWF_NATIVE_SAFE_AREA__ = { getInsets };
+}
+
 afterEach(() => {
   document.documentElement.removeAttribute("style");
   invoke.mockReset();
+  isTauri.mockReturnValue(true);
   deviceKind.mockReturnValue("android");
+  delete (
+    globalThis as typeof globalThis & { __YAWF_TAURI_ANDROID__?: unknown }
+  ).__YAWF_TAURI_ANDROID__;
+  delete (
+    globalThis as typeof globalThis & { __YAWF_NATIVE_SAFE_AREA__?: unknown }
+  ).__YAWF_NATIVE_SAFE_AREA__;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -88,13 +114,169 @@ describe("Android safe-area bridge", () => {
     uninstall();
   });
 
-  it("does not invoke the Android command on desktop", () => {
+  it("uses the authoritative Android marker with a desktop user agent", async () => {
+    deviceKind.mockReturnValue("linux");
+    (
+      globalThis as typeof globalThis & { __YAWF_TAURI_ANDROID__?: unknown }
+    ).__YAWF_TAURI_ANDROID__ = true;
+    invoke.mockResolvedValue({ top: 54, right: 3, bottom: 27, left: 0 });
+    const frames = mockAnimationFrames();
+
+    const uninstall = installMobileSafeAreaInsets();
+    frames.flush();
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("mobile_safe_area_insets");
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("54px");
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-right"),
+    ).toBe("3px");
+    uninstall();
+  });
+
+  it("uses the native snapshot bridge when remote navigation has no Tauri IPC", async () => {
+    isTauri.mockReturnValue(false);
+    installSnapshotBridge(() =>
+      JSON.stringify({ top: 66, right: 6, bottom: 33, left: 0 }),
+    );
+    const frames = mockAnimationFrames();
+
+    const uninstall = installMobileSafeAreaInsets();
+    frames.flush();
+    await flushPromises();
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("66px");
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-right"),
+    ).toBe("6px");
+    uninstall();
+  });
+
+  it("uses the native snapshot bridge with a desktop user agent", async () => {
+    isTauri.mockReturnValue(false);
+    deviceKind.mockReturnValue("linux");
+    installSnapshotBridge(() =>
+      '{"top":42,"right":0,"bottom":21,"left":9}',
+    );
+    const frames = mockAnimationFrames();
+
+    const uninstall = installMobileSafeAreaInsets();
+    frames.flush();
+    await flushPromises();
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-left"),
+    ).toBe("9px");
+    uninstall();
+  });
+
+  it("refreshes native snapshot bridge values after rotation", async () => {
+    isTauri.mockReturnValue(false);
+    const getInsets = vi
+      .fn()
+      .mockReturnValueOnce('{"top":60,"right":0,"bottom":30,"left":0}')
+      .mockReturnValueOnce('{"top":0,"right":12,"bottom":18,"left":12}');
+    installSnapshotBridge(getInsets);
+    const frames = mockAnimationFrames();
+    const uninstall = installMobileSafeAreaInsets();
+
+    frames.flush();
+    await flushPromises();
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("60px");
+
+    window.dispatchEvent(new Event("orientationchange"));
+    frames.flush();
+    await flushPromises();
+    expect(getInsets).toHaveBeenCalledTimes(2);
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("0px");
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-right"),
+    ).toBe("12px");
+    uninstall();
+  });
+
+  it("refreshes from native snapshot events and removes the listener on teardown", async () => {
+    isTauri.mockReturnValue(false);
+    const getInsets = vi
+      .fn()
+      .mockReturnValueOnce('{"top":50,"right":0,"bottom":25,"left":0}')
+      .mockReturnValueOnce('{"top":0,"right":14,"bottom":20,"left":14}');
+    installSnapshotBridge(getInsets);
+    const frames = mockAnimationFrames();
+    const uninstall = installMobileSafeAreaInsets();
+
+    frames.flush();
+    await flushPromises();
+    window.dispatchEvent(new Event("yawf-native-safe-area-change"));
+    frames.flush();
+    await flushPromises();
+
+    expect(getInsets).toHaveBeenCalledTimes(2);
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-right"),
+    ).toBe("14px");
+
+    uninstall();
+    window.dispatchEvent(new Event("yawf-native-safe-area-change"));
+    frames.flush();
+    await flushPromises();
+    expect(getInsets).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects malformed or non-numeric native snapshot bridge values", async () => {
+    isTauri.mockReturnValue(false);
+    const getInsets = vi
+      .fn()
+      .mockReturnValueOnce("not-json")
+      .mockReturnValueOnce(
+        '{"top":1,"right":0,"bottom":2,"left":0,"extra":3}',
+      )
+      .mockReturnValueOnce('{"top":-1,"right":0,"bottom":2,"left":0}')
+      .mockReturnValueOnce('{"top":1.5,"right":0,"bottom":2,"left":0}');
+    installSnapshotBridge(getInsets);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const frames = mockAnimationFrames();
+    const uninstall = installMobileSafeAreaInsets();
+
+    frames.flush();
+    await flushPromises();
+    expect(document.documentElement.style.cssText).toBe("");
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      window.dispatchEvent(new Event("orientationchange"));
+      frames.flush();
+      await flushPromises();
+      expect(document.documentElement.style.cssText).toBe("");
+    }
+    expect(warning).toHaveBeenCalledTimes(4);
+    uninstall();
+  });
+
+  it("does not invoke the Android command outside a native Android webview", () => {
     const frames = mockAnimationFrames();
     deviceKind.mockReturnValue("mac");
-    const uninstall = installMobileSafeAreaInsets();
+    const uninstallDesktop = installMobileSafeAreaInsets();
+    deviceKind.mockReturnValue("ios");
+    const uninstallIos = installMobileSafeAreaInsets();
+    deviceKind.mockReturnValue("android");
+    isTauri.mockReturnValue(false);
+    const uninstallBrowser = installMobileSafeAreaInsets();
+
     expect(frames.request).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
-    uninstall();
+    uninstallDesktop();
+    uninstallIos();
+    uninstallBrowser();
   });
 
   it("refreshes native insets after rotation", async () => {
@@ -112,6 +294,55 @@ describe("Android safe-area bridge", () => {
     await flushPromises();
     expect(invoke).toHaveBeenCalledTimes(2);
     uninstall();
+  });
+
+  it("serializes rotation refreshes and ignores the stale in-flight response", async () => {
+    const first = deferred<{ top: number; right: number; bottom: number; left: number }>();
+    const second = deferred<{ top: number; right: number; bottom: number; left: number }>();
+    invoke.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const frames = mockAnimationFrames();
+    const uninstall = installMobileSafeAreaInsets();
+
+    frames.flush();
+    await vi.dynamicImportSettled();
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event("orientationchange"));
+    window.dispatchEvent(new Event("resize"));
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    first.resolve({ top: 96, right: 0, bottom: 48, left: 0 });
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("");
+
+    second.resolve({ top: 42, right: 0, bottom: 21, left: 0 });
+    await flushPromises();
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("42px");
+    uninstall();
+  });
+
+  it("does not apply or warn from a native response that settles after teardown", async () => {
+    const pending = deferred<{ top: number; right: number; bottom: number; left: number }>();
+    invoke.mockReturnValue(pending.promise);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const frames = mockAnimationFrames();
+    const uninstall = installMobileSafeAreaInsets();
+
+    frames.flush();
+    await vi.dynamicImportSettled();
+    uninstall();
+    pending.resolve({ top: 99, right: 0, bottom: 0, left: 0 });
+    await flushPromises();
+
+    expect(
+      document.documentElement.style.getPropertyValue("--native-safe-area-top"),
+    ).toBe("");
+    expect(warning).not.toHaveBeenCalled();
   });
 
   it("retries after 250 ms and 1000 ms", async () => {

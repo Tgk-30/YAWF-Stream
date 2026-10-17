@@ -153,13 +153,15 @@
 
 .player-external {
   flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: safe center;
   gap: var(--sp-md);
   text-align: center;
   padding: var(--sp-xxxl) var(--sp-xl);
+  overflow-y: auto;
 }
 .player-external-title {
   margin: 0;
@@ -224,39 +226,6 @@
 .player-speed-control select:focus-visible {
   outline: 2px solid rgb(var(--accent-rgb));
   outline-offset: 3px;
-}
-@media (max-width: 560px) {
-  .player-volume-control {
-    display: none;
-  }
-  .player-time,
-  .player-speed-control {
-    display: none;
-  }
-  .player-osd {
-    padding-left: calc(12px * var(--density-scale));
-    padding-right: calc(12px * var(--density-scale));
-  }
-  .player-osd-row {
-    gap: calc(4px * var(--density-scale));
-  }
-  .player-osd-group {
-    gap: calc(3px * var(--density-scale));
-  }
-  .player-osd .chip {
-    min-height: 36px;
-  }
-  .player-osd .player-osd-icon-button {
-    width: 36px;
-    min-width: 36px;
-  }
-  .player-osd .player-primary-play {
-    width: 42px;
-    min-width: 42px;
-  }
-  .player-mobile-optional {
-    display: none;
-  }
 }
 @media (min-width: 561px) and (max-width: 900px) {
   .player-volume-control,
@@ -374,6 +343,10 @@
   width: min(380px, calc(100% - 32px));
   max-height: min(540px, calc(100% - 120px));
   overflow-y: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: var(--sp-md);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: var(--r-lg);
@@ -388,8 +361,13 @@
   align-items: center;
 }
 .player-options-head {
+  position: sticky;
+  top: calc(-1 * var(--sp-md));
+  z-index: 2;
   justify-content: space-between;
-  margin-bottom: var(--sp-md);
+  margin: calc(-1 * var(--sp-md)) calc(-1 * var(--sp-md)) var(--sp-md);
+  padding: var(--sp-md);
+  background: rgba(10, 12, 20, 0.98);
 }
 .player-options-section {
   display: grid;
@@ -431,6 +409,7 @@
   color: inherit;
   text-align: left;
   cursor: pointer;
+  text-decoration: none;
 }
 .player-options-action:hover {
   color: var(--accent);
@@ -443,6 +422,13 @@
 .player-options-status {
   color: rgba(255, 255, 255, 0.62);
   font-size: 0.75rem;
+}
+.player-options-manual-link {
+  display: block;
+  margin-top: var(--sp-sm);
+  color: var(--accent);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
 }
 .player-options-status {
   margin: var(--sp-xs) 0 0;
@@ -461,6 +447,27 @@
   font-weight: 700;
 }
 .player-compatibility-status svg {
+  animation: player-compat-spin 1s linear infinite;
+}
+.player-playback-status {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  max-width: calc(100% - 32px);
+  padding: calc(10px * var(--density-scale)) calc(14px * var(--density-scale));
+  border-radius: calc(999px * var(--radius-scale));
+  background: rgba(5, 7, 13, 0.82);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+.player-playback-status svg {
+  flex: 0 0 auto;
   animation: player-compat-spin 1s linear infinite;
 }
 @keyframes player-compat-spin {
@@ -618,6 +625,10 @@
   width: min(440px, calc(100% - var(--sp-xl)));
   max-height: 60vh;
   overflow-y: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: var(--sp-md);
   border-radius: var(--r-lg);
   background: rgba(12, 14, 22, 1);
@@ -844,4 +855,197 @@
   display: flex;
   gap: var(--sp-sm);
   margin-top: var(--sp-sm);
+}
+
+@media (min-width: 561px) and (max-width: 950px) {
+  .player-osd-row {
+    display: grid;
+    grid-template-columns: minmax(44px, 1fr) auto max-content;
+    column-gap: calc(4px * var(--density-scale));
+  }
+  .player-osd-audio {
+    grid-column: 1;
+    justify-content: flex-start;
+  }
+  .player-osd-transport {
+    grid-column: 2;
+    justify-content: center;
+  }
+  .player-osd-actions {
+    grid-column: 3;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 560px) {
+  .scrubbar {
+    min-height: 44px;
+  }
+  .webview-player {
+    --player-compact-osd-reserve: calc(
+      calc(46px * var(--density-scale))
+      + 24px
+      + var(--sp-xs)
+      + 92px
+      + max(calc(12px * var(--density-scale)), var(--safe-area-bottom))
+    );
+  }
+  .player-close,
+  .player-info-button {
+    width: 44px;
+    height: 44px;
+  }
+  .player-volume-control {
+    display: none;
+  }
+  .player-time,
+  .player-speed-control {
+    display: none;
+  }
+  .player-osd {
+    padding-left: max(calc(12px * var(--density-scale)), var(--safe-area-left));
+    padding-right: max(calc(12px * var(--density-scale)), var(--safe-area-right));
+  }
+  .player-osd-row {
+    display: grid;
+    grid-template-columns: minmax(44px, 1fr) auto;
+    grid-template-areas:
+      "transport transport"
+      "audio actions";
+    gap: calc(4px * var(--density-scale));
+  }
+  .player-osd-group {
+    gap: calc(3px * var(--density-scale));
+  }
+  .player-osd-audio {
+    grid-area: audio;
+    justify-content: flex-start;
+  }
+  .player-osd-transport {
+    grid-area: transport;
+    justify-content: center;
+  }
+  .player-osd-actions {
+    grid-area: actions;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .player-osd .chip {
+    min-height: 44px;
+  }
+  .player-osd .player-osd-icon-button {
+    width: 44px;
+    min-width: 44px;
+  }
+  .player-osd .player-primary-play {
+    width: 48px;
+    min-width: 48px;
+  }
+  .player-osd .player-mobile-optional {
+    display: none;
+  }
+  .player-options-menu,
+  .captions-menu {
+    top: max(calc(60px * var(--density-scale)), var(--safe-area-top));
+    right: max(calc(12px * var(--density-scale)), var(--safe-area-right));
+    bottom: max(calc(12px * var(--density-scale)), var(--safe-area-bottom));
+    left: max(calc(12px * var(--density-scale)), var(--safe-area-left));
+    z-index: 20;
+    width: auto;
+    max-height: none;
+    overflow-y: auto;
+  }
+  .player-options-choice-row .chip,
+  .player-options-action,
+  .player-options-sliders input,
+  .captions-menu button,
+  .captions-menu select,
+  .captions-menu input {
+    min-height: 44px;
+  }
+  .captions-swatch {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+  }
+}
+
+@media (pointer: coarse) {
+  .player-close,
+  .player-info-button,
+  .player-osd .chip,
+  .player-speed-control select {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .player-options-choice-row .chip,
+  .player-options-action,
+  .player-options-sliders input,
+  .captions-menu button,
+  .captions-menu select,
+  .captions-menu input {
+    min-height: 44px;
+  }
+  .captions-swatch {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+  }
+  .scrubbar {
+    min-height: 44px;
+  }
+}
+
+@media (min-width: 561px) and (max-width: 950px) and (max-height: 500px) {
+  .scrubbar {
+    min-height: 44px;
+  }
+  .webview-player {
+    --player-compact-osd-reserve: calc(
+      calc(46px * var(--density-scale))
+      + 24px
+      + var(--sp-xs)
+      + 44px
+      + max(calc(12px * var(--density-scale)), var(--safe-area-bottom))
+    );
+  }
+  .player-options-menu,
+  .captions-menu {
+    top: max(calc(12px * var(--density-scale)), var(--safe-area-top));
+    right: max(calc(12px * var(--density-scale)), var(--safe-area-right));
+    bottom: max(calc(12px * var(--density-scale)), var(--safe-area-bottom));
+    left: max(calc(12px * var(--density-scale)), var(--safe-area-left));
+    z-index: 20;
+    width: auto;
+    max-height: none;
+    overflow-y: auto;
+  }
+  .player-close,
+  .player-info-button {
+    width: 44px;
+    height: 44px;
+  }
+  .player-osd-row {
+    column-gap: calc(4px * var(--density-scale));
+  }
+  .player-osd-group {
+    gap: calc(2px * var(--density-scale));
+  }
+  .player-osd .chip,
+  .player-speed-control select {
+    min-height: 44px;
+  }
+  .player-osd .player-osd-icon-button {
+    width: 44px;
+    min-width: 44px;
+  }
+  .player-speed-control select {
+    width: 64px;
+    min-width: 64px;
+    padding-right: calc(4px * var(--density-scale));
+    padding-left: calc(4px * var(--density-scale));
+  }
+  .player-osd .player-mobile-optional {
+    display: none;
+  }
 }

@@ -69,6 +69,19 @@ export interface ServerHealth {
     latestVersion: string | null;
     available: boolean;
     url: string;
+    state?: "disabled" | "current" | "available" | "unavailable";
+    checkedAt?: string | null;
+  };
+  updater?: {
+    supported: boolean;
+    installType: "docker-compose" | "unsupported";
+    enabled: boolean;
+    state: "unregistered" | "disabled" | "idle" | "checking" | "deferred" | "updating" | "updated" | "rolled_back" | "failed";
+    currentVersion: string | null;
+    candidateVersion: string | null;
+    lastCheckedAt: string | null;
+    lastChangedAt: string | null;
+    detail: string;
   };
   transcode?: {
     enabled: boolean;
@@ -476,6 +489,28 @@ export function ServerHealthPanel({ health }: ServerHealthPanelProps) {
           <a href={health.update.url} target="_blank" rel="noreferrer">View update</a>
         </p>
       )}
+      {health.update?.state === "unavailable" && (
+        <p className="settings-hint t-secondary">The stable server release check is temporarily unavailable.</p>
+      )}
+
+      <div className="settings-status">
+        <strong>Server automatic updates</strong>{" "}
+        {health.updater?.supported ? (
+          <>
+            <span className={`chip${health.updater.enabled ? " is-active" : ""}`}>
+              {health.updater.enabled ? "Enabled" : "Off"}
+            </span>
+            <p className="settings-hint t-secondary">{health.updater.detail}</p>
+            <p className="settings-hint t-secondary">
+              Host policy is root-owned. Use <code>sudo yawf-server-update status</code>, <code>enable</code>, or <code>disable</code> on the Docker host.
+            </p>
+          </>
+        ) : (
+          <p className="settings-hint t-secondary">
+            Automatic installation is unavailable. Docker Compose operators can install and register the host updater; source and Debian installs update manually. The app never receives the Docker socket.
+          </p>
+        )}
+      </div>
 
       <p className="settings-hint t-secondary">
         Last checked {formatShortDate(health.serverTime)}

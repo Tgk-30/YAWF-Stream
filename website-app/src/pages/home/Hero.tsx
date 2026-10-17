@@ -5,7 +5,7 @@ import { Apple, ChevronDown, Smartphone, Terminal } from 'lucide-react';
 import { gsap, useGSAP } from '@/lib/gsap';
 import { usePrefersReducedMotion } from '@/lib/motion';
 import { scrollToTarget } from '@/lib/scroll';
-import { DOWNLOAD_LINKS, GITHUB_RELEASES_LATEST, VERSION } from '@/lib/site';
+import { DOWNLOAD_LINKS, GITHUB_DESKTOP_RELEASE, VERSION } from '@/lib/site';
 import RingGate from '@/components/RingGate';
 import type { RingGateDriver } from '@/components/RingGate';
 import BackgroundVideo from '@/components/BackgroundVideo';
@@ -16,7 +16,7 @@ import { asset } from '@/lib/asset';
 const QUICK_LINKS = [
   { label: 'macOS', icon: Apple, href: DOWNLOAD_LINKS.macos },
   { label: 'Linux', icon: Terminal, href: DOWNLOAD_LINKS.linux },
-  { label: 'Phone & tablet PWA', icon: Smartphone, href: '/devices' },
+  { label: 'Phone & tablet PWA (server)', icon: Smartphone, href: '/devices' },
 ];
 
 /** Chars wrapped in overflow-hidden masks for the cascade (parent must carry text styles). */
@@ -125,12 +125,12 @@ export default function Hero() {
       {/* 4 - content */}
       <div ref={contentRef} className="relative z-10 mx-auto w-full max-w-[1080px] px-6 py-28 text-center">
         <a
-          href={GITHUB_RELEASES_LATEST}
+          href={GITHUB_DESKTOP_RELEASE}
           target="_blank"
           rel="noreferrer"
           className="hero-version inline-flex items-center gap-2 rounded-chip border border-line bg-[var(--surface-glass)] px-3.5 py-1.5 font-mono text-[0.75rem] tracking-[0.04em] text-ink-3 backdrop-blur-sm transition-colors duration-150 hover:border-line-strong hover:text-brand"
         >
-          {VERSION} - latest builds on GitHub Releases
+          Desktop release {VERSION} on GitHub Releases
         </a>
 
         <div className="mt-6 flex flex-wrap items-center justify-center gap-2.5">
@@ -145,7 +145,7 @@ export default function Hero() {
           </span>
         </div>
 
-        <h1 aria-label="Your Accounts. Watch Freely." className="display-xl mt-9 font-display">
+        <h1 aria-label="Your Accounts. Watch Freely." className="display-xl mt-9 font-display max-[360px]:text-[clamp(2.4rem,12vw,2.7rem)]">
           <span className="hero-line-1 block" aria-hidden="true">
             <CascadeChars text="Your Accounts." />
           </span>

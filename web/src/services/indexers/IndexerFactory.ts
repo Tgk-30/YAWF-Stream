@@ -129,8 +129,8 @@ async function testStremioAddonConnection(
     }
 
     return (
-      Object.hasOwn(parsed as Record<string, unknown>, "id") ||
-      Object.hasOwn(parsed as Record<string, unknown>, "resources")
+      Object.prototype.hasOwnProperty.call(parsed, "id") ||
+      Object.prototype.hasOwnProperty.call(parsed, "resources")
     );
   } catch {
     return false;

@@ -12,6 +12,15 @@ on:
     tags:
       - "v*-web"
   workflow_dispatch:
+    inputs:
+      updater_candidate_digest:
+        description: "Optional published candidate image index digest for real Compose updater verification"
+        required: false
+        type: string
+      updater_source_revision:
+        description: "Exact 40-character source revision in that published image"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -28,25 +37,47 @@ jobs:
         with:
           node-version: 24
 
+      - name: Test artifact smoke and cache guards
+        run: node --test scripts/smoke_server_artifact.test.mjs scripts/service_worker_cache_contract.test.mjs
+
       - name: Build web app
         run: |
           cd web
           npm ci
+          npm test
+          npm audit --omit=dev
           npm run build
 
       - name: Build server
         run: |
           cd server
           npm ci
+          npm test
+          npm audit --omit=dev
           npm run build
 
-      - name: Resolve version from the tag
+      - name: Resolve and validate package version
         id: v
         shell: bash
         run: |
-          V="${GITHUB_REF_NAME#v}"   # v0.2.0-web -> 0.2.0-web
-          V="${V%-web}"              # 0.2.0-web  -> 0.2.0
-          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          package_version="$(node -p "require('./server/package.json').version")"
+          if ! [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "server/package.json has an invalid release version" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if ! [[ "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-web)?$ ]]; then
+              echo "release tag must be vX.Y.Z or vX.Y.Z-web" >&2
+              exit 1
+            fi
+            tag_version="${BASH_REMATCH[1]}"
+            if [ "$tag_version" != "$package_version" ]; then
+              echo "release tag version does not match server/package.json" >&2
+              exit 1
+            fi
+          fi
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
 
       - name: Build .deb
         env:
@@ -58,11 +89,41 @@ jobs:
           VERSION: ${{ steps.v.outputs.version }}
         run: cp "dist-deb/debridstreamer-server_${VERSION}_all.deb" "dist-deb/debridstreamer-server_all.deb"
 
+      - name: Smoke exact Debian package contents
+        shell: bash
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          extracted="$(mktemp -d)"
+          trap 'rm -rf "$extracted"' EXIT
+          candidate="dist-deb/debridstreamer-server_${VERSION}_all.deb"
+          receipt="dist-deb/debridstreamer-server_${VERSION}_all.smoke.json"
+          dpkg-deb --extract "$candidate" "$extracted"
+          node scripts/smoke_server_artifact.mjs \
+            --expected-version "$VERSION" \
+            --server-entry "$extracted/opt/debridstreamer/server/dist/index.cjs" \
+            --web-dist "$extracted/opt/debridstreamer/web-dist" \
+            --receipt "$receipt"
+          (
+            cd dist-deb
+            sha256sum \
+              "debridstreamer-server_${VERSION}_all.deb" \
+              debridstreamer-server_all.deb \
+              "yawf-server-updater_${VERSION}.tar.gz" \
+              "debridstreamer-server_${VERSION}_all.smoke.json" \
+              > SHA256SUMS
+          )
+
       - name: Upload as a build artifact
         uses: actions/upload-artifact@v4
         with:
           name: debridstreamer-server-deb
-          path: dist-deb/*.deb
+          path: |
+            dist-deb/*.deb
+            dist-deb/*.smoke.json
+            dist-deb/*.tar.gz
+            dist-deb/SHA256SUMS
 
       - name: Attach to the release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/')
@@ -70,4 +131,388 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           draft: true
-          files: dist-deb/*.deb
+          files: |
+            dist-deb/*.deb
+            dist-deb/*.tar.gz
+            dist-deb/SHA256SUMS
+
+  install-check:
+    name: Installed server package (${{ matrix.runner }})
+    needs: deb
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout candidate source
+        uses: actions/checkout@v4
+
+      - name: Install Node 24 and FFmpeg
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+          sudo apt-get install -y nodejs ffmpeg
+          /usr/bin/node --version | grep -Eq '^v24\.'
+          echo /usr/bin >> "$GITHUB_PATH"
+          ffmpeg -version | sed -n '1p'
+
+      - name: Download exact candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: debridstreamer-server-deb
+          path: ${{ runner.temp }}/server-candidate
+
+      - name: Verify and install exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_version="$(node -p "require('./server/package.json').version")"
+          candidate="$RUNNER_TEMP/server-candidate/debridstreamer-server_${expected_version}_all.deb"
+          test -f "$candidate"
+          (
+            cd "$RUNNER_TEMP/server-candidate"
+            sha256sum --check SHA256SUMS
+          )
+          test "$(dpkg-deb -f "$candidate" Architecture)" = "all"
+          test "$(dpkg-deb -f "$candidate" Version)" = "$expected_version"
+          depends="$(dpkg-deb -f "$candidate" Depends)"
+          grep -Eq '(^|, )nodejs \(>= 24\)(,|$)' <<<"$depends"
+          grep -Eq '(^|, )ffmpeg(,|$)' <<<"$depends"
+          sudo apt-get install -y "$candidate"
+          test "$(dpkg-query -W -f='${Version}' debridstreamer-server)" = "$expected_version"
+          echo "SERVER_DEB=$candidate" >> "$GITHUB_ENV"
+          echo "SERVER_VERSION=$expected_version" >> "$GITHUB_ENV"
+
+      - name: Verify installed service metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f /opt/debridstreamer/server/dist/index.cjs
+          test -f /opt/debridstreamer/web-dist/index.html
+          test -f /lib/systemd/system/debridstreamer.service
+          test -f /etc/debridstreamer/debridstreamer.env
+          test "$(stat -c '%a' /etc/debridstreamer/debridstreamer.env)" = "600"
+          test "$(stat -c '%U:%G' /var/lib/debridstreamer)" = "debridstreamer:debridstreamer"
+          test "$(getent passwd debridstreamer | cut -d: -f6)" = "/var/lib/debridstreamer"
+          systemctl is-enabled debridstreamer | grep -qx enabled
+          grep -q '^User=debridstreamer$' /lib/systemd/system/debridstreamer.service
+          grep -q '^NoNewPrivileges=true$' /lib/systemd/system/debridstreamer.service
+          grep -q '^ProtectSystem=strict$' /lib/systemd/system/debridstreamer.service
+
+      - name: Smoke exact installed payload as service user
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemctl stop debridstreamer
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          cp "$GITHUB_WORKSPACE/scripts/smoke_server_artifact.mjs" "$smoke_dir/smoke_server_artifact.mjs"
+          chmod 0755 "$smoke_dir"
+          chmod 0644 "$smoke_dir/smoke_server_artifact.mjs"
+          sudo -u debridstreamer /usr/bin/node "$smoke_dir/smoke_server_artifact.mjs" \
+            --expected-version "$SERVER_VERSION" \
+            --server-entry /opt/debridstreamer/server/dist/index.cjs \
+            --web-dist /opt/debridstreamer/web-dist \
+            | tee "$RUNNER_TEMP/installed-server-smoke.json"
+
+      - name: Start, restart, and inspect the systemd service
+        shell: bash
+        run: |
+          set -euo pipefail
+          port="$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")"
+          setup_token="$(openssl rand -base64 32 | tr -d '\n')"
+          # Append a test env file after the packaged configuration. Systemd
+          # EnvironmentFile values override Environment directives in drop-ins.
+          sudo install -m 0600 /dev/null /etc/debridstreamer/ci-smoke.env
+          printf '%s\n' \
+            'HOST=127.0.0.1' \
+            "PORT=$port" \
+            "DS_SERVER_SETUP_TOKEN=$setup_token" \
+            'DS_SERVER_COOKIE_SECURE=false' \
+            'DS_SERVER_UPDATE_CHECK=false' \
+            'DS_SERVER_ENABLE_DIRECT_TORRENT=false' \
+            'DS_SERVER_ENABLE_TRANSCODE=false' \
+            'DS_SERVER_LOGGER=false' \
+            | sudo tee /etc/debridstreamer/ci-smoke.env >/dev/null
+          sudo chmod 0600 /etc/debridstreamer/ci-smoke.env
+          sudo install -d -m 0755 /etc/systemd/system/debridstreamer.service.d
+          sudo install -m 0600 /dev/null /etc/systemd/system/debridstreamer.service.d/10-ci-smoke.conf
+          printf '%s\n' '[Service]' 'EnvironmentFile=/etc/debridstreamer/ci-smoke.env' \
+            | sudo tee /etc/systemd/system/debridstreamer.service.d/10-ci-smoke.conf >/dev/null
+          sudo chmod 0600 /etc/systemd/system/debridstreamer.service.d/10-ci-smoke.conf
+          unset setup_token
+          sudo systemctl daemon-reload
+          sudo systemctl start debridstreamer
+
+          wait_for_health() {
+            for attempt in $(seq 1 80); do
+              if curl --fail --silent "http://127.0.0.1:$port/api/health" \
+                | grep -q '"ok":true'; then
+                return 0
+              fi
+              if [ "$attempt" -eq 80 ]; then
+                echo "Installed systemd service did not become healthy" >&2
+                systemctl show debridstreamer \
+                  --property=ActiveState,SubState,Result,ExecMainStatus >&2
+                return 1
+              fi
+              sleep 0.25
+            done
+          }
+          wait_for_health
+          test "$(systemctl show debridstreamer --property=User --value)" = "debridstreamer"
+          main_pid="$(systemctl show debridstreamer --property=MainPID --value)"
+          test "$main_pid" -gt 1
+          test "$(awk '/^Uid:/{print $2}' "/proc/$main_pid/status")" != "0"
+
+          curl --fail --silent --show-error \
+            --dump-header "$RUNNER_TEMP/systemd-index.headers" \
+            --output "$RUNNER_TEMP/systemd-index.html" \
+            "http://127.0.0.1:$port/"
+          grep -Eqi '^content-type: text/html' "$RUNNER_TEMP/systemd-index.headers"
+          grep -Eqi '^cache-control: no-store' "$RUNNER_TEMP/systemd-index.headers"
+          curl --fail --silent --show-error \
+            --dump-header "$RUNNER_TEMP/systemd-shim.headers" \
+            --output "$RUNNER_TEMP/systemd-shim.js" \
+            "http://127.0.0.1:$port/server-mode.js"
+          grep -Eqi '^cache-control: no-store' "$RUNNER_TEMP/systemd-shim.headers"
+          grep -Fq 'globalThis.__DEBRIDSTREAMER_SERVER_URL__ = globalThis.location.origin;' "$RUNNER_TEMP/systemd-shim.js"
+
+          PORT="$port" node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { createHash } from "node:crypto";
+          import { readFile } from "node:fs/promises";
+          const base = `http://127.0.0.1:${process.env.PORT}`;
+          const html = await (await fetch(`${base}/`)).text();
+          const paths = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+\.(?:js|css))"/g)].map((match) => match[1]);
+          assert.ok(paths.some((path) => path.endsWith(".js")));
+          assert.ok(paths.some((path) => path.endsWith(".css")));
+          for (const path of new Set(paths)) {
+            assert.match(path, /-[A-Za-z0-9_-]{8,}\.(?:js|css)$/);
+            const response = await fetch(`${base}${path}`);
+            assert.equal(response.status, 200);
+            assert.equal(response.headers.get("cache-control"), "public, max-age=31536000, immutable");
+            assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+            const served = Buffer.from(await response.arrayBuffer());
+            const packaged = await readFile(`/opt/debridstreamer/web-dist${path}`);
+            const digest = (value) => createHash("sha256").update(value).digest("hex");
+            assert.equal(digest(served), digest(packaged));
+          }
+          NODE
+
+          sudo systemctl restart debridstreamer
+          wait_for_health
+          sudo systemctl stop debridstreamer
+          service_state="$(systemctl is-active debridstreamer || true)"
+          test "$service_state" = "inactive"
+
+      - name: Upload install-check evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-deb-install-check-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/installed-server-smoke.json
+            ${{ runner.temp }}/systemd-index.headers
+            ${{ runner.temp }}/systemd-shim.headers
+
+  compose-updater-check:
+    name: Docker Compose updater transaction (${{ matrix.runner }})
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout candidate source
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Link Node 24 for updater checks
+        shell: bash
+        run: sudo ln -sf "$(command -v node)" /usr/bin/node
+
+      - name: Test updater policy and release guards
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          node --test scripts/server_updater.test.mjs scripts/server_updater_ci_guards.test.mjs
+          timeout 240s env YAWF_REQUIRE_DOCKER=1 node --test scripts/server_updater_install.test.mjs
+          driver_log="$RUNNER_TEMP/server-updater-install-runtime-driver.log"
+          timeout 420s sudo env \
+            YAWF_INSTALLER_RUNTIME_DISPOSABLE=1 \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_OS="$RUNNER_OS" \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            bash scripts/server_updater_install_runtime.sh 2>&1 | tee "$driver_log"
+          runtime_raw="$(sed -n 's/^INSTALLER_RUNTIME_RAW=//p' "$driver_log" | tail -n 1)"
+          runtime_receipt="$(sed -n 's/^INSTALLER_RUNTIME_RECEIPT=//p' "$driver_log" | tail -n 1)"
+          test -n "$runtime_raw"
+          test -n "$runtime_receipt"
+          test -s "$runtime_raw"
+          test -s "$runtime_receipt"
+          expected_source_hash="$(sha256sum deploy/updater/install.sh | awk '{print $1}')"
+          node --input-type=module - "$runtime_raw" "$runtime_receipt" "$expected_source_hash" <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          const [rawPath, receiptPath, expectedSourceHash] = process.argv.slice(2);
+          const raw = readFileSync(rawPath, "utf8");
+          const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+          assert.ok(raw.length > 0 && raw.length <= 32 * 1024, "installer runtime raw output is empty or unbounded");
+          assert.doesNotMatch(raw, /DS_SERVER_SECRET_KEY=/, "installer runtime output exposed an environment value");
+          assert.equal(receipt.ok, true);
+          assert.equal(receipt.mode, "installer-pty-runtime");
+          assert.match(receipt.sourceSha256, /^[a-f0-9]{64}$/);
+          assert.equal(receipt.sourceSha256, expectedSourceHash, "PTY test did not execute the checked-out installer bytes");
+          assert.equal(receipt.cases, 13);
+          for (const key of ["freshDefaultOff", "declinedOff", "eofOff", "nonTtyOff", "unattendedOff", "stubbedDockerRegistrationPolicySystemd", "explicitResetScopeRequired", "safeExplicitReplacement", "existingEnabledPolicyPreserved", "unsafeRegistrationRejected", "enableFailureDisableObserved", "partialRegistrationCleanupObserved", "runtimeLockCleanupObserved", "continuedCleanupAfterErrorObserved"]) {
+            assert.equal(receipt[key], true, `installer receipt did not prove ${key}`);
+          }
+          assert.equal(receipt.installerIssuedUpdateTransaction, false);
+          NODE
+
+      - name: Install disabled updater helper and verify kernel lock exclusion
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo ln -sf "$(command -v node)" /usr/bin/node
+          sudo bash deploy/updater/install.sh
+          sudo sh -c 'mkdir -p /run/yawf-server-updater; exec 9>/run/yawf-server-updater/operation.lock; flock 9; sleep 3' &
+          holder=$!
+          sleep 0.5
+          set +e
+          sudo /usr/local/sbin/yawf-server-update status
+          result=$?
+          set -e
+          wait "$holder"
+          test "$result" -eq 75
+          timer_state="$(systemctl is-enabled yawf-server-update.timer 2>/dev/null || true)"
+          test "$timer_state" = "disabled"
+
+      - name: Verify isolated Compose upgrade and rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$RUNNER_TEMP/server-updater-compose.log"
+          receipt="$RUNNER_TEMP/server-updater-compose.json"
+          expected_version="$(node -p "require('./server/package.json').version")"
+          failure_version="$(node -e "const [a,b,c]=require('./server/package.json').version.split('.').map(Number);process.stdout.write([a,b,c+1].join('.'))")"
+          sudo /usr/bin/node scripts/server_updater_compose_integration.mjs 2>&1 | tee "$raw"
+          /usr/bin/node --input-type=module - "$raw" "$receipt" "$expected_version" "$failure_version" <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync, writeFileSync } from "node:fs";
+          const [raw, receipt, expectedVersion, failureVersion] = process.argv.slice(2);
+          const records = readFileSync(raw, "utf8").split(/\r?\n/).filter(Boolean).flatMap((line) => {
+            try { return [JSON.parse(line)]; } catch { return []; }
+          });
+          const result = records.findLast((record) => record?.mode === "transaction-primitive");
+          assert.ok(result, "synthetic updater receipt is missing");
+          assert.equal(result.ok, true);
+          assert.equal(result.mode, "transaction-primitive");
+          assert.equal(result.version, expectedVersion);
+          assert.match(result.digest, /^sha256:[a-f0-9]{64}$/);
+          assert.equal(result.source, "generated-user-node-fixtures");
+          assert.equal(result.upgraded, expectedVersion);
+          assert.equal(result.rollbackFrom, failureVersion);
+          for (const key of ["fixtureDigestVerified", "fixtureSourceVerified", "ownershipPreserved", "protectedFilesPreserved", "otherServicePreserved"]) {
+            assert.equal(result[key], true, `synthetic receipt did not verify ${key}`);
+          }
+          writeFileSync(receipt, `${JSON.stringify(result)}\n`, { mode: 0o600 });
+          NODE
+          test -s "$receipt"
+
+      - name: Validate optional real updater image inputs
+        if: inputs.updater_candidate_digest != '' || inputs.updater_source_revision != ''
+        shell: bash
+        env:
+          CANDIDATE_DIGEST: ${{ inputs.updater_candidate_digest }}
+          SOURCE_REVISION: ${{ inputs.updater_source_revision }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$SOURCE_REVISION" =~ ^[a-f0-9]{40}$ ]]
+
+      - name: Verify actual published image upgrade and rollback
+        if: inputs.updater_candidate_digest != '' && inputs.updater_source_revision != ''
+        shell: bash
+        env:
+          CANDIDATE_DIGEST: ${{ inputs.updater_candidate_digest }}
+          SOURCE_REVISION: ${{ inputs.updater_source_revision }}
+        run: |
+          set -euo pipefail
+          raw="$RUNNER_TEMP/server-updater-compose-actual.log"
+          receipt="$RUNNER_TEMP/server-updater-compose-actual.json"
+          expected_version="$(node -p "require('./server/package.json').version")"
+          sudo /usr/bin/node scripts/server_updater_compose_integration.mjs \
+            --candidate-digest "$CANDIDATE_DIGEST" \
+            --source-revision "$SOURCE_REVISION" \
+            2>&1 | tee "$raw"
+          /usr/bin/node --input-type=module - "$raw" "$receipt" "$CANDIDATE_DIGEST" "$SOURCE_REVISION" "$expected_version" <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync, writeFileSync } from "node:fs";
+          const [raw, receipt, expectedDigest, expectedSource, expectedVersion] = process.argv.slice(2);
+          const records = readFileSync(raw, "utf8").split(/\r?\n/).filter(Boolean).flatMap((line) => {
+            try { return [JSON.parse(line)]; } catch { return []; }
+          });
+          const result = records.findLast((record) => record?.mode === "actual-published-images");
+          assert.ok(result, "actual updater receipt is missing");
+          assert.equal(result.ok, true);
+          assert.equal(result.mode, "actual-published-images");
+          assert.equal(result.version, expectedVersion);
+          assert.equal(result.digest, expectedDigest);
+          assert.equal(result.source, expectedSource);
+          assert.equal(result.candidateDigest, expectedDigest);
+          assert.equal(result.sourceRevision, expectedSource);
+          assert.match(result.baselineDigest, /^sha256:[a-f0-9]{64}$/);
+          for (const key of ["digestVerified", "sourceVerified", "candidateHealthVerified", "injectedRollbackVerified",
+            "activePlaybackDeferred", "successfulUpdateVerified", "stopFailureVerified", "snapshotFailureVerified",
+            "interruptedRecoveryVerified", "registrationDriftPreserved", "ownershipAndDatabaseWriteVerified", "protectedFilesPreserved", "otherServicePreserved",
+            "umask077PublicStatusVerified", "nonRootReadOnlyStatusVerified"]) {
+            assert.equal(result[key], true, `actual receipt did not verify ${key}`);
+          }
+          const interrupt = records.findLast((record) => record?.diagnostic === "interrupted-transaction");
+          assert.ok(interrupt, "interrupted transaction diagnostic is missing");
+          assert.equal(interrupt.phase, "snapshotted");
+          assert.equal(interrupt.running, false);
+          assert.equal(interrupt.registrationMatches, true);
+          assert.equal(interrupt.containerStatus, "exited");
+          const preSnapshot = records.filter((record) => record?.diagnostic === "pre-snapshot-fault");
+          assert.deepEqual(preSnapshot.map((record) => record.fault).sort(), ["snapshot", "stop"]);
+          for (const record of preSnapshot) {
+            assert.equal(record.state, "failed");
+            assert.equal(record.inhibited, true);
+            assert.equal(record.journalPending, false);
+          }
+          writeFileSync(receipt, `${JSON.stringify(result)}\n`, { mode: 0o600 });
+          NODE
+          test -s "$receipt"
+
+      - name: Retain updater transaction evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-updater-compose-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/server-updater-compose.log
+            ${{ runner.temp }}/server-updater-compose.json
+            ${{ runner.temp }}/server-updater-compose-actual.log
+            ${{ runner.temp }}/server-updater-compose-actual.json
+            ${{ runner.temp }}/server-updater-install-runtime-driver.log
+            ${{ runner.temp }}/yawf-updater-install-runtime.*/installer.raw.log
+            ${{ runner.temp }}/yawf-updater-install-runtime.*/installer.receipt.json
+          if-no-files-found: error

@@ -1,0 +1,13 @@
+[Unit]
+Description=YAWF Stream host update check
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/yawf-server-update run
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true
+

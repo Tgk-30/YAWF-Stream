@@ -127,9 +127,20 @@ describe("ServerHealthPanel", () => {
         publicMode: false,
       },
       warnings: ["Server is running in setup mode", "Low disk space"],
+      updater: {
+        supported: true,
+        installType: "docker-compose",
+        enabled: true,
+        state: "deferred",
+        currentVersion: "2.3.9",
+        candidateVersion: "2.3.10",
+        lastCheckedAt: "2026-06-01T12:00:00.000Z",
+        lastChangedAt: "2026-06-01T12:00:00.000Z",
+        detail: "Active playback is in progress; the update was deferred.",
+      },
     };
 
-    render(<ServerHealthPanel health={health} />);
+    const { rerender } = render(<ServerHealthPanel health={health} />);
 
     expect(screen.getByText("Check")).toBeInTheDocument();
     expect(screen.getByText(/Cookies not secure/)).toBeInTheDocument();
@@ -141,7 +152,13 @@ describe("ServerHealthPanel", () => {
     expect(screen.getByText(/Sessions bound to device/)).toBeInTheDocument();
     expect(screen.getByText("Server is running in setup mode")).toBeInTheDocument();
     expect(screen.getByText("Low disk space")).toBeInTheDocument();
+    expect(screen.getByText("Server automatic updates")).toBeInTheDocument();
+    expect(screen.getByText(/Active playback is in progress/)).toBeInTheDocument();
+    expect(screen.getByText(/sudo yawf-server-update status/)).toBeInTheDocument();
     expect(screen.getByText(/Last checked/)).toBeInTheDocument();
+
+    rerender(<ServerHealthPanel health={{ ...health, updater: undefined }} />);
+    expect(screen.getByText(/Automatic installation is unavailable/)).toBeInTheDocument();
   });
 });
 

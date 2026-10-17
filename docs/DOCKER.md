@@ -16,6 +16,10 @@ ghcr.io/tgk-30/yawf-stream:latest
 
 Tags are created from `main` and Git tags by `.github/workflows/docker-image.yml`.
 
+To pin the Server Mode UI and API to this server release, use
+`ghcr.io/tgk-30/yawf-stream:2.3.8`. The server release updates the Docker `latest`
+tag independently of the multi-platform desktop release.
+
 ## Quick Start
 
 ```sh
@@ -132,3 +136,8 @@ For GHCR images:
 docker compose pull
 docker compose up -d
 ```
+
+Publishing an image does not update an existing running container. Pull and
+recreate it using the commands above, preserving the data volume and server
+secret, then reload the app once online so open clients load the new UI.
+Do not remove the data volume during an update.

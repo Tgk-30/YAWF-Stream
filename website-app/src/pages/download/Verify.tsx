@@ -1,11 +1,14 @@
 import { CheckCircle2, FileKey2, ShieldCheck, Terminal } from 'lucide-react';
-import { GITHUB_RELEASES_LATEST, RELEASE_CHECKSUMS } from '@/lib/site';
+import {
+  GITHUB_DESKTOP_RELEASE,
+  RELEASE_LINKS,
+} from '@/lib/site';
 
 const STEPS = [
   {
     icon: FileKey2,
     title: 'Get the checksum list',
-    body: 'Download SHA256SUMS from the same GitHub Release as the installer.',
+    body: 'Download SHA256SUMS from the matching platform release channel, not a generic latest release.',
   },
   {
     icon: Terminal,
@@ -47,18 +50,36 @@ export default function Verify() {
 
         <div className="mt-8 flex flex-wrap gap-3">
           <a
-            href={RELEASE_CHECKSUMS}
+            href={RELEASE_LINKS.desktopChecksums}
             className="inline-flex min-h-11 items-center rounded-chip bg-brand px-5 py-3 font-semibold text-[var(--ink-on-brand)]"
           >
-            Download SHA256SUMS
+            Desktop SHA256SUMS
           </a>
           <a
-            href={GITHUB_RELEASES_LATEST}
+            href={RELEASE_LINKS.androidTvChecksums}
+            className="inline-flex min-h-11 items-center rounded-chip border border-line px-5 py-3 font-semibold text-ink-1"
+          >
+            Android TV SHA256SUMS
+          </a>
+          <a
+            href={RELEASE_LINKS.androidPhoneChecksums}
+            className="inline-flex min-h-11 items-center rounded-chip border border-line px-5 py-3 font-semibold text-ink-1"
+          >
+            Android SHA256SUMS
+          </a>
+          <a
+            href={RELEASE_LINKS.serverChecksums}
+            className="inline-flex min-h-11 items-center rounded-chip border border-line px-5 py-3 font-semibold text-ink-1"
+          >
+            Server SHA256SUMS
+          </a>
+          <a
+            href={GITHUB_DESKTOP_RELEASE}
             target="_blank"
             rel="noreferrer"
             className="inline-flex min-h-11 items-center rounded-chip border border-line px-5 py-3 font-semibold text-ink-1"
           >
-            View release and provenance
+            Desktop release and provenance
           </a>
         </div>
 
@@ -70,6 +91,17 @@ export default function Verify() {
           </p>
           <p className="mt-2">
             Debian server: install a newer verified .deb manually. It does not use the desktop in-app updater.
+          </p>
+          <p className="mt-2">
+            Server updater: verify the{' '}
+            <a href={RELEASE_LINKS.serverUpdateManifest} className="text-brand hover:text-accent2">
+              update manifest
+            </a>{' '}
+            and{' '}
+            <a href={RELEASE_LINKS.serverVerification} className="text-brand hover:text-accent2">
+              verification record
+            </a>{' '}
+            before installing the optional Docker helper.
           </p>
         </div>
       </div>

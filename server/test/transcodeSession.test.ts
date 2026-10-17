@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { hlsArgs } from "../src/transcodeSession.js";
 
 function valueAfter(args: string[], option: string): string | undefined {
@@ -59,6 +59,22 @@ describe("HLS transcode arguments", () => {
       "v:0,name:1080p v:1,name:720p v:2,name:480p v:3,name:360p",
     );
     expect(args).not.toContain("-c:a");
+  });
+
+  it("maps only the bounded selected source audio stream for fixed and adaptive outputs", () => {
+    const fixed = hlsArgs("https://provider.example/video", "/tmp/yawf", {
+      quality: "480p",
+      audioTrack: 2,
+    });
+    expect(fixed.filter((value) => value === "0:a:2")).toHaveLength(1);
+    expect(fixed).not.toContain("0:a:0");
+
+    const adaptive = hlsArgs("https://provider.example/video", "/tmp/yawf", {
+      quality: "auto",
+      audioTrack: 3,
+    });
+    expect(adaptive.filter((value) => value === "0:a:3")).toHaveLength(4);
+    expect(adaptive).not.toContain("0:a:0");
   });
 
   it("supports explicit tone mapping, subtitle preservation, and hardware encoding", () => {
@@ -177,6 +193,82 @@ describe("transcode staged lifecycle", () => {
       expect(existsSync(fixture.children[1]!.dir)).toBe(false);
       expect(existsSync(active)).toBe(false);
     } finally {
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("transcode stream probe admission", () => {
+  function probeRegistry(
+    probeStreams: NonNullable<Transcoder["probeStreams"]>,
+    maxTranscodes = 2,
+  ) {
+    const database = new AppDatabase(":memory:");
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-probe-registry-"));
+    const registry = new TranscodeRegistry(
+      database,
+      {
+        dataDir,
+        maxTranscodes,
+        transcodeVideoEncoder: "libx264",
+        transcodeStartTimeoutMs: 500,
+      } as ServerConfig,
+      {
+        async detect() { return true; },
+        spawnHls() { throw new Error("not used"); },
+        probeStreams,
+      },
+    );
+    return { dataDir, database, registry };
+  }
+
+  it("bounds ffprobe concurrency across different authorized sessions", async () => {
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let maximum = 0;
+    const probe = vi.fn(async () => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return { audio: true, subtitle: false, audioTracks: [] };
+    });
+    const fixture = probeRegistry(probe, 2);
+    try {
+      const requests = Array.from({ length: 8 }, (_, index) =>
+        fixture.registry.audioTracksFor(`session-${index}`, `https://provider.example/${index}`),
+      );
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(maximum).toBe(2);
+      await expect(Promise.all(requests.slice(2))).resolves.toEqual(
+        Array.from({ length: 6 }, () => null),
+      );
+      releases.forEach((release) => release());
+      await Promise.all(requests.slice(0, 2));
+    } finally {
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reaps probe-only cache entries when their session no longer exists", async () => {
+    const probe = vi.fn(async () => ({
+      audio: true,
+      subtitle: false,
+      audioTracks: [{ index: 0, language: "eng", label: "English", default: true }],
+    }));
+    const fixture = probeRegistry(probe, 1);
+    try {
+      await fixture.registry.audioTracksFor("gone", "https://provider.example/video");
+      await fixture.registry.audioTracksFor("gone", "https://provider.example/video");
+      expect(probe).toHaveBeenCalledTimes(1);
+      (fixture.registry as unknown as { reap(): void }).reap();
+      await fixture.registry.audioTracksFor("gone", "https://provider.example/video");
+      expect(probe).toHaveBeenCalledTimes(2);
+    } finally {
+      await fixture.registry.stop();
       fixture.database.close();
       rmSync(fixture.dataDir, { recursive: true, force: true });
     }

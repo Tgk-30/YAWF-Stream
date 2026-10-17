@@ -100,6 +100,23 @@ describe("useCalendar - initial state", () => {
     const { result } = renderHook(() => useCalendar(null));
     expect(result.current.hasTMDB).toBe(false);
   });
+
+  it("performs zero store or metadata I/O while durable profile setup is disabled", async () => {
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useCalendar(SVC, "series", 0, enabled),
+      { initialProps: { enabled: false } },
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(listLibrary).not.toHaveBeenCalled();
+    expect(listWatchlist).not.toHaveBeenCalled();
+    expect(getUpcomingEpisodesForSeries).not.toHaveBeenCalled();
+    expect(fetchServerUpcomingEpisodes).not.toHaveBeenCalled();
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(1));
+    expect(listWatchlist).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("useCalendar - empty paths", () => {
@@ -148,6 +165,34 @@ describe("useCalendar - live resolution", () => {
       expect.any(Number),
       14,
     );
+  });
+
+  it("projects an empty calendar synchronously when durable setup becomes disabled", async () => {
+    listLibrary.mockResolvedValue([libEntry(preview("s1"))]);
+    getUpcomingEpisodesForSeries.mockResolvedValue([todayEp()]);
+    const renderSnapshots: Array<ReturnType<typeof useCalendar>> = [];
+    const { result, rerender } = renderHook(
+      ({ enabled }) => {
+        const calendar = useCalendar(SVC, "series", 0, enabled);
+        renderSnapshots.push(calendar);
+        return calendar;
+      },
+      { initialProps: { enabled: true } },
+    );
+    await waitFor(() => expect(result.current.entries).toHaveLength(1));
+
+    const snapshotsBeforeDisable = renderSnapshots.length;
+    rerender({ enabled: false });
+
+    expect(renderSnapshots[snapshotsBeforeDisable]).toEqual({
+      entries: [],
+      episodes: [],
+      groups: [],
+      loading: false,
+      error: null,
+      hasSeries: false,
+      hasTMDB: true,
+    });
   });
 });
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for stable YAWF Stream server updates
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=20m
+Persistent=true
+Unit=yawf-server-update.service
+
+[Install]
+WantedBy=timers.target

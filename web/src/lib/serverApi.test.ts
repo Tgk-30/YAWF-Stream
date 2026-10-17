@@ -481,6 +481,71 @@ describe("resolveServerStream", () => {
     });
   });
 
+  it("distinguishes the source default from an explicit zero audio track", () => {
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    expect(api.serverOptimizedSource(direct, {
+      quality: "480p",
+    })).toEqual({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p",
+    });
+    expect(api.serverOptimizedSource(direct, {
+      quality: "480p",
+      audioTrack: 0,
+    })).toMatchObject({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&audio=0",
+      audioTrack: 0,
+    });
+    expect(api.asServerTranscodeStream({
+      streamURL: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&audio=2",
+      fileName: "movie.mkv",
+    } as never)).toMatchObject({
+      streamURL: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&audio=2",
+    });
+  });
+
+  it("adds a bounded nonzero audio track to optimized URLs and fetches same-server inventory", async () => {
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    expect(api.serverOptimizedSource(direct, {
+      quality: "480p",
+      startSeconds: 12,
+      audioTrack: 2,
+    })).toMatchObject({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=12&audio=2",
+      audioTrack: 2,
+    });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      tracks: [
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 2, language: "fra", label: "French", default: false },
+        { index: 99, language: null, label: "invalid", default: false },
+      ],
+    }) as never);
+    await expect(api.serverStreamAudioTracks(direct)).resolves.toEqual([
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 2, language: "fra", label: "French", default: false },
+    ]);
+    expect(lastCall().url).toBe(
+      "https://server.example/api/stream/session-1/audio-tracks",
+    );
+  });
+
+  it("refuses to probe audio tracks on an unconfigured stream origin", async () => {
+    await expect(api.serverStreamAudioTracks({
+      streamURL: "https://provider.example/api/stream/session-1",
+    } as never)).rejects.toThrow("does not belong");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("builds a cookie-free external-player capability URL", () => {
     const token = "A".repeat(43);
     expect(api.serverExternalPlaybackURL({

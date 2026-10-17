@@ -1,0 +1,233 @@
+# Independent Android phone candidate build. This never changes desktop latest.
+# Publication remains an inspected draft followed by operator verification.
+name: android-release
+
+on:
+  push:
+    tags:
+      - "android-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-app:
+    name: Signed Android phone APK
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The phone app is a different artifact from the TV app: package
+      # com.tgk30.debridstreamer against com.yawf.stream.tv, the whole Tauri
+      # application against a WebView shell. Android ties upgrades to the
+      # signing identity, so it gets its own key rather than borrowing the TV
+      # one. A release requires the phone signing identity and artifact;
+      # missing signing material must fail rather than silently omit Android.
+      - name: Check phone signing secrets
+        id: gate
+        shell: bash
+        env:
+          ANDROID_APP_KEYSTORE_BASE64: ${{ secrets.ANDROID_APP_KEYSTORE_BASE64 }}
+          ANDROID_APP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_APP_KEYSTORE_PASSWORD }}
+          ANDROID_APP_KEY_ALIAS: ${{ secrets.ANDROID_APP_KEY_ALIAS }}
+          ANDROID_APP_KEY_PASSWORD: ${{ secrets.ANDROID_APP_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in ANDROID_APP_KEYSTORE_BASE64 ANDROID_APP_KEYSTORE_PASSWORD ANDROID_APP_KEY_ALIAS ANDROID_APP_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then missing=1; fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "::error::The mandatory Android phone signing material is missing."
+            exit 1
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Pinned like the TV app (SEC-012). Once a key exists this is mandatory:
+      # an unpinned signed APK is how a swapped identity ships unnoticed.
+      - name: Require the pinned certificate digest
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s web/src-tauri/SIGNING_CERT_SHA256 ]; then
+            echo "::error::web/src-tauri/SIGNING_CERT_SHA256 is missing. Commit the phone signing certificate SHA-256 before publishing a signed APK."
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        if: steps.gate.outputs.ready == 'true'
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android platform and NDK
+        if: steps.gate.outputs.ready == 'true'
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+
+      - name: Expose build tools and NDK
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          build_tools="$sdk/build-tools/36.0.0"
+          test -x "$build_tools/apksigner"
+          test -x "$build_tools/zipalign"
+          echo "$build_tools" >> "$GITHUB_PATH"
+          ndk="$sdk/ndk/27.2.12479018"
+          tc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$tc/aarch64-linux-android24-clang"
+          {
+            echo "NDK_HOME=$ndk"
+            echo "CC_aarch64_linux_android=$tc/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$tc/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$tc/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+          echo "$tc" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain with Android targets
+        if: steps.gate.outputs.ready == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust build
+        if: steps.gate.outputs.ready == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "web/src-tauri -> target"
+          key: android-release
+          cache-on-failure: true
+
+      - name: Install Node for phone build
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install web dependencies
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: web
+        run: npm ci
+
+      - name: Build the Android project
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: web
+        run: |
+          set -euo pipefail
+          npm run build
+          npm run tauri -- android init --ci
+          node ../scripts/patch_tauri_android.mjs
+          npm run tauri -- android build --apk
+
+      # Tauri's generated Gradle carries no signing config, so the release APK
+      # comes out unsigned. Align and sign it here rather than patching a
+      # generated file that the next Tauri version may reshape.
+      - name: Sign and verify the phone APK
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        env:
+          ANDROID_APP_KEYSTORE_BASE64: ${{ secrets.ANDROID_APP_KEYSTORE_BASE64 }}
+          ANDROID_APP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_APP_KEYSTORE_PASSWORD }}
+          ANDROID_APP_KEY_ALIAS: ${{ secrets.ANDROID_APP_KEY_ALIAS }}
+          ANDROID_APP_KEY_PASSWORD: ${{ secrets.ANDROID_APP_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          version="$(node -p "require('./web/package.json').version")"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#android-v}"
+            test "$tag_version" = "$version"
+          fi
+          ks="$RUNNER_TEMP/yawf-android-app.jks"
+          printf '%s' "$ANDROID_APP_KEYSTORE_BASE64" | base64 --decode > "$ks"
+
+          source="web/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk"
+          test -f "$source"
+          aligned="$RUNNER_TEMP/aligned.apk"
+          asset="$RUNNER_TEMP/YAWF.Stream_Android_${version}.apk"
+          zipalign -P 16 -f 4 "$source" "$aligned"
+          apksigner sign \
+            --ks "$ks" \
+            --ks-pass "env:ANDROID_APP_KEYSTORE_PASSWORD" \
+            --ks-key-alias "$ANDROID_APP_KEY_ALIAS" \
+            --key-pass "env:ANDROID_APP_KEY_PASSWORD" \
+            --out "$asset" \
+            "$aligned"
+          apksigner verify "$asset"
+
+          expected_digest="$(tr -d '[:space:]:' < web/src-tauri/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')"
+          actual_digest="$(
+            apksigner verify --print-certs "$asset" \
+              | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+              | head -1 \
+              | tr -d '[:space:]:' \
+              | tr '[:upper:]' '[:lower:]'
+          )"
+          if [ -z "$actual_digest" ] || [ "$actual_digest" != "$expected_digest" ]; then
+            echo "::error::Phone APK signing certificate does not match web/src-tauri/SIGNING_CERT_SHA256"
+            exit 1
+          fi
+          python3 scripts/verify_android_apk.py \
+            --apk "$asset" \
+            --version "$version" \
+            --certificate-pin web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          rm -f "$ks"
+          mkdir -p "$RUNNER_TEMP/phone-candidate"
+          cp "$asset" "$RUNNER_TEMP/phone-candidate/"
+
+      - name: Retain failed signed APK for private diagnosis
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone-failed-candidate
+          path: ${{ runner.temp }}/YAWF.Stream_Android_*.apk
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Build fixed-channel Android update metadata
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./web/package.json').version")"
+          candidate="$RUNNER_TEMP/phone-candidate"
+          node scripts/build_android_update_manifest.mjs \
+            --apk "$candidate/YAWF.Stream_Android_${version}.apk" \
+            --version "$version" --source "$GITHUB_SHA" \
+            --output "$candidate/android-update.json"
+          (cd "$candidate" && sha256sum "YAWF.Stream_Android_${version}.apk" android-update.json > SHA256SUMS)
+
+      - name: Upload Android verification candidate
+        if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone-verification-candidate
+          path: ${{ runner.temp }}/phone-candidate/*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload Android release candidate
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone-release-candidate
+          path: ${{ runner.temp }}/phone-candidate/*
+          if-no-files-found: error
+          retention-days: 3

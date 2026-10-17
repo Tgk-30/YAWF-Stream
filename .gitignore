@@ -2,6 +2,10 @@
 .swiftpm/
 node_modules/
 
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
 # local preview/launch config
 .claude/
 .agents

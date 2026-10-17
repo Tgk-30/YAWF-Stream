@@ -85,6 +85,8 @@
    bottom nav too, so they need the same card treatment despite their width. */
 @media (max-width: 767px), (max-width: 950px) and (max-height: 500px) {
   .discover > .hero {
+    --hero-viewport-left: var(--sp-md);
+    --hero-viewport-right: var(--sp-md);
     margin: var(--sp-md) var(--sp-md) 0;
     border-radius: var(--r-lg);
   }
@@ -143,7 +145,7 @@
   }
 
   .discover-body {
-    padding: 0 var(--sp-md) var(--sp-lg);
+    padding: 0 max(var(--sp-md), var(--safe-area-right)) var(--sp-lg) max(var(--sp-md), var(--safe-area-left));
   }
 
   .discover-catalog-notice {
@@ -160,7 +162,7 @@
   }
 
   .discover-body {
-    padding: 0 var(--sp-md) var(--sp-md);
+    padding: 0 max(var(--sp-md), var(--safe-area-right)) var(--sp-md) max(var(--sp-md), var(--safe-area-left));
   }
 }
 
@@ -177,11 +179,14 @@
   }
 
   .discover > .hero {
+    --hero-viewport-left: var(--sp-sm);
+    --hero-viewport-right: var(--sp-sm);
     margin-inline: var(--sp-sm);
   }
 
   .discover-body {
-    padding-inline: var(--sp-sm);
+    padding-left: max(var(--sp-sm), var(--safe-area-left));
+    padding-right: max(var(--sp-sm), var(--safe-area-right));
   }
 }
 

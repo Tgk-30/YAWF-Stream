@@ -107,6 +107,7 @@ jobs:
             "YAWF.Stream_${expected_version}_amd64.deb" \
             "YAWF.Stream_${expected_version}_amd64.deb.sig" \
             "YAWF.Stream_Android.TV_${expected_version}.apk" \
+            "YAWF.Stream_Android_${expected_version}.apk" \
             "YAWF.Stream_aarch64.app.tar.gz" \
             "YAWF.Stream_aarch64.app.tar.gz.sig" \
             "YAWF.Stream_x64.app.tar.gz" \
@@ -135,6 +136,55 @@ jobs:
             exit 1
           fi
 
+  android-phone:
+    name: Signed Android phone artifact verification
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android build tools
+        run: sdkmanager "build-tools;36.0.0"
+
+      - name: Download and verify production phone APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          version="${version%-web}"
+          asset="YAWF.Stream_Android_${version}.apk"
+          mkdir -p "$RUNNER_TEMP/phone-assets"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$asset" \
+            --dir "$RUNNER_TEMP/phone-assets"
+          python3 scripts/verify_android_apk.py \
+            --apk "$RUNNER_TEMP/phone-assets/$asset" \
+            --version "$version" \
+            --certificate-pin web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+
   android-tv:
     name: Android TV package verification
     runs-on: ubuntu-24.04
@@ -146,6 +196,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android build tools
         run: sdkmanager "build-tools;36.0.0"

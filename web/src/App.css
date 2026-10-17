@@ -1,5 +1,13 @@
 /* App shell layout - slim nav rail + flexible content area. */
 
+.full-viewport-boot {
+  display: grid;
+  min-height: 100vh;
+  min-height: 100dvh;
+  place-items: center;
+  background: var(--bg-1, #0a0b16);
+}
+
 .app {
   --nav-rail-width: 96px;
   /* Floating glass nav (Apple TV-style): the rail detaches from the edges and

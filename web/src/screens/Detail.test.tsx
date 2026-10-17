@@ -9,7 +9,7 @@
 // can be asserted without their internals.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { MediaPreview, MediaItem } from "../models/media";
 import type { DetailState } from "../data/detail";
@@ -28,6 +28,9 @@ let mockContinueWatching: any[] = [];
 let serverModeOn = false;
 let transcodeAvailable = false;
 let pickerSelection = { season: 1, episode: 3 };
+let mockActiveProfile: { id: string } | null = null;
+let mockServerSession: { profileId: string } | null = null;
+let capturedStreamPlay: (() => void) | null = null;
 const tauriState = vi.hoisted(() => ({ on: false, desktop: false }));
 const downloadsFfmpegAvailable = vi.hoisted(() => vi.fn(async () => true));
 const downloadsRuntime = vi.hoisted(() => ({
@@ -75,6 +78,7 @@ vi.mock("../store/AppStore", () => ({
     trailerOpen: false,
     openTrailer,
     closeTrailer,
+    activeProfile: mockActiveProfile,
   }),
   useCachedResolutions: () =>
     mockCached ? { [mockDetailItem?.id ?? "x"]: mockCached } : {},
@@ -104,6 +108,7 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
 }));
 
 vi.mock("../lib/ServerSessionContext", () => ({
+  useServerSession: () => mockServerSession,
   useTranscodeAvailable: () => transcodeAvailable,
   useDirectTorrentAvailable: () => false,
   useTranscodeCapabilities: () => ({
@@ -127,11 +132,17 @@ const createRequest = vi.fn<(...a: any[]) => any>();
 const resolveServerStream = vi.fn<(...a: any[]) => any>();
 const fetchServerEpisodes = vi.fn<(...a: any[]) => any>();
 const serverOptimizedSource = vi.fn((stream: any, options: any) => ({
-  url: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8`,
-  timelineOffsetSeconds: 0,
+  url: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8${
+    options.startSeconds > 0 ? `?start=${options.startSeconds}` : ""
+  }`,
+  timelineOffsetSeconds: options.startSeconds ?? 0,
   startPositionSeconds: 0,
   quality: options.quality,
 }));
+const serverExternalPlaybackURL = vi.fn(
+  (stream: any) => `${stream.streamURL}/external-test` as string | null,
+);
+const serverStreamAudioTracks = vi.fn(async (_stream?: unknown) => []);
 vi.mock("../lib/serverApi", () => ({
   asServerTranscodeStream: (stream: any) => ({
     ...stream,
@@ -139,7 +150,8 @@ vi.mock("../lib/serverApi", () => ({
   }),
   serverOptimizedSource: (stream: any, options: any) =>
     serverOptimizedSource(stream, options),
-  serverExternalPlaybackURL: (stream: any) => `${stream.streamURL}/external-test`,
+  serverExternalPlaybackURL: (stream: any) => serverExternalPlaybackURL(stream),
+  serverStreamAudioTracks: (stream: any) => serverStreamAudioTracks(stream),
   createRequest: (...a: unknown[]) => createRequest(...a),
   fetchServerEpisodes: (...a: unknown[]) => fetchServerEpisodes(...a),
   resolveServerStream: (...a: unknown[]) => resolveServerStream(...a),
@@ -245,6 +257,26 @@ vi.mock("../components/StreamPicker", () => ({
         play-stream
       </button>
       <button
+        data-testid="play-transcode-stream"
+        onClick={() => onPlay(
+          { streamURL: "https://cdn.example/current.mkv", fileName: "current.mkv", codec: "H.265" },
+          { title: "Current" },
+        )}
+      >
+        play-transcode-stream
+      </button>
+      <button
+        data-testid="capture-stream-play"
+        onClick={() => {
+          capturedStreamPlay = () => onPlay(
+            { streamURL: "https://cdn.example/captured.mkv", fileName: "captured.mkv", codec: "H.265" },
+            { title: "Captured" },
+          );
+        }}
+      >
+        capture-stream-play
+      </button>
+      <button
         data-testid="resolve-and-play-stream"
         onClick={() => {
           const source = {
@@ -307,7 +339,9 @@ vi.mock("../components/Rail", () => ({
 }));
 
 vi.mock("../components/Spinner", () => ({
-  Spinner: () => <div data-testid="spinner" />,
+  Spinner: ({ label }: { label?: string }) => (
+    <div data-testid="spinner" role="status">{label}</div>
+  ),
 }));
 
 vi.mock("../components/VideoPlayer", () => ({
@@ -328,6 +362,8 @@ vi.mock("../components/VideoPlayer", () => ({
     onEnded,
     refreshCurrentSource,
     startPositionSeconds,
+    timelineOffsetSeconds,
+    externalPlaybackUrl,
     initialHandoffState,
   }: any) => (
     <div
@@ -356,6 +392,8 @@ vi.mock("../components/VideoPlayer", () => ({
         playerPreferences?.rememberPerTitleTrackChoices ?? "",
       )}
       data-start-position={String(startPositionSeconds ?? 0)}
+      data-timeline-offset={String(timelineOffsetSeconds ?? 0)}
+      data-external-playback-url={externalPlaybackUrl ?? ""}
       data-handoff-rate={String(initialHandoffState?.playbackRate ?? "")}
     >
       <button type="button" onClick={() => onProgress?.(80, 100)}>
@@ -464,6 +502,9 @@ beforeEach(() => {
   tauriState.on = false;
   tauriState.desktop = false;
   pickerSelection = { season: 1, episode: 3 };
+  mockActiveProfile = null;
+  mockServerSession = null;
+  capturedStreamPlay = null;
   mockServices = {
     tmdb: null,
     indexers: null,
@@ -965,6 +1006,226 @@ describe("Detail play", () => {
     );
   });
 
+  it("shows bounded mobile transcode preparation then falls back to the original source", async () => {
+    vi.useFakeTimers();
+    try {
+      const getTranscodeHLS = vi.fn(() => new Promise<string | null>(() => {}));
+      mockServices.debrid = { getTranscodeHLS };
+      mockCached = {
+        stream: {
+          fileName: "movie.mkv",
+          streamURL: "https://cdn/movie.mkv",
+          codec: "H.265",
+        },
+      };
+      render(<Detail />);
+      await act(async () => {
+        fireEvent.click(screen.getByText("play"));
+        await Promise.resolve();
+      });
+
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Preparing browser-compatible playback",
+      );
+      await act(async () => {
+        vi.advanceTimersByTime(8_000);
+        await Promise.resolve();
+      });
+
+      expect(screen.getByTestId("player")).toHaveAttribute(
+        "data-url",
+        "https://cdn/movie.mkv",
+      );
+      expect(screen.getByTestId("player")).toHaveAttribute(
+        "data-engine",
+        "webview-direct",
+      );
+      expect(getTranscodeHLS).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a stale episode callback from cancelling the current episode preparation", async () => {
+    let resolveTranscode!: (url: string | null) => void;
+    const getTranscodeHLS = vi.fn(
+      () => new Promise<string | null>((resolve) => { resolveTranscode = resolve; }),
+    );
+    mockDetailItem = preview("s1", { type: "series", title: "Series", tmdbId: 200 });
+    mockDetail = detailState({
+      item: mediaItem({ id: "s1", type: "series", title: "Series", tmdbId: 200 }),
+    });
+    mockServices.debrid = { getTranscodeHLS };
+    mockCached = {
+      stream: {
+        fileName: "episode.mkv",
+        streamURL: "https://cdn/episode.mkv",
+        codec: "H.265",
+      },
+    };
+    pickerSelection = { season: 1, episode: 1 };
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await userEvent.click(screen.getByTestId("capture-stream-play"));
+    pickerSelection = { season: 1, episode: 2 };
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await userEvent.click(screen.getByTestId("play-transcode-stream"));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Preparing browser-compatible playback",
+    );
+
+    await act(async () => {
+      capturedStreamPlay?.();
+      await Promise.resolve();
+    });
+    expect(getTranscodeHLS).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Preparing browser-compatible playback",
+    );
+
+    await act(async () => {
+      resolveTranscode("https://cdn/episode-2.m3u8");
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.getByTestId("player")).toHaveAttribute(
+      "data-url",
+      "https://cdn/episode-2.m3u8",
+    ));
+    expect(screen.getByTestId("player")).toHaveAttribute("data-subtitle", "S1 E2");
+  });
+
+  it("does not commit a pending transcode after the debrid service is replaced", async () => {
+    let resolveTranscode!: (url: string | null) => void;
+    const getTranscodeHLS = vi.fn(
+      () => new Promise<string | null>((resolve) => { resolveTranscode = resolve; }),
+    );
+    mockServices.debrid = { getTranscodeHLS };
+    mockCached = {
+      stream: { fileName: "movie.mkv", streamURL: "https://cdn/movie.mkv", codec: "H.265" },
+    };
+    const { rerender } = render(<Detail />);
+    await userEvent.click(screen.getByText("play"));
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    mockServices = {
+      ...mockServices,
+      debrid: { getTranscodeHLS: vi.fn(async () => "https://cdn/new-service.m3u8") },
+    };
+    rerender(<Detail />);
+    resolveTranscode("https://cdn/stale-service.m3u8");
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.queryByTestId("player")).toBeNull();
+    expect(screen.queryByText("Preparing browser-compatible playback…")).toBeNull();
+  });
+
+  it("does not commit pending transcodes across local or server profile changes", async () => {
+    const runProfileChange = async (server: boolean) => {
+      let resolveTranscode!: (url: string | null) => void;
+      const getTranscodeHLS = vi.fn(
+        () => new Promise<string | null>((resolve) => { resolveTranscode = resolve; }),
+      );
+      serverModeOn = server;
+      mockActiveProfile = server ? null : { id: "local-a" };
+      mockServerSession = server ? { profileId: "server-a" } : null;
+      mockServices.debrid = { getTranscodeHLS };
+      mockCached = {
+        stream: { fileName: "movie.mkv", streamURL: "https://cdn/movie.mkv", codec: "H.265" },
+      };
+      const rendered = render(<Detail />);
+      await userEvent.click(screen.getByText("play"));
+      expect(screen.getByRole("status")).toBeInTheDocument();
+
+      if (server) mockServerSession = { profileId: "server-b" };
+      else mockActiveProfile = { id: "local-b" };
+      rendered.rerender(<Detail />);
+      resolveTranscode("https://cdn/stale-profile.m3u8");
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.queryByTestId("player")).toBeNull();
+      rendered.unmount();
+    };
+
+    await runProfileChange(false);
+    await runProfileChange(true);
+  });
+
+  it("invalidates pending transcode ownership when the title changes", async () => {
+    let resolveTranscode!: (url: string | null) => void;
+    mockServices.debrid = {
+      getTranscodeHLS: vi.fn(
+        () => new Promise<string | null>((resolve) => { resolveTranscode = resolve; }),
+      ),
+    };
+    mockCached = {
+      stream: { fileName: "movie.mkv", streamURL: "https://cdn/movie.mkv", codec: "H.265" },
+    };
+    const { rerender } = render(<Detail />);
+    await userEvent.click(screen.getByText("play"));
+
+    mockDetailItem = preview("m2", { type: "movie", title: "Replacement" });
+    mockDetail = detailState({ item: mediaItem({ id: "m2", title: "Replacement" }) });
+    mockCached = null;
+    rerender(<Detail />);
+    resolveTranscode("https://cdn/stale-title.m3u8");
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.queryByTestId("player")).toBeNull();
+    expect(screen.queryByText("Preparing browser-compatible playback…")).toBeNull();
+  });
+
+  it("invalidates pending transcode ownership when Detail closes", async () => {
+    let resolveTranscode!: (url: string | null) => void;
+    mockServices.debrid = {
+      getTranscodeHLS: vi.fn(
+        () => new Promise<string | null>((resolve) => { resolveTranscode = resolve; }),
+      ),
+    };
+    mockCached = {
+      stream: { fileName: "movie.mkv", streamURL: "https://cdn/movie.mkv", codec: "H.265" },
+    };
+    render(<Detail />);
+    await userEvent.click(screen.getByText("play"));
+    await userEvent.click(screen.getByText("close"));
+    resolveTranscode("https://cdn/stale-close.m3u8");
+    await act(async () => { await Promise.resolve(); });
+
+    expect(closeDetail).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("player")).toBeNull();
+    expect(screen.queryByText("Preparing browser-compatible playback…")).toBeNull();
+  });
+
+  it("does not open a stale transcode after Detail unmounts", async () => {
+    let resolveTranscode!: (url: string | null) => void;
+    const getTranscodeHLS = vi.fn(
+      () => new Promise<string | null>((resolve) => { resolveTranscode = resolve; }),
+    );
+    mockServices.debrid = { getTranscodeHLS };
+    mockCached = {
+      stream: {
+        fileName: "movie.mkv",
+        streamURL: "https://cdn/movie.mkv",
+        codec: "H.265",
+      },
+    };
+    const { unmount } = render(<Detail />);
+    await act(async () => {
+      fireEvent.click(screen.getByText("play"));
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Preparing browser-compatible playback",
+    );
+
+    unmount();
+    await act(async () => {
+      resolveTranscode("https://cdn/stale.m3u8");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(openDetailPlayer).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("player")).toBeNull();
+  });
+
   it("re-resolves the same source and preserves position and handoff state", async () => {
     const resolveStream = vi
       .fn()
@@ -1182,6 +1443,66 @@ describe("Detail play", () => {
       { quality: "480p", startSeconds: 0 },
     );
     expect(document.querySelector(".episode-streams")).toBeNull();
+  });
+
+  it("starts initial server HLS near the saved absolute resume position when seek offsets are advertised", async () => {
+    serverModeOn = true;
+    transcodeAvailable = true;
+    mockContinueWatching = [{
+      mediaId: "m1",
+      episodeId: null,
+      progressSeconds: 912,
+      durationSeconds: 4_000,
+      completed: false,
+    }];
+    mockCached = {
+      stream: {
+        fileName: "movie.mkv",
+        streamURL: "https://server.example/api/stream/resume-session",
+        codec: "H.265",
+      },
+    };
+
+    render(<Detail />);
+    await userEvent.click(screen.getByText("play"));
+
+    const player = await screen.findByTestId("player");
+    expect(serverOptimizedSource).toHaveBeenCalledWith(
+      expect.objectContaining({
+        streamURL: "https://server.example/api/stream/resume-session",
+      }),
+      { quality: "480p", startSeconds: 912 },
+    );
+    expect(player).toHaveAttribute(
+      "data-url",
+      "https://server.example/api/stream/resume-session/index.m3u8?start=912",
+    );
+    expect(player).toHaveAttribute("data-timeline-offset", "912");
+    expect(player).toHaveAttribute("data-start-position", "0");
+  });
+
+  it("does not expose a protected server player URL when its external capability is unavailable", async () => {
+    serverModeOn = true;
+    serverExternalPlaybackURL.mockReturnValueOnce(null);
+    mockCached = {
+      stream: {
+        fileName: "movie.mp4",
+        streamURL: "https://server.example/api/stream/protected-session",
+        codec: "H.264",
+      },
+    };
+
+    render(<Detail />);
+    await userEvent.click(screen.getByText("play"));
+
+    const player = await screen.findByTestId("player");
+    expect(player).toHaveAttribute("data-url", "https://server.example/api/stream/protected-session");
+    expect(player).toHaveAttribute("data-external-playback-url", "");
+    expect(serverExternalPlaybackURL).toHaveBeenCalledWith(
+      expect.objectContaining({
+        streamURL: "https://server.example/api/stream/protected-session",
+      }),
+    );
   });
 
   it("routes 2160p DV/HDR H265-in-MP4 straight to native mpv on desktop", async () => {

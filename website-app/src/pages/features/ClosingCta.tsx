@@ -50,7 +50,7 @@ export default function ClosingCta() {
           viewport={{ once: true }}
           transition={{ duration: 0.4, delay: reduced ? 0 : 0.35 }}
         >
-          Free · MIT · {VERSION}
+          Free · MIT · desktop {VERSION}
         </motion.p>
       </div>
     </section>

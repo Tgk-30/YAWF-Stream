@@ -21,7 +21,7 @@ function check(condition, message) {
 const decisionsPath = "docs/SECURITY_DECISIONS.md";
 check(existsSync(join(root, decisionsPath)), "Security decision log exists");
 const decisions = read(decisionsPath);
-for (let id = 1; id <= 13; id += 1) {
+for (let id = 1; id <= 17; id += 1) {
   check(decisions.includes(`SEC-${String(id).padStart(3, "0")}`), `Security decision SEC-${String(id).padStart(3, "0")} is recorded`);
 }
 check(
@@ -80,6 +80,131 @@ const remoteDesktopPermission = read(
 const mobilePermission = read(
   "web/src-tauri/permissions/mobile-commands.toml",
 );
+const androidExternalPlayerCapability = JSON.parse(
+  read("web/src-tauri/capabilities/android-external-player.json"),
+);
+const androidExternalPlayerPermission = read(
+  "web/src-tauri/permissions/android-external-player.toml",
+);
+const androidExternalPlayerCommands = new Set(
+  [...androidExternalPlayerPermission.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
+    .flatMap((match) => [...match[1].matchAll(/"([a-z][a-z0-9_]*)"/g)])
+    .map((match) => match[1]),
+);
+check(
+  androidExternalPlayerCapability.local === true &&
+    androidExternalPlayerCapability.remote == null &&
+    JSON.stringify(androidExternalPlayerCapability.windows) === '["main"]' &&
+    JSON.stringify(androidExternalPlayerCapability.platforms) === '["android"]' &&
+    JSON.stringify(androidExternalPlayerCapability.permissions) === '["android-external-player-command"]' &&
+    androidExternalPlayerCommands.size === 1 &&
+    androidExternalPlayerCommands.has("mobile_open_external_player"),
+  "Android video chooser is restricted to the local main webview and its one command",
+);
+const androidUpdateCapability = JSON.parse(read("web/src-tauri/capabilities/android-local-updater.json"));
+const androidUpdatePermission = read("web/src-tauri/permissions/android-update-dialog.toml");
+const androidUpdateCommands = new Set(
+  [...androidUpdatePermission.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
+    .flatMap((match) => [...match[1].matchAll(/"([a-z][a-z0-9_]*)"/g)])
+    .map((match) => match[1]),
+);
+check(
+  androidUpdateCapability.local === true && androidUpdateCapability.remote == null &&
+    JSON.stringify(androidUpdateCapability.windows) === '["main"]' &&
+    JSON.stringify(androidUpdateCapability.platforms) === '["android"]' &&
+    JSON.stringify(androidUpdateCapability.permissions) === '["android-update-dialog-command"]' &&
+    androidUpdateCommands.size === 1 && androidUpdateCommands.has("mobile_check_android_updates") &&
+    /SEC-017[^\n]*fixed official Android phone channel/.test(decisions),
+  "Android updater dialog is restricted to the local main webview and one no-argument command",
+);
+const androidUpdater = read("scripts/android/YawfAndroidUpdater.kt");
+const androidUpdateCommand = read("web/src-tauri/src/mobile_android_update.rs");
+check(
+  !/@JavascriptInterface|addJavascriptInterface|addWebMessageListener/.test(androidUpdater) &&
+    /mobile_check_android_updates\(webview: tauri::Webview\)/.test(androidUpdateCommand) &&
+    /filesDir, "updates"/.test(androidUpdater) &&
+    /canRequestPackageInstalls/.test(androidUpdater) &&
+    /checkAndroidUpdates/.test(androidUpdateCommand),
+  "Android updater accepts no web URL or metadata and stages installer files privately",
+);
+const androidRemoteSafeAreaCapability = JSON.parse(
+  read("web/src-tauri/capabilities/android-remote-safe-area.json"),
+);
+const androidRemoteSafeAreaPermission = read(
+  "web/src-tauri/permissions/android-remote-safe-area.toml",
+);
+const androidProjectPatcher = read("scripts/patch_tauri_android.mjs");
+const mobileSafeAreaSource = read("web/src/lib/mobileSafeArea.ts");
+// Inspect the current generated activity, not recognized historical templates.
+const currentActivityStart = androidProjectPatcher.indexOf("function serverPlayerPatchedMainActivity(packageName) {");
+const currentActivityEnd = androidProjectPatcher.indexOf("\nfunction patchedMainActivity(", currentActivityStart);
+const currentActivityTemplate = currentActivityStart >= 0 && currentActivityEnd > currentActivityStart
+  ? androidProjectPatcher.slice(currentActivityStart, currentActivityEnd)
+  : "";
+
+const androidRemoteSafeAreaCommands = new Set(
+  [...androidRemoteSafeAreaPermission.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
+    .flatMap((match) => [...match[1].matchAll(/"([a-z][a-z0-9_]*)"/g)])
+    .map((match) => match[1]),
+);
+check(
+  androidRemoteSafeAreaCapability.local === false &&
+    JSON.stringify(androidRemoteSafeAreaCapability.windows) === '["main"]' &&
+    JSON.stringify(androidRemoteSafeAreaCapability.platforms) === '["android"]' &&
+    JSON.stringify(androidRemoteSafeAreaCapability.remote?.urls) === '["https://*:*","http://*:*"]' &&
+    JSON.stringify(androidRemoteSafeAreaCapability.permissions) === '["android-remote-safe-area-command"]' &&
+    androidRemoteSafeAreaCommands.size === 1 &&
+    androidRemoteSafeAreaCommands.has("mobile_safe_area_insets") &&
+    /SEC-014[^\n]*four nonnegative integer safe-area insets[^\n]*no origin attestation[^\n]*no external-player, file, credential, native-network or other native access/.test(decisions),
+  "Remote Android main pages receive only read-only numeric safe-area insets",
+);
+const generatedInsetBridge = /@Keep\nclass YawfSafeAreaBridge\([\s\S]*?\n}\n\nclass MainActivity/.exec(
+  currentActivityTemplate,
+)?.[0];
+const expectedGeneratedInsetBridge = `@Keep
+class YawfSafeAreaBridge(
+  private val snapshot: AtomicReference<String>,
+) {
+  @JavascriptInterface
+  fun getInsets(): String = snapshot.get()
+}
+
+class MainActivity`;
+check(
+  generatedInsetBridge === expectedGeneratedInsetBridge &&
+    (currentActivityTemplate.match(/@JavascriptInterface/g)?.length ?? 0) === 1 &&
+    /private const val SAFE_AREA_BRIDGE_NAME = "__YAWF_NATIVE_SAFE_AREA__"/.test(
+      androidProjectPatcher,
+    ) &&
+    /__YAWF_NATIVE_SAFE_AREA__/.test(mobileSafeAreaSource) &&
+    /webView\.addJavascriptInterface\(safeAreaBridge, SAFE_AREA_BRIDGE_NAME\)/.test(
+      androidProjectPatcher,
+    ) &&
+    /webView\.removeJavascriptInterface\(SAFE_AREA_BRIDGE_NAME\)/.test(
+      androidProjectPatcher,
+    ) &&
+    /private const val SAFE_AREA_CHANGE_SCRIPT = "window\.dispatchEvent\(new Event\('yawf-native-safe-area-change'\)\)"/.test(
+      androidProjectPatcher,
+    ) &&
+    /safeAreaSnapshot\.getAndSet\(nextSnapshot\) != nextSnapshot/.test(
+      androidProjectPatcher,
+    ) &&
+    /webView\.evaluateJavascript\(SAFE_AREA_CHANGE_SCRIPT, null\)/.test(
+      androidProjectPatcher,
+    ) &&
+    /const NATIVE_SAFE_AREA_CHANGE_EVENT = "yawf-native-safe-area-change"/.test(
+      mobileSafeAreaSource,
+    ) &&
+    /addEventListener\(NATIVE_SAFE_AREA_CHANGE_EVENT, schedule\)/.test(
+      mobileSafeAreaSource,
+    ) &&
+    /removeEventListener\(NATIVE_SAFE_AREA_CHANGE_EVENT, schedule\)/.test(
+      mobileSafeAreaSource,
+    ) &&
+    !/__TAURI_INTERNALS__|__TAURI__/.test(androidProjectPatcher) &&
+    !/setWebViewClient|setOnApplyWindowInsetsListener/.test(androidProjectPatcher),
+  "Legacy Android inset transport exposes one cached getter and a fixed no-payload change event",
+);
 const desktopCommandNames = new Set(
   [...desktopPermission.matchAll(/^\s*"([a-z][a-z0-9_]*)",?\s*$/gm)].map(
     (match) => match[1],
@@ -97,6 +222,17 @@ const mobileCommandNames = new Set(
     (match) => match[1],
   ),
 );
+const allMobileCommandNames = new Set([
+  ...mobileCommandNames,
+  ...androidExternalPlayerCommands,
+  ...androidUpdateCommands,
+]);
+check(
+  !mobileCommandNames.has("mobile_open_external_player") &&
+    !desktopCommandNames.has("mobile_open_external_player") &&
+    !remoteDesktopCommandNames.has("mobile_open_external_player"),
+  "The chooser command is not granted by broader mobile, desktop or remote permissions",
+);
 const tauriLib = read("web/src-tauri/src/lib.rs");
 // generate_handler! cannot cfg individual entries, so lib.rs registers one list
 // per target family. Attribute each list to the cfg attribute guarding it rather
@@ -107,8 +243,15 @@ function handlerBlocks(source) {
   const pattern = /\.invoke_handler\(tauri::generate_handler!\[([\s\S]*?)\]\)/g;
   for (const match of source.matchAll(pattern)) {
     const preceding = source.slice(Math.max(0, match.index - 240), match.index);
-    const cfg = [...preceding.matchAll(/#\[cfg\((desktop|mobile)\)\]/g)].pop();
-    if (cfg) blocks.set(cfg[1], match[1]);
+    const cfg = [...preceding.matchAll(/#\[cfg\((desktop|mobile|target_os\s*=\s*"(?:android|ios)")\)\]/g)].pop();
+    if (cfg) {
+      const target = cfg[1].includes('"android"')
+        ? "android"
+        : cfg[1].includes('"ios"')
+          ? "iOS"
+          : cfg[1];
+      blocks.set(target, match[1]);
+    }
   }
   return blocks;
 }
@@ -120,13 +263,14 @@ function registeredCommands(block) {
   );
 }
 const invokeHandlers = handlerBlocks(tauriLib);
-const mobileHandlerBlock = invokeHandlers.get("mobile") ?? "";
+const registeredAndroidCommands = registeredCommands(invokeHandlers.get("android") ?? "");
+const registeredIOSCommands = registeredCommands(invokeHandlers.get("iOS") ?? "");
 const registeredDesktopCommands = registeredCommands(
   invokeHandlers.get("desktop") ?? "",
 );
 check(
-  invokeHandlers.has("desktop") && invokeHandlers.has("mobile"),
-  "Desktop and mobile invoke handler command lists are both readable",
+  invokeHandlers.has("desktop") && invokeHandlers.has("android") && invokeHandlers.has("iOS"),
+  "Desktop, Android and iOS invoke handler command lists are readable",
 );
 check(
   registeredDesktopCommands.size > 0 &&
@@ -137,18 +281,25 @@ check(
   "Desktop app ACL stays in sync with every registered command",
 );
 const registeredMobileCommands = new Set(
-  [
-    ...(mobileHandlerBlock ?? "").matchAll(
-      /^\s*(?:[a-z][a-z0-9_]*::)?([a-z][a-z0-9_]*),\s*$/gm,
-    ),
-  ].map((match) => match[1]),
+  [...registeredAndroidCommands, ...registeredIOSCommands],
+);
+check(
+  registeredAndroidCommands.has("mobile_open_external_player") &&
+    !registeredIOSCommands.has("mobile_open_external_player") &&
+    registeredAndroidCommands.has("mobile_check_android_updates") &&
+    !registeredIOSCommands.has("mobile_check_android_updates") &&
+    [...allMobileCommandNames].every((command) => registeredAndroidCommands.has(command)) &&
+    [...registeredAndroidCommands].every((command) => allMobileCommandNames.has(command)) &&
+    [...mobileCommandNames].every((command) => registeredIOSCommands.has(command)) &&
+    [...registeredIOSCommands].every((command) => mobileCommandNames.has(command)),
+  "Only Android registers its local chooser and updater; iOS retains exactly its mobile command surface",
 );
 check(
   registeredMobileCommands.size > 0 &&
     [...registeredMobileCommands].every((command) =>
-      mobileCommandNames.has(command),
+      allMobileCommandNames.has(command),
     ) &&
-    [...mobileCommandNames].every((command) =>
+    [...allMobileCommandNames].every((command) =>
       registeredMobileCommands.has(command),
     ),
   "Mobile app ACL stays in sync with every registered command",
@@ -185,15 +336,35 @@ check(
 // capability grants every command the platform registers, and outbound HTTP is
 // granted.
 const SUPPORTED_PLATFORMS = ["macOS", "windows", "linux", "android", "iOS"];
-const MOBILE_PLATFORMS = new Set(["android", "iOS"]);
 const appPermissionCommands = new Map([
   ["desktop-commands", desktopCommandNames],
   ["remote-desktop-commands", remoteDesktopCommandNames],
   ["mobile-commands", mobileCommandNames],
+  ["android-external-player-command", androidExternalPlayerCommands],
+  ["android-update-dialog-command", androidUpdateCommands],
+  ["android-remote-safe-area-command", androidRemoteSafeAreaCommands],
 ]);
 const capabilities = readdirSync(join(root, "web/src-tauri/capabilities"))
   .filter((name) => name.endsWith(".json"))
-  .map((name) => JSON.parse(read(`web/src-tauri/capabilities/${name}`)));
+  .flatMap((name) => {
+    const parsed = JSON.parse(read(`web/src-tauri/capabilities/${name}`));
+    return Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed.capabilities)
+        ? parsed.capabilities
+        : [parsed];
+  });
+const androidRemoteCapabilities = capabilities.filter(
+  (entry) =>
+    (entry.platforms ?? SUPPORTED_PLATFORMS).includes("android") &&
+    (entry.remote?.urls?.length ?? 0) > 0,
+);
+check(
+  androidRemoteCapabilities.length === 1 &&
+    androidRemoteCapabilities[0].identifier === "android-remote-safe-area" &&
+    JSON.stringify(androidRemoteCapabilities[0].permissions) === '["android-remote-safe-area-command"]',
+  "All Android remote capabilities together expose only the numeric inset getter",
+);
 for (const platform of SUPPORTED_PLATFORMS) {
   // An omitted platforms list means every platform, and local defaults to true.
   const applying = capabilities.filter(
@@ -215,9 +386,11 @@ for (const platform of SUPPORTED_PLATFORMS) {
       ...(appPermissionCommands.get(id) ?? []),
     ]),
   );
-  const required = MOBILE_PLATFORMS.has(platform)
-    ? registeredMobileCommands
-    : registeredDesktopCommands;
+  const required = platform === "android"
+    ? registeredAndroidCommands
+    : platform === "iOS"
+      ? registeredIOSCommands
+      : registeredDesktopCommands;
   const ungranted = [...required].filter(
     (command) => !grantedCommands.has(command),
   );
@@ -311,6 +484,11 @@ const androidPlaybackHeaders = read(
   "android-tv/app/src/main/java/com/yawf/stream/tv/PlaybackHeaders.java",
 );
 const remoteControl = read("server/src/remoteControl.ts");
+const serverUpdater = read("deploy/updater/yawf-server-update.mjs");
+const serverUpdaterCopy = read("deploy/updater/volume-copy.mjs");
+const serverUpdaterStatus = read("server/src/serverUpdaterStatus.ts");
+const serverCompose = read("deploy/compose/docker-compose.ghcr.yml");
+const serverUpdaterWrapper = read("deploy/updater/yawf-server-update");
 check(
   /allowRawStreamUrls:[\s\S]{0,160}process\.env\.NODE_ENV !== "production"/.test(serverConfig),
   "Production raw stream URL creation defaults off",
@@ -370,6 +548,24 @@ check(
     /REMOTE_COMMAND_LIMIT/.test(remoteControl) &&
     /REMOTE_SESSION_TTL_MS/.test(remoteControl),
   "Phone remote capabilities are hashed, profile-bound, expiring, and queue-bounded",
+);
+check(
+  /REPOSITORY = "ghcr\.io\/tgk-30\/yawf-stream"/.test(serverUpdater) &&
+    /server-update\.json/.test(serverUpdater) &&
+    /candidate\.image\.digest/.test(serverUpdater) &&
+    /"--no-deps", "debridstreamer"/.test(serverUpdater) &&
+    /Active playback is in progress/.test(serverUpdater) &&
+    /snapshotVolume/.test(serverUpdater) &&
+    /rollback\(policy, journal\)/.test(serverUpdater) &&
+    /stopAndConfirm/.test(serverUpdater) &&
+    /registrationIdentity/.test(serverUpdater) &&
+    /"--cap-add", "DAC_OVERRIDE", "--cap-add", "CHOWN"/.test(serverUpdater) &&
+    /flock -n 9/.test(serverUpdaterWrapper) &&
+    /isSymbolicLink\(\)/.test(serverUpdaterCopy) &&
+    /O_NOFOLLOW/.test(serverUpdaterStatus) &&
+    /readServerUpdaterStatus/.test(serverUpdaterStatus) &&
+    !/docker\.sock/.test(serverCompose),
+  "Server auto-update stays in the root host helper with immutable provenance, backup rollback, and read-only app status",
 );
 
 if (failures.length > 0) {

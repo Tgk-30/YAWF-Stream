@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "android-local-updater",
+  "description": "Only the bundled Android main app may open its native fixed-channel update dialog. No URLs, file paths or metadata are accepted. Remote pages have no grant.",
+  "local": true,
+  "windows": ["main"],
+  "platforms": ["android"],
+  "permissions": ["android-update-dialog-command"]
+}

@@ -1,12 +1,13 @@
 {
   "name": "debridstreamer-web",
   "private": true,
-  "version": "2.3.6",
+  "version": "2.3.21",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && npm run check:bundle",
+    "build": "tsc -b && vite build && npm run check:android-webview && npm run check:bundle",
+    "check:android-webview": "node ../scripts/check_android_webview_compat.mjs dist",
     "check:bundle": "node ../scripts/check_bundle_budgets.mjs web",
     "preview": "vite preview",
     "test": "vitest run",
@@ -16,11 +17,11 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
+    "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-http": "^2.5.9",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.1",
+    "@tauri-apps/plugin-updater": "^2.14.0",
     "dexie": "^4.4.4",
     "hls.js": "^1.5.17",
     "lucide-react": "^1.21.0",
@@ -32,7 +33,7 @@
     "subsrt-ts": "^2.1.2"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.12.3",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
@@ -41,11 +42,11 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^6.0.2",
-    "@vitest/coverage-v8": "^4.1.9",
+    "@vitest/coverage-v8": "^4.1.11",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
     "typescript": "^5.6.3",
     "vite": "^8.0.16",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.11"
   }
 }

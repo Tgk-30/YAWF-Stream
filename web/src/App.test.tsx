@@ -14,7 +14,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 // --- Store mock ---------------------------------------------------------
 // App reads a slice of useAppStore; we drive it via a mutable object so each
@@ -231,8 +231,8 @@ vi.mock("./components/GlobalSearch", () => ({
 }));
 
 vi.mock("./components/Spinner", () => ({
-  Spinner: ({ variant }: { variant?: string }) => (
-    <div data-testid="spinner" data-variant={variant} />
+  Spinner: ({ variant, label }: { variant?: string; label?: string }) => (
+    <div data-testid="spinner" data-variant={variant}>{label}</div>
   ),
 }));
 
@@ -379,12 +379,19 @@ vi.mock("./components/SetupNudge", () => ({
 
 // FirstRunHost-only children (imported by App.tsx module). Stub so the module
 // graph resolves without pulling their real (heavy) implementations.
+const suspendFirstRunWizard = vi.hoisted(() => ({
+  current: false,
+  pending: new Promise<void>(() => {}),
+}));
 vi.mock("./components/FirstRunWizard", () => ({
-  FirstRunWizard: ({ onDone }: { onDone: () => void }) => (
-    <button data-testid="first-run" onClick={onDone}>
-      first-run
-    </button>
-  ),
+  FirstRunWizard: ({ onDone }: { onDone: () => void }) => {
+    if (suspendFirstRunWizard.current) throw suspendFirstRunWizard.pending;
+    return (
+      <button data-testid="first-run" onClick={onDone}>
+        first-run
+      </button>
+    );
+  },
 }));
 vi.mock("./components/ServerSetupWizard", () => ({
   ServerSetupWizard: ({ onDone }: { onDone: () => void }) => (
@@ -411,8 +418,10 @@ vi.mock("./lib/ServerSessionContext", () => ({
 let firstRunValue = false;
 let keyGateValue = false;
 let devBypassesOnboardingValue = false;
+let pendingFirstRunPromise: Promise<boolean> | null = null;
+const isFirstRunMock = vi.fn(() => pendingFirstRunPromise ?? Promise.resolve(firstRunValue));
 vi.mock("./lib/firstRun", () => ({
-  isFirstRun: () => Promise.resolve(firstRunValue),
+  isFirstRun: () => isFirstRunMock(),
   devBypassesOnboarding: () => devBypassesOnboardingValue,
   needsKeyOnboarding: () => keyGateValue,
   hasQuickSetupAcknowledgement: () => Promise.resolve(false),
@@ -431,14 +440,15 @@ vi.mock("./lib/serverSetup", () => ({
 }));
 
 let adminHealthCredentials = 0;
+const fetchServerAdminHealthMock = vi.fn(() => {
+  if (pendingAdminHealthPromise !== null) return pendingAdminHealthPromise;
+  if (serverHealthShouldReject) {
+    return Promise.reject(new Error("network offline"));
+  }
+  return Promise.resolve({ counts: { credentials: adminHealthCredentials } });
+});
 vi.mock("./lib/serverApi", () => ({
-  fetchServerAdminHealth: () => {
-    if (pendingAdminHealthPromise !== null) return pendingAdminHealthPromise;
-    if (serverHealthShouldReject) {
-      return Promise.reject(new Error("network offline"));
-    }
-    return Promise.resolve({ counts: { credentials: adminHealthCredentials } });
-  },
+  fetchServerAdminHealth: () => fetchServerAdminHealthMock(),
 }));
 
 import { App, FirstRunHost } from "./App";
@@ -529,6 +539,9 @@ beforeEach(() => {
   smartPreloadEnabled = false;
   sessionValue = null;
   firstRunValue = false;
+  pendingFirstRunPromise = null;
+  isFirstRunMock.mockClear();
+  suspendFirstRunWizard.current = false;
   keyGateValue = false;
   devBypassesOnboardingValue = false;
   secretReadsFailedThisSessionValue = false;
@@ -536,6 +549,7 @@ beforeEach(() => {
   serverHealthShouldReject = false;
   pendingAdminHealthPromise = null;
   adminHealthCredentials = 0;
+  fetchServerAdminHealthMock.mockClear();
   store = makeStore();
   installLocalStorage();
   // Default: the welcome-guide seen flag is set so the auto-tour is OFF unless
@@ -1421,6 +1435,67 @@ describe("FirstRunHost gating", () => {
     expect(screen.getByTestId("spinner")).toBeInTheDocument();
   });
 
+  it("does not read first-run state until critical profile hydration commits", async () => {
+    globalThis.localStorage.setItem("ds_tier_welcomed", "1");
+    store = makeStore({ hydrated: false });
+    const rendered = render(<FirstRunHost />);
+    await waitFor(() => expect(screen.getByTestId("spinner")).toBeInTheDocument());
+    expect(isFirstRunMock).not.toHaveBeenCalled();
+
+    store = makeStore({ hydrated: true });
+    rendered.rerender(<FirstRunHost />);
+    expect(await screen.findByTestId("nav-rail")).toBeInTheDocument();
+    expect(isFirstRunMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a cancelled first-run result behind the newer hydrated read", async () => {
+    let resolveOldFirstRun!: (value: boolean) => void;
+    const oldFirstRun = new Promise<boolean>((resolve) => {
+      resolveOldFirstRun = resolve;
+    });
+    pendingFirstRunPromise = oldFirstRun;
+    store = makeStore({ hydrated: true });
+    const rendered = render(<FirstRunHost />);
+    await waitFor(() => expect(isFirstRunMock).toHaveBeenCalledTimes(1));
+
+    store = makeStore({ hydrated: false });
+    rendered.rerender(<FirstRunHost />);
+    let resolveNewFirstRun!: (value: boolean) => void;
+    const newFirstRun = new Promise<boolean>((resolve) => {
+      resolveNewFirstRun = resolve;
+    });
+    pendingFirstRunPromise = newFirstRun;
+    store = makeStore({ hydrated: true });
+    rendered.rerender(<FirstRunHost />);
+    await waitFor(() => expect(isFirstRunMock).toHaveBeenCalledTimes(2));
+
+    resolveOldFirstRun(true);
+    await act(async () => {
+      await oldFirstRun;
+    });
+    expect(screen.getByTestId("spinner")).toBeInTheDocument();
+    expect(screen.queryByTestId("first-run")).toBeNull();
+
+    resolveNewFirstRun(false);
+    await act(async () => {
+      await newFirstRun;
+    });
+    expect(await screen.findByTestId("nav-rail")).toBeInTheDocument();
+  });
+
+  it("keeps labeled boot feedback visible while the full-app setup chunk suspends", async () => {
+    globalThis.localStorage.setItem("ds_tier_welcomed", "1");
+    firstRunValue = true;
+    suspendFirstRunWizard.current = true;
+
+    render(<FirstRunHost />);
+
+    const label = await screen.findByText("Preparing setup…");
+    expect(label.closest('[aria-busy="true"]')).toHaveClass("full-viewport-boot");
+    expect(screen.getByTestId("spinner")).toBeInTheDocument();
+    expect(screen.queryByTestId("nav-rail")).toBeNull();
+  });
+
   it("renders the App once hydrated with no first-run and no server setup", async () => {
     // welcomed flag set so TierOnboarding never shows; not first-run.
     globalThis.localStorage.setItem("ds_tier_welcomed", "1");
@@ -1545,6 +1620,20 @@ describe("FirstRunHost gating", () => {
     render(<FirstRunHost />);
     expect(await screen.findByTestId("nav-rail")).toBeInTheDocument();
     expect(screen.queryByTestId("server-setup")).not.toBeInTheDocument();
+    expect(fetchServerAdminHealthMock).not.toHaveBeenCalled();
+  });
+
+  it("defers loading admin health until the server session becomes owner", async () => {
+    serverModeValue = true;
+    sessionValue = { role: "member" };
+    globalThis.localStorage.setItem("ds_tier_welcomed", "1");
+    const rendered = render(<FirstRunHost />);
+    expect(await screen.findByTestId("nav-rail")).toBeInTheDocument();
+    expect(fetchServerAdminHealthMock).not.toHaveBeenCalled();
+
+    sessionValue = { role: "owner" };
+    rendered.rerender(<FirstRunHost />);
+    await waitFor(() => expect(fetchServerAdminHealthMock).toHaveBeenCalledTimes(1));
   });
 
   it("falls back from server setup when the admin health check fails", async () => {

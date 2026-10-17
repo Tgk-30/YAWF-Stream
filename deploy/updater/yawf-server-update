@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+lock_dir=/run/yawf-server-updater
+if [ -L "$lock_dir" ]; then
+  echo "yawf-server-update: unsafe lock directory" >&2
+  exit 1
+fi
+install -d -o root -g root -m 0700 "$lock_dir"
+export YAWF_UPDATER_LOCK_FD=9
+exec 9>"$lock_dir/operation.lock"
+if ! /usr/bin/flock -n 9; then
+  echo "yawf-server-update: another updater operation is running" >&2
+  exit 75
+fi
+exec /usr/bin/node /usr/lib/yawf-server-updater/yawf-server-update.mjs "$@"

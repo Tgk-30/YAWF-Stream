@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "android-update-dialog-command"
+description = "Open the native Android update consent dialog for the fixed official phone channel only."
+commands.allow = ["mobile_check_android_updates"]

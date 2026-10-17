@@ -69,6 +69,14 @@ fn main() {
         }
     }
 
+    // Android 15+ devices may use 16 KiB memory pages. Apply both lld page-size
+    // constraints to the shipped cdylib only; the build script itself runs on
+    // the host, so this must use Cargo's target environment rather than cfg!.
+    if target_os == "android" {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-z,max-page-size=16384");
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-z,common-page-size=16384");
+    }
+
     tauri_build::build()
 }
 

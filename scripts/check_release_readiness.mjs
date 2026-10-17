@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateWebsiteReleaseCatalog } from "./check_website_release_catalog.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const checks = [];
@@ -16,6 +18,30 @@ function check(name, pass, detail) {
 
 function workflowHasFullHistoryCheckout(workflow) {
   return /uses:\s*actions\/checkout@v4[\s\S]{0,240}fetch-depth:\s*0/.test(workflow);
+}
+
+function everyAndroidSetupInstallsPlatformTools(workflow) {
+  const setupActions =
+    workflow.match(/uses:\s*android-actions\/setup-android@v3\b/g) ?? [];
+  const explicitPlatformTools =
+    workflow.match(
+      /uses:\s*android-actions\/setup-android@v3\s*\n\s*with:\s*\n\s*packages:\s*platform-tools\b/g,
+    ) ?? [];
+  return (
+    setupActions.length > 0 &&
+    explicitPlatformTools.length === setupActions.length
+  );
+}
+
+function workflowJob(workflow, jobId) {
+  const escaped = jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return workflow.match(
+    new RegExp(`(?:^|\\n)  ${escaped}:\\n[\\s\\S]*?(?=\\n  [a-z][a-z0-9-]*:\\n|$)`),
+  )?.[0] ?? "";
+}
+
+function jobRequiresPushTag(job) {
+  return /^    if: github\.event_name == 'push' && github\.ref_type == 'tag'$/m.test(job);
 }
 
 const tauri = JSON.parse(read("web/src-tauri/tauri.conf.json"));
@@ -45,6 +71,9 @@ check(
 
 const releaseWorkflow = read(".github/workflows/web-release.yml");
 const cleanInstallWorkflow = read(".github/workflows/clean-install.yml");
+const releaseAndroidPhoneJob = workflowJob(releaseWorkflow, "android-app");
+const releaseAndroidPhonePublisherJob = workflowJob(releaseWorkflow, "android-app-publish");
+const cleanInstallAndroidPhoneJob = workflowJob(cleanInstallWorkflow, "android-phone");
 const dockerWorkflow = read(".github/workflows/docker-image.yml");
 const ciWorkflow = read(".github/workflows/ci.yml");
 const cloudflareSiteWorkflow = read(".github/workflows/cloudflare-site.yml");
@@ -65,6 +94,14 @@ const linuxGtkMigration = read("docs/TAURI_LINUX_GTK_MIGRATION.md");
 const bundleBudgetCheck = read("scripts/check_bundle_budgets.mjs");
 const androidProjectPatch = read("scripts/patch_tauri_android.mjs");
 const androidProjectPatchTests = read("scripts/patch_tauri_android.test.mjs");
+const dockerWebBuild = dockerfile.indexOf("RUN npm run build");
+const dockerWebViewCompatibilityCopy = dockerfile.indexOf(
+  "COPY scripts/check_android_webview_compat.mjs /repo/scripts/check_android_webview_compat.mjs",
+);
+const phoneCertificatePinPath = join(root, "web/src-tauri/SIGNING_CERT_SHA256");
+const phoneCertificatePin = existsSync(phoneCertificatePinPath)
+  ? read("web/src-tauri/SIGNING_CERT_SHA256")
+  : "";
 const webPackage = JSON.parse(read("web/package.json"));
 const webPackageLock = JSON.parse(read("web/package-lock.json"));
 const serverPackage = JSON.parse(read("server/package.json"));
@@ -80,9 +117,7 @@ const cargoTomlVersion = read("web/src-tauri/Cargo.toml").match(
 const cargoLockVersion = read("web/src-tauri/Cargo.lock").match(
   /\[\[package\]\]\s*\nname = "debridstreamer"\s*\nversion = "([^"]+)"/,
 )?.[1];
-const websiteVersion = read("website-app/src/lib/site.ts").match(
-  /APP_VERSION\s*=\s*'([^']+)'/,
-)?.[1];
+const websiteReleaseCatalog = read("website-app/src/lib/site.ts");
 const androidTVVersion = read("android-tv/app/build.gradle").match(
   /versionName\s+"([^"]+)"/,
 )?.[1];
@@ -95,7 +130,7 @@ const expectedAndroidTVVersionCode = semanticVersion
     Number(semanticVersion[2]) * 100 +
     Number(semanticVersion[3])
   : Number.NaN;
-const releaseVersions = [
+const sourceVersions = [
   tauri.version,
   webPackage.version,
   webPackageLock.version,
@@ -104,15 +139,33 @@ const releaseVersions = [
   serverVersion,
   websitePackage.version,
   websitePackageLock.version,
-  websiteVersion,
   cargoTomlVersion,
   cargoLockVersion,
   androidTVVersion,
 ];
 check(
-  "Release version surfaces match",
-  releaseVersions.every((version) => version === tauri.version),
-  `web, server, website, Tauri, Cargo, and Android TV versions must all match ${tauri.version}`,
+  "Source version surfaces match",
+  sourceVersions.every((version) => version === tauri.version),
+  `web, server, website package, Tauri, Cargo, and Android TV source versions must all match ${tauri.version}`,
+);
+const websiteReleaseCatalogFailures = validateWebsiteReleaseCatalog(websiteReleaseCatalog);
+check(
+  "Website shipping release catalog is valid",
+  websiteReleaseCatalogFailures.length === 0,
+  websiteReleaseCatalogFailures.join("; ") || "website platform shipping channels must remain explicit",
+);
+let websiteReleaseCatalogMutationTestsPass = true;
+try {
+  execFileSync(process.execPath, ["--test", join(root, "scripts/check_website_release_catalog.test.mjs")], {
+    stdio: "pipe",
+  });
+} catch {
+  websiteReleaseCatalogMutationTestsPass = false;
+}
+check(
+  "Website shipping release catalog mutation tests pass",
+  websiteReleaseCatalogMutationTestsPass,
+  "scripts/check_website_release_catalog.test.mjs must reject independent version, tag, filename, and checksum-channel mutations",
 );
 check(
   "Android TV version code matches release version",
@@ -164,8 +217,63 @@ check(
     /apksigner verify/.test(releaseWorkflow) &&
     /web\/src-tauri\/SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
     /YAWF\.Stream_Android_\$\{version\}\.apk/.test(releaseWorkflow) &&
-    /needs:\s*\[[^\]]*\bandroid-app\b[^\]]*\]/.test(releaseWorkflow),
+    /needs:\s*\[[^\]]*\bandroid-app-publish\b[^\]]*\]/.test(releaseWorkflow),
   ".github/workflows/web-release.yml must sign the phone APK with its own identity, verify it against a pinned certificate, and finalize checksums only after it",
+);
+check(
+  "Manual Android verification cannot enter a publication job",
+  ["release", "android-tv", "android-app-publish", "finalize-release-assets", "clean-install"]
+    .every((name) => jobRequiresPushTag(workflowJob(releaseWorkflow, name))) &&
+    /if: always\(\) && \(\(github\.event_name == 'push' && github\.ref_type == 'tag' && needs\.release\.result == 'success'\) \|\| \(github\.event_name == 'workflow_dispatch' && github\.ref_type == 'branch'\)\)/.test(releaseAndroidPhoneJob) &&
+    !/gh release (?:create|upload|edit)/.test(releaseAndroidPhoneJob),
+  "manual branch dispatch may build a signed verification artifact, but every release-writing job must require a pushed tag",
+);
+check(
+  "Android phone build and publisher keep least-privilege boundaries",
+  /permissions:\s*\n\s*contents:\s*read/.test(releaseAndroidPhoneJob) &&
+    /name:\s*android-phone-verification-candidate/.test(releaseAndroidPhoneJob) &&
+    /name:\s*android-phone-release-candidate/.test(releaseAndroidPhoneJob) &&
+    /permissions:\s*\n\s*contents:\s*write/.test(releaseAndroidPhonePublisherJob) &&
+    !/ANDROID_APP_KEYSTORE_|ANDROID_APP_KEY_PASSWORD|ANDROID_APP_KEY_ALIAS/.test(releaseAndroidPhonePublisherJob),
+  "the signing job must be read-only to repository contents, while only the pushed-tag publisher may write assets and it must receive no signing secrets",
+);
+check(
+  "Android phone signing certificate is publicly pinned",
+  /^[0-9a-f]{64}(?:\r?\n)?$/.test(phoneCertificatePin),
+  "web/src-tauri/SIGNING_CERT_SHA256 must exist and contain exactly one lowercase 64-hex SHA-256 digest",
+);
+check(
+  "Release workflow requires Android phone signing material",
+  /for name in ANDROID_APP_KEYSTORE_BASE64 ANDROID_APP_KEYSTORE_PASSWORD ANDROID_APP_KEY_ALIAS ANDROID_APP_KEY_PASSWORD/.test(
+    releaseAndroidPhoneJob,
+  ) &&
+    /if \[ "\$missing" = "1" \]; then[\s\S]{0,220}exit 1/.test(
+      releaseAndroidPhoneJob,
+    ) &&
+    !/ready=false/.test(releaseAndroidPhoneJob),
+  "the Android phone release job must fail when any dedicated signing value is missing instead of skipping the artifact",
+);
+check(
+  "Release workflow validates the exact Android phone artifact",
+  /source="web\/src-tauri\/gen\/android\/app\/build\/outputs\/apk\/universal\/release\/app-universal-release-unsigned\.apk"/.test(
+    releaseAndroidPhoneJob,
+  ) &&
+    /test -f "\$source"/.test(releaseAndroidPhoneJob) &&
+    /zipalign -P 16 -f 4 "\$source" "\$aligned"/.test(
+      releaseAndroidPhoneJob,
+    ) &&
+    /asset="\$RUNNER_TEMP\/YAWF\.Stream_Android_\$\{version\}\.apk"/.test(
+      releaseAndroidPhoneJob,
+    ) &&
+    /python3 scripts\/verify_android_apk\.py[\s\S]{0,260}--apk "\$asset"[\s\S]{0,260}--certificate-pin web\/src-tauri\/SIGNING_CERT_SHA256/.test(
+      releaseAndroidPhoneJob,
+    ) &&
+    /uses:\s*actions\/upload-artifact@v4[\s\S]{0,220}name:\s*android-phone-release-candidate/.test(releaseAndroidPhoneJob) &&
+    /uses:\s*actions\/download-artifact@v4[\s\S]{0,220}name:\s*android-phone-release-candidate/.test(releaseAndroidPhonePublisherJob) &&
+    /python3 scripts\/verify_android_apk\.py[\s\S]{0,260}--apk "\$asset"[\s\S]{0,260}--certificate-pin web\/src-tauri\/SIGNING_CERT_SHA256/.test(releaseAndroidPhonePublisherJob) &&
+    releaseAndroidPhonePublisherJob.indexOf("python3 scripts/verify_android_apk.py") <
+      releaseAndroidPhonePublisherJob.indexOf("gh release upload"),
+  "the release must select the universal unsigned APK exactly, align native libraries for 16 KiB pages, verify the signed production APK, and only then upload its versioned asset",
 );
 check(
   "Phone APK reuses no Android TV signing material",
@@ -321,6 +429,23 @@ check(
     /android\.software\.leanback/.test(cleanInstallWorkflow) &&
     /android\.hardware\.touchscreen/.test(cleanInstallWorkflow),
   ".github/workflows/clean-install.yml must verify the APK signature, package identity, version, Leanback launcher, and optional touchscreen",
+);
+check(
+  "Clean-install workflow requires and verifies the Android phone asset",
+  /"YAWF\.Stream_Android_\$\{expected_version\}\.apk"/.test(
+    cleanInstallWorkflow,
+  ) &&
+    /asset="YAWF\.Stream_Android_\$\{version\}\.apk"/.test(
+      cleanInstallAndroidPhoneJob,
+    ) &&
+    /gh release download "\$RELEASE_TAG"[\s\S]{0,180}--pattern "\$asset"/.test(
+      cleanInstallAndroidPhoneJob,
+    ) &&
+    /python3 scripts\/verify_android_apk\.py[\s\S]{0,260}--apk "\$RUNNER_TEMP\/phone-assets\/\$asset"[\s\S]{0,260}--certificate-pin web\/src-tauri\/SIGNING_CERT_SHA256/.test(
+      cleanInstallAndroidPhoneJob,
+    ) &&
+    !/^\s*if:/m.test(cleanInstallAndroidPhoneJob),
+  "the reusable clean-install workflow must require the versioned phone APK and always download and verify it as a release job",
 );
 check(
   "Clean-install workflow verifies trust and first launch",
@@ -661,6 +786,20 @@ check(
   "Dockerfile must copy the production bundle-budget verifier before the web build invokes it",
 );
 check(
+  "Docker web build includes Android WebView compatibility gate",
+  dockerWebViewCompatibilityCopy >= 0 &&
+    dockerWebBuild >= 0 &&
+    dockerWebViewCompatibilityCopy < dockerWebBuild,
+  "Dockerfile must copy the transformed-CSS Android WebView compatibility verifier before the web build invokes it",
+);
+check(
+  "Android SDK setup explicitly installs platform tools",
+  [ciWorkflow, releaseWorkflow, cleanInstallWorkflow].every(
+    everyAndroidSetupInstallsPlatformTools,
+  ),
+  "CI, release, and clean-install setup-android steps must explicitly install platform-tools",
+);
+check(
   "Docker user guide exists",
   existsSync(join(root, "docs/DOCKER.md")),
   "docs/DOCKER.md should explain Docker/GHCR setup and persistent data",
@@ -682,11 +821,12 @@ check(
   ".github/workflows/docker-image.yml must turn vX.Y.Z-web into X.Y.Z and X.Y server image tags",
 );
 check(
-  "Pull requests build Docker images without publishing",
+  "Pull requests and manual dispatch verify Docker without publishing",
   /pull_request:\s*[\s\S]{0,80}branches:\s*\n\s*- main/.test(dockerWorkflow) &&
-    /if: github\.event_name != 'pull_request'/.test(dockerWorkflow) &&
-    /push: \$\{\{ github\.event_name != 'pull_request' \}\}/.test(dockerWorkflow),
-  ".github/workflows/docker-image.yml must build changed images on pull requests and publish only outside pull requests",
+    (dockerWorkflow.match(/if: github\.event_name == 'push'/g)?.length ?? 0) >= 2 &&
+    /push: \$\{\{ github\.event_name == 'push' \}\}/.test(dockerWorkflow) &&
+    !/github\.event_name != 'pull_request'/.test(dockerWorkflow),
+  ".github/workflows/docker-image.yml must verify pull requests and dispatches while login, publication and post-publication checks run only on pushes",
 );
 check(
   "Docker workflow runs public preflight",
@@ -773,6 +913,18 @@ check(
   ".github/workflows/ci.yml must test and run the public repo gate plus release readiness and website checks",
 );
 check(
+  "CI tests Android artifact compatibility and production verification",
+  existsSync(join(root, "scripts/check_android_elf_alignment.test.mjs")) &&
+    existsSync(join(root, "scripts/check_android_webview_compat.test.mjs")) &&
+    existsSync(join(root, "scripts/verify_android_apk.py")) &&
+    existsSync(join(root, "scripts/verify_android_apk.test.py")) &&
+    /node --test scripts\/check_android_elf_alignment\.test\.mjs scripts\/check_android_webview_compat\.test\.mjs/.test(
+      ciWorkflow,
+    ) &&
+    /python3 scripts\/verify_android_apk\.test\.py/.test(ciWorkflow),
+  ".github/workflows/ci.yml must run the 16 KiB ELF, legacy WebView CSS, and production APK verifier fixture suites",
+);
+check(
   "CI tests the Android TV package",
   /android-tv:/.test(ciWorkflow) &&
     /platforms;android-36/.test(ciWorkflow) &&
@@ -816,6 +968,20 @@ check(
     /initialGzip/.test(bundleBudgetCheck) &&
     /largestJsGzip/.test(bundleBudgetCheck),
   "web and website production builds must enforce tested and documented initial-load and route-chunk raw/gzip budgets",
+);
+check(
+  "Web production builds enforce Android WebView CSS compatibility",
+  /check_android_webview_compat\.mjs dist/.test(
+    webPackage.scripts?.["check:android-webview"] ?? "",
+  ) &&
+    /npm run check:android-webview/.test(webPackage.scripts?.build ?? "") &&
+    /- name: Web - build \(typecheck \+ vite\), test[\s\S]{0,180}working-directory:\s*web[\s\S]{0,120}npm run build/.test(
+      ciWorkflow,
+    ) &&
+    /node --test scripts\/check_android_elf_alignment\.test\.mjs scripts\/check_android_webview_compat\.test\.mjs/.test(
+      ciWorkflow,
+    ),
+  "the normal web build must inspect transformed dist CSS and CI must exercise both Android artifact compatibility checkers",
 );
 check(
   "CI tests the bundle budget verifier",

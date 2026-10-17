@@ -202,14 +202,14 @@ const STEPS = [
     index: '01',
     icon: Apple,
     title: 'iPhone / iPad',
-    body: 'Open your server URL in Safari → Share → Add to Home Screen.',
+    body: 'Open your running server URL in Safari → Share → Add to Home Screen. No standalone iOS package is published.',
     hint: 'Share → Add to Home Screen',
     kind: 'ios' as const,
   },
   {
     index: '02',
     icon: Smartphone,
-    title: 'Android',
+    title: 'Android browser PWA',
     body: 'Open your server URL over HTTPS in Chrome or Edge → Install app. Android hides the install option on a plain-HTTP address.',
     hint: 'Install app',
     kind: 'android' as const,
@@ -238,9 +238,9 @@ export default function PwaSteps() {
       <style>{LOOP_CSS}</style>
       <div className="mx-auto max-w-content px-6 md:px-10">
         <SectionHeading
-          eyebrow="// PHONE & TABLET"
-          title="No app store. Your server is the store."
-          lede="The PWA is served by your own YAWF Stream server - install it straight from the browser."
+          eyebrow="// OPTIONAL SERVER-HOSTED PWA"
+          title="Prefer a browser install?"
+          lede="For this optional PWA, a running YAWF Stream server is required. Android phones can use the native APK above without their own server. iPhone and iPad use the PWA; no standalone iOS package is published."
         />
 
         <div ref={stageRef} className="mt-12 grid gap-5 md:grid-cols-3">

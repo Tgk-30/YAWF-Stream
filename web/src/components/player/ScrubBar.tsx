@@ -48,6 +48,7 @@ export function ScrubBar({
   disabled = false,
 }: ScrubBarProps) {
   const barRef = useRef<HTMLDivElement | null>(null);
+  const activePointerRef = useRef<number | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
 
   const timeAtX = useCallback(
@@ -55,13 +56,14 @@ export function ScrubBar({
       const bar = barRef.current;
       if (bar == null || !Number.isFinite(duration) || duration <= 0) return null;
       const rect = bar.getBoundingClientRect();
+      if (!Number.isFinite(rect.width) || rect.width <= 0) return null;
       const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
       return { time: ratio * duration, ratio };
     },
     [duration],
   );
 
-  const handleMove = useCallback(
+  const updatePointerPosition = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (disabled) return;
       const at = timeAtX(e.clientX);
@@ -69,16 +71,20 @@ export function ScrubBar({
       const rect = barRef.current!.getBoundingClientRect();
       setHoverX(e.clientX - rect.left);
       onHover(at.time);
+      if (activePointerRef.current === e.pointerId) onSeek(at.time);
     },
-    [disabled, timeAtX, onHover],
+    [disabled, onHover, onSeek, timeAtX],
   );
 
   const handleLeave = useCallback(() => {
     if (disabled) return;
+    // Pointer capture keeps an active touch/mouse drag alive outside the rail.
+    // Clearing it here would make a scrub appear to stop at the first missed
+    // pixel on compact mobile controls.
+    if (activePointerRef.current != null) return;
     setHoverX(null);
     onLeave();
-    onScrubbingChange?.(false);
-  }, [disabled, onLeave, onScrubbingChange]);
+  }, [disabled, onLeave]);
 
   const handleClick = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -88,6 +94,16 @@ export function ScrubBar({
     },
     [disabled, timeAtX, onSeek],
   );
+
+  const finishScrubbing = useCallback((pointerId: number) => {
+    if (activePointerRef.current !== pointerId) return;
+    activePointerRef.current = null;
+    const bar = barRef.current;
+    if (bar?.hasPointerCapture?.(pointerId)) {
+      bar.releasePointerCapture(pointerId);
+    }
+    onScrubbingChange?.(false);
+  }, [onScrubbingChange]);
 
   // Keyboard seeking - a role="slider" must respond to arrows/Home/End (WCAG
   // 2.1). Arrows nudge ±5s, PageUp/Down ±60s, Home/End jump to the ends.
@@ -158,19 +174,24 @@ export function ScrubBar({
       <div
         ref={barRef}
         className="scrubbar"
-        onPointerMove={handleMove}
+        onPointerMove={updatePointerPosition}
         onPointerLeave={handleLeave}
         onPointerDown={(event) => {
           if (disabled) return;
+          activePointerRef.current = event.pointerId;
+          event.currentTarget.setPointerCapture?.(event.pointerId);
           onScrubbingChange?.(true);
           handleClick(event);
         }}
-        onPointerUp={() => {
-          if (!disabled) onScrubbingChange?.(false);
+        onPointerUp={(event) => {
+          if (disabled) return;
+          handleClick(event);
+          finishScrubbing(event.pointerId);
         }}
-        onPointerCancel={() => {
-          if (!disabled) onScrubbingChange?.(false);
+        onPointerCancel={(event) => {
+          if (!disabled) finishScrubbing(event.pointerId);
         }}
+        onLostPointerCapture={(event) => finishScrubbing(event.pointerId)}
         onKeyDown={handleKeyDown}
         role="slider"
         aria-label="Seek"

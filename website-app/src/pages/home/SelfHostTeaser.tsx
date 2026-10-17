@@ -3,14 +3,16 @@ import Chip from '@/components/Chip';
 import SectionHeading from '@/components/SectionHeading';
 import TerminalBlock from '@/components/TerminalBlock';
 import { GhostButton } from '@/components/Buttons';
+import { SERVER_SOURCE_FILES } from '@/lib/site';
 
 const EASE_EXPO = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
 const TERMINAL_LINES = [
-  { text: 'mkdir debridstreamer && cd debridstreamer' },
-  { text: 'curl -fsSLO https://raw.githubusercontent.com/Tgk-30/YAWF-Stream/main/deploy/compose/docker-compose.ghcr.yml' },
-  { text: 'curl -fsSL https://raw.githubusercontent.com/Tgk-30/YAWF-Stream/main/deploy/compose/.env.example -o .env' },
-  { text: 'docker compose -f docker-compose.ghcr.yml up -d' },
+  {
+    text: `( set -eu; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' 0; curl -fsSL ${SERVER_SOURCE_FILES.dockerCompose} -o "$tmp/docker-compose.ghcr.yml"; curl -fsSL ${SERVER_SOURCE_FILES.envExample} -o "$tmp/.env"; sudo mkdir -m 0755 /srv/yawf; sudo install -o root -g root -m 0644 "$tmp/docker-compose.ghcr.yml" /srv/yawf/docker-compose.ghcr.yml; sudo install -o root -g root -m 0600 "$tmp/.env" /srv/yawf/.env )`,
+  },
+  { text: 'sudoedit /srv/yawf/.env' },
+  { text: 'cd /srv/yawf && sudo docker compose -f docker-compose.ghcr.yml up -d --no-deps debridstreamer' },
 ];
 
 const META_CHIPS = ['multi-arch: amd64 + arm64', 'prebuilt image', 'native Node + systemd too'];
@@ -42,7 +44,7 @@ export default function SelfHostTeaser() {
         <SectionHeading
           eyebrow="// SELF-HOST"
           title="One server. Every screen."
-          lede="Run it on an always-on desktop, NAS, VPS, Raspberry Pi, or home server. Credentials stay encrypted on your server and are sent only to the providers they belong to."
+          lede="Run it on an always-on desktop, NAS, VPS, Raspberry Pi, or home server. This is a fresh root-owned Docker setup; existing deployments keep their Compose file, .env, project, and volume identity. Credentials stay encrypted on your server and are sent only to the providers they belong to."
           className="lg:order-first"
         >
           <div className="mt-8">

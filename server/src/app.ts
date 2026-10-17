@@ -73,6 +73,8 @@ import {
   isTranscodeQuality,
 } from "./transcodeSession.js";
 import { SERVER_VERSION } from "./version.js";
+import { fetchLatestServerRelease, serverReleaseStatus } from "./serverRelease.js";
+import { readServerUpdaterStatus } from "./serverUpdaterStatus.js";
 import {
   RemoteControlRegistry,
   type RemoteCommandType,
@@ -1457,9 +1459,20 @@ function safeStaticPath(root: string, urlPath: string): string | null {
   return candidate;
 }
 
+function usableWebDist(webDistPath: string | null): webDistPath is string {
+  if (webDistPath == null) return false;
+  try {
+    const root = resolve(webDistPath);
+    return statSync(root).isDirectory() && statSync(join(root, "index.html")).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function registerStaticApp(app: FastifyInstance, config: ServerConfig): void {
-  if (config.webDistPath == null || !existsSync(config.webDistPath)) return;
-  const root = resolve(config.webDistPath);
+  const webDistPath = config.webDistPath;
+  if (!usableWebDist(webDistPath)) return;
+  const root = resolve(webDistPath);
 
   app.get("/server-mode.js", async (_request, reply) => {
     reply.header("content-type", "text/javascript; charset=utf-8");
@@ -1474,17 +1487,29 @@ function registerStaticApp(app: FastifyInstance, config: ServerConfig): void {
     if (path.startsWith("api/")) throw httpError(404, "Not found.");
 
     const candidate = safeStaticPath(root, `/${path}`);
-    const file =
-      candidate != null && existsSync(candidate) && statSync(candidate).isFile()
-        ? candidate
-        : join(root, "index.html");
+    let file: string;
+    if (candidate != null && existsSync(candidate) && statSync(candidate).isFile()) {
+      file = candidate;
+    } else if (candidate != null && (path.startsWith("assets/") || extname(candidate) !== "")) {
+      reply.code(404);
+      reply.header("content-type", "text/plain; charset=utf-8");
+      reply.header("cache-control", "no-store");
+      return reply.send("Not found.");
+    } else {
+      file = join(root, "index.html");
+    }
 
     const ext = extname(file);
     reply.header("content-type", MIME_TYPES[ext] ?? "application/octet-stream");
     if (ext === ".html") {
       reply.header("cache-control", "no-store");
-    } else {
+    } else if (
+      path.startsWith("assets/") &&
+      /-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/.test(path)
+    ) {
       reply.header("cache-control", "public, max-age=31536000, immutable");
+    } else {
+      reply.header("cache-control", "no-cache");
     }
     return reply.send(createReadStream(file));
   });
@@ -2366,8 +2391,9 @@ function adminHealthSummary(db: AppDatabase, config: ServerConfig) {
   if (!config.trustProxy) {
     warnings.push("Reverse-proxy trust is disabled. Enable DS_SERVER_TRUST_PROXY=true behind a trusted HTTPS proxy.");
   }
-  if (config.webDistPath == null) {
-    warnings.push("Hosted PWA assets are not configured; API-only mode is active.");
+  const webDistReady = usableWebDist(config.webDistPath);
+  if (!webDistReady) {
+    warnings.push("Hosted PWA assets are not ready; API-only mode is active.");
   }
   if (config.publicMode && counts.passwordlessProfiles > 0) {
     warnings.push(`${counts.passwordlessProfiles} active viewer profile(s) do not have a password. Public mode requires every profile to be protected.`);
@@ -2385,7 +2411,7 @@ function adminHealthSummary(db: AppDatabase, config: ServerConfig) {
       corsConfigured: config.corsOrigin != null && config.corsOrigin.trim().length > 0,
       rawStreamUrlsEnabled: config.allowRawStreamUrls,
       directTorrentEnabled: config.enableDirectTorrent,
-      webDistConfigured: config.webDistPath != null,
+      webDistConfigured: webDistReady,
       sessionTtlSeconds: config.sessionTtlSeconds,
       bindSessionUserAgent: config.bindSessionUserAgent,
       publicMode: config.publicMode,
@@ -2481,54 +2507,23 @@ function nextLoginBackoffMs(failures: number): number {
   return Math.min(15 * 60_000, 2_000 * 2 ** Math.min(9, failures - 5));
 }
 
-let releaseCache:
-  | { expiresAt: number; value: { currentVersion: string; latestVersion: string | null; available: boolean; url: string } }
-  | null = null;
-
-function versionParts(version: string): number[] {
-  return version.replace(/^v/, "").split(/[.-]/).slice(0, 3).map((part) => Number(part) || 0);
-}
-
-function newerVersion(latest: string, current: string): boolean {
-  const left = versionParts(latest);
-  const right = versionParts(current);
-  for (let index = 0; index < 3; index += 1) {
-    if (left[index]! > right[index]!) return true;
-    if (left[index]! < right[index]!) return false;
-  }
-  return false;
-}
+let releaseCache: { expiresAt: number; value: ReturnType<typeof serverReleaseStatus> } | null = null;
 
 async function serverUpdateStatus(enabled: boolean) {
-  const url = "https://github.com/Tgk-30/YAWF-Stream/releases/latest";
   if (!enabled) {
-    return { currentVersion: SERVER_VERSION, latestVersion: null, available: false, url };
+    return serverReleaseStatus(SERVER_VERSION, null, "disabled");
   }
   if (releaseCache != null && releaseCache.expiresAt > Date.now()) return releaseCache.value;
-  let latestVersion: string | null = null;
   try {
-    const response = await fetch(
-      "https://api.github.com/repos/Tgk-30/YAWF-Stream/releases/latest",
-      {
-        headers: { accept: "application/vnd.github+json", "user-agent": "YAWF-Stream-Server" },
-        signal: AbortSignal.timeout(3_000),
-      },
-    );
-    if (response.ok) {
-      const body = await response.json() as { tag_name?: unknown };
-      if (typeof body.tag_name === "string") latestVersion = body.tag_name.replace(/^v/, "").replace(/-web$/, "");
-    }
+    const value = serverReleaseStatus(SERVER_VERSION, await fetchLatestServerRelease());
+    releaseCache = { expiresAt: Date.now() + 6 * 60 * 60_000, value };
+    return value;
   } catch {
-    latestVersion = null;
+    // Update discovery is advisory and must never make admin health unavailable.
+    const value = serverReleaseStatus(SERVER_VERSION, null, "unavailable");
+    releaseCache = { expiresAt: Date.now() + 5 * 60_000, value };
+    return value;
   }
-  const value = {
-    currentVersion: SERVER_VERSION,
-    latestVersion,
-    available: latestVersion != null && newerVersion(latestVersion, SERVER_VERSION),
-    url,
-  };
-  releaseCache = { expiresAt: Date.now() + 6 * 60 * 60_000, value };
-  return value;
 }
 
 function streamContentType(fileName: string): string | null {
@@ -2544,6 +2539,7 @@ function registerRoutes(
     ready: boolean;
     toneMappingAvailable: boolean;
     subtitleSidecarAvailable: boolean;
+    audioTrackSelectionAvailable: boolean;
     availableVideoEncoders: ServerConfig["transcodeVideoEncoder"][];
     registry: TranscodeRegistry;
   },
@@ -2561,6 +2557,8 @@ function registerRoutes(
 
   app.get("/api/health", async () => ({
     ok: true,
+    ready: usableWebDist(config.webDistPath),
+    version: SERVER_VERSION,
     setupRequired: userCount(db) === 0,
     setupTokenRequired: userCount(db) === 0 && config.setupToken != null,
   }));
@@ -2591,6 +2589,8 @@ function registerRoutes(
         seekOffset: transcode.ready,
         subtitleSidecar:
           transcode.ready && transcode.subtitleSidecarAvailable,
+        audioTrackSelection:
+          transcode.ready && transcode.audioTrackSelectionAvailable,
         hardwareEncoder: config.transcodeVideoEncoder,
         availableVideoEncoders: transcode.ready
           ? transcode.availableVideoEncoders
@@ -2710,9 +2710,12 @@ function registerRoutes(
         seekOffset: transcode.ready,
         subtitleSidecar:
           transcode.ready && transcode.subtitleSidecarAvailable,
+        audioTrackSelection:
+          transcode.ready && transcode.audioTrackSelectionAvailable,
         toneMapping: transcode.ready && transcode.toneMappingAvailable,
       },
       update: await serverUpdateStatus(config.updateCheck),
+      updater: readServerUpdaterStatus(),
     };
   });
 
@@ -6014,6 +6017,29 @@ function registerRoutes(
     return cookieAuthorized || bearerAuthorized ? row : null;
   };
 
+  // Source audio inventory for the already-authorized stream session. The
+  // registry coalesces this with the job's bounded ffprobe, so opening the
+  // player menu cannot repeatedly consume a short-lived provider URL.
+  app.get("/api/stream/:id/audio-tracks", async (request, reply) => {
+    reply.header("Cache-Control", "private, no-store");
+    if (!transcode.ready || !transcode.audioTrackSelectionAvailable) {
+      throw httpError(404, "Audio track selection is not available.");
+    }
+    const row = loadTranscodeSession(request);
+    if (row == null) throw httpError(404, "Stream session not found.");
+    if (row.source_kind === "direct_torrent") {
+      throw httpError(409, "Audio track selection is not available for Direct P2P playback.");
+    }
+    rateLimit(request, `stream-audio:${row.id}`, 30, 60 * 1000);
+    const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
+    await assertSafeUpstream(upstreamUrl, config.allowRawStreamUrls);
+    const tracks = await transcode.registry.audioTracksFor(row.id, upstreamUrl);
+    if (tracks == null) {
+      throw httpError(409, "Audio track inventory is unavailable for this stream.");
+    }
+    return { tracks };
+  });
+
   // HLS manifest: starts/reuses an ffmpeg job and returns the playlist with
   // session-scoped asset URIs relative to the manifest URL.
   app.get("/api/stream/:id/index.m3u8", async (request, reply) => {
@@ -6039,6 +6065,7 @@ function registerRoutes(
       start?: string;
       hdr?: string;
       subtitles?: string;
+      audio?: string;
     };
     const profile: TranscodeClientProfile =
       query.profile === "high" || query.profile === "data-saver"
@@ -6072,12 +6099,34 @@ function registerRoutes(
       );
     }
     const preserveSubtitles = query.subtitles === "preserve";
+    let audioTrack = 0;
+    let audioTracks: Awaited<ReturnType<TranscodeRegistry["audioTracksFor"]>> | null = null;
+    if (transcode.audioTrackSelectionAvailable) {
+      audioTracks = await transcode.registry.audioTracksFor(row.id, upstreamUrl);
+      audioTrack = audioTracks?.find((track) => track.default)?.index ?? 0;
+    }
+    if (query.audio != null) {
+      if (!/^(?:0|[1-9]|[12][0-9]|3[01])$/.test(query.audio)) {
+        throw httpError(400, "Unsupported audio track.");
+      }
+      if (!transcode.audioTrackSelectionAvailable) {
+        throw httpError(400, "Audio track selection is not available.");
+      }
+      audioTrack = Number(query.audio);
+      if (audioTracks == null) {
+        throw httpError(409, "Audio track inventory is unavailable for this stream.");
+      }
+      if (!audioTracks.some((track) => track.index === audioTrack)) {
+        throw httpError(400, "Unsupported audio track.");
+      }
+    }
     const dir = await transcode.registry.ensureJob(row.id, upstreamUrl, {
       profile,
       quality,
       startSeconds,
       hdrPolicy,
       preserveSubtitles,
+      audioTrack,
     });
     let manifest = await readFile(join(dir, MANIFEST_NAME), "utf8");
     if (
@@ -6108,6 +6157,7 @@ function registerRoutes(
     reply.header("x-yawf-transcode-profile", profile);
     reply.header("x-yawf-transcode-quality", quality);
     reply.header("x-yawf-transcode-start", String(startSeconds));
+    reply.header("x-yawf-transcode-audio", String(audioTrack));
     return reply.send(rewritten);
   });
 
@@ -6202,8 +6252,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           toneMapping: false,
           videoEncoders: [],
           subtitleSidecar: false,
+          audioTrackSelection: false,
         }))
-      : { toneMapping: false, subtitleSidecar: false };
+      : { toneMapping: false, subtitleSidecar: false, audioTrackSelection: false };
   const availableVideoEncoders =
     transcodeCapabilities.videoEncoders ??
     (ffmpegPresent ? [config.transcodeVideoEncoder] : []);
@@ -6332,6 +6383,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     toneMappingAvailable: transcodeCapabilities.toneMapping,
     subtitleSidecarAvailable:
       transcodeCapabilities.subtitleSidecar === true,
+    audioTrackSelectionAvailable:
+      transcodeCapabilities.audioTrackSelection === true,
     availableVideoEncoders,
     registry: transcodeRegistry,
   }, directTorrentRegistry);

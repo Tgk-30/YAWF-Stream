@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "android-remote-safe-area-command"
+description = "Read only the current Android WebView safe-area inset numbers for remote Server Mode layout."
+commands.allow = ["mobile_safe_area_insets"]

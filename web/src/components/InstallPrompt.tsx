@@ -12,6 +12,7 @@ import {
   isSecureContextForInstall,
   isStandaloneDisplay,
 } from "../lib/platform";
+import { isAndroidAppUiContext } from "../lib/androidExternalPlayer";
 import { isTauri } from "../lib/tauri";
 import {
   consumeInstallPrompt,
@@ -21,9 +22,14 @@ import {
 import { Icon } from "./Icon";
 import "./InstallPrompt.css";
 
-/** Static platform gate: never in Tauri, never standalone, mobile UA only. */
+/** Static platform gate: browser-only, never an app WebView or standalone. */
 export function isInstallPromptEligible(): boolean {
-  return !isTauri() && !isStandaloneDisplay() && isMobileBrowser();
+  return (
+    !isTauri() &&
+    !isAndroidAppUiContext() &&
+    !isStandaloneDisplay() &&
+    isMobileBrowser()
+  );
 }
 
 export function InstallPrompt({ onDismiss }: { onDismiss: () => void }) {
