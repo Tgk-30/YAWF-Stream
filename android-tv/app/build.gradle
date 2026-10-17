@@ -16,8 +16,8 @@ android {
         applicationId "com.yawf.stream.tv"
         minSdk 23
         targetSdk 36
-        versionCode 20315
-        versionName "2.3.15"
+        versionCode 20316
+        versionName "2.3.16"
     }
 
     signingConfigs {
