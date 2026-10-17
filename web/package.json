@@ -1,7 +1,7 @@
 {
   "name": "debridstreamer-web",
   "private": true,
-  "version": "2.3.14",
+  "version": "2.3.15",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -17,11 +17,11 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
+    "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-http": "^2.5.9",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.1",
+    "@tauri-apps/plugin-updater": "^2.14.0",
     "dexie": "^4.4.4",
     "hls.js": "^1.5.17",
     "lucide-react": "^1.21.0",
@@ -33,7 +33,7 @@
     "subsrt-ts": "^2.1.2"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.12.3",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

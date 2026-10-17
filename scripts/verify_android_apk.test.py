@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zipfile import ZipInfo
 from verify_android_apk import (
+    resolve_update_paths,
     ABIS, DYNAMIC_PERMISSION, FORBIDDEN, MAX_LIBRARY_BYTES,
     MAX_TOTAL_NATIVE_BYTES, PACKAGE, VerificationError, checked_output,
     locate_sdk_tools, normalize_pin, parse_manifest, validate_update_paths, scan_forbidden_chunks,
@@ -269,6 +270,22 @@ class ContentAndToolTests(unittest.TestCase):
             (sdk / paths[2]).unlink()
             with self.assertRaises(VerificationError):
                 locate_sdk_tools(sdk)
+
+
+
+
+
+class CompiledUpdateResourceTests(unittest.TestCase):
+    TABLE = "  type xml id=12 entryCount=2\n    resource 0x7f120000 xml/file_paths\n      () (file) res/8K.xml type=XML\n    resource 0x7f120001 xml/yawf_update_paths\n      () (file) res/Ab.xml type=XML\n"
+
+    def test_compiled_id_and_renamed_file_are_bound(self):
+        self.assertEqual(resolve_update_paths("@0x7f120001", self.TABLE), "res/Ab.xml")
+        self.assertEqual(resolve_update_paths("@xml/yawf_update_paths", self.TABLE), "res/Ab.xml")
+
+    def test_wrong_id_duplicate_config_and_unsafe_path_fail(self):
+        for resource, table in (("@0x7f120000", self.TABLE), ("@0x7f120001", self.TABLE + self.TABLE), ("@0x7f120001", self.TABLE.replace("res/Ab.xml", "res/../private.xml")), ("@0x7f120001", self.TABLE + "      (land) (file) res/Ac.xml type=XML\n")):
+            with self.subTest(resource=resource, table=table), self.assertRaises(VerificationError):
+                resolve_update_paths(resource, table)
 
 
 if __name__ == "__main__":

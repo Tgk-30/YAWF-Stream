@@ -1,6 +1,6 @@
 [package]
 name = "debridstreamer"
-version = "2.3.14"
+version = "2.3.15"
 description = "YAWF Stream - private streaming hub"
 authors = ["tgk30"]
 edition = "2021"
@@ -55,7 +55,8 @@ fs2 = "0.4"
 # Desktop-only auto-updater. The JS side calls `check()` on launch (see
 # web/src/lib/updater.ts); releases are signed with the updater keypair and
 # published as `latest.json` on GitHub Releases.
-tauri-plugin-updater = "2"
+# Pin the official zip 9 remediation until a crates.io release contains it.
+tauri-plugin-updater = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "ba98bfadc4c868c9a7e1a226c83af528e1f11b89" }
 
 # OS-keychain backend for the SecretStore commands (src/keychain.rs).
 # keyring v3 ships NO default credential store - each platform MUST enable its

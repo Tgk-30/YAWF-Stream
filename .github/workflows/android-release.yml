@@ -112,6 +112,7 @@ jobs:
         with:
           workspaces: "web/src-tauri -> target"
           key: android-release
+          cache-on-failure: true
 
       - name: Install Node for phone build
         if: steps.gate.outputs.ready == 'true'
@@ -190,6 +191,15 @@ jobs:
           rm -f "$ks"
           mkdir -p "$RUNNER_TEMP/phone-candidate"
           cp "$asset" "$RUNNER_TEMP/phone-candidate/"
+
+      - name: Retain failed signed APK for private diagnosis
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone-failed-candidate
+          path: ${{ runner.temp }}/YAWF.Stream_Android_*.apk
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Build fixed-channel Android update metadata
         if: steps.gate.outputs.ready == 'true'
