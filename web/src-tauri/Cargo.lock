@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "debridstreamer"
-version = "2.3.19"
+version = "2.3.20"
 dependencies = [
  "dirs 6.0.0",
  "dispatch2",
@@ -3447,7 +3447,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd3ca559203190a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
+checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
