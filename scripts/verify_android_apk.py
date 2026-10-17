@@ -124,6 +124,17 @@ def parse_manifest(xml, expected_version):
     if None in requested or len(requested) != len(set(requested)):
         raise VerificationError("APK contains malformed or duplicate permission requests")
     allowed = {INTERNET}
+    if version_code(expected_version) >= version_code("2.3.14"):
+        allowed.add("android.permission.REQUEST_INSTALL_PACKAGES")
+        providers = [node for node in applications[0].findall("provider") if node.attrib.get(f"{ANDROID}authorities") == f"{PACKAGE}.updates"]
+        if len(providers) != 1:
+            raise VerificationError("APK must contain exactly one dedicated update provider")
+        provider = providers[0]
+        if provider.attrib.get(f"{ANDROID}name") not in (".YawfUpdateFileProvider", f"{PACKAGE}.YawfUpdateFileProvider") or provider.attrib.get(f"{ANDROID}exported") != "false" or provider.attrib.get(f"{ANDROID}grantUriPermissions") != "true":
+            raise VerificationError("APK update provider is not restricted")
+        metadata = provider.findall("meta-data")
+        if len(metadata) != 1 or metadata[0].attrib.get(f"{ANDROID}name") != "android.support.FILE_PROVIDER_PATHS" or metadata[0].attrib.get(f"{ANDROID}resource") != "@xml/yawf_update_paths":
+            raise VerificationError("APK update provider paths metadata is invalid")
     if DYNAMIC_PERMISSION in requested:
         declarations = [node for node in root.findall("permission") if node.attrib.get(f"{ANDROID}name") == DYNAMIC_PERMISSION]
         if len(declarations) != 1 or not is_signature_protection_level(
@@ -135,6 +146,19 @@ def parse_manifest(xml, expected_version):
         raise VerificationError("APK requests an unexpected Android permission")
     if any(node.attrib.get(f"{ANDROID}name") != DYNAMIC_PERMISSION for node in root.findall("permission")):
         raise VerificationError("APK declares an unexpected custom permission")
+
+
+
+def validate_update_paths(xml):
+    if len(xml) > 16384:
+        raise VerificationError("APK update provider paths are oversized")
+    try:
+        root = ElementTree.fromstring(xml[xml.index("<paths"):])
+    except (ValueError, ElementTree.ParseError):
+        raise VerificationError("APK update provider paths are malformed") from None
+    children = list(root)
+    if root.tag != "paths" or root.attrib or len(children) != 1 or children[0].tag != "files-path" or children[0].attrib != {"name": "updates", "path": "updates/"} or list(children[0]):
+        raise VerificationError("APK update provider must expose only internal updates files")
 
 
 def safe_member_name(name):
@@ -238,6 +262,8 @@ def verify(apk, version, pin_file, sdk):
     validate_signature(signature, expected_pin)
     checked_output([str(zipalign), "-c", "-P", "16", "4", str(apk)], "16 KiB APK ZIP alignment verification")
     parse_manifest(checked_output([str(analyzer), "manifest", "print", str(apk)], "APK manifest inspection"), version)
+    if version_code(version) >= version_code("2.3.14"):
+        validate_update_paths(checked_output([str(analyzer), "resources", "xml", "--file", "res/xml/yawf_update_paths.xml", str(apk)], "APK update paths inspection"))
     with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory(prefix="yawf-apk-verify-") as temporary:
         native, scan = validate_inventory(archive.infolist())
         for info in scan:

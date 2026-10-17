@@ -33,6 +33,9 @@ mod player;
 // in-window path is implemented in render_player.rs on macOS.
 mod render_player;
 
+#[cfg(target_os = "android")]
+mod mobile_android_update;
+
 // Android ACTION_VIEW chooser for cookie-free HTTP(S) stream capabilities.
 // The command is registered only by the Android handler and receives its grant
 // from a separate Android-only local capability.
@@ -839,6 +842,7 @@ pub fn run() {
         app_install_info,
         mobile_safe_area_insets,
         mobile_external_player::mobile_open_external_player,
+        mobile_android_update::mobile_check_android_updates,
         render_player::player_init,
         render_player::player_load,
         render_player::player_command,

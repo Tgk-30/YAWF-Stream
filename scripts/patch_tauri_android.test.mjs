@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -158,6 +158,13 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
     assert.equal(initial.gradleChanged, true);
     assert.equal(initial.activityChanged, true);
     assert.equal(initial.manifestChanged, true);
+    const updater = readFileSync(join(dirname(mainActivity), "YawfAndroidUpdater.kt"), "utf8");
+    assert.match(updater, /class YawfAndroidUpdater/);
+    assert.doesNotMatch(updater, /@JavascriptInterface/);
+    const updatePaths = readFileSync(join(app, "src/main/res/xml/yawf_update_paths.xml"), "utf8");
+    assert.match(updatePaths, /<files-path name="updates" path="updates\/" \/>/);
+    assert.doesNotMatch(updatePaths, /root-path|cache-path|external-path|external-files-path/);
+
 
     const gradle = readFileSync(join(app, "build.gradle.kts"), "utf8");
     const activity = readFileSync(mainActivity, "utf8");
@@ -171,6 +178,13 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
       gradle.match(/implementation\("androidx\.webkit:webkit:1\.14\.0"\)/g)?.length,
       1,
     );
+    assert.match(manifest, /android.permission.REQUEST_INSTALL_PACKAGES/);
+    assert.match(manifest, /android:name=".YawfUpdateFileProvider"/);
+    assert.match(manifest, /android:authorities="\$\{applicationId\}.updates"/);
+    assert.match(activity, /androidUpdater = YawfAndroidUpdater.attach\(this\)/);
+    assert.match(activity, /override fun onResume\(\)/);
+    assert.match(activity, /override fun onPause\(\)/);
+    assert.match(activity, /@Keep\n  fun checkAndroidUpdates\(\)/);
     assert.match(activity, /override fun onWebViewCreate\(webView: WebView\)/);
     assert.match(activity, /setAcceptThirdPartyCookies\(webView, true\)/);
     assert.match(activity, /statusBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/);

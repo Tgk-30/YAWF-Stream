@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -219,7 +219,7 @@ export function previousSafeAreaMainActivityForTest(packageName) {
   return safeAreaPatchedMainActivity(packageName);
 }
 
-function patchedMainActivity(packageName) {
+function serverPlayerPatchedMainActivity(packageName) {
   return `package ${packageName}
 
 import android.app.AlertDialog
@@ -704,6 +704,45 @@ class MainActivity : TauriActivity() {
 }
 `;
 }
+function patchedMainActivity(packageName) {
+  return serverPlayerPatchedMainActivity(packageName)
+    .replace('class MainActivity : TauriActivity() {', 'class MainActivity : TauriActivity() {\n  private lateinit var androidUpdater: YawfAndroidUpdater')
+    .replace('    super.onCreate(savedInstanceState)\n  }', '    super.onCreate(savedInstanceState)\n    androidUpdater = YawfAndroidUpdater.attach(this)\n  }')
+    .replace('  override fun onDestroy() {', `  override fun onResume() {
+    super.onResume()
+    if (::androidUpdater.isInitialized) androidUpdater.onResume()
+  }
+
+  override fun onPause() {
+    if (::androidUpdater.isInitialized) androidUpdater.onPause()
+    super.onPause()
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    if (::androidUpdater.isInitialized) androidUpdater.onWindowFocusChanged(hasFocus)
+  }
+
+  @Keep
+  fun checkAndroidUpdates() {
+    runOnUiThread { if (::androidUpdater.isInitialized) androidUpdater.checkManually() }
+  }
+
+  override fun onDestroy() {
+    if (::androidUpdater.isInitialized) androidUpdater.onDestroy()`);
+}
+
+const updatePaths = '<?xml version="1.0" encoding="utf-8"?>\n<paths xmlns:android="http://schemas.android.com/apk/res/android">\n    <files-path name="updates" path="updates/" />\n</paths>\n';
+const updaterProvider = `        <provider
+            android:name=".YawfUpdateFileProvider"
+            android:authorities="\${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/yawf_update_paths" />
+        </provider>
+`;
+const installPermission = '    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />\n';
+
 function replacementState(source, original, replacement, description) {
   if (source.includes(replacement)) return { changed: false, output: source };
   if (!source.includes(original)) {
@@ -802,7 +841,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     activity === originalActivity ||
     activity === legacyActivity ||
     activity === darkSystemBarActivity ||
-    activity === safeAreaActivity;
+    activity === safeAreaActivity ||
+    activity === serverPlayerPatchedMainActivity(packageName);
   if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",
@@ -819,12 +859,32 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
       "AndroidManifest.xml does not match the supported Tauri Android phone template. Refusing to patch generated sources.",
     );
   }
-  const manifestChanged = hasLeanbackFeature && hasLeanbackCategory;
-  const patchedManifest = manifestChanged
+  const leanbackChanged = hasLeanbackFeature && hasLeanbackCategory;
+  let patchedManifest = leanbackChanged
     ? manifest
         .replace(leanbackFeatureTemplate, "")
         .replace(leanbackCategoryTemplate, "")
     : manifest;
+
+  if (patchedManifest.includes('android.permission.REQUEST_INSTALL_PACKAGES') && !patchedManifest.includes(installPermission)) {
+    throw new Error("Unsupported Android updater permission template.");
+  }
+  if (patchedManifest.includes('YawfUpdateFileProvider') && !patchedManifest.includes(updaterProvider)) {
+    throw new Error("Unsupported Android updater provider template.");
+  }
+  if (!patchedManifest.includes(installPermission)) {
+    patchedManifest = patchedManifest.replace('    <uses-permission android:name="android.permission.INTERNET" />\n', '    <uses-permission android:name="android.permission.INTERNET" />\n' + installPermission);
+  }
+  if (!patchedManifest.includes(updaterProvider)) patchedManifest = patchedManifest.replace('    </application>', updaterProvider + '    </application>');
+  if (!patchedManifest.includes(installPermission) || !patchedManifest.includes(updaterProvider)) throw new Error("Android updater manifest anchors missing.");
+  const manifestChanged = patchedManifest !== manifest;
+  const updaterPath = join(dirname(mainActivityPath), "YawfAndroidUpdater.kt");
+  const updaterSource = readFileSync(new URL("./android/YawfAndroidUpdater.kt", import.meta.url), "utf8").replace(/^package com\.tgk30\.debridstreamer$/m, `package ${packageName}`);
+  const pathsPath = join(appRoot, "src/main/res/xml/yawf_update_paths.xml");
+  for (const [path, expected] of [[updaterPath, updaterSource], [pathsPath, updatePaths]]) {
+    if (existsSync(path) && readFileSync(path, "utf8") !== expected) throw new Error("Generated Android updater source or resource has unrecognized changes. Refusing to overwrite.");
+  }
+  const updaterChanged = !existsSync(updaterPath) || !existsSync(pathsPath);
 
   // Validate every generated template before the first write. A drifted
   // MainActivity or manifest must not leave a half-patched Gradle file behind.
@@ -832,10 +892,15 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
   if (gradleChanged) writeFileSync(gradlePath, patchedGradleWithWebkit);
   if (activityChanged) writeFileSync(mainActivityPath, replacementActivity);
   if (manifestChanged) writeFileSync(manifestPath, patchedManifest);
+  if (updaterChanged) {
+    mkdirSync(dirname(pathsPath), { recursive: true });
+    writeFileSync(updaterPath, updaterSource);
+    writeFileSync(pathsPath, updatePaths);
+  }
 
   return {
     androidRoot,
-    changed: gradleChanged || activityChanged || manifestChanged,
+    changed: gradleChanged || activityChanged || manifestChanged || updaterChanged,
     gradleChanged,
     activityChanged,
     manifestChanged,

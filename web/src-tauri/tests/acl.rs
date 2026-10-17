@@ -269,3 +269,25 @@ fn android_build_injects_a_platform_specific_webview_marker() {
     );
     assert_eq!(source.matches(marker).count(), 1);
 }
+
+#[test]
+fn android_updater_dialog_is_local_only_and_has_no_remote_grant() {
+    let local: serde_json::Value =
+        serde_json::from_str(include_str!("../capabilities/android-local-updater.json")).unwrap();
+    assert_eq!(local["local"], true);
+    assert!(local.get("remote").is_none());
+    assert_eq!(local["platforms"], serde_json::json!(["android"]));
+    assert_eq!(local["windows"], serde_json::json!(["main"]));
+    assert_eq!(
+        local["permissions"],
+        serde_json::json!(["android-update-dialog-command"])
+    );
+    assert!(include_str!("../permissions/android-update-dialog.toml")
+        .contains("commands.allow = [\"mobile_check_android_updates\"]"));
+    for remote in [
+        include_str!("../capabilities/remote.json"),
+        include_str!("../capabilities/android-remote-safe-area.json"),
+    ] {
+        assert!(!remote.contains("android-update-dialog-command"));
+    }
+}

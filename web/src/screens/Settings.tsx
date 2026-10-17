@@ -23,6 +23,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import QRCode from "qrcode";
+import { checkAndroidAppUpdates, hasLocalAndroidUpdater } from "../lib/androidUpdates";
 import { useAppStore } from "../store/AppStore";
 import {
   useServerSession,
@@ -1137,7 +1138,9 @@ function UpdatesTab({
   const [smokeResults, setSmokeResults] = useState<ProviderSmokeResult[] | null>(null);
   const [smokeRunning, setSmokeRunning] = useState(false);
   const [diagnosticsStatus, setDiagnosticsStatus] = useState<string | null>(null);
-  const desktop = isTauri();
+  const desktop = isDesktopTauri();
+  const androidUpdater = hasLocalAndroidUpdater();
+  const [androidUpdateStatus, setAndroidUpdateStatus] = useState<string | null>(null);
 
   async function runProviderChecks() {
     if (debrid == null || smokeRunning) return;
@@ -1174,10 +1177,22 @@ function UpdatesTab({
 
   return (
     <div className="settings-fields">
-      <SettingsInfo label="About desktop updates">
-        Desktop builds use signed release metadata from GitHub Releases. Browser
-        and PWA installs update through the web server instead.
-      </SettingsInfo>
+      {androidUpdater ? (
+        <SettingsInfo label="Android APK updates">
+          Android update checks are managed by the native app, independently of your server version.
+          Enable weekly checks in its native prompt. Downloads and installation need your confirmation.
+          <button type="button" className="btn btn-secondary" onClick={() => {
+            setAndroidUpdateStatus(null);
+            void checkAndroidAppUpdates().then(() => setAndroidUpdateStatus("Android update dialog opened.")).catch(() => setAndroidUpdateStatus("Android update dialog unavailable. Reopen the app and try again."));
+          }}>Check for Android updates</button>
+          {androidUpdateStatus && <p role="status">{androidUpdateStatus}</p>}
+        </SettingsInfo>
+      ) : (
+        <SettingsInfo label="About desktop updates">
+          Desktop builds use signed release metadata from GitHub Releases. Browser
+          and PWA installs update through the web server instead.
+        </SettingsInfo>
+      )}
 
       <section className="settings-section">
         <h2>Credits</h2>
@@ -1195,7 +1210,7 @@ function UpdatesTab({
         </p>
       </section>
 
-      <label className="settings-toggle-row">
+      {!androidUpdater && <><label className="settings-toggle-row">
         <input
           type="checkbox"
           checked={draft.autoUpdateChecks}
@@ -1229,6 +1244,7 @@ function UpdatesTab({
         </span>
       </label>
 
+      </>}
       <section className="settings-diagnostics" aria-labelledby="settings-diagnostics-title">
         <div>
           <h2 id="settings-diagnostics-title">Troubleshooting</h2>

@@ -26,6 +26,7 @@ import {
   compareAppVersions,
   getNativeAppVersion,
 } from "../lib/appVersion";
+import { isDesktopTauri, isTauri } from "../lib/tauri";
 import { Icon } from "./Icon";
 import "./UpdateBanner.css";
 
@@ -76,6 +77,8 @@ export function UpdateBanner({
   // update: it checks and installs even when optional automatic checks or
   // installs are disabled. The active network privacy mode is still honored.
   useEffect(() => {
+    // Native Android owns its independent APK channel, never the server version.
+    if (isTauri() && !isDesktopTauri()) return;
     let cancelled = false;
 
     const beginInstall = (

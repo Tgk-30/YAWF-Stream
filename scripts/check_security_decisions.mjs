@@ -21,7 +21,7 @@ function check(condition, message) {
 const decisionsPath = "docs/SECURITY_DECISIONS.md";
 check(existsSync(join(root, decisionsPath)), "Security decision log exists");
 const decisions = read(decisionsPath);
-for (let id = 1; id <= 13; id += 1) {
+for (let id = 1; id <= 17; id += 1) {
   check(decisions.includes(`SEC-${String(id).padStart(3, "0")}`), `Security decision SEC-${String(id).padStart(3, "0")} is recorded`);
 }
 check(
@@ -101,6 +101,32 @@ check(
     androidExternalPlayerCommands.has("mobile_open_external_player"),
   "Android video chooser is restricted to the local main webview and its one command",
 );
+const androidUpdateCapability = JSON.parse(read("web/src-tauri/capabilities/android-local-updater.json"));
+const androidUpdatePermission = read("web/src-tauri/permissions/android-update-dialog.toml");
+const androidUpdateCommands = new Set(
+  [...androidUpdatePermission.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
+    .flatMap((match) => [...match[1].matchAll(/"([a-z][a-z0-9_]*)"/g)])
+    .map((match) => match[1]),
+);
+check(
+  androidUpdateCapability.local === true && androidUpdateCapability.remote == null &&
+    JSON.stringify(androidUpdateCapability.windows) === '["main"]' &&
+    JSON.stringify(androidUpdateCapability.platforms) === '["android"]' &&
+    JSON.stringify(androidUpdateCapability.permissions) === '["android-update-dialog-command"]' &&
+    androidUpdateCommands.size === 1 && androidUpdateCommands.has("mobile_check_android_updates") &&
+    /SEC-017[^\n]*fixed official Android phone channel/.test(decisions),
+  "Android updater dialog is restricted to the local main webview and one no-argument command",
+);
+const androidUpdater = read("scripts/android/YawfAndroidUpdater.kt");
+const androidUpdateCommand = read("web/src-tauri/src/mobile_android_update.rs");
+check(
+  !/@JavascriptInterface|addJavascriptInterface|addWebMessageListener/.test(androidUpdater) &&
+    /mobile_check_android_updates\(webview: tauri::Webview\)/.test(androidUpdateCommand) &&
+    /filesDir, "updates"/.test(androidUpdater) &&
+    /canRequestPackageInstalls/.test(androidUpdater) &&
+    /checkAndroidUpdates/.test(androidUpdateCommand),
+  "Android updater accepts no web URL or metadata and stages installer files privately",
+);
 const androidRemoteSafeAreaCapability = JSON.parse(
   read("web/src-tauri/capabilities/android-remote-safe-area.json"),
 );
@@ -110,8 +136,8 @@ const androidRemoteSafeAreaPermission = read(
 const androidProjectPatcher = read("scripts/patch_tauri_android.mjs");
 const mobileSafeAreaSource = read("web/src/lib/mobileSafeArea.ts");
 // Inspect the current generated activity, not recognized historical templates.
-const currentActivityStart = androidProjectPatcher.indexOf("function patchedMainActivity(packageName) {");
-const currentActivityEnd = androidProjectPatcher.indexOf("\nfunction replacementState(", currentActivityStart);
+const currentActivityStart = androidProjectPatcher.indexOf("function serverPlayerPatchedMainActivity(packageName) {");
+const currentActivityEnd = androidProjectPatcher.indexOf("\nfunction patchedMainActivity(", currentActivityStart);
 const currentActivityTemplate = currentActivityStart >= 0 && currentActivityEnd > currentActivityStart
   ? androidProjectPatcher.slice(currentActivityStart, currentActivityEnd)
   : "";
@@ -199,6 +225,7 @@ const mobileCommandNames = new Set(
 const allMobileCommandNames = new Set([
   ...mobileCommandNames,
   ...androidExternalPlayerCommands,
+  ...androidUpdateCommands,
 ]);
 check(
   !mobileCommandNames.has("mobile_open_external_player") &&
@@ -259,11 +286,13 @@ const registeredMobileCommands = new Set(
 check(
   registeredAndroidCommands.has("mobile_open_external_player") &&
     !registeredIOSCommands.has("mobile_open_external_player") &&
+    registeredAndroidCommands.has("mobile_check_android_updates") &&
+    !registeredIOSCommands.has("mobile_check_android_updates") &&
     [...allMobileCommandNames].every((command) => registeredAndroidCommands.has(command)) &&
     [...registeredAndroidCommands].every((command) => allMobileCommandNames.has(command)) &&
     [...mobileCommandNames].every((command) => registeredIOSCommands.has(command)) &&
     [...registeredIOSCommands].every((command) => mobileCommandNames.has(command)),
-  "Only Android registers the chooser; iOS retains exactly its mobile command surface",
+  "Only Android registers its local chooser and updater; iOS retains exactly its mobile command surface",
 );
 check(
   registeredMobileCommands.size > 0 &&
@@ -312,6 +341,7 @@ const appPermissionCommands = new Map([
   ["remote-desktop-commands", remoteDesktopCommandNames],
   ["mobile-commands", mobileCommandNames],
   ["android-external-player-command", androidExternalPlayerCommands],
+  ["android-update-dialog-command", androidUpdateCommands],
   ["android-remote-safe-area-command", androidRemoteSafeAreaCommands],
 ]);
 const capabilities = readdirSync(join(root, "web/src-tauri/capabilities"))

@@ -26,6 +26,7 @@ import { setNetworkMode } from "./networkPolicy";
 /** Put a fake Tauri window in place so isTauri() returns true. */
 function enterTauri(): void {
   vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+  vi.stubGlobal("navigator", { userAgent: "Macintosh", platform: "MacIntel", maxTouchPoints: 0 });
 }
 
 beforeEach(() => {
@@ -208,5 +209,21 @@ describe("PendingUpdate.install - progress translation + relaunch", () => {
     const pending = await checkForUpdates();
     await expect(pending!.install()).resolves.toBeUndefined();
     expect(relaunchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("mobile updater separation", () => {
+  it("does not call the desktop plugin in an Android Tauri app", async () => {
+    enterTauri();
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {}, __YAWF_TAURI_MOBILE__: true, __YAWF_TAURI_ANDROID__: true });
+    await expect(checkForUpdates()).resolves.toBeNull();
+    expect(checkMock).not.toHaveBeenCalled();
+  });
+  it("does not call the desktop plugin in an older Android user agent", async () => {
+    enterTauri();
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Linux; Android 11; wv)", platform: "Linux armv8", maxTouchPoints: 5 });
+    await expect(checkForUpdates()).resolves.toBeNull();
+    expect(checkMock).not.toHaveBeenCalled();
   });
 });

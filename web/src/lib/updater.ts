@@ -15,7 +15,7 @@
 // TAURI_SIGNING_PRIVATE_KEY_PASSWORD); the plugin verifies that signature
 // before reporting an update, so an unsigned/forged `latest.json` is ignored.
 
-import { isTauri } from "./tauri";
+import { isDesktopTauri } from "./tauri";
 import { isNetworkAllowed } from "./networkPolicy";
 import { recordDiagnostic } from "./diagnostics";
 
@@ -68,7 +68,7 @@ export interface PendingUpdate {
  * `null` (with a console warning) so launch is never degraded. */
 export async function checkForUpdates(): Promise<PendingUpdate | null> {
   if (!isNetworkAllowed("updates")) return null;
-  if (!isTauri()) return null;
+  if (!isDesktopTauri()) return null;
 
   try {
     // Imported dynamically so the browser bundle never resolves the Tauri

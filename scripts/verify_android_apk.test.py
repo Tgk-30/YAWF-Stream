@@ -11,7 +11,7 @@ from zipfile import ZipInfo
 from verify_android_apk import (
     ABIS, DYNAMIC_PERMISSION, FORBIDDEN, MAX_LIBRARY_BYTES,
     MAX_TOTAL_NATIVE_BYTES, PACKAGE, VerificationError, checked_output,
-    locate_sdk_tools, normalize_pin, parse_manifest, scan_forbidden_chunks,
+    locate_sdk_tools, normalize_pin, parse_manifest, validate_update_paths, scan_forbidden_chunks,
     stream_chunks, validate_inventory, validate_signature, version_code,
     validate_native_header, ELF_ARCHITECTURES, is_signature_protection_level,
 )
@@ -39,6 +39,22 @@ def manifest(**changes):
       <uses-sdk android:minSdkVersion="{minimum}" android:targetSdkVersion="{target}" />
       <uses-permission android:name="android.permission.INTERNET" />{permissions}
       <application {attributes} /><!---->{extra}</manifest>'''.format(**values)
+
+
+def updater_manifest():
+    provider = f'<provider android:name="{PACKAGE}.YawfUpdateFileProvider" android:authorities="{PACKAGE}.updates" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/yawf_update_paths" /></provider>'
+    return manifest(version="2.3.14", code="2003014", permissions='<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />').replace('<application  />', '<application>'+provider+'</application>')
+
+class UpdaterManifestTests(unittest.TestCase):
+    def test_required_exact_update_capability(self):
+        accepts(parse_manifest, updater_manifest(), "2.3.14")
+        for text in (updater_manifest().replace('android.permission.REQUEST_INSTALL_PACKAGES','android.permission.READ_EXTERNAL_STORAGE'), updater_manifest().replace('android:exported="false"','android:exported="true"'), updater_manifest().replace('.updates"','.anywhere"'), updater_manifest().replace('YawfUpdateFileProvider','FileProvider'), updater_manifest().replace('@xml/yawf_update_paths','@xml/file_paths')):
+            with self.assertRaises(VerificationError): parse_manifest(text, "2.3.14")
+    def test_provider_internal_path_only(self):
+        good='<paths><files-path name="updates" path="updates/" /></paths>'
+        accepts(validate_update_paths,good)
+        for text in (good.replace('files-path','external-files-path'),good.replace('updates/','.'),good.replace('updates/','/'),good.replace('</paths>','<root-path name="root" path="/" /></paths>')):
+            with self.assertRaises(VerificationError): validate_update_paths(text)
 
 
 def entry(name, size=1024, mode=stat.S_IFREG | 0o644):

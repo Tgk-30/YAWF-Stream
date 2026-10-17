@@ -428,3 +428,15 @@ describe("UpdateBanner", () => {
     }
   });
 });
+
+it("does not compare Android APK versions against the hosted server or call the desktop updater", async () => {
+  vi.stubGlobal("__TAURI_INTERNALS__", {});
+  vi.stubGlobal("__YAWF_TAURI_MOBILE__", true);
+  vi.stubGlobal("__YAWF_TAURI_ANDROID__", true);
+  getNativeAppVersion.mockResolvedValue("2.3.9");
+  const { container } = render(<UpdateBanner autoCheck={false} autoInstall={false} requiredVersion="2.3.99" />);
+  await Promise.resolve();
+  expect(getNativeAppVersion).not.toHaveBeenCalled();
+  expect(checkForUpdates).not.toHaveBeenCalled();
+  expect(container).toBeEmptyDOMElement();
+});
