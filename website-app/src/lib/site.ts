@@ -31,6 +31,7 @@ export const SERVER_SOURCE_FILES = {
 
 export const RELEASE_LINKS = {
   desktopChecksums: releaseAsset(DESKTOP_RELEASE, 'SHA256SUMS'),
+  androidTvChecksums: releaseAsset(ANDROID_TV_RELEASE, 'SHA256SUMS'),
   androidPhoneChecksums: releaseAsset(ANDROID_PHONE_RELEASE, 'SHA256SUMS'),
   serverChecksums: releaseAsset(SERVER_RELEASE, 'SHA256SUMS'),
   serverUpdateManifest: releaseAsset(SERVER_RELEASE, 'server-update.json'),

@@ -47,6 +47,7 @@ export function validateWebsiteReleaseCatalog(source) {
     "VERSION must remain an explicit desktop-only compatibility label",
   );
   includes(source, "desktopChecksums: releaseAsset(DESKTOP_RELEASE, 'SHA256SUMS')", failures, "desktop checksum channel must use the desktop release");
+  includes(source, "androidTvChecksums: releaseAsset(ANDROID_TV_RELEASE, 'SHA256SUMS')", failures, "Android TV checksum channel must use the Android TV release");
   includes(source, "androidPhoneChecksums: releaseAsset(ANDROID_PHONE_RELEASE, 'SHA256SUMS')", failures, "Android phone checksum channel must use the Android phone release");
   includes(source, "serverChecksums: releaseAsset(SERVER_RELEASE, 'SHA256SUMS')", failures, "server checksum channel must use the server release");
   includes(source, "serverUpdateManifest: releaseAsset(SERVER_RELEASE, 'server-update.json')", failures, "server update manifest must use the server release");

@@ -25,6 +25,11 @@ for (const { name, from, to } of [
     to: "YAWF.Stream_Android_${ANDROID_TV_RELEASE.version}.apk",
   },
   {
+    name: "Android TV checksum channel",
+    from: "androidTvChecksums: releaseAsset(ANDROID_TV_RELEASE, 'SHA256SUMS')",
+    to: "androidTvChecksums: releaseAsset(DESKTOP_RELEASE, 'SHA256SUMS')",
+  },
+  {
     name: "server checksum channel",
     from: "serverChecksums: releaseAsset(SERVER_RELEASE, 'SHA256SUMS')",
     to: "serverChecksums: releaseAsset(DESKTOP_RELEASE, 'SHA256SUMS')",

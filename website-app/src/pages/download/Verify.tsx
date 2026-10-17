@@ -53,7 +53,13 @@ export default function Verify() {
             href={RELEASE_LINKS.desktopChecksums}
             className="inline-flex min-h-11 items-center rounded-chip bg-brand px-5 py-3 font-semibold text-[var(--ink-on-brand)]"
           >
-            Desktop and TV SHA256SUMS
+            Desktop SHA256SUMS
+          </a>
+          <a
+            href={RELEASE_LINKS.androidTvChecksums}
+            className="inline-flex min-h-11 items-center rounded-chip border border-line px-5 py-3 font-semibold text-ink-1"
+          >
+            Android TV SHA256SUMS
           </a>
           <a
             href={RELEASE_LINKS.androidPhoneChecksums}
