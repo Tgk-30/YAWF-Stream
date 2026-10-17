@@ -68,7 +68,6 @@ class YawfAndroidUpdater private constructor(
   private var resumeNumber = 0L
   private var foregroundGeneration = 0L
   private var readinessAttempts = 0
-  private var startupCheckConsidered = false
   private var dialog: AlertDialog? = null
   private var dialogState: DialogState? = null
   private var operationFuture: Future<*>? = null
@@ -180,17 +179,14 @@ class YawfAndroidUpdater private constructor(
       cleanupAfterUpgrade()
       scheduleReadiness(resetAttempts = true)
 
-      if (!startupCheckConsidered) {
-        startupCheckConsidered = true
-        if (
-          persistedDownloadId() == NO_DOWNLOAD_ID &&
-          persistedUpdatePhase() == PHASE_NONE &&
-          !preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false) &&
-          automaticChecksEnabled() &&
-          automaticCheckIsDue()
-        ) {
-          startCheck(manual = false)
-        }
+      if (
+        persistedDownloadId() == NO_DOWNLOAD_ID &&
+        persistedUpdatePhase() == PHASE_NONE &&
+        !preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false) &&
+        automaticChecksEnabled() &&
+        automaticCheckIsDue()
+      ) {
+        startCheck(manual = false)
       }
     }
   }

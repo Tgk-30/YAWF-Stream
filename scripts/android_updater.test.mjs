@@ -170,7 +170,16 @@ test("download, verification, permission, and installer states fail closed", () 
 });
 
 test("cadence, persisted phases, focus recovery, and private staging are wired", () => {
+  const onResume = section("fun onResume()", "/** Forward Activity.onPause()");
   const startCheck = section("private fun startCheck", "private fun showInitialConsentDialog");
+  assert.doesNotMatch(source, /startupCheckConsidered/);
+  assert.match(onResume, /persistedDownloadId\(\) == NO_DOWNLOAD_ID/);
+  assert.match(onResume, /persistedUpdatePhase\(\) == PHASE_NONE/);
+  assert.match(onResume, /!preferences\.getBoolean\(KEY_AWAITING_INSTALL_PERMISSION, false\)/);
+  assert.match(onResume, /automaticChecksEnabled\(\)/);
+  assert.match(onResume, /automaticCheckIsDue\(\)/);
+  assert.match(onResume, /startCheck\(manual = false\)/);
+  assert.match(startCheck, /destroyed \|\| operation != null \|\| !hasNetworkConsent\(\)/);
   assert.doesNotMatch(startCheck, /putLong\(KEY_LAST_AUTOMATIC_CHECK/);
   assert.match(startCheck, /recordCheckSuccess\(\)/);
   assert.match(source, /AUTOMATIC_FAILURE_BACKOFF_MS = 6L \* 60L \* 60L \* 1000L/);
