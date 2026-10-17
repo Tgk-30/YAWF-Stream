@@ -63,9 +63,11 @@ function createFixture() {
   writeFileSync(
     join(app, "build.gradle.kts"),
     `android {
+    compileSdk = 37
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "${packageName}"
+        targetSdk = 37
     }
     buildTypes {
         getByName("debug") {
@@ -434,4 +436,25 @@ test("fails closed when the generated Tauri template drifts", () => {
     );
     assert.equal(readFileSync(gradlePath, "utf8"), initialGradle);
   });
+});
+
+test("pins the audited SDK level and rejects unreviewed template targets before writing", () => {
+  for (const sdk of [36, 37, 38]) {
+    withFixture(({ root, app }) => {
+      const path = join(app, "build.gradle.kts");
+      const original = readFileSync(path, "utf8").replaceAll("Sdk = 37", `Sdk = ${sdk}`);
+      writeFileSync(path, original);
+      if (sdk === 38) {
+        assert.throws(() => patchTauriAndroidProject({ root }), /Unsupported generated Android/);
+        assert.equal(readFileSync(path, "utf8"), original);
+      } else {
+        patchTauriAndroidProject({ root });
+        const patched = readFileSync(path, "utf8");
+        assert.match(patched, /compileSdk = 36/);
+        assert.match(patched, /targetSdk = 36/);
+        assert.doesNotMatch(patched, /Sdk = 37/);
+        assert.equal(patchTauriAndroidProject({ root }).changed, false);
+      }
+    });
+  }
 });

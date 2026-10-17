@@ -49,6 +49,7 @@ def updater_manifest():
 class UpdaterManifestTests(unittest.TestCase):
     def test_required_exact_update_capability(self):
         accepts(parse_manifest, updater_manifest(), "2.3.14")
+        accepts(parse_manifest, updater_manifest().replace("@xml/yawf_update_paths", "@ref/0x7f120001"), "2.3.14")
         for text in (updater_manifest().replace('android.permission.REQUEST_INSTALL_PACKAGES','android.permission.READ_EXTERNAL_STORAGE'), updater_manifest().replace('android:exported="false"','android:exported="true"'), updater_manifest().replace('.updates"','.anywhere"'), updater_manifest().replace('YawfUpdateFileProvider','FileProvider'), updater_manifest().replace('@xml/yawf_update_paths','@xml/file_paths')):
             with self.assertRaises(VerificationError): parse_manifest(text, "2.3.14")
     def test_provider_internal_path_only(self):
@@ -280,6 +281,7 @@ class CompiledUpdateResourceTests(unittest.TestCase):
 
     def test_compiled_id_and_renamed_file_are_bound(self):
         self.assertEqual(resolve_update_paths("@0x7f120001", self.TABLE), "res/Ab.xml")
+        self.assertEqual(resolve_update_paths("@ref/0x7f120001", self.TABLE), "res/Ab.xml")
         self.assertEqual(resolve_update_paths("@xml/yawf_update_paths", self.TABLE), "res/Ab.xml")
 
     def test_wrong_id_duplicate_config_and_unsafe_path_fail(self):

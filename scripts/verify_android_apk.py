@@ -134,7 +134,7 @@ def parse_manifest(xml, expected_version):
         if provider.attrib.get(f"{ANDROID}name") not in (".YawfUpdateFileProvider", f"{PACKAGE}.YawfUpdateFileProvider") or provider.attrib.get(f"{ANDROID}exported") != "false" or provider.attrib.get(f"{ANDROID}grantUriPermissions") != "true":
             raise VerificationError("APK update provider is not restricted")
         metadata = provider.findall("meta-data")
-        if len(metadata) != 1 or metadata[0].attrib.get(f"{ANDROID}name") != "android.support.FILE_PROVIDER_PATHS" or not re.fullmatch(r"@(?:xml/yawf_update_paths|0x[0-9a-fA-F]{8})", metadata[0].attrib.get(f"{ANDROID}resource", "")):
+        if len(metadata) != 1 or metadata[0].attrib.get(f"{ANDROID}name") != "android.support.FILE_PROVIDER_PATHS" or not re.fullmatch(r"@(?:xml/yawf_update_paths|(?:ref/)?0x[0-9a-fA-F]{8})", metadata[0].attrib.get(f"{ANDROID}resource", "")):
             raise VerificationError("APK update provider paths metadata is invalid")
         update_resource = metadata[0].attrib[f"{ANDROID}resource"]
     if DYNAMIC_PERMISSION in requested:
@@ -160,7 +160,7 @@ def resolve_update_paths(resource, table):
     if len(entries) != 1:
         raise VerificationError("APK update paths resource is missing or ambiguous")
     identifier, values = entries[0]
-    if resource not in ("@xml/yawf_update_paths", "@" + identifier):
+    if resource not in ("@xml/yawf_update_paths", "@" + identifier, "@ref/" + identifier):
         raise VerificationError("APK provider references a different paths resource")
     lines = [line.strip() for line in values.splitlines() if line.strip()]
     if len(lines) != 1:

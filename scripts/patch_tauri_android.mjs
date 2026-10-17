@@ -787,7 +787,13 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     defaultConfigTrue,
     "app/build.gradle.kts",
   );
-  const patchedGradle = gradleState.output;
+  // Keep the audited Android 16 behavior; newer CLI templates default to API 37.
+  let patchedGradle = gradleState.output;
+  for (const property of ["compileSdk", "targetSdk"]) {
+    const pattern = new RegExp(`(^[ \t]*${property} = )(36|37)([ \t]*$)`, "m");
+    if (!pattern.test(patchedGradle)) throw new Error(`Unsupported generated Android ${property}. Refusing to patch.`);
+    patchedGradle = patchedGradle.replace(pattern, (_match, prefix, _version, suffix) => prefix + "36" + suffix);
+  }
   if (
     !patchedGradle.includes(defaultConfigTrue) ||
     !patchedGradle.includes(`getByName("debug") {
@@ -888,7 +894,7 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
 
   // Validate every generated template before the first write. A drifted
   // MainActivity or manifest must not leave a half-patched Gradle file behind.
-  const gradleChanged = gradleState.changed || webkitState.changed;
+  const gradleChanged = gradle !== patchedGradleWithWebkit;
   if (gradleChanged) writeFileSync(gradlePath, patchedGradleWithWebkit);
   if (activityChanged) writeFileSync(mainActivityPath, replacementActivity);
   if (manifestChanged) writeFileSync(manifestPath, patchedManifest);
