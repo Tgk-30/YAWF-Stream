@@ -11,7 +11,7 @@ type PublishedRelease = Readonly<{
 
 export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.6', tag: 'v2.3.6-web' };
 export const ANDROID_TV_RELEASE: PublishedRelease = { version: '2.3.6', tag: 'v2.3.6-web' };
-export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.9', tag: 'android-v2.3.9' };
+export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'android-v2.3.20' };
 export const SERVER_RELEASE: PublishedRelease = { version: '2.3.13', tag: 'v2.3.13' };
 
 function releaseAsset(release: PublishedRelease, filename: string) {

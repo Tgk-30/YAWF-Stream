@@ -34,7 +34,7 @@ export default function AndroidPhoneInstall() {
           <GlassCard className="h-full">
             <ShieldCheck className="h-5 w-5 text-brand" />
             <h3 className="display-s mt-4 font-display">Updates stay explicit</h3>
-            <p className="mt-2 text-[0.95rem] leading-[1.7] text-ink-2">Check the published {ANDROID_PHONE_RELEASE.tag} release and Android version compatibility before updating. The download does not silently install updates.</p>
+            <p className="mt-2 text-[0.95rem] leading-[1.7] text-ink-2">Check the published {ANDROID_PHONE_RELEASE.tag} release and Android version compatibility before updating. Older APKs need a one-time manual upgrade over the existing app. Do not uninstall first. Then enable weekly checks in the native prompt; checks run when you open or return to the app. Android asks before installation. The download does not silently install updates.</p>
           </GlassCard>
         </div>
 

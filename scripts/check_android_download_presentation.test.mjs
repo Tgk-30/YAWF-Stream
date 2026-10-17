@@ -37,6 +37,10 @@ test('phone download does not hardcode a release URL or version', () => {
 test('update wording requires an explicit OS compatibility check', () => {
   assert.match(phone, /Check the published \{ANDROID_PHONE_RELEASE\.tag\} release and Android version compatibility before updating/i);
   assert.match(phone, /does not silently install updates/i);
+  assert.match(phone, /one-time manual upgrade over the existing app/i);
+  assert.match(phone, /Do not uninstall first/i);
+  assert.match(phone, /enable weekly checks in the native prompt/i);
+  assert.match(phone, /Android asks before installation/i);
 });
 
 // Source contract should reject the previous presentation if the new section is removed.
