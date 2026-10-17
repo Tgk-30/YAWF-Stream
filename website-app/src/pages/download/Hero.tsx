@@ -1,10 +1,11 @@
 import { useRef } from 'react';
 import { gsap, useGSAP } from '@/lib/gsap';
 import { usePrefersReducedMotion } from '@/lib/motion';
-import { GITHUB_DESKTOP_RELEASE, GITHUB_REPO, VERSION } from '@/lib/site';
+import { ANDROID_PHONE_RELEASE, DOWNLOAD_LINKS, GITHUB_DESKTOP_RELEASE, GITHUB_REPO, VERSION } from '@/lib/site';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import Chip from '@/components/Chip';
 import { asset } from '@/lib/asset';
+import { PrimaryButton } from '@/components/Buttons';
 
 /** Chars wrapped in overflow-hidden masks for the cascade (parent carries text styles). */
 function CascadeChars({ text }: { text: string }) {
@@ -90,7 +91,7 @@ export default function Hero() {
       />
       <div aria-hidden="true" className="absolute inset-0" style={{ background: 'var(--grad-hero-scrim)' }} />
 
-      <div className="relative z-10 mx-auto w-full max-w-[900px] px-6 py-24 text-center">
+      <div className="relative z-10 mx-auto w-full max-w-[900px] px-6 py-12 text-center md:py-24">
         <p className="dl-eyebrow eyebrow">{'// DOWNLOAD'}</p>
 
         <h1 aria-label="Pick a stream." className="display-xl mt-5 font-display">
@@ -105,12 +106,17 @@ export default function Hero() {
           </span>
         </h1>
 
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+          <PrimaryButton href={DOWNLOAD_LINKS.androidPhone}>Download Android APK</PrimaryButton>
+          <span className="font-mono text-[0.7rem] tracking-[0.04em] text-ink-3">{ANDROID_PHONE_RELEASE.tag} · phone & tablet</span>
+        </div>
+
         <p className="dl-lede lede mx-auto mt-6 max-w-[680px]">
-          Free, MIT open source. v2 is available for macOS, Linux, Android TV, Google TV, and any phone or tablet
-          through your server-hosted PWA. Windows follows after its signing gate passes.
+          Free, MIT open source. Get the native Android APK for your phone or tablet, or choose macOS, Linux,
+          Android TV, or Google TV below. iPhone and iPad use your server-hosted PWA. Windows follows after its signing gate passes.
         </p>
 
-        <div className="mt-8 flex flex-wrap items-center justify-center gap-2.5">
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
           {META_CHIPS.map((chip) =>
             chip.href ? (
               <a key={chip.label} href={chip.href} target="_blank" rel="noreferrer" className="dl-chip group">
