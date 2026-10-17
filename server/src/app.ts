@@ -54,6 +54,8 @@ import {
   verifyPassword,
 } from "./crypto.js";
 import { assertSafeUpstream, fetchUpstreamSafely } from "./ssrf.js";
+import { ExternalStreamAssets, type ExternalStreamAsset } from "./externalStreamAssets.js";
+import { MAX_HLS_MANIFEST_BYTES, rewriteHlsManifest } from "./hlsManifest.js";
 import {
   demandAwareNodeReadable,
   streamWithIdleTimeout,
@@ -2040,6 +2042,49 @@ function bindProxyDisconnect(
   };
 }
 
+function isHlsManifest(url: string, contentType: string | null): boolean {
+  const mime = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  return ["application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl", "audio/x-mpegurl"]
+    .includes(mime ?? "") || /\.m3u8$/i.test(new URL(url).pathname);
+}
+
+async function readExternalHlsManifest(
+  upstream: Response,
+  controller: AbortController,
+  config: ServerConfig,
+): Promise<string> {
+  if (upstream.body == null) throw httpError(502, "Empty upstream manifest.");
+  const declared = upstream.headers.get("content-length");
+  if (declared != null && Number(declared) > MAX_HLS_MANIFEST_BYTES) {
+    await upstream.body.cancel();
+    throw httpError(502, "Upstream manifest is too large.");
+  }
+  const reader = streamWithIdleTimeout(
+    upstream.body, controller, config.streamUpstreamIdleTimeoutMs,
+  ).getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    await waitForUpstreamResponse(async () => {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) return;
+        size += chunk.value.byteLength;
+        if (size > MAX_HLS_MANIFEST_BYTES) throw httpError(502, "Upstream manifest is too large.");
+        chunks.push(chunk.value);
+      }
+    }, controller, config.streamUpstreamResponseTimeoutMs);
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+    } catch {
+      throw httpError(502, "Invalid upstream manifest encoding.");
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 function countedNodeStream(
   db: AppDatabase,
   input: {
@@ -2548,6 +2593,8 @@ function registerRoutes(
   const rateLimit = createRateLimiter();
   const loginFailures = new Map<string, LoginFailureState>();
   const remoteControls = new RemoteControlRegistry();
+  const externalAssets = new ExternalStreamAssets();
+  app.addHook("onClose", async () => externalAssets.clear());
 
   const readRemoteToken = (request: FastifyRequest): string | null => {
     const raw = request.headers["x-yawf-remote-token"];
@@ -5659,6 +5706,7 @@ function registerRoutes(
       throw httpError(404, "Active stream session not found.");
     }
     await directTorrent?.release(id);
+    externalAssets.remove(id);
     audit(db, auth, "stream_session.revoke", "stream_session", id);
     return { ok: true };
   });
@@ -5794,7 +5842,7 @@ function registerRoutes(
           profileId: row.profile_id,
           bytes: 0,
           status: upstream.status,
-          completed: true,
+          completed: false,
         });
         return reply.send();
       }
@@ -5822,12 +5870,15 @@ function registerRoutes(
   // `/api/external-stream/*` while every account and API route stays behind
   // Access. Disable automatic request logging so the capability is not written
   // to the application log by Fastify/Pino.
-  app.route({
+  for (const url of [
+    "/api/external-stream/:id/:token",
+    "/api/external-stream/:id/:token/:asset",
+  ]) app.route({
     method: ["GET", "HEAD"],
-    url: "/api/external-stream/:id/:token",
+    url,
     logLevel: "silent",
     handler: async (request, reply) => {
-      const params = request.params as { id: string; token: string };
+      const params = request.params as { id: string; token: string; asset?: string };
       const id = sessionIdParamSchema.parse(params.id);
       const bearer = z.string().trim().min(32).max(128).parse(params.token);
       const row = db.sqlite
@@ -5858,6 +5909,13 @@ function registerRoutes(
         )
       ) {
         throw httpError(404, "Stream session not found.");
+      }
+
+      // Lookup is deliberately after the unchanged database/HMAC checks. A
+      // caller cannot supply a URL, host, path traversal, or another graph ID.
+      const asset = params.asset == null ? null : externalAssets.get(row.id, params.asset);
+      if (params.asset != null && (asset == null || row.source_kind === "direct_torrent")) {
+        throw httpError(404, "Stream asset not found.");
       }
 
       if (row.source_kind === "direct_torrent") {
@@ -5897,10 +5955,12 @@ function registerRoutes(
         }));
       }
 
-      const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
+      const upstreamUrl = asset?.url ?? decryptSecret(row.encrypted_upstream_url, config.secretKey);
       const headers: Record<string, string> = {};
       const range = request.headers.range;
-      if (typeof range === "string") headers.range = range;
+      const hintedManifest = asset?.kind === "manifest" ||
+        isHlsManifest(upstreamUrl, asset == null ? row.content_type : null);
+      if (!hintedManifest && typeof range === "string") headers.range = range;
 
       const controller = new AbortController();
       const cleanupAbortListener = bindProxyDisconnect(request, reply, controller);
@@ -5924,8 +5984,65 @@ function registerRoutes(
         throw error;
       }
 
+      const sourceUrl = upstream.url || upstreamUrl;
+      const manifest = hintedManifest || isHlsManifest(sourceUrl, upstream.headers.get("content-type"));
+      // A byte range of a manifest is not a valid playlist. An extensionless
+      // endpoint may reveal its type only in response headers, so retry that
+      // one response without Range before rewriting the complete document.
+      if (manifest && upstream.status === 206 && headers.range != null) {
+        await upstream.body?.cancel();
+        delete headers.range;
+        try {
+          upstream = await waitForUpstreamResponse(
+            () => fetchUpstreamSafely(upstreamUrl, {
+              method: request.method, headers, signal: controller.signal,
+            }, config.allowRawStreamUrls),
+            controller,
+            config.streamUpstreamResponseTimeoutMs,
+          );
+        } catch (error) {
+          cleanupAbortListener();
+          throw error;
+        }
+      }
       reply.header("cache-control", "private, no-store");
       reply.header("referrer-policy", "no-referrer");
+      if (manifest && upstream.ok) {
+        if (request.method === "HEAD") {
+          await upstream.body?.cancel();
+          cleanupAbortListener();
+          return reply.status(200).type("application/vnd.apple.mpegurl").send();
+        }
+        try {
+          const text = await readExternalHlsManifest(upstream, controller, config);
+          const entries: ExternalStreamAsset[] = [];
+          let rewritten: string;
+          try {
+            rewritten = rewriteHlsManifest(text, upstream.url || upstreamUrl, (url, kind) => {
+              const entry = { url, kind };
+              entries.push(entry);
+              const assetId = ExternalStreamAssets.id(entry);
+              // Relative URLs retain reverse-proxy mount prefixes and work over
+              // either HTTP or HTTPS without trusting forwarded Host headers.
+              return params.asset == null ? `${bearer}/${assetId}` : assetId;
+            });
+          } catch {
+            throw httpError(502, "Unsupported or invalid upstream HLS manifest.");
+          }
+          externalAssets.register(row.id, row.expires_at, entries);
+          recordStreamTransfer(db, {
+            sessionId: row.id, profileId: row.profile_id,
+            bytes: Buffer.byteLength(rewritten), status: 200, completed: false,
+          });
+          return reply.status(200).type("application/vnd.apple.mpegurl").send(rewritten);
+        } catch (error) {
+          controller.abort();
+          await upstream.body?.cancel().catch(() => {});
+          throw error;
+        } finally {
+          cleanupAbortListener();
+        }
+      }
       reply.status(upstream.status);
       for (const header of [
         "accept-ranges",
@@ -5938,7 +6055,7 @@ function registerRoutes(
         const value = upstream.headers.get(header);
         if (value != null) reply.header(header, value);
       }
-      if (row.content_type != null && upstream.headers.get("content-type") == null) {
+      if (asset == null && row.content_type != null && upstream.headers.get("content-type") == null) {
         reply.header("content-type", row.content_type);
       }
 
@@ -5949,7 +6066,7 @@ function registerRoutes(
           profileId: row.profile_id,
           bytes: 0,
           status: upstream.status,
-          completed: true,
+          completed: false,
         });
         return reply.send();
       }
@@ -5958,6 +6075,7 @@ function registerRoutes(
           sessionId: row.id,
           profileId: row.profile_id,
           status: upstream.status,
+          markComplete: asset == null,
           body: streamWithIdleTimeout(
             upstream.body as ReadableStream<Uint8Array>,
             controller,
