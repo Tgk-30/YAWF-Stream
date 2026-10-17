@@ -440,14 +440,15 @@ vi.mock("./lib/serverSetup", () => ({
 }));
 
 let adminHealthCredentials = 0;
+const fetchServerAdminHealthMock = vi.fn(() => {
+  if (pendingAdminHealthPromise !== null) return pendingAdminHealthPromise;
+  if (serverHealthShouldReject) {
+    return Promise.reject(new Error("network offline"));
+  }
+  return Promise.resolve({ counts: { credentials: adminHealthCredentials } });
+});
 vi.mock("./lib/serverApi", () => ({
-  fetchServerAdminHealth: () => {
-    if (pendingAdminHealthPromise !== null) return pendingAdminHealthPromise;
-    if (serverHealthShouldReject) {
-      return Promise.reject(new Error("network offline"));
-    }
-    return Promise.resolve({ counts: { credentials: adminHealthCredentials } });
-  },
+  fetchServerAdminHealth: () => fetchServerAdminHealthMock(),
 }));
 
 import { App, FirstRunHost } from "./App";
@@ -548,6 +549,7 @@ beforeEach(() => {
   serverHealthShouldReject = false;
   pendingAdminHealthPromise = null;
   adminHealthCredentials = 0;
+  fetchServerAdminHealthMock.mockClear();
   store = makeStore();
   installLocalStorage();
   // Default: the welcome-guide seen flag is set so the auto-tour is OFF unless
@@ -1618,6 +1620,20 @@ describe("FirstRunHost gating", () => {
     render(<FirstRunHost />);
     expect(await screen.findByTestId("nav-rail")).toBeInTheDocument();
     expect(screen.queryByTestId("server-setup")).not.toBeInTheDocument();
+    expect(fetchServerAdminHealthMock).not.toHaveBeenCalled();
+  });
+
+  it("defers loading admin health until the server session becomes owner", async () => {
+    serverModeValue = true;
+    sessionValue = { role: "member" };
+    globalThis.localStorage.setItem("ds_tier_welcomed", "1");
+    const rendered = render(<FirstRunHost />);
+    expect(await screen.findByTestId("nav-rail")).toBeInTheDocument();
+    expect(fetchServerAdminHealthMock).not.toHaveBeenCalled();
+
+    sessionValue = { role: "owner" };
+    rendered.rerender(<FirstRunHost />);
+    await waitFor(() => expect(fetchServerAdminHealthMock).toHaveBeenCalledTimes(1));
   });
 
   it("falls back from server setup when the admin health check fails", async () => {

@@ -382,6 +382,7 @@ afterEach(() => {
   delete (window as unknown as Record<string, unknown>).__YAWF_TAURI_ANDROID__;
   delete (window as unknown as Record<string, unknown>).__YAWF_NATIVE_SAFE_AREA__;
   delete (window as unknown as Record<string, unknown>).__YAWF_SERVER_PLAYER__;
+  delete (HTMLMediaElement.prototype as HTMLMediaElement & { audioTracks?: unknown }).audioTracks;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   isTauriMock.mockReturnValue(false);
@@ -615,6 +616,25 @@ describe("VideoPlayer shell", () => {
     );
   });
 
+  it("keeps settings scrollable by touch in mobile and short landscape viewports", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    expect(css).toMatch(
+      /\.player-options-menu\s*\{[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain;[^}]*-webkit-overflow-scrolling:\s*touch;[^}]*touch-action:\s*pan-y;/s,
+    );
+    expect(css).toMatch(
+      /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)[\s\S]*?\.player-options-menu,[\s\S]*?bottom:[^;]+;[\s\S]*?overflow-y:\s*auto;/,
+    );
+    expect(css).toMatch(
+      /@media \(pointer: coarse\)[\s\S]*?\.scrubbar\s*\{[^}]*min-height:\s*44px;/,
+    );
+    expect(css).toMatch(
+      /@media \(max-width: 560px\)\s*\{(?:(?!@media)[\s\S])*?\.scrubbar\s*\{[^}]*min-height:\s*44px;/,
+    );
+    expect(css).toMatch(
+      /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{(?:(?!@media)[\s\S])*?\.scrubbar\s*\{[^}]*min-height:\s*44px;/,
+    );
+  });
+
   it("shows explicit engine, source, and display dimensions in the info popover", async () => {
     render(
       <VideoPlayer
@@ -799,7 +819,7 @@ describe("WebviewPlayer", () => {
     expect(video.volume).toBeCloseTo(0.35);
   });
 
-  it("keeps direct-link recovery inside the player after a browser media error", () => {
+  it("keeps recovery inside the player without leaking a provider URL", () => {
     render(
       <VideoPlayer url="https://x/test.mp4" title="T" onClose={() => {}} />,
     );
@@ -809,7 +829,8 @@ describe("WebviewPlayer", () => {
 
     expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open in external player" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /external player/ })).toBeNull();
+    expect(screen.getByText(/External playback is not available/)).toBeInTheDocument();
   });
 
   it("ignores an error event without a MediaError and accepts later playback readiness", () => {
@@ -988,7 +1009,8 @@ describe("WebviewPlayer", () => {
       });
       expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Open in external player" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /external player/ })).toBeNull();
+      expect(screen.getByText(/External playback is not available/)).toBeInTheDocument();
       expect(document.querySelector(".player-compatibility-status")).toBeNull();
     } finally {
       vi.useRealTimers();
@@ -996,6 +1018,7 @@ describe("WebviewPlayer", () => {
   });
 
   it("offers the stream-scoped external handoff in the playback settings menu", async () => {
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
     const createObjectURL = vi.fn((_blob: Blob) => "blob:player-list");
     const revokeObjectURL = vi.fn();
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
@@ -1005,26 +1028,118 @@ describe("WebviewPlayer", () => {
       render(
         <VideoPlayer
           url="https://server.example/api/stream/session-1"
-          externalPlaybackUrl="https://server.example/api/external-stream/session-1/capability"
+          externalPlaybackUrl={`https://server.example/api/external-stream/session-1/${"A".repeat(43)}`}
           title="Example Movie"
           onClose={() => {}}
         />,
       );
       await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
-      await userEvent.click(screen.getByRole("button", { name: /Open in external player/ }));
+      await userEvent.click(screen.getByRole("button", { name: /Download player playlist/ }));
 
       expect(createObjectURL).toHaveBeenCalledTimes(1);
       const playlist = createObjectURL.mock.calls[0][0] as Blob;
       await expect(playlist.text()).resolves.toContain(
-        "https://server.example/api/external-stream/session-1/capability",
+        `https://server.example/api/external-stream/session-1/${"A".repeat(43)}`,
       );
       expect(click).toHaveBeenCalledTimes(1);
-      expect(screen.getByText(/Player file prepared/)).toBeInTheDocument();
+      expect(screen.getByText(/Player playlist downloaded/)).toBeInTheDocument();
+      expect(recordDiagnosticMock).toHaveBeenCalledWith(
+        "player",
+        "external.playlist_downloaded",
+      );
+      expect(recordDiagnosticMock).not.toHaveBeenCalledWith(
+        "player",
+        "external.started",
+      );
     } finally {
       click.mockRestore();
       restoreCreate();
       restoreRevoke();
     }
+  });
+
+  it("offers explicit iOS VLC and Infuse anchors without claiming either app opened", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const target = `https://server.example/api/external-stream/session-1/${"B".repeat(43)}`;
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1"
+        externalPlaybackUrl={target}
+        title="Film & Friends"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    const vlc = screen.getByRole("link", { name: /Open in VLC/ });
+    const infuse = screen.getByRole("link", { name: /Open in Infuse/ });
+    expect(vlc).toHaveAttribute(
+      "href",
+      `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(target)}`,
+    );
+    expect(infuse).toHaveAttribute(
+      "href",
+      `infuse://x-callback-url/play?url=${encodeURIComponent(target)}&filename=Film%20%26%20Friends`,
+    );
+    fireEvent.click(vlc);
+    expect(recordDiagnosticMock).toHaveBeenCalledWith(
+      "player",
+      "external.intent_requested",
+    );
+    expect(recordDiagnosticMock).not.toHaveBeenCalledWith(
+      "player",
+      "external.started",
+    );
+  });
+
+  it("replaces old browser capability links and never exposes provider URLs", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const first = `https://server.example/api/external-stream/first/${"C".repeat(43)}`;
+    const second = `https://server.example/api/external-stream/second/${"D".repeat(43)}`;
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/first"
+        externalPlaybackUrl={first}
+        title="Film"
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("link", { name: /Open in VLC/ })).toHaveAttribute(
+      "href",
+      expect.stringContaining(encodeURIComponent(first)),
+    );
+
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/second"
+        externalPlaybackUrl={second}
+        title="Film"
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    const replacement = screen.getByRole("link", { name: /Open in VLC/ });
+    expect(replacement).toHaveAttribute(
+      "href",
+      expect.stringContaining(encodeURIComponent(second)),
+    );
+    expect(replacement.getAttribute("href")).not.toContain(encodeURIComponent(first));
+
+    rerender(
+      <VideoPlayer
+        url="https://provider.example/private-file.mkv"
+        externalPlaybackUrl="https://provider.example/private-file.mkv?authorization=secret"
+        title="Film"
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole("link", { name: /Open in VLC/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Download player playlist/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Copy stream link/ })).toBeNull();
+    expect(document.body.innerHTML).not.toContain("authorization=secret");
   });
 
   it("opens the Android chooser with the cookie-free capability and keeps copy fallback", async () => {
@@ -1757,6 +1872,187 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it("loads server audio inventory and restarts the owned optimized stream at the current position", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "fra", label: "French", default: false },
+    ]);
+    const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}&audio=${audioTrack}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    const onProgress = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+          onProgress={onProgress}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(video, "currentTime", { configurable: true, value: 42 });
+      Object.defineProperty(video, "paused", { configurable: true, value: true });
+
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "French" }));
+
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 42, 1));
+      await waitFor(() => expect(hlsInstances.some((instance) =>
+        instance.loadSource.mock.calls.some(([source]) => String(source).includes("audio=1")),
+      )).toBe(true));
+      const switchedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(switchedVideo, "currentTime", { configurable: true, value: 0 });
+      Object.defineProperty(switchedVideo, "duration", { configurable: true, value: 100 });
+      fireEvent.durationChange(switchedVideo);
+      fireEvent.canPlay(switchedVideo);
+      fireEvent.timeUpdate(switchedVideo);
+      expect(onProgress).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        142,
+        expect.objectContaining({ preferredAudioId: "1", preferredAudioLang: "fra" }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("finishes a deferred server inventory when its inline loader identity changes", async () => {
+    const inventory = deferred<Array<{
+      index: number;
+      language: string;
+      label: string;
+      default: boolean;
+    }>>();
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack: 0,
+    }));
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadAudioTracks: () => inventory.promise,
+          request,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByText("Loading audio tracks…")).toBeInTheDocument();
+
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadAudioTracks: () => inventory.promise,
+          request,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => {
+      inventory.resolve([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+      await inventory.promise;
+    });
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(screen.queryByText("Loading audio tracks…")).toBeNull();
+  });
+
+  it("uses the server-reported non-first default audio after optimized activation", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack: 0,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", {
+      status: 200,
+      headers: { "x-yawf-transcode-audio": "1" },
+    })));
+    const onProgress = vi.fn();
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1"
+        title="T"
+        serverOptimized={{
+          qualities: ["480p"],
+          defaultQuality: "480p",
+          loadAudioTracks: async () => [
+            { index: 0, language: "eng", label: "English", default: false },
+            { index: 1, language: "fra", label: "French", default: true },
+          ],
+          request,
+        }}
+        onProgress={onProgress}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0));
+    await waitFor(() => expect(hlsInstances.some((instance) =>
+      instance.loadSource.mock.calls.some(([source]) => String(source).includes("quality=480p")),
+    )).toBe(true));
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 100 });
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 0 });
+    fireEvent.durationChange(video);
+    fireEvent.canPlay(video);
+    fireEvent.timeUpdate(video);
+    expect(onProgress).toHaveBeenLastCalledWith(
+      0,
+      100,
+      expect.objectContaining({ preferredAudioId: "1", preferredAudioLang: null }),
+    );
+  });
+
+  it("restores remembered server audio and does not persist a failed switch", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "fra", label: "French", default: false },
+    ]);
+    const request = vi.fn().mockRejectedValue(new Error("transcode failed"));
+    const onProgress = vi.fn();
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        savedPrefs={{ preferredAudioId: "1", preferredAudioLang: "fra" }}
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onProgress={onProgress}
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0, 1));
+    fireEvent.timeUpdate(document.querySelector("video.player-video") as HTMLVideoElement);
+    expect(onProgress).toHaveBeenLastCalledWith(
+      expect.any(Number),
+      null,
+      expect.objectContaining({ preferredAudioId: "0", preferredAudioLang: "eng" }),
+    );
+  });
+
   it("holds an automatic optimized handoff until the advancing target is exactly seekable", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const prepared = deferred<{
@@ -2388,7 +2684,12 @@ describe("WebviewPlayer", () => {
       quality: "480p" as const,
     }));
     const text = vi.fn(() => manifestText.promise);
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, text })));
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text,
+    })));
     try {
       const { rerender } = render(
         <VideoPlayer
@@ -2808,7 +3109,8 @@ describe("WebviewPlayer", () => {
       expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
       expect(screen.getByText(/Playback did not become ready/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: /Open in external player/ })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /external player/ })).toBeNull();
+      expect(screen.getByText(/External playback is not available/)).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
@@ -3471,7 +3773,42 @@ describe("HLS source attach", () => {
     act(manifestHandler);
 
     expect(hlsInstances[0].audioTrack).toBe(1);
-    expect(screen.getByRole("button", { name: "Playback settings" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("button", { name: "Spanish" })).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(screen.getByRole("button", { name: "English" }));
+    expect(hlsInstances[0].audioTrack).toBe(0);
+    expect(screen.getByRole("button", { name: "English" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("selects browser-native audio tracks when AudioTrackList is exposed", async () => {
+    const tracks = Object.assign(new EventTarget(), {
+      0: { id: "en", label: "English", language: "eng", enabled: true },
+      1: { id: "fr", label: "French", language: "fra", enabled: false },
+      length: 2,
+      item(index: number) {
+        return this[index as 0 | 1] ?? null;
+      },
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", {
+      configurable: true,
+      get: () => tracks,
+    });
+
+    render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("button", { name: "English" })).toHaveAttribute("aria-pressed", "true");
+
+    await userEvent.click(screen.getByRole("button", { name: "French" }));
+    expect(tracks[0].enabled).toBe(false);
+    expect(tracks[1].enabled).toBe(true);
+    expect(screen.getByRole("button", { name: "French" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("explains honestly when the browser does not expose alternate audio", async () => {
+    render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+
+    expect(screen.getByText(/does not expose alternate audio tracks/i)).toBeInTheDocument();
   });
 
   it("retries bounded fatal HLS network errors before surfacing recovery UI", async () => {
@@ -3582,16 +3919,15 @@ describe("HLS source attach", () => {
     expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
   });
 
-  it("uses native HLS (no hls.js) when canPlayType reports support", () => {
+  it("prefers hls.js on non-iOS browsers even when native HLS hides alternate audio", async () => {
     (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
       () => "maybe",
     );
     render(
       <VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />,
     );
-    expect(hlsInstances).toHaveLength(0);
-    const video = document.querySelector("video.player-video") as HTMLVideoElement;
-    expect(video.src).toBe("https://x/stream.m3u8");
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith("https://x/stream.m3u8");
   });
 
   it("uses hls.js on Android when WebView falsely reports native HLS support", async () => {
@@ -3739,28 +4075,29 @@ describe("HLS source attach", () => {
 // ---- External panel: browser vs Tauri --------------------------------------
 
 describe("ExternalPanel (browser)", () => {
-  it("shows the open-externally note and a direct link in the browser", () => {
+  it("does not expose a provider URL to browser external actions", () => {
     render(<VideoPlayer url="https://x/movie.mkv" title="T" onClose={() => {}} />);
-    expect(screen.getByText("Open externally")).toBeInTheDocument();
-    const link = screen.getByRole("link", { name: "Open direct link" });
-    expect(link).toHaveAttribute("href", "https://x/movie.mkv");
-    expect(link).toHaveAttribute("target", "_blank");
+    expect(screen.getByText("Use an external player")).toBeInTheDocument();
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Download player playlist/ })).toBeNull();
+    expect(document.body.innerHTML).not.toContain("https://x/movie.mkv");
   });
 
-  it("uses the cookie-free external capability for the browser direct link", () => {
+  it("uses only the cookie-free external capability for browser actions", () => {
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const capability = `https://server.example/api/external-stream/session-1/${"E".repeat(43)}`;
     render(
       <VideoPlayer
         url="https://server.example/api/stream/session-1"
-        externalPlaybackUrl="https://server.example/api/external-stream/session-1/capability"
+        externalPlaybackUrl={capability}
         kind="external"
         title="T"
         onClose={() => {}}
       />,
     );
-    expect(screen.getByRole("link", { name: "Open direct link" })).toHaveAttribute(
-      "href",
-      "https://server.example/api/external-stream/session-1/capability",
-    );
+    expect(screen.getByRole("button", { name: /Download player playlist/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy stream link" })).toBeInTheDocument();
+    expect(document.body.innerHTML).not.toContain("api/stream/session-1\"");
   });
 
   it("withholds protected playback URLs when no external capability is available", () => {

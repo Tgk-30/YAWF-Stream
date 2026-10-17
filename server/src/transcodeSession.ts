@@ -17,6 +17,8 @@ import type { AppDatabase } from "./db.js";
 import type { ServerConfig } from "./types.js";
 import type {
   Transcoder,
+  TranscoderAudioTrack,
+  TranscoderStreamProbe,
   TranscodeVideoEncoder,
 } from "./transcode.js";
 
@@ -26,6 +28,8 @@ const IDLE_MS = 120_000;
 const REAP_INTERVAL_MS = 30_000;
 const KILL_GRACE_MS = 3000;
 const RETIRED_ASSET_GRACE_MS = 30_000;
+const PROBE_CACHE_IDLE_MS = 5 * 60_000;
+const MAX_PROBE_CACHE_ENTRIES = 64;
 
 /** Legacy client profile names retained for older app versions. */
 export type TranscodeClientProfile = "adaptive" | "high" | "data-saver";
@@ -60,6 +64,8 @@ export interface HlsTranscodeOptions {
   /** Explicit quality takes precedence over the legacy profile. */
   quality?: TranscodeQuality;
   startSeconds?: number;
+  /** Zero-based source audio-stream index. Never a global ffmpeg stream specifier. */
+  audioTrack?: number;
   hdrPolicy?: TranscodeHdrPolicy;
   /** Preserve the first embedded subtitle track as a WebVTT sidecar. */
   preserveSubtitles?: boolean;
@@ -125,6 +131,14 @@ export function hlsArgs(
   const hdrPolicy = options.hdrPolicy ?? "auto";
   const encoder = options.videoEncoder ?? "libx264";
   const includeAudio = options.includeAudio !== false;
+  const audioTrack =
+    options.audioTrack != null &&
+    Number.isInteger(options.audioTrack) &&
+    options.audioTrack >= 0 &&
+    options.audioTrack < 32
+      ? options.audioTrack
+      : 0;
+  const audioMap = `0:a:${audioTrack}`;
   const args = [
     "-nostdin",
     "-y",
@@ -154,13 +168,13 @@ export function hlsArgs(
       ...(includeAudio
         ? [
             "-map",
-            "0:a:0",
+            audioMap,
             "-map",
-            "0:a:0",
+            audioMap,
             "-map",
-            "0:a:0",
+            audioMap,
             "-map",
-            "0:a:0",
+            audioMap,
           ]
         : []),
       ...encoderArgs(encoder, ["8000k", "4500k", "1800k", "700k"]),
@@ -222,7 +236,7 @@ export function hlsArgs(
     args.push(
       "-map",
       "0:v:0",
-      ...(includeAudio ? ["-map", "0:a:0"] : []),
+      ...(includeAudio ? ["-map", audioMap] : []),
       "-vf",
       videoFilter,
       ...encoderArgs(encoder, [fixed.videoBitrate]),
@@ -310,6 +324,18 @@ export class TranscodeRegistry {
   private readonly retired = new Map<string, Job[]>();
   /** Invalidate staging jobs when a session is revoked or the registry stops. */
   private readonly generations = new Map<string, number>();
+  /** One bounded ffprobe per stream session. The same result drives both the
+   * client inventory and FFmpeg job construction, avoiding duplicate reads of
+   * short-lived provider URLs. */
+  private readonly streamProbes = new Map<
+    string,
+    {
+      upstreamUrl: string;
+      promise: Promise<TranscoderStreamProbe | null>;
+      lastAccess: number;
+    }
+  >();
+  private activeProbes = 0;
   private reaper: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -341,6 +367,62 @@ export class TranscodeRegistry {
     }
     const ids = new Set([...this.jobs.keys(), ...this.pending.keys()]);
     await Promise.all([...ids].map((id) => this.kill(id)));
+    this.streamProbes.clear();
+  }
+
+  private probeStreams(
+    sessionId: string,
+    upstreamUrl: string,
+  ): Promise<TranscoderStreamProbe | null> {
+    const cached = this.streamProbes.get(sessionId);
+    if (cached?.upstreamUrl === upstreamUrl) {
+      cached.lastAccess = Date.now();
+      return cached.promise;
+    }
+    // ffprobe is an external process too. Count it against the same global
+    // admission budget as active and warming ffmpeg jobs so opening audio menus
+    // across many sessions cannot bypass maxTranscodes.
+    if (
+      this.activeProbes + this.jobs.size + this.pending.size >= this.config.maxTranscodes ||
+      this.streamProbes.size >= MAX_PROBE_CACHE_ENTRIES
+    ) {
+      return Promise.resolve(null);
+    }
+    this.activeProbes += 1;
+    const promise = new Promise<TranscoderStreamProbe | null>((resolve) => {
+      let settled = false;
+      const finish = (value: TranscoderStreamProbe | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.activeProbes = Math.max(0, this.activeProbes - 1);
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(null), 6_000);
+      timer.unref?.();
+      if (this.transcoder.probeStreams == null) {
+        finish(null);
+        return;
+      }
+      void this.transcoder.probeStreams(upstreamUrl).then(
+        (value) => finish(value),
+        () => finish(null),
+      );
+    });
+    this.streamProbes.set(sessionId, {
+      upstreamUrl,
+      promise,
+      lastAccess: Date.now(),
+    });
+    return promise;
+  }
+
+  async audioTracksFor(
+    sessionId: string,
+    upstreamUrl: string,
+  ): Promise<TranscoderAudioTrack[] | null> {
+    const probe = await this.probeStreams(sessionId, upstreamUrl);
+    return probe?.audioTracks == null ? null : probe.audioTracks.map((track) => ({ ...track }));
   }
 
   /** Kill jobs whose session is gone/revoked/expired, or idle (client left). */
@@ -366,9 +448,23 @@ export class TranscodeRegistry {
         void this.kill(id);
       }
     }
+    for (const [id, probe] of this.streamProbes) {
+      const row = this.db.sqlite
+        .prepare("SELECT revoked_at, expires_at FROM stream_sessions WHERE id = ?")
+        .get(id) as { revoked_at: string | null; expires_at: string | null } | undefined;
+      if (
+        row == null ||
+        row.revoked_at != null ||
+        (row.expires_at != null && row.expires_at <= nowIso) ||
+        now - probe.lastAccess > PROBE_CACHE_IDLE_MS
+      ) {
+        this.streamProbes.delete(id);
+      }
+    }
   }
 
   async kill(sessionId: string): Promise<void> {
+    this.streamProbes.delete(sessionId);
     this.generations.set(sessionId, (this.generations.get(sessionId) ?? 0) + 1);
     const job = this.jobs.get(sessionId);
     if (job != null) {
@@ -488,6 +584,10 @@ export class TranscodeRegistry {
       profile: options.profile ?? "adaptive",
       quality: options.quality ?? qualityForProfile(options.profile ?? "adaptive"),
       startSeconds: Math.max(0, Math.floor(options.startSeconds ?? 0)),
+      audioTrack:
+        options.audioTrack != null && Number.isInteger(options.audioTrack)
+          ? Math.min(31, Math.max(0, options.audioTrack))
+          : 0,
       hdrPolicy: options.hdrPolicy ?? "auto",
       preserveSubtitles: options.preserveSubtitles === true,
       videoEncoder: options.videoEncoder ?? this.config.transcodeVideoEncoder,
@@ -549,17 +649,14 @@ export class TranscodeRegistry {
     // Count actual live ffmpeg work, including a staged replacement. A quality
     // switch at a saturated cap fails honestly while the current job remains
     // playable, rather than exceeding the operator's process limit.
-    if (this.jobs.size + this.pending.size >= this.config.maxTranscodes) {
+    if (this.jobs.size + this.pending.size + this.activeProbes >= this.config.maxTranscodes) {
       throw Object.assign(new Error("The transcoder is busy. Try again shortly."), { statusCode: 503 });
     }
 
     await mkdir(this.config.dataDir, { recursive: true });
     const dir = await mkdtemp(join(this.config.dataDir, "transcode-"));
     let child: ChildProcess;
-    const streamProbe =
-      this.transcoder.probeStreams == null
-        ? null
-        : await this.transcoder.probeStreams(upstreamUrl);
+    const streamProbe = await this.probeStreams(sessionId, upstreamUrl);
     const processOptions = {
       ...options,
       includeAudio: streamProbe?.audio ?? true,

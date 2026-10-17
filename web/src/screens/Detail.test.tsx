@@ -142,6 +142,7 @@ const serverOptimizedSource = vi.fn((stream: any, options: any) => ({
 const serverExternalPlaybackURL = vi.fn(
   (stream: any) => `${stream.streamURL}/external-test` as string | null,
 );
+const serverStreamAudioTracks = vi.fn(async (_stream?: unknown) => []);
 vi.mock("../lib/serverApi", () => ({
   asServerTranscodeStream: (stream: any) => ({
     ...stream,
@@ -150,6 +151,7 @@ vi.mock("../lib/serverApi", () => ({
   serverOptimizedSource: (stream: any, options: any) =>
     serverOptimizedSource(stream, options),
   serverExternalPlaybackURL: (stream: any) => serverExternalPlaybackURL(stream),
+  serverStreamAudioTracks: (stream: any) => serverStreamAudioTracks(stream),
   createRequest: (...a: unknown[]) => createRequest(...a),
   fetchServerEpisodes: (...a: unknown[]) => fetchServerEpisodes(...a),
   resolveServerStream: (...a: unknown[]) => resolveServerStream(...a),

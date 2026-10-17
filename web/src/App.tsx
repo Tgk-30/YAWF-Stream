@@ -61,7 +61,6 @@ import { BandwidthWarningBanner } from "./components/BandwidthWarningBanner";
 import { HostAvailabilityBanner } from "./components/HostAvailabilityBanner";
 import { InstallPrompt, isInstallPromptEligible } from "./components/InstallPrompt";
 import { LocalPlayerHost } from "./components/LocalPlayerHost";
-import { TVPairingDock } from "./components/TVPairingDock";
 // Eager (not lazy): the lock screen must paint in the SAME commit as the app
 // shell, or a code-split chunk load would flash a protected profile's content
 // while an asynchronous gate chunk is still loading.
@@ -86,7 +85,6 @@ import {
 } from "./lib/firstRun";
 import { secretReadsFailedThisSession } from "./storage/KeychainSecretStore";
 import { shouldShowServerSetup } from "./lib/serverSetup";
-import { fetchServerAdminHealth } from "./lib/serverApi";
 import { isTVMode } from "./lib/tvMode";
 import {
   applyDocumentLocale,
@@ -96,11 +94,9 @@ import {
 import { useTheme } from "./theme/useTheme";
 import "./App.css";
 
-// First-paint + light screens stay eager (Discover is the landing screen; the
-// rest are small structural lists that read already-loaded store state).
+// First-paint screens stay eager. Discover is the landing screen; Watchlist and
+// History are small structural lists that read already-loaded store state.
 import { Discover } from "./screens/Discover";
-import { Search } from "./screens/Search";
-import { Library } from "./screens/Library";
 import { Watchlist } from "./screens/Watchlist";
 import { History } from "./screens/History";
 
@@ -111,6 +107,12 @@ import { History } from "./screens/History";
 // inside a <Suspense> with a glass Spinner fallback while its chunk downloads.
 const Calendar = lazy(() =>
   import("./screens/Calendar").then((m) => ({ default: m.Calendar })),
+);
+const Search = lazy(() =>
+  import("./screens/Search").then((m) => ({ default: m.Search })),
+);
+const Library = lazy(() =>
+  import("./screens/Library").then((m) => ({ default: m.Library })),
 );
 const DebridLibrary = lazy(() =>
   import("./screens/DebridLibrary").then((m) => ({ default: m.DebridLibrary })),
@@ -129,6 +131,9 @@ const Assistant = lazy(() =>
 );
 const Detail = lazy(() =>
   import("./screens/Detail").then((m) => ({ default: m.Detail })),
+);
+const TVPairingDock = lazy(() =>
+  import("./components/TVPairingDock").then((m) => ({ default: m.TVPairingDock })),
 );
 
 // Modal/overlay flows most returning users never open (onboarding wizards, the
@@ -272,7 +277,8 @@ export function FirstRunHost() {
       return;
     }
     let cancelled = false;
-    void fetchServerAdminHealth()
+    void import("./lib/serverApi")
+      .then(({ fetchServerAdminHealth }) => fetchServerAdminHealth())
       .then((health) =>
         shouldShowServerSetup({
           role: session.role,
@@ -753,7 +759,11 @@ export function App() {
       {/* Completed downloads can launch playback without opening a Detail
           overlay. The host owns the app-wide native-mpv mount. */}
       <LocalPlayerHost />
-      {isTVMode() && <TVPairingDock />}
+      {isTVMode() && (
+        <Suspense fallback={<Spinner variant="inline" label="Loading phone remote…" />}>
+          <TVPairingDock />
+        </Suspense>
+      )}
 
       {/* Lazily-loaded overlays - each chunk downloads only when first opened.
           A null Suspense fallback is correct here: these are modals, so "nothing

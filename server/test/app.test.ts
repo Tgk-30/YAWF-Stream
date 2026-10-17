@@ -1618,6 +1618,7 @@ describe("DebridStreamer server", () => {
           qualities: string[];
           seekOffset: boolean;
           subtitleSidecar: boolean;
+          audioTrackSelection: boolean;
           toneMapping: boolean;
         };
       }>(
@@ -1636,6 +1637,7 @@ describe("DebridStreamer server", () => {
         qualities: ["auto", "1080p", "720p", "480p", "360p"],
         seekOffset: true,
         subtitleSidecar: true,
+        audioTrackSelection: false,
         toneMapping: true,
       });
     } finally {
@@ -3596,6 +3598,113 @@ describe("DebridStreamer server", () => {
       expect((await request(owner, {
         method: "GET",
         url: `/api/stream/${session.id}/index.m3u8?quality=4k`,
+      })).statusCode).toBe(400);
+    } finally {
+      await on.close();
+    }
+  });
+
+  it("transcode: exposes a cached same-session audio inventory and maps the selected source track", async () => {
+    const base = makeFakeTranscoder();
+    const spawned: string[][] = [];
+    let probes = 0;
+    const audioTranscoder: Transcoder = {
+      ...base,
+      async capabilities() {
+        return {
+          toneMapping: false,
+          videoEncoders: ["libx264"],
+          subtitleSidecar: false,
+          audioTrackSelection: true,
+        };
+      },
+      async probeStreams() {
+        probes += 1;
+        return {
+          audio: true,
+          subtitle: false,
+          audioTracks: [
+            { index: 0, language: "eng", label: "English", default: false },
+            { index: 1, language: "fra", label: "French", default: true },
+          ],
+        };
+      },
+      spawnHls(args) {
+        spawned.push(args);
+        return base.spawnHls(args);
+      },
+    };
+    const on = await buildTranscodeApp({ enableTranscode: true }, audioTranscoder);
+    try {
+      const owner = await setupOwner(on);
+      const health = json<{ transcode: { audioTrackSelection: boolean } }>(
+        await request(owner, {
+          method: "GET",
+          url: "/api/admin/health",
+        }),
+      );
+      expect(health.transcode.audioTrackSelection).toBe(true);
+      const session = await createRawSession(owner);
+      await createProfile(owner, "audio-other", "audio-other-password");
+      const other = await login(on, "audio-other", "audio-other-password");
+      expect((await request(other, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      })).statusCode).toBe(404);
+      expect((await request({ app: on, cookies: new Map() }, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+        headers: { authorization: `Bearer ${"Z".repeat(43)}` },
+      })).statusCode).toBe(404);
+      expect(probes).toBe(0);
+      const bearerInventory = await request({ app: on, cookies: new Map() }, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+        headers: { authorization: session.playbackAuthorization },
+      });
+      expect(bearerInventory.statusCode).toBe(200);
+      expect(bearerInventory.headers["cache-control"]).toBe("private, no-store");
+      expect(probes).toBe(1);
+      const inventory = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      });
+      expect(inventory.statusCode).toBe(200);
+      expect(inventory.headers["cache-control"]).toBe("private, no-store");
+      expect(json<{ tracks: unknown[] }>(inventory).tracks).toEqual([
+        { index: 0, language: "eng", label: "English", default: false },
+        { index: 1, language: "fra", label: "French", default: true },
+      ]);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      })).statusCode).toBe(200);
+      expect(probes).toBe(1);
+
+      const sourceDefault = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p`,
+      });
+      expect(sourceDefault.statusCode).toBe(200);
+      expect(sourceDefault.headers["x-yawf-transcode-audio"]).toBe("1");
+      expect(spawned.at(-1)).toContain("0:a:1");
+
+      const selected = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p&audio=1`,
+      });
+      expect(selected.statusCode).toBe(200);
+      expect(selected.headers["x-yawf-transcode-audio"]).toBe("1");
+      expect(spawned.at(-1)).toContain("0:a:1");
+      expect(probes).toBe(1);
+
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p&audio=2`,
+      })).statusCode).toBe(400);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?audio=../../etc/passwd`,
       })).statusCode).toBe(400);
     } finally {
       await on.close();

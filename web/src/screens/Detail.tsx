@@ -58,6 +58,7 @@ import {
   fetchServerEpisodes,
   resolveServerStream,
   serverOptimizedSource,
+  serverStreamAudioTracks,
   serverExternalPlaybackURL,
   type ServerTranscodeQuality,
 } from "../lib/serverApi";
@@ -2177,6 +2178,7 @@ export function Detail() {
               serverOptimizedQualities.length > 0
                 ? {
                     qualities: serverOptimizedQualities,
+                    loadAudioTracks: () => serverStreamAudioTracks(player.fallbackStream!),
                     defaultQuality: settings.transcode
                       ? settings.dataSaver
                         ? "480p"
@@ -2185,10 +2187,12 @@ export function Detail() {
                     request: async (
                       quality: ServerTranscodeQuality,
                       absolutePositionSeconds: number,
+                      audioTrack?: number,
                     ) =>
                       serverOptimizedSource(player.fallbackStream!, {
                         quality,
                         startSeconds: absolutePositionSeconds,
+                        ...(audioTrack == null ? {} : { audioTrack }),
                         hdrPolicy:
                           /(?:^|[^a-z0-9])(?:dv|dovi|dolby[ ._-]?vision|hdr10\+?|hdr|hlg)(?:[^a-z0-9]|$)/i.test(
                             player.sourceFileName ?? "",

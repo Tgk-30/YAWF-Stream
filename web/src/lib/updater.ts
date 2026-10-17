@@ -17,6 +17,7 @@
 
 import { isDesktopTauri } from "./tauri";
 import { isNetworkAllowed } from "./networkPolicy";
+import type { NetworkMode } from "./networkPolicy";
 import { recordDiagnostic } from "./diagnostics";
 
 const LAST_CHECK_KEY = "ds_last_update_check";
@@ -62,13 +63,24 @@ export interface PendingUpdate {
   install: (onProgress?: (fraction: number | null) => void) => Promise<void>;
 }
 
-/** Check for an available desktop update. Resolves to a {@link PendingUpdate}
- * when a newer signed release is available, else `null`. Never throws - a flaky
- * network, a missing release, or running in a plain browser all resolve to
- * `null` (with a console warning) so launch is never degraded. */
-export async function checkForUpdates(): Promise<PendingUpdate | null> {
-  if (!isNetworkAllowed("updates")) return null;
-  if (!isDesktopTauri()) return null;
+/** A desktop feed check keeps absence, privacy policy, and transport failure
+ * distinct so a mandatory compatibility gate can explain the real blocker. */
+export type UpdateCheckResult =
+  | { status: "available"; update: PendingUpdate }
+  | { status: "no-update" }
+  | { status: "privacy-blocked" }
+  | { status: "unsupported" }
+  | { status: "check-failed" };
+
+/** Check for an available desktop update. Never throws into the UI, while
+ * preserving why no update could be returned. */
+export async function checkForUpdates(
+  networkMode?: NetworkMode,
+): Promise<UpdateCheckResult> {
+  if (!isDesktopTauri()) return { status: "unsupported" };
+  if (!isNetworkAllowed("updates", networkMode)) {
+    return { status: "privacy-blocked" };
+  }
 
   try {
     // Imported dynamically so the browser bundle never resolves the Tauri
@@ -79,7 +91,7 @@ export async function checkForUpdates(): Promise<PendingUpdate | null> {
     if (update == null) {
       // eslint-disable-next-line no-console
       console.info("[updater] App is up to date.");
-      return null;
+      return { status: "no-update" };
     }
 
     // eslint-disable-next-line no-console
@@ -89,44 +101,47 @@ export async function checkForUpdates(): Promise<PendingUpdate | null> {
     );
 
     return {
-      version: update.version,
-      currentVersion: update.currentVersion,
-      notes: update.body ?? null,
-      install: async (onProgress) => {
-        let downloaded = 0;
-        let contentLength = 0;
-        // downloadAndInstall streams progress events; translate them to a 0..1
-        // fraction (or null when the server didn't send a content length).
-        try {
-          await update.downloadAndInstall((event) => {
-            switch (event.event) {
-              case "Started":
-                contentLength = event.data.contentLength ?? 0;
-                onProgress?.(contentLength > 0 ? 0 : null);
-                break;
-              case "Progress":
-                downloaded += event.data.chunkLength;
-                onProgress?.(
-                  contentLength > 0 ? downloaded / contentLength : null,
-                );
-                break;
-              case "Finished":
-                onProgress?.(1);
-                break;
-            }
-          });
-        } catch (error) {
-          recordDiagnostic(
-            "update",
-            "install.failed",
-            "error",
-            error instanceof Error ? error.message : String(error),
-          );
-          throw error;
-        }
-        // Apply by relaunching the freshly-installed binary.
-        const { relaunch } = await import("@tauri-apps/plugin-process");
-        await relaunch();
+      status: "available",
+      update: {
+        version: update.version,
+        currentVersion: update.currentVersion,
+        notes: update.body ?? null,
+        install: async (onProgress) => {
+          let downloaded = 0;
+          let contentLength = 0;
+          // downloadAndInstall streams progress events; translate them to a 0..1
+          // fraction (or null when the server didn't send a content length).
+          try {
+            await update.downloadAndInstall((event) => {
+              switch (event.event) {
+                case "Started":
+                  contentLength = event.data.contentLength ?? 0;
+                  onProgress?.(contentLength > 0 ? 0 : null);
+                  break;
+                case "Progress":
+                  downloaded += event.data.chunkLength;
+                  onProgress?.(
+                    contentLength > 0 ? downloaded / contentLength : null,
+                  );
+                  break;
+                case "Finished":
+                  onProgress?.(1);
+                  break;
+              }
+            });
+          } catch (error) {
+            recordDiagnostic(
+              "update",
+              "install.failed",
+              "error",
+              error instanceof Error ? error.message : String(error),
+            );
+            throw error;
+          }
+          // Apply by relaunching the freshly-installed binary.
+          const { relaunch } = await import("@tauri-apps/plugin-process");
+          await relaunch();
+        },
       },
     };
   } catch (err) {
@@ -138,6 +153,6 @@ export async function checkForUpdates(): Promise<PendingUpdate | null> {
     );
     // eslint-disable-next-line no-console
     console.warn("[updater] Update check failed (ignored):", err);
-    return null;
+    return { status: "check-failed" };
   }
 }

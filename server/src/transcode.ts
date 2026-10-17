@@ -17,11 +17,21 @@ export interface TranscoderCapabilities {
   toneMapping: boolean;
   videoEncoders?: TranscodeVideoEncoder[];
   subtitleSidecar?: boolean;
+  audioTrackSelection?: boolean;
+}
+
+export interface TranscoderAudioTrack {
+  /** Zero-based index within the source's audio streams, not the global stream index. */
+  index: number;
+  language: string | null;
+  label: string | null;
+  default: boolean;
 }
 
 export interface TranscoderStreamProbe {
   audio: boolean;
   subtitle: boolean;
+  audioTracks?: TranscoderAudioTrack[];
 }
 
 export interface Transcoder {
@@ -152,6 +162,7 @@ export const realTranscoder: Transcoder = {
       subtitleSidecar:
         ffprobeAvailable &&
         /(?:^|\s)webvtt(?:\s|$)/m.test(encoders ?? ""),
+      audioTrackSelection: ffprobeAvailable,
     };
   },
   probeStreams(upstreamUrl) {
@@ -172,9 +183,9 @@ export const realTranscoder: Transcoder = {
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_type",
+            "stream=index,codec_type:stream_tags=language,title:stream_disposition=default",
             "-of",
-            "csv=p=0",
+            "json",
             upstreamUrl,
           ],
           { stdio: ["ignore", "pipe", "ignore"] },
@@ -188,16 +199,37 @@ export const realTranscoder: Transcoder = {
             finish(null);
             return;
           }
-          const kinds = new Set(
-            output
-              .split(/\r?\n/)
-              .map((value) => value.trim().toLowerCase())
-              .filter(Boolean),
-          );
-          finish({
-            audio: kinds.has("audio"),
-            subtitle: kinds.has("subtitle"),
-          });
+          try {
+            const parsed = JSON.parse(output) as {
+              streams?: Array<{
+                codec_type?: unknown;
+                tags?: { language?: unknown; title?: unknown };
+                disposition?: { default?: unknown };
+              }>;
+            };
+            const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
+            const clean = (value: unknown, maxLength: number): string | null => {
+              if (typeof value !== "string") return null;
+              const normalized = value.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+              return normalized.length > 0 ? normalized.slice(0, maxLength) : null;
+            };
+            const audioTracks = streams
+              .filter((stream) => stream.codec_type === "audio")
+              .slice(0, 32)
+              .map((stream, index) => ({
+                index,
+                language: clean(stream.tags?.language, 32),
+                label: clean(stream.tags?.title, 128),
+                default: stream.disposition?.default === 1,
+              }));
+            finish({
+              audio: audioTracks.length > 0,
+              subtitle: streams.some((stream) => stream.codec_type === "subtitle"),
+              audioTracks,
+            });
+          } catch {
+            finish(null);
+          }
         });
         timer = setTimeout(() => {
           try {

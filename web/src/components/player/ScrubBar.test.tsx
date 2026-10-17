@@ -138,6 +138,85 @@ describe("ScrubBar pointer flow", () => {
     fireEvent.pointerDown(slider, { clientX: -40 });
     expect(onSeek).toHaveBeenCalledWith(0);
   });
+
+  it("captures the pointer and seeks continuously while dragging outside the rail", () => {
+    const onSeek = vi.fn();
+    const onScrubbingChange = vi.fn();
+
+    render(
+      <ScrubBar
+        currentTime={50}
+        duration={600}
+        preview={null}
+        onHover={() => {}}
+        onLeave={() => {}}
+        onSeek={onSeek}
+        onScrubbingChange={onScrubbingChange}
+      />,
+    );
+
+    const slider = screen.getByRole("slider", { name: "Seek" }) as HTMLElement;
+    slider.getBoundingClientRect = vi.fn(() => ({
+      left: 0,
+      width: 100,
+    } as DOMRect));
+    slider.setPointerCapture = vi.fn();
+    slider.hasPointerCapture = vi.fn(() => true);
+    slider.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(slider, { clientX: 20, pointerId: 7 });
+    fireEvent.pointerMove(slider, { clientX: 75, pointerId: 7 });
+    fireEvent.pointerLeave(slider, { pointerId: 7 });
+    fireEvent.pointerMove(slider, { clientX: 120, pointerId: 7 });
+    fireEvent.pointerUp(slider, { clientX: 120, pointerId: 7 });
+
+    expect(slider.setPointerCapture).toHaveBeenCalledWith(7);
+    expect(onSeek.mock.calls.map(([time]) => time)).toEqual([120, 450, 600, 600]);
+    expect(onScrubbingChange.mock.calls).toEqual([[true], [false]]);
+    expect(slider.releasePointerCapture).toHaveBeenCalledWith(7);
+  });
+
+  it.each(["pointerCancel", "lostPointerCapture"] as const)(
+    "ends an active drag on %s",
+    (eventName) => {
+      const onSeek = vi.fn();
+      const onScrubbingChange = vi.fn();
+      render(
+        <ScrubBar
+          currentTime={50}
+          duration={600}
+          preview={null}
+          onHover={() => {}}
+          onLeave={() => {}}
+          onSeek={onSeek}
+          onScrubbingChange={onScrubbingChange}
+        />,
+      );
+      const slider = screen.getByRole("slider", { name: "Seek" }) as HTMLElement;
+      slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      slider.setPointerCapture = vi.fn();
+      slider.hasPointerCapture = vi.fn(() => true);
+      slider.releasePointerCapture = vi.fn();
+
+      fireEvent.pointerDown(slider, { clientX: 20, pointerId: 7 });
+      fireEvent[eventName](slider, { pointerId: 7 });
+      fireEvent.pointerMove(slider, { clientX: 80, pointerId: 7 });
+
+      expect(onSeek.mock.calls.map(([time]) => time)).toEqual([120]);
+      expect(onScrubbingChange.mock.calls).toEqual([[true], [false]]);
+    },
+  );
+
+  it("does not seek from a zero-width layout box", () => {
+    const { slider, onSeek } = setup(50, 600);
+    slider.getBoundingClientRect = vi.fn(() => ({
+      left: 0,
+      width: 0,
+    } as DOMRect));
+
+    fireEvent.pointerDown(slider, { clientX: 0, pointerId: 1 });
+    expect(onSeek).not.toHaveBeenCalled();
+  });
 });
 
 describe("formatTime", () => {

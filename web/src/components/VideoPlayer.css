@@ -343,6 +343,10 @@
   width: min(380px, calc(100% - 32px));
   max-height: min(540px, calc(100% - 120px));
   overflow-y: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: var(--sp-md);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: var(--r-lg);
@@ -357,8 +361,13 @@
   align-items: center;
 }
 .player-options-head {
+  position: sticky;
+  top: calc(-1 * var(--sp-md));
+  z-index: 2;
   justify-content: space-between;
-  margin-bottom: var(--sp-md);
+  margin: calc(-1 * var(--sp-md)) calc(-1 * var(--sp-md)) var(--sp-md);
+  padding: var(--sp-md);
+  background: rgba(10, 12, 20, 0.98);
 }
 .player-options-section {
   display: grid;
@@ -400,6 +409,7 @@
   color: inherit;
   text-align: left;
   cursor: pointer;
+  text-decoration: none;
 }
 .player-options-action:hover {
   color: var(--accent);
@@ -615,6 +625,10 @@
   width: min(440px, calc(100% - var(--sp-xl)));
   max-height: 60vh;
   overflow-y: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: var(--sp-md);
   border-radius: var(--r-lg);
   background: rgba(12, 14, 22, 1);
@@ -864,6 +878,9 @@
 }
 
 @media (max-width: 560px) {
+  .scrubbar {
+    min-height: 44px;
+  }
   .webview-player {
     --player-compact-osd-reserve: calc(
       calc(46px * var(--density-scale))
@@ -974,9 +991,15 @@
     min-width: 44px;
     height: 44px;
   }
+  .scrubbar {
+    min-height: 44px;
+  }
 }
 
 @media (min-width: 561px) and (max-width: 950px) and (max-height: 500px) {
+  .scrubbar {
+    min-height: 44px;
+  }
   .webview-player {
     --player-compact-osd-reserve: calc(
       calc(46px * var(--density-scale))

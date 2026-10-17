@@ -40,7 +40,7 @@ import {
   playWithMpv,
   mpvStop,
 } from "../lib/tauri";
-import { deviceKind } from "../lib/platform";
+import { deviceKind, isStandaloneDisplay } from "../lib/platform";
 import {
   isAndroidAppUiContext,
   isAndroidExternalPlayerEligible,
@@ -48,6 +48,12 @@ import {
   openAndroidExternalPlayer,
   openAndroidServerExternalPlayer,
 } from "../lib/androidExternalPlayer";
+import {
+  browserExternalCapability,
+  browserExternalGuidance,
+  browserExternalPlayerLinks,
+  type BrowserExternalPlayerLink,
+} from "../lib/browserExternalPlayers";
 import type { SubtitleClient } from "../services/subtitles/OpenSubtitlesClient";
 import type { Translator } from "../services/subtitles/SubtitleTranslator";
 import { useSubtitleTracks } from "./player/useSubtitleTracks";
@@ -94,6 +100,7 @@ import {
   type AndroidTVPlaybackProgress,
 } from "../lib/androidTV";
 import type {
+  ServerAudioTrack,
   ServerOptimizedSource,
   ServerTranscodeQuality,
 } from "../lib/serverApi";
@@ -224,12 +231,14 @@ interface VideoPlayerProps {
    * original-device player without rendering unavailable controls. */
   serverOptimized?: {
     qualities: readonly ServerTranscodeQuality[];
+    loadAudioTracks?: () => Promise<ServerAudioTrack[]>;
     /** Legacy server-transcode preference, applied only after Device Original
      * has started and an optimized manifest is safely prepared. */
     defaultQuality?: ServerTranscodeQuality | null;
     request: (
       quality: ServerTranscodeQuality,
       absolutePositionSeconds: number,
+      audioTrack?: number,
     ) => Promise<ServerOptimizedSource>;
   };
 }
@@ -290,17 +299,14 @@ interface WebKitDocument extends Document {
 }
 
 function shouldUseNativeHls(video: HTMLVideoElement): boolean {
-  // Some Android WebViews report HLS support here, then reject the manifest
-  // with MEDIA_ERR_SRC_NOT_SUPPORTED. hls.js is the reliable Android path.
-  // The native marker covers APK webviews whose user agent looks like desktop;
-  // iOS remains on native HLS because WebKit does not expose MSE there.
+  // Native HLS commonly hides alternate audio tracks from web content even
+  // when it reports that the manifest is playable. Prefer hls.js everywhere it
+  // can use MSE so the player gets a real track inventory. iOS remains native
+  // because WebKit does not expose MSE there. If hls.js later reports MSE as
+  // unavailable, the attach effect falls back to this native capability.
   const kind = deviceKind();
-  const mobileTauri =
-    (window as unknown as Record<string, unknown>).__YAWF_TAURI_MOBILE__ === true;
-  const requiresHlsJs =
-    kind === "android" || (mobileTauri && kind !== "ios");
   return (
-    !requiresHlsJs &&
+    kind === "ios" &&
     video.canPlayType("application/vnd.apple.mpegurl") !== ""
   );
 }
@@ -587,8 +593,34 @@ interface HlsLevelChoice {
 
 interface HlsAudioChoice {
   index: number;
+  id: string;
   label: string;
   language: string | null;
+  isDefault?: boolean;
+}
+
+interface AudioPreference {
+  id: string | null;
+  language: string | null;
+}
+
+/** Safari and some embedded WebViews expose the non-standard AudioTrackList
+ * API. Chromium does not, so every access must remain capability-gated. */
+interface BrowserAudioTrack {
+  id?: string;
+  label?: string;
+  language?: string;
+  enabled: boolean;
+}
+
+interface BrowserAudioTrackList extends EventTarget {
+  readonly length: number;
+  readonly [index: number]: BrowserAudioTrack;
+  item?(index: number): BrowserAudioTrack | null;
+}
+
+interface BrowserAudioVideoElement extends HTMLVideoElement {
+  readonly audioTracks?: BrowserAudioTrackList;
 }
 
 /** Keep media-clock updates local to the scrub bar. Browser `timeupdate` fires
@@ -666,6 +698,7 @@ export function VideoPlayer({
   const requestedEngine = engine ?? inferEngine(url, kind);
   type ScopedOptimizedSource = ServerOptimizedSource & {
     originOwner: string;
+    audioPreference?: AudioPreference;
   };
   type ScopedPosition = {
     originOwner: string;
@@ -729,9 +762,27 @@ export function VideoPlayer({
   // Trying it in the webview lets the normal media-error path request HLS.
   const mobileTauri = androidAppUi || (underTauri && !desktopTauri);
   const dk = deviceKind();
+  const browserExternalTarget = !underTauri && !androidAppUi
+    ? browserExternalCapability(externalTarget)
+    : null;
+  const browserExternalLinks = useMemo(
+    () => browserExternalPlayerLinks(
+      browserExternalTarget,
+      title,
+      dk,
+      isStandaloneDisplay(),
+    ),
+    [browserExternalTarget, dk, title],
+  );
+  const browserExternalHelp = browserExternalTarget == null
+    ? null
+    : browserExternalGuidance(dk, isStandaloneDisplay());
   const androidTauri = isAndroidExternalPlayerEligible();
   const androidServerPlayer = isAndroidServerExternalPlayerEligible(externalTarget);
   const androidNativeChooser = androidTauri || androidServerPlayer;
+  const externalPlaybackAvailable = externalTarget != null && (
+    underTauri || androidAppUi || browserExternalTarget != null
+  );
   const mode: Playability =
     effectiveEngine === "native-mpv" && !mobileTauri ? "external" : "webview";
   // In-window native player: the DEFAULT desktop path for containers/codecs the
@@ -1123,6 +1174,8 @@ export function VideoPlayer({
       quality: ServerTranscodeQuality,
       absolutePositionSeconds: number,
       handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+      audioTrack?: number,
+      audioPreference?: AudioPreference,
     ) => {
       const owner = playbackOwner;
       if (
@@ -1153,7 +1206,11 @@ export function VideoPlayer({
         // the same cold-start budget as hls.js. Device Original remains active
         // throughout preparation and transient server-busy retries.
         const next = await promiseWithinTimeout(
-          Promise.resolve().then(() => serverOptimized.request(quality, position)),
+          Promise.resolve().then(() =>
+            audioTrack == null
+              ? serverOptimized.request(quality, position)
+              : serverOptimized.request(quality, position, audioTrack),
+          ),
           SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS,
           "Server optimized playback timed out before preparation began.",
         );
@@ -1164,6 +1221,7 @@ export function VideoPlayer({
         const manifestDeadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
         let retryDelayMs = SERVER_OPTIMIZED_RETRY_BASE_MS;
         let manifest: string | null = null;
+        let preparedAudioTrack = audioTrack ?? next.audioTrack ?? 0;
         while (manifest == null) {
           if (!ownsRequest() || controller.signal.aborted) return;
           const remainingMs = manifestDeadline - Date.now();
@@ -1197,6 +1255,10 @@ export function VideoPlayer({
           }
           if (!response.ok) {
             throw new Error(`The server could not prepare ${quality} playback (${response.status}).`);
+          }
+          const responseAudioTrack = response.headers.get("x-yawf-transcode-audio");
+          if (/^(?:0|[1-9]|[12][0-9]|3[01])$/.test(responseAudioTrack ?? "")) {
+            preparedAudioTrack = Number(responseAudioTrack);
           }
           const textRemainingMs = manifestDeadline - Date.now();
           if (textRemainingMs <= 0) {
@@ -1235,6 +1297,8 @@ export function VideoPlayer({
         setSourceSwitchState(activationHandoffState);
         setOptimizedSource({
           ...next,
+          audioTrack: preparedAudioTrack,
+          audioPreference,
           startPositionSeconds: activationStart,
           originOwner: owner,
         });
@@ -1403,6 +1467,7 @@ export function VideoPlayer({
         );
         if (!ownsRequest()) return;
         setExternalActionStatus(status);
+        recordDiagnostic("player", "external.started");
       } else if (androidTauri) {
         if (!ownsRequest()) return;
         setExternalActionStatus("Opening Android player chooser…");
@@ -1452,12 +1517,14 @@ export function VideoPlayer({
         setExternalActionStatus(
           "Stream link copied. Paste it into VLC or another player. Native player selection is not enabled in this build.",
         );
+        recordDiagnostic("player", "external.link_copied");
       } else {
-        downloadExternalPlaylist(target, title);
+        if (browserExternalTarget == null) return;
+        downloadExternalPlaylist(browserExternalTarget, title);
         if (!ownsRequest()) return;
-        setExternalActionStatus("Player file prepared. Open it with VLC, IINA, or mpv.");
+        setExternalActionStatus("Player playlist downloaded. Open it with an installed video player.");
+        recordDiagnostic("player", "external.playlist_downloaded");
       }
-      recordDiagnostic("player", "external.started");
     } catch {
       if (!ownsRequest()) return;
       setExternalActionStatus(
@@ -1480,15 +1547,19 @@ export function VideoPlayer({
     androidServerPlayer,
     androidNativeChooser,
     mobileTauri,
+    browserExternalTarget,
     setExternalActionStatus,
   ]);
 
   const copyExternalPlaybackLink = useCallback(async () => {
-    if (externalTarget == null) return;
+    const copyTarget = !underTauri && !androidAppUi
+      ? browserExternalTarget
+      : externalTarget;
+    if (copyTarget == null) return;
     serverExternalRequestRef.current?.abort();
     serverExternalRequestRef.current = null;
     const request = ++externalActionRequestRef.current;
-    const target = externalTarget;
+    const target = copyTarget;
     const owner = playbackOwner;
     const ownsRequest = () =>
       playerMountedRef.current &&
@@ -1518,7 +1589,14 @@ export function VideoPlayer({
       );
       recordDiagnostic("player", "external.copy_failed", "error");
     }
-  }, [externalTarget, playbackOwner, setExternalActionStatus]);
+  }, [
+    androidAppUi,
+    browserExternalTarget,
+    externalTarget,
+    playbackOwner,
+    setExternalActionStatus,
+    underTauri,
+  ]);
 
   // Native hand-off when running under Tauri and the in-window player is off.
   // Primary path is the BUNDLED mpv sidecar (shipped + app-controlled over IPC);
@@ -1926,7 +2004,10 @@ export function VideoPlayer({
             exactHandoff={activeOptimized != null}
             externalHandoffVideoRef={externalHandoffVideoRef}
             serverOptimized={serverOptimized}
+            serverAudioOwner={playbackOwner}
             activeServerOptimizedQuality={activeOptimized?.quality ?? null}
+            activeServerAudioTrack={activeOptimized?.audioTrack ?? 0}
+            activeServerAudioPreference={activeOptimized?.audioPreference ?? null}
             serverOptimizationPending={serverOptimizationPending}
             serverOptimizationError={serverOptimizationError}
             onSwitchServerOptimized={switchToServerOptimized}
@@ -1937,11 +2018,15 @@ export function VideoPlayer({
             }
             onPlaybackStall={recoverPostStartStall}
             onOpenExternalPlayer={() => void openExternalPlayback()}
-            onCopyExternalLink={mobileTauri ? () => void copyExternalPlaybackLink() : undefined}
+            onCopyExternalLink={mobileTauri || browserExternalTarget != null
+              ? () => void copyExternalPlaybackLink()
+              : undefined}
             nativeExternalChooser={androidNativeChooser}
-            externalPlaybackAvailable={externalTarget != null}
+            externalPlaybackAvailable={externalPlaybackAvailable}
             externalActionStatus={externalActionStatus}
             manualExternalUrl={mobileTauri ? externalTarget : null}
+            browserExternalLinks={browserExternalLinks}
+            browserExternalGuidance={browserExternalHelp}
             subtitleClient={subtitleClient ?? null}
             translator={translator ?? null}
             imdbId={imdbId ?? null}
@@ -1956,15 +2041,18 @@ export function VideoPlayer({
         ) : (
           <ExternalPanel
             underTauri={desktopTauri}
-            url={externalTarget}
-            externalPlaybackAvailable={externalTarget != null}
+            externalPlaybackAvailable={externalPlaybackAvailable}
             status={externalStatus}
             error={externalError}
             externalStatus={externalActionStatus}
             onOpenExternal={() => void openExternalPlayback()}
-            onCopyExternal={mobileTauri ? () => void copyExternalPlaybackLink() : undefined}
+            onCopyExternal={mobileTauri || browserExternalTarget != null
+              ? () => void copyExternalPlaybackLink()
+              : undefined}
             nativeExternalChooser={androidNativeChooser}
             manualExternalUrl={mobileTauri ? externalTarget : null}
+            browserExternalLinks={browserExternalLinks}
+            browserExternalGuidance={browserExternalHelp}
             onTryNextSource={onTryNextSource}
             onRetry={
               mode === "webview" && externalError != null
@@ -2034,6 +2122,8 @@ function WebviewPlayer({
   externalPlaybackAvailable,
   externalActionStatus,
   manualExternalUrl,
+  browserExternalLinks,
+  browserExternalGuidance,
   subtitleClient,
   translator,
   imdbId,
@@ -2045,7 +2135,10 @@ function WebviewPlayer({
   onRemoteClose,
   autoCountdown = true,
   serverOptimized,
+  serverAudioOwner,
   activeServerOptimizedQuality,
+  activeServerAudioTrack,
+  activeServerAudioPreference,
   serverOptimizationPending,
   serverOptimizationError,
   onSwitchServerOptimized,
@@ -2103,6 +2196,8 @@ function WebviewPlayer({
   externalPlaybackAvailable: boolean;
   externalActionStatus: string | null;
   manualExternalUrl: string | null;
+  browserExternalLinks: BrowserExternalPlayerLink[];
+  browserExternalGuidance: string | null;
   subtitleClient: SubtitleClient | null;
   translator: Translator | null;
   imdbId: string | null;
@@ -2114,13 +2209,18 @@ function WebviewPlayer({
   onRemoteClose: () => void;
   autoCountdown?: boolean;
   serverOptimized?: VideoPlayerProps["serverOptimized"];
+  serverAudioOwner: string;
   activeServerOptimizedQuality: ServerTranscodeQuality | null;
+  activeServerAudioTrack: number;
+  activeServerAudioPreference: AudioPreference | null;
   serverOptimizationPending: boolean;
   serverOptimizationError: string | null;
   onSwitchServerOptimized: (
     quality: ServerTranscodeQuality,
     absolutePositionSeconds: number,
     handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+    audioTrack?: number,
+    audioPreference?: AudioPreference,
   ) => Promise<void>;
   onSwitchDeviceOriginal: (
     absolutePositionSeconds: number,
@@ -2138,6 +2238,11 @@ function WebviewPlayer({
   const playerPreferencesRef = useRef(playerPreferences);
   playerPreferencesRef.current = playerPreferences;
   const appliedHlsAudioPreferenceRef = useRef(false);
+  const appliedBrowserAudioPreferenceRef = useRef(false);
+  const audioPreferenceRef = useRef<AudioPreference>({ id: null, language: null });
+  const serverAudioModeRef = useRef(serverOptimized?.loadAudioTracks != null);
+  serverAudioModeRef.current = serverOptimized?.loadAudioTracks != null;
+  const appliedServerAudioPreferenceRef = useRef(false);
   const autoplayAttemptedRef = useRef(false);
   const pausedForCastRef = useRef(false);
   const suspendedRef = useRef(suspended);
@@ -2242,11 +2347,69 @@ function WebviewPlayer({
   const [hlsLevel, setHlsLevel] = useState(-1);
   const [hlsAudioTracks, setHlsAudioTracks] = useState<HlsAudioChoice[]>([]);
   const [hlsAudioTrack, setHlsAudioTrack] = useState(-1);
+  const [hlsAudioInventoryKnown, setHlsAudioInventoryKnown] = useState(false);
+  const [nativeHlsPlayback, setNativeHlsPlayback] = useState(false);
+  const [browserAudioTracks, setBrowserAudioTracks] = useState<HlsAudioChoice[]>([]);
+  const [browserAudioTrack, setBrowserAudioTrack] = useState(-1);
+  const [browserAudioApiAvailable, setBrowserAudioApiAvailable] = useState(false);
+  const [serverAudioTracks, setServerAudioTracks] = useState<HlsAudioChoice[]>([]);
+  const [serverAudioInventoryStatus, setServerAudioInventoryStatus] = useState<
+    "idle" | "loading" | "ready" | "unavailable"
+  >("idle");
+  const serverAudioLoadSequenceRef = useRef(0);
+  const serverAudioLoaderRef = useRef(serverOptimized?.loadAudioTracks);
+  serverAudioLoaderRef.current = serverOptimized?.loadAudioTracks;
+  const serverAudioLoaderAvailable = serverOptimized?.loadAudioTracks != null;
   const touchLikePointerRef = useRef(false);
   const volumeIsSilent = muted || volume === 0;
   const underTauri = isTauri();
   const mediaArtist = nowPlaying?.episodeLabel ?? subtitle ?? "";
   const mediaArtworkUrl = nowPlaying?.posterUrl ?? "";
+
+  useEffect(() => {
+    serverAudioLoadSequenceRef.current += 1;
+    setServerAudioTracks([]);
+    setServerAudioInventoryStatus("idle");
+    appliedServerAudioPreferenceRef.current = false;
+  }, [serverAudioOwner]);
+
+  useEffect(() => {
+    const load = serverAudioLoaderRef.current;
+    if (!optionsOpen || load == null || serverAudioInventoryStatus !== "idle") return;
+    const request = ++serverAudioLoadSequenceRef.current;
+    setServerAudioInventoryStatus("loading");
+    void load().then(
+      (tracks) => {
+        if (serverAudioLoadSequenceRef.current !== request) return;
+        const choices = tracks
+          .filter((track) => Number.isInteger(track.index) && track.index >= 0 && track.index < 32)
+          .map((track) => ({
+            index: track.index,
+            id: String(track.index),
+            label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
+            language: track.language?.trim() || null,
+            isDefault: track.default,
+          }));
+        setServerAudioTracks(choices);
+        setServerAudioInventoryStatus("ready");
+      },
+      () => {
+        if (serverAudioLoadSequenceRef.current === request) {
+          setServerAudioInventoryStatus("unavailable");
+        }
+      },
+    );
+  }, [optionsOpen, serverAudioInventoryStatus, serverAudioLoaderAvailable, serverAudioOwner]);
+
+  if (serverAudioLoaderAvailable) {
+    const selected = serverAudioTracks.find(
+      (track) => track.index === activeServerAudioTrack,
+    );
+    audioPreferenceRef.current = {
+      id: activeServerAudioPreference?.id ?? selected?.id ?? String(activeServerAudioTrack),
+      language: activeServerAudioPreference?.language ?? selected?.language ?? null,
+    };
+  }
 
   useTVRemotePlayback({
     videoRef,
@@ -2392,6 +2555,107 @@ function WebviewPlayer({
   // reliably, so gate them to non-HLS in-webview sources.
   const isHls = url.split("?")[0].toLowerCase().endsWith(".m3u8");
   const thumbs = useScrubThumbnails(url, !isHls);
+
+  // Safari/native-HLS and a few embedded browsers expose AudioTrackList on the
+  // media element instead of through hls.js. Chromium intentionally does not,
+  // so capability detection and the unavailable message in the menu are both
+  // required. Track-list events can arrive before or after loadedmetadata.
+  useEffect(() => {
+    const video = videoRef.current as BrowserAudioVideoElement | null;
+    if (video == null) return;
+    const list = video.audioTracks;
+    const listEventsAvailable =
+      list != null &&
+      typeof list.addEventListener === "function" &&
+      typeof list.removeEventListener === "function";
+    appliedBrowserAudioPreferenceRef.current = false;
+    setBrowserAudioTracks([]);
+    setBrowserAudioTrack(-1);
+    setBrowserAudioApiAvailable(listEventsAvailable);
+    if (list == null || !listEventsAvailable) return;
+
+    const trackAt = (index: number): BrowserAudioTrack | null =>
+      list[index] ?? list.item?.(index) ?? null;
+    const choices = (): HlsAudioChoice[] => {
+      const next: HlsAudioChoice[] = [];
+      for (let index = 0; index < list.length; index += 1) {
+        const track = trackAt(index);
+        if (track == null) continue;
+        next.push({
+          index,
+          id: track.id?.trim() || String(index),
+          label:
+            track.label?.trim() ||
+            track.language?.trim() ||
+            `Audio ${index + 1}`,
+          language: track.language?.trim() || null,
+        });
+      }
+      return next;
+    };
+    const selectTrack = (index: number, available: HlsAudioChoice[]) => {
+      for (let candidate = 0; candidate < list.length; candidate += 1) {
+        const track = trackAt(candidate);
+        if (track != null) track.enabled = candidate === index;
+      }
+      const selected = available.find((track) => track.index === index) ?? null;
+      setBrowserAudioTrack(selected?.index ?? -1);
+      audioPreferenceRef.current = {
+        id: selected?.id ?? null,
+        language: selected?.language ?? null,
+      };
+    };
+    const sync = () => {
+      const available = choices();
+      setBrowserAudioTracks(available);
+      let selected = available.find((choice) => trackAt(choice.index)?.enabled) ?? null;
+      if (!appliedBrowserAudioPreferenceRef.current && available.length > 0) {
+        const preferences = playerPreferencesRef.current;
+        const perTitlePrefs = preferences?.rememberPerTitleTrackChoices === false
+          ? null
+          : savedPrefs;
+        const match =
+          findPreferredLanguageMatch(
+            perTitlePrefs?.preferredAudioLang,
+            available,
+            (track) => track.language,
+          ) ??
+          available.find((track) => track.id === perTitlePrefs?.preferredAudioId) ??
+          findPreferredLanguageMatch(
+            preferences?.defaultAudioLanguage,
+            available,
+            (track) => track.language,
+          ) ??
+          findPreferredLanguageMatch(
+            preferences?.defaultAudioLanguage,
+            available,
+            (track) => track.label,
+          );
+        if (match != null) {
+          appliedBrowserAudioPreferenceRef.current = true;
+          selectTrack(match.index, available);
+          selected = match;
+        }
+      }
+      setBrowserAudioTrack(selected?.index ?? -1);
+      audioPreferenceRef.current = {
+        id: selected?.id ?? null,
+        language: selected?.language ?? null,
+      };
+    };
+
+    sync();
+    list.addEventListener("addtrack", sync);
+    list.addEventListener("removetrack", sync);
+    list.addEventListener("change", sync);
+    video.addEventListener("loadedmetadata", sync);
+    return () => {
+      list.removeEventListener("addtrack", sync);
+      list.removeEventListener("removetrack", sync);
+      list.removeEventListener("change", sync);
+      video.removeEventListener("loadedmetadata", sync);
+    };
+  }, [savedPrefs, url]);
 
   // Lock-screen / hardware-media controls. A browser can expose Media Session
   // while supporting only a subset of actions, so every handler registration
@@ -2788,6 +3052,8 @@ function WebviewPlayer({
         video.currentTime + offset,
         d == null ? null : d + offset,
         {
+        preferredAudioId: audioPreferenceRef.current.id,
+        preferredAudioLang: audioPreferenceRef.current.language,
         playbackSpeed:
           Number.isFinite(video.playbackRate) && video.playbackRate > 0
             ? video.playbackRate
@@ -3158,12 +3424,14 @@ function WebviewPlayer({
     if (video == null) return;
 
     if (!isHls) {
+      setNativeHlsPlayback(false);
       // Only (re)assign on an actual URL change - reassigning the same src
       // invokes the media load algorithm and restarts playback from 0.
       if (video.src !== url) video.src = url;
       return;
     }
     if (shouldUseNativeHls(video)) {
+      setNativeHlsPlayback(true);
       // WKWebView/Safari owns HLS loading here. Make its manifest and segment
       // requests use the authenticated webview cookie jar, not URL credentials.
       if (isTrustedServerStreamURL(url)) {
@@ -3181,7 +3449,9 @@ function WebviewPlayer({
     // that return above and never touch it. Fetch it on demand instead.
     let cancelled = false;
     let instance: HlsInstance | null = null;
+    setNativeHlsPlayback(false);
     appliedHlsAudioPreferenceRef.current = false;
+    setHlsAudioInventoryKnown(false);
     let retryTimer: number | undefined;
     const recovery = { networkRetries: 0, mediaRecoveries: 0 };
     const applyHlsAudioPreference = (tracks: HlsAudioChoice[]) => {
@@ -3208,6 +3478,12 @@ function WebviewPlayer({
       appliedHlsAudioPreferenceRef.current = true;
       instance.audioTrack = match.index;
       setHlsAudioTrack(match.index);
+      if (!serverAudioModeRef.current) {
+        audioPreferenceRef.current = {
+          id: match.id,
+          language: match.language,
+        };
+      }
     };
     void import("hls.js").then(({ default: Hls }) => {
       // The effect can be torn down (or the URL swapped) while the chunk is in
@@ -3217,6 +3493,7 @@ function WebviewPlayer({
       if (element == null) return;
       if (!Hls.isSupported()) {
         if (element.canPlayType("application/vnd.apple.mpegurl") !== "") {
+          setNativeHlsPlayback(true);
           if (isTrustedServerStreamURL(url)) {
             element.crossOrigin = "use-credentials";
           } else {
@@ -3308,13 +3585,27 @@ function WebviewPlayer({
         );
         const audioChoices = instance?.audioTracks.map((track, index) => ({
           index,
+          id: String(index),
           label: track.name || track.lang || `Audio ${index + 1}`,
           language: track.lang ?? null,
         })) ?? [];
+        setHlsAudioInventoryKnown(true);
         setHlsAudioTracks(audioChoices);
         applyHlsAudioPreference(audioChoices);
         setHlsLevel(instance?.currentLevel ?? -1);
-        setHlsAudioTrack(instance?.audioTrack ?? -1);
+        const selectedAudioTrack = instance?.audioTrack ?? -1;
+        setHlsAudioTrack(selectedAudioTrack);
+        const selectedAudioChoice = audioChoices.find(
+          (track) => track.index === selectedAudioTrack,
+        );
+        if (selectedAudioChoice != null) {
+          if (!serverAudioModeRef.current) {
+            audioPreferenceRef.current = {
+              id: selectedAudioChoice.id,
+              language: selectedAudioChoice.language,
+            };
+          }
+        }
       });
       instance.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
         setHlsLevel(data.level);
@@ -3322,14 +3613,23 @@ function WebviewPlayer({
       instance.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
         const audioChoices = instance?.audioTracks.map((track, index) => ({
           index,
+          id: String(index),
           label: track.name || track.lang || `Audio ${index + 1}`,
           language: track.lang ?? null,
         })) ?? [];
+        setHlsAudioInventoryKnown(true);
         setHlsAudioTracks(audioChoices);
         applyHlsAudioPreference(audioChoices);
       });
       instance.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => {
         setHlsAudioTrack(data.id);
+        const selected = instance?.audioTracks[data.id];
+        if (!serverAudioModeRef.current) {
+          audioPreferenceRef.current = {
+            id: String(data.id),
+            language: selected?.lang ?? null,
+          };
+        }
       });
       instance.loadSource(url);
       instance.attachMedia(element);
@@ -3348,6 +3648,7 @@ function WebviewPlayer({
       if (hlsRef.current === instance) hlsRef.current = null;
       setHlsLevels([]);
       setHlsAudioTracks([]);
+      setHlsAudioInventoryKnown(false);
     };
   }, [engine, url, isHls]);
 
@@ -3632,12 +3933,28 @@ function WebviewPlayer({
   }, [muted, paused, playbackRate, volume]);
 
   const selectServerOptimizedQuality = useCallback((quality: ServerTranscodeQuality) => {
+    const selected = serverAudioTracks.find(
+      (track) => track.index === activeServerAudioTrack,
+    );
     void onSwitchServerOptimized(
       quality,
       absolutePlaybackPosition(),
       playbackHandoffState,
+      serverOptimized?.loadAudioTracks == null ? undefined : activeServerAudioTrack,
+      activeServerAudioPreference ?? (selected == null ? undefined : {
+        id: selected.id,
+        language: selected.language,
+      }),
     );
-  }, [absolutePlaybackPosition, onSwitchServerOptimized, playbackHandoffState]);
+  }, [
+    absolutePlaybackPosition,
+    activeServerAudioPreference,
+    activeServerAudioTrack,
+    onSwitchServerOptimized,
+    playbackHandoffState,
+    serverAudioTracks,
+    serverOptimized?.loadAudioTracks,
+  ]);
 
   const selectDeviceOriginal = useCallback(() => {
     onSwitchDeviceOriginal(absolutePlaybackPosition(), playbackHandoffState());
@@ -3692,7 +4009,114 @@ function WebviewPlayer({
     if (hls == null) return;
     hls.audioTrack = next;
     setHlsAudioTrack(next);
+    const selected = hlsAudioTracks.find((track) => track.index === next) ?? null;
+    if (!serverAudioModeRef.current) {
+      audioPreferenceRef.current = {
+        id: selected?.id ?? null,
+        language: selected?.language ?? null,
+      };
+    }
   };
+
+  const changeBrowserAudioTrack = (next: number) => {
+    const video = videoRef.current as BrowserAudioVideoElement | null;
+    const list = video?.audioTracks;
+    if (list == null) return;
+    for (let index = 0; index < list.length; index += 1) {
+      const track = list[index] ?? list.item?.(index) ?? null;
+      if (track != null) track.enabled = index === next;
+    }
+    const selected = browserAudioTracks.find((track) => track.index === next) ?? null;
+    setBrowserAudioTrack(selected?.index ?? -1);
+    audioPreferenceRef.current = {
+      id: selected?.id ?? null,
+      language: selected?.language ?? null,
+    };
+  };
+
+  const changeServerAudioTrack = (next: number) => {
+    const selected = serverAudioTracks.find((track) => track.index === next) ?? null;
+    if (selected == null || serverOptimized == null) return;
+    const quality = activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
+    void onSwitchServerOptimized(
+      quality,
+      absolutePlaybackPosition(),
+      playbackHandoffState,
+      next,
+      { id: selected.id, language: selected.language },
+    );
+  };
+
+  useEffect(() => {
+    if (
+      appliedServerAudioPreferenceRef.current ||
+      serverAudioInventoryStatus !== "ready" ||
+      serverAudioTracks.length === 0 ||
+      serverOptimizationPending
+    ) {
+      return;
+    }
+    const preferences = playerPreferencesRef.current;
+    const perTitlePrefs = preferences?.rememberPerTitleTrackChoices === false
+      ? null
+      : savedPrefs;
+    const selected =
+      findPreferredLanguageMatch(
+        perTitlePrefs?.preferredAudioLang,
+        serverAudioTracks,
+        (track) => track.language,
+      ) ??
+      serverAudioTracks.find((track) => track.id === perTitlePrefs?.preferredAudioId) ??
+      findPreferredLanguageMatch(
+        preferences?.defaultAudioLanguage,
+        serverAudioTracks,
+        (track) => track.language,
+      ) ??
+      findPreferredLanguageMatch(
+        preferences?.defaultAudioLanguage,
+        serverAudioTracks,
+        (track) => track.label,
+      ) ??
+      serverAudioTracks.find((track) => track.isDefault) ??
+      serverAudioTracks[0];
+    appliedServerAudioPreferenceRef.current = true;
+    if (selected.index === activeServerAudioTrack || serverOptimized == null) return;
+    const quality = activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
+    void onSwitchServerOptimized(
+      quality,
+      absolutePlaybackPosition(),
+      playbackHandoffState,
+      selected.index,
+      { id: selected.id, language: selected.language },
+    );
+  }, [
+    activeServerAudioTrack,
+    activeServerOptimizedQuality,
+    onSwitchServerOptimized,
+    savedPrefs,
+    serverAudioInventoryStatus,
+    serverAudioTracks,
+    serverOptimizationPending,
+    serverOptimized,
+  ]);
+
+  const serverAudioInventoryKnown = serverAudioInventoryStatus === "ready";
+  const audioChoices = serverAudioInventoryKnown
+    ? serverAudioTracks
+    : hlsAudioInventoryKnown
+      ? hlsAudioTracks
+      : browserAudioTracks;
+  const activeAudioTrack = serverAudioInventoryKnown
+    ? activeServerAudioTrack
+    : hlsAudioInventoryKnown
+      ? hlsAudioTrack
+      : browserAudioTrack;
+  const audioInventoryPending =
+    serverAudioInventoryStatus === "loading" ||
+    (serverOptimized?.loadAudioTracks == null && isHls && !nativeHlsPlayback && !hlsAudioInventoryKnown);
+  const audioSelectionUnavailable =
+    serverAudioInventoryStatus === "unavailable" ||
+    (!serverAudioInventoryKnown && !hlsAudioInventoryKnown && !browserAudioApiAvailable);
 
   return (
     <div
@@ -4113,24 +4537,59 @@ function WebviewPlayer({
               </div>
             </div>
           )}
-          {hlsAudioTracks.length > 1 && (
-            <div className="player-options-section">
-              <span className="t-secondary">Audio track</span>
+          <div className="player-options-section" aria-labelledby="player-audio-track-heading">
+            <span className="t-secondary" id="player-audio-track-heading">Audio track</span>
+            {audioChoices.length > 0 && (
               <div className="player-options-choice-row">
-                {hlsAudioTracks.map((track) => (
+                {audioChoices.map((track) => (
                   <button
                     type="button"
-                    className={`chip${hlsAudioTrack === track.index ? " is-active" : ""}`}
-                    aria-pressed={hlsAudioTrack === track.index}
-                    onClick={() => changeHlsAudioTrack(track.index)}
-                    key={track.index}
+                    className={`chip${activeAudioTrack === track.index ? " is-active" : ""}`}
+                    aria-pressed={activeAudioTrack === track.index}
+                    onClick={() => {
+                      if (serverAudioInventoryKnown) changeServerAudioTrack(track.index);
+                      else if (hlsAudioInventoryKnown) changeHlsAudioTrack(track.index);
+                      else changeBrowserAudioTrack(track.index);
+                    }}
+                    key={track.id}
                   >
                     {track.label}
                   </button>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+            {audioInventoryPending ? (
+              <p className="player-options-status" role="status">
+                Loading audio tracks…
+              </p>
+            ) : audioChoices.length === 1 ? (
+              <p className="player-options-status" role="status">
+                This stream reports one audio track.
+              </p>
+            ) : audioChoices.length === 0 && audioSelectionUnavailable ? (
+              <p className="player-options-status" role="status">
+                This browser does not expose alternate audio tracks. If this source contains more than one, use an external player.
+              </p>
+            ) : audioChoices.length === 0 ? (
+              <p className="player-options-status" role="status">
+                This stream does not report selectable audio tracks.
+              </p>
+            ) : null}
+          </div>
+          {browserExternalLinks.map((link) => (
+            <a
+              className="player-options-action"
+              href={link.href}
+              key={link.id}
+              onClick={() => recordDiagnostic("player", "external.intent_requested")}
+            >
+              <Icon name="play" size={17} />
+              <span>
+                <strong>{link.label}</strong>
+                <small>{link.description}</small>
+              </span>
+            </a>
+          ))}
           {externalPlaybackAvailable ? (
             <button
               type="button"
@@ -4140,12 +4599,16 @@ function WebviewPlayer({
               <Icon name="play" size={17} />
               <span>
                 <strong>
-                  {nativeExternalChooser || manualExternalUrl == null
+                  {browserExternalGuidance != null
+                    ? "Download player playlist (.m3u)"
+                    : nativeExternalChooser || manualExternalUrl == null
                     ? "Open in external player"
                     : "Copy stream link"}
                 </strong>
                 <small>
-                  {nativeExternalChooser
+                  {browserExternalGuidance != null
+                    ? "Save a playlist to open with an installed desktop or mobile player"
+                    : nativeExternalChooser
                     ? "Choose VLC or another installed video app"
                     : manualExternalUrl == null
                     ? "VLC, IINA, mpv, or your device player"
@@ -4158,7 +4621,11 @@ function WebviewPlayer({
               External playback is not available for this protected stream. Retry playback or choose another source.
             </p>
           )}
-          {externalPlaybackAvailable && nativeExternalChooser && onCopyExternalLink != null && (
+          {browserExternalGuidance != null && (
+            <p className="player-options-status">{browserExternalGuidance}</p>
+          )}
+          {externalPlaybackAvailable && onCopyExternalLink != null &&
+            (nativeExternalChooser || browserExternalGuidance != null) && (
             <button
               type="button"
               className="player-options-action"
@@ -4167,7 +4634,7 @@ function WebviewPlayer({
               <Icon name="copy" size={17} />
               <span>
                 <strong>Copy stream link</strong>
-                <small>Use the link manually if no player accepts it</small>
+                <small>Paste it into an installed player</small>
               </span>
             </button>
           )}
@@ -4324,7 +4791,6 @@ function UpNextOverlay({
 
 function ExternalPanel({
   underTauri,
-  url,
   externalPlaybackAvailable,
   status,
   error,
@@ -4333,12 +4799,13 @@ function ExternalPanel({
   onCopyExternal,
   nativeExternalChooser,
   manualExternalUrl,
+  browserExternalLinks,
+  browserExternalGuidance,
   onTryNextSource,
   onRetry,
   retryPending = false,
 }: {
   underTauri: boolean;
-  url: string | null;
   externalPlaybackAvailable: boolean;
   status: string | null;
   error: string | null;
@@ -4347,6 +4814,8 @@ function ExternalPanel({
   onCopyExternal?: () => void;
   nativeExternalChooser: boolean;
   manualExternalUrl: string | null;
+  browserExternalLinks: BrowserExternalPlayerLink[];
+  browserExternalGuidance: string | null;
   onTryNextSource?: () => Promise<void>;
   onRetry?: () => void | Promise<void>;
   retryPending?: boolean;
@@ -4394,9 +4863,21 @@ function ExternalPanel({
           >
             {retryPending ? "Preparing fresh stream" : "Retry playback"}
           </button>
+          {browserExternalLinks.map((link) => (
+            <a
+              className="btn"
+              href={link.href}
+              key={link.id}
+              onClick={() => recordDiagnostic("player", "external.intent_requested")}
+            >
+              {link.label}
+            </a>
+          ))}
           {externalPlaybackAvailable ? (
             <button type="button" className="btn" onClick={onOpenExternal}>
-              {nativeExternalChooser || manualExternalUrl == null
+              {browserExternalGuidance != null
+                ? "Download player playlist (.m3u)"
+                : nativeExternalChooser || manualExternalUrl == null
                 ? "Open in external player"
                 : "Copy stream link"}
             </button>
@@ -4405,12 +4886,16 @@ function ExternalPanel({
               External playback is not available for this protected stream. Retry playback or choose another source.
             </p>
           )}
-          {externalPlaybackAvailable && nativeExternalChooser && onCopyExternal != null && (
+          {externalPlaybackAvailable && onCopyExternal != null &&
+            (nativeExternalChooser || browserExternalGuidance != null) && (
             <button type="button" className="btn" onClick={onCopyExternal}>
               Copy stream link
             </button>
           )}
         </div>
+        {browserExternalGuidance != null && (
+          <p className="player-external-sub t-secondary">{browserExternalGuidance}</p>
+        )}
         {manualExternalUrl != null && (
           <a
             className="btn player-direct-link"
@@ -4475,19 +4960,36 @@ function ExternalPanel({
         )
       ) : (
         <>
-          <h3 className="player-external-title">Open externally</h3>
+          <h3 className="player-external-title">Use an external player</h3>
           <p className="player-external-sub t-secondary">
             {error ??
               "This file (MKV/HEVC) needs an external player or another compatible source."}
           </p>
           {externalPlaybackAvailable ? (
             <>
-              <button type="button" className="btn" onClick={onOpenExternal}>
-                Open in external player
-              </button>
-              <a className="btn player-direct-link" href={url ?? undefined} target="_blank" rel="noreferrer noopener">
-                Open direct link
-              </a>
+              <div className="player-external-actions">
+                {browserExternalLinks.map((link) => (
+                  <a
+                    className="btn"
+                    href={link.href}
+                    key={link.id}
+                    onClick={() => recordDiagnostic("player", "external.intent_requested")}
+                  >
+                    {link.label}
+                  </a>
+                ))}
+                <button type="button" className="btn" onClick={onOpenExternal}>
+                  Download player playlist (.m3u)
+                </button>
+                {onCopyExternal != null && (
+                  <button type="button" className="btn" onClick={onCopyExternal}>
+                    Copy stream link
+                  </button>
+                )}
+              </div>
+              {browserExternalGuidance != null && (
+                <p className="player-external-sub t-secondary">{browserExternalGuidance}</p>
+              )}
             </>
           ) : (
             <p className="player-external-sub" role="status">

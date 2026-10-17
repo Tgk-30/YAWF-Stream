@@ -2539,6 +2539,7 @@ function registerRoutes(
     ready: boolean;
     toneMappingAvailable: boolean;
     subtitleSidecarAvailable: boolean;
+    audioTrackSelectionAvailable: boolean;
     availableVideoEncoders: ServerConfig["transcodeVideoEncoder"][];
     registry: TranscodeRegistry;
   },
@@ -2588,6 +2589,8 @@ function registerRoutes(
         seekOffset: transcode.ready,
         subtitleSidecar:
           transcode.ready && transcode.subtitleSidecarAvailable,
+        audioTrackSelection:
+          transcode.ready && transcode.audioTrackSelectionAvailable,
         hardwareEncoder: config.transcodeVideoEncoder,
         availableVideoEncoders: transcode.ready
           ? transcode.availableVideoEncoders
@@ -2707,6 +2710,8 @@ function registerRoutes(
         seekOffset: transcode.ready,
         subtitleSidecar:
           transcode.ready && transcode.subtitleSidecarAvailable,
+        audioTrackSelection:
+          transcode.ready && transcode.audioTrackSelectionAvailable,
         toneMapping: transcode.ready && transcode.toneMappingAvailable,
       },
       update: await serverUpdateStatus(config.updateCheck),
@@ -6012,6 +6017,29 @@ function registerRoutes(
     return cookieAuthorized || bearerAuthorized ? row : null;
   };
 
+  // Source audio inventory for the already-authorized stream session. The
+  // registry coalesces this with the job's bounded ffprobe, so opening the
+  // player menu cannot repeatedly consume a short-lived provider URL.
+  app.get("/api/stream/:id/audio-tracks", async (request, reply) => {
+    reply.header("Cache-Control", "private, no-store");
+    if (!transcode.ready || !transcode.audioTrackSelectionAvailable) {
+      throw httpError(404, "Audio track selection is not available.");
+    }
+    const row = loadTranscodeSession(request);
+    if (row == null) throw httpError(404, "Stream session not found.");
+    if (row.source_kind === "direct_torrent") {
+      throw httpError(409, "Audio track selection is not available for Direct P2P playback.");
+    }
+    rateLimit(request, `stream-audio:${row.id}`, 30, 60 * 1000);
+    const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
+    await assertSafeUpstream(upstreamUrl, config.allowRawStreamUrls);
+    const tracks = await transcode.registry.audioTracksFor(row.id, upstreamUrl);
+    if (tracks == null) {
+      throw httpError(409, "Audio track inventory is unavailable for this stream.");
+    }
+    return { tracks };
+  });
+
   // HLS manifest: starts/reuses an ffmpeg job and returns the playlist with
   // session-scoped asset URIs relative to the manifest URL.
   app.get("/api/stream/:id/index.m3u8", async (request, reply) => {
@@ -6037,6 +6065,7 @@ function registerRoutes(
       start?: string;
       hdr?: string;
       subtitles?: string;
+      audio?: string;
     };
     const profile: TranscodeClientProfile =
       query.profile === "high" || query.profile === "data-saver"
@@ -6070,12 +6099,34 @@ function registerRoutes(
       );
     }
     const preserveSubtitles = query.subtitles === "preserve";
+    let audioTrack = 0;
+    let audioTracks: Awaited<ReturnType<TranscodeRegistry["audioTracksFor"]>> | null = null;
+    if (transcode.audioTrackSelectionAvailable) {
+      audioTracks = await transcode.registry.audioTracksFor(row.id, upstreamUrl);
+      audioTrack = audioTracks?.find((track) => track.default)?.index ?? 0;
+    }
+    if (query.audio != null) {
+      if (!/^(?:0|[1-9]|[12][0-9]|3[01])$/.test(query.audio)) {
+        throw httpError(400, "Unsupported audio track.");
+      }
+      if (!transcode.audioTrackSelectionAvailable) {
+        throw httpError(400, "Audio track selection is not available.");
+      }
+      audioTrack = Number(query.audio);
+      if (audioTracks == null) {
+        throw httpError(409, "Audio track inventory is unavailable for this stream.");
+      }
+      if (!audioTracks.some((track) => track.index === audioTrack)) {
+        throw httpError(400, "Unsupported audio track.");
+      }
+    }
     const dir = await transcode.registry.ensureJob(row.id, upstreamUrl, {
       profile,
       quality,
       startSeconds,
       hdrPolicy,
       preserveSubtitles,
+      audioTrack,
     });
     let manifest = await readFile(join(dir, MANIFEST_NAME), "utf8");
     if (
@@ -6106,6 +6157,7 @@ function registerRoutes(
     reply.header("x-yawf-transcode-profile", profile);
     reply.header("x-yawf-transcode-quality", quality);
     reply.header("x-yawf-transcode-start", String(startSeconds));
+    reply.header("x-yawf-transcode-audio", String(audioTrack));
     return reply.send(rewritten);
   });
 
@@ -6200,8 +6252,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           toneMapping: false,
           videoEncoders: [],
           subtitleSidecar: false,
+          audioTrackSelection: false,
         }))
-      : { toneMapping: false, subtitleSidecar: false };
+      : { toneMapping: false, subtitleSidecar: false, audioTrackSelection: false };
   const availableVideoEncoders =
     transcodeCapabilities.videoEncoders ??
     (ffmpegPresent ? [config.transcodeVideoEncoder] : []);
@@ -6330,6 +6383,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     toneMappingAvailable: transcodeCapabilities.toneMapping,
     subtitleSidecarAvailable:
       transcodeCapabilities.subtitleSidecar === true,
+    audioTrackSelectionAvailable:
+      transcodeCapabilities.audioTrackSelection === true,
     availableVideoEncoders,
     registry: transcodeRegistry,
   }, directTorrentRegistry);

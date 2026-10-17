@@ -454,6 +454,8 @@ export interface ServerTranscodeOptions {
   startSeconds?: number;
   hdrPolicy?: "auto" | "preserve" | "tone-map";
   preserveSubtitles?: boolean;
+  /** Zero-based audio-stream index from serverStreamAudioTracks. */
+  audioTrack?: number;
 }
 
 /** A bounded server-side rendition. Never forward arbitrary ffmpeg settings. */
@@ -467,6 +469,14 @@ export interface ServerOptimizedSource {
   /** Position to seek within this HLS window when it becomes active. */
   startPositionSeconds: number;
   quality: ServerTranscodeQuality;
+  audioTrack?: number;
+}
+
+export interface ServerAudioTrack {
+  index: number;
+  language: string | null;
+  label: string | null;
+  default: boolean;
 }
 
 export function serverOptimizedSource(
@@ -476,11 +486,19 @@ export function serverOptimizedSource(
   },
 ): ServerOptimizedSource {
   const optimized = asServerTranscodeStream(stream, options);
+  const audioTrack =
+    options.audioTrack != null &&
+    Number.isInteger(options.audioTrack) &&
+    options.audioTrack >= 0 &&
+    options.audioTrack < 32
+      ? options.audioTrack
+      : undefined;
   return {
     url: optimized.streamURL,
     timelineOffsetSeconds: optimized.timelineOffsetSeconds ?? 0,
     startPositionSeconds: 0,
     quality: options.quality,
+    ...(audioTrack == null ? {} : { audioTrack }),
   };
 }
 
@@ -509,6 +527,16 @@ export function asServerTranscodeStream(
   if (startSeconds > 0) params.set("start", String(startSeconds));
   else params.delete("start");
   if (options.hdrPolicy != null) params.set("hdr", options.hdrPolicy);
+  if (options.audioTrack != null) {
+    const audioTrack =
+      Number.isInteger(options.audioTrack) &&
+      options.audioTrack >= 0 &&
+      options.audioTrack < 32
+        ? options.audioTrack
+        : null;
+    if (audioTrack == null) params.delete("audio");
+    else params.set("audio", String(audioTrack));
+  }
   if (options.preserveSubtitles) params.set("subtitles", "preserve");
   else params.delete("subtitles");
   const query = params.toString();
@@ -524,6 +552,38 @@ export function asServerTranscodeStream(
     streamURL,
     timelineOffsetSeconds: startSeconds,
   };
+}
+
+function serverStreamSessionId(stream: StreamInfo): string | null {
+  try {
+    const streamUrl = new URL(stream.streamURL);
+    const configured = new URL(serverBaseURL());
+    if (streamUrl.origin !== configured.origin) return null;
+    const basePath = configured.pathname.replace(/\/+$/, "");
+    const match = new RegExp(
+      `^${basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/api/stream/([^/?#]+)(?:/|$)`,
+      "i",
+    ).exec(streamUrl.pathname);
+    if (match == null) return null;
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+export async function serverStreamAudioTracks(
+  stream: StreamInfo,
+): Promise<ServerAudioTrack[]> {
+  const sessionId = serverStreamSessionId(stream);
+  if (sessionId == null) throw new Error("This stream does not belong to the configured server.");
+  const response = await serverRequest<{ tracks: ServerAudioTrack[] }>(
+    "GET",
+    `/api/stream/${encodeURIComponent(sessionId)}/audio-tracks`,
+  );
+  if (!Array.isArray(response.tracks)) return [];
+  return response.tracks.filter((track) =>
+    Number.isInteger(track.index) && track.index >= 0 && track.index < 32,
+  );
 }
 
 /** Build the capability URL consumed by native players launched from a hosted

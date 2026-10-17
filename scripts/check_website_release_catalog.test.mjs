@@ -11,8 +11,8 @@ test("website release catalog accepts the published platform channels", () => {
 for (const { name, from, to } of [
   {
     name: "desktop version",
-    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.6', tag: 'v2.3.6-web' };",
-    to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.13', tag: 'v2.3.6-web' };",
+    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.20-web' };",
+    to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.21', tag: 'v2.3.20-web' };",
   },
   {
     name: "Android phone tag",

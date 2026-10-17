@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   compareAppVersions,
+  DESKTOP_NATIVE_COMPATIBILITY_FLOOR,
   getAppVersion,
   getNativeAppVersion,
+  requiresDesktopNativeUpdate,
 } from "./appVersion";
 
 const browser = () => "browser-version";
@@ -58,5 +60,23 @@ describe("compareAppVersions", () => {
     ["1.2.3-beta", "1.2.3", -1],
   ])("compares %s with %s", (left, right, direction) => {
     expect(Math.sign(compareAppVersions(left, right))).toBe(direction);
+  });
+});
+
+describe("desktop native compatibility floor", () => {
+  it("keeps the audited native floor independent from the web bundle version", () => {
+    expect(DESKTOP_NATIVE_COMPATIBILITY_FLOOR).toBe("2.3.6");
+    expect(requiresDesktopNativeUpdate("2.3.6")).toBe(false);
+    expect(requiresDesktopNativeUpdate("2.3.13")).toBe(false);
+  });
+
+  it("continues to hard-gate a desktop package below the audited floor", () => {
+    expect(requiresDesktopNativeUpdate("2.3.5")).toBe(true);
+    expect(requiresDesktopNativeUpdate("2.3.6-beta.1")).toBe(true);
+  });
+
+  it("accepts an explicit later floor when a future native ABI changes", () => {
+    expect(requiresDesktopNativeUpdate("2.3.20", "2.3.21")).toBe(true);
+    expect(requiresDesktopNativeUpdate("2.3.21", "2.3.21")).toBe(false);
   });
 });
