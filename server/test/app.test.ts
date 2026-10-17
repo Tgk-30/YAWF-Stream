@@ -1,3 +1,4 @@
+import { SERVER_VERSION } from "../src/version.js";
 import { createServer, type Server } from "node:http";
 import { Readable } from "node:stream";
 import { createHmac, randomBytes } from "node:crypto";
@@ -695,7 +696,7 @@ describe("DebridStreamer server", () => {
     expect(json<{ setupRequired: boolean; ready: boolean; version: string }>(health)).toMatchObject({
       setupRequired: true,
       ready: false,
-      version: "2.3.13",
+      version: SERVER_VERSION,
     });
 
     const owner = await setupOwner(app);

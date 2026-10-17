@@ -124,7 +124,14 @@ test("source and redirect policy cannot be supplied by a caller", () => {
 });
 
 test("download, verification, permission, and installer states fail closed", () => {
-  assert.match(source, /DownloadManager\.Request\(Uri\.parse\(resolvedUrl\)\)/);
+  const enqueueDownload = section("private fun enqueueDownload", "private fun reconcileDownload");
+  assert.match(enqueueDownload, /DownloadManager\.Request\(Uri\.parse\(resolvedUrl\)\)/);
+  assert.match(
+    enqueueDownload,
+    /setNotificationVisibility\(DownloadManager\.Request\.VISIBILITY_VISIBLE\)/,
+  );
+  assert.doesNotMatch(enqueueDownload, /VISIBILITY_VISIBLE_NOTIFY_COMPLETED/);
+  assert.doesNotMatch(enqueueDownload, /VISIBILITY_VISIBLE_NOTIFY_ONLY_COMPLETION/);
   assert.match(source, /setDestinationInExternalFilesDir\(/);
   assert.match(source, /Environment\.DIRECTORY_DOWNLOADS/);
   assert.match(source, /"updates\/\$\{candidate\.apkName\}"/);

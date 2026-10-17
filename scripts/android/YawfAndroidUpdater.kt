@@ -714,7 +714,7 @@ class YawfAndroidUpdater private constructor(
           .setTitle(downloadTitle(candidate))
           .setDescription("Android update")
           .setMimeType(APK_MIME_TYPE)
-          .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+          .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
           .setAllowedOverMetered(true)
           .setAllowedOverRoaming(false)
           .setDestinationInExternalFilesDir(
