@@ -1463,7 +1463,9 @@ export function VideoPlayer({
         const status = await openInExternalPlayer(
           target,
           preferredPlayer,
-          playbackAuthorization,
+          // A distinct cookie-free capability must not enter the native
+          // authenticated-URL proxy, which only accepts /api/stream/:id.
+          target === effectiveUrl ? playbackAuthorization : undefined,
         );
         if (!ownsRequest()) return;
         setExternalActionStatus(status);
@@ -1538,6 +1540,7 @@ export function VideoPlayer({
     }
   }, [
     externalTarget,
+    effectiveUrl,
     playbackOwner,
     playbackAuthorization,
     preferredPlayer,
@@ -1633,10 +1636,14 @@ export function VideoPlayer({
         // mpv missing / failed to spawn - fall back to the VLC/IINA hand-off.
         if (cancelled) return;
         recordDiagnostic("player", "mpv.start_failed", "warning");
+        if (externalTarget == null) {
+          setExternalError("External playback is not available for this protected stream.");
+          return;
+        }
         openInExternalPlayer(
-          effectiveUrl,
+          externalTarget,
           preferredPlayer,
-          playbackAuthorization,
+          externalTarget === effectiveUrl ? playbackAuthorization : undefined,
         )
           .then((status) => {
             if (!cancelled) {
@@ -1663,6 +1670,7 @@ export function VideoPlayer({
     mode,
     desktopTauri,
     effectiveUrl,
+    externalTarget,
     preferredPlayer,
     playbackAuthorization,
     useEmbedded,

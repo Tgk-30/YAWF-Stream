@@ -4125,6 +4125,59 @@ describe("ExternalPanel (browser)", () => {
 });
 
 describe("Built-in player (Tauri)", () => {
+  it("hands a distinct Server Mode external capability to desktop without a playback Authorization argument", async () => {
+    isTauriMock.mockReturnValue(true);
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const target = `https://server.example/api/external-stream/session-1/${"D".repeat(43)}`;
+    render(<VideoPlayer
+      url="https://server.example/api/stream/session-1"
+      externalPlaybackUrl={target}
+      playbackAuthorization={`Bearer ${"D".repeat(43)}`}
+      engine="webview-direct"
+      title="T"
+      onClose={() => {}}
+    />);
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Open in external player/ }));
+    await waitFor(() => expect(openInExternalPlayerMock).toHaveBeenCalledWith(target, undefined, undefined));
+  });
+
+  it("uses the cookie-free capability, not the protected URL, when desktop mpv fallback opens an external app", async () => {
+    isTauriMock.mockReturnValue(true);
+    playWithMpvMock.mockRejectedValue(new Error("no mpv"));
+    const target = `https://server.example/api/external-stream/session-1/${"F".repeat(43)}`;
+    const authorization = `Bearer ${"F".repeat(43)}`;
+    render(<VideoPlayer
+      url="https://server.example/api/stream/session-1"
+      externalPlaybackUrl={target}
+      playbackAuthorization={authorization}
+      engine="native-mpv"
+      useBuiltInPlayer={false}
+      title="T"
+      onClose={() => {}}
+    />);
+    await waitFor(() => expect(playWithMpvMock).toHaveBeenCalledWith(
+      "https://server.example/api/stream/session-1", authorization,
+    ));
+    await waitFor(() => expect(openInExternalPlayerMock).toHaveBeenCalledWith(target, undefined, undefined));
+  });
+
+  it("respects the unavailable capability fence when desktop mpv fails", async () => {
+    isTauriMock.mockReturnValue(true);
+    playWithMpvMock.mockRejectedValue(new Error("no mpv"));
+    render(<VideoPlayer
+      url="https://server.example/api/stream/session-1"
+      externalPlaybackUrl={null}
+      playbackAuthorization={`Bearer ${"G".repeat(43)}`}
+      engine="native-mpv"
+      useBuiltInPlayer={false}
+      title="T"
+      onClose={() => {}}
+    />);
+    await waitFor(() => expect(screen.getByText("External playback is not available for this protected stream.")).toBeInTheDocument());
+    expect(openInExternalPlayerMock).not.toHaveBeenCalled();
+  });
+
   it("renders the in-window libmpv player for MKV when enabled, no hand-off", async () => {
     isTauriMock.mockReturnValue(true);
     render(
