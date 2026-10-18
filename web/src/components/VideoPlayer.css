@@ -198,6 +198,13 @@
  * seeking, captions, casting, picture in picture, and fullscreen.
  * ------------------------------------------------------------------------- */
 .webview-player {
+  --player-compact-osd-reserve: calc(
+    calc(46px * var(--density-scale))
+    + 24px
+    + var(--sp-xs)
+    + 38px
+    + max(calc(12px * var(--density-scale)), var(--safe-area-bottom))
+  );
   position: absolute;
   inset: 0;
   background: #000;
@@ -556,6 +563,8 @@
 }
 .scrubbar-track {
   position: relative;
+  flex: 1 1 0%;
+  min-width: 0;
   height: 4px;
   border-radius: var(--r-pill);
   background: rgba(255, 255, 255, 0.18);
@@ -884,7 +893,7 @@
   .webview-player {
     --player-compact-osd-reserve: calc(
       calc(46px * var(--density-scale))
-      + 24px
+      + 44px
       + var(--sp-xs)
       + 92px
       + max(calc(12px * var(--density-scale)), var(--safe-area-bottom))
@@ -996,6 +1005,18 @@
   }
 }
 
+@media (pointer: coarse) and (min-width: 561px) and (min-height: 501px) {
+  .webview-player {
+    --player-compact-osd-reserve: calc(
+      calc(46px * var(--density-scale))
+      + 44px
+      + var(--sp-xs)
+      + 44px
+      + max(calc(12px * var(--density-scale)), var(--safe-area-bottom))
+    );
+  }
+}
+
 @media (min-width: 561px) and (max-width: 950px) and (max-height: 500px) {
   .scrubbar {
     min-height: 44px;
@@ -1003,7 +1024,7 @@
   .webview-player {
     --player-compact-osd-reserve: calc(
       calc(46px * var(--density-scale))
-      + 24px
+      + 44px
       + var(--sp-xs)
       + 44px
       + max(calc(12px * var(--density-scale)), var(--safe-area-bottom))

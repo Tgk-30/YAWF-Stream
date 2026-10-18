@@ -87,6 +87,30 @@ function extractDominantRGB(img: HTMLImageElement): string | null {
 // backdrops aren't re-probed. Small FIFO cap keeps it bounded across screens.
 const accentCache = new Map<string, string | null>();
 const ACCENT_CACHE_MAX = 64;
+const FAILED_BACKDROP_CACHE_MAX = 64;
+
+function cacheAccent(url: string, value: string | null) {
+  if (accentCache.size >= ACCENT_CACHE_MAX && !accentCache.has(url)) {
+    const oldest = accentCache.keys().next().value;
+    if (oldest != null) accentCache.delete(oldest);
+  }
+  accentCache.set(url, value);
+}
+
+function addFailedBackdrop(
+  failed: ReadonlySet<string>,
+  url: string,
+): ReadonlySet<string> {
+  if (failed.has(url)) return failed;
+
+  const next = new Set(failed);
+  if (next.size >= FAILED_BACKDROP_CACHE_MAX) {
+    const oldest = next.values().next().value;
+    if (oldest != null) next.delete(oldest);
+  }
+  next.add(url);
+  return next;
+}
 
 export function HeroSpotlight({
   items,
@@ -105,6 +129,12 @@ export function HeroSpotlight({
   const [rotationPaused, setRotationPaused] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
+  // Keep failed backdrop URLs bounded to this mounted carousel. A remount gets
+  // a fresh chance, while revisiting a failed slide during this session stays
+  // on the gradient instead of retrying the same request.
+  const [failedBackdrops, setFailedBackdrops] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // PERF: park the carousel entirely while the window is hidden - otherwise it
   // keeps rotating (and preloading + probing backdrops) forever in a window
   // nobody can see.
@@ -112,13 +142,15 @@ export function HeroSpotlight({
   const heroRef = useRef<HTMLDivElement>(null);
   const active = list[Math.min(index, list.length - 1)];
   const backdrop = active ? MediaPreviewNS.backdropURL(active) : null;
+  const backdropFailed = backdrop != null && failedBackdrops.has(backdrop);
+  const displayBackdrop = backdropFailed ? null : backdrop;
 
   // Backdrop crossfade layers, oldest first. The incoming layer fades in ON TOP
   // of the previous one, which stays fully opaque underneath until it is covered
   // and then drops out on animationend - so there is never a luminance dip or a
   // frame of empty hero, even if a dot is clicked mid-crossfade.
   const [layers, setLayers] = useState<BackdropLayer[]>(() =>
-    active ? [{ seq: 1, id: active.id, url: backdrop }] : [],
+    active ? [{ seq: 1, id: active.id, url: displayBackdrop }] : [],
   );
 
   useEffect(() => {
@@ -129,9 +161,9 @@ export function HeroSpotlight({
       // unique across the live list without an impure ref bump.
       const last = prev[prev.length - 1];
       if (last && last.id === active.id) return prev;
-      return [...prev, { seq: (last?.seq ?? 0) + 1, id: active.id, url: backdrop }];
+      return [...prev, { seq: (last?.seq ?? 0) + 1, id: active.id, url: displayBackdrop }];
     });
-  }, [active, backdrop]);
+  }, [active, displayBackdrop]);
 
   useEffect(() => {
     const onVis = () => setHidden(document.hidden);
@@ -164,8 +196,8 @@ export function HeroSpotlight({
 
   // Invisible polish: preload the next backdrop so the crossfade never flashes a
   // half-loaded image. This is a single image the carousel is about to show in
-  // ~12s regardless, so we preload it unconditionally (it's the same bytes, just
-  // a beat earlier - not extra data) rather than gating on smart-preload; only
+  // ~12s while visible, so we preload it when the hero is not hidden or covered
+  // (the same bytes, a beat earlier) rather than gating on smart-preload; only
   // the expensive code-chunk preloads stay gated (see App). The Image is held
   // and detached on cleanup so an in-flight preload doesn't keep loading (and
   // pinning memory) after the hero unmounts or advances. Keyed on the URL string
@@ -173,14 +205,16 @@ export function HeroSpotlight({
   // and re-issued the preload, on every single render).
   const nextBackdrop =
     list.length > 1 ? MediaPreviewNS.backdropURL(list[(index + 1) % list.length]) : null;
+  const nextBackdropFailed =
+    nextBackdrop != null && failedBackdrops.has(nextBackdrop);
   useEffect(() => {
-    if (!nextBackdrop) return;
+    if (!nextBackdrop || nextBackdropFailed || hidden || suspended) return;
     const img = new Image();
     img.src = nextBackdrop;
     return () => {
       img.src = "";
     };
-  }, [nextBackdrop]);
+  }, [nextBackdrop, nextBackdropFailed, hidden, suspended]);
 
   // Per-title accent: recolor the hero chrome from the backdrop's dominant color.
   // Uses a separate CORS probe image so the *displayed* backdrop is never at risk
@@ -188,7 +222,7 @@ export function HeroSpotlight({
   useEffect(() => {
     const el = heroRef.current;
     if (el) el.style.removeProperty("--title-accent-rgb");
-    if (!backdrop || el == null) return;
+    if (!backdrop || backdropFailed || el == null || hidden || suspended) return;
     // Cache hit: no network fetch, no bitmap scan - just set the property.
     if (accentCache.has(backdrop)) {
       const cached = accentCache.get(backdrop);
@@ -201,12 +235,12 @@ export function HeroSpotlight({
     probe.onload = () => {
       if (cancelled) return;
       const rgb = extractDominantRGB(probe);
-      if (accentCache.size >= ACCENT_CACHE_MAX) {
-        const oldest = accentCache.keys().next().value;
-        if (oldest != null) accentCache.delete(oldest);
-      }
-      accentCache.set(backdrop, rgb);
+      cacheAccent(backdrop, rgb);
       if (rgb && heroRef.current) heroRef.current.style.setProperty("--title-accent-rgb", rgb);
+    };
+    probe.onerror = () => {
+      if (cancelled) return;
+      cacheAccent(backdrop, null);
     };
     probe.src = backdrop;
     return () => {
@@ -214,9 +248,10 @@ export function HeroSpotlight({
       // Fully detach so an in-flight download/decode can't complete (and pin the
       // bitmap) after rotation - mirrors the preload cleanup above.
       probe.onload = null;
+      probe.onerror = null;
       probe.src = "";
     };
-  }, [backdrop]);
+  }, [backdrop, backdropFailed, hidden, suspended]);
 
   if (!active) return null;
   const rating = MediaPreviewNS.ratingString(active);
@@ -261,9 +296,12 @@ export function HeroSpotlight({
               draggable={false}
               decoding="async"
               onError={() => {
+                const failedUrl = layer.url;
+                if (!failedUrl) return;
+                setFailedBackdrops((failed) => addFailedBackdrop(failed, failedUrl));
                 setLayers((previous) =>
                   previous.map((entry) =>
-                    entry.seq === layer.seq ? { ...entry, url: null } : entry,
+                    entry.url === failedUrl ? { ...entry, url: null } : entry,
                   ),
                 );
               }}

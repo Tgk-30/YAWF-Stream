@@ -635,6 +635,65 @@ describe("VideoPlayer shell", () => {
     );
   });
 
+  it("gives the absolute-only scrub track a shrink-safe flexible width", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    expect(css).toMatch(/\.scrubbar\s*\{[^}]*display:\s*flex;/s);
+    expect(css).toMatch(
+      /\.scrubbar-track\s*\{[^}]*flex:\s*1\s+1\s+0%;[^}]*min-width:\s*0;/s,
+    );
+    expect(css).toMatch(/\.scrubbar-fill\s*\{[^}]*position:\s*absolute;/s);
+    expect(css).toMatch(/\.scrubbar-hover\s*\{[^}]*position:\s*absolute;/s);
+  });
+
+  it("reserves fine and coarse webview OSDs beneath paused content without touching native overlays", () => {
+    const playerCss = readFileSync("src/components/VideoPlayer.css", "utf8");
+    const pauseCss = readFileSync(
+      "src/components/player/PlayerPauseOverlay.css",
+      "utf8",
+    );
+    const tallCoarseMedia =
+      "@media (pointer: coarse) and (min-width: 561px) and (min-height: 501px)";
+
+    expect(playerCss).toMatch(
+      /\.webview-player\s*\{[^}]*--player-compact-osd-reserve:\s*calc\([^}]*\+ 24px[^}]*\+ var\(--sp-xs\)[^}]*\+ 38px[^}]*var\(--safe-area-bottom\)/,
+    );
+    expect(playerCss).toContain(tallCoarseMedia);
+    expect(playerCss).toMatch(
+      /@media \(pointer: coarse\) and \(min-width: 561px\) and \(min-height: 501px\)\s*\{[\s\S]*?\.webview-player\s*\{[^}]*--player-compact-osd-reserve:\s*calc\([^}]*\+ 44px[^}]*\+ var\(--sp-xs\)[^}]*\+ 44px[^}]*var\(--safe-area-bottom\)/,
+    );
+    expect(playerCss).toMatch(
+      /@media \(max-width: 560px\)\s*\{[\s\S]*?\.webview-player\s*\{[^}]*--player-compact-osd-reserve:\s*calc\([^}]*\+ 44px[^}]*\+ var\(--sp-xs\)[^}]*\+ 92px[^}]*var\(--safe-area-bottom\)/,
+    );
+    expect(playerCss).toMatch(
+      /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{[\s\S]*?\.webview-player\s*\{[^}]*--player-compact-osd-reserve:\s*calc\([^}]*\+ 44px[^}]*\+ var\(--sp-xs\)[^}]*\+ 44px[^}]*var\(--safe-area-bottom\)/,
+    );
+    expect(pauseCss).toMatch(
+      /\.webview-player \.player-pause-content\s*\{[^}]*max-height:\s*calc\(\s*100vh[^}]*var\(--player-compact-osd-reserve\)[^}]*max-height:\s*calc\(\s*100dvh[^}]*var\(--player-compact-osd-reserve\)[^}]*margin-bottom:\s*calc\([^}]*var\(--player-compact-osd-reserve\)[^}]*overflow:\s*hidden;/,
+    );
+    expect(pauseCss).toMatch(
+      /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{[\s\S]*?\.webview-player \.player-pause-content\s*\{[^}]*max-height:\s*calc\(\s*100vh[^}]*var\(--player-compact-osd-reserve\)[^}]*max-height:\s*calc\(\s*100dvh/,
+    );
+    const nativeShortWidth = pauseCss.match(
+      /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{[\s\S]*?\.webview-player \.player-pause-content,\s*\.embed-player \.player-pause-content\s*\{([^}]*)\}/,
+    )?.[1];
+    expect(nativeShortWidth).toBeDefined();
+    expect(nativeShortWidth).toMatch(
+      /width:\s*calc\([^}]*var\(--safe-area-left\)[^}]*var\(--safe-area-right\)/,
+    );
+    expect(nativeShortWidth).not.toMatch(
+      /player-compact-osd-reserve|max-height|margin|overflow/,
+    );
+    expect(pauseCss).toMatch(
+      /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{[\s\S]*?\.webview-player \.player-pause-content h2\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
+    );
+    expect(pauseCss).toMatch(
+      /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{[\s\S]*?\.webview-player \.player-pause-meta,\s*\.webview-player \.player-pause-overview\s*\{[^}]*display:\s*none;/,
+    );
+    expect(pauseCss).not.toMatch(
+      /\.embed-player \.player-pause-content h2\s*\{[^}]*text-overflow:\s*ellipsis;/,
+    );
+  });
+
   it("shows explicit engine, source, and display dimensions in the info popover", async () => {
     render(
       <VideoPlayer
@@ -1066,6 +1125,7 @@ describe("WebviewPlayer", () => {
       <VideoPlayer
         url="https://server.example/api/stream/session-1"
         externalPlaybackUrl={target}
+        sourceFileName="Film & Friends.mp4"
         title="Film & Friends"
         onClose={() => {}}
       />,
@@ -1093,8 +1153,116 @@ describe("WebviewPlayer", () => {
     );
   });
 
-  it("replaces old browser capability links and never exposes provider URLs", async () => {
-    deviceKindMock.mockReturnValue("ios");
+  it("offers the exact Mac IINA settings anchor without claiming the app opened", async () => {
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const target = `https://server.example/api/external-stream/session-1/${"I".repeat(43)}`;
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1"
+        externalPlaybackUrl={target}
+        sourceFileName="Film.mp4"
+        title="Film & mpv-options=--script=/tmp/nope"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    const iina = screen.getByRole("link", { name: /Open in IINA/ });
+    expect(iina).toHaveAttribute(
+      "href",
+      `iina://open?url=${encodeURIComponent(target)}&new_window=1`,
+    );
+    expect(iina.getAttribute("href")).not.toContain("Film");
+    expect(iina.getAttribute("href")).not.toContain("mpv-options");
+    expect(screen.getByRole("link", { name: /Open in Infuse/ })).toHaveAttribute(
+      "href",
+      `infuse://x-callback-url/play?url=${encodeURIComponent(target)}` +
+        "&filename=Film%20%26%20mpv-options%3D--script%3D%2Ftmp%2Fnope",
+    );
+
+    fireEvent.click(iina);
+    expect(recordDiagnosticMock).toHaveBeenCalledWith(
+      "player",
+      "external.intent_requested",
+    );
+    expect(recordDiagnosticMock).not.toHaveBeenCalledWith(
+      "player",
+      "external.started",
+    );
+  });
+
+  it("keeps the same direct IINA action and honest playlist fallback in Mac recovery", async () => {
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const target = `https://server.example/api/external-stream/session-1/${"R".repeat(43)}`;
+    render(
+      <VideoPlayer
+        url="https://server.example/video.mp4"
+        externalPlaybackUrl={target}
+        sourceFileName="Film.m3u8"
+        title="Film"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    const settingsHref = screen.getByRole("link", { name: /Open in IINA/ }).getAttribute("href");
+    expect(settingsHref).toBe(`iina://open?url=${encodeURIComponent(target)}&new_window=1`);
+
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireMediaError(video);
+
+    expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open in IINA" })).toHaveAttribute(
+      "href",
+      settingsHref,
+    );
+    expect(screen.queryByRole("link", { name: /Open in Infuse/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Download player playlist (.m3u)" }))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open in external player" })).toBeNull();
+  });
+
+  it("removes stale Infuse when only the original filename changes from progressive to HLS", async () => {
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const target = `https://server.example/api/external-stream/session-1/${"S".repeat(43)}`;
+    const sourceUrl = "https://server.example/api/stream/session-1";
+    const { rerender } = render(
+      <VideoPlayer
+        url={sourceUrl}
+        externalPlaybackUrl={target}
+        sourceFileName="Film.mp4"
+        title="Film"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    const originalIinaHref = screen.getByRole("link", { name: /Open in IINA/ })
+      .getAttribute("href");
+    expect(screen.getByRole("link", { name: /Open in Infuse/ })).toBeInTheDocument();
+
+    rerender(
+      <VideoPlayer
+        url={sourceUrl}
+        externalPlaybackUrl={target}
+        sourceFileName="Film.m3u8"
+        title="Film"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: /Open in IINA/ })).toHaveAttribute(
+      "href",
+      originalIinaHref,
+    );
+    expect(screen.queryByRole("link", { name: /Open in Infuse/ })).toBeNull();
+  });
+
+  it("replaces stale Mac IINA and Infuse links when the target and original filename change", async () => {
+    deviceKindMock.mockReturnValue("mac");
     vi.stubGlobal("location", new URL("https://server.example/watch"));
     const first = `https://server.example/api/external-stream/first/${"C".repeat(43)}`;
     const second = `https://server.example/api/external-stream/second/${"D".repeat(43)}`;
@@ -1102,31 +1270,35 @@ describe("WebviewPlayer", () => {
       <VideoPlayer
         url="https://server.example/api/stream/first"
         externalPlaybackUrl={first}
+        sourceFileName="Film.mkv"
         title="Film"
         onClose={() => {}}
       />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
-    expect(screen.getByRole("link", { name: /Open in VLC/ })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /Open in IINA/ })).toHaveAttribute(
       "href",
       expect.stringContaining(encodeURIComponent(first)),
     );
+    expect(screen.getByRole("link", { name: /Open in Infuse/ })).toBeInTheDocument();
 
     rerender(
       <VideoPlayer
         url="https://server.example/api/stream/second"
         externalPlaybackUrl={second}
+        sourceFileName="Film.m3u8"
         title="Film"
         onClose={() => {}}
       />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
-    const replacement = screen.getByRole("link", { name: /Open in VLC/ });
+    const replacement = screen.getByRole("link", { name: /Open in IINA/ });
     expect(replacement).toHaveAttribute(
       "href",
-      expect.stringContaining(encodeURIComponent(second)),
+      `iina://open?url=${encodeURIComponent(second)}&new_window=1`,
     );
     expect(replacement.getAttribute("href")).not.toContain(encodeURIComponent(first));
+    expect(screen.queryByRole("link", { name: /Open in Infuse/ })).toBeNull();
 
     rerender(
       <VideoPlayer
@@ -1136,7 +1308,8 @@ describe("WebviewPlayer", () => {
         onClose={() => {}}
       />,
     );
-    expect(screen.queryByRole("link", { name: /Open in VLC/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open in IINA/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open in Infuse/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Download player playlist/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Copy stream link/ })).toBeNull();
     expect(document.body.innerHTML).not.toContain("authorization=secret");

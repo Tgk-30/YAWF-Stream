@@ -51,6 +51,7 @@ import {
 import {
   browserExternalCapability,
   browserExternalGuidance,
+  browserExternalFileHint,
   browserExternalPlayerLinks,
   type BrowserExternalPlayerLink,
 } from "../lib/browserExternalPlayers";
@@ -771,8 +772,9 @@ export function VideoPlayer({
       title,
       dk,
       isStandaloneDisplay(),
+      browserExternalFileHint(sourceFileName),
     ),
-    [browserExternalTarget, dk, title],
+    [browserExternalTarget, dk, sourceFileName, title],
   );
   const browserExternalHelp = browserExternalTarget == null
     ? null
