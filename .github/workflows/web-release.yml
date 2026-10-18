@@ -63,8 +63,8 @@ jobs:
           # runners (NOT `macos-latest` = macOS 26, whose SDK/codesign produces
           # "damaged" bundles): macos-15 = Apple Silicon, macos-15-intel = Intel
           # (macos-13 was retired by GitHub in Dec 2025 - it queues forever).
-          # Both runners' Homebrew bottles carry minos 15.0; bundle-mpv-deps.sh's
-          # vtool min-OS rewrite makes the bundles load on macOS 11+.
+          # Preserve the dependencies' real deployment minima. The final bundle
+          # gate rejects inputs newer than the declared application minimum.
           - platform: macos-15
             os: macos
             rust_target: aarch64-apple-darwin
@@ -454,6 +454,12 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }} ${{ env.FW_CONFIG_ARG }} ${{ env.WINDOWS_SIGN_CONFIG_ARG }}
+
+      - name: Verify macOS bundle deployment minima
+        if: matrix.os == 'macos'
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: node scripts/check_macos_bundle_minimum.mjs "web/src-tauri/target/$RUST_TARGET/release/bundle/macos/YAWF Stream.app"
 
       # tauri-action notarizes + staples the .app but NOT the .dmg container.
       # Notarize + staple the .dmg here, then replace the asset tauri-action

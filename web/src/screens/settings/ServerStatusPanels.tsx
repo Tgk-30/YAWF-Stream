@@ -108,6 +108,7 @@ export interface ActiveStreamSession {
   expiresAt: string;
   bytesServed: number;
   lastAccessedAt: string | null;
+  completedAt?: string | null;
   lastStatus: number | null;
   lastError: string | null;
 }
@@ -413,7 +414,7 @@ export function ServerHealthPanel({ health }: ServerHealthPanelProps) {
         </div>
         <div>
           <strong>{health.counts.activeStreamSessions}</strong>
-          <span className="t-secondary">Active streams</span>
+          <span className="t-secondary">Valid stream links</span>
         </div>
         <div>
           <strong>{health.counts.credentials}</strong>
@@ -526,11 +527,16 @@ export function ActiveStreamsPanel({
   return (
     <div className="settings-source glass-rest">
       <div className="settings-sources-head">
-        <span className="settings-sources-title">Active streams</span>
-        <span className="chip">{streams.length} active</span>
+        <span className="settings-sources-title">Revocable stream access</span>
+        <span className="chip">{streams.length} shown</span>
       </div>
+      <p className="settings-hint t-secondary">
+        A finished transfer can still be used for replay or seeking until its link expires.
+        Terminate access to stop future requests; already buffered video may continue.
+        {streams.length === 100 && " Showing the latest 100 valid grants. Terminating one reveals older grants."}
+      </p>
       {streams.length === 0 ? (
-        <p className="settings-hint t-secondary">No active stream sessions.</p>
+          <p className="settings-hint t-secondary">No valid stream links.</p>
       ) : (
         <div className="settings-usage-list">
           {streams.map((stream) => (
@@ -544,6 +550,7 @@ export function ActiveStreamsPanel({
               </span>
               <span className="settings-profile-meta t-secondary">
                 <span>{formatBytes(stream.bytesServed)}</span>
+                {stream.completedAt != null && <span>Transfer finished; link still valid</span>}
                 {stream.lastStatus != null && <span>HTTP {stream.lastStatus}</span>}
                 {stream.lastError != null && <span>{stream.lastError}</span>}
                 <span>

@@ -178,6 +178,9 @@ jobs:
       - name: Bundle budget verifier tests
         run: node --test scripts/check_bundle_budgets.test.mjs
 
+      - name: macOS bundle minimum verifier tests
+        run: node --test scripts/check_macos_bundle_minimum.test.mjs scripts/bundle_mpv_deployment_minimum.test.mjs
+
       - name: Generated Android project patch tests
         run: node --test scripts/patch_tauri_android.test.mjs
 

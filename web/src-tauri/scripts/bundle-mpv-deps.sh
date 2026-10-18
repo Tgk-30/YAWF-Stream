@@ -17,13 +17,10 @@ LIBMPV="${1:?usage: bundle-mpv-deps.sh <libmpv.2.dylib> <out-dir>}"
 OUT="${2:?usage: bundle-mpv-deps.sh <libmpv.2.dylib> <out-dir>}"
 mkdir -p "$OUT"
 
-# Homebrew builds its bottles with the BUILDER's macOS as the deployment target,
-# so on the macos-15 CI runner libmpv + its whole dep tree carry minos 15.0. dyld
-# then REFUSES to load them on macOS < 15 → the app crashes at launch for every
-# user below the runner's OS (the "quits unexpectedly on an older Mac" bug). These
-# libs don't actually require 15; we rewrite LC_BUILD_VERSION down to the app's own
-# floor so they load everywhere. 11.0 is the Apple-Silicon floor.
-MIN_OS="${MPV_MIN_MACOS:-11.0}"
+# Preserve every original deployment minimum. Changing a load command does not
+# make newer symbols or runtime behavior compatible with an older macOS release.
+# The final application bundle must pass check_macos_bundle_minimum.mjs before
+# release; replace or rebuild incompatible inputs rather than rewriting minos.
 
 realpath_f() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 # Non-system, relocatable deps of a dylib (Homebrew arm64 or Intel prefixes).
@@ -61,16 +58,6 @@ for real in "${files[@]}"; do
   while read -r dep; do
     install_name_tool -change "$dep" "@rpath/$(basename "$(realpath_f "$dep")")" "$f" 2>/dev/null || true
   done < <(deps_of "$real")
-  # Lower the min-OS so dyld loads it on older macOS (see MIN_OS note above). Keep
-  # the SDK field at the dylib's current value; only the minos gates loading. vtool
-  # invalidates the signature → codesign runs AFTER (as does CI's Developer-ID sign).
-  cur_sdk="$(otool -l "$f" | awk '/LC_BUILD_VERSION/{b=1} b&&/sdk /{print $2; exit}')"
-  [ -n "$cur_sdk" ] || cur_sdk="$MIN_OS"
-  if vtool -set-build-version macos "$MIN_OS" "$cur_sdk" -replace -output "$f.tmp" "$f" 2>/dev/null; then
-    mv -f "$f.tmp" "$f"
-  else
-    rm -f "$f.tmp"
-  fi
   codesign --force --sign - "$f"
 done
 

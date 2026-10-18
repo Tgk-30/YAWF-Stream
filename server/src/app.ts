@@ -2299,6 +2299,8 @@ function adminStreamUsageSummary(db: AppDatabase, days: number) {
 }
 
 function adminActiveStreamSessions(db: AppDatabase) {
+  // A completed HTTP response (including one byte range) does not revoke its
+  // playback grant. Keep valid grants visible so an admin can still stop replay.
   const now = nowISO();
   const rows = db.sqlite
     .prepare(
@@ -2312,6 +2314,7 @@ function adminActiveStreamSessions(db: AppDatabase) {
               stream_sessions.expires_at,
               stream_sessions.bytes_served,
               stream_sessions.last_accessed_at,
+              stream_sessions.completed_at,
               stream_sessions.last_status,
               stream_sessions.last_error
        FROM stream_sessions
@@ -2319,7 +2322,6 @@ function adminActiveStreamSessions(db: AppDatabase) {
        JOIN users ON users.id = profiles.user_id
        WHERE stream_sessions.revoked_at IS NULL
          AND stream_sessions.expires_at > ?
-         AND stream_sessions.completed_at IS NULL
        ORDER BY
          COALESCE(stream_sessions.last_accessed_at, stream_sessions.created_at) DESC
        LIMIT 100`,
@@ -2335,6 +2337,7 @@ function adminActiveStreamSessions(db: AppDatabase) {
     expires_at: string;
     bytes_served: number;
     last_accessed_at: string | null;
+    completed_at: string | null;
     last_status: number | null;
     last_error: string | null;
   }>;
@@ -2351,6 +2354,7 @@ function adminActiveStreamSessions(db: AppDatabase) {
       expiresAt: row.expires_at,
       bytesServed: row.bytes_served,
       lastAccessedAt: row.last_accessed_at,
+      completedAt: row.completed_at,
       lastStatus: row.last_status,
       lastError: row.last_error,
     })),
@@ -2381,8 +2385,7 @@ function adminHealthSummary(db: AppDatabase, config: ServerConfig) {
       `SELECT COUNT(*) AS count
        FROM stream_sessions
        WHERE revoked_at IS NULL
-         AND expires_at > ?
-         AND completed_at IS NULL`,
+         AND expires_at > ?`,
       now,
     ),
     credentials: countScalar(
