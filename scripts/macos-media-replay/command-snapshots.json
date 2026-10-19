@@ -980,6 +980,7 @@
       "command": "/tools/make",
       "args": [
         "-j4",
+        "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2 -DDARWIN -fno-common -Wall -ffast-math -fsigned-char",
         "all"
       ],
       "cwd": "/owned/replay/build/libvorbis"
@@ -988,6 +989,7 @@
       "command": "/tools/make",
       "args": [
         "-j4",
+        "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2 -DDARWIN -fno-common -Wall -ffast-math -fsigned-char",
         "install"
       ],
       "cwd": "/owned/replay/build/libvorbis"

@@ -19,7 +19,7 @@
   "normalizedArchivePolicy": "The staged metadata-only provenance sanitization changes the normalized archive SHA-256. The experiment records and freshly admits its generated archive; it must not compare it as equal to the frozen reference archive.",
   "files": {
     "scripts/macos-media-replay/replay-plan.json": "dd198746181e38a914172b238a5c31bde66ef55bd67aafbae455fbe20a527898",
-    "scripts/macos-media-replay/replay_macos_media_sources.mjs": "ff1df5a780184ff79e473cfda1740e039959e7667645f12b3755f793d6fbacb7",
+    "scripts/macos-media-replay/replay_macos_media_sources.mjs": "98ccf3748a53a57fb30f071b82567023c49535770789da033fab9896680908a5",
     "scripts/macos-media-replay/README.md": "f8a4a5166cb8f33944751bc0fb580ec03c9a0e1bc0091638d2913fd87ca0aacf",
     "scripts/macos-media-replay/required-runtime-outputs.json": "0729877e06bbef46f45e63f551df1ff2d7107d9dc482a2748e4b08e399a3fe64",
     "scripts/stage_macos_media_runtime.mjs": "b4736c0d005399f521d7f920a25a98cebd8492055ffdd55e6b51aeeb9f990ff7",

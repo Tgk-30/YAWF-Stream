@@ -244,12 +244,19 @@ export function renderPackageCommands(entry, context) {
   const prefixAndHost = [`--prefix=${context.prefix}`, `--host=${context.host}`];
   let commands;
   switch (entry.adapter) {
-    case "autoconf":
+    case "autoconf": {
+      // libvorbis 1.3.7's generated Darwin configure branch replaces the
+      // supplied CFLAGS with an obsolete linker flag. Override that package's
+      // Make variable without changing the pinned vendor source tree.
+      const makeVariables = entry.id === "libvorbis"
+        ? [`CFLAGS=${context.cflags} -DDARWIN -fno-common -Wall -ffast-math -fsigned-char`]
+        : [];
       commands = [
         { command: join(source, "configure"), args: [...prefixAndHost, ...options], cwd: build },
-        ...makeCommands(context, build, ["all", "install"]),
+        ...makeCommands(context, build, ["all", "install"], makeVariables),
       ];
       break;
+    }
     case "cmake": {
       const cmakeSource = entry.cmakeSourceSubdir ? join(source, entry.cmakeSourceSubdir) : source;
       commands = [

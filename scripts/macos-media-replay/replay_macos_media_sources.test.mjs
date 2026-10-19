@@ -157,6 +157,28 @@ test("uses MuJS release and install-shared without the nonexistent shared target
   assert.ok(commands.every((command) => command.command === FIXED_TOOLS.make));
 });
 
+test("overrides only libvorbis generated Darwin CFLAGS while retaining target flags", () => {
+  const context = fixedContext();
+  const libvorbis = PLAN.packages.find((entry) => entry.id === "libvorbis");
+  const commands = renderPackageCommands(libvorbis, context);
+  const expected = `CFLAGS=${context.cflags} -DDARWIN -fno-common -Wall -ffast-math -fsigned-char`;
+  assert.deepEqual(commands.slice(1).map((command) => command.args), [
+    [`-j${context.jobs}`, expected, "all"],
+    [`-j${context.jobs}`, expected, "install"],
+  ]);
+  assert.ok(commands.every((command) => command.args.every((argument) => !argument.includes("-force_cpusubtype_ALL"))));
+
+  const probe = temporary();
+  writeFileSync(join(probe, "Makefile"), "CFLAGS = -force_cpusubtype_ALL\nall:\n\t@/usr/bin/printf '%s\\n' '$(CFLAGS)'\n");
+  const make = spawnSync("/usr/bin/make", [expected, "all"], { cwd: probe, encoding: "utf8" });
+  assert.equal(make.status, 0, `${make.stdout}\n${make.stderr}`);
+  assert.equal(make.stdout, `${expected.slice("CFLAGS=".length)}\n`);
+
+  for (const entry of PLAN.packages.filter((candidate) => candidate.adapter === "autoconf" && candidate.id !== "libvorbis")) {
+    assert.ok(renderPackageCommands(entry, context).every((command) => command.args.every((argument) => !argument.startsWith("CFLAGS="))), entry.id);
+  }
+});
+
 test("confines the effective install prefix for every package and adapter", () => {
   const context = fixedContext();
   const prefixForms = [
