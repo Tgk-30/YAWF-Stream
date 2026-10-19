@@ -1873,6 +1873,8 @@ export function VideoPlayer({
         onSwitchServerOptimized={switchToServerOptimized}
         onSwitchDeviceOriginal={switchToDeviceOriginal}
         onAbsolutePositionChange={reportAbsolutePosition}
+        onOpenExternalPlayer={externalPlaybackAvailable ? openExternalPlayback : undefined}
+        externalActionStatus={externalPlaybackAvailable ? externalActionStatus : null}
         playbackDecision={playbackDecisionFor(effectiveEngine, effectiveUrl)}
         onProgress={(current, duration, prefs) =>
           onProgress?.(current, duration, prefs)

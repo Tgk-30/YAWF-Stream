@@ -18,6 +18,13 @@ html.mpv-active .embed-player * {
 }
 
 .embed-player {
+  --player-native-osd-reserve: calc(
+    calc(52px * var(--density-scale))
+    + 24px
+    + calc(12px * var(--density-scale))
+    + 60px
+    + max(calc(24px * var(--density-scale)), var(--safe-area-bottom))
+  );
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -581,11 +588,17 @@ html.mpv-active .embed-player * {
   color: rgba(255, 255, 255, 0.55);
 }
 
+.embed-menu-status,
 .embed-menu-error {
   margin: var(--sp-xs) 0 0;
-  color: var(--danger);
   font-size: 0.75rem;
   line-height: 1.4;
+}
+.embed-menu-status {
+  color: var(--text-secondary);
+}
+.embed-menu-error {
+  color: var(--danger);
 }
 .embed-chapter-item {
   gap: calc(16px * var(--density-scale));

@@ -265,6 +265,8 @@ vi.mock("./EmbeddedPlayer", () => ({
     engine: string;
     playbackAuthorization?: string;
     onPlaybackError?: (error: Error) => boolean | Promise<boolean>;
+    onOpenExternalPlayer?: () => void | Promise<void>;
+    externalActionStatus?: string | null;
   }) => (
     <div
       data-testid="embedded-player"
@@ -279,6 +281,14 @@ vi.mock("./EmbeddedPlayer", () => ({
       >
         simulate native failure
       </button>
+      {props.onOpenExternalPlayer != null && (
+        <button type="button" onClick={() => void props.onOpenExternalPlayer?.()}>
+          open embedded external player
+        </button>
+      )}
+      {props.externalActionStatus != null && (
+        <span data-testid="embedded-external-status">{props.externalActionStatus}</span>
+      )}
     </div>
   ),
 }));
@@ -645,7 +655,7 @@ describe("VideoPlayer shell", () => {
     expect(css).toMatch(/\.scrubbar-hover\s*\{[^}]*position:\s*absolute;/s);
   });
 
-  it("reserves fine and coarse webview OSDs beneath paused content without touching native overlays", () => {
+  it("reserves fine and coarse webview OSDs with webview-only compact hiding rules", () => {
     const playerCss = readFileSync("src/components/VideoPlayer.css", "utf8");
     const pauseCss = readFileSync(
       "src/components/player/PlayerPauseOverlay.css",
@@ -673,24 +683,11 @@ describe("VideoPlayer shell", () => {
     expect(pauseCss).toMatch(
       /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{[\s\S]*?\.webview-player \.player-pause-content\s*\{[^}]*max-height:\s*calc\(\s*100vh[^}]*var\(--player-compact-osd-reserve\)[^}]*max-height:\s*calc\(\s*100dvh/,
     );
-    const nativeShortWidth = pauseCss.match(
-      /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{[\s\S]*?\.webview-player \.player-pause-content,\s*\.embed-player \.player-pause-content\s*\{([^}]*)\}/,
-    )?.[1];
-    expect(nativeShortWidth).toBeDefined();
-    expect(nativeShortWidth).toMatch(
-      /width:\s*calc\([^}]*var\(--safe-area-left\)[^}]*var\(--safe-area-right\)/,
-    );
-    expect(nativeShortWidth).not.toMatch(
-      /player-compact-osd-reserve|max-height|margin|overflow/,
-    );
     expect(pauseCss).toMatch(
       /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{[\s\S]*?\.webview-player \.player-pause-content h2\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
     );
     expect(pauseCss).toMatch(
       /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{[\s\S]*?\.webview-player \.player-pause-meta,\s*\.webview-player \.player-pause-overview\s*\{[^}]*display:\s*none;/,
-    );
-    expect(pauseCss).not.toMatch(
-      /\.embed-player \.player-pause-content h2\s*\{[^}]*text-overflow:\s*ellipsis;/,
     );
   });
 
@@ -4298,6 +4295,48 @@ describe("ExternalPanel (browser)", () => {
 });
 
 describe("Built-in player (Tauri)", () => {
+  it("uses the shared owned target for the active native external-player action", async () => {
+    isTauriMock.mockReturnValue(true);
+    const target = `https://server.example/api/external-stream/session-1/${"N".repeat(43)}`;
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1"
+        externalPlaybackUrl={target}
+        playbackAuthorization={`Bearer ${"N".repeat(43)}`}
+        engine="native-mpv"
+        title="T"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "open embedded external player" }),
+    );
+    await waitFor(() =>
+      expect(openInExternalPlayerMock).toHaveBeenCalledWith(target, undefined, undefined),
+    );
+    expect(await screen.findByTestId("embedded-external-status")).toHaveTextContent(
+      "VLC hand-off",
+    );
+  });
+
+  it("withholds the active native external-player action behind an explicit null fence", () => {
+    isTauriMock.mockReturnValue(true);
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1"
+        externalPlaybackUrl={null}
+        playbackAuthorization={`Bearer ${"N".repeat(43)}`}
+        engine="native-mpv"
+        title="T"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "open embedded external player" })).toBeNull();
+    expect(openInExternalPlayerMock).not.toHaveBeenCalled();
+  });
+
   it("hands a distinct Server Mode external capability to desktop without a playback Authorization argument", async () => {
     isTauriMock.mockReturnValue(true);
     vi.stubGlobal("location", new URL("https://server.example/watch"));

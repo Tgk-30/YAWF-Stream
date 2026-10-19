@@ -177,6 +177,25 @@
   overflow: hidden;
 }
 
+.embed-player .player-pause-content {
+  max-height: calc(
+    100vh
+    - var(--player-native-osd-reserve)
+    - calc(10px * var(--density-scale))
+    - max(calc(76px * var(--density-scale)), calc(var(--safe-area-top) + 52px))
+  );
+  max-height: calc(
+    100dvh
+    - var(--player-native-osd-reserve)
+    - calc(10px * var(--density-scale))
+    - max(calc(76px * var(--density-scale)), calc(var(--safe-area-top) + 52px))
+  );
+  margin-bottom: calc(
+    var(--player-native-osd-reserve) + calc(10px * var(--density-scale))
+  );
+  overflow: hidden;
+}
+
 @media (max-width: 640px) {
   .player-pause-content {
     width: calc(
@@ -236,9 +255,74 @@
     white-space: nowrap;
   }
 
+  .embed-player .player-pause-content {
+    margin:
+      0
+      0
+      calc(var(--player-native-osd-reserve) + calc(10px * var(--density-scale)))
+      max(calc(22px * var(--density-scale)), var(--safe-area-left));
+  }
+
+  .embed-player .player-pause-eyebrow {
+    margin-bottom: calc(8px * var(--density-scale));
+  }
+
+  .embed-player .player-pause-content h2 {
+    overflow: hidden;
+    font-size: clamp(1.75rem, calc(5vw * var(--text-scale)), 2.5rem);
+    line-height: 1.1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .embed-player .player-pause-meta {
+    margin-top: calc(10px * var(--density-scale));
+  }
+
+  .embed-player .player-pause-overview {
+    margin-top: calc(8px * var(--density-scale));
+    line-height: 1.4;
+    -webkit-line-clamp: 1;
+  }
+
   .webview-player .player-pause-meta,
   .webview-player .player-pause-overview {
     display: none;
+  }
+}
+
+/* Native desktop windows can be short even at widths above the landscape
+   breakpoint. Keep the full metadata in the accessibility tree while fitting
+   the visible copy above the reserved native control stack. */
+@media (min-width: 750px) and (max-height: 700px) {
+  .embed-player .player-pause-eyebrow {
+    margin-bottom: calc(8px * var(--density-scale));
+  }
+
+  .embed-player .player-pause-content h2 {
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: clamp(1.75rem, calc(3.5vw * var(--text-scale)), 2.5rem);
+    line-height: 1.08;
+    text-overflow: ellipsis;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .embed-player .player-pause-meta {
+    gap: calc(6px * var(--density-scale));
+    margin-top: calc(10px * var(--density-scale));
+  }
+
+  .embed-player .player-pause-meta-item {
+    min-height: 24px;
+  }
+
+  .embed-player .player-pause-overview {
+    margin-top: calc(8px * var(--density-scale));
+    font-size: 0.875rem;
+    line-height: 1.4;
+    -webkit-line-clamp: 2;
   }
 }
 
