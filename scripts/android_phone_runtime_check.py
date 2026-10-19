@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Bounded UI-only Android phone runtime check for a signed release APK.
+"""Bounded black-box Android phone runtime check for a signed release APK.
 
-The driver treats the installed app as a black box. It uses ADB, Android's
-accessibility XML, and real shell input events. It does not call a WebView or
-native bridge, seed private preferences, or enter account credentials.
+The Python driver owns identity, install, diagnostics, and postconditions. A
+separate test-only AndroidX package keeps one UiAutomation session for semantic
+input across the whole setup flow. Shell hierarchy dumps are diagnostic only.
+No path calls a WebView or native bridge, seeds private preferences, or enters
+account credentials.
 """
 
 from __future__ import annotations
@@ -25,6 +27,10 @@ from typing import Iterable, Sequence
 
 PACKAGE = "com.tgk30.debridstreamer"
 ACTIVITY = f"{PACKAGE}/.MainActivity"
+HARNESS_PACKAGE = "com.yawf.runtimeinstrumentation"
+HARNESS_INSTRUMENTATION = (
+    "com.yawf.runtimeinstrumentation.test/androidx.test.runner.AndroidJUnitRunner"
+)
 URL_RE = re.compile(r"https?://[^\s\]\[\"'<>]+", re.IGNORECASE)
 BOUNDS_RE = re.compile(r"^\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]$")
 
@@ -310,6 +316,7 @@ class RuntimeDriver:
         minimum_webview_major: int,
         expected_webview_package: str | None,
         expected_webview_version: str | None,
+        expected_published_version: str,
         boot_timeout: int,
         ui_timeout: int,
         update_timeout: int,
@@ -323,6 +330,7 @@ class RuntimeDriver:
         self.minimum_webview_major = minimum_webview_major
         self.expected_webview_package = expected_webview_package
         self.expected_webview_version = expected_webview_version
+        self.expected_published_version = expected_published_version
         self.boot_timeout = boot_timeout
         self.ui_timeout = ui_timeout
         self.update_timeout = update_timeout
@@ -440,24 +448,114 @@ class RuntimeDriver:
         self.note("MainActivity launched through Android activity manager")
 
     def read_ui(self) -> tuple[list[UiNode], str]:
+        remote = "/sdcard/yawf-runtime-window.xml"
         last_error = ""
         for _ in range(3):
             try:
-                dumped = self.adb.shell(
-                    "uiautomator", "dump", "--compressed", "/sdcard/yawf-runtime-window.xml",
+                removed = self.adb.run(
+                    ["shell", "rm", "-f", remote], timeout=10, check=False
+                )
+                if removed.returncode != 0:
+                    raise RuntimeCheckError("Could not remove the prior diagnostic hierarchy")
+                dumped = self.adb.run(
+                    ["shell", "uiautomator", "dump", "--compressed", remote],
                     timeout=20,
                     check=False,
                 )
-                raw = self.adb.exec_out("cat", "/sdcard/yawf-runtime-window.xml", timeout=20)
-                xml_text = raw.decode("utf-8", "replace").strip()
+                if dumped.returncode != 0:
+                    raise RuntimeCheckError(
+                        "Diagnostic hierarchy dumper exited nonzero: "
+                        + redact_text((dumped.stdout + dumped.stderr).strip())
+                    )
+                exists = self.adb.run(
+                    ["shell", "test", "-s", remote], timeout=10, check=False
+                )
+                if exists.returncode != 0:
+                    raise RuntimeCheckError("Diagnostic hierarchy was not freshly created")
+                raw_result = self.adb.run(
+                    ["exec-out", "cat", remote], timeout=20, check=False, text=False
+                )
+                if raw_result.returncode != 0:
+                    raise RuntimeCheckError("Could not read the fresh diagnostic hierarchy")
+                xml_text = raw_result.stdout.decode("utf-8", "replace").strip()
                 nodes = parse_ui_xml(xml_text)
                 if nodes:
                     return nodes, xml_text
                 last_error = "accessibility hierarchy was empty"
             except (ET.ParseError, ValueError, RuntimeCheckError) as error:
                 last_error = str(error)
+            finally:
+                self.adb.run(["shell", "rm", "-f", remote], timeout=10, check=False)
             time.sleep(1)
         raise RuntimeCheckError(f"Could not read Android accessibility hierarchy: {last_error}")
+
+    def run_persistent_harness(self) -> None:
+        package_paths = self.adb.shell("pm", "path", HARNESS_PACKAGE).splitlines()
+        if not any(line.strip().startswith("package:") for line in package_paths):
+            raise RuntimeCheckError("Persistent instrumentation helper is not installed")
+        listed = self.adb.shell("pm", "list", "instrumentation")
+        expected = f"instrumentation:{HARNESS_INSTRUMENTATION} (target={HARNESS_PACKAGE})"
+        if expected not in listed:
+            raise RuntimeCheckError("Persistent instrumentation runner is not registered")
+
+        self.adb.shell("am", "force-stop", PACKAGE)
+        self.adb.run(["logcat", "-c"], check=False)
+        subdir = "persistent-flow"
+        output = self.adb.run(
+            [
+                "shell",
+                "am",
+                "instrument",
+                "-w",
+                "-r",
+                "-e",
+                "class",
+                (
+                    "com.yawf.runtimeinstrumentation.RuntimeFlowTest#"
+                    "completeSetupAndNativeUpdateFlowInOneSession"
+                ),
+                "-e",
+                "evidenceSubdir",
+                subdir,
+                "-e",
+                "candidateVersion",
+                self.expected_version,
+                "-e",
+                "publishedVersion",
+                self.expected_published_version,
+                HARNESS_INSTRUMENTATION,
+            ],
+            timeout=self.ui_timeout * 5 + self.update_timeout,
+            check=False,
+        )
+        self.write_text("instrumentation-output.txt", output.stdout + output.stderr)
+
+        harness_evidence = self.evidence / "persistent-instrumentation"
+        harness_evidence.mkdir(parents=True, exist_ok=True)
+        remote = f"/sdcard/Android/data/{HARNESS_PACKAGE}/files/{subdir}/."
+        pulled = self.adb.run(
+            ["pull", remote, str(harness_evidence)], timeout=120, check=False
+        )
+        self.write_text("instrumentation-pull.txt", pulled.stdout + pulled.stderr)
+        if pulled.returncode != 0:
+            raise RuntimeCheckError("Could not retain persistent instrumentation evidence")
+        receipt_path = harness_evidence / "instrumentation-receipt.json"
+        if not receipt_path.is_file():
+            raise RuntimeCheckError("Persistent instrumentation receipt is missing")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+        passed = (
+            output.returncode == 0
+            and "OK (1 test)" in output.stdout
+            and "INSTRUMENTATION_CODE: -1" in output.stdout
+            and receipt.get("outcome") == "passed"
+            and receipt.get("persistentUiAutomationSession") is True
+            and receipt.get("candidateVersion") == self.expected_version
+            and receipt.get("publishedChannelVersion") == self.expected_published_version
+        )
+        if not passed:
+            raise RuntimeCheckError("Persistent instrumentation setup flow did not pass")
+        self.note("Persistent UiAutomation session completed setup and native update flow")
 
     def assert_no_binding_terms(self, nodes: Iterable[UiNode]) -> None:
         found = find_binding_terms(nodes)
@@ -647,75 +745,12 @@ class RuntimeDriver:
         self.verify_webview_provider()
         self.install()
         self.verify_installed_identity()
-        self.start_app()
-
-        entry, _, _ = self.wait_for_onboarding_entry(
-            timeout=90,
-            include_update_consent=True,
-        )
-        if entry == "update-consent":
-            self.snapshot("initial-update-consent")
-            self.tap_text("Not now")
-        else:
-            # Give the activity-owned consent prompt one bounded chance to appear.
-            time.sleep(4)
-            nodes, _ = self.read_ui()
-            consent = select_node(nodes, "Enable Android update checks?", self.screen_size)
-            if consent is not None:
-                self.snapshot("initial-update-consent")
-                self.tap_text("Not now")
-
-        entry, _, _ = self.wait_for_onboarding_entry(timeout=60)
-        if entry == "tier-welcome":
-            self.snapshot("tier-welcome")
-            # This exact Skip is the ordinary explanatory TierOnboarding action.
-            # snapshot() and tap_text() both reapply the binding-terms guard.
-            self.tap_text("Skip", exact=True)
-            self.note("Dismissed the ordinary tier welcome before first-run setup")
-
-        self.wait_for_any(["How do you want to use YAWF Stream?"], timeout=60)
-        self.snapshot("first-run")
-        # WebView accessibility flattens the full choice card into one button
-        # label, so match its stable title inside the aggregated label.
-        self.tap_text("Quick setup", exact=False)
-        self.wait_for_any(["Continue without adding credentials"])
-        self.snapshot("quick-setup-notice")
-        self.tap_text(
-            "I understand the privacy, reliability, catalog, and playback limits and want to use Quick setup.",
-            exact=False,
-        )
-        self.tap_text("Continue with Quick setup", require_enabled=True)
-        self.wait_for_any(["Discover", "Skip", "Skip the tour"], timeout=90)
-        self.dismiss_nonbinding_tours()
-        self.snapshot("discover-after-setup")
-
-        self.tap_text("More navigation")
-        self.tap_text("Settings")
-        self.wait_for_any(["Settings"], timeout=60)
-        self.snapshot("settings")
-        self.choose_settings_updates()
-        self.scroll_until_text("Android APK updates")
-        self.scroll_until_text("Check for Android updates")
-        self.snapshot("android-update-card")
-        self.tap_text("Check for Android updates")
-        self.wait_for_any(["Check for Android updates?"], timeout=30)
-        self.snapshot("manual-update-consent")
-        self.tap_text("Check now")
-
-        result, _, _, _ = self.wait_for_any(
-            [
-                "YAWF Stream is up to date",
-                "Update check failed",
-                "Update available",
-                "Update ready to install",
-            ],
-            timeout=self.update_timeout,
-        )
-        self.snapshot("manual-update-result")
-        if result != "YAWF Stream is up to date":
-            raise RuntimeCheckError(f"Unexpected native updater result: {result}")
+        self.run_persistent_harness()
         self.assert_no_download_or_installer()
-        self.note("Native manual check reported no newer signed Android release")
+        self.note(
+            "Native manual check reported no newer signed Android release for "
+            f"installed {self.expected_version} over public {self.expected_published_version}"
+        )
 
     def write_text(self, name: str, value: str) -> None:
         (self.evidence / name).write_text(redact_text(value), encoding="utf-8")
@@ -766,6 +801,7 @@ def execute(args: argparse.Namespace) -> int:
         minimum_webview_major=args.minimum_webview_major,
         expected_webview_package=args.expected_webview_package,
         expected_webview_version=args.expected_webview_version,
+        expected_published_version=args.expected_published_version,
         boot_timeout=args.boot_timeout,
         ui_timeout=args.ui_timeout,
         update_timeout=args.update_timeout,
@@ -1035,6 +1071,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--minimum-webview-major", type=int, default=90)
     parser.add_argument("--expected-webview-package")
     parser.add_argument("--expected-webview-version")
+    parser.add_argument("--expected-published-version", default="2.3.21")
     parser.add_argument("--boot-timeout", type=int, default=300)
     parser.add_argument("--ui-timeout", type=int, default=60)
     parser.add_argument("--update-timeout", type=int, default=120)

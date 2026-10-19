@@ -12,6 +12,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/macos-media-replay-experiment.yml"
+      - "scripts/ci/macos_media_replay_workflow_args_test.py"
       - "scripts/ci/run_macos_media_replay_experiment.py"
       - "scripts/ci/run_macos_media_replay_experiment.test.py"
       - "scripts/macos-media-replay/**"
@@ -69,6 +70,7 @@ jobs:
           set -euo pipefail
           node --test scripts/macos-media-replay/replay_macos_media_sources.test.mjs
           env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/test-home" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C /usr/bin/python3 -B scripts/macos-media-replay/normalize_source_archive_test.py -v
+          /usr/bin/python3 -I -B scripts/ci/macos_media_replay_workflow_args_test.py -v
           /usr/bin/python3 -I -B scripts/ci/run_macos_media_replay_experiment.test.py -v
 
       - name: Run the confined toolchain probe or clean replay
@@ -86,12 +88,14 @@ jobs:
           test -d "$toolchain_bin"
           test -d "$developer_bin"
           tool_path="$(dirname "$(command -v node)"):$brew_prefix/bin:$libtool_prefix/bin:$toolchain_bin:$developer_bin:/usr/bin:/bin:/usr/sbin:/sbin"
-          probe_args=()
+          # BEGIN replay argument selection
+          probe_args=(--jobs 8)
           case "$PROBE_ONLY" in
             true) probe_args+=(--probe-only) ;;
             false) ;;
             *) echo "Refusing unexpected PROBE_ONLY value" >&2; exit 1 ;;
           esac
+          # END replay argument selection
           /usr/bin/python3 -I -B scripts/ci/run_macos_media_replay_experiment.py \
             --candidate-dir "$RUNNER_TEMP/source-artifact" \
             --workspace "$RUNNER_TEMP/macos-media-replay-experiment" \
@@ -100,7 +104,6 @@ jobs:
             --node "$(command -v node)" \
             --developer-dir "$developer_dir" \
             --tool-path "$tool_path" \
-            --jobs 8 \
             "${probe_args[@]}"
 
       - name: Summarize the bounded experiment result

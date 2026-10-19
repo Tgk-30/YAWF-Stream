@@ -8,6 +8,7 @@ on:
     paths:
       - .github/workflows/android-runtime-check.yml
       - scripts/android_phone_runtime_check.py
+      - scripts/android-runtime-instrumentation/**
 
 permissions:
   contents: read
@@ -22,7 +23,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    name: Signed phone APK on fresh API 30 KVM emulator
+    name: Signed phone APK on two fresh sequential API 30 KVM emulators
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -31,6 +32,7 @@ jobs:
       CANDIDATE_APK_SHA256: 3165df8cc7bc774cdab81e0049987246255eebb9d1bec47ba0b346a707e3d90c
       CANDIDATE_VERSION: 2.3.23
       CANDIDATE_VERSION_CODE: "2003023"
+      PUBLISHED_ANDROID_VERSION: 2.3.21
       CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.23.apk
       EVIDENCE: android-runtime-evidence
       AVD_NAME: yawf-phone-api30-runtime
@@ -65,6 +67,7 @@ jobs:
           {
             echo "sourceRevision=$actual"
             echo "candidateRunId=$CANDIDATE_RUN_ID"
+            echo "acceptanceRuns=2-sequential-fresh-avds"
             echo "emulatorImage=system-images;android-30;google_apis;x86_64"
             echo "gpuBackend=$EMULATOR_GPU"
           } > "$EVIDENCE/binding.txt"
@@ -88,6 +91,11 @@ jobs:
         with:
           packages: platform-tools
 
+      - name: Set up pinned Gradle for the isolated instrumentation APK
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
       - name: Install one API 30 x86_64 emulator image and verification tools
         shell: bash
         run: |
@@ -98,6 +106,7 @@ jobs:
             "platform-tools" \
             "emulator" \
             "platforms;android-30" \
+            "platforms;android-36" \
             "build-tools;36.0.0" \
             "system-images;android-30;google_apis;x86_64"
           build_tools="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/36.0.0"
@@ -229,7 +238,50 @@ jobs:
       - name: Test the bounded UI driver
         run: python3 scripts/android_phone_runtime_check.py --self-test
 
-      - name: Require KVM and create one fresh AVD
+      - name: Test policy mutants and build the isolated instrumentation APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/android-runtime-instrumentation/policy_mutation_check.py \
+            | tee "$EVIDENCE/instrumentation-policy-mutations.json"
+          gradle \
+            --project-dir scripts/android-runtime-instrumentation \
+            --no-daemon \
+            --max-workers=2 \
+            :app:testDebugUnitTest \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest
+          app_apk="scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk"
+          test_apk="scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+          test -f "$app_apk"
+          test -f "$test_apk"
+          {
+            sha256sum "$app_apk" "$test_apk"
+            echo "agp=9.3.1"
+            echo "gradle=9.6.1"
+            echo "androidxTestRunner=1.7.0"
+            echo "androidxTestExtJunit=1.3.0"
+            echo "androidxUiAutomator=2.3.0"
+            echo "uiautomatorDocs=https://developer.android.com/training/testing/other-components/ui-automator-legacy"
+            echo "androidxTestDocs=https://developer.android.com/jetpack/androidx/releases/test"
+          } > "$EVIDENCE/instrumentation-build.txt"
+          test "$(apkanalyzer manifest application-id "$app_apk")" = "com.yawf.runtimeinstrumentation"
+          test "$(apkanalyzer manifest application-id "$test_apk")" = "com.yawf.runtimeinstrumentation.test"
+          apkanalyzer manifest print "$app_apk" > "$EVIDENCE/instrumentation-app-manifest.xml"
+          apkanalyzer manifest print "$test_apk" > "$EVIDENCE/instrumentation-test-manifest.xml"
+          if grep -Eqi 'INTERNET|BIND_ACCESSIBILITY_SERVICE|MANAGE_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE' \
+            "$EVIDENCE/instrumentation-app-manifest.xml" "$EVIDENCE/instrumentation-test-manifest.xml"; then
+            echo "::error::The isolated instrumentation APK requested a forbidden permission" >&2
+            exit 1
+          fi
+          grep -F 'androidx.test.runner.AndroidJUnitRunner' \
+            "$EVIDENCE/instrumentation-test-manifest.xml"
+          grep -F 'com.yawf.runtimeinstrumentation' \
+            "$EVIDENCE/instrumentation-test-manifest.xml"
+          echo "HARNESS_APP_APK=$app_apk" >> "$GITHUB_ENV"
+          echo "HARNESS_TEST_APK=$test_apk" >> "$GITHUB_ENV"
+
+      - name: Run the persistent flow on two fresh sequential API 30 emulators
         shell: bash
         run: |
           set -euo pipefail
@@ -239,108 +291,169 @@ jobs:
             sudo chmod 0600 /dev/kvm
           fi
           test -r /dev/kvm -a -w /dev/kvm
-          stat -c 'kvmOwner=%u kvmGroup=%g kvmMode=%a' /dev/kvm \
-            > "$EVIDENCE/kvm.txt"
+          stat -c 'kvmOwner=%u kvmGroup=%g kvmMode=%a' /dev/kvm > "$EVIDENCE/kvm.txt"
+
           export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-android"
           export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
           export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
           mkdir -p "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME"
-          {
-            echo "ANDROID_USER_HOME=$ANDROID_USER_HOME"
-            echo "ANDROID_EMULATOR_HOME=$ANDROID_EMULATOR_HOME"
-            echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME"
-          } >> "$GITHUB_ENV"
           command -v avdmanager | tee "$EVIDENCE/avdmanager-path.txt"
           sdkmanager --version | tee "$EVIDENCE/sdkmanager-version.txt"
           emulator_bin="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/emulator/emulator"
           qemu_bin="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/emulator/qemu/linux-x86_64/qemu-system-x86_64"
           ldd "$emulator_bin" | tee "$EVIDENCE/emulator-ldd.txt"
           ldd "$qemu_bin" | tee "$EVIDENCE/qemu-ldd.txt"
-          # The supported launcher supplies bundled QEMU library paths at runtime.
           if grep -q 'not found' "$EVIDENCE/emulator-ldd.txt"; then
             echo "::error::Android emulator launcher dependencies are missing" >&2
             exit 1
           fi
           emulator -version | tee "$EVIDENCE/emulator-version.txt"
-          printf 'no\n' | avdmanager create avd \
-            --force \
-            --name "$AVD_NAME" \
-            --package "system-images;android-30;google_apis;x86_64" \
-            --device "pixel" \
-            --path "$ANDROID_AVD_HOME/$AVD_NAME" \
-            2>&1 | tee "$EVIDENCE/avd-create.txt"
-          emulator -list-avds 2>&1 | tee "$EVIDENCE/avd-list.txt"
-          grep -Fx "$AVD_NAME" "$EVIDENCE/avd-list.txt"
-          avdmanager list avd -c 2>&1 | tee "$EVIDENCE/avdmanager-list.txt"
 
-      - name: Start the single isolated API 30 emulator
-        shell: bash
-        run: |
-          set -euo pipefail
-          if adb devices | awk 'NR > 1 && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'; then
-            echo "::error::An Android device was already attached."
-            exit 1
-          fi
-          nohup emulator \
-            -avd "$AVD_NAME" \
-            -port 5554 \
-            -accel on \
-            -gpu "$EMULATOR_GPU" \
-            -no-window \
-            -no-audio \
-            -no-boot-anim \
-            -no-snapshot \
-            -camera-back none \
-            -camera-front none \
-            -cores 2 \
-            -memory 2048 \
-            > "$EVIDENCE/emulator.log" 2>&1 &
-          echo "$!" > "$EVIDENCE/emulator.pid"
+          CURRENT_EVIDENCE=""
+          CURRENT_PID=""
 
-      - name: Install and select the pinned CI-only WebView provider
-        shell: bash
-        run: |
-          set -euo pipefail
-          deadline=$((SECONDS + 300))
-          until [ "$(adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null || true)" = "device" ] && \
-            [ "$(adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::error::Emulator did not boot before the WebView provider deadline" >&2
+          stop_current() {
+            set +e
+            if [ -z "$CURRENT_PID" ]; then
+              return 0
+            fi
+            adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
+            for _ in 1 2 3 4 5; do
+              if ! adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
+                echo "emulatorStopped=true" > "$CURRENT_EVIDENCE/cleanup.txt"
+                wait "$CURRENT_PID" 2>/dev/null || true
+                CURRENT_PID=""
+                set -e
+                return 0
+              fi
+              sleep 2
+            done
+            kill "$CURRENT_PID" 2>/dev/null || true
+            sleep 2
+            if adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
+              echo "emulatorStopped=false" > "$CURRENT_EVIDENCE/cleanup.txt"
+              set -e
+              return 1
+            fi
+            echo "emulatorStopped=true" > "$CURRENT_EVIDENCE/cleanup.txt"
+            CURRENT_PID=""
+            set -e
+          }
+
+          collect_current_failure() {
+            set +e
+            if [ -z "$CURRENT_EVIDENCE" ]; then
+              echo "evidenceCollection=notStarted" > "$EVIDENCE/workflow-failure-receipt.txt"
+              return 0
+            fi
+            mkdir -p "$CURRENT_EVIDENCE"
+            adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$CURRENT_EVIDENCE/workflow-failure.png"
+            adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
+              | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+              > "$CURRENT_EVIDENCE/workflow-failure-activity.txt"
+            adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime \
+              | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+              > "$CURRENT_EVIDENCE/workflow-failure-logcat.txt"
+            adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print data_app_anr \
+              | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+              > "$CURRENT_EVIDENCE/workflow-failure-anr.txt"
+            timeout 30s adb -s "$EMULATOR_SERIAL" shell dumpsys SurfaceFlinger \
+              | head -c 1048576 \
+              | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+              > "$CURRENT_EVIDENCE/workflow-failure-surfaceflinger.txt"
+            echo "evidenceCollection=attempted" > "$CURRENT_EVIDENCE/workflow-failure-receipt.txt"
+          }
+
+          on_exit() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              collect_current_failure
+            fi
+            stop_current || status=1
+            exit "$status"
+          }
+          trap on_exit EXIT
+
+          for run_number in 1 2; do
+            CURRENT_EVIDENCE="$EVIDENCE/run-$run_number"
+            mkdir -p "$CURRENT_EVIDENCE"
+            printf '%s\n' "$run_number" > "$EVIDENCE/current-run.txt"
+            run_avd="$AVD_NAME-$run_number"
+            {
+              echo "acceptanceRun=$run_number"
+              echo "avdName=$run_avd"
+              echo "freshOwnedEmulator=true"
+            } > "$CURRENT_EVIDENCE/run-binding.txt"
+
+            if adb devices | awk 'NR > 1 && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'; then
+              echo "::error::An Android device was already attached before run $run_number." >&2
               exit 1
             fi
+            printf 'no\n' | avdmanager create avd \
+              --force \
+              --name "$run_avd" \
+              --package "system-images;android-30;google_apis;x86_64" \
+              --device "pixel" \
+              --path "$ANDROID_AVD_HOME/$run_avd" \
+              2>&1 | tee "$CURRENT_EVIDENCE/avd-create.txt"
+            emulator -list-avds 2>&1 | tee "$CURRENT_EVIDENCE/avd-list.txt"
+            grep -Fx "$run_avd" "$CURRENT_EVIDENCE/avd-list.txt"
+
+            nohup emulator \
+              -avd "$run_avd" \
+              -port 5554 \
+              -accel on \
+              -gpu "$EMULATOR_GPU" \
+              -no-window \
+              -no-audio \
+              -no-boot-anim \
+              -no-snapshot \
+              -camera-back none \
+              -camera-front none \
+              -cores 2 \
+              -memory 2048 \
+              > "$CURRENT_EVIDENCE/emulator.log" 2>&1 &
+            CURRENT_PID=$!
+            printf '%s\n' "$CURRENT_PID" > "$CURRENT_EVIDENCE/emulator.pid"
+            printf '%s\n' "$CURRENT_PID" > "$EVIDENCE/current-emulator.pid"
+
+            deadline=$((SECONDS + 240))
+            until [ "$(adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null || true)" = "device" ] && \
+              [ "$(adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "::error::Fresh emulator $run_number did not boot before the deadline" >&2
+                exit 1
+              fi
+              sleep 2
+            done
+            api_level="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')"
+            build_type="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.type | tr -d '\r')"
+            test "$api_level" = "30"
+            test "$build_type" = "userdebug"
+            {
+              echo "apiLevel=$api_level"
+              echo "buildType=$build_type"
+              echo "freshOwnedEmulator=true"
+            } > "$CURRENT_EVIDENCE/webview-emulator-precondition.txt"
+
+            adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate \
+              > "$CURRENT_EVIDENCE/webview-provider-stock.txt"
+            timeout 180s adb -s "$EMULATOR_SERIAL" install --no-streaming -r "$WEBVIEW_APK" \
+              | tee "$CURRENT_EVIDENCE/webview-provider-install.txt"
+            grep -Eq '^Success\r?$' "$CURRENT_EVIDENCE/webview-provider-install.txt"
+            adb -s "$EMULATOR_SERIAL" shell cmd webviewupdate set-webview-implementation "$WEBVIEW_PACKAGE" \
+              > "$CURRENT_EVIDENCE/webview-provider-select.txt"
             sleep 2
-          done
-          api_level="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')"
-          build_type="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.type | tr -d '\r')"
-          test "$api_level" = "30"
-          test "$build_type" = "userdebug"
-          {
-            echo "apiLevel=$api_level"
-            echo "buildType=$build_type"
-            echo "freshOwnedEmulator=true"
-          } > "$EVIDENCE/webview-emulator-precondition.txt"
-          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate \
-            > "$EVIDENCE/webview-provider-stock.txt"
-          timeout 180s adb -s "$EMULATOR_SERIAL" install --no-streaming -r "$WEBVIEW_APK" \
-            | tee "$EVIDENCE/webview-provider-install.txt"
-          grep -Eq '^Success\r?$' "$EVIDENCE/webview-provider-install.txt"
-          adb -s "$EMULATOR_SERIAL" shell cmd webviewupdate set-webview-implementation "$WEBVIEW_PACKAGE" \
-            > "$EVIDENCE/webview-provider-select.txt"
-          sleep 2
-          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate \
-            > "$EVIDENCE/webview-provider-after.txt"
-          adb -s "$EMULATOR_SERIAL" shell dumpsys package "$WEBVIEW_PACKAGE" \
-            > "$EVIDENCE/webview-provider-package.txt"
-          WEBVIEW_PACKAGE="$WEBVIEW_PACKAGE" \
-          WEBVIEW_VERSION="$WEBVIEW_VERSION" \
-          WEBVIEW_VERSION_CODE="$WEBVIEW_VERSION_CODE" \
-          EVIDENCE="$EVIDENCE" \
-          python3 - <<'PY'
+            adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate \
+              > "$CURRENT_EVIDENCE/webview-provider-after.txt"
+            adb -s "$EMULATOR_SERIAL" shell dumpsys package "$WEBVIEW_PACKAGE" \
+              > "$CURRENT_EVIDENCE/webview-provider-package.txt"
+            RUN_EVIDENCE="$CURRENT_EVIDENCE" python3 - <<'PYVERIFY'
           import os
           import re
           from pathlib import Path
 
-          evidence = Path(os.environ["EVIDENCE"])
+          evidence = Path(os.environ["RUN_EVIDENCE"])
           current = (evidence / "webview-provider-after.txt").read_text()
           match = re.search(
               r"Current WebView package \(name, version\): \(([^,]+),\s*([^)]+)\)",
@@ -349,42 +462,49 @@ jobs:
           assert match is not None
           assert match.group(1).strip() == os.environ["WEBVIEW_PACKAGE"]
           assert match.group(2).strip() == os.environ["WEBVIEW_VERSION"]
-
           package_dump = (evidence / "webview-provider-package.txt").read_text()
           assert re.search(rf"\bversionCode={re.escape(os.environ['WEBVIEW_VERSION_CODE'])}\b", package_dump)
           assert re.search(rf"\bversionName={re.escape(os.environ['WEBVIEW_VERSION'])}(?:\s|$)", package_dump)
-          PY
-          provider_path="$(adb -s "$EMULATOR_SERIAL" shell pm path "$WEBVIEW_PACKAGE" \
-            | tr -d '\r' | sed -n 's/^package://p' | head -n 1)"
-          test -n "$provider_path"
-          installed_sha="$(adb -s "$EMULATOR_SERIAL" shell sha256sum "$provider_path" | awk '{print $1}')"
-          test "$installed_sha" = "$WEBVIEW_APK_SHA256"
-          {
-            echo "installedApkSha256=$installed_sha"
-            echo "scope=isolated-ci-only"
-            echo "shippingProvider=false"
-            echo "currentSecurityBrowserProof=false"
-          } > "$EVIDENCE/webview-provider-installed.txt"
+          PYVERIFY
+            provider_path="$(adb -s "$EMULATOR_SERIAL" shell pm path "$WEBVIEW_PACKAGE" \
+              | tr -d '\r' | sed -n 's/^package://p' | head -n 1)"
+            test -n "$provider_path"
+            installed_sha="$(adb -s "$EMULATOR_SERIAL" shell sha256sum "$provider_path" | awk '{print $1}')"
+            test "$installed_sha" = "$WEBVIEW_APK_SHA256"
+            echo "installedApkSha256=$installed_sha" \
+              > "$CURRENT_EVIDENCE/webview-provider-installed.txt"
 
-      - name: Run setup and native update UI through real input
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/android_phone_runtime_check.py \
-            --adb adb \
-            --serial "$EMULATOR_SERIAL" \
-            --apk "$CANDIDATE_APK" \
-            --evidence "$EVIDENCE" \
-            --expected-sha256 "$CANDIDATE_APK_SHA256" \
-            --expected-version "$CANDIDATE_VERSION" \
-            --expected-version-code "$CANDIDATE_VERSION_CODE" \
-            --minimum-webview-major 90 \
-            --expected-webview-package "$WEBVIEW_PACKAGE" \
-            --expected-webview-version "$WEBVIEW_VERSION" \
-            --boot-timeout 300 \
-            --ui-timeout 60 \
-            --update-timeout 120
+            timeout 120s adb -s "$EMULATOR_SERIAL" install --no-streaming -r "$HARNESS_APP_APK" \
+              | tee "$CURRENT_EVIDENCE/instrumentation-app-install.txt"
+            grep -Eq '^Success\r?$' "$CURRENT_EVIDENCE/instrumentation-app-install.txt"
+            timeout 120s adb -s "$EMULATOR_SERIAL" install --no-streaming -r -t "$HARNESS_TEST_APK" \
+              | tee "$CURRENT_EVIDENCE/instrumentation-test-install.txt"
+            grep -Eq '^Success\r?$' "$CURRENT_EVIDENCE/instrumentation-test-install.txt"
+            adb -s "$EMULATOR_SERIAL" shell pm list instrumentation \
+              | tee "$CURRENT_EVIDENCE/instrumentation-registered.txt"
+            grep -F \
+              'instrumentation:com.yawf.runtimeinstrumentation.test/androidx.test.runner.AndroidJUnitRunner (target=com.yawf.runtimeinstrumentation)' \
+              "$CURRENT_EVIDENCE/instrumentation-registered.txt"
 
+            python3 scripts/android_phone_runtime_check.py \
+              --adb adb \
+              --serial "$EMULATOR_SERIAL" \
+              --apk "$CANDIDATE_APK" \
+              --evidence "$CURRENT_EVIDENCE" \
+              --expected-sha256 "$CANDIDATE_APK_SHA256" \
+              --expected-version "$CANDIDATE_VERSION" \
+              --expected-version-code "$CANDIDATE_VERSION_CODE" \
+              --expected-published-version "$PUBLISHED_ANDROID_VERSION" \
+              --minimum-webview-major 90 \
+              --expected-webview-package "$WEBVIEW_PACKAGE" \
+              --expected-webview-version "$WEBVIEW_VERSION" \
+              --boot-timeout 60 \
+              --ui-timeout 60 \
+              --update-timeout 120
+
+            stop_current
+          done
+          trap - EXIT
       - name: Preserve bounded failure evidence
         if: failure()
         shell: bash
@@ -398,28 +518,33 @@ jobs:
             } > "$EVIDENCE/workflow-failure-receipt.txt"
             exit 0
           fi
-          if [ ! -f "$EVIDENCE/emulator.pid" ]; then
+          if [ ! -f "$EVIDENCE/current-emulator.pid" ]; then
             {
               echo "evidenceCollection=notStarted"
               echo "reason=emulator-not-started"
             } > "$EVIDENCE/workflow-failure-receipt.txt"
             exit 0
           fi
-          adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$EVIDENCE/workflow-failure.png"
+          current_evidence="$EVIDENCE"
+          if [ -s "$EVIDENCE/current-run.txt" ]; then
+            current_evidence="$EVIDENCE/run-$(cat "$EVIDENCE/current-run.txt")"
+          fi
+          mkdir -p "$current_evidence"
+          adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$current_evidence/workflow-failure.png"
           adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
-            > "$EVIDENCE/workflow-failure-activity.txt"
+            > "$current_evidence/workflow-failure-activity.txt"
           adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
-            > "$EVIDENCE/workflow-failure-logcat.txt"
+            > "$current_evidence/workflow-failure-logcat.txt"
           adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print data_app_anr \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
-            > "$EVIDENCE/workflow-failure-anr.txt"
+            > "$current_evidence/workflow-failure-anr.txt"
           timeout 30s adb -s "$EMULATOR_SERIAL" shell dumpsys SurfaceFlinger \
             | head -c 1048576 \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
-            > "$EVIDENCE/workflow-failure-surfaceflinger.txt"
-          echo "evidenceCollection=attempted" > "$EVIDENCE/workflow-failure-receipt.txt"
+            > "$current_evidence/workflow-failure-surfaceflinger.txt"
+          echo "evidenceCollection=attempted" > "$current_evidence/workflow-failure-receipt.txt"
 
       - name: Stop the owned emulator
         if: always()
@@ -427,37 +552,37 @@ jobs:
         run: |
           set +e
           mkdir -p "$EVIDENCE"
-          if [ ! -f "$EVIDENCE/emulator.pid" ]; then
-            echo "emulatorState=notStarted" > "$EVIDENCE/cleanup.txt"
+          if [ ! -f "$EVIDENCE/current-emulator.pid" ]; then
+            echo "emulatorState=notStarted" > "$EVIDENCE/final-cleanup.txt"
             exit 0
           fi
           if ! command -v adb >/dev/null 2>&1; then
-            kill "$(cat "$EVIDENCE/emulator.pid")" 2>/dev/null || true
+            kill "$(cat "$EVIDENCE/current-emulator.pid")" 2>/dev/null || true
             {
               echo "emulatorState=started"
               echo "cleanupState=failed"
               echo "processSignalAttempted=true"
               echo "reason=adb-unavailable"
-            } > "$EVIDENCE/cleanup.txt"
+            } > "$EVIDENCE/final-cleanup.txt"
             echo "::error::ADB is unavailable after the emulator was started."
             exit 1
           fi
           adb -s "$EMULATOR_SERIAL" emu kill
           for _ in 1 2 3 4 5; do
             if ! adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
-              echo "emulatorStopped=true" > "$EVIDENCE/cleanup.txt"
+              echo "emulatorStopped=true" > "$EVIDENCE/final-cleanup.txt"
               exit 0
             fi
             sleep 2
           done
-          kill "$(cat "$EVIDENCE/emulator.pid")" 2>/dev/null || true
+          kill "$(cat "$EVIDENCE/current-emulator.pid")" 2>/dev/null || true
           sleep 2
           if adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
-            echo "emulatorStopped=false" > "$EVIDENCE/cleanup.txt"
+            echo "emulatorStopped=false" > "$EVIDENCE/final-cleanup.txt"
             echo "::error::The owned emulator did not stop."
             exit 1
           fi
-          echo "emulatorStopped=true" > "$EVIDENCE/cleanup.txt"
+          echo "emulatorStopped=true" > "$EVIDENCE/final-cleanup.txt"
 
       - name: Upload runtime evidence
         if: always()
