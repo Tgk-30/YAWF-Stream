@@ -77,9 +77,12 @@ The artifact directory contains:
   values for signing, deployment-minimum rewriting, and DYLD use.
 - `yawf-macos-media-runtime-source-<identity>.tar.gz`: acquired component
   source archives and exact Git source trees without `.git`, compiled output,
-  build directories, or temporary files. It includes license notices,
-  checksums, a source-bundle manifest, this driver and document, the manifest,
-  patch, and x264 build addition. Repository-relative paths are preserved.
+  or temporary files. It includes license notices, checksums, a source-bundle
+  manifest, this driver and document, the manifest, patch, and x264 build
+  addition. Repository-relative paths are preserved.
+  Known in-tree build products, including SVT-AV1 `Bin/Release` libraries and
+  application binaries, are filtered while source archives, notices,
+  configure inputs, and build scripts remain present.
 - `SHA256SUMS`: hashes for every distributable file in the artifact directory.
 
 Root integration must relocate the dylib closure, verify every Mach-O slice

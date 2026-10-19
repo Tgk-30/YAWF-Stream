@@ -398,7 +398,8 @@ check(
   "legacy WebViews receive viewport fallbacks before dynamic viewport units",
   /\.full-viewport-boot\s*\{[\s\S]{0,180}min-height:\s*100vh;\s*min-height:\s*100dvh;/.test(appCss) &&
     /@media\s*\(max-width:\s*699px\),\s*\(max-width:\s*950px\)\s*and\s*\(max-height:\s*500px\)[\s\S]{0,320}\.app-content\s*\{[\s\S]{0,260}height:\s*100vh;\s*height:\s*100dvh;/.test(appCss) &&
-    (playerPauseCss.match(/max-height:\s*calc\(\s*100vh[\s\S]{0,360}max-height:\s*calc\(\s*100dvh/g)?.length ?? 0) === 2 &&
+    // Two webview surfaces and the native pause surface each retain a fallback.
+    (playerPauseCss.match(/max-height:\s*calc\(\s*100vh[\s\S]{0,360}max-height:\s*calc\(\s*100dvh/g)?.length ?? 0) === 3 &&
     (playerInfoCss.match(/max-height:\s*calc\(100vh[\s\S]{0,240}max-height:\s*calc\(100dvh/g)?.length ?? 0) === 2 &&
     /\.nav-rail-more-scrim\s*\{[\s\S]{0,320}height:\s*100vh;\s*height:\s*100dvh;/.test(navCss) &&
     mobileMoreSheetRule.includes("max-height: min(") &&

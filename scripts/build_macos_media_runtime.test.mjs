@@ -17,6 +17,7 @@ import {
   assertNativeArchitecture,
   buildMacosMediaRuntime,
   collectSourceInventory,
+  copyComponentSources,
   createBuildPlan,
   createSourceBundleManifest,
   loadMediaRuntimeManifest,
@@ -242,6 +243,46 @@ test("inventories component archives and notices while excluding Git metadata", 
       ),
     );
     assert.equal(bundleManifest.componentSources, inventory);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("copies component source inputs without generated SVT release binaries", () => {
+  const root = fixture();
+  const source = join(root, "sources");
+  const destination = join(root, "bundle");
+  const svtRelease = join(
+    source,
+    "libjxl",
+    "third_party",
+    "svt-av1",
+    "Bin",
+    "Release",
+  );
+  try {
+    mkdirSync(svtRelease, { recursive: true });
+    mkdirSync(join(source, "libjxl", ".git"), { recursive: true });
+    mkdirSync(join(source, "libjxl", "Build", "linux"), { recursive: true });
+    writeFileSync(join(svtRelease, "libSvtAv1Enc.3.dylib"), "compiled library");
+    writeFileSync(join(svtRelease, "libSvtAv1Enc.a"), "compiled archive");
+    writeFileSync(join(svtRelease, "SvtAv1EncApp"), "compiled executable");
+    writeFileSync(join(svtRelease, "NOTICE"), "upstream notice");
+    writeFileSync(join(source, "libjxl", "configure"), "configure source");
+    writeFileSync(join(source, "libjxl", "Build", "linux", "build.sh"), "build source");
+    writeFileSync(join(source, "svt-av1-source.tar.gz"), "component archive");
+    writeFileSync(join(source, "libjxl", ".git", "config"), "checkout metadata");
+
+    copyComponentSources(source, destination);
+
+    assert.equal(existsSync(join(destination, "libjxl", "third_party", "svt-av1", "Bin", "Release", "libSvtAv1Enc.3.dylib")), false);
+    assert.equal(existsSync(join(destination, "libjxl", "third_party", "svt-av1", "Bin", "Release", "libSvtAv1Enc.a")), false);
+    assert.equal(existsSync(join(destination, "libjxl", "third_party", "svt-av1", "Bin", "Release", "SvtAv1EncApp")), false);
+    assert.equal(existsSync(join(destination, "libjxl", "third_party", "svt-av1", "Bin", "Release", "NOTICE")), true);
+    assert.equal(existsSync(join(destination, "libjxl", "configure")), true);
+    assert.equal(existsSync(join(destination, "libjxl", "Build", "linux", "build.sh")), true);
+    assert.equal(existsSync(join(destination, "svt-av1-source.tar.gz")), true);
+    assert.equal(existsSync(join(destination, "libjxl", ".git")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

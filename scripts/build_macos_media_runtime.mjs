@@ -546,14 +546,33 @@ export function verifyFfmpegBuildConfiguration(recipeDirectory, arch) {
   };
 }
 
-function copyComponentSources(source, destination) {
+const GENERATED_COMPONENT_BINARY_DIRECTORY = /(?:^|\/)Bin\/Release(?:\/|$)/;
+const COMPILED_BINARY_FILENAME = /(?:\.dylib|\.so(?:\.\d+)*|\.a|\.o|\.obj|\.dll|\.exe|\.pdb)$/i;
+const SVT_RELEASE_EXECUTABLE = /^SvtAv1[^/]*App$/;
+
+function excludeComponentSourcePath(relativePath) {
+  const normalized = relativePath.split(sep).join("/");
+  const parts = normalized.split("/");
+  if (
+    parts.some(
+      (part) =>
+        part === ".git" ||
+        part.startsWith(".tmp_extract_") ||
+        part.endsWith(".partial"),
+    )
+  ) {
+    return true;
+  }
+  if (!GENERATED_COMPONENT_BINARY_DIRECTORY.test(normalized)) return false;
+  const name = basename(normalized);
+  return COMPILED_BINARY_FILENAME.test(name) || SVT_RELEASE_EXECUTABLE.test(name);
+}
+
+export function copyComponentSources(source, destination) {
   cpSync(source, destination, {
     recursive: true,
     dereference: false,
-    filter: (path) => {
-      const parts = relative(source, path).split(sep);
-      return !parts.some((part) => part === ".git" || part.startsWith(".tmp_extract_") || part.endsWith(".partial"));
-    },
+    filter: (path) => !excludeComponentSourcePath(relative(source, path)),
   });
 }
 
@@ -596,7 +615,7 @@ export function createSourceBundleManifest(manifest, sourceInventory) {
     componentSources: sourceInventory,
     excluded: [
       "upstream recipe archive and tree because redistribution rights are unresolved",
-      "compiled binaries and build directories",
+      "known generated compiled binaries from in-tree build output directories",
       ".git metadata and temporary files",
     ],
   };
