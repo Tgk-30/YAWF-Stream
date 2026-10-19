@@ -152,12 +152,28 @@ jobs:
           test -r /dev/kvm -a -w /dev/kvm
           stat -c 'kvmOwner=%u kvmGroup=%g kvmMode=%a' /dev/kvm \
             > "$EVIDENCE/kvm.txt"
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-android"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME"
+          {
+            echo "ANDROID_USER_HOME=$ANDROID_USER_HOME"
+            echo "ANDROID_EMULATOR_HOME=$ANDROID_EMULATOR_HOME"
+            echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME"
+          } >> "$GITHUB_ENV"
+          command -v avdmanager | tee "$EVIDENCE/avdmanager-path.txt"
+          sdkmanager --version | tee "$EVIDENCE/sdkmanager-version.txt"
+          emulator -version | tee "$EVIDENCE/emulator-version.txt"
           printf 'no\n' | avdmanager create avd \
             --force \
             --name "$AVD_NAME" \
             --package "system-images;android-30;google_apis;x86_64" \
-            --device "pixel"
-          emulator -list-avds | grep -Fx "$AVD_NAME"
+            --device "pixel" \
+            --path "$ANDROID_AVD_HOME/$AVD_NAME" \
+            2>&1 | tee "$EVIDENCE/avd-create.txt"
+          emulator -list-avds 2>&1 | tee "$EVIDENCE/avd-list.txt"
+          grep -Fx "$AVD_NAME" "$EVIDENCE/avd-list.txt"
+          avdmanager list avd -c 2>&1 | tee "$EVIDENCE/avdmanager-list.txt"
 
       - name: Start the single isolated API 30 emulator
         shell: bash
