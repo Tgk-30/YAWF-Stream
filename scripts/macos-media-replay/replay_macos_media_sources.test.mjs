@@ -147,6 +147,16 @@ test("matches the reviewed command snapshot for every package", () => {
   assert.deepEqual(actual, expected);
 });
 
+test("uses MuJS release and install-shared without the nonexistent shared target", () => {
+  const entry = PLAN.packages.find((candidate) => candidate.id === "mujs");
+  assert.deepEqual(entry.options, ["release"]);
+  const commands = renderPackageCommands(entry, fixedContext());
+  assert.deepEqual(commands.map((command) => command.args.at(-1)), [
+    "release", "install", "install-shared",
+  ]);
+  assert.ok(commands.every((command) => command.command === FIXED_TOOLS.make));
+});
+
 test("confines the effective install prefix for every package and adapter", () => {
   const context = fixedContext();
   const prefixForms = [

@@ -145,17 +145,6 @@
         "prefix=/owned/replay/install/arm64",
         "CC=/tools/clang",
         "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2",
-        "shared"
-      ],
-      "cwd": "/owned/replay/sources/mujs-1.3.9"
-    },
-    {
-      "command": "/tools/make",
-      "args": [
-        "-j4",
-        "prefix=/owned/replay/install/arm64",
-        "CC=/tools/clang",
-        "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2",
         "install"
       ],
       "cwd": "/owned/replay/sources/mujs-1.3.9"

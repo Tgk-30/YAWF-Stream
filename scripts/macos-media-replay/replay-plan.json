@@ -73,8 +73,7 @@
       "adapter": "mujs-make",
       "dependencies": [],
       "options": [
-        "release",
-        "shared"
+        "release"
       ],
       "expected": [
         "lib/libmujs.dylib"
