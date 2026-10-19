@@ -143,12 +143,13 @@ jobs:
               "owned-output/replay-arm64-macos11/media-smoke/RESULTS.json",
               "owned-output/replay-arm64-macos11/media-smoke/*-stdout.log",
               "owned-output/replay-arm64-macos11/media-smoke/*-stderr.log",
-              "owned-output/replay-arm64-macos11/builds/*/CMakeCache.txt",
-              "owned-output/replay-arm64-macos11/builds/*/meson-info/intro-buildoptions.json",
-              "owned-output/replay-arm64-macos11/builds/*/configdata.pm",
-              "owned-output/replay-arm64-macos11/builds/*/config.h",
-              "owned-output/replay-arm64-macos11/builds/*/config.mak",
-              "owned-output/replay-arm64-macos11/builds/*/ffbuild/config.mak",
+              "owned-output/replay-arm64-macos11/build/*/CMakeCache.txt",
+              "owned-output/replay-arm64-macos11/build/*/meson-info/intro-buildoptions.json",
+              "owned-output/replay-arm64-macos11/build/*/meson-private/cmd_line.txt",
+              "owned-output/replay-arm64-macos11/build/*/configdata.pm",
+              "owned-output/replay-arm64-macos11/build/*/config.h",
+              "owned-output/replay-arm64-macos11/build/*/config.mak",
+              "owned-output/replay-arm64-macos11/build/*/ffbuild/config.mak",
           ]
 
           for pattern in patterns:

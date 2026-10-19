@@ -133,14 +133,15 @@ test("confines the effective install prefix for every package and adapter", () =
   }
 });
 
-test("gives every Meson setup explicit release, shared, and owned-prefix data", () => {
+test("gives every Meson setup exactly one explicit release, shared, and owned-prefix value", () => {
   const context = fixedContext();
   for (const entry of PLAN.packages.filter((candidate) => candidate.adapter === "meson")) {
     const setup = renderPackageCommands(entry, context)[0];
-    assert.ok(setup.args.includes(`--prefix=${context.prefix}`), entry.id);
-    assert.ok(setup.args.includes("--buildtype=release"), entry.id);
-    assert.ok(setup.args.includes("--default-library=shared"), entry.id);
-    assert.ok(setup.args.includes("--wrap-mode=nofallback"), entry.id);
+    assert.equal(setup.args.filter((argument) => argument === `--prefix=${context.prefix}` || argument === `-Dprefix=${context.prefix}`).length, 1, `${entry.id} prefix`);
+    assert.equal(setup.args.filter((argument) => argument === "--buildtype=release" || argument === "-Dbuildtype=release").length, 1, `${entry.id} buildtype`);
+    assert.equal(setup.args.filter((argument) => argument === "--default-library=shared" || argument === "-Ddefault_library=shared").length, 1, `${entry.id} default library`);
+    assert.equal(setup.args.filter((argument) => argument === "--wrap-mode=nofallback").length, 1, `${entry.id} fallback mode`);
+    assert.ok(setup.args.includes(`--native-file=${context.machineFile}`), entry.id);
   }
   const root = temporary();
   context.machineFile = join(root, "machine.ini");

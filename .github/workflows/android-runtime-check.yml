@@ -36,6 +36,14 @@ jobs:
       AVD_NAME: yawf-phone-api30-runtime
       EMULATOR_SERIAL: emulator-5554
       EMULATOR_GPU: swiftshader_indirect
+      WEBVIEW_SOURCE_COMMIT: c8187ca9e2dd5fd69f108c67e9aea44be37fb4e6
+      WEBVIEW_GIT_BLOB_SHA1: 6df66d443a0206d856b4e01465230fb5b2acd418
+      WEBVIEW_BASE64_SIZE: "122983788"
+      WEBVIEW_APK_SIZE: "92237839"
+      WEBVIEW_APK_SHA256: a566260ccd6cef57e43cbdc99ddf4a967da9782e75effef163940ed3e83682ef
+      WEBVIEW_PACKAGE: com.android.webview
+      WEBVIEW_VERSION: 91.0.4472.114
+      WEBVIEW_VERSION_CODE: "447211456"
 
     steps:
       - name: Checkout runtime driver
@@ -139,6 +147,85 @@ jobs:
             | sed -n '/certificate SHA-256 digest:/p' \
             > "$EVIDENCE/apk-signer.txt"
 
+      - name: Fetch and verify the pinned CI-only WebView provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          WEBVIEW_APK="$RUNNER_TEMP/yawf-ci-webview91-x86_64.apk"
+          encoded="$RUNNER_TEMP/yawf-ci-webview91-x86_64.apk.base64"
+          source_url="https://android.googlesource.com/platform/external/chromium-webview/+/$WEBVIEW_SOURCE_COMMIT/prebuilt/x86_64/webview.apk?format=TEXT"
+          timeout 360s curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            --proto-redir '=https' \
+            --tlsv1.2 \
+            --retry 2 \
+            --retry-connrefused \
+            --retry-max-time 180 \
+            --connect-timeout 20 \
+            --max-time 120 \
+            --max-filesize "$WEBVIEW_BASE64_SIZE" \
+            --output "$encoded" \
+            "$source_url"
+          test "$(stat -c %s "$encoded")" = "$WEBVIEW_BASE64_SIZE"
+          timeout 90s base64 --decode "$encoded" > "$WEBVIEW_APK"
+          test "$(stat -c %s "$WEBVIEW_APK")" = "$WEBVIEW_APK_SIZE"
+          printf '%s  %s\n' "$WEBVIEW_APK_SHA256" "$WEBVIEW_APK" | sha256sum -c -
+          WEBVIEW_APK="$WEBVIEW_APK" \
+          WEBVIEW_APK_SIZE="$WEBVIEW_APK_SIZE" \
+          WEBVIEW_GIT_BLOB_SHA1="$WEBVIEW_GIT_BLOB_SHA1" \
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          apk = Path(os.environ["WEBVIEW_APK"])
+          expected_size = int(os.environ["WEBVIEW_APK_SIZE"])
+          digest = hashlib.sha1()
+          digest.update(f"blob {expected_size}\0".encode())
+          with apk.open("rb") as source:
+              while chunk := source.read(1024 * 1024):
+                  digest.update(chunk)
+          assert apk.stat().st_size == expected_size
+          assert digest.hexdigest() == os.environ["WEBVIEW_GIT_BLOB_SHA1"]
+          PY
+          test "$(apkanalyzer manifest application-id "$WEBVIEW_APK")" = "$WEBVIEW_PACKAGE"
+          test "$(apkanalyzer manifest version-name "$WEBVIEW_APK")" = "$WEBVIEW_VERSION"
+          test "$(apkanalyzer manifest version-code "$WEBVIEW_APK")" = "$WEBVIEW_VERSION_CODE"
+          test "$(apkanalyzer manifest min-sdk "$WEBVIEW_APK")" = "21"
+          test "$(apkanalyzer manifest target-sdk "$WEBVIEW_APK")" = "31"
+          WEBVIEW_APK="$WEBVIEW_APK" python3 - <<'PY'
+          import os
+          import zipfile
+
+          with zipfile.ZipFile(os.environ["WEBVIEW_APK"]) as archive:
+              abis = sorted(
+                  {name.split("/", 2)[1] for name in archive.namelist() if name.startswith("lib/") and name.count("/") >= 2}
+              )
+          assert "x86_64" in abis, abis
+          assert set(abis) <= {"x86", "x86_64"}, abis
+          PY
+          apksigner verify --print-certs "$WEBVIEW_APK" \
+            | sed -n '/certificate SHA-256 digest:/p' \
+            > "$EVIDENCE/webview-provider-signer.txt"
+          test -s "$EVIDENCE/webview-provider-signer.txt"
+          {
+            echo "sourceCommit=$WEBVIEW_SOURCE_COMMIT"
+            echo "gitBlobSha1=$WEBVIEW_GIT_BLOB_SHA1"
+            echo "apkBytes=$WEBVIEW_APK_SIZE"
+            echo "apkSha256=$WEBVIEW_APK_SHA256"
+            echo "package=$WEBVIEW_PACKAGE"
+            echo "version=$WEBVIEW_VERSION"
+            echo "versionCode=$WEBVIEW_VERSION_CODE"
+            echo "abis=x86,x86_64"
+            echo "scope=isolated-ci-only"
+            echo "shippingProvider=false"
+            echo "currentSecurityBrowserProof=false"
+          } > "$EVIDENCE/webview-provider-download.txt"
+          echo "WEBVIEW_APK=$WEBVIEW_APK" >> "$GITHUB_ENV"
+          rm "$encoded"
+
       - name: Test the bounded UI driver
         run: python3 scripts/android_phone_runtime_check.py --self-test
 
@@ -210,6 +297,75 @@ jobs:
             > "$EVIDENCE/emulator.log" 2>&1 &
           echo "$!" > "$EVIDENCE/emulator.pid"
 
+      - name: Install and select the pinned CI-only WebView provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 300))
+          until [ "$(adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null || true)" = "device" ] && \
+            [ "$(adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::Emulator did not boot before the WebView provider deadline" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          api_level="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')"
+          build_type="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.type | tr -d '\r')"
+          test "$api_level" = "30"
+          test "$build_type" = "userdebug"
+          {
+            echo "apiLevel=$api_level"
+            echo "buildType=$build_type"
+            echo "freshOwnedEmulator=true"
+          } > "$EVIDENCE/webview-emulator-precondition.txt"
+          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate \
+            > "$EVIDENCE/webview-provider-stock.txt"
+          timeout 180s adb -s "$EMULATOR_SERIAL" install --no-streaming -r "$WEBVIEW_APK" \
+            | tee "$EVIDENCE/webview-provider-install.txt"
+          grep -Eq '^Success\r?$' "$EVIDENCE/webview-provider-install.txt"
+          adb -s "$EMULATOR_SERIAL" shell cmd webviewupdate set-webview-implementation "$WEBVIEW_PACKAGE" \
+            > "$EVIDENCE/webview-provider-select.txt"
+          sleep 2
+          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate \
+            > "$EVIDENCE/webview-provider-after.txt"
+          adb -s "$EMULATOR_SERIAL" shell dumpsys package "$WEBVIEW_PACKAGE" \
+            > "$EVIDENCE/webview-provider-package.txt"
+          WEBVIEW_PACKAGE="$WEBVIEW_PACKAGE" \
+          WEBVIEW_VERSION="$WEBVIEW_VERSION" \
+          WEBVIEW_VERSION_CODE="$WEBVIEW_VERSION_CODE" \
+          EVIDENCE="$EVIDENCE" \
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          evidence = Path(os.environ["EVIDENCE"])
+          current = (evidence / "webview-provider-after.txt").read_text()
+          match = re.search(
+              r"Current WebView package \(name, version\): \(([^,]+),\s*([^)]+)\)",
+              current,
+          )
+          assert match is not None
+          assert match.group(1).strip() == os.environ["WEBVIEW_PACKAGE"]
+          assert match.group(2).strip() == os.environ["WEBVIEW_VERSION"]
+
+          package_dump = (evidence / "webview-provider-package.txt").read_text()
+          assert re.search(rf"\bversionCode={re.escape(os.environ['WEBVIEW_VERSION_CODE'])}\b", package_dump)
+          assert re.search(rf"\bversionName={re.escape(os.environ['WEBVIEW_VERSION'])}(?:\s|$)", package_dump)
+          PY
+          provider_path="$(adb -s "$EMULATOR_SERIAL" shell pm path "$WEBVIEW_PACKAGE" \
+            | tr -d '\r' | sed -n 's/^package://p' | head -n 1)"
+          test -n "$provider_path"
+          installed_sha="$(adb -s "$EMULATOR_SERIAL" shell sha256sum "$provider_path" | awk '{print $1}')"
+          test "$installed_sha" = "$WEBVIEW_APK_SHA256"
+          {
+            echo "installedApkSha256=$installed_sha"
+            echo "scope=isolated-ci-only"
+            echo "shippingProvider=false"
+            echo "currentSecurityBrowserProof=false"
+          } > "$EVIDENCE/webview-provider-installed.txt"
+
       - name: Run setup and native update UI through real input
         shell: bash
         run: |
@@ -222,6 +378,9 @@ jobs:
             --expected-sha256 "$CANDIDATE_APK_SHA256" \
             --expected-version "$CANDIDATE_VERSION" \
             --expected-version-code "$CANDIDATE_VERSION_CODE" \
+            --minimum-webview-major 90 \
+            --expected-webview-package "$WEBVIEW_PACKAGE" \
+            --expected-webview-version "$WEBVIEW_VERSION" \
             --boot-timeout 300 \
             --ui-timeout 60 \
             --update-timeout 120

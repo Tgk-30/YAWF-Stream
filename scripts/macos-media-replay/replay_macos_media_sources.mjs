@@ -254,8 +254,7 @@ export function renderPackageCommands(entry, context) {
           command: context.tool("meson"),
           args: [
             "setup", build, source, `--native-file=${context.machineFile}`,
-            `--prefix=${context.prefix}`, "--buildtype=release", "--default-library=shared",
-            "--wrap-mode=nofallback", ...options,
+            `--prefix=${context.prefix}`, "--wrap-mode=nofallback", ...options,
           ],
           cwd: context.child,
         },

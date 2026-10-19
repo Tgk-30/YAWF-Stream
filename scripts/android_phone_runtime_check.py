@@ -75,6 +75,12 @@ class UiNode:
         return tuple(value for value in (self.text, self.description) if value)
 
 
+@dataclasses.dataclass(frozen=True)
+class WebViewProvider:
+    package_name: str
+    version_name: str
+
+
 def parse_bounds(value: str) -> Bounds:
     match = BOUNDS_RE.fullmatch(value)
     if match is None:
@@ -164,6 +170,41 @@ def bounded_text(value: str, max_bytes: int) -> str:
     return kept + f"\n<truncated after {max_bytes} bytes>\n"
 
 
+def parse_webview_provider(value: str) -> WebViewProvider:
+    match = re.search(
+        r"Current WebView package \(name, version\): \(([^,]+),\s*([^)]+)\)",
+        value,
+    )
+    if match is None:
+        raise RuntimeCheckError("Could not determine the current Android WebView provider")
+    return WebViewProvider(
+        package_name=match.group(1).strip(),
+        version_name=match.group(2).strip(),
+    )
+
+
+def validate_webview_provider(
+    provider: WebViewProvider,
+    *,
+    minimum_major: int,
+    expected_package: str | None,
+    expected_version: str | None,
+) -> int:
+    version_match = re.fullmatch(r"(\d+)(?:\..*)?", provider.version_name)
+    if version_match is None:
+        raise RuntimeCheckError("Current Android WebView has an invalid version")
+    major = int(version_match.group(1))
+    if major < minimum_major:
+        raise RuntimeCheckError(
+            f"Current Android WebView major {major} is below required {minimum_major}"
+        )
+    if expected_package is not None and provider.package_name != expected_package:
+        raise RuntimeCheckError("Current Android WebView package does not match the CI pin")
+    if expected_version is not None and provider.version_name != expected_version:
+        raise RuntimeCheckError("Current Android WebView version does not match the CI pin")
+    return major
+
+
 def find_binding_terms(nodes: Iterable[UiNode]) -> list[str]:
     text = " ".join(label for node in nodes for label in node.labels).casefold()
     forbidden = ("terms of service", "license agreement", "user agreement", "binding terms")
@@ -241,6 +282,9 @@ class RuntimeDriver:
         expected_sha256: str,
         expected_version: str,
         expected_version_code: int,
+        minimum_webview_major: int,
+        expected_webview_package: str | None,
+        expected_webview_version: str | None,
         boot_timeout: int,
         ui_timeout: int,
         update_timeout: int,
@@ -251,6 +295,9 @@ class RuntimeDriver:
         self.expected_sha256 = expected_sha256.casefold()
         self.expected_version = expected_version
         self.expected_version_code = expected_version_code
+        self.minimum_webview_major = minimum_webview_major
+        self.expected_webview_package = expected_webview_package
+        self.expected_webview_version = expected_webview_version
         self.boot_timeout = boot_timeout
         self.ui_timeout = ui_timeout
         self.update_timeout = update_timeout
@@ -293,6 +340,35 @@ class RuntimeDriver:
         if actual != self.expected_sha256:
             raise RuntimeCheckError(f"Candidate SHA-256 mismatch: {actual}")
         self.note(f"Candidate SHA-256 verified: {actual}")
+
+    def verify_webview_provider(self) -> None:
+        provider_dump = self.adb.shell("dumpsys", "webviewupdate", timeout=60)
+        self.write_text("webview-provider-driver-dumpsys.txt", provider_dump)
+        provider = parse_webview_provider(provider_dump)
+        version_match = re.fullmatch(r"(\d+)(?:\..*)?", provider.version_name)
+        parsed_major = int(version_match.group(1)) if version_match is not None else -1
+        self.write_text(
+            "webview-provider-driver-receipt.txt",
+            f"currentPackage={provider.package_name}\n"
+            f"currentVersion={provider.version_name}\n"
+            f"currentMajor={parsed_major}\n"
+            f"minimumMajor={self.minimum_webview_major}\n"
+            f"expectedPackage={self.expected_webview_package or '<not-pinned>'}\n"
+            f"expectedVersion={self.expected_webview_version or '<not-pinned>'}\n"
+            "scope=isolated-ci-only\n"
+            "shippingProvider=false\n"
+            "currentSecurityBrowserProof=false\n",
+        )
+        major = validate_webview_provider(
+            provider,
+            minimum_major=self.minimum_webview_major,
+            expected_package=self.expected_webview_package,
+            expected_version=self.expected_webview_version,
+        )
+        self.note(
+            f"Isolated CI WebView compatibility provider verified at major {major}; "
+            "not a shipping or current-security-browser claim"
+        )
 
     def install(self) -> None:
         result = self.adb.run(
@@ -512,6 +588,7 @@ class RuntimeDriver:
     def run_flow(self) -> None:
         self.check_apk_hash()
         self.wait_for_boot()
+        self.verify_webview_provider()
         self.install()
         self.verify_installed_identity()
         self.start_app()
@@ -622,6 +699,9 @@ def execute(args: argparse.Namespace) -> int:
         expected_sha256=args.expected_sha256,
         expected_version=args.expected_version,
         expected_version_code=args.expected_version_code,
+        minimum_webview_major=args.minimum_webview_major,
+        expected_webview_package=args.expected_webview_package,
+        expected_webview_version=args.expected_webview_version,
         boot_timeout=args.boot_timeout,
         ui_timeout=args.ui_timeout,
         update_timeout=args.update_timeout,
@@ -738,6 +818,51 @@ class ParserTests(unittest.TestCase):
     def test_redacts_web_urls(self) -> None:
         self.assertEqual(redact_text("visit https://example.test/a?q=1 now"), "visit <redacted-url> now")
 
+    def test_parses_current_webview_provider(self) -> None:
+        dump = (
+            "Current WebView package (name, version): "
+            "(com.android.webview, 91.0.4472.114)\n"
+        )
+        self.assertEqual(
+            parse_webview_provider(dump),
+            WebViewProvider("com.android.webview", "91.0.4472.114"),
+        )
+        with self.assertRaisesRegex(RuntimeCheckError, "Could not determine"):
+            parse_webview_provider("Current WebView package is null")
+
+    def test_webview_provider_policy_requires_minimum_and_exact_identity(self) -> None:
+        provider = WebViewProvider("com.android.webview", "91.0.4472.114")
+        self.assertEqual(
+            validate_webview_provider(
+                provider,
+                minimum_major=90,
+                expected_package="com.android.webview",
+                expected_version="91.0.4472.114",
+            ),
+            91,
+        )
+        with self.assertRaisesRegex(RuntimeCheckError, "below required"):
+            validate_webview_provider(
+                WebViewProvider("com.android.webview", "83.0.4103.106"),
+                minimum_major=90,
+                expected_package="com.android.webview",
+                expected_version=None,
+            )
+        with self.assertRaisesRegex(RuntimeCheckError, "package does not match"):
+            validate_webview_provider(
+                provider,
+                minimum_major=90,
+                expected_package="com.google.android.webview",
+                expected_version=None,
+            )
+        with self.assertRaisesRegex(RuntimeCheckError, "version does not match"):
+            validate_webview_provider(
+                provider,
+                minimum_major=90,
+                expected_package="com.android.webview",
+                expected_version="91.0.4472.115",
+            )
+
     def test_bounds_large_diagnostic_text(self) -> None:
         self.assertEqual(bounded_text("abc", 3), "abc")
         self.assertEqual(
@@ -768,6 +893,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--expected-sha256")
     parser.add_argument("--expected-version", default="2.3.23")
     parser.add_argument("--expected-version-code", type=int, default=2003023)
+    parser.add_argument("--minimum-webview-major", type=int, default=90)
+    parser.add_argument("--expected-webview-package")
+    parser.add_argument("--expected-webview-version")
     parser.add_argument("--boot-timeout", type=int, default=300)
     parser.add_argument("--ui-timeout", type=int, default=60)
     parser.add_argument("--update-timeout", type=int, default=120)
