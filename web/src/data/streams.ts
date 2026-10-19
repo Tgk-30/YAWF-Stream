@@ -19,7 +19,12 @@ import type {
   IndexerManager,
   IndexerSearchError,
 } from "../services/indexers/IndexerManager";
-import { VideoQuality, type TorrentResult } from "../services/indexers/models";
+import {
+  torrentResultSelectionKey,
+  torrentResultHasUsableFileSelection,
+  VideoQuality,
+  type TorrentResult,
+} from "../services/indexers/models";
 import type { AppSettings, StreamMaxQuality } from "./settings";
 import { fetchServerStreams } from "../lib/serverApi";
 import { configuredServerURL } from "../lib/serverMode";
@@ -137,30 +142,35 @@ export function filterStreamRows(rows: StreamRow[], settings: AppSettings): Stre
   return rows.filter((row) => streamMatchesDataSaver(row, settings));
 }
 
-/** Collapse cross-indexer duplicates: the SAME torrent (infoHash) is often
+/** Collapse cross-indexer duplicates of the same torrent/file selection. A
+ * single torrent can expose multiple explicit Stremio file indices, which are
+ * different playable rows and must not collapse.
  * returned by several indexers, swamping the stream list with identical entries.
  * Keep one row per infoHash - the most useful variant (prefer a cached copy,
  * then more seeders) - preserving each release's first-seen slot. Pure +
  * automatic (no information is lost: it's the same torrent). */
 export function dedupeStreamRows(rows: StreamRow[]): StreamRow[] {
-  const byHash = new Map<string, StreamRow>();
+  const bySelection = new Map<string, StreamRow>();
   const order: string[] = [];
   for (const row of rows) {
-    const key = row.result.infoHash.toLowerCase();
-    const existing = byHash.get(key);
+    const key = torrentResultSelectionKey(row.result);
+    const existing = bySelection.get(key);
     if (existing == null) {
-      byHash.set(key, row);
+      bySelection.set(key, row);
       order.push(key);
     } else {
-      byHash.set(key, betterDuplicate(existing, row));
+      bySelection.set(key, betterDuplicate(existing, row));
     }
   }
-  return order.map((k) => byHash.get(k)!);
+  return order.map((k) => bySelection.get(k)!);
 }
 
 /** Pick the more useful of two rows for the same torrent: a cached copy beats an
  * uncached one; otherwise the one with more seeders. */
 function betterDuplicate(a: StreamRow, b: StreamRow): StreamRow {
+  const aUsable = torrentResultHasUsableFileSelection(a.result);
+  const bUsable = torrentResultHasUsableFileSelection(b.result);
+  if (aUsable !== bUsable) return aUsable ? a : b;
   if ((a.cachedOn != null) !== (b.cachedOn != null)) {
     return a.cachedOn != null ? a : b;
   }

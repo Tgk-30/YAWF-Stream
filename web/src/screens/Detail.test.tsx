@@ -291,6 +291,21 @@ vi.mock("../components/StreamPicker", () => ({
       >
         resolve-and-play-stream
       </button>
+      <button
+        data-testid="resolve-exact-stream"
+        onClick={() => {
+          const source = {
+            infoHash: "HASH",
+            title: "collection.mkv",
+            codec: "H.265",
+            fileIndex: 0,
+            fileNameHint: "Requested.Small.mp4",
+          };
+          void resolveStream({ result: source, cachedOn: "torbox" });
+        }}
+      >
+        resolve-exact-stream
+      </button>
     </div>
   ),
 }));
@@ -475,7 +490,12 @@ function streamsState(): StreamsState {
   };
 }
 
-function downloadRow(title: string, sizeBytes: number) {
+function downloadRow(
+  title: string,
+  sizeBytes: number,
+  fileIndex: number | null = null,
+  fileNameHint: string | null = null,
+) {
   return {
     result: TorrentResult.fromSearch({
       infoHash: title,
@@ -484,6 +504,8 @@ function downloadRow(title: string, sizeBytes: number) {
       seeders: 10,
       leechers: 0,
       indexerName: "Test source",
+      fileIndex,
+      fileNameHint,
     }),
     cachedOn: null,
   };
@@ -1273,6 +1295,23 @@ describe("Detail play", () => {
     expect(screen.getByTestId("player")).toHaveAttribute("data-handoff-rate", "1.5");
   });
 
+  it("forwards an exact selector, including index zero, to local debrid", async () => {
+    const resolveStream = vi.fn(async () => ({
+      fileName: "Requested.Small.mp4",
+      streamURL: "https://cdn.example/requested.mp4",
+      codec: "H.264",
+    }));
+    mockServices.debrid = { hasServices: true, resolveStream };
+
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("resolve-exact-stream"));
+    await waitFor(() => expect(resolveStream).toHaveBeenCalledWith(
+      "HASH",
+      "torbox",
+      { fileIndex: 0, fileName: "Requested.Small.mp4" },
+    ));
+  });
+
   it("re-resolves cached instant play from provenance when the source list is empty", async () => {
     const resolveStream = vi.fn(async () => ({
       fileName: "movie.mp4",
@@ -1290,6 +1329,8 @@ describe("Detail play", () => {
     mockCached = {
       mediaId: "m1",
       infoHash: "CACHED-HASH",
+      fileIndex: 0,
+      fileNameHint: "movie.mp4",
       debridService: "RD",
       resolvedAt: new Date().toISOString(),
       stream: {
@@ -1312,7 +1353,10 @@ describe("Detail play", () => {
       "data-url",
       "https://cdn.example/cached-fresh.mp4",
     ));
-    expect(resolveStream).toHaveBeenCalledWith("cached-hash", "real_debrid", null);
+    expect(resolveStream).toHaveBeenCalledWith("cached-hash", "real_debrid", {
+      fileIndex: 0,
+      fileName: "movie.mp4",
+    });
     expect(screen.getByTestId("player")).toHaveAttribute("data-start-position", "88");
     expect(screen.getByTestId("player")).toHaveAttribute("data-handoff-rate", "1.5");
   });
@@ -1662,7 +1706,12 @@ describe("Detail downloads", () => {
       streamCachedOnly: false,
     };
     mockStreams = streamsState();
-    mockStreams.rows = [downloadRow("Movie 2160p", 8_000_000_000)];
+    mockStreams.rows = [downloadRow(
+      "Movie 2160p",
+      8_000_000_000,
+      0,
+      "Requested.Small.mp4",
+    )];
 
     render(<Detail />);
     await userEvent.click(screen.getByRole("button", { name: "download" }));
@@ -1670,7 +1719,11 @@ describe("Detail downloads", () => {
 
     await waitFor(() =>
       expect(downloadsRuntime.enqueue).toHaveBeenCalledWith(
-        expect.objectContaining({ sizeBytes: 8_000_000_000 }),
+        expect.objectContaining({
+          sizeBytes: 8_000_000_000,
+          fileIndex: 0,
+          fileNameHint: "Requested.Small.mp4",
+        }),
       ),
     );
   });

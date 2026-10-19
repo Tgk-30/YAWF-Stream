@@ -103,6 +103,39 @@ describe("lastPathComponent", () => {
 });
 
 describe("DebridFileSelector.selectBest", () => {
+  it("selects only a unique named exact file and rejects incomplete or impossible hints", () => {
+    const candidates = [
+      { link: "17", fileName: "extras/Large.Movie.mkv", sizeBytes: 9_000 },
+      { link: "903", fileName: "feature/Requested.Small.avi", sizeBytes: 100 },
+      { link: "44", fileName: "README.txt", sizeBytes: 10 },
+    ];
+
+    expect(DebridFileSelector.selectForHint(candidates, {
+      fileIndex: 0,
+      fileName: "Requested.Small.avi",
+    })?.link).toBe("903");
+    expect(DebridFileSelector.selectForHint(candidates, {
+      fileIndex: 0,
+      fileName: null,
+    })).toBeNull();
+    expect(DebridFileSelector.selectForHint(candidates, {
+      fileIndex: 1_000_001,
+      fileName: "Requested.Small.avi",
+    })).toBeNull();
+    expect(DebridFileSelector.selectForHint(
+      candidates.concat({ link: "904", fileName: "other/Requested.Small.avi", sizeBytes: 90 }),
+      { fileIndex: 0, fileName: "Requested.Small.avi" },
+    )).toBeNull();
+    expect(DebridFileSelector.selectForHint(
+      [{ link: "1", fileName: "Show.S02E08.mp4", sizeBytes: 100 }],
+      {
+        fileIndex: 0,
+        fileName: "Show.S02E08.mp4",
+        season: 2,
+        episode: 7,
+      },
+    )).toBeNull();
+  });
   function f(
     fileName: string,
     sizeBytes: number,

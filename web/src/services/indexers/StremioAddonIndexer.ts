@@ -17,7 +17,11 @@
 // without aborting sibling indexers).
 
 import type { MediaType } from "../../models/media";
-import { TorrentResult } from "./models";
+import {
+  MAX_TORRENT_FILE_INDEX,
+  normalizeTorrentFileNameHint,
+  TorrentResult,
+} from "./models";
 import {
   defaultFetchImpl,
   type FetchImpl,
@@ -33,6 +37,7 @@ interface StremioStream {
   title?: string | null;
   infoHash?: string | null;
   fileIdx?: number | null;
+  behaviorHints?: { filename?: string | null } | null;
   url?: string | null;
 }
 
@@ -189,6 +194,13 @@ export class StremioAddonIndexer implements TorrentIndexer {
     for (const stream of streams) {
       const hash = resolveInfoHash(stream);
       if (hash == null) continue;
+      const hasExplicitFileIndex = stream.fileIdx != null;
+      if (
+        hasExplicitFileIndex &&
+        (!Number.isSafeInteger(stream.fileIdx) ||
+          (stream.fileIdx as number) < 0 ||
+          (stream.fileIdx as number) > MAX_TORRENT_FILE_INDEX)
+      ) continue;
 
       // Prefer the descriptive multi-line `title`, falling back to `name` and
       // finally the bare hash so parsing always has something to work on.
@@ -208,6 +220,14 @@ export class StremioAddonIndexer implements TorrentIndexer {
           ? stream.url
           : makeMagnet(hash, primaryTitle);
 
+      const fileIndex =
+        hasExplicitFileIndex
+          ? (stream.fileIdx as number)
+          : null;
+      const fileNameHint = normalizeTorrentFileNameHint(
+        stream.behaviorHints?.filename,
+      );
+
       results.push(
         TorrentResult.fromSearch({
           infoHash: hash,
@@ -217,6 +237,8 @@ export class StremioAddonIndexer implements TorrentIndexer {
           leechers: 0,
           indexerName: this.name,
           magnetURI,
+          fileIndex,
+          fileNameHint,
         }),
       );
     }

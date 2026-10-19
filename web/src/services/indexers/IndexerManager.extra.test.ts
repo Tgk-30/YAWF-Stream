@@ -26,7 +26,13 @@ import {
 
 function makeStub(args: {
   name: string;
-  results?: { infoHash: string; quality: VideoQuality; seeders: number }[];
+  results?: {
+    infoHash: string;
+    quality: VideoQuality;
+    seeders: number;
+    fileIndex?: number | null;
+    fileNameHint?: string | null;
+  }[];
   throws?: unknown;
 }): TorrentIndexer {
   return {
@@ -35,7 +41,7 @@ function makeStub(args: {
       if (args.throws !== undefined) throw args.throws;
       return (args.results ?? []).map((r) => ({
         get id() {
-          return r.infoHash;
+          return r.fileIndex == null ? r.infoHash : `${r.infoHash}:${r.fileIndex}`;
         },
         infoHash: r.infoHash,
         title: "Some.Release.1080p",
@@ -50,6 +56,11 @@ function makeStub(args: {
         magnetURI: null,
         isCached: false,
         cachedOn: null,
+        fileIndex: r.fileIndex ?? null,
+        fileNameHint:
+          r.fileNameHint !== undefined
+            ? r.fileNameHint
+            : r.fileIndex == null ? null : `file-${r.fileIndex}.mkv`,
       }));
     },
     async searchByQuery() {
@@ -170,6 +181,35 @@ describe("IndexerManager errorMessage branches", () => {
     const results = await manager.searchAll("tt0001", "movie");
     expect(results.map((r) => r.infoHash)).toEqual(["a".repeat(40)]);
     expect(manager.lastSearchErrors).toEqual([{ indexer: "Bad", error: "boom" }]);
+  });
+
+  it("preserves different explicit file indices from the same info hash", async () => {
+    const manager = new IndexerManager();
+    manager.setIndexers([makeStub({
+      name: "Files",
+      results: [
+        { infoHash: "a".repeat(40), quality: VideoQuality.hd720p, seeders: 2, fileIndex: 0 },
+        { infoHash: "a".repeat(40), quality: VideoQuality.hd1080p, seeders: 1, fileIndex: 1 },
+      ],
+    })]);
+
+    const results = await manager.searchAll("tt0001", "movie");
+    expect(results.map((result) => result.fileIndex)).toEqual([1, 0]);
+  });
+
+  it("prefers a usable selector over a higher-seeder duplicate", async () => {
+    const manager = new IndexerManager();
+    manager.setIndexers([makeStub({
+      name: "Files",
+      results: [
+        { infoHash: "a".repeat(40), quality: VideoQuality.uhd4k, seeders: 999, fileIndex: 0, fileNameHint: null },
+        { infoHash: "a".repeat(40), quality: VideoQuality.hd720p, seeders: 1, fileIndex: 0, fileNameHint: "small.avi" },
+      ],
+    })]);
+
+    const results = await manager.searchAll("tt0001", "movie");
+    expect(results).toHaveLength(1);
+    expect(results[0].fileNameHint).toBe("small.avi");
   });
 
   it("tolerates an indexer missing searchByQuery by returning no query results", async () => {

@@ -613,6 +613,65 @@ export interface EpisodeFileHint {
   episode: number;
 }
 
+/** Exact Stremio torrent-file request. `fileIndex` is the zero-based file index
+ * from the add-on. Provider-native file IDs are not assumed equivalent.
+ * `fileName` is optional metadata used to prove a unique provider-side match. */
+export interface ExactFileHint {
+  fileIndex: number;
+  fileName: string | null;
+  season?: number;
+  episode?: number;
+}
+
+export type DebridFileHint = EpisodeFileHint | ExactFileHint;
+
+export function isExactFileHint(hint: DebridFileHint): hint is ExactFileHint {
+  return "fileIndex" in hint;
+}
+
+function normalizedSelectionPath(value: string): string {
+  return value
+    .normalize("NFC")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/{2,}/g, "/");
+}
+
+/** Strictly match a provider file by the add-on's bounded filename metadata.
+ * Full paths win. A basename fallback is accepted only when it is unique.
+ * An index without a filename cannot be translated to provider-native IDs. */
+export function selectExactFileCandidate(
+  candidates: DebridFileCandidate[],
+  hint: ExactFileHint,
+): DebridFileCandidate | null {
+  if (
+    !Number.isSafeInteger(hint.fileIndex) ||
+    hint.fileIndex < 0 ||
+    hint.fileIndex > 1_000_000
+  ) return null;
+  const playable = candidates.filter((candidate) => meta(candidate).isVideo);
+  const requested = normalizedSelectionPath(hint.fileName ?? "");
+  if (requested.length === 0) return null;
+  if (
+    hint.season != null &&
+    hint.episode != null &&
+    !fileMatchesEpisode(requested, { season: hint.season, episode: hint.episode })
+  ) return null;
+
+  const fullMatches = playable.filter(
+    (candidate) => normalizedSelectionPath(candidate.fileName) === requested,
+  );
+  if (fullMatches.length === 1) return fullMatches[0];
+  if (fullMatches.length > 1) return null;
+
+  const requestedBase = lastPathComponent(requested);
+  const baseMatches = playable.filter(
+    (candidate) => lastPathComponent(normalizedSelectionPath(candidate.fileName)) === requestedBase,
+  );
+  return baseMatches.length === 1 ? baseMatches[0] : null;
+}
+
 /** Extract an exact episode tag (S02E05 / S2 E5 / 2x05 …) from UPPERCASED
  * text. These two regexes are THE canonical patterns - classifyRowForEpisode
  * in data/streams.ts consumes this same function for its exact-match branch,
@@ -657,6 +716,16 @@ export function fileMatchesEpisode(
  * names carry that exact episode tag; when nothing matches (single-file
  * torrents, odd naming), it falls back to the full set - today's behavior. */
 export const DebridFileSelector = {
+  selectForHint(
+    candidates: DebridFileCandidate[],
+    hint: DebridFileHint | null = null,
+  ): DebridFileCandidate | null {
+    if (hint != null && isExactFileHint(hint)) {
+      return selectExactFileCandidate(candidates, hint);
+    }
+    return this.selectBest(candidates, hint);
+  },
+
   selectBest(
     candidates: DebridFileCandidate[],
     hint: EpisodeFileHint | null = null,

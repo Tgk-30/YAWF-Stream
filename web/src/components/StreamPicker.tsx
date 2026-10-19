@@ -17,6 +17,7 @@ import {
 } from "../services/debrid/models";
 import {
   TorrentResult,
+  torrentResultSelectionKey,
   VideoCodec,
   VideoQuality,
 } from "../services/indexers/models";
@@ -242,10 +243,10 @@ export function StreamPicker({
       );
       return;
     }
-    const hash = row.result.infoHash;
-    if (resolutionStates[hash] === "resolving") return;
+    const selectionKey = torrentResultSelectionKey(row.result);
+    if (resolutionStates[selectionKey] === "resolving") return;
     setResolveError(null);
-    setResolutionStates((current) => ({ ...current, [hash]: "resolving" }));
+    setResolutionStates((current) => ({ ...current, [selectionKey]: "resolving" }));
     try {
       // Direct P2P waits for the server's bounded metadata path. Applying the
       // debrid-only UI timeout here would show a false failure while the server
@@ -260,15 +261,15 @@ export function StreamPicker({
       onPlay(stream, row.result);
     } catch (err) {
       setResolveError(actionableProviderError(err));
-      setResolutionStates((current) => ({ ...current, [hash]: "failed" }));
+      setResolutionStates((current) => ({ ...current, [selectionKey]: "failed" }));
     } finally {
       // A failed resolve stays visibly terminal and retryable. A successful
       // resolve drops back to its normal Instant/Will cache badge while play
       // starts; a late completion after the timeout cannot call onPlay.
       setResolutionStates((current) => {
-        if (current[hash] !== "resolving") return current;
+        if (current[selectionKey] !== "resolving") return current;
         const next = { ...current };
-        delete next[hash];
+        delete next[selectionKey];
         return next;
       });
     }
@@ -644,11 +645,11 @@ function StreamBody({
       <ul className="streams-list">
         {visibleRows.map(({ row, assessment, recommended }) => (
           <StreamRowItem
-            key={row.result.infoHash}
+            key={torrentResultSelectionKey(row.result)}
             row={row}
             assessment={assessment}
             recommended={recommended}
-            resolutionStatus={resolutionStates[row.result.infoHash] ?? null}
+            resolutionStatus={resolutionStates[torrentResultSelectionKey(row.result)] ?? null}
             onSelect={() => onSelect(row)}
             onSelectDirect={onSelectDirect == null ? undefined : () => onSelectDirect(row)}
             pack={

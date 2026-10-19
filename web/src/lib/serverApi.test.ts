@@ -606,6 +606,45 @@ describe("resolveServerStream", () => {
       episode: 4,
     });
   });
+
+  it("adds exact file index zero and bounded filename to the resolve body", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ stream: {
+        streamURL: "/play/abc",
+        fileName: "prefix/Show.S02E04.Requested.Small.mp4",
+      } }) as never,
+    );
+    await api.resolveServerStream(row, {
+      fileHint: {
+        fileIndex: 0,
+        fileName: "Show.S02E04.Requested.Small.mp4",
+        season: 2,
+        episode: 4,
+      },
+    });
+
+    expect(JSON.parse(lastCall().init.body as string)).toMatchObject({
+      fileIndex: 0,
+      fileName: "Show.S02E04.Requested.Small.mp4",
+      season: 2,
+      episode: 4,
+    });
+  });
+
+  it("rejects an older server that ignores an exact selector", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ stream: {
+        streamURL: "/play/wrong",
+        fileName: "Large.Wrong.mkv",
+      } }) as never,
+    );
+
+    await expect(api.resolveServerStream(row, {
+      fileHint: { fileIndex: 0, fileName: "Requested.Small.mp4" },
+    })).rejects.toThrow(
+      "The server returned a different torrent file. Update the server or choose another source.",
+    );
+  });
 });
 
 describe("search & discovery query building", () => {

@@ -1,7 +1,12 @@
 import type { MediaType } from "../models/media";
 import type { CastMember, Episode, MediaItem, MediaPreview, Season } from "../models/media";
 import type { AIMovieRecommendation, AIUsageMetrics } from "../services/ai/models";
-import type { DebridServiceType, StreamInfo } from "../services/debrid/models";
+import {
+  selectExactFileCandidate,
+  type DebridServiceType,
+  type ExactFileHint,
+  type StreamInfo,
+} from "../services/debrid/models";
 import type {
   SubtitleSearchParams,
   SubtitleSearchResult,
@@ -404,9 +409,16 @@ export async function resolveServerStream(
     transcode?: boolean;
     transcodeOptions?: ServerTranscodeOptions;
     media?: { id: string; type: MediaType };
-    /** Episode context (series) - steers season-pack file selection on the
-     *  server. Omitted for movies / older servers (unknown fields ignored). */
-    fileHint?: { season: number; episode: number } | null;
+    /** Episode or exact torrent-file context for server-side selection. */
+    fileHint?:
+      | { season: number; episode: number }
+      | {
+          fileIndex: number;
+          fileName: string | null;
+          season?: number;
+          episode?: number;
+        }
+      | null;
     backend?: "debrid" | "direct_torrent";
     directTorrentAcknowledged?: boolean;
   } = {},
@@ -429,7 +441,17 @@ export async function resolveServerStream(
         ? { mediaId: opts.media.id, mediaType: opts.media.type }
         : {}),
       ...(opts.fileHint != null
-        ? { season: opts.fileHint.season, episode: opts.fileHint.episode }
+        ? {
+            ...(opts.fileHint.season != null && opts.fileHint.episode != null
+              ? { season: opts.fileHint.season, episode: opts.fileHint.episode }
+              : {}),
+            ...("fileIndex" in opts.fileHint
+              ? {
+                  fileIndex: opts.fileHint.fileIndex,
+                  fileName: opts.fileHint.fileName,
+                }
+              : {}),
+          }
         : {}),
     },
   );
@@ -437,6 +459,24 @@ export async function resolveServerStream(
     ...response.stream,
     streamURL: absoluteServerURL(response.stream.streamURL),
   };
+  const exactHint = opts.fileHint != null && "fileIndex" in opts.fileHint
+    ? opts.fileHint as ExactFileHint
+    : null;
+  if (
+    exactHint != null &&
+    selectExactFileCandidate(
+      [{
+        link: stream.streamURL,
+        fileName: stream.fileName ?? "",
+        sizeBytes: stream.sizeBytes ?? 0,
+      }],
+      exactHint,
+    ) == null
+  ) {
+    throw new Error(
+      "The server returned a different torrent file. Update the server or choose another source.",
+    );
+  }
   // Reuse the session's HLS manifest when the user explicitly requested lower
   // data use. The hosted web compatibility path calls the same helper when the
   // original format cannot be decoded by browsers.

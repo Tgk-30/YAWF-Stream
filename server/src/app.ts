@@ -674,8 +674,12 @@ const resolveStreamSchema = z.object({
   // largest-file pick, exactly today's behavior.
   season: z.number().int().min(1).max(200).nullable().optional(),
   episode: z.number().int().min(1).max(10_000).nullable().optional(),
+  fileIndex: z.number().int().min(0).max(1_000_000).optional(),
+  fileName: z.string().regex(/^[^\u0000-\u001f\u007f]+$/).trim().min(1).max(1024).optional(),
   backend: z.enum(["debrid", "direct_torrent"]).default("debrid"),
   directTorrentAcknowledged: z.boolean().default(false),
+}).refine((value) => (value.fileIndex == null) === (value.fileName == null), {
+  message: "An exact file selection requires both fileIndex and fileName.",
 });
 
 const profileSettingSchema = z.object({
@@ -5487,6 +5491,12 @@ function registerRoutes(
     requireCsrf(request);
     rateLimit(request, `streams:resolve:${auth.profileId}`, 120, 60 * 1000);
     const body = parseBody(resolveStreamSchema, request.body);
+    const episodeHint = body.season != null && body.episode != null
+      ? { season: body.season, episode: body.episode }
+      : null;
+    const fileHint = body.fileIndex != null && body.fileName != null
+      ? { fileIndex: body.fileIndex, fileName: body.fileName, ...episodeHint }
+      : episodeHint;
     // Kid play-block - the authoritative content gate, FAIL-CLOSED. A capped/kid
     // profile may resolve a title only when (a) it declares its media identity,
     // (b) the title is a MOVIE within the cap, and (c) the infoHash is genuinely a
@@ -5531,6 +5541,10 @@ function registerRoutes(
         body.mediaId,
         body.mediaType,
         body.infoHash,
+        null,
+        null,
+        false,
+        fileHint,
       ).catch(() => false);
       if (!belongs) {
         throw blocked("infohash_unbound", { mediaId: body.mediaId, infoHash: body.infoHash });
@@ -5565,6 +5579,7 @@ function registerRoutes(
         body.season ?? null,
         body.episode ?? null,
         !auth.isKid && auth.maturityMax == null,
+        fileHint,
       ).catch(() => false);
       if (!belongs) {
         throw httpError(403, "This Direct P2P source is not bound to the selected title.");
@@ -5576,10 +5591,7 @@ function registerRoutes(
           profileId: auth.profileId,
           infoHash: body.infoHash,
           expiresInSeconds: body.expiresInSeconds,
-          fileHint:
-            body.season != null && body.episode != null
-              ? { season: body.season, episode: body.episode }
-              : null,
+          fileHint,
         });
         const session = createStreamSession(db, config, auth, {
           id: sessionId,
@@ -5617,10 +5629,7 @@ function registerRoutes(
     const directStream = await resolveServerStream(db, config, auth.profileId, {
       infoHash: body.infoHash,
       preferredService: body.preferredService ?? null,
-      fileHint:
-        body.season != null && body.episode != null
-          ? { season: body.season, episode: body.episode }
-          : null,
+      fileHint,
     });
     const session = createStreamSession(db, config, auth, {
       upstreamUrl: directStream.streamURL,
@@ -6475,7 +6484,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.setErrorHandler((error, _request, reply) => {
     const zodError = error instanceof z.ZodError;
-    const statusCode = zodError ? 400 : ((error as { statusCode?: number }).statusCode ?? 500);
+    const selectionFailed = error != null && typeof error === "object"
+      && (error as { name?: string }).name === "DebridError"
+      && (error as { kind?: string }).kind === "fileSelectionFailed";
+    const statusCode = zodError ? 400 : selectionFailed ? 422
+      : ((error as { statusCode?: number }).statusCode ?? 500);
     const message = error instanceof Error ? error.message : "Request failed.";
     if (statusCode >= 500) app.log.error(error);
     // Debrid provider failures (invalid token, upstream 5xx) used to collapse
@@ -6488,7 +6501,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       typeof error === "object" &&
       (error as { name?: string }).name === "DebridError";
     reply.status(statusCode).send({
-      error: statusCode >= 500 && !isDebridError ? "Internal server error." : message,
+      error: selectionFailed
+        ? "The selected file is unavailable or does not match this source. Choose another source."
+        : statusCode >= 500 && !isDebridError ? "Internal server error." : message,
       issues: zodError ? error.issues : undefined,
     });
   });

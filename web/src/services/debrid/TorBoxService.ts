@@ -12,7 +12,8 @@ import {
   type DebridAccountInfo,
   type DebridFileCandidate,
   DebridFileSelector,
-  type EpisodeFileHint,
+  type DebridFileHint,
+  isExactFileHint,
   type DebridServiceType,
   DebridServiceType as DebridServiceTypeNS,
   type StreamInfo,
@@ -129,7 +130,7 @@ export class TorBoxService implements DebridService {
 
   async getStreamURL(
     torrentId: string,
-    fileHint: EpisodeFileHint | null = null,
+    fileHint: DebridFileHint | null = null,
   ): Promise<StreamInfo> {
     const maxAttempts = 20;
     const terminalReadyStates = new Set(["cached", "completed", "uploading"]);
@@ -162,6 +163,9 @@ export class TorBoxService implements DebridService {
       throw DebridError.downloadFailed(
         `Torrent not ready: ${lastState.length === 0 ? "unknown" : lastState}`,
       );
+    }
+    if (selectedFile == null && fileHint != null && isExactFileHint(fileHint)) {
+      throw DebridError.fileSelectionFailed();
     }
 
     const fallbackId = 0;
@@ -325,7 +329,7 @@ export class TorBoxService implements DebridService {
 
   private bestFile(
     files: TorrentFileEntry[],
-    fileHint: EpisodeFileHint | null = null,
+    fileHint: DebridFileHint | null = null,
   ): TorrentFileEntry | null {
     if (files.length === 0) return null;
 
@@ -335,8 +339,13 @@ export class TorBoxService implements DebridService {
       sizeBytes: file.sizeBytes,
     }));
 
-    const selected = DebridFileSelector.selectBest(candidates, fileHint);
-    if (selected == null) return null;
+    const selected = DebridFileSelector.selectForHint(candidates, fileHint);
+    if (selected == null) {
+      if (fileHint != null && isExactFileHint(fileHint)) {
+        throw DebridError.fileSelectionFailed();
+      }
+      return null;
+    }
     const selectedId = Number.parseInt(selected.link, 10);
     if (Number.isNaN(selectedId)) return null;
 

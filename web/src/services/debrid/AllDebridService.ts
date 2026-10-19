@@ -11,7 +11,8 @@ import {
   type DebridAccountInfo,
   type DebridFileCandidate,
   DebridFileSelector,
-  type EpisodeFileHint,
+  type DebridFileHint,
+  isExactFileHint,
   type DebridServiceType,
   DebridServiceType as DebridServiceTypeNS,
   type DebridTorrent,
@@ -111,7 +112,7 @@ export class AllDebridService implements DebridService {
 
   async getStreamURL(
     torrentId: string,
-    fileHint: EpisodeFileHint | null = null,
+    fileHint: DebridFileHint | null = null,
   ): Promise<StreamInfo> {
     const maxAttempts = 20;
     let magnets: Record<string, unknown> = {};
@@ -140,7 +141,11 @@ export class AllDebridService implements DebridService {
     }
 
     const links = asObjectArray(magnets.links);
-    if (links == null) throw DebridError.noFilesAvailable();
+    if (links == null) {
+      throw fileHint != null && isExactFileHint(fileHint)
+        ? DebridError.fileSelectionFailed()
+        : DebridError.noFilesAvailable();
+    }
 
     const candidates: DebridFileCandidate[] = [];
     for (const item of links) {
@@ -149,8 +154,12 @@ export class AllDebridService implements DebridService {
       const size = int64Value(item.size) ?? 0;
       candidates.push({ link: item.link, fileName: filename, sizeBytes: size });
     }
-    const selected = DebridFileSelector.selectBest(candidates, fileHint);
-    if (selected == null) throw DebridError.noFilesAvailable();
+    const selected = DebridFileSelector.selectForHint(candidates, fileHint);
+    if (selected == null) {
+      throw fileHint != null && isExactFileHint(fileHint)
+        ? DebridError.fileSelectionFailed()
+        : DebridError.noFilesAvailable();
+    }
 
     const streamURL = await this.unrestrict(selected.link);
     const filename = selected.fileName;

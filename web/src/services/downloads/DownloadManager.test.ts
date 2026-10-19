@@ -271,6 +271,39 @@ describe("DownloadManager", () => {
     expect(store.history).toEqual(expect.arrayContaining(["queued", "resolving", "downloading", "optimizing", "completed"]));
   });
 
+  it("forwards a durable exact file selector when resolving a download", async () => {
+    const store = new DownloadStore();
+    const native = makeBridge();
+    const debrid = resolver();
+    const manager = new DownloadManager(store as unknown as Store, debrid, {
+      bridge: native.bridge,
+    });
+    managers.push(manager);
+    await manager.start();
+    const record = await manager.enqueue({
+      jobId: "selected-file",
+      mediaId: "tmdb-files",
+      title: "Requested Small",
+      infoHash: "collection",
+      fileIndex: 1,
+      fileNameHint: "Show.S02E07.Small.mp4",
+      season: 2,
+      episode: 7,
+      mode: "full",
+    });
+
+    await waitUntil(() => expect(status(store, record.jobId)).resolves.toBe("downloading"));
+    expect(debrid.resolveStream).toHaveBeenCalledWith("collection", null, {
+      fileIndex: 1,
+      fileName: "Show.S02E07.Small.mp4",
+      season: 2,
+      episode: 7,
+    });
+    expect(await store.listDownloads()).toEqual([
+      expect.objectContaining({ fileIndex: 1, fileNameHint: "Show.S02E07.Small.mp4" }),
+    ]);
+  });
+
   it("stores transcode percent without overwriting downloaded byte counters", async () => {
     const store = new DownloadStore();
     const native = makeBridge();

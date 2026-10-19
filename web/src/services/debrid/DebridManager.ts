@@ -8,7 +8,7 @@
 // path is intentionally not ported here (no DB/keychain in the web layer);
 // services are registered directly via addService, as the Swift tests do.
 
-import { CacheStatus, type DebridServiceType, DebridServiceType as DebridServiceTypeNS, type DebridTorrent, type EpisodeFileHint, type StreamInfo } from "./models";
+import { CacheStatus, type DebridServiceType, DebridServiceType as DebridServiceTypeNS, type DebridTorrent, type DebridFileHint, type StreamInfo } from "./models";
 import { type DebridService, DebridError } from "./types";
 import { RealDebridService } from "./RealDebridService";
 
@@ -169,7 +169,7 @@ export class DebridManager {
   async resolveStream(
     hash: string,
     preferredService: DebridServiceType | null = null,
-    fileHint: EpisodeFileHint | null = null,
+    fileHint: DebridFileHint | null = null,
   ): Promise<StreamInfo> {
     const service = this.pickService(preferredService);
 
@@ -189,7 +189,7 @@ export class DebridManager {
   private async resolveWithRealDebrid(
     service: RealDebridService,
     hash: string,
-    fileHint: EpisodeFileHint | null = null,
+    fileHint: DebridFileHint | null = null,
   ): Promise<StreamInfo> {
     let torrentId: string;
 
