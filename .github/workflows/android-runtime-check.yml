@@ -84,6 +84,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse0
           sdkmanager \
             "platform-tools" \
             "emulator" \
@@ -163,6 +165,14 @@ jobs:
           } >> "$GITHUB_ENV"
           command -v avdmanager | tee "$EVIDENCE/avdmanager-path.txt"
           sdkmanager --version | tee "$EVIDENCE/sdkmanager-version.txt"
+          emulator_bin="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/emulator/emulator"
+          qemu_bin="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/emulator/qemu/linux-x86_64/qemu-system-x86_64"
+          ldd "$emulator_bin" | tee "$EVIDENCE/emulator-ldd.txt"
+          ldd "$qemu_bin" | tee "$EVIDENCE/qemu-ldd.txt"
+          if grep -q 'not found' "$EVIDENCE/emulator-ldd.txt" || grep -q 'not found' "$EVIDENCE/qemu-ldd.txt"; then
+            echo "::error::Android emulator loader dependencies are missing" >&2
+            exit 1
+          fi
           emulator -version | tee "$EVIDENCE/emulator-version.txt"
           printf 'no\n' | avdmanager create avd \
             --force \
