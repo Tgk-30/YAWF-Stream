@@ -45,6 +45,7 @@ jobs:
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern latest.json \
+            --pattern latest-macos11.json \
             --dir "$RUNNER_TEMP/release-assets"
           gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
@@ -57,7 +58,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           INCLUDE_WINDOWS: ${{ inputs.include_windows }}
-          LATEST_JSON: ${{ runner.temp }}/release-assets/latest.json
+          LEGACY_JSON: ${{ runner.temp }}/release-assets/latest.json
+          MACOS11_JSON: ${{ runner.temp }}/release-assets/latest-macos11.json
           ASSET_NAMES: ${{ runner.temp }}/release-assets/names.txt
         run: |
           set -euo pipefail
@@ -65,12 +67,19 @@ jobs:
           expected_version="${expected_version%-web}"
           node <<'NODE'
           const { readFileSync } = require("node:fs");
-          const manifest = JSON.parse(readFileSync(process.env.LATEST_JSON, "utf8"));
+          const legacy = JSON.parse(readFileSync(process.env.LEGACY_JSON, "utf8"));
+          const manifest = JSON.parse(readFileSync(process.env.MACOS11_JSON, "utf8"));
           const expectedVersion = process.env.RELEASE_TAG.replace(/^v/, "").replace(/-web$/, "");
-          if (manifest.version !== expectedVersion) {
-            throw new Error(`latest.json version ${manifest.version} does not match ${expectedVersion}`);
+          for (const [name, candidate] of [["latest.json", legacy], ["latest-macos11.json", manifest]]) {
+            if (candidate.version !== expectedVersion) throw new Error(`${name} version ${candidate.version} does not match ${expectedVersion}`);
           }
+          const legacyPlatforms = legacy.platforms ?? {};
           const platforms = manifest.platforms ?? {};
+          const expectedLegacy = Object.fromEntries(Object.entries(platforms).filter(([key]) => !key.startsWith("darwin-x86_64")));
+          if (JSON.stringify(legacyPlatforms) !== JSON.stringify(expectedLegacy)) throw new Error("latest.json must equal latest-macos11.json minus Intel targets");
+          for (const key of ["darwin-aarch64", "darwin-aarch64-app", "darwin-x86_64", "darwin-x86_64-app"]) {
+            if (!platforms[key]) throw new Error(`latest-macos11.json is missing ${key}`);
+          }
           const required = [
             "darwin-aarch64",
             "darwin-aarch64-app",
@@ -83,16 +92,16 @@ jobs:
           for (const key of required) {
             const entry = platforms[key];
             if (!entry?.url?.includes(`/releases/download/${process.env.RELEASE_TAG}/`)) {
-              throw new Error(`latest.json is missing a release-scoped URL for ${key}`);
+              throw new Error(`latest-macos11.json is missing a release-scoped URL for ${key}`);
             }
             if (typeof entry.signature !== "string" || entry.signature.length < 40) {
-              throw new Error(`latest.json is missing an updater signature for ${key}`);
+              throw new Error(`latest-macos11.json is missing an updater signature for ${key}`);
             }
           }
           const windows = Object.keys(platforms).filter((key) => key.startsWith("windows-"));
           if (process.env.INCLUDE_WINDOWS === "true") {
             for (const key of ["windows-x86_64", "windows-x86_64-msi", "windows-x86_64-nsis"]) {
-              if (!windows.includes(key)) throw new Error(`latest.json is missing ${key}`);
+              if (!windows.includes(key)) throw new Error(`latest-macos11.json is missing ${key}`);
             }
           } else if (windows.length > 0) {
             throw new Error(`Held Windows channel leaked into latest.json: ${windows.join(", ")}`);
@@ -112,7 +121,8 @@ jobs:
             "YAWF.Stream_aarch64.app.tar.gz.sig" \
             "YAWF.Stream_x64.app.tar.gz" \
             "YAWF.Stream_x64.app.tar.gz.sig" \
-            "latest.json"; do
+            "latest.json" \
+            "latest-macos11.json"; do
             grep -Fxq "$asset" "$ASSET_NAMES" || {
               echo "Required release asset is missing: $asset" >&2
               exit 1

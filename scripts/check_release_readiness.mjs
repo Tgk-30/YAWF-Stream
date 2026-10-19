@@ -54,8 +54,8 @@ check(
 check(
   "Tauri updater endpoint",
   Array.isArray(updater?.endpoints) &&
-    updater.endpoints.some((url) => /releases\/latest\/download\/latest\.json$/.test(url)),
-  "web/src-tauri/tauri.conf.json must point at latest.json",
+    updater.endpoints.some((url) => /releases\/latest\/download\/latest-macos11\.json$/.test(url)),
+  "web/src-tauri/tauri.conf.json must point at latest-macos11.json",
 );
 check(
   "Tauri updater public key",
@@ -177,7 +177,7 @@ check(
 check(
   "Release workflow emits updater JSON",
   /includeUpdaterJson:\s*true/.test(releaseWorkflow),
-  ".github/workflows/web-release.yml should publish latest.json",
+  ".github/workflows/web-release.yml should publish both updater manifests",
 );
 check(
   "Release workflow signs updater artifacts",
@@ -552,8 +552,8 @@ check(
   /manifest:/.test(cleanInstallWorkflow) &&
     /darwin-aarch64-app/.test(cleanInstallWorkflow) &&
     /linux-x86_64-appimage/.test(cleanInstallWorkflow) &&
-    /latest\.json is missing an updater signature/.test(cleanInstallWorkflow) &&
-    /Held Windows channel leaked into latest\.json/.test(cleanInstallWorkflow) &&
+    /latest\.json must equal latest-macos11\.json minus Intel targets/.test(cleanInstallWorkflow) &&
+    /latest-macos11\.json is missing an updater signature/.test(cleanInstallWorkflow) &&
     /Held Windows channel leaked an asset into the draft release/.test(cleanInstallWorkflow),
   ".github/workflows/clean-install.yml must require signed macOS and Linux updater entries and reject Windows manifest entries or assets while that channel is held",
 );

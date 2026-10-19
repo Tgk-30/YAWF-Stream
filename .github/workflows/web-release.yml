@@ -903,6 +903,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
       - name: Download draft release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -912,6 +914,19 @@ jobs:
           gh release download "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --dir artifacts
+
+      - name: Split desktop updater feeds
+        run: |
+          set -euo pipefail
+          node scripts/split_desktop_updater_manifests.mjs artifacts/latest.json artifacts/latest.json artifacts/latest-macos11.json "$GITHUB_REF_NAME"
+          test ! -e artifacts/latest.json.sig
+
+      - name: Upload desktop updater feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" artifacts/latest.json artifacts/latest-macos11.json --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Create SHA256SUMS
         run: |
