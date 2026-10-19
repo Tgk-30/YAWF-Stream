@@ -5,6 +5,24 @@ import test from "node:test";
 const producer = readFileSync(new URL("../.github/workflows/macos-media-runtime.yml", import.meta.url), "utf8");
 const consumer = readFileSync(new URL("../.github/workflows/web-release.yml", import.meta.url), "utf8");
 
+export function assertMacMediaBuildTools(source) {
+  assert.match(source, /brew install [^\n]*\blibtool\b/);
+  assert.match(source, /libtool_prefix="\$\(brew --prefix libtool\)"/);
+  assert.match(source, /test -x "\$libtool_prefix\/bin\/glibtoolize"/);
+  assert.match(source, /test -f "\$libtool_prefix\/share\/aclocal\/libtool\.m4"/);
+  assert.match(source, /echo "ACLOCAL_PATH=\$libtool_prefix\/share\/aclocal\$\{ACLOCAL_PATH:\+:\$ACLOCAL_PATH\}" >> "\$GITHUB_ENV"/);
+}
+
+test("clean macOS runners install GNU libtool and expose its Autoconf macros", () => assertMacMediaBuildTools(producer));
+test("rejects missing GNU libtool installation, executable, macro or search path", () => {
+  for (const [before, after] of [
+    ["automake libtool nasm", "automake nasm"],
+    ['test -x "$libtool_prefix/bin/glibtoolize"', "true"],
+    ['test -f "$libtool_prefix/share/aclocal/libtool.m4"', "true"],
+    ['echo "ACLOCAL_PATH=', 'echo "UNUSED_ACLOCAL_PATH='],
+  ]) assert.throws(() => assertMacMediaBuildTools(producer.replace(before, after)));
+});
+
 export function assertMacMediaTransport(source, target) {
   assert.match(source, /tar -czf "macos-media-runtime-\$MEDIA_ARCH\.tar\.gz" -C media-candidate \./);
   assert.match(source, /shasum -a 256 "macos-media-runtime-\$MEDIA_ARCH\.tar\.gz" > "macos-media-runtime-\$MEDIA_ARCH\.tar\.gz\.sha256"/);

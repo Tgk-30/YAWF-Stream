@@ -34,7 +34,12 @@ jobs:
         with:
           node-version: 24
       - name: Install build tools, not host media libraries
-        run: brew install cmake meson ninja autoconf automake nasm pkgconf
+        run: |
+          brew install cmake meson ninja autoconf automake libtool nasm pkgconf
+          libtool_prefix="$(brew --prefix libtool)"
+          test -x "$libtool_prefix/bin/glibtoolize"
+          test -f "$libtool_prefix/share/aclocal/libtool.m4"
+          echo "ACLOCAL_PATH=$libtool_prefix/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}" >> "$GITHUB_ENV"
       - name: Test acquisition, relocation and runtime gates
         run: node --test scripts/build_macos_media_runtime.test.mjs scripts/stage_macos_media_runtime.test.mjs scripts/smoke_macos_media_runtime.test.mjs
       - name: Compile pinned source for the native architecture
