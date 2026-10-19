@@ -184,10 +184,14 @@ class ReplayExperimentTests(unittest.TestCase):
             self.assertEqual(receipt["developerRealPath"], str(developer.resolve()))
             self.assertEqual(receipt["sdk"]["selectedPath"], str(sdk))
             self.assertEqual(receipt["tools"]["ar"]["selectedPath"], str(selected["ar"]))
+            self.assertEqual(receipt["tools"]["metal"]["selectedBy"], "/usr/bin/xcrun")
+            self.assertEqual(receipt["tools"]["metallib"]["selectedBy"], "/usr/bin/xcrun")
             self.assertEqual(receipt["tools"]["pkg-config"]["selectedPath"], str(path_bin / "pkg-config"))
             arguments = REPLAY.controller_tool_arguments(receipt)
             self.assertEqual(arguments[arguments.index("--ar") + 1], str(selected["ar"]))
             self.assertEqual(arguments[arguments.index("--pkg-config") + 1], str(path_bin / "pkg-config"))
+            self.assertEqual(arguments[arguments.index("--metal") + 1], str(selected["metal"]))
+            self.assertEqual(arguments[arguments.index("--metallib") + 1], str(selected["metallib"]))
 
             outside = root / "outside-ar"
             outside.write_text("#!/bin/sh\nexit 0\n")
@@ -214,6 +218,46 @@ class ReplayExperimentTests(unittest.TestCase):
 
             with self.assertRaisesRegex(REPLAY.ReplayError, "timed out after 60 seconds while selecting clang"):
                 REPLAY.discover_tool_selection(developer, str(path_bin), environment, run=timeout_run)
+
+    def test_accepts_only_trusted_xcrun_selected_metal_tools_outside_the_developer_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            developer = root / "Xcode.app/Contents/Developer"
+            xcode_bin = developer / "Toolchains/XcodeDefault.xctoolchain/usr/bin"
+            developer_bin = developer / "usr/bin"
+            sdk = developer / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+            path_bin = root / "path-bin"
+            cryptex_bin = root / "system-metal-cryptex/usr/bin"
+            for target in (xcode_bin, developer_bin, sdk, path_bin, cryptex_bin):
+                target.mkdir(parents=True, exist_ok=True)
+            selected = {}
+            for name in REPLAY.XCODE_TOOL_NAMES:
+                if name in {"metal", "metallib"}:
+                    path = cryptex_bin / name
+                else:
+                    path = (developer_bin if name == "make" else xcode_bin) / name
+                path.write_text("#!/bin/sh\nexit 0\n")
+                path.chmod(0o755)
+                selected[name] = path
+            for name in REPLAY.PATH_TOOL_NAMES:
+                path = path_bin / name
+                path.write_text("#!/bin/sh\nexit 0\n")
+                path.chmod(0o755)
+
+            def trusted_xcrun(command, **_kwargs):
+                if "--show-sdk-path" in command:
+                    return subprocess.CompletedProcess(command, 0, stdout=f"{sdk}\n")
+                return subprocess.CompletedProcess(command, 0, stdout=f"{selected[command[-1]]}\n")
+
+            environment = REPLAY.clean_environment(root / "state", str(path_bin), str(developer))
+            receipt = REPLAY.discover_tool_selection(developer, str(path_bin), environment, run=trusted_xcrun)
+            for name in ("metal", "metallib"):
+                self.assertEqual(receipt["tools"][name]["selectedPath"], str(selected[name]))
+                self.assertEqual(receipt["tools"][name]["selectedBy"], "/usr/bin/xcrun")
+                self.assertFalse(REPLAY._within(developer.resolve(), selected[name].resolve()))
+            arguments = REPLAY.controller_tool_arguments(receipt)
+            self.assertEqual(arguments[arguments.index("--metal") + 1], str(selected["metal"]))
+            self.assertEqual(arguments[arguments.index("--metallib") + 1], str(selected["metallib"]))
 
     def test_public_inventory_provenance_is_source_identity_relative_and_exactly_pinned(self):
         staged = json.loads((PUBLIC_ROOT / "scripts/macos-media-replay/required-runtime-outputs.json").read_text())

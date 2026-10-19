@@ -44,6 +44,8 @@ const FIXED_TOOLS = {
   strip: "/tools/strip",
   make: "/tools/make",
   pkgConfig: "/tools/pkg-config",
+  metal: "/tools/metal",
+  metallib: "/tools/metallib",
 };
 const OBSERVED_APPLE_ARCHIVE_MEMBERS = "__.SYMDEF SORTED\nprobe.c.o\nprobe.cpp.o\n";
 
@@ -57,7 +59,7 @@ function digest(path) {
 
 function executableTools() {
   const root = temporary();
-  for (const name of ["clang", "clang++", "ar", "ranlib", "nm", "strip", "make", "pkg-config", "cmake", "meson", "ninja"]) {
+  for (const name of ["clang", "clang++", "ar", "ranlib", "nm", "strip", "make", "pkg-config", "metal", "metallib", "cmake", "meson", "ninja"]) {
     const path = join(root, name);
     writeFileSync(path, "#!/bin/sh\nexit 0\n");
     chmodSync(path, 0o755);
@@ -73,6 +75,8 @@ function executableTools() {
       strip: join(root, "strip"),
       make: join(root, "make"),
       pkgConfig: join(root, "pkg-config"),
+      metal: join(root, "metal"),
+      metallib: join(root, "metallib"),
     },
   };
 }
@@ -145,6 +149,17 @@ test("matches the reviewed command snapshot for every package", () => {
   const actual = Object.fromEntries(PLAN.packages.map((entry) => [entry.id, normalizedCommands(entry)]));
   const expected = JSON.parse(readFileSync(new URL("./command-snapshots.json", import.meta.url), "utf8"));
   assert.deepEqual(actual, expected);
+});
+
+test("binds FFmpeg Metal tools explicitly and confines the clang module cache", () => {
+  const context = fixedContext();
+  const ffmpeg = PLAN.packages.find((entry) => entry.id === "ffmpeg");
+  const configure = renderPackageCommands(ffmpeg, context)[0];
+  assert.ok(configure.args.includes(`--metalcc=${context.metal} -fmodules-cache-path=${context.metalModuleCache}`));
+  assert.ok(configure.args.includes(`--metallib=${context.metallib}`));
+  assert.equal(createBuildEnvironment(context).CLANG_MODULE_CACHE_PATH, context.metalModuleCache);
+  assert.ok(context.metalModuleCache.startsWith(`${context.child}/`));
+  assert.doesNotMatch(JSON.stringify(configure), /xcrun(?:\s|-sdk)/);
 });
 
 test("uses MuJS release and install-shared without the nonexistent shared target", () => {
@@ -373,8 +388,18 @@ test("rejects dropped FFmpeg features and x264 shared-only or target configurati
   });
   writeFileSync(join(ffmpegBuild, "config.h"), `${macros.join("\n")}\n`);
   const targetFlags = `-arch arm64 -mmacosx-version-min=11.0 -isysroot ${context.sdk}`;
-  writeFileSync(join(ffmpegBuild, "ffbuild", "config.mak"), `ARCH=aarch64\nCFLAGS=${targetFlags}\nLDFLAGS=${targetFlags}\n`);
+  const metalReceipt = `ARCH=aarch64\nCFLAGS=${targetFlags}\nLDFLAGS=${targetFlags}\nMETALCC=${context.metal} -fmodules-cache-path=${context.metalModuleCache}\nMETALLIB=${context.metallib}\nCONFIG_METAL=yes\n`;
+  writeFileSync(join(ffmpegBuild, "ffbuild", "config.mak"), metalReceipt);
   assert.doesNotThrow(() => verifyConfigurationReceipt(ffmpeg, context));
+  for (const mutation of [
+    metalReceipt.replace(` -fmodules-cache-path=${context.metalModuleCache}`, ""),
+    metalReceipt.replace(`METALLIB=${context.metallib}`, "METALLIB=xcrun -sdk macosx metallib"),
+    metalReceipt.replace("CONFIG_METAL=yes", "CONFIG_METAL=no"),
+  ]) {
+    writeFileSync(join(ffmpegBuild, "ffbuild", "config.mak"), mutation);
+    assert.throws(() => verifyConfigurationReceipt(ffmpeg, context), /METALCC|METALLIB|CONFIG_METAL/);
+  }
+  writeFileSync(join(ffmpegBuild, "ffbuild", "config.mak"), metalReceipt);
   writeFileSync(join(ffmpegBuild, "config.h"), `${macros.filter((line) => !line.startsWith("#define CONFIG_LIBX264 ")).join("\n")}\n`);
   assert.throws(() => verifyConfigurationReceipt(ffmpeg, context), /LIBX264/);
 
@@ -469,7 +494,7 @@ function probeFixture() {
   const child = temporary();
   const selected = executableTools();
   const context = createContext({ child, arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: selected.path, tools: selected.tools });
-  for (const directory of [context.builds, context.prefix, join(child, "home"), join(child, "tmp"), context.xcrunCacheRoot]) mkdirSync(directory, { recursive: true });
+  for (const directory of [context.builds, context.prefix, join(child, "home"), join(child, "tmp"), context.xcrunCacheRoot, context.metalModuleCache]) mkdirSync(directory, { recursive: true });
   writeMachineFile(context);
   return { child, context };
 }
@@ -486,6 +511,10 @@ function successfulProbeExecutor(context, archiveMemberOutput = OBSERVED_APPLE_A
       chmodSync(linkProbe, 0o755);
     } else if (command === context.make) {
       writeFileSync(join(context.child, "toolchain-probe", "make-probe.ok"), "make-probe-ok\n");
+    } else if (command === context.metal) {
+      writeFileSync(args[args.indexOf("-o") + 1], "metal-air");
+    } else if (command === context.metallib) {
+      writeFileSync(args[args.indexOf("-o") + 1], "metal-library");
     }
     return {
       status: 0,
@@ -495,7 +524,7 @@ function successfulProbeExecutor(context, archiveMemberOutput = OBSERVED_APPLE_A
   };
 }
 
-test("runs the Meson static-library, ranlib, ar, and make probe before accepting the toolchain", () => {
+test("runs C, C++, make, and confined Metal probes before accepting the toolchain", () => {
   const { child, context } = probeFixture();
   const receipt = runToolchainProbe(context, successfulProbeExecutor(context));
   assert.equal(receipt.result, "pass");
@@ -503,6 +532,10 @@ test("runs the Meson static-library, ranlib, ar, and make probe before accepting
   assert.deepEqual(receipt.archiveMembers, ["__.SYMDEF SORTED", "probe.c.o", "probe.cpp.o"]);
   assert.equal(receipt.cxxLinkProbe, "build/toolchain-probe/toolchain_link_probe");
   assert.equal(receipt.cxxLinkOutput, "cxx-link-probe-ok\n");
+  assert.equal(receipt.metalModuleCache, context.metalModuleCache);
+  assert.equal(receipt.metalAir, "build/toolchain-probe/probe.air");
+  assert.equal(receipt.metalLibrary, "build/toolchain-probe/probe.metallib");
+  assert.match(readFileSync(join(child, "toolchain-probe", "source", "probe.metal"), "utf8"), /kernel void yawf_probe/);
   assert.match(readFileSync(join(child, "toolchain-probe", "source", "meson.build"), "utf8"), /project\('toolchain-probe', \['c', 'cpp'\]\)/);
   assert.match(readFileSync(join(child, "toolchain-probe", "source", "meson.build"), "utf8"), /\['probe\.c', 'probe\.cpp'\]/);
   assert.match(readFileSync(join(child, "toolchain-probe", "source", "link_probe.cpp"), "utf8"), /std::cout/);
@@ -514,7 +547,11 @@ test("runs the Meson static-library, ranlib, ar, and make probe before accepting
     context.ar,
     join(context.builds, "toolchain-probe", "toolchain_link_probe"),
     context.make,
+    context.metal,
+    context.metallib,
   ]);
+  const metalCommand = receipt.commands.at(-2);
+  assert.deepEqual(metalCommand.args, ["-c", `-fmodules-cache-path=${context.metalModuleCache}`, join(child, "toolchain-probe", "source", "probe.metal"), "-o", join(context.builds, "toolchain-probe", "probe.air")]);
   assert.equal(JSON.parse(readFileSync(join(child, "TOOLCHAIN-PROBE.json"), "utf8")).result, "pass");
 });
 

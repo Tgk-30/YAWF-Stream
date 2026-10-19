@@ -23,7 +23,7 @@ MAX_OUTER_MEMBERS = 512
 MAX_OUTER_BYTES = 2 * 1024 * 1024 * 1024
 FORBIDDEN_ENV_PREFIXES = ("DYLD_", "PYTHON")
 FORBIDDEN_ENV_NAMES = {"NODE_OPTIONS", "NODE_PATH", "NPM_CONFIG_PREFIX", "LD_LIBRARY_PATH"}
-XCODE_TOOL_NAMES = ("clang", "clang++", "ar", "ranlib", "nm", "strip", "make")
+XCODE_TOOL_NAMES = ("clang", "clang++", "ar", "ranlib", "nm", "strip", "make", "metal", "metallib")
 PATH_TOOL_NAMES = ("pkg-config", "meson", "ninja")
 XCRUN_TIMEOUT_SECONDS = 60
 
@@ -359,7 +359,9 @@ def discover_tool_selection(
         lines = output.splitlines()
         if result.returncode != 0 or len(lines) != 1 or not lines[0].strip():
             raise ReplayError(f"xcrun could not select the exact {name} tool")
-        tools[name] = _selected_executable(Path(lines[0].strip()), name, developer_real)
+        required_root = None if name in {"metal", "metallib"} else developer_real
+        tools[name] = _selected_executable(Path(lines[0].strip()), name, required_root)
+        tools[name]["selectedBy"] = "/usr/bin/xcrun"
     try:
         sdk_result = run(
             ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"],
@@ -384,7 +386,7 @@ def discover_tool_selection(
         "sdk": sdk,
         "toolPathEntries": tool_path.split(":"),
         "tools": tools,
-        "selection": "Xcode tools and macOS SDK selected by trusted /usr/bin/xcrun with explicit DEVELOPER_DIR and finite per-call timeout; PATH tools selected without fallback",
+        "selection": "Xcode tools, including explicit Metal compiler and linker paths, and macOS SDK selected by trusted /usr/bin/xcrun with explicit DEVELOPER_DIR and finite per-call timeout; PATH tools selected without fallback",
     }
 
 
@@ -399,6 +401,8 @@ def controller_tool_arguments(selection: dict) -> list[str]:
         ("--strip", "strip"),
         ("--make", "make"),
         ("--pkg-config", "pkg-config"),
+        ("--metal", "metal"),
+        ("--metallib", "metallib"),
     )
     arguments = []
     for flag, name in mapping:

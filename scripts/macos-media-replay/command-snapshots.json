@@ -1367,6 +1367,8 @@
         "--nm=/tools/nm",
         "--strip=/tools/strip",
         "--pkg-config=/tools/pkg-config",
+        "--metalcc=/tools/metal -fmodules-cache-path=/owned/replay/metal-module-cache",
+        "--metallib=/tools/metallib",
         "--extra-cflags=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2 -I/owned/replay/install/arm64/include",
         "--extra-ldflags=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -L/owned/replay/install/arm64/lib",
         "--enable-gpl",

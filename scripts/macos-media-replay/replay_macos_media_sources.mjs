@@ -33,7 +33,7 @@ const VALID_ARCHES = new Set(["arm64", "x86_64"]);
 const ADAPTERS = new Set(["autoconf", "cmake", "meson", "luajit-make", "mujs-make", "openssl", "x264", "ffmpeg"]);
 const FORBIDDEN_TEXT = /(?:https?:\/\/|git:\/\/|\bgit\s+(?:clone|submodule)|\bcurl\b|\bwget\b)/i;
 const SHIM_DENIAL_TEXT = /(?:xcrun_db|couldn't create cache file|operation not permitted)/i;
-const TOOL_KEYS = ["cc", "cxx", "ar", "ranlib", "nm", "strip", "make", "pkgConfig"];
+const TOOL_KEYS = ["cc", "cxx", "ar", "ranlib", "nm", "strip", "make", "pkgConfig", "metal", "metallib"];
 const DARWIN_ARCHIVE_INDEX_MEMBERS = new Set(["__.SYMDEF", "__.SYMDEF SORTED"]);
 
 function fail(message) {
@@ -306,7 +306,7 @@ export function renderPackageCommands(entry, context) {
       break;
     case "ffmpeg":
       commands = [
-        { command: join(source, "configure"), args: [`--prefix=${context.prefix}`, `--arch=${context.arch}`, "--target-os=darwin", `--cc=${context.cc}`, `--cxx=${context.cxx}`, `--ar=${context.ar}`, `--ranlib=${context.ranlib}`, `--nm=${context.nm}`, `--strip=${context.strip}`, `--pkg-config=${context.pkgConfig}`, `--extra-cflags=${context.cflags} -I${context.prefix}/include`, `--extra-ldflags=${context.ldflags} -L${context.prefix}/lib`, ...options], cwd: build },
+        { command: join(source, "configure"), args: [`--prefix=${context.prefix}`, `--arch=${context.arch}`, "--target-os=darwin", `--cc=${context.cc}`, `--cxx=${context.cxx}`, `--ar=${context.ar}`, `--ranlib=${context.ranlib}`, `--nm=${context.nm}`, `--strip=${context.strip}`, `--pkg-config=${context.pkgConfig}`, `--metalcc=${context.metal} -fmodules-cache-path=${context.metalModuleCache}`, `--metallib=${context.metallib}`, `--extra-cflags=${context.cflags} -I${context.prefix}/include`, `--extra-ldflags=${context.ldflags} -L${context.prefix}/lib`, ...options], cwd: build },
         ...makeCommands(context, build, ["all", "install"]),
       ];
       break;
@@ -359,6 +359,7 @@ export function createContext({ child, arch, jobs, sdk, toolPath, tools }) {
     ...selected, cflags: flags, ldflags: flags.replace(/ -O2$/, ""),
     machineFile: join(child, `meson-${arch}-darwin.ini`),
     xcrunCacheRoot: join(child, "xcrun-cache"),
+    metalModuleCache: join(child, "metal-module-cache"),
   };
 }
 
@@ -378,6 +379,7 @@ export function createBuildEnvironment(context, base = process.env) {
     MAKE: context.make,
     PKG_CONFIG: context.pkgConfig,
     XCRUN_CACHE_ROOT: context.xcrunCacheRoot,
+    CLANG_MODULE_CACHE_PATH: context.metalModuleCache,
     CFLAGS: context.cflags,
     CXXFLAGS: context.cflags,
     LDFLAGS: context.ldflags,
@@ -539,6 +541,9 @@ export function verifyConfigurationReceipt(entry, context) {
       const value = make.get(key) ?? "";
       for (const token of [`-arch ${context.arch}`, "-mmacosx-version-min=11.0", `-isysroot ${context.sdk}`]) if (!value.includes(token)) fail(`ffmpeg config.mak receipt dropped ${key} target flags`);
     }
+    requireConfigured(make, "METALCC", `${context.metal} -fmodules-cache-path=${context.metalModuleCache}`, "ffmpeg config.mak receipt");
+    requireConfigured(make, "METALLIB", context.metallib, "ffmpeg config.mak receipt");
+    requireConfigured(make, "CONFIG_METAL", "yes", "ffmpeg config.mak receipt");
     return;
   }
   if (entry.adapter === "x264") {
@@ -613,6 +618,9 @@ export function runToolchainProbe(context, execute = spawnSync) {
   const cxxLinkProbe = join(build, "toolchain_link_probe");
   const makefile = join(context.child, "toolchain-probe", "Makefile");
   const makeMarker = join(context.child, "toolchain-probe", "make-probe.ok");
+  const metalSource = join(source, "probe.metal");
+  const metalAir = join(build, "probe.air");
+  const metalLibrary = join(build, "probe.metallib");
   const environment = createBuildEnvironment(context);
   const records = [];
   const logs = [];
@@ -624,6 +632,7 @@ export function runToolchainProbe(context, execute = spawnSync) {
   writeFileSync(join(source, "probe.c"), "int toolchain_probe(void) { return 0; }\n");
   writeFileSync(join(source, "probe.cpp"), "int toolchain_cpp_probe() { return 0; }\n");
   writeFileSync(join(source, "link_probe.cpp"), "#include <iostream>\nint main() { std::cout << \"cxx-link-probe-ok\\n\"; return std::cout.good() ? 0 : 1; }\n");
+  writeFileSync(metalSource, "#include <metal_stdlib>\nusing namespace metal;\nkernel void yawf_probe(device float *out [[buffer(0)]], uint i [[thread_position_in_grid]]) { out[i] = 1.0f; }\n");
   writeFileSync(makefile, `all:\n\t@/usr/bin/printf 'make-probe-ok\\n' > '${makeMarker}'\n`);
 
   const invoke = (command, args, cwd) => {
@@ -670,6 +679,10 @@ export function runToolchainProbe(context, execute = spawnSync) {
     if (cxxLinkOutput !== "cxx-link-probe-ok\n") fail("toolchain probe C++ link executable output is unexpected");
     invoke(context.make, ["-f", makefile, "all"], context.child);
     if (readFileSync(makeMarker, "utf8") !== "make-probe-ok\n") fail("toolchain probe make marker is missing or incorrect");
+    invoke(context.metal, ["-c", `-fmodules-cache-path=${context.metalModuleCache}`, metalSource, "-o", metalAir], context.child);
+    if (!statSync(metalAir, { throwIfNoEntry: false })?.isFile() || statSync(metalAir).size === 0) fail("toolchain probe did not produce Metal AIR");
+    invoke(context.metallib, ["--split-module-without-linking", metalAir, "-o", metalLibrary], context.child);
+    if (!statSync(metalLibrary, { throwIfNoEntry: false })?.isFile() || statSync(metalLibrary).size === 0) fail("toolchain probe did not produce a Metal library");
     writeFileSync(logPath, logs.join("\n"));
     const receipt = {
       schemaVersion: 1,
@@ -681,6 +694,9 @@ export function runToolchainProbe(context, execute = spawnSync) {
       archiveMembers,
       cxxLinkProbe: posixRelative(relative(context.child, cxxLinkProbe)),
       cxxLinkOutput,
+      metalModuleCache: context.metalModuleCache,
+      metalAir: posixRelative(relative(context.child, metalAir)),
+      metalLibrary: posixRelative(relative(context.child, metalLibrary)),
       commands: records,
       shimDenialsObserved: false,
     };
@@ -698,6 +714,9 @@ export function runToolchainProbe(context, execute = spawnSync) {
       archiveMembers,
       cxxLinkProbe: posixRelative(relative(context.child, cxxLinkProbe)),
       cxxLinkOutput,
+      metalModuleCache: context.metalModuleCache,
+      metalAir: posixRelative(relative(context.child, metalAir)),
+      metalLibrary: posixRelative(relative(context.child, metalLibrary)),
       commands: records,
     });
     throw error;
@@ -805,7 +824,7 @@ function prepareContext({ outputRoot, arch, jobs, sdk, toolPath, tools, actualAr
   const child = prepareChild(ownedRoot, arch);
   const context = createContext({ child, arch, jobs, sdk, toolPath, tools });
   verifySelectedTools(context);
-  for (const directory of [context.sources, context.builds, context.prefix, join(child, "home"), join(child, "tmp"), context.xcrunCacheRoot]) mkdirSync(directory, { recursive: true });
+  for (const directory of [context.sources, context.builds, context.prefix, join(child, "home"), join(child, "tmp"), context.xcrunCacheRoot, context.metalModuleCache]) mkdirSync(directory, { recursive: true });
   writeMachineFile(context);
   return context;
 }
@@ -879,7 +898,7 @@ export function main(argv = process.argv.slice(2)) {
     return;
   }
   if (!["commands", "build", "probe"].includes(args.mode)) fail("mode must be init, verify, commands, build, or probe");
-  for (const required of ["output-root", "arch", "jobs", "sdk", "tool-path", "cc", "cxx", "ar", "ranlib", "nm", "strip", "make", "pkg-config"]) {
+  for (const required of ["output-root", "arch", "jobs", "sdk", "tool-path", "cc", "cxx", "ar", "ranlib", "nm", "strip", "make", "pkg-config", "metal", "metallib"]) {
     if (!args[required]) fail(`${args.mode} requires --${required}`);
   }
   const tools = {
@@ -891,6 +910,8 @@ export function main(argv = process.argv.slice(2)) {
     strip: args.strip,
     make: args.make,
     pkgConfig: args["pkg-config"],
+    metal: args.metal,
+    metallib: args.metallib,
   };
   if (args.mode === "probe") {
     const context = prepareToolchainProbe({
