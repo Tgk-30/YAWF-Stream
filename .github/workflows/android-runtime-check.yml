@@ -1,0 +1,247 @@
+name: Android phone runtime check
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/android-runtime-check.yml
+      - scripts/android_phone_runtime_check.py
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-phone-runtime-check
+  cancel-in-progress: false
+
+jobs:
+  api30-runtime:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    name: Signed phone APK on fresh API 30 KVM emulator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CANDIDATE_RUN_ID: "39306282501"
+      CANDIDATE_SOURCE_SHA: d9ff4b4b073b2ed4c445a44b431a01442be3709f
+      CANDIDATE_APK_SHA256: 3165df8cc7bc774cdab81e0049987246255eebb9d1bec47ba0b346a707e3d90c
+      CANDIDATE_VERSION: 2.3.23
+      CANDIDATE_VERSION_CODE: "2003023"
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.23.apk
+      EVIDENCE: android-runtime-evidence
+      AVD_NAME: yawf-phone-api30-runtime
+      EMULATOR_SERIAL: emulator-5554
+      EMULATOR_GPU: swiftshader_indirect
+
+    steps:
+      - name: Checkout runtime driver
+        uses: actions/checkout@v4
+
+      - name: Checkout exact candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SOURCE_SHA }}
+          path: candidate-source
+
+      - name: Confirm exact source and prepare evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          actual="$(git -C candidate-source rev-parse HEAD)"
+          test "$actual" = "$CANDIDATE_SOURCE_SHA"
+          {
+            echo "sourceRevision=$actual"
+            echo "candidateRunId=$CANDIDATE_RUN_ID"
+            echo "emulatorImage=system-images;android-30;google_apis;x86_64"
+            echo "gpuBackend=$EMULATOR_GPU"
+          } > "$EVIDENCE/binding.txt"
+
+      - name: Download exact signed candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-phone-release-candidate
+          path: candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ env.CANDIDATE_RUN_ID }}
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK command line tools
+        uses: android-actions/setup-android@v3
+
+      - name: Install one API 30 x86_64 emulator image and verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager \
+            "platform-tools" \
+            "emulator" \
+            "platforms;android-30" \
+            "build-tools;36.0.0" \
+            "system-images;android-30;google_apis;x86_64"
+          build_tools="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/36.0.0"
+          test -x "$build_tools/apksigner"
+          test -x "$build_tools/aapt2"
+          command -v apkanalyzer
+          echo "$build_tools" >> "$GITHUB_PATH"
+
+      - name: Verify exact APK, manifest, source, and signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$CANDIDATE_APK"
+          printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$CANDIDATE_APK" | sha256sum -c -
+          (cd candidate && sha256sum -c SHA256SUMS)
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path("candidate/android-update.json").read_text())
+          assert manifest["schemaVersion"] == 1
+          assert manifest["version"] == os.environ["CANDIDATE_VERSION"]
+          assert manifest["versionCode"] == int(os.environ["CANDIDATE_VERSION_CODE"])
+          assert manifest["packageName"] == "com.tgk30.debridstreamer"
+          assert manifest["sourceRevision"] == os.environ["CANDIDATE_SOURCE_SHA"]
+          assert manifest["apk"]["name"] == Path(os.environ["CANDIDATE_APK"]).name
+          assert manifest["apk"]["sha256"] == os.environ["CANDIDATE_APK_SHA256"]
+          assert manifest["apk"]["size"] == Path(os.environ["CANDIDATE_APK"]).stat().st_size
+          PY
+          test "$(apkanalyzer manifest application-id "$CANDIDATE_APK")" = "com.tgk30.debridstreamer"
+          test "$(apkanalyzer manifest version-name "$CANDIDATE_APK")" = "$CANDIDATE_VERSION"
+          test "$(apkanalyzer manifest version-code "$CANDIDATE_APK")" = "$CANDIDATE_VERSION_CODE"
+          python3 candidate-source/scripts/verify_android_apk.py \
+            --apk "$CANDIDATE_APK" \
+            --version "$CANDIDATE_VERSION" \
+            --certificate-pin candidate-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" \
+            | tee "$EVIDENCE/offline-verification.txt"
+          apksigner verify --print-certs "$CANDIDATE_APK" \
+            | sed -n '/certificate SHA-256 digest:/p' \
+            > "$EVIDENCE/apk-signer.txt"
+
+      - name: Test the bounded UI driver
+        run: python3 scripts/android_phone_runtime_check.py --self-test
+
+      - name: Require KVM and create one fresh AVD
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          test -r /dev/kvm -a -w /dev/kvm
+          stat -c 'kvmOwner=%u kvmGroup=%g kvmMode=%a' /dev/kvm \
+            > "$EVIDENCE/kvm.txt"
+          printf 'no\n' | avdmanager create avd \
+            --force \
+            --name "$AVD_NAME" \
+            --package "system-images;android-30;google_apis;x86_64" \
+            --device "pixel"
+          emulator -list-avds | grep -Fx "$AVD_NAME"
+
+      - name: Start the single isolated API 30 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          if adb devices | awk 'NR > 1 && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::An Android device was already attached."
+            exit 1
+          fi
+          nohup emulator \
+            -avd "$AVD_NAME" \
+            -port 5554 \
+            -accel on \
+            -gpu "$EMULATOR_GPU" \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -no-snapshot \
+            -camera-back none \
+            -camera-front none \
+            -cores 2 \
+            -memory 2048 \
+            > "$EVIDENCE/emulator.log" 2>&1 &
+          echo "$!" > "$EVIDENCE/emulator.pid"
+
+      - name: Run setup and native update UI through real input
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/android_phone_runtime_check.py \
+            --adb adb \
+            --serial "$EMULATOR_SERIAL" \
+            --apk "$CANDIDATE_APK" \
+            --evidence "$EVIDENCE" \
+            --expected-sha256 "$CANDIDATE_APK_SHA256" \
+            --expected-version "$CANDIDATE_VERSION" \
+            --expected-version-code "$CANDIDATE_VERSION_CODE" \
+            --boot-timeout 300 \
+            --ui-timeout 60 \
+            --update-timeout 120
+
+      - name: Preserve bounded failure evidence
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$EVIDENCE"
+          adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$EVIDENCE/workflow-failure.png"
+          adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
+            | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+            > "$EVIDENCE/workflow-failure-activity.txt"
+          adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime \
+            | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+            > "$EVIDENCE/workflow-failure-logcat.txt"
+          adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print data_app_anr \
+            | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+            > "$EVIDENCE/workflow-failure-anr.txt"
+          timeout 30s adb -s "$EMULATOR_SERIAL" shell dumpsys SurfaceFlinger \
+            | head -c 1048576 \
+            | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+            > "$EVIDENCE/workflow-failure-surfaceflinger.txt"
+
+      - name: Stop the owned emulator
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$EVIDENCE"
+          adb -s "$EMULATOR_SERIAL" emu kill
+          for _ in 1 2 3 4 5; do
+            if ! adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
+              echo "emulatorStopped=true" > "$EVIDENCE/cleanup.txt"
+              exit 0
+            fi
+            sleep 2
+          done
+          if [ -f "$EVIDENCE/emulator.pid" ]; then
+            kill "$(cat "$EVIDENCE/emulator.pid")" 2>/dev/null || true
+          fi
+          sleep 2
+          if adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
+            echo "emulatorStopped=false" > "$EVIDENCE/cleanup.txt"
+            echo "::error::The owned emulator did not stop."
+            exit 1
+          fi
+          echo "emulatorStopped=true" > "$EVIDENCE/cleanup.txt"
+
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone-api30-runtime-evidence
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 7
