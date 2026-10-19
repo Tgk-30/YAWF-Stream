@@ -23,6 +23,9 @@ MAX_OUTER_MEMBERS = 512
 MAX_OUTER_BYTES = 2 * 1024 * 1024 * 1024
 FORBIDDEN_ENV_PREFIXES = ("DYLD_", "PYTHON")
 FORBIDDEN_ENV_NAMES = {"NODE_OPTIONS", "NODE_PATH", "NPM_CONFIG_PREFIX", "LD_LIBRARY_PATH"}
+XCODE_TOOL_NAMES = ("clang", "clang++", "ar", "ranlib", "nm", "strip", "make")
+PATH_TOOL_NAMES = ("pkg-config", "meson", "ninja")
+XCRUN_TIMEOUT_SECONDS = 60
 
 
 class ReplayError(Exception):
@@ -269,7 +272,7 @@ def clean_environment(output_root: Path, tool_path: str, developer_dir: str) -> 
         "XCRUN_CACHE_ROOT": str(output_root / "xcrun-cache"),
         "LANG": "C",
         "LC_ALL": "C",
-        "DEVELOPER_DIR": developer_dir,
+        "DEVELOPER_DIR": str(developer_dir),
     }
 
 
@@ -277,6 +280,133 @@ def ensure_clean_process_environment(environment: dict[str, str]) -> None:
     forbidden = [key for key in environment if key in FORBIDDEN_ENV_NAMES or key.startswith(FORBIDDEN_ENV_PREFIXES)]
     if forbidden:
         raise ReplayError("sandbox process environment contains a forbidden override")
+
+
+def _within(root: Path, path: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _selected_executable(path: Path, label: str, required_root: Path | None = None) -> dict[str, str]:
+    if not path.is_absolute() or any(character in str(path) for character in ("\n", "\r", "\x00")):
+        raise ReplayError(f"selected {label} path is not absolute and safe")
+    try:
+        real = path.resolve(strict=True)
+    except OSError as error:
+        raise ReplayError(f"selected {label} path cannot be resolved") from error
+    if not real.is_file() or not os.access(path, os.X_OK):
+        raise ReplayError(f"selected {label} path is not executable")
+    if required_root is not None and not _within(required_root, real):
+        raise ReplayError(f"selected {label} path is outside the selected Developer directory")
+    return {
+        "selectedPath": str(path),
+        "realPath": str(real),
+    }
+
+
+def _selected_directory(path: Path, label: str, required_root: Path) -> dict[str, str]:
+    if not path.is_absolute() or any(character in str(path) for character in ("\n", "\r", "\x00")):
+        raise ReplayError(f"selected {label} path is not absolute and safe")
+    try:
+        real = path.resolve(strict=True)
+    except OSError as error:
+        raise ReplayError(f"selected {label} path cannot be resolved") from error
+    if not real.is_dir() or not _within(required_root, real):
+        raise ReplayError(f"selected {label} path is outside the selected Developer directory")
+    return {
+        "selectedPath": str(path),
+        "realPath": str(real),
+    }
+
+
+def _find_path_tool(name: str, tool_path: str) -> Path:
+    for directory in tool_path.split(":"):
+        candidate = Path(directory) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise ReplayError(f"required controlled PATH tool is unavailable: {name}")
+
+
+def discover_tool_selection(
+    developer_dir: Path,
+    tool_path: str,
+    environment: dict[str, str],
+    run=subprocess.run,
+) -> dict:
+    try:
+        developer_real = developer_dir.resolve(strict=True)
+    except OSError as error:
+        raise ReplayError("selected Developer directory cannot be resolved") from error
+    if not developer_real.is_dir():
+        raise ReplayError("selected Developer directory is not a directory")
+    tools = {}
+    for name in XCODE_TOOL_NAMES:
+        try:
+            result = run(
+                ["/usr/bin/xcrun", "--find", name],
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=XCRUN_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ReplayError(f"xcrun timed out after {XCRUN_TIMEOUT_SECONDS} seconds while selecting {name}") from error
+        output = result.stdout or ""
+        lines = output.splitlines()
+        if result.returncode != 0 or len(lines) != 1 or not lines[0].strip():
+            raise ReplayError(f"xcrun could not select the exact {name} tool")
+        tools[name] = _selected_executable(Path(lines[0].strip()), name, developer_real)
+    try:
+        sdk_result = run(
+            ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"],
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=XCRUN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ReplayError(f"xcrun timed out after {XCRUN_TIMEOUT_SECONDS} seconds while selecting the macOS SDK") from error
+    sdk_lines = (sdk_result.stdout or "").splitlines()
+    if sdk_result.returncode != 0 or len(sdk_lines) != 1 or not sdk_lines[0].strip():
+        raise ReplayError("xcrun could not select the exact macOS SDK")
+    sdk = _selected_directory(Path(sdk_lines[0].strip()), "macOS SDK", developer_real)
+    for name in PATH_TOOL_NAMES:
+        tools[name] = _selected_executable(_find_path_tool(name, tool_path), name)
+    return {
+        "schemaVersion": 1,
+        "developerDir": str(developer_dir),
+        "developerRealPath": str(developer_real),
+        "sdk": sdk,
+        "toolPathEntries": tool_path.split(":"),
+        "tools": tools,
+        "selection": "Xcode tools and macOS SDK selected by trusted /usr/bin/xcrun with explicit DEVELOPER_DIR and finite per-call timeout; PATH tools selected without fallback",
+    }
+
+
+def controller_tool_arguments(selection: dict) -> list[str]:
+    tools = selection["tools"]
+    mapping = (
+        ("--cc", "clang"),
+        ("--cxx", "clang++"),
+        ("--ar", "ar"),
+        ("--ranlib", "ranlib"),
+        ("--nm", "nm"),
+        ("--strip", "strip"),
+        ("--make", "make"),
+        ("--pkg-config", "pkg-config"),
+    )
+    arguments = []
+    for flag, name in mapping:
+        selected = tools.get(name, {}).get("selectedPath")
+        if not selected:
+            raise ReplayError(f"tool selection is missing {name}")
+        arguments.extend((flag, selected))
+    return arguments
 
 
 def run_checked(command: list[str], *, environment: dict[str, str], log: Path | None = None) -> None:
@@ -443,7 +573,12 @@ def main_run(args: argparse.Namespace) -> None:
     trusted_logs.mkdir()
     trusted_init_environment = clean_environment(workspace / "trusted-init-state", args.tool_path, args.developer_dir)
     ensure_clean_process_environment(trusted_init_environment)
+    for key in ("HOME", "TMPDIR", "XCRUN_CACHE_ROOT"):
+        Path(trusted_init_environment[key]).mkdir(parents=True, exist_ok=True)
     run_checked([str(args.node), str(controller / "replay_macos_media_sources.mjs"), "init", "--output-root", str(output)], environment=trusted_init_environment, log=trusted_logs / "init.log")
+    tool_selection = discover_tool_selection(Path(args.developer_dir), args.tool_path, trusted_init_environment)
+    write_json(receipts / "05-toolchain-selection.json", tool_selection)
+    selected_sdk = tool_selection["sdk"]["selectedPath"]
 
     child = output / "replay-arm64-macos11"
     xcrun_wrapper_root = workspace / "tool-wrappers"
@@ -487,22 +622,45 @@ def main_run(args: argparse.Namespace) -> None:
 
     build_profile = workspace / "build.sb"
     build_profile.write_text(sandbox_profile(child))
+    controller_mode = "probe" if args.probe_only else "build"
     build_command = [
         "/usr/bin/sandbox-exec", "-f", str(build_profile), "/usr/bin/env", "-i",
         *[f"{key}={value}" for key, value in environment.items()],
-        str(args.node), str(controller / "replay_macos_media_sources.mjs"), "build",
-        "--source-root", str(source_root), "--output-root", str(output), "--arch", EXPECTED_ARCH,
-        "--jobs", str(args.jobs), "--sdk", args.sdk, "--tool-path", environment["PATH"],
+        str(args.node), str(controller / "replay_macos_media_sources.mjs"), controller_mode,
+        "--output-root", str(output), "--arch", EXPECTED_ARCH,
+        "--jobs", str(args.jobs), "--sdk", selected_sdk, "--tool-path", environment["PATH"],
+        *controller_tool_arguments(tool_selection),
     ]
+    if not args.probe_only:
+        build_command.extend(("--source-root", str(source_root)))
     run_checked(build_command, environment={}, log=trusted_logs / "controller-build.log")
-    invoke_sandbox(build_profile, environment, wrapper, [
-        "--internal-postbuild", "--output-root", str(output), "--source-root", str(source_root),
-        "--project-root", str(project), "--controller-root", str(controller), "--node", str(args.node),
-        "--sdk", args.sdk, "--tool-path", environment["PATH"], "--jobs", str(args.jobs),
-    ], trusted_logs / "postbuild.log")
+    toolchain_probe = load_json(child / "TOOLCHAIN-PROBE.json")
+    if toolchain_probe.get("result") != "pass" or toolchain_probe.get("shimDenialsObserved") is not False:
+        raise ReplayError("toolchain probe receipt did not record a clean pass")
+    if not args.probe_only:
+        invoke_sandbox(build_profile, environment, wrapper, [
+            "--internal-postbuild", "--output-root", str(output), "--source-root", str(source_root),
+            "--project-root", str(project), "--controller-root", str(controller), "--node", str(args.node),
+            "--tool-path", environment["PATH"], "--jobs", str(args.jobs),
+        ], trusted_logs / "postbuild.log")
     after = {"sentinel": sha256_file(sentinel), "sourceArchive": sha256_file(source_archive), "normalizedArchive": sha256_file(normalized), "sourceInventory": sha256_file(source_root / "SOURCE-INVENTORY.json")}
     if preserved != after or any(path.name != "sentinel.txt" for path in outside.iterdir()):
         raise ReplayError("confined replay changed an outside sentinel or source input")
+    if args.probe_only:
+        write_json(output / "PROBE-ONLY-RECEIPT.json", {
+            "schemaVersion": 1,
+            "result": "pass",
+            "scope": "same-profile ARM macOS toolchain probe only; no package replay, artifact equivalence, publication, signing, or licensing claim",
+            "transport": transport,
+            "normalization": normalization,
+            "freshAdmission": admission,
+            "controlHashes": observed_controls,
+            "confinement": canary,
+            "toolchainSelection": tool_selection,
+            "toolchainProbe": toolchain_probe,
+            "outsideAndSourceInputsPreserved": True,
+        })
+        return
     write_json(output / "PREPARATION-RECEIPT.json", {
         "schemaVersion": 1,
         "result": "pass",
@@ -513,6 +671,8 @@ def main_run(args: argparse.Namespace) -> None:
         "frozenNormalizedReferenceOnly": pins["referenceOnlyFrozenNormalizedSha256"],
         "controlHashes": observed_controls,
         "confinement": canary,
+        "toolchainSelection": tool_selection,
+        "toolchainProbe": toolchain_probe,
         "outsideControl": "loopback TCP connection accepted before sandbox denial check",
         "outsideAndSourceInputsPreserved": True,
     })
@@ -531,11 +691,11 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--outside-root", type=Path)
     value.add_argument("--source-root", type=Path)
     value.add_argument("--node", type=Path)
-    value.add_argument("--sdk")
     value.add_argument("--developer-dir")
     value.add_argument("--tool-path")
     value.add_argument("--jobs", type=int, default=8)
     value.add_argument("--port", type=int)
+    value.add_argument("--probe-only", action="store_true")
     return value
 
 
@@ -546,7 +706,7 @@ def entrypoint() -> None:
     elif args.internal_postbuild:
         internal_postbuild(args)
     else:
-        required = [args.candidate_dir, args.workspace, args.project_root, args.controller_root, args.node, args.sdk, args.developer_dir, args.tool_path]
+        required = [args.candidate_dir, args.workspace, args.project_root, args.controller_root, args.node, args.developer_dir, args.tool_path]
         if any(value is None for value in required) or not 1 <= args.jobs <= 16:
             raise ReplayError("experiment arguments are incomplete or invalid")
         main_run(args)

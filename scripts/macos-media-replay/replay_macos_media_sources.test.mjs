@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -16,6 +16,7 @@ import {
   initializeOutputRoot,
   loadPlan,
   prepareReplay,
+  runToolchainProbe,
   renderPackageCommands,
   snapshotInstalledMachO,
   validatePlan,
@@ -34,6 +35,17 @@ const ORDER = [
   "svt-av1", "libjxl", "dav1d", "speex", "libogg", "libvorbis", "libaribcaption", "harfbuzz",
   "fontconfig", "libarchive", "rubberband", "libbluray", "libplacebo", "libass", "ffmpeg", "mpv",
 ];
+const FIXED_TOOLS = {
+  cc: "/tools/clang",
+  cxx: "/tools/clang++",
+  ar: "/tools/ar",
+  ranlib: "/tools/ranlib",
+  nm: "/tools/nm",
+  strip: "/tools/strip",
+  make: "/tools/make",
+  pkgConfig: "/tools/pkg-config",
+};
+const OBSERVED_APPLE_ARCHIVE_MEMBERS = "__.SYMDEF SORTED\nprobe.c.o\nprobe.cpp.o\n";
 
 function temporary() {
   return mkdtempSync(join(tmpdir(), "independent-media-replay-"));
@@ -41,6 +53,28 @@ function temporary() {
 
 function digest(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function executableTools() {
+  const root = temporary();
+  for (const name of ["clang", "clang++", "ar", "ranlib", "nm", "strip", "make", "pkg-config", "cmake", "meson", "ninja"]) {
+    const path = join(root, name);
+    writeFileSync(path, "#!/bin/sh\nexit 0\n");
+    chmodSync(path, 0o755);
+  }
+  return {
+    path: root,
+    tools: {
+      cc: join(root, "clang"),
+      cxx: join(root, "clang++"),
+      ar: join(root, "ar"),
+      ranlib: join(root, "ranlib"),
+      nm: join(root, "nm"),
+      strip: join(root, "strip"),
+      make: join(root, "make"),
+      pkgConfig: join(root, "pkg-config"),
+    },
+  };
 }
 
 function fixtureBundle({ tamper = false, escapeSymlink = false, relativeSymlink = false, componentAlias = false } = {}) {
@@ -78,7 +112,7 @@ function fixtureBundle({ tamper = false, escapeSymlink = false, relativeSymlink 
 }
 
 function fixedContext(arch = "arm64") {
-  const context = createContext({ child: "/owned/replay", arch, jobs: 4, sdk: "/SDK/MacOSX.sdk", toolPath: "/tools" });
+  const context = createContext({ child: "/owned/replay", arch, jobs: 4, sdk: "/SDK/MacOSX.sdk", toolPath: "/tools", tools: FIXED_TOOLS });
   context.tool = (name) => `/tools/${name}`;
   return context;
 }
@@ -173,10 +207,11 @@ test("finds owned CMake libraries while excluding a simulated host package prefi
   const project = join(child, "probe-source");
   const build = join(child, "probe-build");
   const simulatedHost = join(child, "host-homebrew");
+  const selected = executableTools();
   mkdirSync(sdk);
   mkdirSync(project);
   mkdirSync(join(simulatedHost, "lib"), { recursive: true });
-  const context = createContext({ child, arch: "arm64", jobs: 1, sdk, toolPath: process.env.PATH });
+  const context = createContext({ child, arch: "arm64", jobs: 1, sdk, toolPath: process.env.PATH, tools: selected.tools });
   mkdirSync(join(context.prefix, "lib"), { recursive: true });
   const ownedLibrary = join(context.prefix, "lib", "libreplay_owned_probe.dylib");
   writeFileSync(ownedLibrary, "owned");
@@ -228,7 +263,7 @@ test("passes LuaJIT flags through variables its reviewed Makefiles consume", () 
 });
 
 test("rejects dropped CMake and Meson options and target flags from post-config receipts", () => {
-  const context = createContext({ child: temporary(), arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", toolPath: "/tools" });
+  const context = createContext({ child: temporary(), arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", toolPath: "/tools", tools: FIXED_TOOLS });
   const cmake = PLAN.packages.find((entry) => entry.id === "libwebp");
   const cmakeBuild = join(context.builds, cmake.id);
   mkdirSync(cmakeBuild, { recursive: true });
@@ -260,7 +295,7 @@ test("rejects dropped CMake and Meson options and target flags from post-config 
 });
 
 test("rejects dropped FFmpeg features and x264 shared-only or target configuration receipts", () => {
-  const context = createContext({ child: temporary(), arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", toolPath: "/tools" });
+  const context = createContext({ child: temporary(), arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", toolPath: "/tools", tools: FIXED_TOOLS });
   const ffmpeg = PLAN.packages.find((entry) => entry.id === "ffmpeg");
   const ffmpegBuild = join(context.builds, ffmpeg.id);
   mkdirSync(join(ffmpegBuild, "ffbuild"), { recursive: true });
@@ -287,7 +322,7 @@ test("rejects dropped FFmpeg features and x264 shared-only or target configurati
 });
 
 test("validates OpenSSL configdata prefix, shared mode, architecture, SDK, and macOS 11 flags", () => {
-  const context = createContext({ child: temporary(), arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", toolPath: "/tools" });
+  const context = createContext({ child: temporary(), arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", toolPath: "/tools", tools: FIXED_TOOLS });
   const openssl = PLAN.packages.find((entry) => entry.id === "openssl");
   const build = join(context.builds, openssl.id);
   mkdirSync(build, { recursive: true });
@@ -323,6 +358,15 @@ test("propagates native architecture, macOS 11, SDK, prefix, and isolated discov
     assert.equal(environment.PKG_CONFIG_PATH, "/owned/replay/install/" + arch + "/lib/pkgconfig");
     assert.equal(environment.PKG_CONFIG_LIBDIR, environment.PKG_CONFIG_PATH);
     assert.equal(environment.CMAKE_PREFIX_PATH, "/owned/replay/install/" + arch);
+    assert.equal(environment.CC, "/tools/clang");
+    assert.equal(environment.CXX, "/tools/clang++");
+    assert.equal(environment.AR, "/tools/ar");
+    assert.equal(environment.RANLIB, "/tools/ranlib");
+    assert.equal(environment.NM, "/tools/nm");
+    assert.equal(environment.STRIP, "/tools/strip");
+    assert.equal(environment.MAKE, "/tools/make");
+    assert.equal(environment.PKG_CONFIG, "/tools/pkg-config");
+    assert.equal(environment.XCRUN_CACHE_ROOT, "/owned/replay/xcrun-cache");
     assert.equal(environment.CPATH, "");
     assert.equal(environment.LIBRARY_PATH, "");
     assert.equal(environment.NO_PROXY, "*");
@@ -333,7 +377,129 @@ test("propagates native architecture, macOS 11, SDK, prefix, and isolated discov
     assert.match(machine, new RegExp(`cpu = '${arch === "arm64" ? "aarch64" : "x86_64"}'`));
     assert.match(machine, /-mmacosx-version-min=11\.0/);
     assert.match(machine, /-isysroot/);
+    assert.match(machine, /ar = '\/tools\/ar'/);
+    assert.match(machine, /strip = '\/tools\/strip'/);
+    assert.match(machine, /pkg-config = '\/tools\/pkg-config'/);
+    assert.doesNotMatch(machine, /(?:ar|strip|pkg-config) = '(?:ar|strip|pkg-config)'/);
   }
+});
+
+test("requires explicit absolute tool paths and never falls back to a bare PATH name", () => {
+  assert.throws(
+    () => createContext({ child: "/owned/replay", arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/tools" }),
+    /explicit tool selection/,
+  );
+  assert.throws(
+    () => createContext({ child: "/owned/replay", arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/tools", tools: { ...FIXED_TOOLS, ar: "ar" } }),
+    /explicit ar tool path/,
+  );
+  const context = fixedContext();
+  context.tool = createContext({ child: "/owned/replay", arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/definitely-missing", tools: FIXED_TOOLS }).tool;
+  assert.throws(() => context.tool("meson"), /required tool is unavailable/);
+});
+
+function probeFixture() {
+  const child = temporary();
+  const selected = executableTools();
+  const context = createContext({ child, arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: selected.path, tools: selected.tools });
+  for (const directory of [context.builds, context.prefix, join(child, "home"), join(child, "tmp"), context.xcrunCacheRoot]) mkdirSync(directory, { recursive: true });
+  writeMachineFile(context);
+  return { child, context };
+}
+
+function successfulProbeExecutor(context, archiveMemberOutput = OBSERVED_APPLE_ARCHIVE_MEMBERS) {
+  return (command, args) => {
+    if (args[0] === "setup") {
+      mkdirSync(join(context.builds, "toolchain-probe", "meson-logs"), { recursive: true });
+      writeFileSync(join(context.builds, "toolchain-probe", "meson-logs", "meson-log.txt"), "clean toolchain selection\n");
+    } else if (args[0] === "compile") {
+      writeFileSync(join(context.builds, "toolchain-probe", "libtoolchain_probe.a"), "archive");
+      const linkProbe = join(context.builds, "toolchain-probe", "toolchain_link_probe");
+      writeFileSync(linkProbe, "link probe");
+      chmodSync(linkProbe, 0o755);
+    } else if (command === context.make) {
+      writeFileSync(join(context.child, "toolchain-probe", "make-probe.ok"), "make-probe-ok\n");
+    }
+    return {
+      status: 0,
+      stdout: command === context.ar ? archiveMemberOutput : command === join(context.builds, "toolchain-probe", "toolchain_link_probe") ? "cxx-link-probe-ok\n" : "",
+      stderr: "",
+    };
+  };
+}
+
+test("runs the Meson static-library, ranlib, ar, and make probe before accepting the toolchain", () => {
+  const { child, context } = probeFixture();
+  const receipt = runToolchainProbe(context, successfulProbeExecutor(context));
+  assert.equal(receipt.result, "pass");
+  assert.equal(receipt.shimDenialsObserved, false);
+  assert.deepEqual(receipt.archiveMembers, ["__.SYMDEF SORTED", "probe.c.o", "probe.cpp.o"]);
+  assert.equal(receipt.cxxLinkProbe, "build/toolchain-probe/toolchain_link_probe");
+  assert.equal(receipt.cxxLinkOutput, "cxx-link-probe-ok\n");
+  assert.match(readFileSync(join(child, "toolchain-probe", "source", "meson.build"), "utf8"), /project\('toolchain-probe', \['c', 'cpp'\]\)/);
+  assert.match(readFileSync(join(child, "toolchain-probe", "source", "meson.build"), "utf8"), /\['probe\.c', 'probe\.cpp'\]/);
+  assert.match(readFileSync(join(child, "toolchain-probe", "source", "link_probe.cpp"), "utf8"), /std::cout/);
+  assert.ok(receipt.commands[0].args.includes("--buildtype=release"));
+  assert.deepEqual(receipt.commands.map((command) => command.command), [
+    join(context.toolPath, "meson"),
+    join(context.toolPath, "meson"),
+    context.ranlib,
+    context.ar,
+    join(context.builds, "toolchain-probe", "toolchain_link_probe"),
+    context.make,
+  ]);
+  assert.equal(JSON.parse(readFileSync(join(child, "TOOLCHAIN-PROBE.json"), "utf8")).result, "pass");
+});
+
+test("accepts exactly one C and C++ probe object and at most one documented Darwin archive index", () => {
+  const mutations = [
+    "__.SYMDEF SORTED\nprobe.c.o\n",
+    "__.SYMDEF SORTED\nprobe.cpp.o\n",
+    "__.SYMDEF SORTED\nprobe.c.o\nprobe.cpp.o\nprobe.c.o\n",
+    "__.SYMDEF SORTED\n__.SYMDEF SORTED\nprobe.c.o\nprobe.cpp.o\n",
+    "__.SYMDEF\n__.SYMDEF SORTED\nprobe.c.o\nprobe.cpp.o\n",
+    "__.SYMDEF SORTED\nprobe.c.o\nprobe.cpp.o\nunexpected.o\n",
+    "__.SYMDEF SORTED\nlibtoolchain_probe.a.p/probe.c.o\nprobe.cpp.o\n",
+  ];
+  for (const archiveMemberOutput of mutations) {
+    const { child, context } = probeFixture();
+    assert.throws(
+      () => runToolchainProbe(context, successfulProbeExecutor(context, archiveMemberOutput)),
+      /archive membership is unexpected/,
+      archiveMemberOutput,
+    );
+    const receipt = JSON.parse(readFileSync(join(child, "TOOLCHAIN-PROBE.json"), "utf8"));
+    assert.equal(receipt.result, "fail");
+    assert.deepEqual(receipt.archiveMembers, archiveMemberOutput.trimEnd().split("\n"));
+  }
+});
+
+test("accepts the documented unsorted Darwin archive index name", () => {
+  const { context } = probeFixture();
+  const receipt = runToolchainProbe(context, successfulProbeExecutor(context, "__.SYMDEF\nprobe.c.o\nprobe.cpp.o\n"));
+  assert.deepEqual(receipt.archiveMembers, ["__.SYMDEF", "probe.c.o", "probe.cpp.o"]);
+});
+
+test("requires the C++ link executable to run with its exact libc++ marker", () => {
+  const { context } = probeFixture();
+  const execute = successfulProbeExecutor(context);
+  assert.throws(
+    () => runToolchainProbe(context, (command, args, options) => {
+      const result = execute(command, args, options);
+      if (command === join(context.builds, "toolchain-probe", "toolchain_link_probe")) return { ...result, stdout: "" };
+      return result;
+    }),
+    /C\+\+ link executable output is unexpected/,
+  );
+});
+
+test("rejects an Apple shim cache denial even when the probe command exits zero", () => {
+  const { child, context } = probeFixture();
+  const execute = () => ({ status: 0, stdout: "clang: error: couldn't create cache file /tmp/xcrun_db: Operation not permitted\n", stderr: "" });
+  assert.throws(() => runToolchainProbe(context, execute), /shim cache denial/);
+  const receipt = JSON.parse(readFileSync(join(child, "TOOLCHAIN-PROBE.json"), "utf8"));
+  assert.equal(receipt.result, "fail");
+  assert.match(receipt.error, /shim cache denial/);
 });
 
 test("allows only native arm64 and x86_64 replays", () => {
@@ -345,9 +511,9 @@ test("allows only native arm64 and x86_64 replays", () => {
 
 test("rejects SDK and replay paths that can inject machine-file or CMake syntax", () => {
   for (const sdk of ["/SDK/it's", "/SDK/back\\slash", "/SDK/list;entry", "/SDK/line\nbreak"]) {
-    assert.throws(() => createContext({ child: "/owned/replay", arch: "arm64", jobs: 1, sdk, toolPath: "/tools" }), /machine-file-safe/);
+    assert.throws(() => createContext({ child: "/owned/replay", arch: "arm64", jobs: 1, sdk, toolPath: "/tools", tools: FIXED_TOOLS }), /machine-file-safe/);
   }
-  assert.throws(() => createContext({ child: "/owned/replay;other", arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/tools" }), /machine-file-safe/);
+  assert.throws(() => createContext({ child: "/owned/replay;other", arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/tools", tools: FIXED_TOOLS }), /machine-file-safe/);
 });
 
 test("rejects online commands and forward dependencies in a mutated plan", () => {
@@ -381,8 +547,9 @@ test("rejects component-root aliases and preserves contained relative links verb
   assert.throws(() => verifySourceBundle(fixtureBundle({ componentAlias: true }), PLAN), /missing or aliased/);
   const source = fixtureBundle({ relativeSymlink: true });
   const output = temporary();
+  const selected = executableTools();
   initializeOutputRoot(output);
-  const prepared = prepareReplay({ sourceRoot: source, outputRoot: output, arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", plan: PLAN, actualArch: "arm64" });
+  const prepared = prepareReplay({ sourceRoot: source, outputRoot: output, arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", toolPath: selected.path, tools: selected.tools, plan: PLAN, actualArch: "arm64" });
   const first = PLAN.packages[0];
   const copiedLink = join(prepared.context.sources, first.sourceDir, "source-link.txt");
   assert.equal(readlinkSync(copiedLink), "source.txt");
@@ -395,36 +562,53 @@ test("refuses unmarked, nonempty, and reused output roots", () => {
   writeFileSync(join(unmarked, "user-file"), "keep");
   assert.throws(() => initializeOutputRoot(unmarked), /must be empty/);
   const owned = temporary();
+  const selected = executableTools();
   initializeOutputRoot(owned);
   assert.equal(assertOwnedOutputRoot(owned), realpathSync(owned));
   const source = fixtureBundle();
-  prepareReplay({ sourceRoot: source, outputRoot: owned, arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", plan: PLAN, actualArch: "arm64" });
+  prepareReplay({ sourceRoot: source, outputRoot: owned, arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", toolPath: selected.path, tools: selected.tools, plan: PLAN, actualArch: "arm64" });
   assert.throws(
-    () => prepareReplay({ sourceRoot: source, outputRoot: owned, arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", plan: PLAN, actualArch: "arm64" }),
+    () => prepareReplay({ sourceRoot: source, outputRoot: owned, arch: "arm64", jobs: 1, sdk: "/SDK/MacOSX.sdk", toolPath: selected.path, tools: selected.tools, plan: PLAN, actualArch: "arm64" }),
     /replay child already exists; it will not be deleted or reused/,
   );
 });
 
 test("bounds parallelism", () => {
-  assert.throws(() => createContext({ child: "/owned/replay", arch: "arm64", jobs: 0, sdk: "/SDK", toolPath: "/tools" }), /jobs/);
-  assert.throws(() => createContext({ child: "/owned/replay", arch: "arm64", jobs: 17, sdk: "/SDK", toolPath: "/tools" }), /jobs/);
-  assert.equal(createContext({ child: "/owned/replay", arch: "arm64", jobs: 16, sdk: "/SDK", toolPath: "/tools" }).jobs, 16);
+  assert.throws(() => createContext({ child: "/owned/replay", arch: "arm64", jobs: 0, sdk: "/SDK", toolPath: "/tools", tools: FIXED_TOOLS }), /jobs/);
+  assert.throws(() => createContext({ child: "/owned/replay", arch: "arm64", jobs: 17, sdk: "/SDK", toolPath: "/tools", tools: FIXED_TOOLS }), /jobs/);
+  assert.equal(createContext({ child: "/owned/replay", arch: "arm64", jobs: 16, sdk: "/SDK", toolPath: "/tools", tools: FIXED_TOOLS }).jobs, 16);
 });
 
 test("propagates a command failure and retains a failed status receipt", () => {
   const child = temporary();
-  const context = createContext({ child, arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/usr/bin:/bin" });
+  const context = createContext({ child, arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/usr/bin:/bin", tools: FIXED_TOOLS });
   const prepared = {
     context,
     plan: { packages: [{ id: "failing", expected: ["lib/never.dylib"] }] },
     commands: [{ id: "failing", commands: [{ command: "/usr/bin/false", args: [], cwd: child }] }],
   };
-  assert.throws(() => executeReplay(prepared), /status 1/);
+  let probeRan = false;
+  assert.throws(() => executeReplay(prepared, () => { probeRan = true; }), /status 1/);
+  assert.equal(probeRan, true);
   assert.deepEqual(JSON.parse(readFileSync(join(child, "STATUS.json"), "utf8")), {
     schemaVersion: 1,
     result: "fail",
     error: "build command failed with status 1",
   });
+});
+
+test("stops before the first package command when the same-profile toolchain probe fails", () => {
+  const child = temporary();
+  const marker = join(child, "package-started");
+  const context = createContext({ child, arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/usr/bin:/bin", tools: FIXED_TOOLS });
+  const prepared = {
+    context,
+    plan: { packages: [{ id: "must-not-start", expected: [] }] },
+    commands: [{ id: "must-not-start", commands: [{ command: "/usr/bin/touch", args: [marker], cwd: child }] }],
+  };
+  assert.throws(() => executeReplay(prepared, () => { throw new Error("probe rejected toolchain"); }), /probe rejected toolchain/);
+  assert.equal(existsSync(marker), false);
+  assert.equal(JSON.parse(readFileSync(join(child, "STATUS.json"), "utf8")).result, "fail");
 });
 
 test("requires every expected installed product", () => {
@@ -439,7 +623,7 @@ test("requires every expected installed product", () => {
 
 test("diffs the prefix and inspects every new or changed Mach-O, including unlisted files", () => {
   const child = temporary();
-  const context = createContext({ child, arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/tools" });
+  const context = createContext({ child, arch: "arm64", jobs: 1, sdk: "/SDK", toolPath: "/tools", tools: FIXED_TOOLS });
   mkdirSync(join(context.prefix, "lib", "plugins"), { recursive: true });
   const expected = join(context.prefix, "lib", "libexample.dylib");
   const unlisted = join(context.prefix, "lib", "plugins", "helper.bundle");

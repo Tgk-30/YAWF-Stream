@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import {
+  accessSync,
   chmodSync,
   closeSync,
   copyFileSync,
@@ -18,6 +19,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -30,6 +32,9 @@ export const CHILD_MARKER = ".yawf-independent-media-replay-child.json";
 const VALID_ARCHES = new Set(["arm64", "x86_64"]);
 const ADAPTERS = new Set(["autoconf", "cmake", "meson", "luajit-make", "mujs-make", "openssl", "x264", "ffmpeg"]);
 const FORBIDDEN_TEXT = /(?:https?:\/\/|git:\/\/|\bgit\s+(?:clone|submodule)|\bcurl\b|\bwget\b)/i;
+const SHIM_DENIAL_TEXT = /(?:xcrun_db|couldn't create cache file|operation not permitted)/i;
+const TOOL_KEYS = ["cc", "cxx", "ar", "ranlib", "nm", "strip", "make", "pkgConfig"];
+const DARWIN_ARCHIVE_INDEX_MEMBERS = new Set(["__.SYMDEF", "__.SYMDEF SORTED"]);
 
 function fail(message) {
   throw new Error(message);
@@ -209,6 +214,12 @@ function commonCmake(context) {
     `-DCMAKE_OSX_ARCHITECTURES=${context.arch}`,
     "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
     `-DCMAKE_OSX_SYSROOT=${context.sdk}`,
+    `-DCMAKE_C_COMPILER=${context.cc}`,
+    `-DCMAKE_CXX_COMPILER=${context.cxx}`,
+    `-DCMAKE_AR=${context.ar}`,
+    `-DCMAKE_RANLIB=${context.ranlib}`,
+    `-DCMAKE_NM=${context.nm}`,
+    `-DCMAKE_STRIP=${context.strip}`,
     `-DCMAKE_PREFIX_PATH=${context.prefix}`,
     `-DCMAKE_FIND_ROOT_PATH=${context.prefix};${context.sdk}`,
     "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
@@ -222,8 +233,7 @@ function commonCmake(context) {
 }
 
 function makeCommands(context, cwd, targets, variables = []) {
-  const make = context.tool("make");
-  return targets.map((target) => ({ command: make, args: [`-j${context.jobs}`, ...variables, target], cwd }));
+  return targets.map((target) => ({ command: context.make, args: [`-j${context.jobs}`, ...variables, target], cwd }));
 }
 
 export function renderPackageCommands(entry, context) {
@@ -288,7 +298,7 @@ export function renderPackageCommands(entry, context) {
       break;
     case "ffmpeg":
       commands = [
-        { command: join(source, "configure"), args: [`--prefix=${context.prefix}`, `--arch=${context.arch}`, "--target-os=darwin", `--cc=${context.cc}`, `--cxx=${context.cxx}`, `--extra-cflags=${context.cflags} -I${context.prefix}/include`, `--extra-ldflags=${context.ldflags} -L${context.prefix}/lib`, "--pkg-config=pkg-config", ...options], cwd: build },
+        { command: join(source, "configure"), args: [`--prefix=${context.prefix}`, `--arch=${context.arch}`, "--target-os=darwin", `--cc=${context.cc}`, `--cxx=${context.cxx}`, `--ar=${context.ar}`, `--ranlib=${context.ranlib}`, `--nm=${context.nm}`, `--strip=${context.strip}`, `--pkg-config=${context.pkgConfig}`, `--extra-cflags=${context.cflags} -I${context.prefix}/include`, `--extra-ldflags=${context.ldflags} -L${context.prefix}/lib`, ...options], cwd: build },
         ...makeCommands(context, build, ["all", "install"]),
       ];
       break;
@@ -300,7 +310,18 @@ export function renderPackageCommands(entry, context) {
   return commands;
 }
 
-export function createContext({ child, arch, jobs, sdk, toolPath }) {
+function validateExplicitTools(tools) {
+  if (!tools || typeof tools !== "object") fail("explicit tool selection is required");
+  const selected = {};
+  for (const key of TOOL_KEYS) {
+    const path = tools[key];
+    if (typeof path !== "string" || !isAbsolute(path) || /[\0\r\n'\\;]/.test(path)) fail(`explicit ${key} tool path is invalid`);
+    selected[key] = path;
+  }
+  return selected;
+}
+
+export function createContext({ child, arch, jobs, sdk, toolPath, tools }) {
   if (!Number.isInteger(jobs) || jobs < 1 || jobs > 16) fail("jobs must be an integer from 1 through 16");
   if (!isAbsolute(sdk) || /[\0\r\n'\\;]/.test(sdk)) fail("SDK path must be an absolute machine-file-safe path");
   if (!isAbsolute(child) || /[\0\r\n'\\;]/.test(child)) fail("replay child must be an absolute machine-file-safe path");
@@ -312,15 +333,24 @@ export function createContext({ child, arch, jobs, sdk, toolPath }) {
   const tool = (name) => {
     for (const directory of path.split(":")) {
       const candidate = join(directory, name);
-      if (existsSync(candidate)) return candidate;
+      try {
+        if (statSync(candidate).isFile()) {
+          accessSync(candidate, fsConstants.X_OK);
+          return candidate;
+        }
+      } catch {
+        // Continue to the next exact PATH entry.
+      }
     }
-    return name;
+    fail(`required tool is unavailable in the controlled PATH: ${name}`);
   };
+  const selected = validateExplicitTools(tools);
   return {
     child, arch, jobs, sdk, prefix, sources, builds, toolPath: path, tool,
     host: arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin",
-    cc: "clang", cxx: "clang++", cflags: flags, ldflags: flags.replace(/ -O2$/, ""),
+    ...selected, cflags: flags, ldflags: flags.replace(/ -O2$/, ""),
     machineFile: join(child, `meson-${arch}-darwin.ini`),
+    xcrunCacheRoot: join(child, "xcrun-cache"),
   };
 }
 
@@ -333,6 +363,13 @@ export function createBuildEnvironment(context, base = process.env) {
     MACOSX_DEPLOYMENT_TARGET: "11.0",
     CC: context.cc,
     CXX: context.cxx,
+    AR: context.ar,
+    RANLIB: context.ranlib,
+    NM: context.nm,
+    STRIP: context.strip,
+    MAKE: context.make,
+    PKG_CONFIG: context.pkgConfig,
+    XCRUN_CACHE_ROOT: context.xcrunCacheRoot,
     CFLAGS: context.cflags,
     CXXFLAGS: context.cflags,
     LDFLAGS: context.ldflags,
@@ -358,7 +395,7 @@ export function createBuildEnvironment(context, base = process.env) {
 }
 
 export function writeMachineFile(context) {
-  const text = `[binaries]\nc = '${context.cc}'\ncpp = '${context.cxx}'\nobjc = '${context.cc}'\nobjcpp = '${context.cxx}'\nar = 'ar'\nstrip = 'strip'\npkg-config = 'pkg-config'\n\n[built-in options]\nprefix = '${context.prefix}'\nbuildtype = 'release'\ndefault_library = 'shared'\nc_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}', '-O2']\nc_link_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}']\ncpp_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}', '-O2']\ncpp_link_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}']\nobjc_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}']\nobjc_link_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}']\n\n[host_machine]\nsystem = 'darwin'\ncpu_family = '${context.arch === "arm64" ? "aarch64" : "x86_64"}'\ncpu = '${context.arch === "arm64" ? "aarch64" : "x86_64"}'\nendian = 'little'\n`;
+  const text = `[binaries]\nc = '${context.cc}'\ncpp = '${context.cxx}'\nobjc = '${context.cc}'\nobjcpp = '${context.cxx}'\nar = '${context.ar}'\nstrip = '${context.strip}'\npkg-config = '${context.pkgConfig}'\n\n[built-in options]\nprefix = '${context.prefix}'\nbuildtype = 'release'\ndefault_library = 'shared'\nc_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}', '-O2']\nc_link_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}']\ncpp_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}', '-O2']\ncpp_link_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}']\nobjc_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}']\nobjc_link_args = ['-arch', '${context.arch}', '-mmacosx-version-min=11.0', '-isysroot', '${context.sdk}']\n\n[host_machine]\nsystem = 'darwin'\ncpu_family = '${context.arch === "arm64" ? "aarch64" : "x86_64"}'\ncpu = '${context.arch === "arm64" ? "aarch64" : "x86_64"}'\nendian = 'little'\n`;
   writeFileSync(context.machineFile, text);
 }
 
@@ -540,6 +577,124 @@ function run(command, environment) {
   if (result.status !== 0) fail(`build command failed with status ${result.status}`);
 }
 
+export function verifySelectedTools(context) {
+  for (const key of TOOL_KEYS) {
+    const path = context[key];
+    let info;
+    try {
+      info = statSync(path);
+      accessSync(path, fsConstants.X_OK);
+    } catch {
+      fail(`selected ${key} tool is not executable`);
+    }
+    if (!info.isFile()) fail(`selected ${key} tool is not a regular file`);
+  }
+}
+
+function probeTools(context) {
+  return Object.fromEntries(TOOL_KEYS.map((key) => [key, context[key]]));
+}
+
+export function runToolchainProbe(context, execute = spawnSync) {
+  const source = join(context.child, "toolchain-probe", "source");
+  const build = join(context.builds, "toolchain-probe");
+  const logPath = join(context.child, "TOOLCHAIN-PROBE.log");
+  const receiptPath = join(context.child, "TOOLCHAIN-PROBE.json");
+  const archive = join(build, "libtoolchain_probe.a");
+  const cxxLinkProbe = join(build, "toolchain_link_probe");
+  const makefile = join(context.child, "toolchain-probe", "Makefile");
+  const makeMarker = join(context.child, "toolchain-probe", "make-probe.ok");
+  const environment = createBuildEnvironment(context);
+  const records = [];
+  const logs = [];
+  let archiveMembers = null;
+  let cxxLinkOutput = null;
+  mkdirSync(source, { recursive: true });
+  mkdirSync(build, { recursive: true });
+  writeFileSync(join(source, "meson.build"), "project('toolchain-probe', ['c', 'cpp'])\nstatic_library('toolchain_probe', ['probe.c', 'probe.cpp'], install: false)\nexecutable('toolchain_link_probe', 'link_probe.cpp', install: false)\n");
+  writeFileSync(join(source, "probe.c"), "int toolchain_probe(void) { return 0; }\n");
+  writeFileSync(join(source, "probe.cpp"), "int toolchain_cpp_probe() { return 0; }\n");
+  writeFileSync(join(source, "link_probe.cpp"), "#include <iostream>\nint main() { std::cout << \"cxx-link-probe-ok\\n\"; return std::cout.good() ? 0 : 1; }\n");
+  writeFileSync(makefile, `all:\n\t@/usr/bin/printf 'make-probe-ok\\n' > '${makeMarker}'\n`);
+
+  const invoke = (command, args, cwd) => {
+    const result = execute(command, args, { cwd, env: environment, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+    const stdout = result.stdout ?? "";
+    const stderr = result.stderr ?? "";
+    const combined = `${stdout}${stderr}`;
+    const status = Number.isInteger(result.status) ? result.status : null;
+    records.push({ command, args, cwd, status });
+    logs.push(`$ ${JSON.stringify([command, ...args])}\n[status ${status ?? "none"}]\n${stdout}${stderr}`);
+    if (result.error) throw result.error;
+    if (status !== 0) fail(`toolchain probe command failed with status ${status}`);
+    if (SHIM_DENIAL_TEXT.test(combined)) fail("toolchain probe observed an Apple shim cache denial");
+    return combined;
+  };
+
+  try {
+    const meson = context.tool("meson");
+    invoke(meson, ["setup", build, source, `--native-file=${context.machineFile}`, "--buildtype=release", "--wrap-mode=nofallback"], context.child);
+    invoke(meson, ["compile", "-C", build, "-j", String(context.jobs)], context.child);
+    const mesonLog = join(build, "meson-logs", "meson-log.txt");
+    if (!statSync(mesonLog, { throwIfNoEntry: false })?.isFile()) fail("toolchain probe did not retain the Meson diagnostic log");
+    if (SHIM_DENIAL_TEXT.test(readFileSync(mesonLog, "utf8"))) fail("toolchain probe Meson log contains an Apple shim cache denial");
+    if (!lstatSync(archive, { throwIfNoEntry: false })?.isFile()) fail("toolchain probe did not produce its static archive");
+    invoke(context.ranlib, [archive], context.child);
+    const memberOutput = invoke(context.ar, ["-t", archive], context.child);
+    archiveMembers = memberOutput
+      .split("\n")
+      .map((value) => value.endsWith("\r") ? value.slice(0, -1) : value)
+      .filter((value) => value.length > 0);
+    const expectedObjects = new Set(["probe.c.o", "probe.cpp.o"]);
+    const probeObjects = archiveMembers.filter((value) => expectedObjects.has(value));
+    const indexMembers = archiveMembers.filter((value) => DARWIN_ARCHIVE_INDEX_MEMBERS.has(value));
+    const unexpectedMembers = archiveMembers.filter((value) => !expectedObjects.has(value) && !DARWIN_ARCHIVE_INDEX_MEMBERS.has(value));
+    if (
+      probeObjects.length !== expectedObjects.size ||
+      ![...expectedObjects].every((value) => archiveMembers.includes(value)) ||
+      indexMembers.length > 1 ||
+      unexpectedMembers.length > 0 ||
+      new Set(archiveMembers).size !== archiveMembers.length
+    ) fail("toolchain probe archive membership is unexpected");
+    if (!lstatSync(cxxLinkProbe, { throwIfNoEntry: false })?.isFile()) fail("toolchain probe did not produce its C++ link executable");
+    cxxLinkOutput = invoke(cxxLinkProbe, [], context.child);
+    if (cxxLinkOutput !== "cxx-link-probe-ok\n") fail("toolchain probe C++ link executable output is unexpected");
+    invoke(context.make, ["-f", makefile, "all"], context.child);
+    if (readFileSync(makeMarker, "utf8") !== "make-probe-ok\n") fail("toolchain probe make marker is missing or incorrect");
+    writeFileSync(logPath, logs.join("\n"));
+    const receipt = {
+      schemaVersion: 1,
+      result: "pass",
+      tools: probeTools(context),
+      xcrunCacheRoot: context.xcrunCacheRoot,
+      mesonMachineFile: context.machineFile,
+      archive: posixRelative(relative(context.child, archive)),
+      archiveMembers,
+      cxxLinkProbe: posixRelative(relative(context.child, cxxLinkProbe)),
+      cxxLinkOutput,
+      commands: records,
+      shimDenialsObserved: false,
+    };
+    writeJsonAtomic(receiptPath, receipt);
+    return receipt;
+  } catch (error) {
+    writeFileSync(logPath, logs.join("\n"));
+    writeJsonAtomic(receiptPath, {
+      schemaVersion: 1,
+      result: "fail",
+      error: error instanceof Error ? error.message : "unknown failure",
+      tools: probeTools(context),
+      xcrunCacheRoot: context.xcrunCacheRoot,
+      mesonMachineFile: context.machineFile,
+      archiveMembers,
+      cxxLinkProbe: posixRelative(relative(context.child, cxxLinkProbe)),
+      cxxLinkOutput,
+      commands: records,
+    });
+    throw error;
+  }
+}
+
 const MACH_O_MAGICS = new Set(["feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"]);
 
 function isMachO(path) {
@@ -635,30 +790,41 @@ function prepareChild(outputRoot, arch) {
   return child;
 }
 
-export function prepareReplay({ sourceRoot, outputRoot, arch, jobs, sdk, toolPath, plan = loadPlan(), actualArch = process.arch }) {
+function prepareContext({ outputRoot, arch, jobs, sdk, toolPath, tools, actualArch }) {
   assertNativeArchitecture(arch, actualArch);
-  const sources = verifySourceBundle(sourceRoot, plan);
   const ownedRoot = assertOwnedOutputRoot(outputRoot);
   const child = prepareChild(ownedRoot, arch);
-  const context = createContext({ child, arch, jobs, sdk, toolPath });
-  for (const directory of [context.sources, context.builds, context.prefix, join(child, "home"), join(child, "tmp")]) mkdirSync(directory, { recursive: true });
+  const context = createContext({ child, arch, jobs, sdk, toolPath, tools });
+  verifySelectedTools(context);
+  for (const directory of [context.sources, context.builds, context.prefix, join(child, "home"), join(child, "tmp"), context.xcrunCacheRoot]) mkdirSync(directory, { recursive: true });
+  writeMachineFile(context);
+  return context;
+}
+
+export function prepareToolchainProbe({ outputRoot, arch, jobs, sdk, toolPath, tools, actualArch = process.arch }) {
+  return prepareContext({ outputRoot, arch, jobs, sdk, toolPath, tools, actualArch });
+}
+
+export function prepareReplay({ sourceRoot, outputRoot, arch, jobs, sdk, toolPath, tools, plan = loadPlan(), actualArch = process.arch }) {
+  const sources = verifySourceBundle(sourceRoot, plan);
+  const context = prepareContext({ outputRoot, arch, jobs, sdk, toolPath, tools, actualArch });
   for (const entry of plan.packages) copySafeTree(join(sources.components, entry.sourceDir), join(context.sources, entry.sourceDir));
   const luaJit = plan.packages.find((entry) => entry.id === "luajit");
   if (!luaJit) fail("LuaJIT package is missing from the replay plan");
   verifyLuaJitMakefileContract(join(context.sources, luaJit.sourceDir));
-  writeMachineFile(context);
   const commands = plan.packages.map((entry) => ({ id: entry.id, commands: renderPackageCommands(entry, context) }));
-  writeJsonAtomic(join(child, "COMMANDS.json"), { schemaVersion: 1, arch, target: "11.0", jobs, commands });
+  writeJsonAtomic(join(context.child, "COMMANDS.json"), { schemaVersion: 1, arch, target: "11.0", jobs, commands });
   return { plan, context, commands };
 }
 
-export function executeReplay(prepared) {
+export function executeReplay(prepared, probe = runToolchainProbe) {
   const environment = createBuildEnvironment(prepared.context);
   const statusPath = join(prepared.context.child, "STATUS.json");
   const auditPath = join(prepared.context.child, "INSTALL-AUDIT.json");
   let installedMachO = snapshotInstalledMachO(prepared.context.prefix);
   const audits = [];
   try {
+    probe(prepared.context);
     for (const packageCommands of prepared.commands) {
       const entry = prepared.plan.packages.find((candidate) => candidate.id === packageCommands.id);
       for (const [index, command] of packageCommands.commands.entries()) {
@@ -678,10 +844,16 @@ export function executeReplay(prepared) {
   }
 }
 
-function sdkPath() {
-  const result = spawnSync("/usr/bin/xcrun", ["--sdk", "macosx", "--show-sdk-path"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" } });
-  if (result.status !== 0) fail("could not resolve the macOS SDK path");
-  return result.stdout.trim();
+export function executeToolchainProbe(context) {
+  const statusPath = join(context.child, "STATUS.json");
+  try {
+    const receipt = runToolchainProbe(context);
+    writeJsonAtomic(statusPath, { schemaVersion: 1, result: "probe-pass", packages: 0, arch: context.arch, target: "11.0" });
+    return receipt;
+  } catch (error) {
+    writeJsonAtomic(statusPath, { schemaVersion: 1, result: "fail", error: error instanceof Error ? error.message : "unknown failure" });
+    throw error;
+  }
 }
 
 export function main(argv = process.argv.slice(2)) {
@@ -697,11 +869,32 @@ export function main(argv = process.argv.slice(2)) {
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
-  if (args.mode !== "commands" && args.mode !== "build") fail("mode must be init, verify, commands, or build");
-  for (const required of ["source-root", "output-root", "arch", "jobs"]) if (!args[required]) fail(`${args.mode} requires --${required}`);
+  if (!["commands", "build", "probe"].includes(args.mode)) fail("mode must be init, verify, commands, build, or probe");
+  for (const required of ["output-root", "arch", "jobs", "sdk", "tool-path", "cc", "cxx", "ar", "ranlib", "nm", "strip", "make", "pkg-config"]) {
+    if (!args[required]) fail(`${args.mode} requires --${required}`);
+  }
+  const tools = {
+    cc: args.cc,
+    cxx: args.cxx,
+    ar: args.ar,
+    ranlib: args.ranlib,
+    nm: args.nm,
+    strip: args.strip,
+    make: args.make,
+    pkgConfig: args["pkg-config"],
+  };
+  if (args.mode === "probe") {
+    const context = prepareToolchainProbe({
+      outputRoot: args["output-root"], arch: args.arch, jobs: Number(args.jobs),
+      sdk: args.sdk, toolPath: args["tool-path"], tools,
+    });
+    executeToolchainProbe(context);
+    return;
+  }
+  if (!args["source-root"]) fail(`${args.mode} requires --source-root`);
   const prepared = prepareReplay({
     sourceRoot: args["source-root"], outputRoot: args["output-root"], arch: args.arch,
-    jobs: Number(args.jobs), sdk: args.sdk || sdkPath(), toolPath: args["tool-path"],
+    jobs: Number(args.jobs), sdk: args.sdk, toolPath: args["tool-path"], tools,
   });
   if (args.mode === "build") executeReplay(prepared);
   else process.stdout.write(`${join(prepared.context.child, "COMMANDS.json")}\n`);

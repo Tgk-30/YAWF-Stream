@@ -6,6 +6,7 @@ import os
 import tarfile
 import tempfile
 import unittest
+import subprocess
 from pathlib import Path
 
 
@@ -117,20 +118,124 @@ class ReplayExperimentTests(unittest.TestCase):
         with self.assertRaisesRegex(REPLAY.ReplayError, "forbidden override"):
             REPLAY.ensure_clean_process_environment({**environment, "NODE_OPTIONS": "--require injected"})
 
+    def test_probe_only_is_opt_in_at_the_wrapper_and_workflow_is_fail_closed_for_pr_and_manual_runs(self):
+        self.assertFalse(REPLAY.parser().parse_args([]).probe_only)
+        self.assertTrue(REPLAY.parser().parse_args(["--probe-only"]).probe_only)
+        workflow = (PUBLIC_ROOT / ".github/workflows/macos-media-replay-experiment.yml").read_text()
+        self.assertIn("probe_only:", workflow)
+        probe_input = workflow[workflow.index("probe_only:"):workflow.index("  pull_request:")]
+        self.assertIn("default: true", probe_input)
+        probe_expression = next(line.strip() for line in workflow.splitlines() if line.strip().startswith("PROBE_ONLY:"))
+        self.assertEqual(
+            probe_expression,
+            "PROBE_ONLY: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.probe_only) }}",
+        )
+        self.assertIn('case "$PROBE_ONLY" in', workflow)
+        self.assertIn("true) probe_args+=(--probe-only) ;;", workflow)
+        self.assertIn("false) ;;", workflow)
+        self.assertIn("*) echo \"Refusing unexpected PROBE_ONLY value\" >&2; exit 1 ;;", workflow)
+        self.assertNotIn("github.event_name == 'workflow_dispatch' && inputs.probe_only || false", workflow)
+        timeout_expression = next(line.strip() for line in workflow.splitlines() if line.strip().startswith("timeout-minutes:"))
+        self.assertEqual(
+            timeout_expression,
+            "timeout-minutes: ${{ (github.event_name == 'pull_request' || inputs.probe_only) && 20 || 90 }}",
+        )
+        event_cases = [
+            ("pull_request", False, True, 20),
+            ("workflow_dispatch", True, True, 20),
+            ("workflow_dispatch", False, False, 90),
+        ]
+        for event_name, manual_input, expected_probe_only, expected_timeout in event_cases:
+            probe_only = event_name == "pull_request" or (event_name == "workflow_dispatch" and manual_input)
+            timeout_minutes = 20 if event_name == "pull_request" or manual_input else 90
+            self.assertEqual(probe_only, expected_probe_only, (event_name, manual_input))
+            self.assertEqual(timeout_minutes, expected_timeout, (event_name, manual_input))
+
+    def test_discovers_exact_selected_xcode_tools_and_controlled_path_tools_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            developer = root / "Xcode.app/Contents/Developer"
+            xcode_bin = developer / "Toolchains/XcodeDefault.xctoolchain/usr/bin"
+            developer_bin = developer / "usr/bin"
+            sdk = developer / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+            path_bin = root / "path-bin"
+            for target in (xcode_bin, developer_bin, sdk, path_bin):
+                target.mkdir(parents=True, exist_ok=True)
+            selected = {}
+            for name in REPLAY.XCODE_TOOL_NAMES:
+                path = (developer_bin if name == "make" else xcode_bin) / name
+                path.write_text("#!/bin/sh\nexit 0\n")
+                path.chmod(0o755)
+                selected[name] = path
+            for name in REPLAY.PATH_TOOL_NAMES:
+                path = path_bin / name
+                path.write_text("#!/bin/sh\nexit 0\n")
+                path.chmod(0o755)
+
+            def run(command, **_kwargs):
+                self.assertEqual(_kwargs["timeout"], REPLAY.XCRUN_TIMEOUT_SECONDS)
+                if "--show-sdk-path" in command:
+                    return subprocess.CompletedProcess(command, 0, stdout=f"{sdk}\n")
+                name = command[-1]
+                return subprocess.CompletedProcess(command, 0, stdout=f"{selected[name]}\n")
+
+            environment = REPLAY.clean_environment(root / "state", str(path_bin), str(developer))
+            receipt = REPLAY.discover_tool_selection(developer, str(path_bin), environment, run=run)
+            self.assertEqual(receipt["developerRealPath"], str(developer.resolve()))
+            self.assertEqual(receipt["sdk"]["selectedPath"], str(sdk))
+            self.assertEqual(receipt["tools"]["ar"]["selectedPath"], str(selected["ar"]))
+            self.assertEqual(receipt["tools"]["pkg-config"]["selectedPath"], str(path_bin / "pkg-config"))
+            arguments = REPLAY.controller_tool_arguments(receipt)
+            self.assertEqual(arguments[arguments.index("--ar") + 1], str(selected["ar"]))
+            self.assertEqual(arguments[arguments.index("--pkg-config") + 1], str(path_bin / "pkg-config"))
+
+            outside = root / "outside-ar"
+            outside.write_text("#!/bin/sh\nexit 0\n")
+            outside.chmod(0o755)
+
+            def outside_run(command, **_kwargs):
+                if "--show-sdk-path" in command:
+                    return subprocess.CompletedProcess(command, 0, stdout=f"{sdk}\n")
+                name = command[-1]
+                path = outside if name == "ar" else selected[name]
+                return subprocess.CompletedProcess(command, 0, stdout=f"{path}\n")
+
+            with self.assertRaisesRegex(REPLAY.ReplayError, "outside the selected Developer directory"):
+                REPLAY.discover_tool_selection(developer, str(path_bin), environment, run=outside_run)
+
+            def failed_run(command, **_kwargs):
+                return subprocess.CompletedProcess(command, 1, stdout="not found\n")
+
+            with self.assertRaisesRegex(REPLAY.ReplayError, "could not select"):
+                REPLAY.discover_tool_selection(developer, str(path_bin), environment, run=failed_run)
+
+            def timeout_run(command, **kwargs):
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+            with self.assertRaisesRegex(REPLAY.ReplayError, "timed out after 60 seconds while selecting clang"):
+                REPLAY.discover_tool_selection(developer, str(path_bin), environment, run=timeout_run)
+
     def test_public_inventory_provenance_is_source_identity_relative_and_exactly_pinned(self):
         staged = json.loads((PUBLIC_ROOT / "scripts/macos-media-replay/required-runtime-outputs.json").read_text())
         pins = json.loads((PUBLIC_ROOT / "scripts/macos-media-replay/experiment-pins.json").read_text())
+        normalizer = json.loads((PUBLIC_ROOT / "scripts/macos-media-replay/archive-normalizer-plan.json").read_text())
         staged_path = PUBLIC_ROOT / "scripts/macos-media-replay/required-runtime-outputs.json"
+        controller_path = PUBLIC_ROOT / "scripts/macos-media-replay/replay_macos_media_sources.mjs"
         self.assertEqual(staged["sourceInstallInventory"], f"source-identity/{staged['sourceIdentity']}/recipe/install/arm64")
         self.assertNotIn("/Volumes/", json.dumps(staged))
         self.assertEqual(REPLAY.sha256_file(staged_path), "0729877e06bbef46f45e63f551df1ff2d7107d9dc482a2748e4b08e399a3fe64")
         self.assertEqual(pins["files"]["scripts/macos-media-replay/required-runtime-outputs.json"], REPLAY.sha256_file(staged_path))
+        self.assertEqual(pins["files"]["scripts/macos-media-replay/replay_macos_media_sources.mjs"], REPLAY.sha256_file(controller_path))
+        self.assertIn(
+            {"base": "controller", "source": "replay_macos_media_sources.mjs", "destination": "replay-controls/replay_macos_media_sources.mjs", "role": "independent replay controller"},
+            normalizer["bundledInputs"],
+        )
         self.assertEqual(pins["referenceOnlyFrozenNormalizedSha256"], "2ff768a121271a9ab056f6a111b15245a7f84ea3f3f5a165e4f0dd24d4e3ff0c")
 
     def test_workflow_is_one_bounded_same_repo_arm_experiment_with_diagnostic_evidence_only(self):
         workflow = (PUBLIC_ROOT / ".github/workflows/macos-media-replay-experiment.yml").read_text()
         self.assertIn("runs-on: macos-15", workflow)
-        self.assertIn("timeout-minutes: 90", workflow)
+        self.assertIn("timeout-minutes: ${{ (github.event_name == 'pull_request' || inputs.probe_only) && 20 || 90 }}", workflow)
         self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", workflow)
         self.assertIn('run-id: ${{ env.SOURCE_RUN_ID }}', workflow)
         self.assertIn('github-token: ${{ github.token }}', workflow)
@@ -138,12 +243,24 @@ class ReplayExperimentTests(unittest.TestCase):
         self.assertIn("actions/upload-artifact@v4", workflow)
         self.assertIn("if: always()", workflow)
         self.assertIn("maximum_total_bytes = 96 * 1024 * 1024", workflow)
+        self.assertIn("probe_only:", workflow)
+        self.assertIn("default: true", workflow)
+        self.assertIn("--probe-only", workflow)
+        self.assertIn("owned-output/replay-arm64-macos11/build/*/meson-logs/meson-log.txt", workflow)
+        self.assertIn("owned-output/replay-arm64-macos11/meson-*.ini", workflow)
+        self.assertIn('"receipts/*.json"', workflow)
+        self.assertIn("05-toolchain-selection.json", (HERE / "run_macos_media_replay_experiment.py").read_text())
+        self.assertIn("$developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin", workflow)
+        self.assertIn("$developer_dir/usr/bin", workflow)
         self.assertNotIn('path: ${{ runner.temp }}/macos-media-replay-experiment', workflow)
         self.assertNotIn("normalized-source.tar.gz", workflow)
         self.assertNotIn("secrets.", workflow)
         self.assertNotIn("strategy:", workflow)
         self.assertNotIn("actions/upload-release-asset", workflow)
         self.assertNotIn("softprops/action-gh-release", workflow)
+        profile_function = workflow + (HERE / "run_macos_media_replay_experiment.py").read_text()
+        self.assertNotIn('(allow network', profile_function)
+        self.assertNotIn('(allow file-write', profile_function)
 
 
 if __name__ == "__main__":

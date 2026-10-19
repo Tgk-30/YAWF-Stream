@@ -2,6 +2,12 @@ name: macOS media source replay experiment
 
 on:
   workflow_dispatch:
+    inputs:
+      probe_only:
+        description: Run only the same-profile toolchain canary before authorizing a full replay
+        required: true
+        default: true
+        type: boolean
   pull_request:
     branches: [main]
     paths:
@@ -25,12 +31,13 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     name: Confined ARM source replay, no publication
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: ${{ (github.event_name == 'pull_request' || inputs.probe_only) && 20 || 90 }}
     env:
       SOURCE_RUN_ID: "39304293958"
       SOURCE_ARTIFACT: macos-media-runtime-arm64
       OUTER_SHA256: 11af8849872ae1c302b6a5fb6ba823e369648be3e9597c1ba2c5150e7a9f4d50
       INNER_SOURCE_SHA256: baf26db61e0e50011f748e2ddfe06a764972d8fd9ff5a562f50da94d2727dbff
+      PROBE_ONLY: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.probe_only) }}
 
     steps:
       - name: Checkout proposed replay controls
@@ -64,7 +71,7 @@ jobs:
           env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/test-home" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C /usr/bin/python3 -B scripts/macos-media-replay/normalize_source_archive_test.py -v
           /usr/bin/python3 -I -B scripts/ci/run_macos_media_replay_experiment.test.py -v
 
-      - name: Run one confined clean replay and headless smoke
+      - name: Run the confined toolchain probe or clean replay
         shell: bash
         run: |
           set -euo pipefail
@@ -73,17 +80,28 @@ jobs:
           test "$(/usr/bin/python3 -c 'import json; print(json.load(open("scripts/macos-media-replay/archive-normalizer-plan.json"))["inputArchiveSha256"])')" = "$INNER_SOURCE_SHA256"
           brew_prefix="$(brew --prefix)"
           libtool_prefix="$(brew --prefix libtool)"
-          tool_path="$(dirname "$(command -v node)"):$brew_prefix/bin:$libtool_prefix/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          developer_dir="$(/usr/bin/xcode-select -p)"
+          toolchain_bin="$developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          developer_bin="$developer_dir/usr/bin"
+          test -d "$toolchain_bin"
+          test -d "$developer_bin"
+          tool_path="$(dirname "$(command -v node)"):$brew_prefix/bin:$libtool_prefix/bin:$toolchain_bin:$developer_bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          probe_args=()
+          case "$PROBE_ONLY" in
+            true) probe_args+=(--probe-only) ;;
+            false) ;;
+            *) echo "Refusing unexpected PROBE_ONLY value" >&2; exit 1 ;;
+          esac
           /usr/bin/python3 -I -B scripts/ci/run_macos_media_replay_experiment.py \
             --candidate-dir "$RUNNER_TEMP/source-artifact" \
             --workspace "$RUNNER_TEMP/macos-media-replay-experiment" \
             --project-root "$GITHUB_WORKSPACE" \
             --controller-root "$GITHUB_WORKSPACE/scripts/macos-media-replay" \
             --node "$(command -v node)" \
-            --sdk "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" \
-            --developer-dir "$(/usr/bin/xcode-select -p)" \
+            --developer-dir "$developer_dir" \
             --tool-path "$tool_path" \
-            --jobs 8
+            --jobs 8 \
+            "${probe_args[@]}"
 
       - name: Summarize the bounded experiment result
         if: always()
@@ -97,6 +115,18 @@ jobs:
           receipt = json.load(open(sys.argv[1]))
           print(json.dumps({
               "result": receipt["result"],
+              "freshNormalizedSha256": receipt["freshAdmission"]["archiveSha256"],
+              "outsideAndSourceInputsPreserved": receipt["outsideAndSourceInputsPreserved"],
+              "scope": receipt["scope"],
+          }, indent=2))
+          PY
+          elif test -f "$root/PROBE-ONLY-RECEIPT.json"; then
+            /usr/bin/python3 -I -B - "$root/PROBE-ONLY-RECEIPT.json" <<'PY'
+          import json, sys
+          receipt = json.load(open(sys.argv[1]))
+          print(json.dumps({
+              "result": receipt["result"],
+              "mode": "probe-only",
               "freshNormalizedSha256": receipt["freshAdmission"]["archiveSha256"],
               "outsideAndSourceInputsPreserved": receipt["outsideAndSourceInputsPreserved"],
               "scope": receipt["scope"],
@@ -134,8 +164,12 @@ jobs:
               "trusted-logs/*.log",
               "*.sb",
               "owned-output/PREPARATION-RECEIPT.json",
+              "owned-output/PROBE-ONLY-RECEIPT.json",
               "owned-output/canary-child/CONFINEMENT-CANARY.json",
               "owned-output/replay-arm64-macos11/STATUS.json",
+              "owned-output/replay-arm64-macos11/TOOLCHAIN-PROBE.json",
+              "owned-output/replay-arm64-macos11/TOOLCHAIN-PROBE.log",
+              "owned-output/replay-arm64-macos11/meson-*.ini",
               "owned-output/replay-arm64-macos11/INSTALL-AUDIT.json",
               "owned-output/replay-arm64-macos11/COMMANDS.json",
               "owned-output/replay-arm64-macos11/EXPERIMENT-RESULTS.json",
@@ -146,6 +180,8 @@ jobs:
               "owned-output/replay-arm64-macos11/build/*/CMakeCache.txt",
               "owned-output/replay-arm64-macos11/build/*/meson-info/intro-buildoptions.json",
               "owned-output/replay-arm64-macos11/build/*/meson-private/cmd_line.txt",
+              "owned-output/replay-arm64-macos11/build/*/meson-logs/meson-log.txt",
+              "owned-output/replay-arm64-macos11/build/*/meson-logs/install-log.txt",
               "owned-output/replay-arm64-macos11/build/*/configdata.pm",
               "owned-output/replay-arm64-macos11/build/*/config.h",
               "owned-output/replay-arm64-macos11/build/*/config.mak",
