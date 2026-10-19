@@ -28,6 +28,33 @@ final class FlowPolicyAssertions {
                 "The native consent dialog must be handled before covered web content");
     }
 
+    static void nativeButtonLabelsAcceptUppercaseAndMixedCase() {
+        check(FlowPolicy.NOT_NOW_BUTTON.matches("button2", "NOT NOW"),
+                "The themed uppercase negative button label must match");
+        check(FlowPolicy.NOT_NOW_BUTTON.matches("button2", "nOt NoW"),
+                "A mixed-case negative button label must match");
+        check(FlowPolicy.CHECK_NOW_BUTTON.matches("button1", "CHECK NOW"),
+                "The themed uppercase positive button label must match");
+    }
+
+    static void nativeButtonLabelsRejectAffixesAndNewlines() {
+        check(!FlowPolicy.NOT_NOW_BUTTON.matches("button2", "Not now please"),
+                "A suffixed negative label must not match");
+        check(!FlowPolicy.NOT_NOW_BUTTON.matches("button2", "Please Not now"),
+                "A prefixed negative label must not match");
+        check(!FlowPolicy.NOT_NOW_BUTTON.matches("button2", "Not now\n"),
+                "A newline-suffixed negative label must not match");
+        check(!FlowPolicy.CHECK_NOW_BUTTON.matches("button1", "Check now\n"),
+                "A newline-suffixed positive label must not match");
+    }
+
+    static void nativeButtonResourceIdentityIsExact() {
+        check(!FlowPolicy.NOT_NOW_BUTTON.matches("button1", "Not now"),
+                "The negative label on another native button must not match");
+        check(!FlowPolicy.CHECK_NOW_BUTTON.matches("button2", "Check now"),
+                "The positive label on another native button must not match");
+    }
+
     static void bindingTermsAreRejectedButPrivacyNoticeIsAllowed() {
         check(FlowPolicy.containsBindingTerms("Accept the Terms of Service"),
                 "Binding terms must be rejected");

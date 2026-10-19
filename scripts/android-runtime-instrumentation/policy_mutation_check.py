@@ -26,6 +26,18 @@ MUTANTS = {
         "if (updateConsent) {",
         "if (false && updateConsent) {",
     ),
+    "nativeButtonCase": (
+        "Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE",
+        "Pattern.UNICODE_CASE",
+    ),
+    "nativeButtonAnchoring": (
+        '"\\\\A" + Pattern.quote(expectedLabel) + "\\\\z"',
+        '".*" + Pattern.quote(expectedLabel) + ".*"',
+    ),
+    "nativeButtonResource": (
+        "return resourceName.equals(observedResourceName)\n                    && textPattern.matcher(observedText == null ? \"\" : observedText).matches();",
+        "return textPattern.matcher(observedText == null ? \"\" : observedText).matches();",
+    ),
     "termsPolicy": (
         "terms of service|license agreement|user agreement|binding terms",
         "privacy notice|license agreement|user agreement|binding terms",

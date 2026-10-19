@@ -11,6 +11,35 @@ public final class FlowPolicy {
             "No newer signed Android phone release is available.";
     public static final Pattern BINDING_TERMS_PATTERN = Pattern.compile(
             "(?is).*\\b(?:terms of service|license agreement|user agreement|binding terms)\\b.*");
+    public static final NativeButtonSpec NOT_NOW_BUTTON =
+            new NativeButtonSpec("button2", "Not now");
+    public static final NativeButtonSpec CHECK_NOW_BUTTON =
+            new NativeButtonSpec("button1", "Check now");
+
+    public static final class NativeButtonSpec {
+        private final String resourceName;
+        private final Pattern textPattern;
+
+        private NativeButtonSpec(String resourceName, String expectedLabel) {
+            this.resourceName = resourceName;
+            this.textPattern = Pattern.compile(
+                    "\\A" + Pattern.quote(expectedLabel) + "\\z",
+                    Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+        }
+
+        public String resourceName() {
+            return resourceName;
+        }
+
+        public Pattern textPattern() {
+            return textPattern;
+        }
+
+        public boolean matches(String observedResourceName, String observedText) {
+            return resourceName.equals(observedResourceName)
+                    && textPattern.matcher(observedText == null ? "" : observedText).matches();
+        }
+    }
 
     public enum OnboardingEntry {
         UPDATE_CONSENT,

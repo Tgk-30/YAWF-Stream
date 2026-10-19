@@ -133,7 +133,7 @@ public final class RuntimeFlowTest {
 
         waitFor(By.text("Check for Android updates?"), SHORT_WAIT_MS, "native manual-check confirmation");
         capture("manual-update-consent");
-        click(By.text("Check now"), "Check now", SHORT_WAIT_MS, true);
+        click(nativeButton(FlowPolicy.CHECK_NOW_BUTTON), "Check now", SHORT_WAIT_MS, true);
 
         UiObject2 title = waitFor(
                 By.text(FlowPolicy.UP_TO_DATE_TITLE), UPDATE_WAIT_MS, "native up-to-date title");
@@ -175,7 +175,7 @@ public final class RuntimeFlowTest {
             switch (entry) {
                 case UPDATE_CONSENT:
                     capture("initial-update-consent");
-                    click(By.text("Not now"), "Not now", SHORT_WAIT_MS, true);
+                    click(nativeButton(FlowPolicy.NOT_NOW_BUTTON), "Not now", SHORT_WAIT_MS, true);
                     break;
                 case TIER_WELCOME:
                     capture("tier-welcome");
@@ -263,6 +263,12 @@ public final class RuntimeFlowTest {
         log("Clicked semantic control: " + label);
         device.waitForIdle(1_000);
         return object;
+    }
+
+    private BySelector nativeButton(FlowPolicy.NativeButtonSpec button) {
+        return By.res("android", button.resourceName())
+                .pkg(PRODUCT_PACKAGE)
+                .text(button.textPattern());
     }
 
     private UiObject2 waitFor(BySelector selector, long timeoutMs, String label) {

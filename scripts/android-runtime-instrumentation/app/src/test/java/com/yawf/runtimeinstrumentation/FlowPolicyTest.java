@@ -19,6 +19,21 @@ public final class FlowPolicyTest {
     }
 
     @Test
+    public void nativeButtonLabelsAcceptUppercaseAndMixedCase() {
+        FlowPolicyAssertions.nativeButtonLabelsAcceptUppercaseAndMixedCase();
+    }
+
+    @Test
+    public void nativeButtonLabelsRejectAffixesAndNewlines() {
+        FlowPolicyAssertions.nativeButtonLabelsRejectAffixesAndNewlines();
+    }
+
+    @Test
+    public void nativeButtonResourceIdentityIsExact() {
+        FlowPolicyAssertions.nativeButtonResourceIdentityIsExact();
+    }
+
+    @Test
     public void bindingTermsAreRejectedButPrivacyNoticeIsAllowed() {
         FlowPolicyAssertions.bindingTermsAreRejectedButPrivacyNoticeIsAllowed();
     }

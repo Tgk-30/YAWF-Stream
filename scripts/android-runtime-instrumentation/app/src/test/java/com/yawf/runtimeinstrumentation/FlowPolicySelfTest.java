@@ -11,6 +11,9 @@ public final class FlowPolicySelfTest {
         tests.put("firstRunPriority", FlowPolicyAssertions::firstRunWinsWhenBothWebClassifiersMatch);
         tests.put("tierComplete", FlowPolicyAssertions::tierRequiresCompleteControls);
         tests.put("consentPriority", FlowPolicyAssertions::nativeConsentWinsWhenVisible);
+        tests.put("nativeButtonCase", FlowPolicyAssertions::nativeButtonLabelsAcceptUppercaseAndMixedCase);
+        tests.put("nativeButtonAnchoring", FlowPolicyAssertions::nativeButtonLabelsRejectAffixesAndNewlines);
+        tests.put("nativeButtonResource", FlowPolicyAssertions::nativeButtonResourceIdentityIsExact);
         tests.put("termsPolicy", FlowPolicyAssertions::bindingTermsAreRejectedButPrivacyNoticeIsAllowed);
         tests.put("exactNativeResult", FlowPolicyAssertions::nativeResultRequiresExactTitleAndMessage);
         tests.put("versionPins", FlowPolicyAssertions::channelVersionsArePinned);
