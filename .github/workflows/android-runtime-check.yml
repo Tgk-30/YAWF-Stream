@@ -169,8 +169,9 @@ jobs:
           qemu_bin="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/emulator/qemu/linux-x86_64/qemu-system-x86_64"
           ldd "$emulator_bin" | tee "$EVIDENCE/emulator-ldd.txt"
           ldd "$qemu_bin" | tee "$EVIDENCE/qemu-ldd.txt"
-          if grep -q 'not found' "$EVIDENCE/emulator-ldd.txt" || grep -q 'not found' "$EVIDENCE/qemu-ldd.txt"; then
-            echo "::error::Android emulator loader dependencies are missing" >&2
+          # The supported launcher supplies bundled QEMU library paths at runtime.
+          if grep -q 'not found' "$EVIDENCE/emulator-ldd.txt"; then
+            echo "::error::Android emulator launcher dependencies are missing" >&2
             exit 1
           fi
           emulator -version | tee "$EVIDENCE/emulator-version.txt"
