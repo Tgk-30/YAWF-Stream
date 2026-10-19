@@ -200,6 +200,7 @@ test("roots every CMake package lookup in the owned prefix and selected SDK", ()
   const context = fixedContext();
   for (const entry of PLAN.packages.filter((candidate) => candidate.adapter === "cmake")) {
     const setup = renderPackageCommands(entry, context)[0];
+    assert.equal(setup.args.filter((arg) => arg === "-DCMAKE_POLICY_VERSION_MINIMUM=3.5").length, 1, entry.id);
     assert.ok(setup.args.includes(`-DCMAKE_PREFIX_PATH=${context.prefix}`), entry.id);
     assert.ok(setup.args.includes(`-DCMAKE_FIND_ROOT_PATH=${context.prefix};${context.sdk}`), entry.id);
     for (const kind of ["INCLUDE", "LIBRARY", "PACKAGE"]) assert.ok(setup.args.includes(`-DCMAKE_FIND_ROOT_PATH_MODE_${kind}=ONLY`), `${entry.id} ${kind}`);
@@ -255,6 +256,37 @@ message(STATUS "replay-prefix-probe=pass")
   assert.match(result.stdout, /replay-prefix-probe=pass/);
 });
 
+test("configures a legacy CMake 3.1 project with the explicit external policy floor", () => {
+  const child = temporary();
+  const sdk = join(child, "sdk");
+  const project = join(child, "legacy-cmake-source");
+  const build = join(child, "legacy-cmake-build");
+  mkdirSync(sdk);
+  mkdirSync(project);
+  const selected = executableTools();
+  const context = createContext({ child, arch: "arm64", jobs: 1, sdk, toolPath: process.env.PATH, tools: selected.tools });
+  writeFileSync(join(project, "CMakeLists.txt"), `
+cmake_minimum_required(VERSION 3.1)
+project(replay_legacy_policy NONE)
+if(NOT CMAKE_POLICY_VERSION_MINIMUM STREQUAL "3.5")
+  message(FATAL_ERROR "explicit external policy floor missing")
+endif()
+message(STATUS "replay-legacy-policy=pass")
+`);
+  const entry = PLAN.packages.find((candidate) => candidate.id === "uchardet");
+  const setup = renderPackageCommands(entry, context)[0];
+  const args = [...setup.args];
+  args[1] = project;
+  args[3] = build;
+  const result = spawnSync(setup.command, args, {
+    cwd: child, env: createBuildEnvironment(context, process.env), encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /replay-legacy-policy=pass/);
+  assert.match(readFileSync(join(build, "CMakeCache.txt"), "utf8"), /^CMAKE_POLICY_VERSION_MINIMUM:[^=]+=3\.5$/m);
+});
+
 test("passes LuaJIT flags through variables its reviewed Makefiles consume", () => {
   const source = temporary();
   mkdirSync(join(source, "src"));
@@ -279,11 +311,14 @@ test("rejects dropped CMake and Meson options and target flags from post-config 
   mkdirSync(cmakeBuild, { recursive: true });
   const cmakeValues = [
     "CMAKE_BUILD_TYPE:STRING=Release", `CMAKE_INSTALL_PREFIX:PATH=${context.prefix}`, "CMAKE_INSTALL_LIBDIR:PATH=lib",
+    "CMAKE_POLICY_VERSION_MINIMUM:UNINITIALIZED=3.5",
     `CMAKE_OSX_ARCHITECTURES:STRING=${context.arch}`, "CMAKE_OSX_DEPLOYMENT_TARGET:STRING=11.0", `CMAKE_OSX_SYSROOT:PATH=${context.sdk}`,
     ...cmake.options.map((option) => `${option.slice(2).replace("=", ":STRING=")}`),
   ];
   writeFileSync(join(cmakeBuild, "CMakeCache.txt"), `${cmakeValues.join("\n")}\n`);
   assert.doesNotThrow(() => verifyConfigurationReceipt(cmake, context));
+  writeFileSync(join(cmakeBuild, "CMakeCache.txt"), `${cmakeValues.filter((line) => !line.startsWith("CMAKE_POLICY_VERSION_MINIMUM:")).join("\n")}\n`);
+  assert.throws(() => verifyConfigurationReceipt(cmake, context), /CMAKE_POLICY_VERSION_MINIMUM/);
   writeFileSync(join(cmakeBuild, "CMakeCache.txt"), `${cmakeValues.filter((line) => !line.startsWith("WEBP_BUILD_LIBWEBPMUX:")).join("\n")}\n`);
   assert.throws(() => verifyConfigurationReceipt(cmake, context), /WEBP_BUILD_LIBWEBPMUX/);
 

@@ -209,6 +209,7 @@ function replaceTokens(value, context) {
 function commonCmake(context) {
   return [
     "-DCMAKE_BUILD_TYPE=Release",
+    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
     `-DCMAKE_INSTALL_PREFIX=${context.prefix}`,
     "-DCMAKE_INSTALL_LIBDIR=lib",
     `-DCMAKE_OSX_ARCHITECTURES=${context.arch}`,
@@ -468,7 +469,8 @@ export function verifyConfigurationReceipt(entry, context) {
   if (entry.adapter === "cmake") {
     const values = parseCmakeCache(join(build, "CMakeCache.txt"));
     const required = new Map([
-      ["CMAKE_BUILD_TYPE", "Release"], ["CMAKE_INSTALL_PREFIX", context.prefix], ["CMAKE_INSTALL_LIBDIR", "lib"],
+      ["CMAKE_BUILD_TYPE", "Release"], ["CMAKE_POLICY_VERSION_MINIMUM", "3.5"],
+      ["CMAKE_INSTALL_PREFIX", context.prefix], ["CMAKE_INSTALL_LIBDIR", "lib"],
       ["CMAKE_OSX_ARCHITECTURES", context.arch], ["CMAKE_OSX_DEPLOYMENT_TARGET", "11.0"], ["CMAKE_OSX_SYSROOT", context.sdk],
       ...requestedDefinitions(entry, context),
     ]);
