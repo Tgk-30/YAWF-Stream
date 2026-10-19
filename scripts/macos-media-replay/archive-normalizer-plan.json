@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "inputArchiveSha256": "baf26db61e0e50011f748e2ddfe06a764972d8fd9ff5a562f50da94d2727dbff",
+  "archiveRoot": "yawf-macos-media-runtime-source",
+  "originalOwnedSourcesPrefix": "/Users/runner/work/_temp/yawf-media-cache/yawf-macos-media-runtime-arm64-ecfa245848515ea49ec9/recipe/sources",
+  "limits": {
+    "members": 50000,
+    "links": 256,
+    "regularBytes": 1100000000,
+    "memberBytes": 134217728,
+    "pathBytes": 4096
+  },
+  "bundledInputs": [
+    {
+      "base": "controller",
+      "source": "replay-plan.json",
+      "destination": "replay-controls/replay-plan.json",
+      "role": "independent replay plan"
+    },
+    {
+      "base": "controller",
+      "source": "replay_macos_media_sources.mjs",
+      "destination": "replay-controls/replay_macos_media_sources.mjs",
+      "role": "independent replay controller"
+    },
+    {
+      "base": "controller",
+      "source": "README.md",
+      "destination": "replay-controls/README.md",
+      "role": "independent replay usage and limits"
+    },
+    {
+      "base": "controller",
+      "source": "required-runtime-outputs.json",
+      "destination": "replay-controls/required-runtime-outputs.json",
+      "role": "canonical staged runtime output inventory"
+    },
+    {
+      "base": "project",
+      "source": "scripts/stage_macos_media_runtime.mjs",
+      "destination": "replay-support/scripts/stage_macos_media_runtime.mjs",
+      "role": "owned runtime stager"
+    },
+    {
+      "base": "project",
+      "source": "scripts/check_macos_bundle_minimum.mjs",
+      "destination": "replay-support/scripts/check_macos_bundle_minimum.mjs",
+      "role": "owned bundle minimum checker"
+    }
+  ]
+}

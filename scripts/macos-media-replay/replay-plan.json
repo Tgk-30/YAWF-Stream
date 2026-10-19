@@ -1,0 +1,745 @@
+{
+  "schemaVersion": 1,
+  "target": "11.0",
+  "maximumJobs": 16,
+  "configurationEvidence": "Generated config.status, CMakeCache.txt, meson-private/cmd_line.txt, configdata.pm, config.mak, and the completed build log from the 2026-10-18 arm64 build. No upstream recipe control file is an input to this plan.",
+  "packages": [
+    {
+      "id": "freetype",
+      "version": "2.14.3",
+      "sourceDir": "freetype-2.14.3",
+      "adapter": "autoconf",
+      "dependencies": [],
+      "options": [
+        "--enable-shared",
+        "--disable-static",
+        "--without-harfbuzz",
+        "--without-png",
+        "--without-brotli",
+        "--without-bzip2",
+        "--with-zlib"
+      ],
+      "expected": [
+        "lib/libfreetype.6.dylib"
+      ]
+    },
+    {
+      "id": "fribidi",
+      "version": "1.0.17",
+      "sourceDir": "fribidi-1.0.17",
+      "adapter": "meson",
+      "dependencies": [],
+      "options": [
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Ddocs=false",
+        "-Dtests=false"
+      ],
+      "expected": [
+        "lib/libfribidi.0.dylib"
+      ]
+    },
+    {
+      "id": "libunibreak",
+      "version": "7.0",
+      "sourceDir": "libunibreak-7.0",
+      "adapter": "autoconf",
+      "dependencies": [],
+      "options": [
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "expected": [
+        "lib/libunibreak.7.dylib"
+      ]
+    },
+    {
+      "id": "luajit",
+      "version": "8e6520a7aecd0517e792b359afbbfd7274791f5f",
+      "sourceDir": "luajit-8e6520a7aecd0517e792b359afbbfd7274791f5f",
+      "adapter": "luajit-make",
+      "dependencies": [],
+      "options": [
+        "amalg"
+      ],
+      "expected": [
+        "lib/libluajit-5.1.2.1.1781602682.dylib"
+      ]
+    },
+    {
+      "id": "mujs",
+      "version": "1.3.9",
+      "sourceDir": "mujs-1.3.9",
+      "adapter": "mujs-make",
+      "dependencies": [],
+      "options": [
+        "release",
+        "shared"
+      ],
+      "expected": [
+        "lib/libmujs.dylib"
+      ]
+    },
+    {
+      "id": "uchardet",
+      "version": "0.0.8",
+      "sourceDir": "uchardet-0.0.8",
+      "adapter": "cmake",
+      "dependencies": [],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_STATIC=OFF"
+      ],
+      "expected": [
+        "lib/libuchardet.0.0.8.dylib"
+      ]
+    },
+    {
+      "id": "little-cms2",
+      "version": "2.19",
+      "sourceDir": "little-cms2-2.19",
+      "adapter": "autoconf",
+      "dependencies": [],
+      "options": [
+        "--enable-shared",
+        "--disable-static",
+        "--without-jpeg",
+        "--without-tiff",
+        "--without-zlib"
+      ],
+      "expected": [
+        "lib/liblcms2.2.dylib"
+      ]
+    },
+    {
+      "id": "libudfread",
+      "version": "1.2.0",
+      "sourceDir": "libudfread-1.2.0",
+      "adapter": "meson",
+      "dependencies": [],
+      "options": [
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Denable_examples=false"
+      ],
+      "expected": [
+        "lib/libudfread.3.dylib"
+      ]
+    },
+    {
+      "id": "lz4",
+      "version": "1.10.0",
+      "sourceDir": "lz4-1.10.0",
+      "adapter": "cmake",
+      "cmakeSourceSubdir": "build/cmake",
+      "dependencies": [],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_STATIC_LIBS=OFF",
+        "-DLZ4_BUILD_CLI=OFF",
+        "-DLZ4_BUILD_LEGACY_LZ4C=OFF"
+      ],
+      "expected": [
+        "lib/liblz4.1.10.0.dylib"
+      ]
+    },
+    {
+      "id": "zstd",
+      "version": "1.5.7",
+      "sourceDir": "zstd-1.5.7",
+      "adapter": "cmake",
+      "cmakeSourceSubdir": "build/cmake",
+      "dependencies": [],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DZSTD_BUILD_SHARED=ON",
+        "-DZSTD_BUILD_STATIC=OFF",
+        "-DZSTD_BUILD_PROGRAMS=OFF",
+        "-DZSTD_BUILD_TESTS=OFF",
+        "-DZSTD_BUILD_CONTRIB=OFF",
+        "-DZSTD_BUILD_DEPRECATED=OFF"
+      ],
+      "expected": [
+        "lib/libzstd.1.5.7.dylib"
+      ]
+    },
+    {
+      "id": "zimg",
+      "version": "3.0.6",
+      "sourceDir": "zimg-3.0.6",
+      "adapter": "autoconf",
+      "dependencies": [],
+      "options": [
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "expected": [
+        "lib/libzimg.2.dylib"
+      ]
+    },
+    {
+      "id": "openssl",
+      "version": "4.0.3",
+      "sourceDir": "openssl-4.0.3",
+      "adapter": "openssl",
+      "dependencies": [],
+      "options": [
+        "--libdir=lib",
+        "--openssldir=/etc/ssl",
+        "enable-shared",
+        "no-acvp-tests",
+        "no-allocfail-tests",
+        "no-apps",
+        "no-asan",
+        "no-brotli",
+        "no-brotli-dynamic",
+        "no-buildtest-c++",
+        "no-crypto-mdebug",
+        "no-demos",
+        "no-docs",
+        "no-dynamic-engine",
+        "no-ec_explicit_curves",
+        "no-ec_nistp_64_gcc_128",
+        "no-egd",
+        "no-engine",
+        "no-external-tests",
+        "no-fips",
+        "no-fips-jitter",
+        "no-fips-post",
+        "no-fips-securitychecks",
+        "no-fuzz-afl",
+        "no-fuzz-libfuzzer",
+        "no-h3demo",
+        "no-hqinterop",
+        "no-jitter",
+        "no-ktls",
+        "no-lms",
+        "no-md2",
+        "no-msan",
+        "no-pie",
+        "no-rc5",
+        "no-sctp",
+        "no-sslkeylog",
+        "no-static-engine",
+        "no-static-vcruntime",
+        "no-tests",
+        "no-tfo",
+        "no-tls-deprecated-ec",
+        "no-trace",
+        "no-ubsan",
+        "no-unit-test",
+        "no-uplink",
+        "no-weak-ssl-ciphers",
+        "no-winstore",
+        "no-zlib",
+        "no-zlib-dynamic",
+        "no-zstd",
+        "no-zstd-dynamic"
+      ],
+      "expected": [
+        "lib/libssl.4.dylib",
+        "lib/libcrypto.4.dylib"
+      ]
+    },
+    {
+      "id": "libbs2b",
+      "version": "3.1.0",
+      "sourceDir": "libbs2b-3.1.0",
+      "adapter": "autoconf",
+      "dependencies": [],
+      "options": [
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "expected": [
+        "lib/libbs2b.0.dylib"
+      ]
+    },
+    {
+      "id": "soxr",
+      "version": "0.1.3",
+      "sourceDir": "soxr-0.1.3-Source",
+      "adapter": "cmake",
+      "dependencies": [],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_TESTS=OFF",
+        "-DBUILD_EXAMPLES=OFF"
+      ],
+      "expected": [
+        "lib/libsoxr.0.1.2.dylib"
+      ]
+    },
+    {
+      "id": "x264",
+      "version": "b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "sourceDir": "x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "adapter": "x264",
+      "dependencies": [],
+      "options": [
+        "--enable-shared",
+        "--disable-static",
+        "--disable-cli"
+      ],
+      "expected": [
+        "lib/libx264.165.dylib"
+      ]
+    },
+    {
+      "id": "jpeg-turbo",
+      "version": "3.1.4.1",
+      "sourceDir": "jpeg-turbo-3.1.4.1",
+      "adapter": "cmake",
+      "dependencies": [],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DENABLE_SHARED=ON",
+        "-DENABLE_STATIC=OFF",
+        "-DWITH_JPEG8=OFF",
+        "-DWITH_SIMD=ON",
+        "-DWITH_TOOLS=ON"
+      ],
+      "expected": [
+        "lib/libjpeg.62.4.0.dylib"
+      ]
+    },
+    {
+      "id": "libwebp",
+      "version": "1.6.0",
+      "sourceDir": "libwebp-1.6.0",
+      "adapter": "cmake",
+      "dependencies": [],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DWEBP_BUILD_ANIM_UTILS=OFF",
+        "-DWEBP_BUILD_CWEBP=OFF",
+        "-DWEBP_BUILD_DWEBP=OFF",
+        "-DWEBP_BUILD_EXTRAS=OFF",
+        "-DWEBP_BUILD_FUZZTEST=OFF",
+        "-DWEBP_BUILD_GIF2WEBP=OFF",
+        "-DWEBP_BUILD_IMG2WEBP=OFF",
+        "-DWEBP_BUILD_LIBWEBPMUX=ON",
+        "-DWEBP_BUILD_VWEBP=OFF",
+        "-DWEBP_BUILD_WEBPINFO=OFF",
+        "-DWEBP_BUILD_WEBPMUX=OFF",
+        "-DWEBP_BUILD_WEBP_JS=OFF",
+        "-DWEBP_ENABLE_SIMD=ON",
+        "-DWEBP_LINK_STATIC=OFF"
+      ],
+      "expected": [
+        "lib/libwebp.7.2.0.dylib",
+        "lib/libwebpdecoder.3.2.0.dylib",
+        "lib/libwebpdemux.2.0.17.dylib",
+        "lib/libwebpmux.3.1.2.dylib",
+        "lib/libsharpyuv.0.1.2.dylib"
+      ]
+    },
+    {
+      "id": "svt-av1",
+      "version": "4.2.0",
+      "sourceDir": "svt-av1-4.2.0",
+      "adapter": "cmake",
+      "dependencies": [],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_APPS=OFF",
+        "-DBUILD_TESTING=OFF",
+        "-DSVT_AV1_LTO=OFF",
+        "-DSVT_AV1_NVTX=OFF",
+        "-DSVT_AV1_PGO=OFF"
+      ],
+      "expected": [
+        "lib/libSvtAv1Enc.4.2.0.dylib"
+      ]
+    },
+    {
+      "id": "libjxl",
+      "version": "0.11.2",
+      "sourceDir": "libjxl-0.11.2",
+      "adapter": "cmake",
+      "dependencies": [],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_TESTING=OFF",
+        "-DHWY_ENABLE_INSTALL=ON",
+        "-DJPEGXL_BUNDLE_LIBPNG=NO",
+        "-DJPEGXL_ENABLE_BENCHMARK=OFF",
+        "-DJPEGXL_ENABLE_DEVTOOLS=OFF",
+        "-DJPEGXL_ENABLE_DOXYGEN=OFF",
+        "-DJPEGXL_ENABLE_EXAMPLES=OFF",
+        "-DJPEGXL_ENABLE_FUZZERS=OFF",
+        "-DJPEGXL_ENABLE_JNI=OFF",
+        "-DJPEGXL_ENABLE_JPEGLI=OFF",
+        "-DJPEGXL_ENABLE_MANPAGES=OFF",
+        "-DJPEGXL_ENABLE_OPENEXR=OFF",
+        "-DJPEGXL_ENABLE_SKCMS=OFF",
+        "-DJPEGXL_ENABLE_TOOLS=OFF",
+        "-DJPEGXL_ENABLE_TRANSCODE_JPEG=OFF",
+        "-DJPEGXL_ENABLE_VIEWERS=OFF"
+      ],
+      "expected": [
+        "lib/libjxl.0.11.2.dylib",
+        "lib/libjxl_cms.0.11.2.dylib",
+        "lib/libjxl_threads.0.11.2.dylib",
+        "lib/libbrotlicommon.1.0.9.dylib",
+        "lib/libbrotlidec.1.0.9.dylib",
+        "lib/libbrotlienc.1.0.9.dylib"
+      ]
+    },
+    {
+      "id": "dav1d",
+      "version": "1.5.3",
+      "sourceDir": "dav1d-1.5.3",
+      "adapter": "meson",
+      "dependencies": [],
+      "options": [
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Denable_examples=false",
+        "-Denable_tests=false",
+        "-Denable_tools=false"
+      ],
+      "expected": [
+        "lib/libdav1d.7.dylib"
+      ]
+    },
+    {
+      "id": "speex",
+      "version": "1.2.1",
+      "sourceDir": "speex-1.2.1",
+      "adapter": "autoconf",
+      "dependencies": [],
+      "options": [
+        "--enable-shared",
+        "--disable-static",
+        "--disable-ogg"
+      ],
+      "expected": [
+        "lib/libspeex.1.dylib"
+      ]
+    },
+    {
+      "id": "libogg",
+      "version": "1.3.6",
+      "sourceDir": "libogg-1.3.6",
+      "adapter": "autoconf",
+      "dependencies": [],
+      "options": [
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "expected": [
+        "lib/libogg.0.dylib"
+      ]
+    },
+    {
+      "id": "libvorbis",
+      "version": "1.3.7",
+      "sourceDir": "libvorbis-1.3.7",
+      "adapter": "autoconf",
+      "dependencies": [
+        "libogg"
+      ],
+      "options": [
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "expected": [
+        "lib/libvorbis.0.dylib",
+        "lib/libvorbisenc.2.dylib",
+        "lib/libvorbisfile.3.dylib"
+      ]
+    },
+    {
+      "id": "libaribcaption",
+      "version": "1.1.2",
+      "sourceDir": "libaribcaption-1.1.2",
+      "adapter": "cmake",
+      "dependencies": [],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON"
+      ],
+      "expected": [
+        "lib/libaribcaption.dylib"
+      ]
+    },
+    {
+      "id": "harfbuzz",
+      "version": "14.2.1",
+      "sourceDir": "harfbuzz-14.2.1",
+      "adapter": "meson",
+      "dependencies": [
+        "freetype"
+      ],
+      "options": [
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dbenchmark=disabled",
+        "-Dcoretext=enabled",
+        "-Ddocs=disabled",
+        "-Dfreetype=enabled",
+        "-Dglib=disabled",
+        "-Dgobject=disabled",
+        "-Dicu=disabled",
+        "-Dintrospection=disabled",
+        "-Dtests=disabled"
+      ],
+      "expected": [
+        "lib/libharfbuzz.0.dylib",
+        "lib/libharfbuzz-subset.0.dylib",
+        "lib/libharfbuzz-gpu.0.dylib",
+        "lib/libharfbuzz-raster.0.dylib",
+        "lib/libharfbuzz-vector.0.dylib"
+      ]
+    },
+    {
+      "id": "fontconfig",
+      "version": "2.18.1",
+      "sourceDir": "fontconfig-2.18.1",
+      "adapter": "meson",
+      "dependencies": [
+        "freetype"
+      ],
+      "options": [
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dcache-build=disabled",
+        "-Ddoc=disabled",
+        "-Dnls=disabled",
+        "-Dtests=disabled",
+        "-Dtools=disabled"
+      ],
+      "expected": [
+        "lib/libfontconfig.1.dylib"
+      ]
+    },
+    {
+      "id": "libarchive",
+      "version": "3.8.8",
+      "sourceDir": "libarchive-3.8.8",
+      "adapter": "cmake",
+      "dependencies": [
+        "lz4",
+        "zstd"
+      ],
+      "options": [
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_TESTING=ON",
+        "-DENABLE_TEST=OFF",
+        "-DENABLE_BZip2=OFF",
+        "-DENABLE_EXPAT=OFF",
+        "-DENABLE_LIBB2=OFF",
+        "-DENABLE_LIBXML2=OFF",
+        "-DENABLE_LZ4=ON",
+        "-DENABLE_LZO=OFF",
+        "-DENABLE_MBEDTLS=OFF",
+        "-DENABLE_NETTLE=OFF",
+        "-DENABLE_OPENSSL=OFF",
+        "-DENABLE_ZSTD=ON"
+      ],
+      "expected": [
+        "lib/libarchive.13.8.8.dylib"
+      ]
+    },
+    {
+      "id": "rubberband",
+      "version": "4.0.0",
+      "sourceDir": "rubberband-4.0.0",
+      "adapter": "meson",
+      "dependencies": [],
+      "options": [
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dfft=vdsp",
+        "-Dresampler=builtin",
+        "-Dcmdline=disabled"
+      ],
+      "expected": [
+        "lib/librubberband.3.dylib"
+      ]
+    },
+    {
+      "id": "libbluray",
+      "version": "1.4.1",
+      "sourceDir": "libbluray-1.4.1",
+      "adapter": "meson",
+      "dependencies": [
+        "libudfread",
+        "freetype",
+        "fontconfig"
+      ],
+      "options": [
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dbdj_jar=disabled",
+        "-Denable_tools=false",
+        "-Denable_examples=false",
+        "-Denable_devtools=false",
+        "-Dlibxml2=disabled"
+      ],
+      "expected": [
+        "lib/libbluray.3.dylib"
+      ]
+    },
+    {
+      "id": "libplacebo",
+      "version": "7.360.1",
+      "sourceDir": "libplacebo-7.360.1",
+      "adapter": "meson",
+      "dependencies": [
+        "little-cms2"
+      ],
+      "options": [
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dvulkan=disabled",
+        "-Dopengl=enabled",
+        "-Dd3d11=disabled",
+        "-Ddemos=false",
+        "-Dtests=false",
+        "-Dshaderc=disabled",
+        "-Dglslang=disabled",
+        "-Dlcms=enabled"
+      ],
+      "expected": [
+        "lib/libplacebo.360.dylib"
+      ]
+    },
+    {
+      "id": "libass",
+      "version": "0.17.5",
+      "sourceDir": "libass-0.17.5",
+      "adapter": "autoconf",
+      "dependencies": [
+        "freetype",
+        "fribidi",
+        "harfbuzz",
+        "fontconfig",
+        "libunibreak"
+      ],
+      "options": [
+        "--enable-shared",
+        "--disable-static",
+        "--enable-fontconfig",
+        "--disable-libtool-lock"
+      ],
+      "expected": [
+        "lib/libass.9.dylib"
+      ]
+    },
+    {
+      "id": "ffmpeg",
+      "version": "9.0.2",
+      "sourceDir": "ffmpeg-9.0.2",
+      "adapter": "ffmpeg",
+      "dependencies": [
+        "x264",
+        "openssl",
+        "speex",
+        "libvorbis",
+        "dav1d",
+        "libass",
+        "libaribcaption",
+        "libwebp",
+        "libjxl",
+        "svt-av1",
+        "libbs2b",
+        "soxr",
+        "rubberband",
+        "zimg",
+        "fontconfig",
+        "freetype",
+        "fribidi",
+        "harfbuzz"
+      ],
+      "options": [
+        "--enable-gpl",
+        "--enable-version3",
+        "--enable-libx264",
+        "--enable-shared",
+        "--disable-static",
+        "--enable-ffmpeg",
+        "--enable-ffprobe",
+        "--disable-ffplay",
+        "--disable-doc",
+        "--disable-debug",
+        "--enable-network",
+        "--enable-openssl",
+        "--enable-videotoolbox",
+        "--enable-audiotoolbox",
+        "--enable-libspeex",
+        "--enable-libvorbis",
+        "--enable-libdav1d",
+        "--enable-libass",
+        "--enable-libaribcaption",
+        "--enable-libwebp",
+        "--enable-libjxl",
+        "--enable-libsvtav1",
+        "--enable-libbs2b",
+        "--enable-libsoxr",
+        "--enable-librubberband",
+        "--enable-libzimg",
+        "--enable-libfontconfig",
+        "--enable-libfreetype",
+        "--enable-libfribidi",
+        "--enable-libharfbuzz"
+      ],
+      "expected": [
+        "bin/ffmpeg",
+        "bin/ffprobe",
+        "lib/libavcodec.63.1.102.dylib",
+        "lib/libavdevice.63.1.102.dylib",
+        "lib/libavfilter.12.1.102.dylib",
+        "lib/libavformat.63.1.102.dylib",
+        "lib/libavutil.61.1.102.dylib",
+        "lib/libswresample.7.1.102.dylib",
+        "lib/libswscale.10.1.102.dylib"
+      ]
+    },
+    {
+      "id": "mpv",
+      "version": "0.41.0",
+      "sourceDir": "mpv-0.41.0",
+      "adapter": "meson",
+      "dependencies": [
+        "ffmpeg",
+        "libplacebo",
+        "luajit",
+        "mujs",
+        "little-cms2",
+        "libarchive",
+        "libbluray",
+        "uchardet",
+        "rubberband",
+        "zimg",
+        "jpeg-turbo"
+      ],
+      "options": [
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dlibmpv=true",
+        "-Dcplayer=false",
+        "-Dmacos-cocoa-cb=disabled",
+        "-Dmacos-touchbar=disabled",
+        "-Dmacos-media-player=disabled",
+        "-Dmanpage-build=disabled",
+        "-Dtests=false",
+        "-Dlua=luajit",
+        "-Djavascript=enabled",
+        "-Dlcms2=enabled",
+        "-Dvulkan=disabled",
+        "-Dgl=enabled",
+        "-Dzimg=enabled",
+        "-Dlibbluray=enabled",
+        "-Dlibarchive=enabled",
+        "-Duchardet=enabled",
+        "-Djpeg=enabled",
+        "-Drubberband=enabled",
+        "-Dswift-flags=-target {swiftTarget}"
+      ],
+      "expected": [
+        "lib/libmpv.2.dylib"
+      ]
+    }
+  ]
+}

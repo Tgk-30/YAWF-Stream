@@ -1,0 +1,1430 @@
+{
+  "freetype": [
+    {
+      "command": "/owned/replay/sources/freetype-2.14.3/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static",
+        "--without-harfbuzz",
+        "--without-png",
+        "--without-brotli",
+        "--without-bzip2",
+        "--with-zlib"
+      ],
+      "cwd": "/owned/replay/build/freetype"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/freetype"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/freetype"
+    }
+  ],
+  "fribidi": [
+    {
+      "command": "/tools/meson",
+      "args": [
+        "setup",
+        "/owned/replay/build/fribidi",
+        "/owned/replay/sources/fribidi-1.0.17",
+        "--native-file=/owned/replay/meson-arm64-darwin.ini",
+        "--prefix=/owned/replay/install/arm64",
+        "--buildtype=release",
+        "--default-library=shared",
+        "--wrap-mode=nofallback",
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Ddocs=false",
+        "-Dtests=false"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "compile",
+        "-C",
+        "/owned/replay/build/fribidi",
+        "-j",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "install",
+        "-C",
+        "/owned/replay/build/fribidi"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "libunibreak": [
+    {
+      "command": "/owned/replay/sources/libunibreak-7.0/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "cwd": "/owned/replay/build/libunibreak"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/libunibreak"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/libunibreak"
+    }
+  ],
+  "luajit": [
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "PREFIX=/owned/replay/install/arm64",
+        "MACOSX_DEPLOYMENT_TARGET=11.0",
+        "CC=clang",
+        "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2",
+        "LDFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk",
+        "amalg"
+      ],
+      "cwd": "/owned/replay/sources/luajit-8e6520a7aecd0517e792b359afbbfd7274791f5f"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "PREFIX=/owned/replay/install/arm64",
+        "MACOSX_DEPLOYMENT_TARGET=11.0",
+        "CC=clang",
+        "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2",
+        "LDFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk",
+        "install"
+      ],
+      "cwd": "/owned/replay/sources/luajit-8e6520a7aecd0517e792b359afbbfd7274791f5f"
+    }
+  ],
+  "mujs": [
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "prefix=/owned/replay/install/arm64",
+        "CC=clang",
+        "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2",
+        "release"
+      ],
+      "cwd": "/owned/replay/sources/mujs-1.3.9"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "prefix=/owned/replay/install/arm64",
+        "CC=clang",
+        "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2",
+        "shared"
+      ],
+      "cwd": "/owned/replay/sources/mujs-1.3.9"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "prefix=/owned/replay/install/arm64",
+        "CC=clang",
+        "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2",
+        "install"
+      ],
+      "cwd": "/owned/replay/sources/mujs-1.3.9"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "prefix=/owned/replay/install/arm64",
+        "CC=clang",
+        "CFLAGS=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2",
+        "install-shared"
+      ],
+      "cwd": "/owned/replay/sources/mujs-1.3.9"
+    }
+  ],
+  "uchardet": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/uchardet-0.0.8",
+        "-B",
+        "/owned/replay/build/uchardet",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_STATIC=OFF"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/uchardet",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/uchardet"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "little-cms2": [
+    {
+      "command": "/owned/replay/sources/little-cms2-2.19/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static",
+        "--without-jpeg",
+        "--without-tiff",
+        "--without-zlib"
+      ],
+      "cwd": "/owned/replay/build/little-cms2"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/little-cms2"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/little-cms2"
+    }
+  ],
+  "libudfread": [
+    {
+      "command": "/tools/meson",
+      "args": [
+        "setup",
+        "/owned/replay/build/libudfread",
+        "/owned/replay/sources/libudfread-1.2.0",
+        "--native-file=/owned/replay/meson-arm64-darwin.ini",
+        "--prefix=/owned/replay/install/arm64",
+        "--buildtype=release",
+        "--default-library=shared",
+        "--wrap-mode=nofallback",
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Denable_examples=false"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "compile",
+        "-C",
+        "/owned/replay/build/libudfread",
+        "-j",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "install",
+        "-C",
+        "/owned/replay/build/libudfread"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "lz4": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/lz4-1.10.0/build/cmake",
+        "-B",
+        "/owned/replay/build/lz4",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_STATIC_LIBS=OFF",
+        "-DLZ4_BUILD_CLI=OFF",
+        "-DLZ4_BUILD_LEGACY_LZ4C=OFF"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/lz4",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/lz4"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "zstd": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/zstd-1.5.7/build/cmake",
+        "-B",
+        "/owned/replay/build/zstd",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DZSTD_BUILD_SHARED=ON",
+        "-DZSTD_BUILD_STATIC=OFF",
+        "-DZSTD_BUILD_PROGRAMS=OFF",
+        "-DZSTD_BUILD_TESTS=OFF",
+        "-DZSTD_BUILD_CONTRIB=OFF",
+        "-DZSTD_BUILD_DEPRECATED=OFF"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/zstd",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/zstd"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "zimg": [
+    {
+      "command": "/owned/replay/sources/zimg-3.0.6/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "cwd": "/owned/replay/build/zimg"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/zimg"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/zimg"
+    }
+  ],
+  "openssl": [
+    {
+      "command": "/owned/replay/sources/openssl-4.0.3/Configure",
+      "args": [
+        "darwin64-arm64-cc",
+        "--prefix=/owned/replay/install/arm64",
+        "--libdir=lib",
+        "--openssldir=/etc/ssl",
+        "enable-shared",
+        "no-acvp-tests",
+        "no-allocfail-tests",
+        "no-apps",
+        "no-asan",
+        "no-brotli",
+        "no-brotli-dynamic",
+        "no-buildtest-c++",
+        "no-crypto-mdebug",
+        "no-demos",
+        "no-docs",
+        "no-dynamic-engine",
+        "no-ec_explicit_curves",
+        "no-ec_nistp_64_gcc_128",
+        "no-egd",
+        "no-engine",
+        "no-external-tests",
+        "no-fips",
+        "no-fips-jitter",
+        "no-fips-post",
+        "no-fips-securitychecks",
+        "no-fuzz-afl",
+        "no-fuzz-libfuzzer",
+        "no-h3demo",
+        "no-hqinterop",
+        "no-jitter",
+        "no-ktls",
+        "no-lms",
+        "no-md2",
+        "no-msan",
+        "no-pie",
+        "no-rc5",
+        "no-sctp",
+        "no-sslkeylog",
+        "no-static-engine",
+        "no-static-vcruntime",
+        "no-tests",
+        "no-tfo",
+        "no-tls-deprecated-ec",
+        "no-trace",
+        "no-ubsan",
+        "no-unit-test",
+        "no-uplink",
+        "no-weak-ssl-ciphers",
+        "no-winstore",
+        "no-zlib",
+        "no-zlib-dynamic",
+        "no-zstd",
+        "no-zstd-dynamic"
+      ],
+      "cwd": "/owned/replay/build/openssl"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/openssl"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install_sw"
+      ],
+      "cwd": "/owned/replay/build/openssl"
+    }
+  ],
+  "libbs2b": [
+    {
+      "command": "/owned/replay/sources/libbs2b-3.1.0/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "cwd": "/owned/replay/build/libbs2b"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/libbs2b"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/libbs2b"
+    }
+  ],
+  "soxr": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/soxr-0.1.3-Source",
+        "-B",
+        "/owned/replay/build/soxr",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_TESTS=OFF",
+        "-DBUILD_EXAMPLES=OFF"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/soxr",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/soxr"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "x264": [
+    {
+      "command": "/owned/replay/sources/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static",
+        "--disable-cli",
+        "--extra-cflags=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2",
+        "--extra-ldflags=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk"
+      ],
+      "cwd": "/owned/replay/build/x264"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/x264"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/x264"
+    }
+  ],
+  "jpeg-turbo": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/jpeg-turbo-3.1.4.1",
+        "-B",
+        "/owned/replay/build/jpeg-turbo",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DENABLE_SHARED=ON",
+        "-DENABLE_STATIC=OFF",
+        "-DWITH_JPEG8=OFF",
+        "-DWITH_SIMD=ON",
+        "-DWITH_TOOLS=ON"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/jpeg-turbo",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/jpeg-turbo"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "libwebp": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/libwebp-1.6.0",
+        "-B",
+        "/owned/replay/build/libwebp",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DWEBP_BUILD_ANIM_UTILS=OFF",
+        "-DWEBP_BUILD_CWEBP=OFF",
+        "-DWEBP_BUILD_DWEBP=OFF",
+        "-DWEBP_BUILD_EXTRAS=OFF",
+        "-DWEBP_BUILD_FUZZTEST=OFF",
+        "-DWEBP_BUILD_GIF2WEBP=OFF",
+        "-DWEBP_BUILD_IMG2WEBP=OFF",
+        "-DWEBP_BUILD_LIBWEBPMUX=ON",
+        "-DWEBP_BUILD_VWEBP=OFF",
+        "-DWEBP_BUILD_WEBPINFO=OFF",
+        "-DWEBP_BUILD_WEBPMUX=OFF",
+        "-DWEBP_BUILD_WEBP_JS=OFF",
+        "-DWEBP_ENABLE_SIMD=ON",
+        "-DWEBP_LINK_STATIC=OFF"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/libwebp",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/libwebp"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "svt-av1": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/svt-av1-4.2.0",
+        "-B",
+        "/owned/replay/build/svt-av1",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_APPS=OFF",
+        "-DBUILD_TESTING=OFF",
+        "-DSVT_AV1_LTO=OFF",
+        "-DSVT_AV1_NVTX=OFF",
+        "-DSVT_AV1_PGO=OFF"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/svt-av1",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/svt-av1"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "libjxl": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/libjxl-0.11.2",
+        "-B",
+        "/owned/replay/build/libjxl",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_TESTING=OFF",
+        "-DHWY_ENABLE_INSTALL=ON",
+        "-DJPEGXL_BUNDLE_LIBPNG=NO",
+        "-DJPEGXL_ENABLE_BENCHMARK=OFF",
+        "-DJPEGXL_ENABLE_DEVTOOLS=OFF",
+        "-DJPEGXL_ENABLE_DOXYGEN=OFF",
+        "-DJPEGXL_ENABLE_EXAMPLES=OFF",
+        "-DJPEGXL_ENABLE_FUZZERS=OFF",
+        "-DJPEGXL_ENABLE_JNI=OFF",
+        "-DJPEGXL_ENABLE_JPEGLI=OFF",
+        "-DJPEGXL_ENABLE_MANPAGES=OFF",
+        "-DJPEGXL_ENABLE_OPENEXR=OFF",
+        "-DJPEGXL_ENABLE_SKCMS=OFF",
+        "-DJPEGXL_ENABLE_TOOLS=OFF",
+        "-DJPEGXL_ENABLE_TRANSCODE_JPEG=OFF",
+        "-DJPEGXL_ENABLE_VIEWERS=OFF"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/libjxl",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/libjxl"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "dav1d": [
+    {
+      "command": "/tools/meson",
+      "args": [
+        "setup",
+        "/owned/replay/build/dav1d",
+        "/owned/replay/sources/dav1d-1.5.3",
+        "--native-file=/owned/replay/meson-arm64-darwin.ini",
+        "--prefix=/owned/replay/install/arm64",
+        "--buildtype=release",
+        "--default-library=shared",
+        "--wrap-mode=nofallback",
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Denable_examples=false",
+        "-Denable_tests=false",
+        "-Denable_tools=false"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "compile",
+        "-C",
+        "/owned/replay/build/dav1d",
+        "-j",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "install",
+        "-C",
+        "/owned/replay/build/dav1d"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "speex": [
+    {
+      "command": "/owned/replay/sources/speex-1.2.1/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static",
+        "--disable-ogg"
+      ],
+      "cwd": "/owned/replay/build/speex"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/speex"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/speex"
+    }
+  ],
+  "libogg": [
+    {
+      "command": "/owned/replay/sources/libogg-1.3.6/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "cwd": "/owned/replay/build/libogg"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/libogg"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/libogg"
+    }
+  ],
+  "libvorbis": [
+    {
+      "command": "/owned/replay/sources/libvorbis-1.3.7/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static"
+      ],
+      "cwd": "/owned/replay/build/libvorbis"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/libvorbis"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/libvorbis"
+    }
+  ],
+  "libaribcaption": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/libaribcaption-1.1.2",
+        "-B",
+        "/owned/replay/build/libaribcaption",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/libaribcaption",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/libaribcaption"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "harfbuzz": [
+    {
+      "command": "/tools/meson",
+      "args": [
+        "setup",
+        "/owned/replay/build/harfbuzz",
+        "/owned/replay/sources/harfbuzz-14.2.1",
+        "--native-file=/owned/replay/meson-arm64-darwin.ini",
+        "--prefix=/owned/replay/install/arm64",
+        "--buildtype=release",
+        "--default-library=shared",
+        "--wrap-mode=nofallback",
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dbenchmark=disabled",
+        "-Dcoretext=enabled",
+        "-Ddocs=disabled",
+        "-Dfreetype=enabled",
+        "-Dglib=disabled",
+        "-Dgobject=disabled",
+        "-Dicu=disabled",
+        "-Dintrospection=disabled",
+        "-Dtests=disabled"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "compile",
+        "-C",
+        "/owned/replay/build/harfbuzz",
+        "-j",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "install",
+        "-C",
+        "/owned/replay/build/harfbuzz"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "fontconfig": [
+    {
+      "command": "/tools/meson",
+      "args": [
+        "setup",
+        "/owned/replay/build/fontconfig",
+        "/owned/replay/sources/fontconfig-2.18.1",
+        "--native-file=/owned/replay/meson-arm64-darwin.ini",
+        "--prefix=/owned/replay/install/arm64",
+        "--buildtype=release",
+        "--default-library=shared",
+        "--wrap-mode=nofallback",
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dcache-build=disabled",
+        "-Ddoc=disabled",
+        "-Dnls=disabled",
+        "-Dtests=disabled",
+        "-Dtools=disabled"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "compile",
+        "-C",
+        "/owned/replay/build/fontconfig",
+        "-j",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "install",
+        "-C",
+        "/owned/replay/build/fontconfig"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "libarchive": [
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "-S",
+        "/owned/replay/sources/libarchive-3.8.8",
+        "-B",
+        "/owned/replay/build/libarchive",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/owned/replay/install/arm64",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_OSX_ARCHITECTURES=arm64",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
+        "-DCMAKE_OSX_SYSROOT=/SDK/MacOSX.sdk",
+        "-DCMAKE_PREFIX_PATH=/owned/replay/install/arm64",
+        "-DCMAKE_FIND_ROOT_PATH=/owned/replay/install/arm64;/SDK/MacOSX.sdk",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+        "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local",
+        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_TESTING=ON",
+        "-DENABLE_TEST=OFF",
+        "-DENABLE_BZip2=OFF",
+        "-DENABLE_EXPAT=OFF",
+        "-DENABLE_LIBB2=OFF",
+        "-DENABLE_LIBXML2=OFF",
+        "-DENABLE_LZ4=ON",
+        "-DENABLE_LZO=OFF",
+        "-DENABLE_MBEDTLS=OFF",
+        "-DENABLE_NETTLE=OFF",
+        "-DENABLE_OPENSSL=OFF",
+        "-DENABLE_ZSTD=ON"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--build",
+        "/owned/replay/build/libarchive",
+        "--parallel",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/cmake",
+      "args": [
+        "--install",
+        "/owned/replay/build/libarchive"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "rubberband": [
+    {
+      "command": "/tools/meson",
+      "args": [
+        "setup",
+        "/owned/replay/build/rubberband",
+        "/owned/replay/sources/rubberband-4.0.0",
+        "--native-file=/owned/replay/meson-arm64-darwin.ini",
+        "--prefix=/owned/replay/install/arm64",
+        "--buildtype=release",
+        "--default-library=shared",
+        "--wrap-mode=nofallback",
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dfft=vdsp",
+        "-Dresampler=builtin",
+        "-Dcmdline=disabled"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "compile",
+        "-C",
+        "/owned/replay/build/rubberband",
+        "-j",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "install",
+        "-C",
+        "/owned/replay/build/rubberband"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "libbluray": [
+    {
+      "command": "/tools/meson",
+      "args": [
+        "setup",
+        "/owned/replay/build/libbluray",
+        "/owned/replay/sources/libbluray-1.4.1",
+        "--native-file=/owned/replay/meson-arm64-darwin.ini",
+        "--prefix=/owned/replay/install/arm64",
+        "--buildtype=release",
+        "--default-library=shared",
+        "--wrap-mode=nofallback",
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dbdj_jar=disabled",
+        "-Denable_tools=false",
+        "-Denable_examples=false",
+        "-Denable_devtools=false",
+        "-Dlibxml2=disabled"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "compile",
+        "-C",
+        "/owned/replay/build/libbluray",
+        "-j",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "install",
+        "-C",
+        "/owned/replay/build/libbluray"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "libplacebo": [
+    {
+      "command": "/tools/meson",
+      "args": [
+        "setup",
+        "/owned/replay/build/libplacebo",
+        "/owned/replay/sources/libplacebo-7.360.1",
+        "--native-file=/owned/replay/meson-arm64-darwin.ini",
+        "--prefix=/owned/replay/install/arm64",
+        "--buildtype=release",
+        "--default-library=shared",
+        "--wrap-mode=nofallback",
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dvulkan=disabled",
+        "-Dopengl=enabled",
+        "-Dd3d11=disabled",
+        "-Ddemos=false",
+        "-Dtests=false",
+        "-Dshaderc=disabled",
+        "-Dglslang=disabled",
+        "-Dlcms=enabled"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "compile",
+        "-C",
+        "/owned/replay/build/libplacebo",
+        "-j",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "install",
+        "-C",
+        "/owned/replay/build/libplacebo"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ],
+  "libass": [
+    {
+      "command": "/owned/replay/sources/libass-0.17.5/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--host=aarch64-apple-darwin",
+        "--enable-shared",
+        "--disable-static",
+        "--enable-fontconfig",
+        "--disable-libtool-lock"
+      ],
+      "cwd": "/owned/replay/build/libass"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/libass"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/libass"
+    }
+  ],
+  "ffmpeg": [
+    {
+      "command": "/owned/replay/sources/ffmpeg-9.0.2/configure",
+      "args": [
+        "--prefix=/owned/replay/install/arm64",
+        "--arch=arm64",
+        "--target-os=darwin",
+        "--cc=clang",
+        "--cxx=clang++",
+        "--extra-cflags=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -O2 -I/owned/replay/install/arm64/include",
+        "--extra-ldflags=-arch arm64 -mmacosx-version-min=11.0 -isysroot /SDK/MacOSX.sdk -L/owned/replay/install/arm64/lib",
+        "--pkg-config=pkg-config",
+        "--enable-gpl",
+        "--enable-version3",
+        "--enable-libx264",
+        "--enable-shared",
+        "--disable-static",
+        "--enable-ffmpeg",
+        "--enable-ffprobe",
+        "--disable-ffplay",
+        "--disable-doc",
+        "--disable-debug",
+        "--enable-network",
+        "--enable-openssl",
+        "--enable-videotoolbox",
+        "--enable-audiotoolbox",
+        "--enable-libspeex",
+        "--enable-libvorbis",
+        "--enable-libdav1d",
+        "--enable-libass",
+        "--enable-libaribcaption",
+        "--enable-libwebp",
+        "--enable-libjxl",
+        "--enable-libsvtav1",
+        "--enable-libbs2b",
+        "--enable-libsoxr",
+        "--enable-librubberband",
+        "--enable-libzimg",
+        "--enable-libfontconfig",
+        "--enable-libfreetype",
+        "--enable-libfribidi",
+        "--enable-libharfbuzz"
+      ],
+      "cwd": "/owned/replay/build/ffmpeg"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "all"
+      ],
+      "cwd": "/owned/replay/build/ffmpeg"
+    },
+    {
+      "command": "/tools/make",
+      "args": [
+        "-j4",
+        "install"
+      ],
+      "cwd": "/owned/replay/build/ffmpeg"
+    }
+  ],
+  "mpv": [
+    {
+      "command": "/tools/meson",
+      "args": [
+        "setup",
+        "/owned/replay/build/mpv",
+        "/owned/replay/sources/mpv-0.41.0",
+        "--native-file=/owned/replay/meson-arm64-darwin.ini",
+        "--prefix=/owned/replay/install/arm64",
+        "--buildtype=release",
+        "--default-library=shared",
+        "--wrap-mode=nofallback",
+        "-Dbuildtype=release",
+        "-Ddefault_library=shared",
+        "-Dlibmpv=true",
+        "-Dcplayer=false",
+        "-Dmacos-cocoa-cb=disabled",
+        "-Dmacos-touchbar=disabled",
+        "-Dmacos-media-player=disabled",
+        "-Dmanpage-build=disabled",
+        "-Dtests=false",
+        "-Dlua=luajit",
+        "-Djavascript=enabled",
+        "-Dlcms2=enabled",
+        "-Dvulkan=disabled",
+        "-Dgl=enabled",
+        "-Dzimg=enabled",
+        "-Dlibbluray=enabled",
+        "-Dlibarchive=enabled",
+        "-Duchardet=enabled",
+        "-Djpeg=enabled",
+        "-Drubberband=enabled",
+        "-Dswift-flags=-target arm64-apple-macosx11.0"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "compile",
+        "-C",
+        "/owned/replay/build/mpv",
+        "-j",
+        "4"
+      ],
+      "cwd": "/owned/replay"
+    },
+    {
+      "command": "/tools/meson",
+      "args": [
+        "install",
+        "-C",
+        "/owned/replay/build/mpv"
+      ],
+      "cwd": "/owned/replay"
+    }
+  ]
+}
