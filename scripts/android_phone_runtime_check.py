@@ -17,6 +17,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import unittest
@@ -31,8 +32,73 @@ HARNESS_PACKAGE = "com.yawf.runtimeinstrumentation"
 HARNESS_INSTRUMENTATION = (
     "com.yawf.runtimeinstrumentation.test/androidx.test.runner.AndroidJUnitRunner"
 )
+HARNESS_EVIDENCE_SUBDIR = "persistent-flow"
+HARNESS_EVIDENCE_MAX_FILES = 42
+HARNESS_CAPTURE_NAME_RE = re.compile(
+    r"(?:0[1-9]|1[0-9]|20)-(?:initial-update-consent|tier-welcome|first-run|"
+    r"quick-setup-notice|discover-after-setup|settings|android-update-card|"
+    r"manual-update-consent|manual-update-result|failure)\.(?:png|xml)"
+)
+HARNESS_FIXED_EVIDENCE_LIMITS = {
+    "actions.txt": 64 * 1024,
+    "instrumentation-receipt.json": 16 * 1024,
+}
 URL_RE = re.compile(r"https?://[^\s\]\[\"'<>]+", re.IGNORECASE)
 BOUNDS_RE = re.compile(r"^\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]$")
+
+
+def harness_evidence_limit(name: str) -> int:
+    fixed = HARNESS_FIXED_EVIDENCE_LIMITS.get(name)
+    if fixed is not None:
+        return fixed
+    if HARNESS_CAPTURE_NAME_RE.fullmatch(name) is None:
+        raise RuntimeCheckError(f"Unexpected persistent evidence file: {name!r}")
+    return 8 * 1024 * 1024 if name.endswith(".png") else 1024 * 1024
+
+
+def validate_harness_evidence_listing(value: str) -> list[str]:
+    names = [line.removesuffix("\r") for line in value.splitlines()]
+    if not names:
+        raise RuntimeCheckError("Persistent instrumentation produced no evidence files")
+    if len(names) > HARNESS_EVIDENCE_MAX_FILES:
+        raise RuntimeCheckError("Persistent instrumentation evidence file count exceeded")
+    if len(names) != len(set(names)):
+        raise RuntimeCheckError("Persistent instrumentation evidence listing had duplicates")
+    for name in names:
+        if name != Path(name).name or name in {".", ".."}:
+            raise RuntimeCheckError("Persistent instrumentation evidence name was unsafe")
+        harness_evidence_limit(name)
+    if "instrumentation-receipt.json" not in names:
+        raise RuntimeCheckError("Persistent instrumentation receipt was not listed")
+    return names
+
+
+def validate_harness_evidence_size(name: str, value: str) -> int:
+    normalized = value.strip()
+    if re.fullmatch(r"[1-9]\d*", normalized) is None:
+        raise RuntimeCheckError(f"Persistent evidence size was invalid for {name}")
+    size = int(normalized)
+    if size > harness_evidence_limit(name):
+        raise RuntimeCheckError(f"Persistent evidence file exceeded its bound: {name}")
+    return size
+
+
+def validate_harness_evidence_bytes(name: str, expected_size: int, value: bytes) -> None:
+    if len(value) != expected_size:
+        raise RuntimeCheckError(f"Persistent evidence read was partial for {name}")
+
+
+def persistent_harness_error(
+    runner_passed: bool, retrieval_error: RuntimeCheckError | None
+) -> RuntimeCheckError | None:
+    if not runner_passed:
+        detail = ""
+        if retrieval_error is not None:
+            detail = "; evidence retrieval also failed and was retained separately"
+        return RuntimeCheckError(
+            "Persistent instrumentation runner failed; exact runner output retained" + detail
+        )
+    return retrieval_error
 
 
 class RuntimeCheckError(RuntimeError):
@@ -500,7 +566,7 @@ class RuntimeDriver:
 
         self.adb.shell("am", "force-stop", PACKAGE)
         self.adb.run(["logcat", "-c"], check=False)
-        subdir = "persistent-flow"
+        subdir = HARNESS_EVIDENCE_SUBDIR
         output = self.adb.run(
             [
                 "shell",
@@ -532,23 +598,25 @@ class RuntimeDriver:
 
         harness_evidence = self.evidence / "persistent-instrumentation"
         harness_evidence.mkdir(parents=True, exist_ok=True)
-        remote = f"/sdcard/Android/data/{HARNESS_PACKAGE}/files/{subdir}/."
-        pulled = self.adb.run(
-            ["pull", remote, str(harness_evidence)], timeout=120, check=False
-        )
-        self.write_text("instrumentation-pull.txt", pulled.stdout + pulled.stderr)
-        if pulled.returncode != 0:
-            raise RuntimeCheckError("Could not retain persistent instrumentation evidence")
-        receipt_path = harness_evidence / "instrumentation-receipt.json"
-        if not receipt_path.is_file():
-            raise RuntimeCheckError("Persistent instrumentation receipt is missing")
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-
-        passed = (
+        runner_passed = (
             output.returncode == 0
             and "OK (1 test)" in output.stdout
             and "INSTRUMENTATION_CODE: -1" in output.stdout
-            and receipt.get("outcome") == "passed"
+        )
+        retrieval_error: RuntimeCheckError | None = None
+        try:
+            self.retrieve_persistent_harness_evidence(subdir, harness_evidence)
+        except RuntimeCheckError as error:
+            retrieval_error = error
+            self.write_text("instrumentation-pull.txt", f"ERROR: {error}\n")
+        harness_error = persistent_harness_error(runner_passed, retrieval_error)
+        if harness_error is not None:
+            raise harness_error
+        receipt_path = harness_evidence / "instrumentation-receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+        passed = (
+            receipt.get("outcome") == "passed"
             and receipt.get("persistentUiAutomationSession") is True
             and receipt.get("candidateVersion") == self.expected_version
             and receipt.get("publishedChannelVersion") == self.expected_published_version
@@ -556,6 +624,67 @@ class RuntimeDriver:
         if not passed:
             raise RuntimeCheckError("Persistent instrumentation setup flow did not pass")
         self.note("Persistent UiAutomation session completed setup and native update flow")
+
+    def retrieve_persistent_harness_evidence(
+        self, subdir: str, destination: Path
+    ) -> None:
+        if subdir != HARNESS_EVIDENCE_SUBDIR:
+            raise RuntimeCheckError("Persistent evidence subdirectory did not match the pin")
+        remote_dir = f"files/{subdir}"
+        listed = self.adb.run(
+            ["exec-out", "run-as", HARNESS_PACKAGE, "ls", "-1", remote_dir],
+            timeout=20,
+            check=False,
+            text=False,
+        )
+        if listed.returncode != 0:
+            raise RuntimeCheckError("Could not enumerate internal persistent evidence")
+        try:
+            listing = listed.stdout.decode("utf-8", "strict")
+        except UnicodeDecodeError as error:
+            raise RuntimeCheckError("Persistent evidence listing was not UTF-8") from error
+        names = validate_harness_evidence_listing(listing)
+        retained: list[str] = []
+        for name in names:
+            remote = f"{remote_dir}/{name}"
+            sized = self.adb.run(
+                [
+                    "exec-out",
+                    "run-as",
+                    HARNESS_PACKAGE,
+                    "stat",
+                    "-c",
+                    "%s",
+                    remote,
+                ],
+                timeout=20,
+                check=False,
+                text=False,
+            )
+            if sized.returncode != 0:
+                raise RuntimeCheckError(f"Could not size persistent evidence file: {name}")
+            try:
+                size_text = sized.stdout.decode("ascii", "strict")
+            except UnicodeDecodeError as error:
+                raise RuntimeCheckError(
+                    f"Persistent evidence size was not ASCII for {name}"
+                ) from error
+            expected_size = validate_harness_evidence_size(name, size_text)
+            read = self.adb.run(
+                ["exec-out", "run-as", HARNESS_PACKAGE, "cat", remote],
+                timeout=30,
+                check=False,
+                text=False,
+            )
+            if read.returncode != 0:
+                raise RuntimeCheckError(f"Could not read persistent evidence file: {name}")
+            validate_harness_evidence_bytes(name, expected_size, read.stdout)
+            (destination / name).write_bytes(read.stdout)
+            retained.append(f"{name} {expected_size}")
+        self.write_text(
+            "instrumentation-pull.txt",
+            "method=run-as-internal-files\n" + "\n".join(retained) + "\n",
+        )
 
     def assert_no_binding_terms(self, nodes: Iterable[UiNode]) -> None:
         found = find_binding_terms(nodes)
@@ -1050,6 +1179,114 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(find_binding_terms(nodes), [])
         terms = self.XML.replace("Quick setup NOT RECOMMENDED", "Accept the Terms of Service")
         self.assertEqual(find_binding_terms(parse_ui_xml(terms)), ["terms of service"])
+
+    def test_accepts_strict_internal_harness_evidence_listing(self) -> None:
+        listing = "01-first-run.png\n01-first-run.xml\nactions.txt\ninstrumentation-receipt.json\n"
+        self.assertEqual(
+            validate_harness_evidence_listing(listing),
+            [
+                "01-first-run.png",
+                "01-first-run.xml",
+                "actions.txt",
+                "instrumentation-receipt.json",
+            ],
+        )
+
+    def test_rejects_harness_evidence_traversal_name(self) -> None:
+        with self.assertRaisesRegex(RuntimeCheckError, "unsafe"):
+            validate_harness_evidence_listing(
+                "../instrumentation-receipt.json\ninstrumentation-receipt.json\n"
+            )
+
+    def test_rejects_duplicate_harness_evidence_name(self) -> None:
+        with self.assertRaisesRegex(RuntimeCheckError, "duplicates"):
+            validate_harness_evidence_listing(
+                "instrumentation-receipt.json\ninstrumentation-receipt.json\n"
+            )
+
+    def test_rejects_unexpected_harness_evidence_name(self) -> None:
+        with self.assertRaisesRegex(RuntimeCheckError, "Unexpected"):
+            validate_harness_evidence_listing(
+                "arbitrary.txt\ninstrumentation-receipt.json\n"
+            )
+
+    def test_rejects_oversize_harness_evidence_before_read(self) -> None:
+        with self.assertRaisesRegex(RuntimeCheckError, "exceeded"):
+            validate_harness_evidence_size("actions.txt", str(64 * 1024 + 1))
+
+    def test_rejects_harness_evidence_count_above_bound(self) -> None:
+        captures = [
+            f"{index:02d}-{label}.png"
+            for index in range(1, 15)
+            for label in ("first-run", "failure", "settings")
+        ]
+        listing = "\n".join(["instrumentation-receipt.json", *captures]) + "\n"
+        self.assertGreater(len(captures) + 1, HARNESS_EVIDENCE_MAX_FILES)
+        with self.assertRaisesRegex(RuntimeCheckError, "count exceeded"):
+            validate_harness_evidence_listing(listing)
+
+    def test_rejects_partial_harness_evidence_read(self) -> None:
+        with self.assertRaisesRegex(RuntimeCheckError, "partial"):
+            validate_harness_evidence_bytes("actions.txt", 4, b"abc")
+
+    def test_rejects_empty_harness_evidence_command_output(self) -> None:
+        with self.assertRaisesRegex(RuntimeCheckError, "no evidence"):
+            validate_harness_evidence_listing("")
+
+    def test_rejects_listing_without_harness_receipt(self) -> None:
+        with self.assertRaisesRegex(RuntimeCheckError, "receipt was not listed"):
+            validate_harness_evidence_listing("actions.txt\n")
+
+    def test_runner_failure_precedes_partial_evidence_failure(self) -> None:
+        partial = RuntimeCheckError("Persistent evidence read was partial")
+        selected = persistent_harness_error(False, partial)
+        self.assertIsNotNone(selected)
+        self.assertIn("runner failed", str(selected))
+        self.assertNotIn("read was partial", str(selected))
+        self.assertIs(persistent_harness_error(True, partial), partial)
+
+    def test_retrieves_bounded_internal_evidence_only_through_run_as(self) -> None:
+        payloads = {
+            "actions.txt": b"one action\n",
+            "instrumentation-receipt.json": b'{"outcome":"passed"}\n',
+        }
+
+        class FakeAdb:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, ...]] = []
+
+            def run(self, args, **_kwargs):
+                call = tuple(args)
+                self.calls.append(call)
+                if call[-3:] == ("ls", "-1", "files/persistent-flow"):
+                    value = b"actions.txt\ninstrumentation-receipt.json\n"
+                elif "stat" in call:
+                    value = str(len(payloads[call[-1].rsplit("/", 1)[-1]])).encode() + b"\n"
+                elif "cat" in call:
+                    value = payloads[call[-1].rsplit("/", 1)[-1]]
+                else:
+                    raise AssertionError(f"Unexpected fake ADB call: {call}")
+                return subprocess.CompletedProcess(call, 0, value, b"")
+
+        fake = FakeAdb()
+        driver = object.__new__(RuntimeDriver)
+        driver.adb = fake
+        with tempfile.TemporaryDirectory(prefix="yawf-evidence-test-") as temporary:
+            destination = Path(temporary)
+            driver.evidence = destination
+            driver.retrieve_persistent_harness_evidence(
+                HARNESS_EVIDENCE_SUBDIR, destination
+            )
+            self.assertEqual((destination / "actions.txt").read_bytes(), payloads["actions.txt"])
+            self.assertEqual(
+                (destination / "instrumentation-receipt.json").read_bytes(),
+                payloads["instrumentation-receipt.json"],
+            )
+        self.assertTrue(fake.calls)
+        self.assertTrue(
+            all(call[:3] == ("exec-out", "run-as", HARNESS_PACKAGE) for call in fake.calls)
+        )
+        self.assertFalse(any("pull" in call for call in fake.calls))
 
 
 def run_self_tests() -> int:

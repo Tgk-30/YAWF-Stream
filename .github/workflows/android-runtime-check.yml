@@ -278,6 +278,14 @@ jobs:
             "$EVIDENCE/instrumentation-test-manifest.xml"
           grep -F 'com.yawf.runtimeinstrumentation' \
             "$EVIDENCE/instrumentation-test-manifest.xml"
+          runtime_test_source="scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeFlowTest.java"
+          grep -F 'instrumentation.getTargetContext().startActivity(intent)' "$runtime_test_source"
+          grep -F 'targetContext.getFilesDir()' "$runtime_test_source"
+          if grep -Fq 'instrumentation.getContext().startActivity(intent)' "$runtime_test_source" || \
+            grep -Fq 'getExternalFilesDir' "$runtime_test_source"; then
+            echo "::error::The isolated harness regressed to a mismatched UID context or external evidence." >&2
+            exit 1
+          fi
           echo "HARNESS_APP_APK=$app_apk" >> "$GITHUB_ENV"
           echo "HARNESS_TEST_APK=$test_apk" >> "$GITHUB_ENV"
 
@@ -317,7 +325,7 @@ jobs:
             if [ -z "$CURRENT_PID" ]; then
               return 0
             fi
-            adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
+            timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
             for _ in 1 2 3 4 5; do
               if ! adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
                 echo "emulatorStopped=true" > "$CURRENT_EVIDENCE/cleanup.txt"
@@ -347,14 +355,14 @@ jobs:
               return 0
             fi
             mkdir -p "$CURRENT_EVIDENCE"
-            adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$CURRENT_EVIDENCE/workflow-failure.png"
-            adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
+            timeout 20s adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$CURRENT_EVIDENCE/workflow-failure.png"
+            timeout 20s adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
               | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
               > "$CURRENT_EVIDENCE/workflow-failure-activity.txt"
-            adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime \
+            timeout 20s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime \
               | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
               > "$CURRENT_EVIDENCE/workflow-failure-logcat.txt"
-            adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print data_app_anr \
+            timeout 20s adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print data_app_anr \
               | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
               > "$CURRENT_EVIDENCE/workflow-failure-anr.txt"
             timeout 30s adb -s "$EMULATOR_SERIAL" shell dumpsys SurfaceFlinger \
@@ -510,6 +518,18 @@ jobs:
         shell: bash
         run: |
           set +e
+          set -o pipefail
+          cap_one_mib() {
+            python3 -c '
+          import sys
+          remaining = 1048576
+          while chunk := sys.stdin.buffer.read(65536):
+              if remaining:
+                  kept = chunk[:remaining]
+                  sys.stdout.buffer.write(kept)
+                  remaining -= len(kept)
+          '
+          }
           mkdir -p "$EVIDENCE"
           if ! command -v adb >/dev/null 2>&1; then
             {
@@ -530,20 +550,62 @@ jobs:
             current_evidence="$EVIDENCE/run-$(cat "$EVIDENCE/current-run.txt")"
           fi
           mkdir -p "$current_evidence"
-          adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$current_evidence/workflow-failure.png"
-          adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
+          # The primary step's EXIT trap already captured evidence and stopped
+          # its emulator. Preserve that completed capture even if a device still
+          # reports connected while the duplicate failure step starts.
+          if [ -f "$current_evidence/workflow-failure-receipt.txt" ]; then
+            {
+              echo "evidenceCollection=preserved"
+              echo "reason=primary-exit-trap-already-captured"
+            } > "$EVIDENCE/workflow-failure-receipt.txt"
+            exit 0
+          fi
+          if [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null)" != "device" ]; then
+            {
+              echo "evidenceCollection=preserved"
+              echo "reason=emulator-already-stopped-or-unavailable"
+            } > "$EVIDENCE/workflow-failure-receipt.txt"
+            exit 0
+          fi
+          capture="$current_evidence/.workflow-failure.png.tmp"
+          if timeout 20s adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$capture" && [ -s "$capture" ]; then
+            mv -f "$capture" "$current_evidence/workflow-failure.png"
+          else
+            rm -f "$capture"
+          fi
+          capture="$current_evidence/.workflow-failure-activity.txt.tmp"
+          if timeout 20s adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
-            > "$current_evidence/workflow-failure-activity.txt"
-          adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime \
+            > "$capture" && [ -s "$capture" ]; then
+            mv -f "$capture" "$current_evidence/workflow-failure-activity.txt"
+          else
+            rm -f "$capture"
+          fi
+          capture="$current_evidence/.workflow-failure-logcat.txt.tmp"
+          if timeout 20s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
-            > "$current_evidence/workflow-failure-logcat.txt"
-          adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print data_app_anr \
+            > "$capture" && [ -s "$capture" ]; then
+            mv -f "$capture" "$current_evidence/workflow-failure-logcat.txt"
+          else
+            rm -f "$capture"
+          fi
+          capture="$current_evidence/.workflow-failure-anr.txt.tmp"
+          if timeout 20s adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print data_app_anr \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
-            > "$current_evidence/workflow-failure-anr.txt"
-          timeout 30s adb -s "$EMULATOR_SERIAL" shell dumpsys SurfaceFlinger \
-            | head -c 1048576 \
+            > "$capture" && [ -s "$capture" ]; then
+            mv -f "$capture" "$current_evidence/workflow-failure-anr.txt"
+          else
+            rm -f "$capture"
+          fi
+          capture="$current_evidence/.workflow-failure-surfaceflinger.txt.tmp"
+          if timeout 30s adb -s "$EMULATOR_SERIAL" shell dumpsys SurfaceFlinger \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
-            > "$current_evidence/workflow-failure-surfaceflinger.txt"
+            | cap_one_mib \
+            > "$capture" && [ -s "$capture" ]; then
+            mv -f "$capture" "$current_evidence/workflow-failure-surfaceflinger.txt"
+          else
+            rm -f "$capture"
+          fi
           echo "evidenceCollection=attempted" > "$current_evidence/workflow-failure-receipt.txt"
 
       - name: Stop the owned emulator
@@ -567,7 +629,7 @@ jobs:
             echo "::error::ADB is unavailable after the emulator was started."
             exit 1
           fi
-          adb -s "$EMULATOR_SERIAL" emu kill
+          timeout 10s adb -s "$EMULATOR_SERIAL" emu kill
           for _ in 1 2 3 4 5; do
             if ! adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
               echo "emulatorStopped=true" > "$EVIDENCE/final-cleanup.txt"

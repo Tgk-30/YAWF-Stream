@@ -40,6 +40,7 @@ public final class RuntimeFlowTest {
     private static final long SHORT_WAIT_MS = 15_000;
     private static final long UI_WAIT_MS = 90_000;
     private static final long UPDATE_WAIT_MS = 120_000;
+    private static final String EVIDENCE_SUBDIR = "persistent-flow";
     private static final int MAX_CAPTURES = 20;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
     private static final long MAX_HIERARCHY_BYTES = 1024L * 1024L;
@@ -60,12 +61,13 @@ public final class RuntimeFlowTest {
         instrumentation = InstrumentationRegistry.getInstrumentation();
         device = UiDevice.getInstance(instrumentation);
         Bundle arguments = InstrumentationRegistry.getArguments();
-        String evidenceSubdir = arguments.getString("evidenceSubdir", "persistent-flow");
+        String evidenceSubdir = arguments.getString("evidenceSubdir", EVIDENCE_SUBDIR);
         assertTrue("Unsafe evidence subdirectory", SAFE_SUBDIR.matcher(evidenceSubdir).matches());
+        assertTrue("Unexpected evidence subdirectory", EVIDENCE_SUBDIR.equals(evidenceSubdir));
         Context targetContext = instrumentation.getTargetContext();
-        File externalFiles = targetContext.getExternalFilesDir(null);
-        assertNotNull("External files directory unavailable", externalFiles);
-        evidenceDir = new File(externalFiles, evidenceSubdir);
+        File internalFiles = targetContext.getFilesDir();
+        assertNotNull("Internal files directory unavailable", internalFiles);
+        evidenceDir = new File(internalFiles, evidenceSubdir);
         assertTrue("Could not create evidence directory", evidenceDir.mkdirs() || evidenceDir.isDirectory());
 
         candidateVersion = arguments.getString("candidateVersion", "");
@@ -151,7 +153,7 @@ public final class RuntimeFlowTest {
                 .addCategory(Intent.CATEGORY_LAUNCHER)
                 .setComponent(new ComponentName(PRODUCT_PACKAGE, PRODUCT_ACTIVITY))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-        instrumentation.getContext().startActivity(intent);
+        instrumentation.getTargetContext().startActivity(intent);
         assertTrue(
                 "Product package did not become visible",
                 device.wait(Until.hasObject(By.pkg(PRODUCT_PACKAGE)), UI_WAIT_MS));
