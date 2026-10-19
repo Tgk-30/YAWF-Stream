@@ -1,0 +1,93 @@
+name: macOS media runtime
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/*macos*"
+      - "scripts/macos-media-runtime/**"
+      - "docs/MACOS_MEDIA_RUNTIME.md"
+      - ".github/workflows/macos-media-runtime.yml"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Native ${{ matrix.arch }} media runtime
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install build tools, not host media libraries
+        run: brew install cmake meson ninja autoconf automake nasm pkgconf
+      - name: Test acquisition, relocation and runtime gates
+        run: node --test scripts/build_macos_media_runtime.test.mjs scripts/stage_macos_media_runtime.test.mjs scripts/smoke_macos_media_runtime.test.mjs
+      - name: Compile pinned source for the native architecture
+        id: media
+        env:
+          MEDIA_ARCH: ${{ matrix.arch }}
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { buildMacosMediaRuntime } from './scripts/build_macos_media_runtime.mjs';
+          const result = await buildMacosMediaRuntime({ workspace: join(process.env.RUNNER_TEMP, 'yawf-media-cache'), requestedArch: process.env.MEDIA_ARCH, jobs: 8 });
+          appendFileSync(process.env.GITHUB_OUTPUT, `root=${result.root}\nprefix=${result.buildInstallPrefix}\nsource=${result.sourceBundle}\nprovenance=${result.provenance}\n`);
+          JS
+      - name: Relocate and locally sign media without rewriting minima
+        env:
+          MEDIA_PREFIX: ${{ steps.media.outputs.prefix }}
+          MEDIA_ARCH: ${{ matrix.arch }}
+        run: node scripts/stage_macos_media_runtime.mjs "$MEDIA_PREFIX" "$RUNNER_TEMP/media-candidate" "$MEDIA_ARCH"
+      - name: Verify natural loading, H264, HLS audio and seek
+        run: node scripts/smoke_macos_media_runtime.mjs "$RUNNER_TEMP/media-candidate" "$RUNNER_TEMP/media-runtime-evidence"
+      - name: Retain exact component sources and provenance
+        env:
+          MEDIA_ROOT: ${{ steps.media.outputs.root }}
+          MEDIA_SOURCE: ${{ steps.media.outputs.source }}
+          MEDIA_PROVENANCE: ${{ steps.media.outputs.provenance }}
+          MEDIA_ARCH: ${{ matrix.arch }}
+        run: |
+          node scripts/prepare_macos_media_notices.mjs "$MEDIA_ROOT" "$RUNNER_TEMP/media-candidate/notices"
+          mkdir "$RUNNER_TEMP/media-candidate/source"
+          cp "$MEDIA_SOURCE" "$RUNNER_TEMP/media-candidate/source/"
+          cp "$MEDIA_PROVENANCE" "$RUNNER_TEMP/media-candidate/source/macos-media-provenance-$MEDIA_ARCH.json"
+      - name: Upload verification candidate, not a release
+        env:
+          MEDIA_ARCH: ${{ matrix.arch }}
+        run: |
+          cd "$RUNNER_TEMP"
+          tar -czf "macos-media-runtime-$MEDIA_ARCH.tar.gz" -C media-candidate .
+          shasum -a 256 "macos-media-runtime-$MEDIA_ARCH.tar.gz" > "macos-media-runtime-$MEDIA_ARCH.tar.gz.sha256"
+      - name: Preserve executable modes and aliases in archived transport
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-media-runtime-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/macos-media-runtime-${{ matrix.arch }}.tar.gz
+            ${{ runner.temp }}/macos-media-runtime-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain runtime failure or success evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-media-evidence-${{ matrix.arch }}
+          path: ${{ runner.temp }}/media-runtime-evidence
+          if-no-files-found: ignore
+          retention-days: 14

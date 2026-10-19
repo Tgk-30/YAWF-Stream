@@ -1,0 +1,89 @@
+--- a/build.sh
++++ b/build.sh
+@@ -113,0 +114 @@
++run buildscripts/build-x264.sh            # H.264 encoder used by server transcode
+--- a/buildscripts/build-ffmpeg.sh
++++ b/buildscripts/build-ffmpeg.sh
+@@ -38,0 +39 @@
++        --enable-libx264 \
+@@ -41 +42,3 @@
+-        --disable-programs \
++        --enable-ffmpeg \
++        --enable-ffprobe \
++        --disable-ffplay \
+--- a/buildscripts/common.sh
++++ b/buildscripts/common.sh
+@@ -7 +7 @@
+-export MACOSX_DEPLOYMENT_TARGET="12.0"
++export MACOSX_DEPLOYMENT_TARGET="11.0"
+@@ -14 +14,9 @@
+-JOBS=$(sysctl -n hw.ncpu)
++JOBS="${YAWF_MEDIA_JOBS:-8}"
++case "$JOBS" in
++    ''|*[!0-9]*) echo "ERROR: YAWF_MEDIA_JOBS must be an integer" >&2; exit 1 ;;
++esac
++if [ "$JOBS" -lt 1 ] || [ "$JOBS" -gt 16 ]; then
++    echo "ERROR: YAWF_MEDIA_JOBS must be between 1 and 16" >&2
++    exit 1
++fi
++SOURCE_ARCHIVE_MAX_BYTES=$((256 * 1024 * 1024))
+@@ -38,0 +47,20 @@
++    case "$url" in
++        https://*) ;;
++        *) echo "ERROR: source URL must use HTTPS: ${url}" >&2; exit 1 ;;
++    esac
++
++    verify_source_archive() {
++        local candidate="$1" actual_sha256 size
++        size=$(stat -f %z "$candidate" 2>/dev/null || stat -c %s "$candidate")
++        if [ "$size" -lt 1 ] || [ "$size" -gt "$SOURCE_ARCHIVE_MAX_BYTES" ]; then
++            echo "ERROR: source archive size outside allowed range: ${filename}" >&2
++            return 1
++        fi
++        actual_sha256=$(shasum -a 256 "$candidate" | awk '{print $1}')
++        if [ "$actual_sha256" != "$expected_sha256" ]; then
++            echo "ERROR: SHA256 mismatch for ${filename}" >&2
++            echo "  Expected: ${expected_sha256}" >&2
++            echo "  Got:      ${actual_sha256}" >&2
++            return 1
++        fi
++    }
+@@ -41,8 +69,3 @@
+-        local actual_sha256
+-        actual_sha256=$(shasum -a 256 "$dest" | awk '{print $1}')
+-        if [ "$actual_sha256" = "$expected_sha256" ]; then
+-            log_step "Cached: ${filename}"
+-            return 0
+-        fi
+-        log_step "SHA256 mismatch on cached ${filename} — re-downloading"
+-        rm -f "$dest"
++        verify_source_archive "$dest" || exit 1
++        log_step "Cached and verified: ${filename}"
++        return 0
+@@ -50,0 +74,2 @@
++    local temporary="${dest}.download.$$"
++    trap 'rm -f "$temporary"' RETURN
+@@ -52,11 +77,5 @@
+-    curl -fsSL --retry 3 --retry-delay 5 -o "$dest" "$url"
+-
+-    local actual_sha256
+-    actual_sha256=$(shasum -a 256 "$dest" | awk '{print $1}')
+-    if [ "$actual_sha256" != "$expected_sha256" ]; then
+-        echo "ERROR: SHA256 mismatch for ${filename}" >&2
+-        echo "  Expected: ${expected_sha256}" >&2
+-        echo "  Got:      ${actual_sha256}" >&2
+-        rm -f "$dest"
+-        exit 1
+-    fi
++    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 5 \
++        --max-filesize "$SOURCE_ARCHIVE_MAX_BYTES" -o "$temporary" "$url"
++    verify_source_archive "$temporary" || exit 1
++    mv "$temporary" "$dest"
++    trap - RETURN
+--- a/versions.env
++++ b/versions.env
+@@ -130,0 +131,4 @@
++
++X264_COMMIT="b35605ace3ddf7c1a5d67a2eb553f034aef41d55"
++X264_SHA256="6eeb82934e69fd51e043bd8c5b0d152839638d1ce7aa4eea65a3fedcf83ff224"
++X264_URL="https://code.videolan.org/videolan/x264/-/archive/${X264_COMMIT}/x264-${X264_COMMIT}.tar.bz2"

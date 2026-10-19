@@ -31,6 +31,7 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "macOS": {
+      "minimumSystemVersion": "11.0",
       "entitlements": "entitlements.plist"
     },
     "linux": {
@@ -54,6 +55,7 @@
     "resources": [
       "resources/server/**/*",
       "resources/ffmpeg/**/*",
+      "resources/media-notices/**/*",
       "lib/**/*"
     ]
   },

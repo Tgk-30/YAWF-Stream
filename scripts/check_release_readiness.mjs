@@ -78,6 +78,7 @@ const dockerWorkflow = read(".github/workflows/docker-image.yml");
 const ciWorkflow = read(".github/workflows/ci.yml");
 const cloudflareSiteWorkflow = read(".github/workflows/cloudflare-site.yml");
 const desktopBuildWorkflow = read(".github/workflows/desktop-build.yml");
+const macosMediaWorkflow = read(".github/workflows/macos-media-runtime.yml");
 const dockerIgnore = read(".dockerignore");
 const dockerfile = read("Dockerfile");
 const publicRepoPreflight = read("scripts/public_repo_preflight.mjs");
@@ -585,9 +586,13 @@ check(
 check(
   "Release workflow bundles ffmpeg binaries",
   // The optimize/remux engine shells out to bundled ffmpeg/ffprobe, so every
-  // desktop target must fetch them exactly like the Node runtime above: macOS
-  // per-arch via matrix.node_runtime, Linux and Windows literally.
-  /download_ffmpeg\.mjs \$\{\{ matrix\.node_runtime \}\}/.test(releaseWorkflow) &&
+  // macOS consumes separately verified source builds; other targets retain
+  // their pinned downloads. All CLIs must be present before packaging.
+  /needs:\s*macos-media-runtime/.test(releaseWorkflow) &&
+    /name:\s*macos-media-runtime-\$\{\{ matrix\.media_arch \}\}/.test(releaseWorkflow) &&
+    /media-candidate\/ffmpeg/.test(releaseWorkflow) &&
+    /buildMacosMediaRuntime/.test(macosMediaWorkflow) &&
+    /smoke_macos_media_runtime\.mjs/.test(macosMediaWorkflow) &&
     /download_ffmpeg\.mjs\s+linux-x64/.test(releaseWorkflow) &&
     /download_ffmpeg\.mjs\s+win-x64/.test(releaseWorkflow),
   ".github/workflows/web-release.yml must fetch ffmpeg/ffprobe for macOS (per-arch), Linux, and Windows before packaging",
@@ -608,13 +613,24 @@ check(
 );
 check(
   "Local macOS package is self-contained for playback",
-  /download_ffmpeg\.mjs/.test(localPackage) &&
-    /"bundle-mpv-deps\.sh"/.test(localPackage) &&
+  /buildMacosMediaRuntime/.test(localPackage) &&
+    /stageMediaRuntime/.test(localPackage) &&
+    /smokeMediaRuntime/.test(localPackage) &&
+    /prepareMediaNotices/.test(localPackage) &&
+    /check_macos_bundle_minimum\.mjs/.test(localPackage) &&
     /MPV_LIB_DIR/.test(localPackage) &&
     /otool/.test(localPackage) &&
     /\/opt\/homebrew/.test(localPackage) &&
     /\/usr\/local/.test(localPackage),
   "scripts/package_tauri_local.mjs must bundle ffmpeg and libmpv, link through the bundled tree, and reject build-machine paths",
+);
+check(
+  "macOS source-built media notices are bundled",
+  tauri.bundle?.macOS?.minimumSystemVersion === "11.0" &&
+    tauri.bundle.resources.includes("resources/media-notices/**/*") &&
+    /prepare_macos_media_notices\.mjs/.test(macosMediaWorkflow) &&
+    /Attach corresponding media sources to the draft/.test(releaseWorkflow),
+  "macOS11 packaging must include exact component notices and corresponding media sources",
 );
 check(
   "Local package script creates macOS app zip",

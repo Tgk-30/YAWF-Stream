@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { desktopNodeRuntimeVersion } from "./desktop_node_runtime_policy.mjs";
+import { buildMacosMediaRuntime } from "./build_macos_media_runtime.mjs";
+import { stageMediaRuntime } from "./stage_macos_media_runtime.mjs";
+import { smokeMediaRuntime } from "./smoke_macos_media_runtime.mjs";
+import { prepareMediaNotices } from "./prepare_macos_media_notices.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const web = join(root, "web");
@@ -56,19 +61,27 @@ function filesBelow(path) {
   return files;
 }
 
-function prepareLocalMacMpv() {
+async function prepareLocalMacMpv() {
   if (process.platform !== "darwin") return null;
 
   const tauriDir = join(web, "src-tauri");
   const frameworksDir = join(tauriDir, "Frameworks");
-  const mpvPrefix = commandOutput("brew", ["--prefix", "mpv"]);
-  const libmpv = join(mpvPrefix, "lib", "libmpv.2.dylib");
-  if (!existsSync(libmpv)) {
-    throw new Error(`Homebrew libmpv is missing: ${libmpv}. Run \`brew install mpv\`.`);
-  }
-
+  const media = await buildMacosMediaRuntime({ workspace: process.env.YAWF_MEDIA_BUILD_CACHE ?? join(root, ".build", "macos-media-runtime") });
+  const stagingRoot = mkdtempSync(join(media.root, "package-stage-"));
+  const staging = join(stagingRoot, "runtime");
+  stageMediaRuntime({ prefix: media.buildInstallPrefix, output: staging, arch: process.arch === "arm64" ? "arm64" : "x86_64" });
+  smokeMediaRuntime(staging, join(stagingRoot, "smoke"));
+  const notices = join(stagingRoot, "notices");
+  prepareMediaNotices(media.root, notices);
   rmSync(frameworksDir, { recursive: true, force: true });
-  run(join(tauriDir, "scripts", "bundle-mpv-deps.sh"), [libmpv, frameworksDir]);
+  cpSync(join(staging, "Frameworks"), frameworksDir, { recursive: true, verbatimSymlinks: true });
+  const ffmpegDestination = join(tauriDir, "resources", "ffmpeg", runtime);
+  mkdirSync(dirname(ffmpegDestination), { recursive: true });
+  rmSync(ffmpegDestination, { recursive: true, force: true });
+  cpSync(join(staging, "ffmpeg"), ffmpegDestination, { recursive: true });
+  const noticeDestination = join(tauriDir, "resources", "media-notices");
+  rmSync(join(noticeDestination, "components"), { recursive: true, force: true });
+  cpSync(notices, noticeDestination, { recursive: true });
   const frameworks = filesBelow(frameworksDir)
     .filter((path) => path.endsWith(".dylib"))
     .map((path) => relative(tauriDir, path).split("\\").join("/"));
@@ -123,6 +136,8 @@ function createLocalMacDownloadArtifact() {
     }
   }
 
+  run(process.execPath, ["scripts/check_macos_bundle_minimum.mjs", appPath]);
+
   rmSync(zipPath, { force: true });
   run("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", appName, zipPath], { cwd: bundleDir });
   console.log(`Created local macOS download artifact: ${zipPath}`);
@@ -132,10 +147,10 @@ run("npm", ["run", "build"], { cwd: server });
 run("npm", ["run", "build"], { cwd: web });
 run(process.execPath, ["scripts/prepare_tauri_server_resources.mjs"]);
 run(process.execPath, ["scripts/download_tauri_node_runtime.mjs", runtime], {
-  env: { NODE_RUNTIME_VERSION: process.env.NODE_RUNTIME_VERSION ?? "24.17.0" },
+  env: { NODE_RUNTIME_VERSION: desktopNodeRuntimeVersion(runtime, process.env.NODE_RUNTIME_VERSION) },
 });
-run(process.execPath, ["scripts/download_ffmpeg.mjs", runtime]);
-const localMacMpv = prepareLocalMacMpv();
+if (process.platform !== "darwin") run(process.execPath, ["scripts/download_ffmpeg.mjs", runtime]);
+const localMacMpv = await prepareLocalMacMpv();
 const localTauriConfig = {
   bundle: {
     createUpdaterArtifacts: false,
@@ -156,7 +171,7 @@ run("npm", [
   JSON.stringify(localTauriConfig),
 ], {
   cwd: web,
-  env: localMacMpv == null ? {} : { MPV_LIB_DIR: localMacMpv.frameworksDir },
+  env: localMacMpv == null ? {} : { MPV_LIB_DIR: localMacMpv.frameworksDir, MACOSX_DEPLOYMENT_TARGET: "11.0" },
 });
 createLocalMacDownloadArtifact();
 run(process.execPath, ["scripts/smoke_tauri_server_bundle.mjs"]);
