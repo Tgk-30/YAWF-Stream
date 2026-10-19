@@ -18,7 +18,8 @@ jobs:
   build:
     name: Native ${{ matrix.arch }} media runtime
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    # Intel source compilation reached FFmpeg linking at the former 45-minute limit.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       max-parallel: 2

@@ -45,3 +45,15 @@ test("rejects missing archive/checksum/post-transport smoke contracts", () => {
   ]) assert.throws(() => assertMacMediaTransport(producer.replace(before, after), consumer));
   assert.throws(() => assertMacMediaTransport(producer, consumer.replace("name: Retest natural media runtime after artifact transport", "name: Removed smoke")));
 });
+
+export function assertMacMediaBuildBudget(source) {
+  const timeout = /^    timeout-minutes: (\d+)$/m.exec(source);
+  assert.ok(timeout != null && Number(timeout[1]) >= 60 && Number(timeout[1]) <= 120, "native Intel source builds need a finite 60-to-120-minute budget");
+}
+
+test("native Intel compilation has a bounded budget beyond the observed 45-minute build", () => assertMacMediaBuildBudget(producer));
+test("rejects the exhausted 45-minute budget and an excessive build budget", () => {
+  for (const minutes of [45, 121]) {
+    assert.throws(() => assertMacMediaBuildBudget(producer.replace(/timeout-minutes: \d+/, `timeout-minutes: ${minutes}`)));
+  }
+});
