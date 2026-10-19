@@ -205,6 +205,31 @@ def validate_webview_provider(
     return major
 
 
+def classify_onboarding_entry(
+    nodes: Iterable[UiNode], screen_size: tuple[int, int]
+) -> str | None:
+    # The FirstRunWizard eyebrow also says "Welcome to YAWF Stream", so its
+    # unique question must take priority over the tier welcome heading.
+    first_run = select_node(
+        nodes, "How do you want to use YAWF Stream?", screen_size, exact=True
+    )
+    if first_run is not None:
+        return "first-run"
+
+    heading = select_node(nodes, "Welcome to YAWF Stream", screen_size, exact=True)
+    skip = select_node(nodes, "Skip", screen_size, exact=True)
+    next_button = select_node(nodes, "Next", screen_size, exact=True)
+    if (
+        heading is not None
+        and skip is not None
+        and next_button is not None
+        and skip.clickable
+        and next_button.clickable
+    ):
+        return "tier-welcome"
+    return None
+
+
 def find_binding_terms(nodes: Iterable[UiNode]) -> list[str]:
     text = " ".join(label for node in nodes for label in node.labels).casefold()
     forbidden = ("terms of service", "license agreement", "user agreement", "binding terms")
@@ -480,6 +505,37 @@ class RuntimeDriver:
         self.write_text("last-timeout.xml", last_xml)
         raise RuntimeCheckError(f"Timed out waiting for UI text: {', '.join(labels)}")
 
+    def wait_for_onboarding_entry(
+        self,
+        *,
+        timeout: int,
+        include_update_consent: bool = False,
+        poll_interval: float = 2.0,
+    ) -> tuple[str, list[UiNode], str]:
+        deadline = time.monotonic() + timeout
+        last_xml = ""
+        while time.monotonic() < deadline:
+            nodes, xml_text = self.read_ui()
+            last_xml = xml_text
+            self.assert_no_binding_terms(nodes)
+            if include_update_consent:
+                consent = select_node(
+                    nodes,
+                    "Enable Android update checks?",
+                    self.screen_size,
+                    exact=True,
+                )
+                if consent is not None:
+                    return "update-consent", nodes, xml_text
+            entry = classify_onboarding_entry(nodes, self.screen_size)
+            if entry is not None:
+                return entry, nodes, xml_text
+            time.sleep(poll_interval)
+        self.write_text("last-onboarding-timeout.xml", last_xml)
+        raise RuntimeCheckError(
+            "Timed out waiting for the tier welcome or First Run Wizard"
+        )
+
     def tap_text(
         self,
         label: str,
@@ -593,11 +649,11 @@ class RuntimeDriver:
         self.verify_installed_identity()
         self.start_app()
 
-        label, _, _, _ = self.wait_for_any(
-            ["Enable Android update checks?", "How do you want to use YAWF Stream?"],
+        entry, _, _ = self.wait_for_onboarding_entry(
             timeout=90,
+            include_update_consent=True,
         )
-        if label == "Enable Android update checks?":
+        if entry == "update-consent":
             self.snapshot("initial-update-consent")
             self.tap_text("Not now")
         else:
@@ -608,6 +664,14 @@ class RuntimeDriver:
             if consent is not None:
                 self.snapshot("initial-update-consent")
                 self.tap_text("Not now")
+
+        entry, _, _ = self.wait_for_onboarding_entry(timeout=60)
+        if entry == "tier-welcome":
+            self.snapshot("tier-welcome")
+            # This exact Skip is the ordinary explanatory TierOnboarding action.
+            # snapshot() and tap_text() both reapply the binding-terms guard.
+            self.tap_text("Skip", exact=True)
+            self.note("Dismissed the ordinary tier welcome before first-run setup")
 
         self.wait_for_any(["How do you want to use YAWF Stream?"], timeout=60)
         self.snapshot("first-run")
@@ -749,12 +813,87 @@ class ParserTests(unittest.TestCase):
   </node>
 </hierarchy>"""
 
+    TIER_WELCOME_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<hierarchy rotation="0">
+  <node text="" content-desc="" resource-id="" class="android.widget.FrameLayout" clickable="false" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[0,0][1080,1920]">
+    <node text="Welcome" content-desc="" resource-id="" class="android.app.Dialog" clickable="false" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[0,0][1080,1794]" />
+    <node text="GET STARTED" content-desc="" resource-id="" class="android.widget.TextView" clickable="false" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[136,627][370,666]" />
+    <node text="Welcome to YAWF Stream" content-desc="" resource-id="" class="android.view.View" clickable="false" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[136,695][945,771]" />
+    <node text="Skip" content-desc="" resource-id="" class="android.widget.Button" clickable="true" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[136,1134][262,1244]" />
+    <node text="Next" content-desc="" resource-id="" class="android.widget.Button" clickable="true" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[779,1128][945,1249]" />
+  </node>
+</hierarchy>"""
+
+    FIRST_RUN_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<hierarchy rotation="0">
+  <node text="" content-desc="" resource-id="" class="android.widget.FrameLayout" clickable="false" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[0,0][1080,2148]">
+    <node text="WELCOME TO YAWF STREAM" content-desc="" resource-id="" class="android.widget.TextView" clickable="false" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[165,154][687,195]" />
+    <node text="How do you want to use YAWF Stream?" content-desc="" resource-id="" class="android.view.View" clickable="false" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[110,222][970,374]" />
+    <node text="Quick setup NOT RECOMMENDED Start with public sources without adding your own keys now. Catalog and playback limits are explained before continuing." content-desc="" resource-id="quick" class="android.widget.Button" clickable="true" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[110,918][970,1204]" />
+  </node>
+</hierarchy>"""
+
     def test_parse_and_select_accessible_control(self) -> None:
         nodes = parse_ui_xml(self.XML)
         node = select_node(nodes, "Quick setup", (1080, 1920), exact=False)
         self.assertIsNotNone(node)
         self.assertEqual(node.bounds.center, (500, 300))
         self.assertTrue(node.clickable)
+
+    def test_first_run_classifier_prioritizes_question_over_welcome_eyebrow(self) -> None:
+        first_run_nodes = parse_ui_xml(self.FIRST_RUN_XML)
+        self.assertIsNotNone(
+            select_node(
+                first_run_nodes,
+                "Welcome to YAWF Stream",
+                (1080, 1920),
+                exact=True,
+            )
+        )
+        self.assertEqual(
+            classify_onboarding_entry(first_run_nodes, (1080, 1920)),
+            "first-run",
+        )
+
+        # Combine retained nodes from the actual FirstRun and TierWelcome XMLs
+        # so both classifiers match. The unique FirstRun question still wins.
+        combined_nodes = first_run_nodes + parse_ui_xml(self.TIER_WELCOME_XML)
+        self.assertEqual(
+            classify_onboarding_entry(combined_nodes, (1080, 1920)),
+            "first-run",
+        )
+
+    def test_onboarding_wait_ignores_partial_tier_mount_until_controls_ready(self) -> None:
+        next_node = '    <node text="Next" content-desc="" resource-id="" class="android.widget.Button" clickable="true" checkable="false" checked="false" enabled="true" scrollable="false" bounds="[779,1128][945,1249]" />\n'
+        partial_xml = self.TIER_WELCOME_XML.replace(next_node, "")
+        responses = iter(
+            [
+                (parse_ui_xml(partial_xml), partial_xml),
+                (parse_ui_xml(self.TIER_WELCOME_XML), self.TIER_WELCOME_XML),
+            ]
+        )
+        reads = 0
+
+        def read_ui() -> tuple[list[UiNode], str]:
+            nonlocal reads
+            reads += 1
+            return next(responses)
+
+        driver = object.__new__(RuntimeDriver)
+        driver.screen_size = (1080, 1920)
+        driver.ui_timeout = 1
+        driver.read_ui = read_ui
+        driver.assert_no_binding_terms = RuntimeDriver.assert_no_binding_terms.__get__(
+            driver, RuntimeDriver
+        )
+        driver.write_text = lambda _name, _value: self.fail("unexpected timeout")
+
+        entry, _, _ = driver.wait_for_onboarding_entry(
+            timeout=1,
+            poll_interval=0,
+        )
+        self.assertEqual(entry, "tier-welcome")
+        self.assertEqual(reads, 2)
 
     def test_contains_match_prefers_checkable_node(self) -> None:
         nodes = parse_ui_xml(self.XML)
