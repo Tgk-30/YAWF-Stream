@@ -77,6 +77,8 @@ jobs:
 
       - name: Set up Android SDK command line tools
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install one API 30 x86_64 emulator image and verification tools
         shell: bash
@@ -197,6 +199,20 @@ jobs:
         run: |
           set +e
           mkdir -p "$EVIDENCE"
+          if ! command -v adb >/dev/null 2>&1; then
+            {
+              echo "evidenceCollection=notStarted"
+              echo "reason=adb-unavailable"
+            } > "$EVIDENCE/workflow-failure-receipt.txt"
+            exit 0
+          fi
+          if [ ! -f "$EVIDENCE/emulator.pid" ]; then
+            {
+              echo "evidenceCollection=notStarted"
+              echo "reason=emulator-not-started"
+            } > "$EVIDENCE/workflow-failure-receipt.txt"
+            exit 0
+          fi
           adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$EVIDENCE/workflow-failure.png"
           adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
@@ -211,6 +227,7 @@ jobs:
             | head -c 1048576 \
             | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
             > "$EVIDENCE/workflow-failure-surfaceflinger.txt"
+          echo "evidenceCollection=attempted" > "$EVIDENCE/workflow-failure-receipt.txt"
 
       - name: Stop the owned emulator
         if: always()
@@ -218,6 +235,21 @@ jobs:
         run: |
           set +e
           mkdir -p "$EVIDENCE"
+          if [ ! -f "$EVIDENCE/emulator.pid" ]; then
+            echo "emulatorState=notStarted" > "$EVIDENCE/cleanup.txt"
+            exit 0
+          fi
+          if ! command -v adb >/dev/null 2>&1; then
+            kill "$(cat "$EVIDENCE/emulator.pid")" 2>/dev/null || true
+            {
+              echo "emulatorState=started"
+              echo "cleanupState=failed"
+              echo "processSignalAttempted=true"
+              echo "reason=adb-unavailable"
+            } > "$EVIDENCE/cleanup.txt"
+            echo "::error::ADB is unavailable after the emulator was started."
+            exit 1
+          fi
           adb -s "$EMULATOR_SERIAL" emu kill
           for _ in 1 2 3 4 5; do
             if ! adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
@@ -226,9 +258,7 @@ jobs:
             fi
             sleep 2
           done
-          if [ -f "$EVIDENCE/emulator.pid" ]; then
-            kill "$(cat "$EVIDENCE/emulator.pid")" 2>/dev/null || true
-          fi
+          kill "$(cat "$EVIDENCE/emulator.pid")" 2>/dev/null || true
           sleep 2
           if adb devices | awk -v serial="$EMULATOR_SERIAL" '$1 == serial { found = 1 } END { exit found ? 0 : 1 }'; then
             echo "emulatorStopped=false" > "$EVIDENCE/cleanup.txt"
