@@ -91,10 +91,16 @@ jobs:
             "build-tools;36.0.0" \
             "system-images;android-30;google_apis;x86_64"
           build_tools="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/36.0.0"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           test -x "$build_tools/apksigner"
           test -x "$build_tools/aapt2"
+          test -x "$sdk_root/emulator/emulator"
           command -v apkanalyzer
-          echo "$build_tools" >> "$GITHUB_PATH"
+          {
+            echo "$build_tools"
+            echo "$sdk_root/emulator"
+            echo "$sdk_root/platform-tools"
+          } >> "$GITHUB_PATH"
 
       - name: Verify exact APK, manifest, source, and signer
         shell: bash
