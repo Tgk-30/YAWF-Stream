@@ -55,6 +55,39 @@ final class FlowPolicyAssertions {
                 "The positive label on another native button must not match");
     }
 
+    static void actualWebViewTextButtonsMatchExactObservedNodes() {
+        check(FlowPolicy.MORE_NAVIGATION_BUTTON.matches(
+                        "com.tgk30.debridstreamer", "android.widget.Button", "More navigation", ""),
+                "The actual API 30 More navigation text node must match");
+        check(FlowPolicy.SKIP_THE_TOUR_BUTTON.matches(
+                        "com.tgk30.debridstreamer", "android.widget.Button", "Skip the tour", ""),
+                "The actual API 30 tour Skip text node must match");
+    }
+
+    static void legacyWebViewDescriptionButtonsRemainSupported() {
+        check(FlowPolicy.MORE_NAVIGATION_BUTTON.matches(
+                        "com.tgk30.debridstreamer", "android.widget.Button", "", "More navigation"),
+                "A WebView exposing aria-label as content description must match");
+        check(FlowPolicy.SKIP_THE_TOUR_BUTTON.matches(
+                        "com.tgk30.debridstreamer", "android.widget.Button", "", "Skip the tour"),
+                "The tour control description variant must match");
+    }
+
+    static void labeledWebButtonsRejectWrongIdentityShapeAndAffixes() {
+        check(!FlowPolicy.MORE_NAVIGATION_BUTTON.matches(
+                        "other.package", "android.widget.Button", "More navigation", ""),
+                "Another package must not match");
+        check(!FlowPolicy.MORE_NAVIGATION_BUTTON.matches(
+                        "com.tgk30.debridstreamer", "android.view.View", "More navigation", ""),
+                "A nonbutton node must not match");
+        check(!FlowPolicy.MORE_NAVIGATION_BUTTON.matches(
+                        "com.tgk30.debridstreamer", "android.widget.Button", "More navigation now", ""),
+                "A suffixed label must not match");
+        check(!FlowPolicy.SKIP_THE_TOUR_BUTTON.matches(
+                        "com.tgk30.debridstreamer", "android.widget.Button", "Skip the tour\n", ""),
+                "A newline-suffixed label must not match");
+    }
+
     static void bindingTermsAreRejectedButPrivacyNoticeIsAllowed() {
         check(FlowPolicy.containsBindingTerms("Accept the Terms of Service"),
                 "Binding terms must be rejected");

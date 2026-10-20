@@ -40,6 +40,7 @@ public final class RuntimeFlowTest {
     private static final long SHORT_WAIT_MS = 15_000;
     private static final long UI_WAIT_MS = 90_000;
     private static final long UPDATE_WAIT_MS = 120_000;
+    private static final long TOUR_MOUNT_WAIT_MS = 5_000;
     private static final String EVIDENCE_SUBDIR = "persistent-flow";
     private static final int MAX_CAPTURES = 20;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
@@ -112,16 +113,11 @@ public final class RuntimeFlowTest {
                 false);
         click(By.text("Continue with Quick setup"), "Continue with Quick setup", SHORT_WAIT_MS, true);
 
-        waitForAny(
-                UI_WAIT_MS,
-                By.text("Discover"),
-                By.text("Skip"),
-                By.text("Skip tour"),
-                By.desc("Skip the tour"));
+        waitFor(By.text("Discover"), UI_WAIT_MS, "Discover after setup");
         dismissOrdinaryTours();
         capture("discover-after-setup");
 
-        click(By.desc("More navigation"), "More navigation", UI_WAIT_MS, false);
+        clickWebButton(FlowPolicy.MORE_NAVIGATION_BUTTON, "More navigation", UI_WAIT_MS);
         click(By.text("Settings"), "Settings", SHORT_WAIT_MS, false);
         waitFor(By.text("Settings"), UI_WAIT_MS, "Settings heading");
         capture("settings");
@@ -192,22 +188,36 @@ public final class RuntimeFlowTest {
         fail("Timed out reaching the FirstRunWizard through native consent and tier welcome");
     }
 
-    private void dismissOrdinaryTours() {
-        BySelector[] selectors = new BySelector[] {
-                By.text("Skip tour"), By.desc("Skip the tour"), By.text("Skip")
+    private void dismissOrdinaryTours() throws IOException {
+        FlowPolicy.LabeledWebButtonSpec[] controls = new FlowPolicy.LabeledWebButtonSpec[] {
+                FlowPolicy.SKIP_THE_TOUR_BUTTON,
+                FlowPolicy.SKIP_TOUR_BUTTON
         };
+        long mountDeadline = SystemClock.uptimeMillis() + TOUR_MOUNT_WAIT_MS;
+        UiObject2 object = null;
+        while (SystemClock.uptimeMillis() < mountDeadline && object == null) {
+            assertNoBindingTerms();
+            object = findWebButtonNow(controls);
+            if (object == null) {
+                SystemClock.sleep(250);
+            }
+        }
+        if (object == null) {
+            log("No ordinary tour appeared during the bounded mount wait");
+            return;
+        }
+        capture("tour-ready");
         for (int attempt = 0; attempt < 4; attempt++) {
-            UiObject2 object = findAnyNow(selectors);
+            assertNoBindingTerms();
+            object = findWebButtonNow(controls);
             if (object == null) {
                 return;
             }
-            assertNoBindingTerms();
-            object = findAnyNow(selectors);
-            assertNotNull("Tour control disappeared after policy guard", object);
             object.click();
-            log("Clicked an ordinary nonbinding tour Skip control");
+            log("Clicked an exact labeled ordinary tour Skip button");
             device.waitForIdle(1_000);
         }
+        assertTrue("Ordinary tour remained after four bounded Skip actions", findWebButtonNow(controls) == null);
     }
 
     private void openHelpAndUpdates() {
@@ -263,6 +273,47 @@ public final class RuntimeFlowTest {
         log("Clicked semantic control: " + label);
         device.waitForIdle(1_000);
         return object;
+    }
+
+    private UiObject2 clickWebButton(
+            FlowPolicy.LabeledWebButtonSpec button,
+            String label,
+            long timeoutMs) {
+        BySelector[] selectors = webButtonSelectors(button);
+        waitForAny(timeoutMs, selectors);
+        assertNoBindingTerms();
+        UiObject2 object = findAnyNow(selectors);
+        assertNotNull(label + " disappeared after policy guard", object);
+        assertTrue(label + " was disabled", object.isEnabled());
+        object.click();
+        log("Clicked exact text-or-description WebView button: " + label);
+        device.waitForIdle(1_000);
+        return object;
+    }
+
+    private UiObject2 findWebButtonNow(FlowPolicy.LabeledWebButtonSpec... buttons) {
+        for (FlowPolicy.LabeledWebButtonSpec button : buttons) {
+            UiObject2 object = findAnyNow(webButtonSelectors(button));
+            if (object != null) {
+                return object;
+            }
+        }
+        return null;
+    }
+
+    private BySelector[] webButtonSelectors(FlowPolicy.LabeledWebButtonSpec button) {
+        return new BySelector[] {
+                By.text(button.label())
+                        .pkg(FlowPolicy.PRODUCT_PACKAGE)
+                        .clazz(FlowPolicy.WEB_BUTTON_CLASS)
+                        .clickable(true)
+                        .enabled(true),
+                By.desc(button.label())
+                        .pkg(FlowPolicy.PRODUCT_PACKAGE)
+                        .clazz(FlowPolicy.WEB_BUTTON_CLASS)
+                        .clickable(true)
+                        .enabled(true)
+        };
     }
 
     private BySelector nativeButton(FlowPolicy.NativeButtonSpec button) {

@@ -38,6 +38,18 @@ MUTANTS = {
         "return resourceName.equals(observedResourceName)\n                    && textPattern.matcher(observedText == null ? \"\" : observedText).matches();",
         "return textPattern.matcher(observedText == null ? \"\" : observedText).matches();",
     ),
+    "webButtonText": (
+        "&& (label.equals(observedText) || label.equals(observedDescription));",
+        "&& label.equals(observedDescription);",
+    ),
+    "webButtonDescription": (
+        "&& (label.equals(observedText) || label.equals(observedDescription));",
+        "&& label.equals(observedText);",
+    ),
+    "webButtonIdentity": (
+        "return PRODUCT_PACKAGE.equals(observedPackage)\n                    && WEB_BUTTON_CLASS.equals(observedClass)",
+        "return PRODUCT_PACKAGE.equals(observedPackage)\n                    && !WEB_BUTTON_CLASS.equals(observedClass)",
+    ),
     "termsPolicy": (
         "terms of service|license agreement|user agreement|binding terms",
         "privacy notice|license agreement|user agreement|binding terms",

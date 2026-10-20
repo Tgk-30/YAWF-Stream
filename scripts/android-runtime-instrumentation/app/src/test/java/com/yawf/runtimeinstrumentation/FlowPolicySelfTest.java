@@ -14,6 +14,9 @@ public final class FlowPolicySelfTest {
         tests.put("nativeButtonCase", FlowPolicyAssertions::nativeButtonLabelsAcceptUppercaseAndMixedCase);
         tests.put("nativeButtonAnchoring", FlowPolicyAssertions::nativeButtonLabelsRejectAffixesAndNewlines);
         tests.put("nativeButtonResource", FlowPolicyAssertions::nativeButtonResourceIdentityIsExact);
+        tests.put("webButtonText", FlowPolicyAssertions::actualWebViewTextButtonsMatchExactObservedNodes);
+        tests.put("webButtonDescription", FlowPolicyAssertions::legacyWebViewDescriptionButtonsRemainSupported);
+        tests.put("webButtonIdentity", FlowPolicyAssertions::labeledWebButtonsRejectWrongIdentityShapeAndAffixes);
         tests.put("termsPolicy", FlowPolicyAssertions::bindingTermsAreRejectedButPrivacyNoticeIsAllowed);
         tests.put("exactNativeResult", FlowPolicyAssertions::nativeResultRequiresExactTitleAndMessage);
         tests.put("versionPins", FlowPolicyAssertions::channelVersionsArePinned);

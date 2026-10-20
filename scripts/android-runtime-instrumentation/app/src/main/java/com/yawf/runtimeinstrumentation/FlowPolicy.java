@@ -5,6 +5,14 @@ import java.util.regex.Pattern;
 /** Pure policy shared by the host self-tests and the persistent device flow. */
 public final class FlowPolicy {
     public static final String EXPECTED_CANDIDATE_VERSION = "2.3.23";
+    public static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
+    public static final String WEB_BUTTON_CLASS = "android.widget.Button";
+    public static final LabeledWebButtonSpec MORE_NAVIGATION_BUTTON =
+            new LabeledWebButtonSpec("More navigation");
+    public static final LabeledWebButtonSpec SKIP_THE_TOUR_BUTTON =
+            new LabeledWebButtonSpec("Skip the tour");
+    public static final LabeledWebButtonSpec SKIP_TOUR_BUTTON =
+            new LabeledWebButtonSpec("Skip tour");
     public static final String EXPECTED_PUBLISHED_VERSION = "2.3.21";
     public static final String UP_TO_DATE_TITLE = "YAWF Stream is up to date";
     public static final String UP_TO_DATE_MESSAGE =
@@ -38,6 +46,28 @@ public final class FlowPolicy {
         public boolean matches(String observedResourceName, String observedText) {
             return resourceName.equals(observedResourceName)
                     && textPattern.matcher(observedText == null ? "" : observedText).matches();
+        }
+    }
+
+    public static final class LabeledWebButtonSpec {
+        private final String label;
+
+        private LabeledWebButtonSpec(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+
+        public boolean matches(
+                String observedPackage,
+                String observedClass,
+                String observedText,
+                String observedDescription) {
+            return PRODUCT_PACKAGE.equals(observedPackage)
+                    && WEB_BUTTON_CLASS.equals(observedClass)
+                    && (label.equals(observedText) || label.equals(observedDescription));
         }
     }
 

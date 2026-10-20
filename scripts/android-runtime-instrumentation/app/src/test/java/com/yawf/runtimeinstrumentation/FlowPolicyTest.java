@@ -34,6 +34,21 @@ public final class FlowPolicyTest {
     }
 
     @Test
+    public void actualWebViewTextButtonsMatchExactObservedNodes() {
+        FlowPolicyAssertions.actualWebViewTextButtonsMatchExactObservedNodes();
+    }
+
+    @Test
+    public void legacyWebViewDescriptionButtonsRemainSupported() {
+        FlowPolicyAssertions.legacyWebViewDescriptionButtonsRemainSupported();
+    }
+
+    @Test
+    public void labeledWebButtonsRejectWrongIdentityShapeAndAffixes() {
+        FlowPolicyAssertions.labeledWebButtonsRejectWrongIdentityShapeAndAffixes();
+    }
+
+    @Test
     public void bindingTermsAreRejectedButPrivacyNoticeIsAllowed() {
         FlowPolicyAssertions.bindingTermsAreRejectedButPrivacyNoticeIsAllowed();
     }
