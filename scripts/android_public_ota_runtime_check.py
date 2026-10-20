@@ -236,23 +236,63 @@ class PackageIdentity:
 
 
 def parse_package_identity(value: str) -> PackageIdentity:
-    patterns = {
-        "version_name": r"\bversionName=([^\s]+)",
-        "version_code": r"\bversionCode=(\d+)",
-        "uid": r"\buserId=(\d+)",
-        "first_install_time": r"\bfirstInstallTime=([^\n\r]+)",
-        "last_update_time": r"\blastUpdateTime=([^\n\r]+)",
-    }
-    found = {name: re.search(pattern, value) for name, pattern in patterns.items()}
-    if any(match is None for match in found.values()):
-        raise RuntimeGateError("Package identity fields are incomplete")
-    return PackageIdentity(
-        version_name=found["version_name"].group(1),
-        version_code=int(found["version_code"].group(1)),
-        uid=int(found["uid"].group(1)),
-        first_install_time=found["first_install_time"].group(1).strip(),
-        last_update_time=found["last_update_time"].group(1).strip(),
+    if len(re.findall(r"(?m)^Packages:$", value)) != 1:
+        raise RuntimeGateError("Package identity Packages section is missing or ambiguous")
+    package_headers = list(re.finditer(r"(?m)^  Package \[([^\]\r\n]+)\] \([^\r\n)]+\):$", value))
+    if len(package_headers) != 1 or package_headers[0].group(1) != PRODUCT_PACKAGE:
+        raise RuntimeGateError("Package identity target section is missing or ambiguous")
+    header = package_headers[0]
+    section_tail = value[header.end():]
+    next_section = re.search(r"(?m)^[A-Za-z][^\r\n]*:\s*$", section_tail)
+    section = section_tail[:next_section.start()] if next_section is not None else section_tail
+
+    user_sections = list(re.finditer(r"(?m)^    User (\d+):([^\r\n]*)$", section))
+    if len(user_sections) != 1 or user_sections[0].group(1) != "0":
+        raise RuntimeGateError("Package identity must contain exactly one User 0 section")
+    if re.search(r"(?:^|\s)installed=true(?:\s|$)", user_sections[0].group(2)) is None:
+        raise RuntimeGateError("Package identity User 0 installation state is missing")
+    package_fields = section[:user_sections[0].start()]
+    user_zero_fields = section[user_sections[0].end():]
+
+    def exactly_one(pattern: str, label: str, source: str = package_fields) -> str:
+        matches = re.findall(pattern, source, re.MULTILINE)
+        if len(matches) != 1 or not matches[0].strip():
+            raise RuntimeGateError(f"Package identity {label} is missing or ambiguous")
+        return matches[0].strip()
+
+    legacy_uids = re.findall(r"(?m)^    userId=(\d+)\s*$", package_fields)
+    modern_app_ids = re.findall(r"(?m)^    appId=(\d+)\s*$", package_fields)
+    if len(legacy_uids) > 1 or len(modern_app_ids) > 1:
+        raise RuntimeGateError("Package identity application ID is duplicated")
+    if bool(legacy_uids) == bool(modern_app_ids):
+        raise RuntimeGateError("Package identity must contain exactly one userId or appId")
+    uid = int((legacy_uids or modern_app_ids)[0])
+    if not 10_000 <= uid < 100_000:
+        raise RuntimeGateError("Package identity User 0 UID is outside the application range")
+
+    package_first_install = re.findall(
+        r"(?m)^    firstInstallTime=([^\r\n]+)$", package_fields
     )
+    user_first_install = re.findall(
+        r"(?m)^      firstInstallTime=([^\r\n]+)$", user_zero_fields
+    )
+    first_install_times = package_first_install + user_first_install
+    if len(first_install_times) != 1 or not first_install_times[0].strip():
+        raise RuntimeGateError("Package identity firstInstallTime is missing or ambiguous")
+    return PackageIdentity(
+        version_name=exactly_one(r"^    versionName=([^\s]+)\s*$", "versionName"),
+        version_code=int(exactly_one(r"^    versionCode=(\d+)(?:\s+.*)?$", "versionCode")),
+        uid=uid,
+        first_install_time=first_install_times[0].strip(),
+        last_update_time=exactly_one(
+            r"^    lastUpdateTime=([^\r\n]+)$", "lastUpdateTime"
+        ),
+    )
+
+
+def record_package_identity(write_diagnostic, name: str, value: str) -> PackageIdentity:
+    write_diagnostic(name, value)
+    return parse_package_identity(value)
 
 
 def validate_receipt(value: dict[str, object]) -> None:
@@ -488,7 +528,9 @@ class OtaRuntimeDriver:
         self.package_absent()
         self.adb.install_harness(self.args.harness_app_sha256, self.args.harness_test_sha256)
         self.adb.install_baseline_once()
-        identity = parse_package_identity(self.package_dump())
+        identity = record_package_identity(
+            self.write, "baseline-package.txt", self.package_dump()
+        )
         if identity.version_name != BASELINE_VERSION or identity.version_code != BASELINE_CODE:
             raise RuntimeGateError("Installed baseline version identity mismatch")
         pulled = self.evidence / "installed-baseline-2.3.21.apk"
@@ -498,7 +540,6 @@ class OtaRuntimeDriver:
         if signer != SIGNER_PIN:
             raise RuntimeGateError("Installed baseline signer mismatch")
         self.assert_unknown_source_denied("before")
-        self.write("baseline-package.txt", self.package_dump())
         self.write("baseline-identity.json", json.dumps(dataclasses.asdict(identity), indent=2) + "\n")
         self.note("Exactly one official baseline product install and scoped read-only pull passed")
         return identity, signer
@@ -569,7 +610,7 @@ class OtaRuntimeDriver:
             raise RuntimeGateError("Harness receipt is missing")
 
     def verify_final(self, baseline: PackageIdentity, baseline_signer: str) -> None:
-        final = parse_package_identity(self.package_dump())
+        final = record_package_identity(self.write, "final-package.txt", self.package_dump())
         if final.version_name != TARGET_VERSION or final.version_code != TARGET_CODE:
             raise RuntimeGateError("Final installed version identity mismatch")
         if final.uid != baseline.uid or final.first_install_time != baseline.first_install_time:
@@ -592,7 +633,6 @@ class OtaRuntimeDriver:
         ).strip()
         if residual:
             raise RuntimeGateError("External update APK remained after relaunch cleanup")
-        self.write("final-package.txt", self.package_dump())
         self.write("final-identity.json", json.dumps(dataclasses.asdict(final), indent=2) + "\n")
         self.write(
             "installed-byte-identity.txt",
@@ -824,11 +864,87 @@ class PolicyTests(unittest.TestCase):
                 parse_checksums(path)
 
     def test_identity_requires_all_retention_fields(self) -> None:
-        value = "versionName=2.3.21 versionCode=2003021 userId=10123\nfirstInstallTime=2026-10-20 01:02:03\nlastUpdateTime=2026-10-20 01:02:03\n"
-        identity = parse_package_identity(value)
-        self.assertEqual(identity.uid, 10123)
+        api30 = """Permissions:
+  Permission [com.tgk30.debridstreamer.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION] (abc):
+    uid=99999 gids=[] type=0 prot=signature
+Packages:
+  Package [com.tgk30.debridstreamer] (c51a00c):
+    userId=10170
+    versionCode=2003021 minSdk=24 targetSdk=36
+    versionName=2.3.21
+    timeStamp=2026-10-20 01:02:03
+    firstInstallTime=2026-10-20 01:02:03
+    lastUpdateTime=2026-10-20 01:02:03
+    User 0: ceDataInode=131827 installed=true hidden=false stopped=true
+      gids=[3003]
+Queries:
+  system apps queryable: false
+"""
+        api36 = """Permissions:
+  Permission [com.tgk30.debridstreamer.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION] (da31363):
+    uid=10218 gids=[] type=0 prot=signature
+Packages:
+  Package [com.tgk30.debridstreamer] (3a628df):
+    appId=10218
+    versionCode=2003025 minSdk=24 targetSdk=36
+    versionName=2.3.25
+    timeStamp=2026-10-20 05:11:15
+    lastUpdateTime=2026-10-20 05:11:15
+    User 0: ceDataInode=352915 installed=true hidden=false stopped=true
+      firstInstallTime=2026-10-20 05:11:15
+      gids=[3003]
+Queries:
+  system apps queryable: false
+"""
+        legacy = parse_package_identity(api30)
+        modern = parse_package_identity(api36)
+        self.assertEqual((legacy.uid, legacy.first_install_time), (10170, "2026-10-20 01:02:03"))
+        self.assertEqual((modern.uid, modern.first_install_time), (10218, "2026-10-20 05:11:15"))
+
+        invalid = [
+            api36.replace("    appId=10218\n", ""),
+            api36.replace("    appId=10218\n", "    appId=10218\n    appId=10218\n"),
+            api36.replace("    appId=10218\n", "    userId=10218\n    appId=10218\n"),
+            api36.replace("    appId=10218\n", "    userId=10217\n    appId=10218\n"),
+            api36.replace("Package [com.tgk30.debridstreamer]", "Package [other.package]"),
+            api36.replace("    versionCode=2003025 minSdk=24 targetSdk=36\n", ""),
+            api36.replace("    versionName=2.3.25\n", ""),
+            api36.replace("    versionName=2.3.25\n", "    versionName=2.3.25\n    versionName=2.3.25\n"),
+            api36.replace("    lastUpdateTime=2026-10-20 05:11:15\n", ""),
+            api36.replace(
+                "    lastUpdateTime=2026-10-20 05:11:15\n",
+                "    lastUpdateTime=2026-10-20 05:11:15\n"
+                "    lastUpdateTime=2026-10-20 05:11:15\n",
+            ),
+            api36.replace("      firstInstallTime=2026-10-20 05:11:15\n", ""),
+            api36.replace(
+                "      firstInstallTime=2026-10-20 05:11:15\n",
+                "      firstInstallTime=2026-10-20 05:11:15\n"
+                "      firstInstallTime=2026-10-20 05:11:15\n",
+            ),
+            api36.replace("    appId=10218\n", "    appId=999\n"),
+            api36.replace("    User 0:", "    User 10:"),
+            api36.replace(
+                "Queries:\n",
+                "    User 0: ceDataInode=352916 installed=true hidden=false stopped=true\n"
+                "Queries:\n",
+            ),
+            api36.replace(" installed=true", " installed=false"),
+            api36.replace("Queries:\n", "  Package [com.tgk30.debridstreamer] (duplicate):\nQueries:\n"),
+        ]
+        for damaged in invalid:
+            with self.assertRaises(RuntimeGateError):
+                parse_package_identity(damaged)
+
+        writes: list[tuple[str, str]] = []
+        missing_uid = api36.replace("    appId=10218\n", "")
         with self.assertRaises(RuntimeGateError):
-            parse_package_identity(value.replace("userId=10123", ""))
+            record_package_identity(
+                lambda name, payload: writes.append((name, payload)),
+                "baseline-package.txt",
+                missing_uid,
+            )
+        self.assertEqual(writes, [("baseline-package.txt", missing_uid)])
 
     def test_receipt_requires_every_transaction_fact(self) -> None:
         receipt = {

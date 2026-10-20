@@ -224,8 +224,8 @@ test("each host policy self-test kills a targeted valid-Python semantic mutant",
       'if set(result) != {TARGET_APK_NAME, "android-update.json"}:',
     ]],
     ["test_identity_requires_all_retention_fields", [
-      '"uid": r"\\buserId=(\\d+)",',
-      '"uid": r"\\buser=(\\d+)",',
+      '    modern_app_ids = re.findall(r"(?m)^    appId=(\\d+)\\s*$", package_fields)',
+      "    modern_app_ids = []",
     ]],
     ["test_receipt_requires_every_transaction_fact", [
       "for key, expected_value in expected.items():\n        if value.get(key)",
@@ -254,6 +254,97 @@ test("each host policy self-test kills a targeted valid-Python semantic mutant",
       await writeFile(mutatedPath, original.replace(before, after));
       const mutant = spawnSync("python3", [mutatedPath, "--self-test", name], { encoding: "utf8" });
       assert.notEqual(mutant.status, 0, `semantic mutant survived: ${name}`);
+    }
+
+    const identityMutants = [
+      [
+        '    if bool(legacy_uids) == bool(modern_app_ids):\n' +
+          '        raise RuntimeGateError("Package identity must contain exactly one userId or appId")\n' +
+          '    uid = int((legacy_uids or modern_app_ids)[0])',
+        '    if legacy_uids and modern_app_ids:\n' +
+          '        raise RuntimeGateError("Package identity must contain exactly one userId or appId")\n' +
+          '    uid = int((legacy_uids or modern_app_ids or ["10218"])[0])',
+        "missing application identity",
+      ],
+      [
+        '    if bool(legacy_uids) == bool(modern_app_ids):',
+        '    if not legacy_uids and not modern_app_ids:',
+        "mixed legacy and modern identity",
+      ],
+      [
+        '    if len(legacy_uids) > 1 or len(modern_app_ids) > 1:',
+        '    if len(legacy_uids) > 1:',
+        "duplicate appId",
+      ],
+      [
+        '    if len(package_headers) != 1 or package_headers[0].group(1) != PRODUCT_PACKAGE:',
+        '    if len(package_headers) != 1:',
+        "wrong package",
+      ],
+      [
+        '    if len(package_headers) != 1 or package_headers[0].group(1) != PRODUCT_PACKAGE:',
+        '    if package_headers[0].group(1) != PRODUCT_PACKAGE:',
+        "duplicate package section",
+      ],
+      [
+        '    if len(first_install_times) != 1 or not first_install_times[0].strip():\n' +
+          '        raise RuntimeGateError("Package identity firstInstallTime is missing or ambiguous")',
+        '    if len(first_install_times) > 1:\n' +
+          '        raise RuntimeGateError("Package identity firstInstallTime is missing or ambiguous")\n' +
+          '    if not first_install_times:\n' +
+          '        first_install_times = ["2026-10-20 05:11:15"]',
+        "missing first install time",
+      ],
+      [
+        '        last_update_time=exactly_one(\n' +
+          '            r"^    lastUpdateTime=([^\\r\\n]+)$", "lastUpdateTime"\n' +
+          '        ),',
+        '        last_update_time="2026-10-20 05:11:15",',
+        "missing last update time",
+      ],
+      [
+        '    if re.search(r"(?:^|\\s)installed=true(?:\\s|$)", user_sections[0].group(2)) is None:',
+        '    if False and re.search(r"(?:^|\\s)installed=true(?:\\s|$)", user_sections[0].group(2)) is None:',
+        "User 0 not installed",
+      ],
+      [
+        '    if len(user_sections) != 1 or user_sections[0].group(1) != "0":',
+        '    if len(user_sections) != 1:',
+        "nonzero Android user",
+      ],
+      [
+        '    if not 10_000 <= uid < 100_000:',
+        '    if False and not 10_000 <= uid < 100_000:',
+        "nonapplication appId",
+      ],
+      [
+        '        version_name=exactly_one(r"^    versionName=([^\\s]+)\\s*$", "versionName"),',
+        '        version_name="2.3.25",',
+        "missing versionName",
+      ],
+      [
+        '        version_code=int(exactly_one(r"^    versionCode=(\\d+)(?:\\s+.*)?$", "versionCode")),',
+        '        version_code=2_003_025,',
+        "missing versionCode",
+      ],
+      [
+        '    write_diagnostic(name, value)\n    return parse_package_identity(value)',
+        '    identity = parse_package_identity(value)\n' +
+          '    write_diagnostic(name, value)\n' +
+          '    return identity',
+        "diagnostic written only after parsing",
+      ],
+    ];
+    for (const [before, after, label] of identityMutants) {
+      assert.equal(original.split(before).length - 1, 1, `identity mutation site must be unique: ${label}`);
+      const mutatedPath = join(temporary, `identity-${label.replaceAll(" ", "-")}.py`);
+      await writeFile(mutatedPath, original.replace(before, after));
+      const mutant = spawnSync(
+        "python3",
+        [mutatedPath, "--self-test", "test_identity_requires_all_retention_fields"],
+        { encoding: "utf8" },
+      );
+      assert.notEqual(mutant.status, 0, `identity semantic mutant survived: ${label}`);
     }
   } finally {
     await rm(temporary, { recursive: true, force: true });
