@@ -11,6 +11,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
@@ -50,6 +51,7 @@ public final class RuntimeOtaFlowTest {
     private static final int MAX_ACTION_LINES = 260;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
     private static final long MAX_HIERARCHY_BYTES = 1024L * 1024L;
+    private static final int WELCOME_STAGE_SETTLED_SAMPLES = 2;
     private static final Pattern SAFE_SUBDIR = Pattern.compile("[A-Za-z0-9._-]{1,64}");
     private static final Pattern URL = Pattern.compile("https?://\\S+", Pattern.CASE_INSENSITIVE);
     private static final Pattern UPDATE_TEXT = Pattern.compile("\\AUpdate\\z", Pattern.CASE_INSENSITIVE);
@@ -261,13 +263,81 @@ public final class RuntimeOtaFlowTest {
             capture(capturePrefix + "-" + (step + 1));
             clickWebButton(button, capturePrefix + " " + label, SHORT_WAIT_MS);
             if (step + 1 < titles.length) {
-                waitFor(By.text(titles[step + 1]), UI_WAIT_MS, capturePrefix + " next stage");
+                if (titles == WELCOME_TITLES) {
+                    waitForRefreshedWelcomeStage(
+                            titles[step + 1], step + 2, capturePrefix + " next stage");
+                } else {
+                    waitFor(By.text(titles[step + 1]), UI_WAIT_MS, capturePrefix + " next stage");
+                }
             } else {
-                assertTrue(
-                        capturePrefix + " did not close after its final action",
-                        device.wait(Until.gone(By.text(title)), UI_WAIT_MS));
+                if (titles == WELCOME_TITLES) {
+                    waitForRefreshedWelcomeClosed(capturePrefix);
+                } else {
+                    assertTrue(
+                            capturePrefix + " did not close after its final action",
+                            device.wait(Until.gone(By.text(title)), UI_WAIT_MS));
+                }
             }
         }
+    }
+
+    private void waitForRefreshedWelcomeStage(
+            String expectedTitle, int oneBasedStep, String label) {
+        assertTrue(
+                "Accessibility cache refresh requires Android API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        BySelector dialogSelector = By.text("Welcome tour")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.app.Dialog");
+        BySelector titleSelector = By.text(expectedTitle)
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.TextView");
+        BySelector counterSelector = By.text(String.valueOf(oneBasedStep))
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.TextView");
+        long deadline = SystemClock.uptimeMillis() + UI_WAIT_MS;
+        int settled = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+            UiObject2 dialog = cacheCleared ? device.findObject(dialogSelector) : null;
+            boolean exactStage = dialog != null
+                    && dialog.findObject(titleSelector) != null
+                    && dialog.findObject(counterSelector) != null;
+            if (exactStage) {
+                settled++;
+                if (settled >= WELCOME_STAGE_SETTLED_SAMPLES) {
+                    log("Observed refreshed exact Welcome title and counter for " + label);
+                    return;
+                }
+            } else {
+                settled = 0;
+            }
+            SystemClock.sleep(250);
+        }
+        fail("Timed out waiting for refreshed exact Welcome title and counter for " + label);
+    }
+
+    private void waitForRefreshedWelcomeClosed(String label) {
+        BySelector dialogSelector = By.text("Welcome tour")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.app.Dialog");
+        long deadline = SystemClock.uptimeMillis() + UI_WAIT_MS;
+        int settled = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+            boolean dialogGone = cacheCleared && device.findObject(dialogSelector) == null;
+            if (dialogGone && ++settled >= WELCOME_STAGE_SETTLED_SAMPLES) {
+                log("Observed refreshed Welcome dialog closure for " + label);
+                return;
+            }
+            if (!dialogGone) {
+                settled = 0;
+            }
+            SystemClock.sleep(250);
+        }
+        fail(label + " did not settle closed after its final action");
     }
 
     private void dismissSetupReminder() throws IOException {
