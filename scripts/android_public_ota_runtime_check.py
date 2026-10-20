@@ -853,6 +853,13 @@ class PolicyTests(unittest.TestCase):
                 path.write_bytes(bytes([index + 1]))
             adb = AdmittedAdb("adb", "emulator-5554", *files)
             adb.baseline_installed = True
+            dispatches: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+            def fail_on_dispatch(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+                dispatches.append((args, kwargs))
+                raise AssertionError("Forbidden admission case reached external ADB dispatch")
+
+            adb._execute = fail_on_dispatch
             forbidden = [
                 ["install", str(files[1])],
                 ["install-multiple", str(files[1])],
@@ -865,6 +872,7 @@ class PolicyTests(unittest.TestCase):
             for command in forbidden:
                 with self.assertRaises(RuntimeGateError, msg=str(command)):
                     adb.run(command)
+            self.assertEqual(dispatches, [], "Every forbidden command must fail before dispatch")
 
     def test_scoped_pulls_require_correct_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -873,16 +881,31 @@ class PolicyTests(unittest.TestCase):
             for path in files:
                 path.write_bytes(b"x")
             adb = AdmittedAdb("adb", "emulator-5554", *files)
+            rejected_dispatches: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+            def fail_on_dispatch(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+                rejected_dispatches.append((args, kwargs))
+                raise AssertionError("Invalid pull state reached external ADB dispatch")
+
+            adb._execute = fail_on_dispatch
             with self.assertRaises(RuntimeGateError):
                 adb.pull_baseline_once("/base.apk", root / "pulled.apk")
             with self.assertRaises(RuntimeGateError):
                 adb.pull_final_once("/base.apk", root / "final.apk")
+            self.assertEqual(rejected_dispatches, [], "Invalid pull states must fail before dispatch")
             adb.baseline_installed = True
-            adb._execute = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", "")
+            allowed_dispatches: list[tuple[object, ...]] = []
+
+            def successful_dispatch(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+                allowed_dispatches.append(args)
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            adb._execute = successful_dispatch
             adb.pull_baseline_once("/base.apk", root / "pulled.apk")
             adb.mark_installer_success_receipt()
             adb.pull_final_once("/base.apk", root / "final.apk")
             self.assertTrue(adb.baseline_pulled and adb.final_pulled)
+            self.assertEqual(len(allowed_dispatches), 2)
 
     def test_evidence_names_reject_traversal(self) -> None:
         self.assertIsNotNone(SAFE_EVIDENCE_NAME.fullmatch("01-initial-update-consent.png"))

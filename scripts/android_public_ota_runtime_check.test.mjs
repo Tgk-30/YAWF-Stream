@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -12,6 +12,13 @@ const runtimePath = join(
   root,
   "scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeOtaFlowTest.java",
 );
+const pythonLookup = spawnSync(
+  "/usr/bin/env",
+  ["python3", "-c", "import sys; print(sys.executable)"],
+  { encoding: "utf8" },
+);
+assert.equal(pythonLookup.status, 0, `python3 lookup failed: ${pythonLookup.stderr}`);
+const pythonExecutable = pythonLookup.stdout.trim();
 
 function validateWorkflow(source) {
   const failures = [];
@@ -149,8 +156,52 @@ test("negative observations scope and restore a short UiAutomator idle timeout",
   }
 });
 
+async function assertAdbAdmissionEnvironmentIsolation(original) {
+  const mutationBefore = 'if lowered[0].startswith("install") or lowered[0] in {"push", "sync"}:';
+  const mutationAfter = 'if lowered[0].startswith("install") or lowered[0] in {"sync"}:';
+  assert.equal(original.split(mutationBefore).length - 1, 1);
+
+  const temporary = await mkdtemp(join(tmpdir(), "yawf-ota-adb-admission-"));
+  try {
+    const fakeBin = join(temporary, "fake-bin");
+    const absentBin = join(temporary, "absent-bin");
+    const fakeLog = join(temporary, "fake-adb.log");
+    await Promise.all([mkdir(fakeBin), mkdir(absentBin)]);
+    const fakeAdb = join(fakeBin, "adb");
+    await writeFile(
+      fakeAdb,
+      '#!/bin/sh\nprintf "called\\n" >> "$YAWF_FAKE_ADB_LOG"\nexit 0\n',
+    );
+    await chmod(fakeAdb, 0o755);
+    const mutatedPath = join(temporary, "mutated-admission.py");
+    await writeFile(mutatedPath, original.replace(mutationBefore, mutationAfter));
+
+    for (const [label, pathValue] of [["fake-present", fakeBin], ["absent", absentBin]]) {
+      const env = { ...process.env, PATH: pathValue, YAWF_FAKE_ADB_LOG: fakeLog };
+      const baseline = spawnSync(
+        pythonExecutable,
+        [driverPath, "--self-test", "test_admission_locks_all_product_install_routes"],
+        { encoding: "utf8", env },
+      );
+      assert.equal(baseline.status, 0, `${label} baseline failed: ${baseline.stderr}`);
+      const mutant = spawnSync(
+        pythonExecutable,
+        [mutatedPath, "--self-test", "test_admission_locks_all_product_install_routes"],
+        { encoding: "utf8", env },
+      );
+      assert.notEqual(mutant.status, 0, `${label} admission mutant survived`);
+      assert.match(mutant.stderr, /Forbidden admission case reached external ADB dispatch/);
+      const calls = await readFile(fakeLog, "utf8").catch(() => "");
+      assert.equal(calls, "", `${label} invoked external adb`);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
 test("each host policy self-test kills a targeted valid-Python semantic mutant", async () => {
   const original = await readFile(driverPath, "utf8");
+  await assertAdbAdmissionEnvironmentIsolation(original);
   const mutants = new Map([
     ["test_manifest_exact", [
       "for key, expected_value in expected.items():\n        if type(value.get(key))",
