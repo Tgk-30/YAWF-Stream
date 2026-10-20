@@ -79,6 +79,12 @@ public final class FlowPolicy {
         WAIT
     }
 
+    public enum SettingsNavigationState {
+        BLOCKED_FIRST_RUN,
+        READY,
+        WAIT
+    }
+
     private FlowPolicy() {}
 
     public static OnboardingEntry classifyOnboarding(
@@ -97,6 +103,19 @@ public final class FlowPolicy {
             return OnboardingEntry.TIER_WELCOME;
         }
         return OnboardingEntry.WAIT;
+    }
+
+    public static SettingsNavigationState classifySettingsNavigation(
+            boolean firstRunVisible,
+            boolean moreDialogVisible,
+            boolean settingsAnchorVisible) {
+        if (firstRunVisible) {
+            return SettingsNavigationState.BLOCKED_FIRST_RUN;
+        }
+        if (!moreDialogVisible && settingsAnchorVisible) {
+            return SettingsNavigationState.READY;
+        }
+        return SettingsNavigationState.WAIT;
     }
 
     public static boolean containsBindingTerms(String value) {

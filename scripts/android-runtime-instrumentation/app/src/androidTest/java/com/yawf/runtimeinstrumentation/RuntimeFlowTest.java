@@ -119,7 +119,7 @@ public final class RuntimeFlowTest {
 
         clickWebButton(FlowPolicy.MORE_NAVIGATION_BUTTON, "More navigation", UI_WAIT_MS);
         click(By.text("Settings"), "Settings", SHORT_WAIT_MS, false);
-        waitFor(By.text("Settings"), UI_WAIT_MS, "Settings heading");
+        waitForSettingsRoute();
         capture("settings");
         openHelpAndUpdates();
         scrollUntil(By.text("Android APK updates"), "Android APK updates");
@@ -230,6 +230,32 @@ public final class RuntimeFlowTest {
             SystemClock.sleep(250);
         }
         fail("Ordinary tour did not settle after one guarded Skip action");
+    }
+
+    private void waitForSettingsRoute() {
+        BySelector[] settingsAnchors = new BySelector[] {
+                By.text("Help & updates"),
+                By.text("Install & setup"),
+                By.text("Appearance"),
+                By.desc("Settings category")
+        };
+        long deadline = SystemClock.uptimeMillis() + UI_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            FlowPolicy.SettingsNavigationState state = FlowPolicy.classifySettingsNavigation(
+                    device.hasObject(By.text("How do you want to use YAWF Stream?")),
+                    device.hasObject(By.res("mobile-nav-more")),
+                    findAnyNow(settingsAnchors) != null);
+            if (state == FlowPolicy.SettingsNavigationState.BLOCKED_FIRST_RUN) {
+                fail("FirstRunWizard opened instead of the Settings route");
+            }
+            if (state == FlowPolicy.SettingsNavigationState.READY) {
+                log("Observed the More dialog gone and a Settings-only semantic anchor");
+                return;
+            }
+            SystemClock.sleep(250);
+        }
+        fail("Settings route did not replace the More dialog with a Settings-only anchor");
     }
 
     private void openHelpAndUpdates() {

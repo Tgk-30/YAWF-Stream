@@ -32,6 +32,7 @@ let pickerSelection = { season: 1, episode: 3 };
 let mockActiveProfile: { id: string } | null = null;
 let mockServerSession: { profileId: string } | null = null;
 let capturedStreamPlay: (() => void) | null = null;
+const useStreamsMock = vi.hoisted(() => vi.fn());
 const tauriState = vi.hoisted(() => ({ on: false, desktop: false }));
 const downloadsFfmpegAvailable = vi.hoisted(() => vi.fn(async () => true));
 const downloadsRuntime = vi.hoisted(() => ({
@@ -90,7 +91,10 @@ vi.mock("../data/detail", () => ({
 }));
 
 vi.mock("../data/streams", () => ({
-  useStreams: () => mockStreams,
+  useStreams: (...args: unknown[]) => {
+    useStreamsMock(...args);
+    return mockStreams;
+  },
   filterStreamRows: (rows: unknown[]) => rows,
 }));
 
@@ -202,6 +206,7 @@ vi.mock("../components/DetailHero", () => ({
     requestState,
     tasteSignal,
     onTasteSignal,
+    playLabel,
     onPlay,
     onDownload,
     downloadDisabledReason,
@@ -216,6 +221,7 @@ vi.mock("../components/DetailHero", () => ({
       <span data-testid="hero-reqstate">{requestState}</span>
       <span data-testid="hero-taste">{tasteSignal ?? "none"}</span>
       <span data-testid="hero-completion">{completionLabel ?? "none"}</span>
+      <span data-testid="hero-play-label">{playLabel}</span>
       {externalRatings}
       <button onClick={onPlay}>play</button>
       {onToggleMovieWatched && (
@@ -551,6 +557,7 @@ beforeEach(() => {
   };
   mockSettings = { transcode: false, ratingScale: "thumbs" };
   vi.clearAllMocks();
+  useStreamsMock.mockClear();
   movieHistory = null;
   recentTasteEvents.mockResolvedValue([]);
   listHistory.mockResolvedValue([]);
@@ -792,11 +799,60 @@ describe("Detail actions", () => {
 
 describe("Detail play", () => {
   it("opens Settings when the title cannot be resolved to a searchable id", async () => {
+    mockDetail = detailState({ imdbId: null });
     mockStreams = { ...streamsState(), missingImdbId: true };
     render(<Detail />);
 
     await userEvent.click(screen.getByText("play"));
     expect(navigate).toHaveBeenCalledWith("settings");
+  });
+
+  it("keeps pending metadata out of the missing-id setup route until it settles", async () => {
+    const scrollIntoView = vi.fn();
+    const orig = document.getElementById.bind(document);
+    const getElementByIdSpy = vi.spyOn(document, "getElementById").mockImplementation((id) => {
+      const el = orig(id);
+      if (el) (el as any).scrollIntoView = scrollIntoView;
+      return el;
+    });
+    mockDetail = { ...detailState({ imdbId: null }), loading: true };
+    mockStreams = { ...streamsState(), missingImdbId: true };
+    const { rerender } = render(<Detail />);
+
+    expect(screen.getByTestId("hero-play-label")).toHaveTextContent("Play");
+    expect(useStreamsMock).toHaveBeenLastCalledWith(
+      null,
+      "movie",
+      null,
+      null,
+      "Selected",
+      2020,
+      mockServices.indexers,
+      mockServices.debrid,
+      true,
+    );
+    await userEvent.click(screen.getByText("play"));
+    expect(navigate).not.toHaveBeenCalledWith("settings");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+
+    mockDetail = { ...mockDetail, loading: false };
+    rerender(<Detail />);
+
+    expect(screen.getByTestId("hero-play-label")).toHaveTextContent("Set up streaming");
+    expect(useStreamsMock).toHaveBeenLastCalledWith(
+      null,
+      "movie",
+      null,
+      null,
+      "Selected",
+      2020,
+      mockServices.indexers,
+      mockServices.debrid,
+      false,
+    );
+    await userEvent.click(screen.getByText("play"));
+    expect(navigate).toHaveBeenCalledWith("settings");
+    getElementByIdSpy.mockRestore();
   });
 
   it("scrolls to the stream picker when there is no cached resolution", async () => {

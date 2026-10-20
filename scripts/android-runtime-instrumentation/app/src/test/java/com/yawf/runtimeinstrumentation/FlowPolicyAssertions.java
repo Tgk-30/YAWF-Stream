@@ -101,6 +101,28 @@ final class FlowPolicyAssertions {
                 "Additional absent observations must remain settled");
     }
 
+    static void settingsNavigationRequiresClosedDrawerAndSettingsOnlyAnchor() {
+        check(
+                FlowPolicy.classifySettingsNavigation(false, true, true)
+                        == FlowPolicy.SettingsNavigationState.WAIT,
+                "A Settings anchor behind the open More dialog must not pass");
+        check(
+                FlowPolicy.classifySettingsNavigation(false, false, false)
+                        == FlowPolicy.SettingsNavigationState.WAIT,
+                "A closed drawer without a Settings-only anchor must not pass");
+        check(
+                FlowPolicy.classifySettingsNavigation(false, false, true)
+                        == FlowPolicy.SettingsNavigationState.READY,
+                "Only a closed drawer plus a Settings-only anchor may pass");
+    }
+
+    static void settingsNavigationFailsClosedWhenFirstRunReopens() {
+        check(
+                FlowPolicy.classifySettingsNavigation(true, false, true)
+                        == FlowPolicy.SettingsNavigationState.BLOCKED_FIRST_RUN,
+                "FirstRunWizard must block Settings admission even when other signals look ready");
+    }
+
     static void bindingTermsAreRejectedButPrivacyNoticeIsAllowed() {
         check(FlowPolicy.containsBindingTerms("Accept the Terms of Service"),
                 "Binding terms must be rejected");

@@ -402,7 +402,8 @@ function errorMessage(error: unknown): string {
  * season/episode so the search and ranking are episode-specific; movies pass
  * null/null. `year` is the item's release year when known - used to down-rank
  * (movies only) same-titled releases from a different year, e.g. The Odyssey
- * (2026) vs its 1997/2016 adaptations. */
+ * (2026) vs its 1997/2016 adaptations. `imdbIdPending` distinguishes metadata
+ * that is still loading from a settled title that genuinely has no IMDb id. */
 export function useStreams(
   imdbId: string | null,
   type: MediaType,
@@ -412,17 +413,19 @@ export function useStreams(
   year: number | null,
   indexers: IndexerManager,
   debrid: DebridManager | null,
+  imdbIdPending = false,
 ): StreamsState {
   const serverURL = configuredServerURL();
   const serverMode = serverURL != null;
   const hasIndexers = serverMode ? true : indexers.activeIndexers.length > 0;
   const hasDebrid = serverMode ? true : debrid != null && debrid.hasServices;
+  const waitingForImdbId = imdbId == null && imdbIdPending && hasIndexers;
 
   const [state, setState] = useState<StreamsState>({
     ...EMPTY,
     hasIndexers,
     hasDebrid,
-    loading: imdbId != null && hasIndexers,
+    loading: (imdbId != null && hasIndexers) || waitingForImdbId,
   });
 
   const run = useCallback(
@@ -434,8 +437,8 @@ export function useStreams(
           ...EMPTY,
           hasIndexers,
           hasDebrid,
-          missingImdbId: imdbId == null,
-          loading: false,
+          missingImdbId: imdbId == null && !imdbIdPending,
+          loading: waitingForImdbId,
         });
         return;
       }
@@ -558,7 +561,7 @@ export function useStreams(
         }
       }
     },
-    [imdbId, type, season, episode, title, year, indexers, debrid, hasIndexers, hasDebrid, serverMode],
+    [imdbId, type, season, episode, title, year, indexers, debrid, imdbIdPending, hasIndexers, hasDebrid, serverMode, waitingForImdbId],
   );
 
   useEffect(() => {
