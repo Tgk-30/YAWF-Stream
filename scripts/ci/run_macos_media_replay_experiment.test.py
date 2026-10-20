@@ -106,7 +106,7 @@ class ReplayExperimentTests(unittest.TestCase):
         self.assertIn("build_profile.write_text(sandbox_profile(child))", wrapper)
         self.assertNotIn("build_profile.write_text(sandbox_profile(output))", wrapper)
         self.assertIn('"/usr/bin/sandbox-exec", "-f", str(build_profile)', wrapper)
-        self.assertIn("invoke_sandbox(build_profile, environment, wrapper", wrapper)
+        self.assertIn("invoke_sandbox(build_profile, environment, selected_python, wrapper", wrapper)
 
     def test_clean_environment_has_child_owned_state_and_no_ambient_overrides(self):
         environment = REPLAY.clean_environment(Path("/private/tmp/owned"), "/tools:/usr/bin:/bin", "/Applications/Xcode.app/Contents/Developer")
@@ -186,6 +186,8 @@ class ReplayExperimentTests(unittest.TestCase):
             self.assertEqual(receipt["tools"]["ar"]["selectedPath"], str(selected["ar"]))
             self.assertEqual(receipt["tools"]["metal"]["selectedBy"], "/usr/bin/xcrun")
             self.assertEqual(receipt["tools"]["metallib"]["selectedBy"], "/usr/bin/xcrun")
+            self.assertEqual(receipt["tools"]["python3"]["selectedBy"], "/usr/bin/xcrun")
+            self.assertTrue(REPLAY._within(developer.resolve(), Path(receipt["tools"]["python3"]["realPath"])))
             self.assertEqual(receipt["tools"]["pkg-config"]["selectedPath"], str(path_bin / "pkg-config"))
             arguments = REPLAY.controller_tool_arguments(receipt)
             self.assertEqual(arguments[arguments.index("--ar") + 1], str(selected["ar"]))
@@ -207,6 +209,16 @@ class ReplayExperimentTests(unittest.TestCase):
             with self.assertRaisesRegex(REPLAY.ReplayError, "outside the selected Developer directory"):
                 REPLAY.discover_tool_selection(developer, str(path_bin), environment, run=outside_run)
 
+            def outside_python_run(command, **_kwargs):
+                if "--show-sdk-path" in command:
+                    return subprocess.CompletedProcess(command, 0, stdout=f"{sdk}\n")
+                name = command[-1]
+                path = outside if name == "python3" else selected[name]
+                return subprocess.CompletedProcess(command, 0, stdout=f"{path}\n")
+
+            with self.assertRaisesRegex(REPLAY.ReplayError, "outside the selected Developer directory"):
+                REPLAY.discover_tool_selection(developer, str(path_bin), environment, run=outside_python_run)
+
             def failed_run(command, **_kwargs):
                 return subprocess.CompletedProcess(command, 1, stdout="not found\n")
 
@@ -218,6 +230,36 @@ class ReplayExperimentTests(unittest.TestCase):
 
             with self.assertRaisesRegex(REPLAY.ReplayError, "timed out after 60 seconds while selecting clang"):
                 REPLAY.discover_tool_selection(developer, str(path_bin), environment, run=timeout_run)
+
+    def test_sandbox_launcher_uses_the_canonical_admitted_developer_python_without_system_shim_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            developer = root / "Xcode.app/Contents/Developer"
+            interpreter = developer / "Library/Frameworks/Python.framework/Versions/3/bin/python3"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_text("#!/bin/sh\nexit 0\n")
+            interpreter.chmod(0o755)
+            selected_path = developer / "usr/bin/python3"
+            selected_path.parent.mkdir(parents=True)
+            selected_path.symlink_to(interpreter)
+            selected = REPLAY._selected_executable(selected_path, "python3", developer.resolve())
+            self.assertEqual(selected["realPath"], str(interpreter.resolve()))
+
+            command = REPLAY.sandbox_command(
+                root / "build.sb",
+                REPLAY.clean_environment(root / "child", "/usr/bin:/bin", str(developer)),
+                Path(selected["realPath"]),
+                root / "wrapper.py",
+                ["--internal-postbuild"],
+            )
+            self.assertIn(str(interpreter.resolve()), command)
+            self.assertNotIn("/usr/bin/python3", command)
+
+            outside = root / "outside-python3"
+            outside.write_text("#!/bin/sh\nexit 0\n")
+            outside.chmod(0o755)
+            with self.assertRaisesRegex(REPLAY.ReplayError, "outside the selected Developer directory"):
+                REPLAY._selected_executable(outside, "python3", developer.resolve())
 
     def test_accepts_only_trusted_xcrun_selected_metal_tools_outside_the_developer_directory(self):
         with tempfile.TemporaryDirectory() as directory:

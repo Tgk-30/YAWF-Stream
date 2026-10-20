@@ -20,9 +20,9 @@
   "files": {
     "scripts/macos-media-replay/replay-plan.json": "dd198746181e38a914172b238a5c31bde66ef55bd67aafbae455fbe20a527898",
     "scripts/macos-media-replay/replay_macos_media_sources.mjs": "971b19cf98d6b8e5958670b4c1bba33612e04a7e94e35fc64c5a5a8470775a52",
-    "scripts/macos-media-replay/README.md": "19abd4f48fedccc49c812d07410af2fe0403c3039e85bd088636392309dd26ec",
+    "scripts/macos-media-replay/README.md": "23ff70e79c45f0fabc7c67c88c05381fac0b8b86f2c5482c1ac54dfb3ce7a417",
     "scripts/macos-media-replay/required-runtime-outputs.json": "0729877e06bbef46f45e63f551df1ff2d7107d9dc482a2748e4b08e399a3fe64",
-    "scripts/stage_macos_media_runtime.mjs": "b4736c0d005399f521d7f920a25a98cebd8492055ffdd55e6b51aeeb9f990ff7",
+    "scripts/stage_macos_media_runtime.mjs": "83014667964170b5da895e572d1801d91bf29ee39b569c316394da738b9c1bf6",
     "scripts/check_macos_bundle_minimum.mjs": "74e59f73733c49fef73957d526c1841a2feec112ed84522b4c6672be5025e8c8",
     "scripts/smoke_macos_media_runtime.mjs": "f15267ac8299f091547a8468477d6a12fe2464a99532630e4102a6a9f4bebdf9"
   }

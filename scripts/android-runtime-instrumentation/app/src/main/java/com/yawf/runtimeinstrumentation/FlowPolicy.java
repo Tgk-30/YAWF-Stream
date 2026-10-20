@@ -4,7 +4,7 @@ import java.util.regex.Pattern;
 
 /** Pure policy shared by the host self-tests and the persistent device flow. */
 public final class FlowPolicy {
-    public static final String EXPECTED_CANDIDATE_VERSION = "2.3.23";
+    public static final String EXPECTED_CANDIDATE_VERSION = "2.3.25";
     public static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
     public static final String WEB_BUTTON_CLASS = "android.widget.Button";
     public static final LabeledWebButtonSpec MORE_NAVIGATION_BUTTON =
@@ -79,6 +79,12 @@ public final class FlowPolicy {
         WAIT
     }
 
+    public enum SettingsNavigationState {
+        BLOCKED_FIRST_RUN,
+        READY,
+        WAIT
+    }
+
     private FlowPolicy() {}
 
     public static OnboardingEntry classifyOnboarding(
@@ -97,6 +103,19 @@ public final class FlowPolicy {
             return OnboardingEntry.TIER_WELCOME;
         }
         return OnboardingEntry.WAIT;
+    }
+
+    public static SettingsNavigationState classifySettingsNavigation(
+            boolean firstRunVisible,
+            boolean moreDialogVisible,
+            boolean settingsAnchorVisible) {
+        if (firstRunVisible) {
+            return SettingsNavigationState.BLOCKED_FIRST_RUN;
+        }
+        if (!moreDialogVisible && settingsAnchorVisible) {
+            return SettingsNavigationState.READY;
+        }
+        return SettingsNavigationState.WAIT;
     }
 
     public static boolean containsBindingTerms(String value) {

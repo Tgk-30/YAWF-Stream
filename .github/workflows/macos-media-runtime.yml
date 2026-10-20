@@ -20,7 +20,44 @@ permissions:
   contents: read
 
 jobs:
+  transport:
+    # GitHub requires push access to read an unpublished draft. Keep that
+    # credential in a static transport job with no checkout or project code.
+    if: github.event_name != 'pull_request'
+    name: Retrieve the pinned private source seed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      SOURCE_RELEASE_ID: "417897650"
+      SOURCE_ASSET_ID: "657879542"
+      SOURCE_FILE: macos-media-runtime-arm64.tar.gz
+      OUTER_SHA256: 11af8849872ae1c302b6a5fb6ba823e369648be3e9597c1ba2c5150e7a9f4d50
+    steps:
+      - name: Retrieve only the fixed draft asset and metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          transport="$RUNNER_TEMP/source-transport"
+          mkdir -p "$transport"
+          gh api "repos/Tgk-30/YAWF-Stream/releases/$SOURCE_RELEASE_ID" > "$transport/source-transport-metadata.json"
+          gh api "repos/Tgk-30/YAWF-Stream/releases/assets/$SOURCE_ASSET_ID" \
+            -H 'Accept: application/octet-stream' > "$transport/$SOURCE_FILE"
+          test "$(sha256sum "$transport/$SOURCE_FILE" | awk '{print $1}')" = "$OUTER_SHA256"
+          printf '%s  %s\n' "$OUTER_SHA256" "$SOURCE_FILE" > "$transport/$SOURCE_FILE.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinned-source-seed-transport
+          path: ${{ runner.temp }}/source-transport
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
   source:
+    needs: transport
     name: Prepare one exact corresponding-source archive
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -28,20 +65,27 @@ jobs:
       archive_sha256: ${{ steps.source.outputs.archive_sha256 }}
       archive_file: ${{ steps.source.outputs.archive_file }}
     env:
-      SOURCE_RUN_ID: "39304293958"
-      SOURCE_ARTIFACT: macos-media-runtime-arm64
+      SOURCE_RELEASE_ID: "417897650"
+      SOURCE_ASSET_ID: "657879542"
+      SOURCE_FILE: macos-media-runtime-arm64.tar.gz
       OUTER_SHA256: 11af8849872ae1c302b6a5fb6ba823e369648be3e9597c1ba2c5150e7a9f4d50
       INNER_SOURCE_SHA256: baf26db61e0e50011f748e2ddfe06a764972d8fd9ff5a562f50da94d2727dbff
     steps:
       - uses: actions/checkout@v4
-      - name: Download the exact pinned source transport
-        uses: actions/download-artifact@v4
         with:
-          name: ${{ env.SOURCE_ARTIFACT }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: pinned-source-seed-transport
           path: ${{ runner.temp }}/source-transport
-          github-token: ${{ github.token }}
-          repository: Tgk-30/YAWF-Stream
-          run-id: ${{ env.SOURCE_RUN_ID }}
+      - name: Validate the exact pinned durable source transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          transport="$RUNNER_TEMP/source-transport"
+          python3 -I -B scripts/ci/produce_macos_media_runtime.py \
+            --verify-source-transport-metadata "$transport/source-transport-metadata.json" \
+            > "$transport/transport-verification.json"
       - name: Prepare and freshly admit the canonical source archive
         id: source
         shell: bash
@@ -52,6 +96,7 @@ jobs:
           python3 -I -B scripts/ci/produce_macos_media_runtime.py \
             --prepare-source \
             --candidate-dir "$RUNNER_TEMP/source-transport" \
+            --source-transport-metadata "$RUNNER_TEMP/source-transport/source-transport-metadata.json" \
             --output-dir "$RUNNER_TEMP/corresponding-source" \
             --github-output "$GITHUB_OUTPUT"
       - name: Retain the one byte-identical source input for both native jobs

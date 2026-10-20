@@ -27,13 +27,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CANDIDATE_RUN_ID: "39306282501"
-      CANDIDATE_SOURCE_SHA: d9ff4b4b073b2ed4c445a44b431a01442be3709f
-      CANDIDATE_APK_SHA256: 3165df8cc7bc774cdab81e0049987246255eebb9d1bec47ba0b346a707e3d90c
-      CANDIDATE_VERSION: 2.3.23
-      CANDIDATE_VERSION_CODE: "2003023"
+      CANDIDATE_RUN_ID: "39365387810"
+      CANDIDATE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd
+      CANDIDATE_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b
+      CANDIDATE_VERSION: 2.3.25
+      CANDIDATE_VERSION_CODE: "2003025"
       PUBLISHED_ANDROID_VERSION: 2.3.21
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.23.apk
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.25.apk
       EVIDENCE: android-runtime-evidence
       AVD_NAME: yawf-phone-api30-runtime
       EMULATOR_SERIAL: emulator-5554
@@ -75,7 +75,7 @@ jobs:
       - name: Download exact signed candidate artifact
         uses: actions/download-artifact@v4
         with:
-          name: android-phone-release-candidate
+          name: android-phone-verification-candidate
           path: candidate
           github-token: ${{ github.token }}
           run-id: ${{ env.CANDIDATE_RUN_ID }}
@@ -121,28 +121,12 @@ jobs:
             echo "$sdk_root/platform-tools"
           } >> "$GITHUB_PATH"
 
-      - name: Verify exact APK, manifest, source, and signer
+      - name: Verify exact APK and signer with local verification metadata
         shell: bash
         run: |
           set -euo pipefail
           test -f "$CANDIDATE_APK"
           printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$CANDIDATE_APK" | sha256sum -c -
-          (cd candidate && sha256sum -c SHA256SUMS)
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          manifest = json.loads(Path("candidate/android-update.json").read_text())
-          assert manifest["schemaVersion"] == 1
-          assert manifest["version"] == os.environ["CANDIDATE_VERSION"]
-          assert manifest["versionCode"] == int(os.environ["CANDIDATE_VERSION_CODE"])
-          assert manifest["packageName"] == "com.tgk30.debridstreamer"
-          assert manifest["sourceRevision"] == os.environ["CANDIDATE_SOURCE_SHA"]
-          assert manifest["apk"]["name"] == Path(os.environ["CANDIDATE_APK"]).name
-          assert manifest["apk"]["sha256"] == os.environ["CANDIDATE_APK_SHA256"]
-          assert manifest["apk"]["size"] == Path(os.environ["CANDIDATE_APK"]).stat().st_size
-          PY
           test "$(apkanalyzer manifest application-id "$CANDIDATE_APK")" = "com.tgk30.debridstreamer"
           test "$(apkanalyzer manifest version-name "$CANDIDATE_APK")" = "$CANDIDATE_VERSION"
           test "$(apkanalyzer manifest version-code "$CANDIDATE_APK")" = "$CANDIDATE_VERSION_CODE"
@@ -155,6 +139,44 @@ jobs:
           apksigner verify --print-certs "$CANDIDATE_APK" \
             | sed -n '/certificate SHA-256 digest:/p' \
             > "$EVIDENCE/apk-signer.txt"
+          local_metadata_dir="$(pwd)/$EVIDENCE/local-generated-verification-metadata"
+          mkdir -p "$local_metadata_dir"
+          node candidate-source/scripts/build_android_update_manifest.mjs \
+            --apk "$CANDIDATE_APK" \
+            --version "$CANDIDATE_VERSION" \
+            --source "$CANDIDATE_SOURCE_SHA" \
+            --output "$local_metadata_dir/android-update.json"
+          printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$(basename "$CANDIDATE_APK")" \
+            > "$local_metadata_dir/SHA256SUMS"
+          (
+            cd "$(dirname "$CANDIDATE_APK")"
+            sha256sum -c "$local_metadata_dir/SHA256SUMS"
+          )
+          {
+            echo "classification=locally-generated-runtime-verification-metadata"
+            echo "releaseAsset=false"
+            echo "otaPublicationEvidence=false"
+            echo "sourceRevision=$CANDIDATE_SOURCE_SHA"
+            echo "candidateRunId=$CANDIDATE_RUN_ID"
+          } > "$local_metadata_dir/PROVENANCE.txt"
+          export LOCAL_METADATA_DIR="$local_metadata_dir"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(
+              (Path(os.environ["LOCAL_METADATA_DIR"]) / "android-update.json").read_text()
+          )
+          assert manifest["schemaVersion"] == 1
+          assert manifest["version"] == os.environ["CANDIDATE_VERSION"]
+          assert manifest["versionCode"] == int(os.environ["CANDIDATE_VERSION_CODE"])
+          assert manifest["packageName"] == "com.tgk30.debridstreamer"
+          assert manifest["sourceRevision"] == os.environ["CANDIDATE_SOURCE_SHA"]
+          assert manifest["apk"]["name"] == Path(os.environ["CANDIDATE_APK"]).name
+          assert manifest["apk"]["sha256"] == os.environ["CANDIDATE_APK_SHA256"]
+          assert manifest["apk"]["size"] == Path(os.environ["CANDIDATE_APK"]).stat().st_size
+          PY
 
       - name: Fetch and verify the pinned CI-only WebView provider
         shell: bash

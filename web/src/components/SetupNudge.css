@@ -64,6 +64,15 @@
   color: var(--text-primary);
 }
 
+@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {
+  /* The mobile More drawer is modal and its NavRail stacking context is 30.
+     Keep this reminder below it so covered drawer actions cannot receive the
+     reminder's guided-setup action instead. */
+  .setup-nudge {
+    z-index: 29;
+  }
+}
+
 @media (max-width: 640px) {
   .setup-nudge {
     align-items: flex-start;

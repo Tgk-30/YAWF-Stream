@@ -24,6 +24,7 @@ import {
 import { createPortal } from "react-dom";
 import QRCode from "qrcode";
 import { checkAndroidAppUpdates, hasLocalAndroidUpdater } from "../lib/androidUpdates";
+import { isAndroidAppUiContext } from "../lib/androidExternalPlayer";
 import { useAppStore } from "../store/AppStore";
 import {
   useServerSession,
@@ -653,7 +654,7 @@ export function Settings() {
           />
         )}
         {tab === "language" && <LanguageRegionTab draft={draft} patch={patch} />}
-        {tab === "install" && <InstallTab />}
+        {tab === "install" && <InstallTab onOpenUpdates={() => setTab("updates")} />}
         {tab === "playback" && <PlaybackTab draft={draft} patch={patch} />}
         {tab === "privacy" && <PrivacyTab draft={draft} patch={patch} />}
         {tab === "updates" && (
@@ -2229,13 +2230,15 @@ function DownloadsFolderSetting() {
   );
 }
 
-function InstallTab() {
+function InstallTab({ onOpenUpdates }: { onOpenUpdates: () => void }) {
   const [promptEvent, setPromptEvent] = useState<BeforeInstallPromptEvent | null>(
     null,
   );
-  const [installed, setInstalled] = useState(() => isStandaloneDisplay());
+  const [pwaInstalled, setPwaInstalled] = useState(() => isStandaloneDisplay());
   const [installPath, setInstallPath] = useState<InstallPath>("device");
   const kind = deviceKind();
+  const nativeAndroidApp = isAndroidAppUiContext();
+  const installed = nativeAndroidApp || pwaInstalled;
 
   useEffect(() => {
     const onPrompt = (event: Event) => {
@@ -2243,7 +2246,7 @@ function InstallTab() {
       setPromptEvent(event as BeforeInstallPromptEvent);
     };
     const onInstalled = () => {
-      setInstalled(true);
+      setPwaInstalled(true);
       setPromptEvent(null);
     };
     window.addEventListener("beforeinstallprompt", onPrompt);
@@ -2259,7 +2262,7 @@ function InstallTab() {
     await promptEvent.prompt();
     await promptEvent.userChoice.catch(() => null);
     setPromptEvent(null);
-    setInstalled(isStandaloneDisplay());
+    setPwaInstalled(isStandaloneDisplay());
   }
 
   const primary =
@@ -2289,9 +2292,15 @@ function InstallTab() {
   }> = [
     {
       id: "device",
-      label: installed ? "Installed app" : primary.title,
-      summary: installed
-        ? "This device already has launcher access."
+      label: nativeAndroidApp
+        ? "Installed Android app"
+        : installed
+          ? "Installed app"
+          : primary.title,
+      summary: nativeAndroidApp
+        ? "The signed Android app is installed on this device."
+        : installed
+          ? "This device already has launcher access."
         : "Set up launcher access or desktop hosting on this device.",
     },
     {
@@ -2356,13 +2365,26 @@ function InstallTab() {
           <>
             <div className="settings-install-card glass-rest">
               <div>
-                <h3>{installed ? "Installed" : primary.title}</h3>
+                <h3>
+                  {nativeAndroidApp
+                    ? "Android app installed"
+                    : installed
+                      ? "Installed"
+                      : primary.title}
+                </h3>
                 <p className="t-secondary">
-                  {installed
+                  {nativeAndroidApp
+                    ? "YAWF Stream is installed. Open Help & updates to check for signed Android updates."
+                    : installed
                     ? "This server is already running as an installed app."
                     : primary.body}
                 </p>
               </div>
+              {nativeAndroidApp && (
+                <button type="button" className="btn" onClick={onOpenUpdates}>
+                  Open Help & updates
+                </button>
+              )}
               {promptEvent != null && !installed && (
                 <button type="button" className="btn" onClick={() => void promptInstall()}>
                   Install app

@@ -424,7 +424,10 @@ export function Detail() {
     detailItem?.year ?? detail.data.item?.year ?? null,
     services.indexers,
     services.debrid,
+    detail.loading,
   );
+  const confirmedMissingImdbId =
+    streams.missingImdbId && !detail.loading && detail.data.imdbId == null;
 
   // Download selection intentionally follows the current list's source order.
   // The first row at a selected resolution is the same "best currently listed"
@@ -1774,7 +1777,7 @@ export function Detail() {
               : undefined
           }
           playLabel={
-            !streams.hasDebrid || streams.missingImdbId
+            !streams.hasDebrid || confirmedMissingImdbId
               ? "Set up streaming"
               : "Play"
           }
@@ -1804,7 +1807,7 @@ export function Detail() {
                 : null
           }
           onPlay={() => {
-            if (!streams.hasDebrid || streams.missingImdbId) {
+            if (!streams.hasDebrid || confirmedMissingImdbId) {
               navigate("settings");
               return;
             }

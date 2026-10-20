@@ -54,6 +54,14 @@ MUTANTS = {
         "return consecutiveAbsentSamples >= TOUR_SETTLED_ABSENT_SAMPLES;",
         "return consecutiveAbsentSamples >= 1;",
     ),
+    "settingsNavigationClosedAndAnchored": (
+        "if (!moreDialogVisible && settingsAnchorVisible) {",
+        "if (settingsAnchorVisible) {",
+    ),
+    "settingsNavigationFirstRunBlocked": (
+        "if (firstRunVisible) {",
+        "if (false && firstRunVisible) {",
+    ),
     "termsPolicy": (
         "terms of service|license agreement|user agreement|binding terms",
         "privacy notice|license agreement|user agreement|binding terms",

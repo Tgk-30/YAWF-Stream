@@ -159,22 +159,32 @@ async function renderStreams(
   season: number | null = null,
   episode: number | null = null,
   title: string | null = null,
-): Promise<{ state: StreamsState; cleanup: () => void }> {
+  imdbIdPending = false,
+): Promise<{ initial: StreamsState; state: StreamsState; cleanup: () => void }> {
   // First synchronous render: the hook returns the initial state and registers
   // its effect.
-  const initial = useStreams(imdbId, type, season, episode, title, null, indexers, debrid);
+  const initial = useStreams(
+    imdbId,
+    type,
+    season,
+    episode,
+    title,
+    null,
+    indexers,
+    debrid,
+    imdbIdPending,
+  );
   // Run the registered effect (kicks off the async run + returns teardown).
   const teardown = cell.effect ? cell.effect() : undefined;
   // Flush the microtask queue so the async `run` settles into setState.
   await flush();
   return {
+    initial,
     state: cell.state as StreamsState,
     cleanup: () => {
       if (typeof teardown === "function") teardown();
     },
   };
-  // `initial` intentionally unused beyond proving the first render didn't throw.
-  void initial;
 }
 
 /** Let pending promise chains settle. A few macrotask ticks cover the
@@ -206,6 +216,82 @@ describe("useStreams - idle / no-imdb / no-indexer guards", () => {
     expect(state.error).toBeNull();
     // hasIndexers still reflects the configured indexers even when idle.
     expect(state.hasIndexers).toBe(true);
+  });
+
+  it("keeps a pending IMDb id in loading state, then reports a settled missing id", async () => {
+    const search = vi.fn(async () => [torrent({ infoHash: "unexpected" })]);
+    const indexers = fakeIndexers({ active: ["jackett"], searchAll: search });
+
+    const pending = await renderStreams(
+      null,
+      "movie",
+      indexers,
+      null,
+      null,
+      null,
+      null,
+      true,
+    );
+    expect(pending.initial.loading).toBe(true);
+    expect(pending.state).toMatchObject({ loading: true, missingImdbId: false });
+    expect(search).not.toHaveBeenCalled();
+    pending.cleanup();
+
+    const settled = await renderStreams(null, "movie", indexers, null);
+    expect(settled.state).toMatchObject({ loading: false, missingImdbId: true });
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it("starts the search only after pending metadata supplies a valid IMDb id", async () => {
+    const search = vi.fn(async () => [] as TorrentResult[]);
+    const indexers = fakeIndexers({ active: ["jackett"], searchAll: search });
+
+    const pending = await renderStreams(
+      null,
+      "movie",
+      indexers,
+      null,
+      null,
+      null,
+      null,
+      true,
+    );
+    expect(search).not.toHaveBeenCalled();
+    pending.cleanup();
+
+    const ready = await renderStreams("tt123", "movie", indexers, null);
+    expect(search).toHaveBeenCalledOnce();
+    expect(search).toHaveBeenCalledWith(
+      "tt123",
+      "movie",
+      null,
+      null,
+      expect.any(AbortSignal),
+    );
+    expect(ready.state).toMatchObject({ loading: false, missingImdbId: false });
+  });
+
+  it("keeps the no-indexer gate idle while an IMDb id is pending", async () => {
+    const search = vi.fn(async () => [torrent({ infoHash: "unexpected" })]);
+    const indexers = fakeIndexers({ active: [], searchAll: search });
+    const { initial, state } = await renderStreams(
+      null,
+      "movie",
+      indexers,
+      null,
+      null,
+      null,
+      null,
+      true,
+    );
+
+    expect(initial.loading).toBe(false);
+    expect(state).toMatchObject({
+      loading: false,
+      hasIndexers: false,
+      missingImdbId: false,
+    });
+    expect(search).not.toHaveBeenCalled();
   });
 
   it("does NOT load when no indexers are configured (Local mode)", async () => {

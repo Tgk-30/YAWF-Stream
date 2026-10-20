@@ -18,6 +18,8 @@ public final class FlowPolicySelfTest {
         tests.put("webButtonDescription", FlowPolicyAssertions::legacyWebViewDescriptionButtonsRemainSupported);
         tests.put("webButtonIdentity", FlowPolicyAssertions::labeledWebButtonsRejectWrongIdentityShapeAndAffixes);
         tests.put("tourDismissalSettled", FlowPolicyAssertions::tourDismissalRequiresThreeConsecutiveAbsentSamples);
+        tests.put("settingsNavigationClosedAndAnchored", FlowPolicyAssertions::settingsNavigationRequiresClosedDrawerAndSettingsOnlyAnchor);
+        tests.put("settingsNavigationFirstRunBlocked", FlowPolicyAssertions::settingsNavigationFailsClosedWhenFirstRunReopens);
         tests.put("termsPolicy", FlowPolicyAssertions::bindingTermsAreRejectedButPrivacyNoticeIsAllowed);
         tests.put("exactNativeResult", FlowPolicyAssertions::nativeResultRequiresExactTitleAndMessage);
         tests.put("versionPins", FlowPolicyAssertions::channelVersionsArePinned);

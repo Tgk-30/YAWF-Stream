@@ -140,6 +140,12 @@ const shortLandscapeNavCss = shortLandscapeNavStart >= 0 && narrowNavStart > sho
 const narrowNavCss = narrowNavStart >= 0 && desktopBottomNavStart > narrowNavStart
   ? navCss.slice(narrowNavStart, desktopBottomNavStart)
   : "";
+const setupNudgeMobileStackCss = atRuleBlock(
+  setupNudgeCss,
+  "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {",
+);
+const setupNudgeBaseRule = ruleBlock(setupNudgeCss, ".setup-nudge");
+const setupNudgeMobileStackRule = ruleBlock(setupNudgeMobileStackCss, ".setup-nudge");
 const mobileNavRule = ruleBlock(mobileNavCss, ".nav-rail");
 const mobileNavFrostRule = ruleBlock(mobileNavCss, ".nav-rail::after");
 const mobileMoreScrimRule = ruleBlock(mobileNavCss, ".nav-rail-more-scrim");
@@ -251,6 +257,14 @@ check(
     /@media\s*\(max-width:\s*699px\)[\s\S]*\.browse\s*\{[\s\S]{0,220}inset:\s*0;/.test(browseCss) &&
     !/inset:\s*0\s+0\s+calc\(var\(--mobile-nav-height\)/.test(`${detailCss}\n${browseCss}`),
   "Detail.css and Browse.css must cover the entire phone viewport while NavRail is hidden.",
+);
+
+check(
+  "mobile setup reminder stays below the modal navigation stack",
+  /z-index:\s*40;/.test(setupNudgeBaseRule) &&
+    /z-index:\s*29;/.test(setupNudgeMobileStackRule) &&
+    /z-index:\s*30;/.test(mobileNavRule),
+  "SetupNudge.css must preserve desktop layer 40 but use layer 29 at the exact mobile NavRail breakpoint so the layer-30 More dialog remains modal.",
 );
 
 check(

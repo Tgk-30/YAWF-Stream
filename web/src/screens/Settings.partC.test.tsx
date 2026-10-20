@@ -16,7 +16,7 @@
 // Tauri is mocked TRUE so DesktopHostPanel renders (partA mocks it false).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { defaultSettings, type AppSettings } from "../data/settings";
 
@@ -24,7 +24,20 @@ import { defaultSettings, type AppSettings } from "../data/settings";
 
 let mockSettings: AppSettings = defaultSettings();
 let mockSimpleMode = false;
+let mockDeviceKind: "ios" | "android" | "mac" | "windows" | "linux" | "desktop" | "unknown" = "mac";
+let mockStandaloneDisplay = false;
+let mockAndroidAppUi = false;
 const updateSettings = vi.fn();
+
+vi.mock("../lib/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/platform")>()),
+  deviceKind: () => mockDeviceKind,
+  isStandaloneDisplay: () => mockStandaloneDisplay,
+}));
+
+vi.mock("../lib/androidExternalPlayer", () => ({
+  isAndroidAppUiContext: () => mockAndroidAppUi,
+}));
 
 vi.mock("../store/AppStore", () => ({
   useAppStore: () => ({
@@ -129,6 +142,9 @@ const statusBase = {
 beforeEach(() => {
   mockSettings = defaultSettings();
   mockSimpleMode = false;
+  mockDeviceKind = "mac";
+  mockStandaloneDisplay = false;
+  mockAndroidAppUi = false;
   mockIsTauri = true;
   mockIsDesktopTauri = true;
   mockServerURL = null;
@@ -407,6 +423,67 @@ describe("Settings · Updates", () => {
 // ============================================================================
 
 describe("Settings · Install (setup paths)", () => {
+  it("shows installed update guidance instead of browser installation inside the Android app", async () => {
+    const user = userEvent.setup();
+    mockDeviceKind = "android";
+    mockAndroidAppUi = true;
+    // The canonical UI-context helper also covers a remote app document where
+    // local-only Tauri IPC is absent.
+    mockIsTauri = false;
+    mockIsDesktopTauri = false;
+    renderAt("install");
+
+    expect(screen.getByText("Android app installed")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "YAWF Stream is installed. Open Help & updates to check for signed Android updates.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Install on Android")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Use the browser install prompt when available, or Install app from Chrome or Edge.",
+      ),
+    ).not.toBeInTheDocument();
+
+    const prompt = vi.fn(async () => {});
+    const event = new Event("beforeinstallprompt") as Event & {
+      prompt: typeof prompt;
+      userChoice: Promise<{ outcome: "accepted"; platform: string }>;
+    };
+    event.prompt = prompt;
+    event.userChoice = Promise.resolve({ outcome: "accepted", platform: "web" });
+    act(() => fireEvent(window, event));
+    expect(screen.queryByRole("button", { name: "Install app" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Open Help & updates" }));
+    expect(document.querySelector('button[data-tab="updates"]')).toHaveClass("is-active");
+  });
+
+  it("keeps Android browser installation guidance and its captured PWA action", async () => {
+    mockDeviceKind = "android";
+    mockAndroidAppUi = false;
+    mockIsTauri = false;
+    mockIsDesktopTauri = false;
+    renderAt("install");
+
+    expect(screen.getAllByText("Install on Android")).toHaveLength(3);
+    expect(
+      screen.getByText(
+        "Use the browser install prompt when available, or Install app from Chrome or Edge.",
+      ),
+    ).toBeInTheDocument();
+
+    const event = new Event("beforeinstallprompt") as Event & {
+      prompt: () => Promise<void>;
+      userChoice: Promise<{ outcome: "accepted"; platform: string }>;
+    };
+    event.prompt = vi.fn(async () => {});
+    event.userChoice = Promise.resolve({ outcome: "accepted", platform: "web" });
+    act(() => fireEvent(window, event));
+    expect(await screen.findByRole("button", { name: "Install app" })).toBeInTheDocument();
+  });
+
   it("defaults to the device path and switches through every setup path", async () => {
     const user = userEvent.setup();
     renderAt("install");

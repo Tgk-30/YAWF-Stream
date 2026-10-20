@@ -54,6 +54,16 @@ public final class FlowPolicyTest {
     }
 
     @Test
+    public void settingsNavigationRequiresClosedDrawerAndSettingsOnlyAnchor() {
+        FlowPolicyAssertions.settingsNavigationRequiresClosedDrawerAndSettingsOnlyAnchor();
+    }
+
+    @Test
+    public void settingsNavigationFailsClosedWhenFirstRunReopens() {
+        FlowPolicyAssertions.settingsNavigationFailsClosedWhenFirstRunReopens();
+    }
+
+    @Test
     public void bindingTermsAreRejectedButPrivacyNoticeIsAllowed() {
         FlowPolicyAssertions.bindingTermsAreRejectedButPrivacyNoticeIsAllowed();
     }

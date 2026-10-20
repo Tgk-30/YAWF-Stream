@@ -16,14 +16,61 @@ export function assertMacMediaBuildTools(source) {
 test("clean native runners install explicit build tools without media libraries", () => assertMacMediaBuildTools(producer));
 
 test("one freshly admitted content-addressed source archive feeds both native jobs", () => {
-  assert.match(producer, /jobs:\n  source:/);
+  assert.match(producer, /jobs:[\s\S]*\n  source:/);
   assert.match(producer, /name: macos-media-corresponding-source/g);
   assert.match(producer, /needs: source/);
   assert.match(producer, /EXPECTED_SOURCE_SHA256: \$\{\{ needs\.source\.outputs\.archive_sha256 \}\}/);
   assert.match(producer, /EXPECTED_SOURCE_FILE: \$\{\{ needs\.source\.outputs\.archive_file \}\}/);
-  assert.match(producer, /run-id: \$\{\{ env\.SOURCE_RUN_ID \}\}/);
+  assertDurableSourceTransport(producer);
   assert.match(producer, /actions: read/);
   assert.doesNotMatch(producer, /buildMacosMediaRuntime|build_macos_media_runtime\.mjs/);
+});
+
+export function assertDurableSourceTransport(source) {
+  const metadata = source.indexOf('gh api "repos/Tgk-30/YAWF-Stream/releases/$SOURCE_RELEASE_ID"');
+  const validate = source.indexOf('--verify-source-transport-metadata "$transport/source-transport-metadata.json"');
+  const asset = source.indexOf('gh api "repos/Tgk-30/YAWF-Stream/releases/assets/$SOURCE_ASSET_ID"');
+  const prepare = source.indexOf('--prepare-source');
+  assert.ok(metadata >= 0 && asset > metadata && validate > asset && prepare > validate,
+    "retrieved release metadata must be verified before source preparation");
+  assert.match(source, /SOURCE_RELEASE_ID: "417897650"/);
+  assert.match(source, /SOURCE_ASSET_ID: "657879542"/);
+  assert.match(source, /--source-transport-metadata "\$RUNNER_TEMP\/source-transport\/source-transport-metadata\.json"/);
+  assert.doesNotMatch(source.slice(0, source.indexOf("  build:")), /SOURCE_RUN_ID|run-id:/);
+  assertPrivateTransportIsolation(source);
+}
+
+export function assertPrivateTransportIsolation(source) {
+  const transport = source.slice(source.indexOf("  transport:"), source.indexOf("  source:"));
+  const preparation = source.slice(source.indexOf("  source:"), source.indexOf("  build:"));
+  assert.match(transport, /if: github\.event_name != 'pull_request'/);
+  assert.match(transport, /permissions:\n\s+contents: write/);
+  assert.doesNotMatch(transport, /actions\/checkout|python|node |scripts\//);
+  assert.match(preparation, /needs: transport/);
+  assert.match(preparation, /persist-credentials: false/);
+  assert.doesNotMatch(preparation, /GH_TOKEN|contents: write|gh api/);
+}
+
+test("durable source transport rejects bypassed validation and expiring seed retrieval", () => {
+  assertDurableSourceTransport(producer);
+  assert.throws(() => assertDurableSourceTransport(producer.replace(
+    '--verify-source-transport-metadata "$transport/source-transport-metadata.json"',
+    '--unverified-metadata "$transport/source-transport-metadata.json"',
+  )));
+  assert.throws(() => assertDurableSourceTransport(producer.replace(
+    '      SOURCE_ASSET_ID: "657879542"',
+    '      SOURCE_RUN_ID: "39304293958"',
+  )));
+});
+
+test("private draft access never grants a write token to pull requests or project code", () => {
+  assertPrivateTransportIsolation(producer);
+  for (const [before, after] of [
+    ["if: github.event_name != 'pull_request'", "if: always()"],
+    ["name: Retrieve only the fixed draft asset and metadata", "uses: actions/checkout@v4"],
+    ["persist-credentials: false", "persist-credentials: true"],
+    ["name: Validate the exact pinned durable source transport", "name: Run\n        env:\n          GH_TOKEN: token"],
+  ]) assert.throws(() => assertPrivateTransportIsolation(producer.replace(before, after)));
 });
 
 test("both native architectures use the independent confined shipping producer", () => {
@@ -65,7 +112,7 @@ test("existing release transport and post-transport smoke stay compatible", () =
 test("native builds retain a finite budget and bounded evidence", () => {
   const timeout = /^    timeout-minutes: (\d+)$/gm;
   const values = [...producer.matchAll(timeout)].map((match) => Number(match[1]));
-  assert.deepEqual(values, [30, 120]);
+  assert.deepEqual(values, [10, 30, 120]);
   assert.match(producer, /Retain bounded runtime failure or success evidence/);
   assert.doesNotMatch(producer, /owned-output\/replay-\$\{\{ matrix\.arch \}\}-macos11\/install/);
 });
