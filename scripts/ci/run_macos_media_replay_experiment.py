@@ -23,7 +23,7 @@ MAX_OUTER_MEMBERS = 512
 MAX_OUTER_BYTES = 2 * 1024 * 1024 * 1024
 FORBIDDEN_ENV_PREFIXES = ("DYLD_", "PYTHON")
 FORBIDDEN_ENV_NAMES = {"NODE_OPTIONS", "NODE_PATH", "NPM_CONFIG_PREFIX", "LD_LIBRARY_PATH"}
-XCODE_TOOL_NAMES = ("clang", "clang++", "ar", "ranlib", "nm", "strip", "make", "metal", "metallib")
+XCODE_TOOL_NAMES = ("clang", "clang++", "ar", "ranlib", "nm", "strip", "make", "metal", "metallib", "python3")
 PATH_TOOL_NAMES = ("pkg-config", "meson", "ninja")
 XCRUN_TIMEOUT_SECONDS = 60
 
@@ -426,9 +426,9 @@ def run_checked(command: list[str], *, environment: dict[str, str], log: Path | 
         raise ReplayError(f"confined command failed with status {result.returncode}: {command[0]}\n{output[-2000:]}")
 
 
-def sandbox_command(profile: Path, environment: dict[str, str], wrapper: Path, arguments: list[str]) -> list[str]:
+def sandbox_command(profile: Path, environment: dict[str, str], python: Path, wrapper: Path, arguments: list[str]) -> list[str]:
     assignments = [f"{key}={value}" for key, value in environment.items()]
-    return ["/usr/bin/sandbox-exec", "-f", str(profile), "/usr/bin/env", "-i", *assignments, "/usr/bin/python3", "-I", "-B", str(wrapper), *arguments]
+    return ["/usr/bin/sandbox-exec", "-f", str(profile), "/usr/bin/env", "-i", *assignments, str(python), "-I", "-B", str(wrapper), *arguments]
 
 
 def internal_canary(args: argparse.Namespace) -> None:
@@ -511,8 +511,8 @@ def internal_postbuild(args: argparse.Namespace) -> None:
     })
 
 
-def invoke_sandbox(profile: Path, environment: dict[str, str], wrapper: Path, arguments: list[str], log: Path) -> None:
-    run_checked(sandbox_command(profile, environment, wrapper, arguments), environment={}, log=log)
+def invoke_sandbox(profile: Path, environment: dict[str, str], python: Path, wrapper: Path, arguments: list[str], log: Path) -> None:
+    run_checked(sandbox_command(profile, environment, python, wrapper, arguments), environment={}, log=log)
 
 
 def main_run(args: argparse.Namespace) -> None:
@@ -583,6 +583,7 @@ def main_run(args: argparse.Namespace) -> None:
     tool_selection = discover_tool_selection(Path(args.developer_dir), args.tool_path, trusted_init_environment)
     write_json(receipts / "05-toolchain-selection.json", tool_selection)
     selected_sdk = tool_selection["sdk"]["selectedPath"]
+    selected_python = Path(tool_selection["tools"]["python3"]["realPath"])
 
     child = output / "replay-arm64-macos11"
     xcrun_wrapper_root = workspace / "tool-wrappers"
@@ -612,7 +613,7 @@ def main_run(args: argparse.Namespace) -> None:
     canary_profile = workspace / "canary.sb"
     canary_profile.write_text(sandbox_profile(canary_child))
     canary_environment = clean_environment(canary_child, environment["PATH"], args.developer_dir)
-    invoke_sandbox(canary_profile, canary_environment, wrapper, ["--internal-canary", "--output-root", str(canary_child), "--outside-root", str(output), "--port", str(port)], trusted_logs / "canary.log")
+    invoke_sandbox(canary_profile, canary_environment, selected_python, wrapper, ["--internal-canary", "--output-root", str(canary_child), "--outside-root", str(output), "--port", str(port)], trusted_logs / "canary.log")
     server.close()
     canary = load_json(canary_child / "CONFINEMENT-CANARY.json")
     if not all(canary.values()) or sibling_sentinel.read_text() != "sandbox-sibling-sentinel\n":
@@ -642,7 +643,7 @@ def main_run(args: argparse.Namespace) -> None:
     if toolchain_probe.get("result") != "pass" or toolchain_probe.get("shimDenialsObserved") is not False:
         raise ReplayError("toolchain probe receipt did not record a clean pass")
     if not args.probe_only:
-        invoke_sandbox(build_profile, environment, wrapper, [
+        invoke_sandbox(build_profile, environment, selected_python, wrapper, [
             "--internal-postbuild", "--output-root", str(output), "--source-root", str(source_root),
             "--project-root", str(project), "--controller-root", str(controller), "--node", str(args.node),
             "--tool-path", environment["PATH"], "--jobs", str(args.jobs),

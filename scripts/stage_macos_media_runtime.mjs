@@ -2,7 +2,7 @@
 // Relocate only verified source-built media inputs. Signing is performed after
 // relocation; deployment minima are compared, never rewritten.
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compareMacosVersions, parseOtoolMinimum } from "./check_macos_bundle_minimum.mjs";
@@ -42,13 +42,39 @@ export function rpaths(output) {
     .map((path) => { if (!path) throw new Error("Malformed LC_RPATH"); return path; });
 }
 
-export function stageMediaRuntime({ prefix: prefixInput, output: outputInput, arch, run = tool, sign = true }) {
+function requiredSelection(prefix, requiredOutputs) {
+  if (requiredOutputs === undefined) return null;
+  if (!Array.isArray(requiredOutputs) || requiredOutputs.length !== 57 || new Set(requiredOutputs).size !== 57) {
+    throw new Error("Required runtime contract must contain 57 unique files");
+  }
+  const libraries = new Map();
+  const programs = new Map();
+  for (const relativePath of requiredOutputs) {
+    if (typeof relativePath !== "string" || !/^(lib\/[^/]+\.dylib|bin\/(ffmpeg|ffprobe))$/.test(relativePath)) {
+      throw new Error("Required runtime contract contains an unsupported path");
+    }
+    const source = join(prefix, relativePath);
+    if (!existsSync(source)) throw new Error(`Required runtime input is missing: ${relativePath}`);
+    const metadata = lstatSync(source);
+    if (metadata.isSymbolicLink() || !metadata.isFile()) throw new Error(`Required runtime input is not a canonical regular file: ${relativePath}`);
+    const canonical = realpathSync(source);
+    if (!within(prefix, canonical)) throw new Error(`Required runtime input escapes source prefix: ${relativePath}`);
+    (relativePath.startsWith("lib/") ? libraries : programs).set(basename(relativePath), canonical);
+  }
+  if (libraries.size !== 55 || programs.size !== 2 || !programs.has("ffmpeg") || !programs.has("ffprobe")) {
+    throw new Error("Required runtime contract must select 55 libraries, ffmpeg, and ffprobe");
+  }
+  return { libraries, programs };
+}
+
+export function stageMediaRuntime({ prefix: prefixInput, output: outputInput, arch, requiredOutputs, run = tool, sign = true }) {
   if (!["arm64", "x86_64"].includes(arch)) throw new Error("Expected native arm64 or x86_64 architecture");
   const prefix = realpathSync(resolve(prefixInput));
   const output = canonicalDestination(outputInput);
   if (within(prefix, output) || within(output, prefix)) throw new Error("Output and source prefix must be separate trees");
   if (existsSync(output)) throw new Error("Output must not already exist; no existing files will be removed");
   const lib = join(prefix, "lib");
+  const selected = requiredSelection(prefix, requiredOutputs);
   const aliases = new Map();
   const inputs = new Map();
   for (const name of readdirSync(lib).filter((name) => name.endsWith(".dylib"))) {
@@ -59,9 +85,11 @@ export function stageMediaRuntime({ prefix: prefixInput, output: outputInput, ar
     inputs.set(canonical, path);
   }
   const mpv = aliases.get("libmpv.2.dylib");
-  if (!mpv) throw new Error("Source prefix is missing libmpv.2.dylib");
-  const plan = [...inputs].map(([name, source]) => ({ name, source, library: true }));
-  for (const name of ["ffmpeg", "ffprobe"]) plan.push({ name, source: join(prefix, "bin", name), library: false });
+  if (!mpv || (selected && !selected.libraries.has(mpv))) throw new Error("Required runtime is missing libmpv.2.dylib");
+  const plannedLibraries = selected?.libraries ?? inputs;
+  const plan = [...plannedLibraries].map(([name, source]) => ({ name, source, library: true }));
+  const plannedPrograms = selected?.programs ?? new Map(["ffmpeg", "ffprobe"].map((name) => [name, join(prefix, "bin", name)]));
+  for (const [name, source] of plannedPrograms) plan.push({ name, source, library: false });
 
   // Complete admission before copying or signing any file.
   for (const item of plan) {
@@ -83,6 +111,7 @@ export function stageMediaRuntime({ prefix: prefixInput, output: outputInput, ar
       }
       const target = aliases.get(basename(dependency));
       if (!target) throw new Error(`Unresolved media dependency: ${item.name} -> ${basename(dependency)}`);
+      if (selected && !selected.libraries.has(target)) throw new Error(`Required runtime contract omits dependency: ${item.name} -> ${target}`);
       item.changes.push([dependency, `${item.library ? "@loader_path" : "@loader_path/../../../../Frameworks"}/${target}`]);
     }
   }
@@ -114,9 +143,15 @@ export function stageMediaRuntime({ prefix: prefixInput, output: outputInput, ar
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
-    const [prefix, output, arch] = process.argv.slice(2);
-    if (!prefix || !output || !arch || process.argv.length !== 5) throw new Error("Usage: node scripts/stage_macos_media_runtime.mjs <install-prefix> <new-output> <arm64|x86_64>");
-    const result = stageMediaRuntime({ prefix, output, arch });
+    const [prefix, output, arch, requiredContract] = process.argv.slice(2);
+    if (!prefix || !output || !arch || ![5, 6].includes(process.argv.length)) throw new Error("Usage: node scripts/stage_macos_media_runtime.mjs <install-prefix> <new-output> <arm64|x86_64> [required-runtime-outputs.json]");
+    let requiredOutputs;
+    if (requiredContract) {
+      const contract = JSON.parse(readFileSync(requiredContract, "utf8"));
+      if (contract?.schemaVersion !== 1) throw new Error("Required runtime contract has an unsupported schema");
+      requiredOutputs = contract.outputs;
+    }
+    const result = stageMediaRuntime({ prefix, output, arch, requiredOutputs });
     console.log(`Staged ${result.files.length} source-built media files for ${result.arch}; original minima preserved`);
   } catch (error) {
     console.error(error.message);

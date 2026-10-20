@@ -26,6 +26,19 @@ CONTROLLER = PROJECT / "scripts/macos-media-replay"
 PINS = CONTROLLER / "shipping-source-pins.json"
 TARGET = "11.0"
 VALID_ARCHES = {"arm64", "x86_64"}
+DURABLE_RELEASE_PIN = {
+    "repository": "Tgk-30/YAWF-Stream",
+    "releaseId": 417897650,
+    "tag": "media-source-seed-20261019",
+    "draft": True,
+    "targetCommitish": "163c6d3d52ed5b537099deffbb6fa655f437d200",
+    "asset": {
+        "id": 657879542,
+        "name": "macos-media-runtime-arm64.tar.gz",
+        "size": 481020410,
+        "digest": "sha256:11af8849872ae1c302b6a5fb6ba823e369648be3e9597c1ba2c5150e7a9f4d50",
+    },
+}
 
 
 class ProductionError(RuntimeError):
@@ -58,19 +71,82 @@ def pinned_source() -> dict:
     if pins.get("schemaVersion") != 1:
         raise ProductionError("shipping source pins have an unsupported schema")
     artifact = pins.get("artifact", {})
+    durable = pins.get("durableRelease")
     source = pins.get("source", {})
     if artifact.get("repository") != "Tgk-30/YAWF-Stream" or artifact.get("runId") != "39304293958" or artifact.get("name") != "macos-media-runtime-arm64":
         raise ProductionError("shipping source transport is not exactly pinned")
+    if durable != DURABLE_RELEASE_PIN:
+        raise ProductionError("durable shipping source release is not exactly pinned")
     for value in (artifact.get("outerSha256"), source.get("sha256")):
         if not isinstance(value, str) or len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
             raise ProductionError("shipping source digest is invalid")
     safe_relative(artifact.get("outerFile", ""), "outer source file")
     safe_relative(source.get("member", ""), "inner source member")
+    if artifact.get("outerFile") != durable["asset"]["name"] or artifact.get("outerSha256") != durable["asset"]["digest"].removeprefix("sha256:"):
+        raise ProductionError("historical and durable source transport pins disagree")
     return pins
 
 
-def prepare_source(candidate_dir: Path, output_dir: Path) -> dict:
+def validate_source_transport_metadata(metadata: object, pins: dict) -> dict:
+    if not isinstance(metadata, dict):
+        raise ProductionError("source transport release metadata is not an object")
+    durable = pins["durableRelease"]
+    repository = durable["repository"]
+    release_id = durable["releaseId"]
+    release_url = f"https://api.github.com/repos/{repository}/releases/{release_id}"
+    if metadata.get("url") != release_url or metadata.get("assets_url") != f"{release_url}/assets":
+        raise ProductionError("source transport release metadata has the wrong repository or release")
+    if metadata.get("id") != release_id or metadata.get("tag_name") != durable["tag"]:
+        raise ProductionError("source transport release identity differs from its pin")
+    if metadata.get("draft") is not durable["draft"] or metadata.get("target_commitish") != durable["targetCommitish"]:
+        raise ProductionError("source transport release state or target differs from its pin")
+    assets = metadata.get("assets")
+    if not isinstance(assets, list) or not all(isinstance(asset, dict) for asset in assets):
+        raise ProductionError("source transport release assets are malformed")
+    expected = durable["asset"]
+    id_matches = [asset for asset in assets if asset.get("id") == expected["id"]]
+    name_matches = [asset for asset in assets if asset.get("name") == expected["name"]]
+    if len(id_matches) != 1 or len(name_matches) != 1 or id_matches[0] is not name_matches[0]:
+        raise ProductionError("source transport release does not contain exactly one pinned asset")
+    asset = id_matches[0]
+    expected_asset_url = f"https://api.github.com/repos/{repository}/releases/assets/{expected['id']}"
+    if asset.get("url") != expected_asset_url or asset.get("state") != "uploaded":
+        raise ProductionError("source transport asset state or repository differs from its pin")
+    if any(asset.get(key) != expected[key] for key in ("id", "name", "size", "digest")):
+        raise ProductionError("source transport asset metadata differs from its pin")
+    return {
+        "repository": repository,
+        "releaseId": release_id,
+        "tag": durable["tag"],
+        "draft": durable["draft"],
+        "targetCommitish": durable["targetCommitish"],
+        "asset": dict(expected),
+    }
+
+
+def verify_source_transport_metadata_file(metadata_path: Path, pins: dict = None) -> dict:
+    if metadata_path.is_symlink() or not metadata_path.is_file():
+        raise ProductionError("source transport release metadata file is missing or aliased")
+    return validate_source_transport_metadata(load(metadata_path), pins if pins is not None else pinned_source())
+
+
+def verify_source_transport_files(candidate_dir: Path, metadata_path: Path, pins: dict) -> dict:
+    verified = verify_source_transport_metadata_file(metadata_path, pins)
+    candidate = candidate_dir.resolve(strict=True)
+    asset = pins["durableRelease"]["asset"]
+    outer = candidate / asset["name"]
+    if outer.is_symlink() or not outer.is_file():
+        raise ProductionError("downloaded durable source transport is missing or aliased")
+    if outer.stat().st_size != asset["size"]:
+        raise ProductionError("downloaded durable source transport size differs from its pin")
+    if digest(outer) != asset["digest"].removeprefix("sha256:"):
+        raise ProductionError("downloaded durable source transport digest differs from its pin")
+    return verified
+
+
+def prepare_source(candidate_dir: Path, output_dir: Path, metadata_path: Path) -> dict:
     pins = pinned_source()
+    release = verify_source_transport_files(candidate_dir, metadata_path, pins)
     candidate = candidate_dir.resolve(strict=True)
     output = output_dir.resolve()
     if output.exists():
@@ -80,6 +156,7 @@ def prepare_source(candidate_dir: Path, output_dir: Path) -> dict:
         output.mkdir(parents=True)
     seed = output / "source-seed.tar.gz"
     transport = replay.extract_pinned_source(candidate, seed, pins)
+    transport["durableRelease"] = release
     temporary = output / "normalized-source.pending.tar.gz"
     normalizer = subprocess.run([
         "/usr/bin/python3", "-I", "-B", str(CONTROLLER / "normalize_source_archive.py"),
@@ -219,6 +296,17 @@ def run_phase(command: list[str], environment: dict[str, str], log: Path) -> Non
     replay.run_checked(command, environment=environment, log=log)
 
 
+def shipping_stage_command(node: Path, source_root: Path, prefix: Path, stage: Path, arch: str) -> list[str]:
+    return [
+        str(node),
+        str(source_root / "replay-support/scripts/stage_macos_media_runtime.mjs"),
+        str(prefix),
+        str(stage),
+        arch,
+        str(source_root / "replay-controls/required-runtime-outputs.json"),
+    ]
+
+
 def internal_postbuild(args: argparse.Namespace) -> None:
     replay.ensure_clean_process_environment(dict(os.environ))
     output = args.output_root.resolve(strict=True)
@@ -235,7 +323,7 @@ def internal_postbuild(args: argparse.Namespace) -> None:
     logs.mkdir(exist_ok=True)
     stage = child / "media-candidate"
     support = source_root / "replay-support/scripts"
-    run_phase([str(node), str(support / "stage_macos_media_runtime.mjs"), str(prefix), str(stage), arch], dict(os.environ), logs / "stage.log")
+    run_phase(shipping_stage_command(node, source_root, prefix, stage, arch), dict(os.environ), logs / "stage.log")
     shipping = validate_prefix_and_stage(source_root, prefix, stage)
 
     fixture = child / "minimum-fixture/ReplayMinimum.app/Contents"
@@ -319,6 +407,7 @@ def build_runtime(source_dir: Path, workspace_input: Path, arch: str, jobs: int,
         Path(init_env[key]).mkdir(parents=True, exist_ok=True)
     replay.run_checked([str(node_input), str(controller), "init", "--output-root", str(output)], environment=init_env, log=logs / "init.log")
     tools = replay.discover_tool_selection(Path(developer_dir), tool_path, init_env)
+    selected_python = Path(tools["tools"]["python3"]["realPath"])
     child = output / f"replay-{arch}-macos11"
     wrappers = workspace / "tool-wrappers"
     wrappers.mkdir()
@@ -342,7 +431,7 @@ def build_runtime(source_dir: Path, workspace_input: Path, arch: str, jobs: int,
     canary_profile = workspace / "canary.sb"; canary_profile.write_text(replay.sandbox_profile(canary_child))
     canary_env = replay.clean_environment(canary_child, environment["PATH"], developer_dir)
     bundled_wrapper = bundled / "produce_macos_media_runtime.py"
-    replay.invoke_sandbox(canary_profile, canary_env, bundled_wrapper, ["--internal-canary", "--output-root", str(canary_child), "--outside-root", str(output), "--port", str(port)], logs / "canary.log")
+    replay.invoke_sandbox(canary_profile, canary_env, selected_python, bundled_wrapper, ["--internal-canary", "--output-root", str(canary_child), "--outside-root", str(output), "--port", str(port)], logs / "canary.log")
     server.close()
     canary = load(canary_child / "CONFINEMENT-CANARY.json")
     if not all(canary.values()):
@@ -357,7 +446,7 @@ def build_runtime(source_dir: Path, workspace_input: Path, arch: str, jobs: int,
     ]
     replay.run_checked(build, environment={}, log=logs / "controller-build.log")
     write_json(child / "CONFINEMENT.json", {"sameProfileNetworkDenied": canary["tcpConnectDenied"], "sameProfileOutsideWriteDenied": all(canary[key] for key in ("outsideWriteDenied", "symlinkEscapeWriteDenied", "spawnedOutsideWriteDenied")), "sandboxProfileSha256": digest(profile)})
-    replay.invoke_sandbox(profile, environment, bundled_wrapper, [
+    replay.invoke_sandbox(profile, environment, selected_python, bundled_wrapper, [
         "--internal-postbuild", "--output-root", str(output), "--source-root", str(source_root), "--source-archive", str(archive),
         "--arch", arch, "--node", str(node_input),
     ], logs / "postbuild.log")
@@ -374,9 +463,11 @@ def parser() -> argparse.ArgumentParser:
     modes = value.add_mutually_exclusive_group(required=True)
     modes.add_argument("--prepare-source", action="store_true")
     modes.add_argument("--build", action="store_true")
+    modes.add_argument("--verify-source-transport-metadata", type=Path, metavar="JSON")
     modes.add_argument("--internal-canary", action="store_true", help=argparse.SUPPRESS)
     modes.add_argument("--internal-postbuild", action="store_true", help=argparse.SUPPRESS)
     value.add_argument("--candidate-dir", type=Path)
+    value.add_argument("--source-transport-metadata", type=Path)
     value.add_argument("--output-dir", type=Path)
     value.add_argument("--source-dir", type=Path)
     value.add_argument("--source-root", type=Path)
@@ -402,10 +493,13 @@ def main() -> None:
         if not all((args.output_root, args.source_root, args.source_archive, args.arch, args.node)):
             raise ProductionError("internal postbuild arguments are incomplete")
         internal_postbuild(args); return
-    if args.prepare_source:
-        if not args.candidate_dir or not args.output_dir:
-            raise ProductionError("source preparation requires candidate and output directories")
-        result = prepare_source(args.candidate_dir, args.output_dir)
+    if args.verify_source_transport_metadata:
+        result = verify_source_transport_metadata_file(args.verify_source_transport_metadata)
+        outputs = {}
+    elif args.prepare_source:
+        if not args.candidate_dir or not args.output_dir or not args.source_transport_metadata:
+            raise ProductionError("source preparation requires candidate, metadata, and output paths")
+        result = prepare_source(args.candidate_dir, args.output_dir, args.source_transport_metadata)
         outputs = {"archive_sha256": result["archiveSha256"], "archive_file": result["archiveFile"]}
     else:
         if not all((args.source_dir, args.workspace, args.arch, args.node, args.tool_path, args.developer_dir)):

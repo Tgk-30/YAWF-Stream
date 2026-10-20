@@ -21,9 +21,34 @@ test("one freshly admitted content-addressed source archive feeds both native jo
   assert.match(producer, /needs: source/);
   assert.match(producer, /EXPECTED_SOURCE_SHA256: \$\{\{ needs\.source\.outputs\.archive_sha256 \}\}/);
   assert.match(producer, /EXPECTED_SOURCE_FILE: \$\{\{ needs\.source\.outputs\.archive_file \}\}/);
-  assert.match(producer, /run-id: \$\{\{ env\.SOURCE_RUN_ID \}\}/);
+  assertDurableSourceTransport(producer);
   assert.match(producer, /actions: read/);
   assert.doesNotMatch(producer, /buildMacosMediaRuntime|build_macos_media_runtime\.mjs/);
+});
+
+export function assertDurableSourceTransport(source) {
+  const metadata = source.indexOf('gh api "repos/Tgk-30/YAWF-Stream/releases/$SOURCE_RELEASE_ID"');
+  const validate = source.indexOf('--verify-source-transport-metadata "$transport/source-transport-metadata.json"');
+  const asset = source.indexOf('gh api "repos/Tgk-30/YAWF-Stream/releases/assets/$SOURCE_ASSET_ID"');
+  const prepare = source.indexOf('--prepare-source');
+  assert.ok(metadata >= 0 && validate > metadata && asset > validate && prepare > asset,
+    "release metadata must be verified before asset retrieval and preparation");
+  assert.match(source, /SOURCE_RELEASE_ID: "417897650"/);
+  assert.match(source, /SOURCE_ASSET_ID: "657879542"/);
+  assert.match(source, /--source-transport-metadata "\$RUNNER_TEMP\/source-transport\/source-transport-metadata\.json"/);
+  assert.doesNotMatch(source.slice(0, source.indexOf("  build:")), /actions\/download-artifact|SOURCE_RUN_ID|run-id:/);
+}
+
+test("durable source transport rejects bypassed validation and expiring seed retrieval", () => {
+  assertDurableSourceTransport(producer);
+  assert.throws(() => assertDurableSourceTransport(producer.replace(
+    '--verify-source-transport-metadata "$transport/source-transport-metadata.json"',
+    '--unverified-metadata "$transport/source-transport-metadata.json"',
+  )));
+  assert.throws(() => assertDurableSourceTransport(producer.replace(
+    '      - name: Download the exact pinned durable source transport',
+    '      - uses: actions/download-artifact@v4\n      - name: Download the exact pinned durable source transport',
+  )));
 });
 
 test("both native architectures use the independent confined shipping producer", () => {

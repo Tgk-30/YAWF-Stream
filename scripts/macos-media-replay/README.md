@@ -77,6 +77,10 @@ ARM and Intel replay results must be recorded separately.
 
 `scripts/ci/produce_macos_media_runtime.py` first creates one content-addressed
 normalized archive from the exact transport pinned by `shipping-source-pins.json`.
+The transport is retained in a dedicated unpublished source-seed release, not an
+expiring Actions artifact. Release and asset IDs, repository, draft state, target,
+size and SHA-256 are verified before preparation. Historical Actions provenance
+is retained but is never used as a fallback download.
 Both native architecture jobs consume those same bytes. The producer safely
 admits the archive, executes the controller bundled inside it, and derives the
 only staging prefix as `replay-<arch>-macos11/install/<arch>` inside a new marked

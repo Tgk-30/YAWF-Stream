@@ -48,6 +48,19 @@ function fixture() {
   return { root, prefix, output, metadata, calls, run, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
+function addLibrary(fixtureValue, name) {
+  const path = join(fixtureValue.prefix, "lib", name);
+  writeFileSync(path, `original:lib/${name}`);
+  fixtureValue.metadata.set(path, { minimum: "11.0", arch: "arm64", id: path, deps: [], rpaths: [] });
+  return `lib/${name}`;
+}
+
+function shippingOutputs(fixtureValue) {
+  const libraries = ["lib/libmpv.2.dylib", "lib/libcodec.1.2.dylib", "lib/libmujs.dylib"];
+  for (let index = 0; index < 52; index += 1) libraries.push(addLibrary(fixtureValue, `librequired-${String(index).padStart(2, "0")}.1.dylib`));
+  return [...libraries, "bin/ffmpeg", "bin/ffprobe"];
+}
+
 test("relocation resolves versioned aliases and MuJS without changing input bytes/minima", () => {
   const f = fixture();
   try {
@@ -73,6 +86,63 @@ test("relocation resolves versioned aliases and MuJS without changing input byte
     assert.equal(JSON.stringify(result).includes(f.root), false);
     assert.equal(JSON.stringify(result).includes("$PREFIX/lib/libcodec.1.dylib"), true);
   } finally { f.cleanup(); }
+});
+
+test("shipping contract stages exactly 55 canonical libraries and two programs while excluding observed prefix extras", () => {
+  const f = fixture();
+  try {
+    const requiredOutputs = shippingOutputs(f);
+    addLibrary(f, "libsoxr-lsr.0.1.9.dylib");
+    addLibrary(f, "libturbojpeg.0.4.0.dylib");
+    symlinkSync("libsoxr-lsr.0.1.9.dylib", join(f.prefix, "lib/libsoxr-lsr.dylib"));
+    symlinkSync("libturbojpeg.0.4.0.dylib", join(f.prefix, "lib/libturbojpeg.dylib"));
+
+    const result = stageMediaRuntime({ ...f, arch: "arm64", requiredOutputs });
+
+    assert.equal(result.files.length, 57);
+    assert.equal(existsSync(join(f.output, "Frameworks/libsoxr-lsr.0.1.9.dylib")), false);
+    assert.equal(existsSync(join(f.output, "Frameworks/libturbojpeg.0.4.0.dylib")), false);
+    assert.equal(existsSync(join(f.output, "Frameworks/librequired-51.1.dylib")), true);
+    assert.equal(existsSync(join(f.output, "ffmpeg/ffmpeg")), true);
+    assert.equal(existsSync(join(f.output, "ffmpeg/ffprobe")), true);
+  } finally { f.cleanup(); }
+});
+
+test("shipping contract rejects a selected dependency omitted from its 55 libraries before output", () => {
+  const f = fixture();
+  try {
+    const requiredOutputs = shippingOutputs(f);
+    const codec = requiredOutputs.indexOf("lib/libcodec.1.2.dylib");
+    requiredOutputs[codec] = addLibrary(f, "libreplacement.1.dylib");
+    assert.throws(
+      () => stageMediaRuntime({ ...f, arch: "arm64", requiredOutputs }),
+      /contract omits dependency: libmpv\.2\.dylib -> libcodec\.1\.2\.dylib/,
+    );
+    assert.equal(existsSync(f.output), false);
+    assert.equal(f.calls.some(([command]) => command === "install_name_tool" || command === "codesign"), false);
+  } finally { f.cleanup(); }
+});
+
+test("shipping contract rejects missing, nonregular, and aliased required canonical inputs before output", () => {
+  for (const mode of ["missing", "nonregular", "aliased"]) {
+    const f = fixture();
+    try {
+      const requiredOutputs = shippingOutputs(f);
+      if (mode === "missing") requiredOutputs[3] = "lib/libmissing.1.dylib";
+      if (mode === "nonregular") {
+        mkdirSync(join(f.prefix, "lib/libdirectory.dylib"));
+        requiredOutputs[3] = "lib/libdirectory.dylib";
+      }
+      if (mode === "aliased") requiredOutputs[1] = "lib/libcodec.1.dylib";
+      assert.throws(
+        () => stageMediaRuntime({ ...f, arch: "arm64", requiredOutputs }),
+        mode === "missing" ? /input is missing/ : /not a canonical regular file/,
+        mode,
+      );
+      assert.equal(existsSync(f.output), false, mode);
+      assert.equal(f.calls.some(([command]) => command === "install_name_tool" || command === "codesign"), false, mode);
+    } finally { f.cleanup(); }
+  }
 });
 
 for (const [name, mutate, pattern] of [
