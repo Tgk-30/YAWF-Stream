@@ -6163,11 +6163,12 @@ function registerRoutes(
     rateLimit(request, `stream-audio:${row.id}`, 30, 60 * 1000);
     const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
     await assertSafeUpstream(upstreamUrl, config.allowRawStreamUrls);
-    const tracks = await transcode.registry.audioTracksFor(row.id, upstreamUrl);
+    const sourceInfo = await transcode.registry.sourceInfoFor(row.id, upstreamUrl);
+    const tracks = sourceInfo.audioTracks;
     if (tracks == null) {
       throw httpError(409, "Audio track inventory is unavailable for this stream.");
     }
-    return { tracks };
+    return { tracks, durationSeconds: sourceInfo.durationSeconds };
   });
 
   // HLS manifest: starts/reuses an ffmpeg job and returns the playlist with

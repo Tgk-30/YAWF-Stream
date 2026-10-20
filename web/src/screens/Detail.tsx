@@ -61,6 +61,7 @@ import {
   resolveServerStream,
   serverOptimizedSource,
   serverStreamAudioTracks,
+  serverStreamSourceInfo,
   serverExternalPlaybackURL,
   type ServerTranscodeQuality,
 } from "../lib/serverApi";
@@ -2200,6 +2201,7 @@ export function Detail() {
                 ? {
                     qualities: serverOptimizedQualities,
                     loadAudioTracks: () => serverStreamAudioTracks(player.fallbackStream!),
+                    loadSourceInfo: () => serverStreamSourceInfo(player.fallbackStream!),
                     defaultQuality: settings.transcode
                       ? settings.dataSaver
                         ? "480p"

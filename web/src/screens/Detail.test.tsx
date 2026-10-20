@@ -27,6 +27,7 @@ let mockCached: any = null;
 let mockContinueWatching: any[] = [];
 let serverModeOn = false;
 let transcodeAvailable = false;
+let transcodeQualities: Array<"480p" | "360p"> = [];
 let pickerSelection = { season: 1, episode: 3 };
 let mockActiveProfile: { id: string } | null = null;
 let mockServerSession: { profileId: string } | null = null;
@@ -113,6 +114,7 @@ vi.mock("../lib/ServerSessionContext", () => ({
   useDirectTorrentAvailable: () => false,
   useTranscodeCapabilities: () => ({
     adaptive: transcodeAvailable,
+    qualities: transcodeQualities,
     seekOffset: transcodeAvailable,
     subtitleSidecar: transcodeAvailable,
     hardwareEncoder: "libx264",
@@ -143,6 +145,9 @@ const serverExternalPlaybackURL = vi.fn(
   (stream: any) => `${stream.streamURL}/external-test` as string | null,
 );
 const serverStreamAudioTracks = vi.fn(async (_stream?: unknown) => []);
+const serverStreamSourceInfo = vi.fn(async (_stream?: unknown) => ({
+  tracks: [], durationSeconds: 600,
+}));
 vi.mock("../lib/serverApi", () => ({
   asServerTranscodeStream: (stream: any) => ({
     ...stream,
@@ -152,6 +157,7 @@ vi.mock("../lib/serverApi", () => ({
     serverOptimizedSource(stream, options),
   serverExternalPlaybackURL: (stream: any) => serverExternalPlaybackURL(stream),
   serverStreamAudioTracks: (stream: any) => serverStreamAudioTracks(stream),
+  serverStreamSourceInfo: (stream: any) => serverStreamSourceInfo(stream),
   createRequest: (...a: unknown[]) => createRequest(...a),
   fetchServerEpisodes: (...a: unknown[]) => fetchServerEpisodes(...a),
   resolveServerStream: (...a: unknown[]) => resolveServerStream(...a),
@@ -380,6 +386,7 @@ vi.mock("../components/VideoPlayer", () => ({
     timelineOffsetSeconds,
     externalPlaybackUrl,
     initialHandoffState,
+    serverOptimized,
   }: any) => (
     <div
       data-testid="player"
@@ -410,7 +417,13 @@ vi.mock("../components/VideoPlayer", () => ({
       data-timeline-offset={String(timelineOffsetSeconds ?? 0)}
       data-external-playback-url={externalPlaybackUrl ?? ""}
       data-handoff-rate={String(initialHandoffState?.playbackRate ?? "")}
+      data-has-source-info={String(serverOptimized?.loadSourceInfo != null)}
     >
+      {serverOptimized?.loadSourceInfo != null && (
+        <button type="button" onClick={() => void serverOptimized.loadSourceInfo()}>
+          load-source-info
+        </button>
+      )}
       <button type="button" onClick={() => onProgress?.(80, 100)}>
         report-progress
       </button>
@@ -521,6 +534,7 @@ beforeEach(() => {
   mockContinueWatching = [];
   serverModeOn = false;
   transcodeAvailable = false;
+  transcodeQualities = [];
   tauriState.on = false;
   tauriState.desktop = false;
   pickerSelection = { season: 1, episode: 3 };
@@ -1454,6 +1468,7 @@ describe("Detail play", () => {
   it("automatically uses server HLS for an incompatible source in the hosted web app", async () => {
     serverModeOn = true;
     transcodeAvailable = true;
+    transcodeQualities = ["480p"];
     resolveServerStream.mockResolvedValue({
       fileName: "show.mkv",
       streamURL: "https://server.example/api/stream/session-1",
@@ -1472,6 +1487,12 @@ describe("Detail play", () => {
 
     const player = await screen.findByTestId("player");
     expect(player).toHaveAttribute("data-engine", "webview-hls-transcode");
+    expect(player).toHaveAttribute("data-has-source-info", "true");
+    await userEvent.click(screen.getByText("load-source-info"));
+    expect(serverStreamSourceInfo).toHaveBeenCalledWith(expect.objectContaining({
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "show.mkv",
+    }));
     expect(player).toHaveAttribute(
       "data-url",
       "https://server.example/api/stream/session-1/index.m3u8",

@@ -3683,6 +3683,7 @@ describe("DebridStreamer server", () => {
         return {
           audio: true,
           subtitle: false,
+          durationSeconds: 600,
           audioTracks: [
             { index: 0, language: "eng", label: "English", default: false },
             { index: 1, language: "fra", label: "French", default: true },
@@ -3724,6 +3725,7 @@ describe("DebridStreamer server", () => {
       });
       expect(bearerInventory.statusCode).toBe(200);
       expect(bearerInventory.headers["cache-control"]).toBe("private, no-store");
+      expect(json<{ durationSeconds: number }>(bearerInventory).durationSeconds).toBe(600);
       expect(probes).toBe(1);
       const inventory = await request(owner, {
         method: "GET",
@@ -3731,6 +3733,7 @@ describe("DebridStreamer server", () => {
       });
       expect(inventory.statusCode).toBe(200);
       expect(inventory.headers["cache-control"]).toBe("private, no-store");
+      expect(json<{ durationSeconds: number }>(inventory).durationSeconds).toBe(600);
       expect(json<{ tracks: unknown[] }>(inventory).tracks).toEqual([
         { index: 0, language: "eng", label: "English", default: false },
         { index: 1, language: "fra", label: "French", default: true },

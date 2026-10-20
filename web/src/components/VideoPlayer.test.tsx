@@ -41,19 +41,32 @@ const { hlsInstances, hlsIsSupported } = vi.hoisted(() => ({
 }));
 const scrubBarMock = vi.hoisted(() => vi.fn((props: {
   currentTime: number;
+  duration: number;
+  onSeek: (time: number) => void;
   onScrubbingChange?: (scrubbing: boolean) => void;
 }) => (
   <div
     data-testid="scrub-bar"
     data-current-time={props.currentTime}
+    data-duration={props.duration}
     onPointerDown={() => props.onScrubbingChange?.(true)}
     onPointerUp={() => props.onScrubbingChange?.(false)}
   />
 )));
 const iconMock = vi.hoisted(() => vi.fn(({ name }: { name: string }) => <span data-icon={name} />));
 const recordDiagnosticMock = vi.hoisted(() => vi.fn());
+const { scrobbleStartMock, scrobblePauseMock, scrobbleStopMock } = vi.hoisted(() => ({
+  scrobbleStartMock: vi.fn(),
+  scrobblePauseMock: vi.fn(),
+  scrobbleStopMock: vi.fn(),
+}));
 vi.mock("../lib/diagnostics", () => ({
   recordDiagnostic: (...args: unknown[]) => recordDiagnosticMock(...args),
+}));
+vi.mock("../data/traktScrobble", () => ({
+  scrobblePlaybackStart: (...args: unknown[]) => scrobbleStartMock(...args),
+  scrobblePlaybackPause: (...args: unknown[]) => scrobblePauseMock(...args),
+  scrobblePlaybackStop: (...args: unknown[]) => scrobbleStopMock(...args),
 }));
 vi.mock("./CastControls", () => ({
   CastControls: ({ onLocalPlaybackChange }: {
@@ -345,6 +358,9 @@ function fireMediaError(video: HTMLMediaElement, code = 3): void {
 beforeEach(() => {
   vi.stubGlobal("location", new URL("tauri://localhost/"));
   recordDiagnosticMock.mockClear();
+  scrobbleStartMock.mockClear();
+  scrobblePauseMock.mockClear();
+  scrobbleStopMock.mockClear();
   globalThis.__DEBRIDSTREAMER_SERVER_URL__ = undefined;
   hlsInstances.length = 0;
   hlsIsSupported.mockReturnValue(true);
@@ -2457,7 +2473,10 @@ describe("WebviewPlayer", () => {
       expect(play).toHaveBeenCalledTimes(1);
       fireEvent.pointerMove(restoredVideo);
       fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
-      expect(screen.getByRole("alert")).toHaveTextContent("Device Original was restored");
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Server Optimized could not synchronize. Device Original was restored.",
+      );
+      expect(screen.getByRole("alert")).not.toHaveTextContent("after synchronization");
       expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute(
         "aria-pressed",
         "true",
@@ -2472,10 +2491,11 @@ describe("WebviewPlayer", () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const request = vi.fn(async () => ({
       url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
-      timelineOffsetSeconds: 0,
+      timelineOffsetSeconds: 395,
       startPositionSeconds: 0,
       quality: "480p" as const,
     }));
+    const onProgress = vi.fn();
     vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
     try {
       render(
@@ -2483,12 +2503,17 @@ describe("WebviewPlayer", () => {
           url="https://server.example/api/stream/session-1"
           title="Example Movie"
           serverOptimized={{ qualities: ["480p"], request }}
+          onProgress={onProgress}
           onClose={() => {}}
         />,
       );
       const originalVideo = document.querySelector("video.player-video") as HTMLVideoElement;
       Object.defineProperty(originalVideo, "paused", { configurable: true, value: false });
+      Object.defineProperty(originalVideo, "duration", { configurable: true, value: 533 });
+      originalVideo.currentTime = 395;
+      fireEvent.loadedMetadata(originalVideo);
       fireEvent.canPlay(originalVideo);
+      fireEvent.timeUpdate(originalVideo);
       fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
       fireEvent.click(screen.getByRole("button", { name: "480p" }));
       await act(async () => {
@@ -2511,6 +2536,8 @@ describe("WebviewPlayer", () => {
       fireEvent.seeked(optimizedVideo);
       expect(screen.queryByText("Synchronizing playback…")).toBeNull();
 
+      optimizedVideo.currentTime = 12;
+      fireEvent.timeUpdate(optimizedVideo);
       optimizedPaused = true;
       fireEvent.pause(optimizedVideo);
       const errorRegistration = hlsInstances.at(-1)?.on.mock.calls.find(
@@ -2528,18 +2555,671 @@ describe("WebviewPlayer", () => {
       expect(restoredVideo).not.toBeNull();
       if (restoredVideo == null) throw new Error("Device Original was not restored");
       expect(restoredVideo).not.toBe(optimizedVideo);
-      Object.defineProperty(restoredVideo, "duration", { configurable: true, value: 120 });
+      Object.defineProperty(restoredVideo, "duration", { configurable: true, value: Number.NaN });
       Object.defineProperty(restoredVideo, "paused", { configurable: true, value: true });
       const play = vi.mocked(HTMLMediaElement.prototype.play);
       play.mockClear();
       fireEvent.loadedMetadata(restoredVideo);
+      expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / 8:53");
+      Object.defineProperty(restoredVideo, "duration", { configurable: true, value: 533 });
+      fireEvent.durationChange(restoredVideo);
+      expect(restoredVideo.currentTime).toBe(407);
       fireEvent.seeked(restoredVideo);
       fireEvent.canPlay(restoredVideo);
       expect(play).not.toHaveBeenCalled();
+      fireEvent.timeUpdate(restoredVideo);
+      expect(document.querySelector(".player-time")).toHaveTextContent("6:47 / 8:53");
+      expect(onProgress).toHaveBeenLastCalledWith(
+        407,
+        533,
+        expect.objectContaining({ playbackSpeed: 1 }),
+      );
+      fireEvent.pointerMove(restoredVideo);
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Server Optimized failed after synchronization. Device Original was restored.",
+      );
+      expect(screen.getByRole("alert")).not.toHaveTextContent("could not synchronize");
       expect(screen.queryByText("Playback interrupted")).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("keeps the original total when a partial optimized EVENT playlist reaches its local end", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=395",
+      timelineOffsetSeconds: 395,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const onProgress = vi.fn();
+    const onEnded = vi.fn();
+    const onPlayNext = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["480p"], request }}
+          onProgress={onProgress}
+          onEnded={onEnded}
+          upNext={{ label: "Next episode" }}
+          onPlayNext={onPlayNext}
+          scrobbleContext={{ tmdbId: 123, type: "movie" }}
+          onClose={() => {}}
+        />,
+      );
+      const originalVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(originalVideo, "duration", { configurable: true, value: 533 });
+      Object.defineProperty(originalVideo, "paused", { configurable: true, value: true });
+      originalVideo.currentTime = 395;
+      fireEvent.loadedMetadata(originalVideo);
+      fireEvent.timeUpdate(originalVideo);
+
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "480p" }));
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 395));
+      const optimizedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(optimizedVideo).not.toBe(originalVideo);
+      let optimizedTime = 0;
+      Object.defineProperty(optimizedVideo, "duration", { configurable: true, value: 12 });
+      Object.defineProperty(optimizedVideo, "currentTime", {
+        configurable: true,
+        get: () => optimizedTime,
+        set: (value: number) => { optimizedTime = value; },
+      });
+      Object.defineProperty(optimizedVideo, "paused", { configurable: true, value: true });
+      fireEvent.loadedMetadata(optimizedVideo);
+      fireEvent.canPlay(optimizedVideo);
+      fireEvent.seeked(optimizedVideo);
+
+      optimizedTime = 12;
+      fireEvent.timeUpdate(optimizedVideo);
+      expect(document.querySelector(".player-time")).toHaveTextContent("6:47 / 8:53");
+      expect(onProgress).toHaveBeenLastCalledWith(
+        407,
+        533,
+        expect.objectContaining({ playbackSpeed: 1 }),
+      );
+
+      fireEvent.ended(optimizedVideo);
+      await waitFor(() => expect(
+        (document.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe("https://server.example/api/stream/session-1"));
+      expect(onEnded).not.toHaveBeenCalled();
+      expect(onPlayNext).not.toHaveBeenCalled();
+      expect(scrobbleStopMock).toHaveBeenCalled();
+      expect(scrobbleStopMock.mock.calls.every(([, progress]) => Number(progress) < 100)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("scrubs the absolute total and restarts optimized windows for out-of-window seeks", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (_quality: string, position: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const originalVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(originalVideo, "duration", { configurable: true, value: 1_000 });
+      Object.defineProperty(originalVideo, "paused", { configurable: true, value: true });
+      originalVideo.currentTime = 395;
+      fireEvent.loadedMetadata(originalVideo);
+      fireEvent.timeUpdate(originalVideo);
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "480p" }));
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(1, "480p", 395));
+
+      const firstWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+      let firstWindowTime = 0;
+      Object.defineProperty(firstWindow, "duration", { configurable: true, value: 12 });
+      Object.defineProperty(firstWindow, "currentTime", {
+        configurable: true,
+        get: () => firstWindowTime,
+        set: (value: number) => { firstWindowTime = value; },
+      });
+      Object.defineProperty(firstWindow, "paused", { configurable: true, value: true });
+      fireEvent.loadedMetadata(firstWindow);
+      fireEvent.canPlay(firstWindow);
+      fireEvent.seeked(firstWindow);
+      firstWindowTime = 7;
+      fireEvent.timeUpdate(firstWindow);
+      expect(screen.getByTestId("scrub-bar")).toHaveAttribute("data-duration", "1000");
+      expect(screen.getByTestId("scrub-bar")).toHaveAttribute("data-current-time", "402");
+
+      const firstScrub = scrubBarMock.mock.calls.at(-1)?.[0];
+      if (firstScrub == null) throw new Error("Scrub bar props were not captured");
+      act(() => firstScrub.onSeek(400));
+      expect(firstWindowTime).toBe(5);
+      expect(request).toHaveBeenCalledTimes(1);
+
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+      act(() => firstScrub.onSeek(100));
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(2, "480p", 100));
+      const secondWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(secondWindow).not.toBe(firstWindow);
+      Object.defineProperty(secondWindow, "duration", { configurable: true, value: 12 });
+      Object.defineProperty(secondWindow, "paused", { configurable: true, value: true });
+      secondWindow.currentTime = 0;
+      fireEvent.loadedMetadata(secondWindow);
+      fireEvent.canPlay(secondWindow);
+      fireEvent.seeked(secondWindow);
+      fireEvent.timeUpdate(secondWindow);
+      expect(play).not.toHaveBeenCalled();
+      expect(screen.getByTestId("scrub-bar")).toHaveAttribute("data-duration", "1000");
+      expect(screen.getByTestId("scrub-bar")).toHaveAttribute("data-current-time", "100");
+
+      const secondScrub = scrubBarMock.mock.calls.at(-1)?.[0];
+      if (secondScrub == null) throw new Error("Replacement scrub bar props were not captured");
+      act(() => secondScrub.onSeek(800));
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(3, "480p", 800));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not promote an initial zero-offset optimized EVENT window to the media total", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const onProgress = vi.fn();
+    const onEnded = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onProgress={onProgress}
+          onEnded={onEnded}
+          scrobbleContext={{ tmdbId: 456, type: "movie" }}
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0));
+      const optimizedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      let optimizedTime = 0;
+      Object.defineProperty(optimizedVideo, "duration", { configurable: true, value: 12 });
+      Object.defineProperty(optimizedVideo, "currentTime", {
+        configurable: true,
+        get: () => optimizedTime,
+        set: (value: number) => { optimizedTime = value; },
+      });
+      fireEvent.loadedMetadata(optimizedVideo);
+      fireEvent.canPlay(optimizedVideo);
+      fireEvent.seeked(optimizedVideo);
+      optimizedTime = 5;
+      fireEvent.timeUpdate(optimizedVideo);
+
+      expect(onProgress).toHaveBeenLastCalledWith(
+        5,
+        null,
+        expect.objectContaining({ playbackSpeed: 1 }),
+      );
+      expect(document.querySelector(".player-time")).toHaveTextContent("0:05 / --:--");
+      fireEvent.ended(optimizedVideo);
+      await waitFor(() => expect(
+        (document.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe("https://server.example/api/stream/session-1"));
+      expect(onEnded).not.toHaveBeenCalled();
+      expect(scrobbleStopMock.mock.calls.every(([, progress]) => Number(progress) < 100)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("treats an initial trusted Server Optimized HLS URL as partial without requesting a switch", () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const onProgress = vi.fn();
+    const onEnded = vi.fn();
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0"
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{ qualities: ["480p"], request }}
+        onProgress={onProgress}
+        onEnded={onEnded}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 12 });
+    video.currentTime = 5;
+    fireEvent.loadedMetadata(video);
+    fireEvent.timeUpdate(video);
+
+    expect(request).not.toHaveBeenCalled();
+    expect(onProgress).toHaveBeenLastCalledWith(
+      5,
+      null,
+      expect.objectContaining({ playbackSpeed: 1 }),
+    );
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:05 / --:--");
+    fireEvent.ended(video);
+    expect(onEnded).not.toHaveBeenCalled();
+  });
+
+  it("loads source duration once for initial partial HLS and seeks outside its local window", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const loadSourceInfo = vi.fn(async () => ({
+      durationSeconds: 600,
+      tracks: [
+        { index: 0, language: "en", label: "English", default: false },
+        { index: 1, language: "fr", label: "French", default: true },
+      ],
+    }));
+    const request = vi.fn(async (_quality: string, position: number, _audio?: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    const player = (loader: () => Promise<{ durationSeconds: number | null }>) => (
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0"
+        sourceRevision={1}
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: loader, request }}
+        onClose={() => {}}
+      />
+    );
+    const { rerender } = render(player(() => loadSourceInfo()));
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 12 });
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 5 });
+    fireEvent.loadedMetadata(video);
+    fireEvent.timeUpdate(video);
+
+    await waitFor(() => expect(document.querySelector(".player-time")?.textContent).toContain(
+      "0:05 / 10:00",
+    ));
+    expect(screen.getByTestId("scrub-bar").getAttribute("data-duration")).toBe("600");
+    expect(screen.getByTestId("scrub-bar").getAttribute("data-current-time")).toBe("5");
+    rerender(player(() => loadSourceInfo()));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(loadSourceInfo).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "French" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "English" }).getAttribute("aria-pressed")).toBe("false");
+
+    const scrub = scrubBarMock.mock.calls.at(-1)?.[0];
+    if (scrub == null) throw new Error("Scrub bar props were not captured");
+    act(() => scrub.onSeek(450));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 450, 1));
+    expect(video.currentTime).toBe(5);
+    await waitFor(() => expect(
+      document.querySelector("video.player-video"),
+    ).not.toBe(video));
+    expect(loadSourceInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a manual audio zero after an optimized remount instead of restoring stale preferences", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}&audio=${String(audioTrack)}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const requestedUrl = new URL(String(input));
+      return new Response("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n", {
+        status: 200,
+        headers: {
+          "x-yawf-transcode-audio": requestedUrl.searchParams.get("audio") ?? "1",
+        },
+      });
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0"
+        sourceRevision={1}
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        savedPrefs={{ preferredAudioId: "1", preferredAudioLang: "fr" }}
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo: async () => ({
+            durationSeconds: 600,
+            tracks: [
+              { index: 0, language: "en", label: "English", default: false },
+              { index: 1, language: "fr", label: "French", default: true },
+            ],
+          }),
+          request,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    const initialVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(initialVideo, "duration", { configurable: true, value: 12 });
+    Object.defineProperty(initialVideo, "currentTime", { configurable: true, value: 5 });
+    initialVideo.volume = 0.35;
+    initialVideo.muted = true;
+    await waitFor(() => expect(
+      screen.getByTestId("scrub-bar").getAttribute("data-duration"),
+    ).toBe("600"));
+
+    const scrub = scrubBarMock.mock.calls.at(-1)?.[0];
+    if (scrub == null) throw new Error("Scrub bar props were not captured");
+    act(() => scrub.onSeek(450));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 450, 1));
+    const frenchVideo = await waitFor(() => {
+      const current = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(current).not.toBe(initialVideo);
+      return current;
+    });
+    Object.defineProperty(frenchVideo, "duration", { configurable: true, value: 12 });
+    Object.defineProperty(frenchVideo, "currentTime", { configurable: true, value: 5 });
+    expect(frenchVideo.volume).toBeCloseTo(0.35);
+    expect(frenchVideo.muted).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("button", { name: "French" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+    await waitFor(() => expect(request).toHaveBeenNthCalledWith(2, "480p", 455, 0));
+    const englishVideo = await waitFor(() => {
+      const current = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(current).not.toBe(frenchVideo);
+      return current;
+    });
+    expect(englishVideo.volume).toBeCloseTo(0.35);
+    expect(englishVideo.muted).toBe(true);
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("button", { name: "English" }).getAttribute("aria-pressed")).toBe("true");
+    expect(request).toHaveBeenCalledTimes(2);
+  }, 15_000);
+
+  it("keeps an explicit initial audio zero when source metadata defaults to another track", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}&audio=${String(audioTrack)}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&audio=0"
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo: async () => ({
+            durationSeconds: 600,
+            tracks: [
+              { index: 0, language: "en", label: "English", default: false },
+              { index: 1, language: "fr", label: "French", default: true },
+            ],
+          }),
+          request,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 12 });
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 5 });
+    await waitFor(() => expect(
+      screen.getByTestId("scrub-bar").getAttribute("data-duration"),
+    ).toBe("600"));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("button", { name: "English" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "French" }).getAttribute("aria-pressed")).toBe("false");
+
+    const scrub = scrubBarMock.mock.calls.at(-1)?.[0];
+    if (scrub == null) throw new Error("Scrub bar props were not captured");
+    act(() => scrub.onSeek(450));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 450, 0));
+  });
+
+  it("omits initial audio selection while source metadata is still unknown", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const sourceInfo = deferred<{
+      durationSeconds: number | null;
+      tracks?: Array<{
+        index: number;
+        language: string | null;
+        label: string | null;
+        default: boolean;
+      }>;
+    }>();
+    const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo: () => sourceInfo.promise,
+          request,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 5 });
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "480p" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 5));
+    expect(request.mock.calls[0]).toHaveLength(2);
+    await act(async () => {
+      sourceInfo.resolve({ durationSeconds: null });
+      await sourceInfo.promise;
+    });
+  });
+
+  it.each([
+    ["null", null],
+    ["negative", -1],
+    ["infinite", Number.POSITIVE_INFINITY],
+    ["over-limit", 86_401],
+  ])("rejects %s source-info duration without replacing the unknown total", async (
+    _label,
+    durationSeconds,
+  ) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const loadSourceInfo = vi.fn(async () => ({ durationSeconds }));
+    render(
+      <VideoPlayer
+        url={`https://server.example/api/stream/session-${String(durationSeconds)}/index.m3u8?quality=480p`}
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo,
+          request: async () => ({
+            url: "https://server.example/api/stream/session/index.m3u8?quality=480p",
+            timelineOffsetSeconds: 0,
+            startPositionSeconds: 0,
+            quality: "480p",
+          }),
+        }}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    await waitFor(() => expect(loadSourceInfo).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    Object.defineProperty(video, "duration", { configurable: true, value: 12 });
+    video.currentTime = 5;
+    fireEvent.loadedMetadata(video);
+    fireEvent.timeUpdate(video);
+    expect(document.querySelector(".player-time")?.textContent).toContain("0:05 / --:--");
+  });
+
+  it("ignores source-info completion after the original URL or revision changes", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const staleInfo = deferred<{ durationSeconds: number | null }>();
+    const currentInfo = deferred<{ durationSeconds: number | null }>();
+    const loadSourceInfo = vi.fn()
+      .mockImplementationOnce(() => staleInfo.promise)
+      .mockImplementationOnce(() => currentInfo.promise);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-a/index.m3u8?quality=480p"
+        sourceRevision={1}
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(loadSourceInfo).toHaveBeenCalledTimes(1));
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-b/index.m3u8?quality=480p"
+        sourceRevision={2}
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(loadSourceInfo).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      staleInfo.resolve({ durationSeconds: 600 });
+      await staleInfo.promise;
+    });
+    expect(document.querySelector(".player-time")?.textContent).toContain("0:00 / --:--");
+  });
+
+  it("times out source-info loading without accepting a late result or interrupting playback", async () => {
+    vi.useFakeTimers();
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const sourceInfo = deferred<{ durationSeconds: number | null }>();
+    const loadSourceInfo = vi.fn(() => sourceInfo.promise);
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo,
+          request: async () => ({
+            url: "https://server.example/api/stream/session/index.m3u8?quality=480p",
+            timelineOffsetSeconds: 0,
+            startPositionSeconds: 0,
+            quality: "480p",
+          }),
+        }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+      vi.advanceTimersByTime(8_000);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      sourceInfo.resolve({ durationSeconds: 600 });
+      await sourceInfo.promise;
+    });
+    expect(loadSourceInfo).toHaveBeenCalledTimes(1);
+    expect(document.querySelector(".player-time")?.textContent).toContain("0:00 / --:--");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("prefers an original video duration over later source metadata", async () => {
+    const sourceInfo = deferred<{ durationSeconds: number | null }>();
+    const loadSourceInfo = vi.fn(() => sourceInfo.promise);
+    render(
+      <VideoPlayer
+        url="https://x/original.mkv"
+        engine="webview-direct"
+        title="Example Movie"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo,
+          request: async () => ({
+            url: "https://server.example/api/stream/session/index.m3u8?quality=480p",
+            timelineOffsetSeconds: 0,
+            startPositionSeconds: 0,
+            quality: "480p",
+          }),
+        }}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 533 });
+    video.currentTime = 20;
+    fireEvent.loadedMetadata(video);
+    fireEvent.timeUpdate(video);
+    expect(document.querySelector(".player-time")?.textContent).toContain("0:20 / 8:53");
+    await act(async () => {
+      sourceInfo.resolve({ durationSeconds: 600 });
+      await sourceInfo.promise;
+    });
+    expect(document.querySelector(".player-time")?.textContent).toContain("0:20 / 8:53");
   });
 
   it("retains Device Original when optimized manifest preparation fails", async () => {
@@ -3027,6 +3707,111 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it("publishes and seeks the full known timeline through Media Session for a partial stream", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
+    const setPositionState = vi.fn();
+    const mediaSession = {
+      metadata: null,
+      playbackState: "none",
+      setActionHandler: vi.fn((
+        action: MediaSessionAction,
+        handler: MediaSessionActionHandler | null,
+      ) => handlers.set(action, handler)),
+      setPositionState,
+    } as unknown as MediaSession;
+    const restoreMediaSession = replaceProperty(navigator, "mediaSession", mediaSession);
+    const request = vi.fn(async (_quality: string, position: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p"
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          serverOptimized={{
+            qualities: ["480p"],
+            loadSourceInfo: async () => ({ durationSeconds: 600 }),
+            request,
+          }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        duration: { configurable: true, value: 12 },
+        currentTime: { configurable: true, value: 5, writable: true },
+        playbackRate: { configurable: true, value: 1, writable: true },
+        paused: { configurable: true, value: true },
+      });
+      await waitFor(() => expect(
+        screen.getByTestId("scrub-bar").getAttribute("data-duration"),
+      ).toBe("600"));
+      fireEvent.loadedMetadata(video);
+      fireEvent.timeUpdate(video);
+      expect(setPositionState).toHaveBeenLastCalledWith({
+        duration: 600,
+        position: 5,
+        playbackRate: 1,
+      });
+
+      handlers.get("seekto")?.({ action: "seekto", seekTime: 450 });
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 450));
+      expect(video.currentTime).toBe(5);
+    } finally {
+      restoreMediaSession();
+    }
+  });
+
+  it("does not publish a partial local window as the Media Session total", () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const setPositionState = vi.fn();
+    const mediaSession = {
+      metadata: null,
+      playbackState: "none",
+      setActionHandler: vi.fn(),
+      setPositionState,
+    } as unknown as MediaSession;
+    const restoreMediaSession = replaceProperty(navigator, "mediaSession", mediaSession);
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p"
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          serverOptimized={{
+            qualities: ["480p"],
+            request: async () => ({
+              url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+              timelineOffsetSeconds: 0,
+              startPositionSeconds: 0,
+              quality: "480p",
+            }),
+          }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        duration: { configurable: true, value: 12 },
+        currentTime: { configurable: true, value: 5, writable: true },
+      });
+      fireEvent.loadedMetadata(video);
+      fireEvent.timeUpdate(video);
+      expect(setPositionState).not.toHaveBeenCalled();
+    } finally {
+      restoreMediaSession();
+    }
+  });
+
   it("shows a fullscreen control and reflects fullscreenchange state", async () => {
     const requestFullscreen = vi.fn().mockResolvedValue(undefined);
     const restoreRequestFullscreen = replaceProperty(
@@ -3201,6 +3986,63 @@ describe("WebviewPlayer", () => {
     expect(document.querySelector(".player-time")).toHaveTextContent(
       "11:52 / 13:20",
     );
+  });
+
+  it("resets the remembered total for a query-distinct file and a fresh source revision", () => {
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://x/download?fileId=A"
+        sourceRevision={1}
+        title="Shared episode title"
+        subtitle="S1 E1"
+        scrobbleContext={{ tmdbId: 123, type: "series", season: 1, episode: 1 }}
+        onClose={() => {}}
+      />,
+    );
+    const firstVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(firstVideo, "duration", { configurable: true, value: 533 });
+    firstVideo.currentTime = 395;
+    fireEvent.loadedMetadata(firstVideo);
+    fireEvent.timeUpdate(firstVideo);
+    expect(document.querySelector(".player-time")).toHaveTextContent("6:35 / 8:53");
+
+    rerender(
+      <VideoPlayer
+        url="https://x/download?fileId=B"
+        sourceRevision={1}
+        title="Shared episode title"
+        subtitle="S1 E1"
+        scrobbleContext={{ tmdbId: 123, type: "series", season: 1, episode: 1 }}
+        onClose={() => {}}
+      />,
+    );
+    const refreshedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(refreshedVideo).not.toBe(firstVideo);
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / --:--");
+    Object.defineProperty(refreshedVideo, "duration", { configurable: true, value: 222 });
+    refreshedVideo.currentTime = 20;
+    fireEvent.loadedMetadata(refreshedVideo);
+    fireEvent.timeUpdate(refreshedVideo);
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:20 / 3:42");
+
+    rerender(
+      <VideoPlayer
+        url="https://x/download?fileId=B"
+        sourceRevision={2}
+        title="Shared episode title"
+        subtitle="S1 E1"
+        scrobbleContext={{ tmdbId: 123, type: "series", season: 1, episode: 1 }}
+        onClose={() => {}}
+      />,
+    );
+    const secondVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(secondVideo).not.toBe(refreshedVideo);
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / --:--");
+    Object.defineProperty(secondVideo, "duration", { configurable: true, value: 120 });
+    secondVideo.currentTime = 15;
+    fireEvent.loadedMetadata(secondVideo);
+    fireEvent.timeUpdate(secondVideo);
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:15 / 2:00");
   });
 
   it("hides inactive web chrome, preserves it for pause or menus, and reveals it on pointer activity", () => {
@@ -3566,6 +4408,88 @@ describe("WebviewPlayer", () => {
       const probe = setup();
       press("5");
       expect(probe.currentTime()).toBe(50); // 50% of 100s
+    });
+
+    it("uses the full known timeline for a partial-stream number shortcut", async () => {
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      const request = vi.fn(async (_quality: string, position: number) => ({
+        url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}`,
+        timelineOffsetSeconds: position,
+        startPositionSeconds: 0,
+        quality: "480p" as const,
+      }));
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p"
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          serverOptimized={{
+            qualities: ["480p"],
+            loadSourceInfo: async () => ({ durationSeconds: 600 }),
+            request,
+          }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        duration: { configurable: true, value: 12 },
+        currentTime: { configurable: true, value: 5, writable: true },
+        paused: { configurable: true, value: true },
+      });
+      await waitFor(() => expect(
+        screen.getByTestId("scrub-bar").getAttribute("data-duration"),
+      ).toBe("600"));
+
+      press("7");
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 420));
+      expect(video.currentTime).toBe(5);
+    });
+
+    it("keeps in-window keyboard seeks local and requests a new partial window when crossed", async () => {
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      const request = vi.fn(async (_quality: string, position: number) => ({
+        url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}`,
+        timelineOffsetSeconds: position,
+        startPositionSeconds: 0,
+        quality: "480p" as const,
+      }));
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=100"
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          timelineOffsetSeconds={100}
+          serverOptimized={{
+            qualities: ["480p"],
+            loadSourceInfo: async () => ({ durationSeconds: 600 }),
+            request,
+          }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let currentTime = 5;
+      Object.defineProperties(video, {
+        duration: { configurable: true, value: 12 },
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (next: number) => { currentTime = next; },
+        },
+        paused: { configurable: true, value: true },
+      });
+      await waitFor(() => expect(
+        screen.getByTestId("scrub-bar").getAttribute("data-duration"),
+      ).toBe("600"));
+
+      press("ArrowRight");
+      expect(currentTime).toBe(10);
+      expect(request).not.toHaveBeenCalled();
+      currentTime = 11;
+      press("ArrowRight");
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 116));
+      expect(currentTime).toBe(11);
     });
 
     it("ignores shortcuts while a text field is focused", () => {

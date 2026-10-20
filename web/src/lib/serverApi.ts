@@ -519,6 +519,11 @@ export interface ServerAudioTrack {
   default: boolean;
 }
 
+export interface ServerStreamSourceInfo {
+  tracks: ServerAudioTrack[];
+  durationSeconds: number | null;
+}
+
 export function serverOptimizedSource(
   stream: StreamInfo,
   options: Omit<ServerTranscodeOptions, "profile"> & {
@@ -611,19 +616,39 @@ function serverStreamSessionId(stream: StreamInfo): string | null {
   }
 }
 
-export async function serverStreamAudioTracks(
+export async function serverStreamSourceInfo(
   stream: StreamInfo,
-): Promise<ServerAudioTrack[]> {
+): Promise<ServerStreamSourceInfo> {
   const sessionId = serverStreamSessionId(stream);
   if (sessionId == null) throw new Error("This stream does not belong to the configured server.");
-  const response = await serverRequest<{ tracks: ServerAudioTrack[] }>(
+  const response = await serverRequest<{ tracks?: unknown; durationSeconds?: unknown }>(
     "GET",
     `/api/stream/${encodeURIComponent(sessionId)}/audio-tracks`,
   );
-  if (!Array.isArray(response.tracks)) return [];
-  return response.tracks.filter((track) =>
-    Number.isInteger(track.index) && track.index >= 0 && track.index < 32,
-  );
+  const tracks = Array.isArray(response.tracks)
+    ? response.tracks.filter((track): track is ServerAudioTrack => {
+        if (track == null || typeof track !== "object") return false;
+        const index = (track as { index?: unknown }).index;
+        return Number.isInteger(index) && (index as number) >= 0 && (index as number) < 32;
+      })
+    : [];
+  const durationSeconds = response.durationSeconds;
+  return {
+    tracks,
+    durationSeconds:
+      typeof durationSeconds === "number" &&
+      Number.isFinite(durationSeconds) &&
+      durationSeconds > 0 &&
+      durationSeconds <= 86_400
+        ? durationSeconds
+        : null,
+  };
+}
+
+export async function serverStreamAudioTracks(
+  stream: StreamInfo,
+): Promise<ServerAudioTrack[]> {
+  return (await serverStreamSourceInfo(stream)).tracks;
 }
 
 /** Build the capability URL consumed by native players launched from a hosted

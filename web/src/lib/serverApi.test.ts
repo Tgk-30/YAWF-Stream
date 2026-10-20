@@ -539,6 +539,68 @@ describe("resolveServerStream", () => {
     );
   });
 
+  it("returns validated source tracks and original duration from the existing endpoint", async () => {
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      tracks: [
+        { index: 0, language: "eng", label: "English", default: true },
+        null,
+        { index: 32, language: null, label: "invalid", default: false },
+      ],
+      durationSeconds: 5423.125,
+    }) as never);
+
+    await expect(api.serverStreamSourceInfo(direct)).resolves.toEqual({
+      tracks: [{ index: 0, language: "eng", label: "English", default: true }],
+      durationSeconds: 5423.125,
+    });
+    expect(lastCall().url).toBe(
+      "https://server.example/api/stream/session-1/audio-tracks",
+    );
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["string", "120"],
+    ["zero", 0],
+    ["negative", -1],
+    ["excessive", 86_400.001],
+  ])("returns null for %s server source duration", async (_label, durationSeconds) => {
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      tracks: [],
+      ...(durationSeconds === undefined ? {} : { durationSeconds }),
+    }) as never);
+
+    await expect(api.serverStreamSourceInfo(direct)).resolves.toEqual({
+      tracks: [],
+      durationSeconds: null,
+    });
+  });
+
+  it("rejects non-finite JSON duration and accepts the inclusive one-day limit", async () => {
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    fetchMock
+      .mockResolvedValueOnce(rawResponse('{"tracks":[],"durationSeconds":1e309}') as never)
+      .mockResolvedValueOnce(jsonResponse({ tracks: [], durationSeconds: 86_400 }) as never);
+
+    await expect(api.serverStreamSourceInfo(direct)).resolves.toMatchObject({
+      durationSeconds: null,
+    });
+    await expect(api.serverStreamSourceInfo(direct)).resolves.toMatchObject({
+      durationSeconds: 86_400,
+    });
+  });
+
   it("refuses to probe audio tracks on an unconfigured stream origin", async () => {
     await expect(api.serverStreamAudioTracks({
       streamURL: "https://provider.example/api/stream/session-1",

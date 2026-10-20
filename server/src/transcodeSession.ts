@@ -77,6 +77,11 @@ export interface HlsTranscodeOptions {
   includeSubtitle?: boolean;
 }
 
+export interface TranscodeSourceInfo {
+  audioTracks: TranscoderAudioTrack[] | null;
+  durationSeconds: number | null;
+}
+
 function encoderArgs(
   encoder: TranscodeVideoEncoder,
   bitrates: readonly string[],
@@ -315,6 +320,11 @@ interface PendingJob {
 
 export class TranscodeRegistry {
   private readonly jobs = new Map<string, Job>();
+  /** Child processes remain here until Node reports exit or close.
+   * Completed jobs keep their cached assets in `jobs`, but no longer consume
+   * an execution slot. Conversely, a disposed child still consumes a slot
+   * until the OS has actually reported its termination. */
+  private readonly liveChildren = new Set<ChildProcess>();
   // In-flight job creations keyed by session, so concurrent ensureJob() calls
   // for the same session share ONE creation instead of racing (which would
   // orphan an ffmpeg + temp dir and bypass the maxTranscodes cap).
@@ -343,6 +353,30 @@ export class TranscodeRegistry {
     private readonly config: ServerConfig,
     private readonly transcoder: Transcoder,
   ) {}
+
+  private activeWorkCount(): number {
+    let pendingReservations = 0;
+    for (const pending of this.pending.values()) {
+      if (pending.job == null) pendingReservations += 1;
+    }
+    return this.liveChildren.size + pendingReservations + this.activeProbes;
+  }
+
+  private trackChild(child: ChildProcess): void {
+    this.liveChildren.add(child);
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      this.liveChildren.delete(child);
+    };
+    // `exit` is the process-capacity boundary. `close` follows after stdio is
+    // closed and is also emitted after a spawn error. An `error` alone can mean
+    // a later kill/send failure, so it must not prematurely release a process
+    // that has not actually terminated.
+    child.once("exit", finish);
+    child.once("close", finish);
+  }
 
   /** Boot sweep (rm temp dirs left by a previous crash) + start the idle/expiry
    *  reaper. Only called when transcoding is active. */
@@ -383,7 +417,7 @@ export class TranscodeRegistry {
     // admission budget as active and warming ffmpeg jobs so opening audio menus
     // across many sessions cannot bypass maxTranscodes.
     if (
-      this.activeProbes + this.jobs.size + this.pending.size >= this.config.maxTranscodes ||
+      this.activeWorkCount() >= this.config.maxTranscodes ||
       this.streamProbes.size >= MAX_PROBE_CACHE_ENTRIES
     ) {
       return Promise.resolve(null);
@@ -421,8 +455,28 @@ export class TranscodeRegistry {
     sessionId: string,
     upstreamUrl: string,
   ): Promise<TranscoderAudioTrack[] | null> {
+    return (await this.sourceInfoFor(sessionId, upstreamUrl)).audioTracks;
+  }
+
+  async sourceInfoFor(
+    sessionId: string,
+    upstreamUrl: string,
+  ): Promise<TranscodeSourceInfo> {
     const probe = await this.probeStreams(sessionId, upstreamUrl);
-    return probe?.audioTracks == null ? null : probe.audioTracks.map((track) => ({ ...track }));
+    const durationSeconds = probe?.durationSeconds;
+    return {
+      audioTracks:
+        probe?.audioTracks == null
+          ? null
+          : probe.audioTracks.map((track) => ({ ...track })),
+      durationSeconds:
+        typeof durationSeconds === "number" &&
+        Number.isFinite(durationSeconds) &&
+        durationSeconds > 0 &&
+        durationSeconds <= 86_400
+          ? durationSeconds
+          : null,
+    };
   }
 
   /** Kill jobs whose session is gone/revoked/expired, or idle (client left). */
@@ -649,7 +703,7 @@ export class TranscodeRegistry {
     // Count actual live ffmpeg work, including a staged replacement. A quality
     // switch at a saturated cap fails honestly while the current job remains
     // playable, rather than exceeding the operator's process limit.
-    if (this.jobs.size + this.pending.size + this.activeProbes >= this.config.maxTranscodes) {
+    if (this.activeWorkCount() >= this.config.maxTranscodes) {
       throw Object.assign(new Error("The transcoder is busy. Try again shortly."), { statusCode: 503 });
     }
 
@@ -691,6 +745,7 @@ export class TranscodeRegistry {
       disposed: false,
       assetGeneration: basename(dir),
     };
+    for (const process of children) this.trackChild(process);
     registerStaged(job);
     // Prevent an unhandled spawn error from crashing the server and let startup
     // fail immediately when FFmpeg exits before producing a playable segment.
