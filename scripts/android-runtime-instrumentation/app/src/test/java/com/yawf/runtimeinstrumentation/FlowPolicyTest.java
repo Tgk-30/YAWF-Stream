@@ -49,6 +49,11 @@ public final class FlowPolicyTest {
     }
 
     @Test
+    public void tourDismissalRequiresThreeConsecutiveAbsentSamples() {
+        FlowPolicyAssertions.tourDismissalRequiresThreeConsecutiveAbsentSamples();
+    }
+
+    @Test
     public void bindingTermsAreRejectedButPrivacyNoticeIsAllowed() {
         FlowPolicyAssertions.bindingTermsAreRejectedButPrivacyNoticeIsAllowed();
     }

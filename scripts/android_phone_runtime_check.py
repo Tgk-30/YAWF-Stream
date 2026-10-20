@@ -36,7 +36,7 @@ HARNESS_EVIDENCE_SUBDIR = "persistent-flow"
 HARNESS_EVIDENCE_MAX_FILES = 42
 HARNESS_CAPTURE_NAME_RE = re.compile(
     r"(?:0[1-9]|1[0-9]|20)-(?:initial-update-consent|tier-welcome|first-run|"
-    r"quick-setup-notice|discover-after-setup|settings|android-update-card|"
+    r"quick-setup-notice|tour-ready|discover-after-setup|settings|android-update-card|"
     r"manual-update-consent|manual-update-result|failure)\.(?:png|xml)"
 )
 HARNESS_FIXED_EVIDENCE_LIMITS = {
@@ -1191,6 +1191,25 @@ class ParserTests(unittest.TestCase):
                 "instrumentation-receipt.json",
             ],
         )
+
+    def test_accepts_exact_tour_ready_capture_pair(self) -> None:
+        listing = (
+            "05-tour-ready.png\n"
+            "05-tour-ready.xml\n"
+            "instrumentation-receipt.json\n"
+        )
+        self.assertEqual(
+            validate_harness_evidence_listing(listing),
+            [
+                "05-tour-ready.png",
+                "05-tour-ready.xml",
+                "instrumentation-receipt.json",
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeCheckError, "Unexpected"):
+            validate_harness_evidence_listing(
+                "05-tour-ready-extra.png\ninstrumentation-receipt.json\n"
+            )
 
     def test_rejects_harness_evidence_traversal_name(self) -> None:
         with self.assertRaisesRegex(RuntimeCheckError, "unsafe"):

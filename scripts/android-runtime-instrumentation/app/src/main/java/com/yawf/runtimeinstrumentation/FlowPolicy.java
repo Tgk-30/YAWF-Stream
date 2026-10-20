@@ -13,6 +13,7 @@ public final class FlowPolicy {
             new LabeledWebButtonSpec("Skip the tour");
     public static final LabeledWebButtonSpec SKIP_TOUR_BUTTON =
             new LabeledWebButtonSpec("Skip tour");
+    private static final int TOUR_SETTLED_ABSENT_SAMPLES = 3;
     public static final String EXPECTED_PUBLISHED_VERSION = "2.3.21";
     public static final String UP_TO_DATE_TITLE = "YAWF Stream is up to date";
     public static final String UP_TO_DATE_MESSAGE =
@@ -100,6 +101,10 @@ public final class FlowPolicy {
 
     public static boolean containsBindingTerms(String value) {
         return BINDING_TERMS_PATTERN.matcher(value == null ? "" : value).matches();
+    }
+
+    public static boolean isTourDismissalSettled(int consecutiveAbsentSamples) {
+        return consecutiveAbsentSamples >= TOUR_SETTLED_ABSENT_SAMPLES;
     }
 
     public static boolean isExactUpToDateResult(String title, String message) {

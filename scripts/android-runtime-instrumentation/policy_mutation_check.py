@@ -50,6 +50,10 @@ MUTANTS = {
         "return PRODUCT_PACKAGE.equals(observedPackage)\n                    && WEB_BUTTON_CLASS.equals(observedClass)",
         "return PRODUCT_PACKAGE.equals(observedPackage)\n                    && !WEB_BUTTON_CLASS.equals(observedClass)",
     ),
+    "tourDismissalSettled": (
+        "return consecutiveAbsentSamples >= TOUR_SETTLED_ABSENT_SAMPLES;",
+        "return consecutiveAbsentSamples >= 1;",
+    ),
     "termsPolicy": (
         "terms of service|license agreement|user agreement|binding terms",
         "privacy notice|license agreement|user agreement|binding terms",

@@ -88,6 +88,19 @@ final class FlowPolicyAssertions {
                 "A newline-suffixed label must not match");
     }
 
+    static void tourDismissalRequiresThreeConsecutiveAbsentSamples() {
+        check(!FlowPolicy.isTourDismissalSettled(0),
+                "No absent observation must not count as settled");
+        check(!FlowPolicy.isTourDismissalSettled(1),
+                "One transient absent observation must not count as settled");
+        check(!FlowPolicy.isTourDismissalSettled(2),
+                "Two transient absent observations must not count as settled");
+        check(FlowPolicy.isTourDismissalSettled(3),
+                "Three consecutive absent observations must count as settled");
+        check(FlowPolicy.isTourDismissalSettled(4),
+                "Additional absent observations must remain settled");
+    }
+
     static void bindingTermsAreRejectedButPrivacyNoticeIsAllowed() {
         check(FlowPolicy.containsBindingTerms("Accept the Terms of Service"),
                 "Binding terms must be rejected");

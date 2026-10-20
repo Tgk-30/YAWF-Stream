@@ -207,17 +207,29 @@ public final class RuntimeFlowTest {
             return;
         }
         capture("tour-ready");
-        for (int attempt = 0; attempt < 4; attempt++) {
+        assertNoBindingTerms();
+        object = findWebButtonNow(controls);
+        assertNotNull("Tour Skip button disappeared after policy guard", object);
+        object.click();
+        log("Clicked one exact labeled ordinary tour Skip button");
+
+        long dismissalDeadline = SystemClock.uptimeMillis() + TOUR_MOUNT_WAIT_MS;
+        int consecutiveAbsentSamples = 0;
+        while (SystemClock.uptimeMillis() < dismissalDeadline) {
             assertNoBindingTerms();
             object = findWebButtonNow(controls);
             if (object == null) {
-                return;
+                consecutiveAbsentSamples++;
+                if (FlowPolicy.isTourDismissalSettled(consecutiveAbsentSamples)) {
+                    log("Observed the ordinary tour absent for a settled bounded interval");
+                    return;
+                }
+            } else {
+                consecutiveAbsentSamples = 0;
             }
-            object.click();
-            log("Clicked an exact labeled ordinary tour Skip button");
-            device.waitForIdle(1_000);
+            SystemClock.sleep(250);
         }
-        assertTrue("Ordinary tour remained after four bounded Skip actions", findWebButtonNow(controls) == null);
+        fail("Ordinary tour did not settle after one guarded Skip action");
     }
 
     private void openHelpAndUpdates() {

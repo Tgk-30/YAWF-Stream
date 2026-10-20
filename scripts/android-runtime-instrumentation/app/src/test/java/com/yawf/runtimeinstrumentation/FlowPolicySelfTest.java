@@ -17,6 +17,7 @@ public final class FlowPolicySelfTest {
         tests.put("webButtonText", FlowPolicyAssertions::actualWebViewTextButtonsMatchExactObservedNodes);
         tests.put("webButtonDescription", FlowPolicyAssertions::legacyWebViewDescriptionButtonsRemainSupported);
         tests.put("webButtonIdentity", FlowPolicyAssertions::labeledWebButtonsRejectWrongIdentityShapeAndAffixes);
+        tests.put("tourDismissalSettled", FlowPolicyAssertions::tourDismissalRequiresThreeConsecutiveAbsentSamples);
         tests.put("termsPolicy", FlowPolicyAssertions::bindingTermsAreRejectedButPrivacyNoticeIsAllowed);
         tests.put("exactNativeResult", FlowPolicyAssertions::nativeResultRequiresExactTitleAndMessage);
         tests.put("versionPins", FlowPolicyAssertions::channelVersionsArePinned);
