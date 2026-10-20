@@ -10,10 +10,25 @@ export type BrowserExternalDevice =
   | "unknown";
 
 export interface BrowserExternalPlayerLink {
-  id: "vlc" | "infuse";
+  id: "vlc" | "infuse" | "iina";
   label: string;
   description: string;
   href: string;
+}
+
+export type BrowserExternalFileHint = "video-file" | "hls-playlist" | "unknown";
+
+/** A filename hint, not response MIME or verified player compatibility. Never
+ * infer it from an extensionless capability or a browser-transcode rendition. */
+export function browserExternalFileHint(
+  sourceFileName: string | null | undefined,
+): BrowserExternalFileHint {
+  const name = sourceFileName?.trim() ?? "";
+  if (/\.m3u8?$/i.test(name)) return "hls-playlist";
+  if (/\.(?:mp4|m4v|mov|mkv|avi|webm|ts|m2ts|mts|mpg|mpeg|wmv|flv|ogv|3gp)$/i.test(name)) {
+    return "video-file";
+  }
+  return "unknown";
 }
 
 /**
@@ -39,6 +54,7 @@ export function browserExternalPlayerLinks(
   title: string,
   device: BrowserExternalDevice,
   _standalone: boolean,
+  originalHint: BrowserExternalFileHint = "unknown",
 ): BrowserExternalPlayerLink[] {
   const target = browserExternalCapability(rawUrl);
   if (target == null) return [];
@@ -53,12 +69,12 @@ export function browserExternalPlayerLinks(
         description: "Requires VLC for iPhone or iPad",
         href: `vlc-x-callback://x-callback-url/stream?url=${encodedTarget}`,
       },
-      {
-        id: "infuse",
+      ...(originalHint === "video-file" ? [{
+        id: "infuse" as const,
         label: "Open in Infuse",
-        description: "Requires Infuse",
+        description: "Requires Infuse; filename compatibility hint only",
         href: `infuse://x-callback-url/play?url=${encodedTarget}&filename=${encodedTitle}`,
-      },
+      }] : []),
     ];
   }
 
@@ -73,12 +89,22 @@ export function browserExternalPlayerLinks(
   }
 
   if (device === "mac") {
-    return [{
-      id: "infuse",
-      label: "Open in Infuse",
-      description: "Requires Infuse for Mac",
-      href: `infuse://x-callback-url/play?url=${encodedTarget}&filename=${encodedTitle}`,
-    }];
+    return [
+      {
+        id: "iina",
+        label: "Open in IINA",
+        description: "Requires IINA 1.4.4 or newer for Mac",
+        // Only these fixed parameters are permitted. In particular, never
+        // forward provider query values, titles or mpv options into this scheme.
+        href: `iina://open?url=${encodedTarget}&new_window=1`,
+      },
+      ...(originalHint === "video-file" ? [{
+        id: "infuse" as const,
+        label: "Open in Infuse",
+        description: "Requires Infuse for Mac; filename compatibility hint only",
+        href: `infuse://x-callback-url/play?url=${encodedTarget}&filename=${encodedTitle}`,
+      }] : []),
+    ];
   }
 
   return [];
@@ -92,6 +118,9 @@ export function browserExternalGuidance(
     " Browser-login-protected servers also require the operator to allow the external-stream capability route; no login cookie is placed in this link.";
   if (device === "windows") {
     return "Windows web apps cannot reliably launch a specific desktop player. Download the playlist or copy the link into an installed player." + protectedServerNote;
+  }
+  if (device === "mac") {
+    return "Choose an installed player above. IINA 1.4.4 or newer supports the direct handoff; Infuse is shown only when the original filename looks like a video file; playback compatibility is not verified. Downloading a playlist and copying the link remain separate fallbacks." + protectedServerNote;
   }
   return "Download a playlist for an installed player, or copy the stream link and paste it into one." + protectedServerNote;
 }

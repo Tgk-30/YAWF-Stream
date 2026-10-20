@@ -6,7 +6,7 @@ import type {
   DebridAccountInfo,
   DebridServiceType,
   DebridTorrent,
-  EpisodeFileHint,
+  DebridFileHint,
   StreamInfo,
 } from "./models";
 
@@ -23,6 +23,7 @@ type DebridErrorKind =
   | "rateLimited"
   | "torrentNotFound"
   | "noFilesAvailable"
+  | "fileSelectionFailed"
   | "downloadFailed"
   | "httpError"
   | "networkError";
@@ -73,6 +74,12 @@ export class DebridError extends Error {
   }
   static noFilesAvailable(): DebridError {
     return new DebridError("noFilesAvailable", "No downloadable files found");
+  }
+  static fileSelectionFailed(): DebridError {
+    return new DebridError(
+      "fileSelectionFailed",
+      "The requested torrent file could not be matched uniquely",
+    );
   }
   static downloadFailed(msg: string): DebridError {
     return new DebridError("downloadFailed", `Download failed: ${msg}`, {
@@ -131,10 +138,9 @@ export interface DebridService {
   /** Select specific files from a torrent for download. */
   selectFiles(torrentId: string, fileIds: number[]): Promise<void>;
 
-  /** Get a direct streaming URL for a torrent. With an episode hint (season
-   *  packs), implementations steer the file pick to that exact episode and
-   *  fall back to the default pick when no file matches. */
-  getStreamURL(torrentId: string, fileHint?: EpisodeFileHint | null): Promise<StreamInfo>;
+  /** Get a direct streaming URL for a torrent. Exact file hints fail closed
+   * when the provider response cannot uniquely identify the requested file. */
+  getStreamURL(torrentId: string, fileHint?: DebridFileHint | null): Promise<StreamInfo>;
 
   /** Unrestrict a hosted link to a direct download URL (returned as a string). */
   unrestrict(link: string): Promise<string>;

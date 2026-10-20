@@ -664,7 +664,9 @@ export function Settings() {
             appVersion={appVersion ?? __APP_VERSION__}
           />
         )}
-        {tab === "server" && <ServerTab />}
+        {tab === "server" && (
+          <ServerTab key={serverSession?.profileId ?? "no-profile"} />
+        )}
         {tab === "keys" && <KeysTab draft={draft} patch={patch} />}
         {tab === "debrid" && <DebridTab draft={draft} patch={patch} />}
         {tab === "sources" && <SourcesTab draft={draft} patch={patch} />}
@@ -1178,15 +1180,42 @@ function UpdatesTab({
   return (
     <div className="settings-fields">
       {androidUpdater ? (
-        <SettingsInfo label="Android APK updates">
-          Android update checks are managed by the native app, independently of your server version.
-          Enable weekly checks in its native prompt. Downloads and installation need your confirmation.
-          <button type="button" className="btn btn-secondary" onClick={() => {
-            setAndroidUpdateStatus(null);
-            void checkAndroidAppUpdates().then(() => setAndroidUpdateStatus("Android update dialog opened.")).catch(() => setAndroidUpdateStatus("Android update dialog unavailable. Reopen the app and try again."));
-          }}>Check for Android updates</button>
-          {androidUpdateStatus && <p role="status">{androidUpdateStatus}</p>}
-        </SettingsInfo>
+        <section
+          className="settings-section settings-install-card glass-rest"
+          aria-labelledby="android-apk-updates-title"
+        >
+          <div>
+            <h2 id="android-apk-updates-title">Android APK updates</h2>
+            <p className="settings-hint">
+              Android update checks are managed by the native app, independently
+              of your server version. Enable weekly checks in its native prompt.
+              Downloads and installation need your confirmation.
+            </p>
+            {androidUpdateStatus && (
+              <p className="settings-status" role="status">
+                {androidUpdateStatus}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              setAndroidUpdateStatus(null);
+              void checkAndroidAppUpdates()
+                .then(() =>
+                  setAndroidUpdateStatus("Android update dialog opened."),
+                )
+                .catch(() =>
+                  setAndroidUpdateStatus(
+                    "Android update dialog unavailable. Reopen the app and try again.",
+                  ),
+                );
+            }}
+          >
+            Check for Android updates
+          </button>
+        </section>
       ) : (
         <SettingsInfo label="About desktop updates">
           Desktop builds use signed release metadata from GitHub Releases. Browser

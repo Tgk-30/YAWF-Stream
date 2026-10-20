@@ -30,6 +30,7 @@ export const WEBVIEW_STARTUP_TIMEOUT_MS = 20_000;
 export const SERVER_HLS_STARTUP_TIMEOUT_MS = 45_000;
 export const WEBVIEW_FALLBACK_TIMEOUT_MS = 8_000;
 const SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS = 8_000;
+const MAX_SOURCE_DURATION_SECONDS = 86_400;
 const SERVER_OPTIMIZED_RETRY_BASE_MS = 500;
 const SERVER_OPTIMIZED_RETRY_MAX_MS = 4_000;
 import { Icon } from "./Icon";
@@ -51,6 +52,7 @@ import {
 import {
   browserExternalCapability,
   browserExternalGuidance,
+  browserExternalFileHint,
   browserExternalPlayerLinks,
   type BrowserExternalPlayerLink,
 } from "../lib/browserExternalPlayers";
@@ -232,6 +234,10 @@ interface VideoPlayerProps {
   serverOptimized?: {
     qualities: readonly ServerTranscodeQuality[];
     loadAudioTracks?: () => Promise<ServerAudioTrack[]>;
+    loadSourceInfo?: () => Promise<{
+      durationSeconds: number | null;
+      tracks?: ServerAudioTrack[];
+    }>;
     /** Legacy server-transcode preference, applied only after Device Original
      * has started and an optimized manifest is safely prepared. */
     defaultQuality?: ServerTranscodeQuality | null;
@@ -472,6 +478,52 @@ function isTrustedServerHlsManifestURL(rawUrl: string): boolean {
   }
 }
 
+function serverOptimizedQualityFromURL(
+  rawUrl: string,
+  qualities: readonly ServerTranscodeQuality[],
+): ServerTranscodeQuality | null {
+  if (!isTrustedServerHlsManifestURL(rawUrl)) return null;
+  try {
+    const quality = new URL(rawUrl, window.location.href).searchParams.get("quality");
+    return qualities.find((candidate) => candidate === quality) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function serverOptimizedAudioFromURL(rawUrl: string): number | null {
+  if (!isTrustedServerHlsManifestURL(rawUrl)) return null;
+  try {
+    const rawAudio = new URL(rawUrl, window.location.href).searchParams.get("audio");
+    if (rawAudio == null || !/^\d+$/.test(rawAudio)) return null;
+    const audioTrack = Number(rawAudio);
+    return Number.isInteger(audioTrack) && audioTrack >= 0 && audioTrack < 32
+      ? audioTrack
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizedServerAudioTracks(
+  tracks: readonly ServerAudioTrack[] | undefined,
+): ServerAudioTrack[] {
+  if (!Array.isArray(tracks)) return [];
+  const seen = new Set<number>();
+  return tracks.filter((track) => {
+    if (
+      !Number.isInteger(track.index) ||
+      track.index < 0 ||
+      track.index >= 32 ||
+      seen.has(track.index)
+    ) {
+      return false;
+    }
+    seen.add(track.index);
+    return true;
+  }).slice(0, 32);
+}
+
 function webviewStartupTimeout(engine: PlaybackEngine, sourceUrl: string): number {
   return engine === "webview-hls-transcode" &&
     isTrustedServerHlsManifestURL(sourceUrl)
@@ -553,6 +605,10 @@ function clockLabel(seconds: number): string {
   return hours > 0
     ? `${hours}:${String(minutes).padStart(2, "0")}:${secs}`
     : `${minutes}:${secs}`;
+}
+
+function durationClockLabel(seconds: number | null): string {
+  return seconds == null ? "--:--" : clockLabel(seconds);
 }
 
 /** Browsers cannot spawn arbitrary local executables. A tiny M3U file is the
@@ -699,10 +755,20 @@ export function VideoPlayer({
   type ScopedOptimizedSource = ServerOptimizedSource & {
     originOwner: string;
     audioPreference?: AudioPreference;
+    partialTimeline: boolean;
   };
   type ScopedPosition = {
     originOwner: string;
     position: number;
+  };
+  type ScopedDuration = {
+    originOwner: string;
+    duration: number;
+  };
+  type ScopedSourceAudio = {
+    originOwner: string;
+    tracks: ServerAudioTrack[];
+    defaultTrack: number | null;
   };
   const [fallbackSource, setFallbackSource] = useState<{
     originUrl: string;
@@ -712,11 +778,21 @@ export function VideoPlayer({
   const [optimizedSource, setOptimizedSource] = useState<ScopedOptimizedSource | null>(null);
   const [sourceSwitchPosition, setSourceSwitchPosition] = useState<ScopedPosition | null>(null);
   const [sourceSwitchState, setSourceSwitchState] = useState<PlaybackHandoffState | null>(null);
+  const [knownAbsoluteDuration, setKnownAbsoluteDuration] = useState<ScopedDuration | null>(null);
+  const [knownSourceAudio, setKnownSourceAudio] = useState<ScopedSourceAudio | null>(null);
   const [serverOptimizationError, setServerOptimizationError] = useState<string | null>(null);
   const [serverOptimizationPending, setServerOptimizationPending] = useState(false);
   const latestAbsolutePositionRef = useRef(0);
   const autoOptimizationAttemptedRef = useRef<string | null>(null);
   const playbackOwner = `${requestedEngine}\u0000${sourceRevision}\u0000${url}`;
+  // The original URL, engine, and caller-issued revision define media identity.
+  // Internal optimized/fallback URLs never change this owner, while a fresh
+  // external resolution cannot inherit duration from an older file by accident.
+  const durationOwner = playbackOwner;
+  const activeKnownAbsoluteDuration =
+    knownAbsoluteDuration?.originOwner === durationOwner
+      ? knownAbsoluteDuration.duration
+      : null;
   const activeFallback =
     fallbackSource?.originUrl === url &&
     fallbackSource.originEngine === requestedEngine
@@ -726,6 +802,23 @@ export function VideoPlayer({
     optimizedSource?.originOwner === playbackOwner
       ? optimizedSource
       : null;
+  const initialServerOptimizedTimeline =
+    activeOptimized == null &&
+    serverOptimized != null &&
+    requestedEngine === "webview-hls-transcode" &&
+    isTrustedServerHlsManifestURL(url);
+  const initialServerOptimizedQuality = initialServerOptimizedTimeline
+    ? serverOptimizedQualityFromURL(url, serverOptimized?.qualities ?? [])
+    : null;
+  const explicitInitialServerAudioTrack = initialServerOptimizedTimeline
+    ? serverOptimizedAudioFromURL(url)
+    : null;
+  const activeKnownSourceAudio = knownSourceAudio?.originOwner === playbackOwner
+    ? knownSourceAudio
+    : null;
+  const initialServerAudioTrack = explicitInitialServerAudioTrack ??
+    activeKnownSourceAudio?.defaultTrack ??
+    null;
   const activeSourceSwitchPosition =
     sourceSwitchPosition?.originOwner === playbackOwner
       ? sourceSwitchPosition.position
@@ -771,8 +864,9 @@ export function VideoPlayer({
       title,
       dk,
       isStandaloneDisplay(),
+      browserExternalFileHint(sourceFileName),
     ),
-    [browserExternalTarget, dk, title],
+    [browserExternalTarget, dk, sourceFileName, title],
   );
   const browserExternalHelp = browserExternalTarget == null
     ? null
@@ -854,6 +948,7 @@ export function VideoPlayer({
     request: number;
     controller: AbortController;
   } | null>(null);
+  const sourceInfoLoadOwnerRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     playerMountedRef.current = true;
     return () => {
@@ -900,6 +995,54 @@ export function VideoPlayer({
   const reportAbsolutePosition = useCallback((next: number) => {
     if (Number.isFinite(next)) latestAbsolutePositionRef.current = Math.max(0, next);
   }, []);
+
+  const rememberAbsoluteDuration = useCallback((next: number) => {
+    if (!Number.isFinite(next) || next <= 0) return;
+    setKnownAbsoluteDuration((current) =>
+      current?.originOwner === durationOwner && current.duration === next
+        ? current
+        : { originOwner: durationOwner, duration: next },
+    );
+  }, [durationOwner]);
+
+  const reportProgress = useCallback((
+    currentSeconds: number,
+    durationSeconds: number | null,
+    prefs?: PlaybackPrefs,
+  ) => {
+    if (
+      activeOptimized == null &&
+      activeFallback == null &&
+      !initialServerOptimizedTimeline &&
+      durationSeconds != null
+    ) {
+      rememberAbsoluteDuration(durationSeconds);
+    }
+    onProgress?.(
+      currentSeconds,
+      activeKnownAbsoluteDuration ?? durationSeconds,
+      prefs,
+    );
+  }, [
+    activeFallback,
+    activeKnownAbsoluteDuration,
+    activeOptimized,
+    initialServerOptimizedTimeline,
+    onProgress,
+    rememberAbsoluteDuration,
+  ]);
+
+  const reportEnded = useCallback((
+    currentSeconds: number,
+    durationSeconds: number | null,
+    prefs?: PlaybackPrefs,
+  ) => {
+    onEnded?.(
+      currentSeconds,
+      activeKnownAbsoluteDuration ?? durationSeconds,
+      prefs,
+    );
+  }, [activeKnownAbsoluteDuration, onEnded]);
 
   const currentWebviewHandoffState = useCallback((
     fallback?: PlaybackHandoffState | null,
@@ -998,6 +1141,55 @@ export function VideoPlayer({
     setServerOptimizationError(null);
     setServerOptimizationPending(false);
   }, [requestedEngine, sourceRevision, url]);
+
+  useEffect(() => {
+    setKnownAbsoluteDuration(null);
+  }, [durationOwner]);
+
+  useEffect(() => {
+    const loadSourceInfo = serverOptimized?.loadSourceInfo;
+    if (
+      mode !== "webview" ||
+      loadSourceInfo == null ||
+      sourceInfoLoadOwnerRef.current === playbackOwner
+    ) {
+      return;
+    }
+    const owner = playbackOwner;
+    sourceInfoLoadOwnerRef.current = owner;
+    void promiseWithinTimeout(
+      Promise.resolve().then(loadSourceInfo),
+      SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS,
+      "Source information timed out.",
+    ).then((sourceInfo) => {
+      if (!playerMountedRef.current || playbackOwnerRef.current !== owner) return;
+      const durationSeconds = sourceInfo.durationSeconds;
+      if (
+        typeof durationSeconds === "number" &&
+        Number.isFinite(durationSeconds) &&
+        durationSeconds > 0 &&
+        durationSeconds <= MAX_SOURCE_DURATION_SECONDS
+      ) {
+        setKnownAbsoluteDuration((current) =>
+          current?.originOwner === owner
+            ? current
+            : { originOwner: owner, duration: durationSeconds },
+        );
+      }
+      const tracks = normalizedServerAudioTracks(sourceInfo.tracks);
+      if (tracks.length > 0) {
+        const defaults = tracks.filter((track) => track.default);
+        setKnownSourceAudio({
+          originOwner: owner,
+          tracks,
+          defaultTrack: defaults.length === 1 ? defaults[0].index : null,
+        });
+      }
+    }).catch(() => {
+      // Source metadata is an optional enhancement. Playback remains usable
+      // with an unknown total when probing is unavailable or times out.
+    });
+  }, [mode, playbackOwner, serverOptimized?.loadSourceInfo]);
 
   const clearChromeTimer = useCallback(() => {
     window.clearTimeout(chromeHideTimer.current);
@@ -1221,7 +1413,7 @@ export function VideoPlayer({
         const manifestDeadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
         let retryDelayMs = SERVER_OPTIMIZED_RETRY_BASE_MS;
         let manifest: string | null = null;
-        let preparedAudioTrack = audioTrack ?? next.audioTrack ?? 0;
+        let preparedAudioTrack = audioTrack ?? next.audioTrack;
         while (manifest == null) {
           if (!ownsRequest() || controller.signal.aborted) return;
           const remainingMs = manifestDeadline - Date.now();
@@ -1299,6 +1491,7 @@ export function VideoPlayer({
           ...next,
           audioTrack: preparedAudioTrack,
           audioPreference,
+          partialTimeline: /(?:^|\n)#EXT-X-PLAYLIST-TYPE:EVENT(?:\r?$|\s)/m.test(manifest),
           startPositionSeconds: activationStart,
           originOwner: owner,
         });
@@ -1378,9 +1571,17 @@ export function VideoPlayer({
             };
         switchToDeviceOriginal(latestAbsolutePositionRef.current, restoredState);
         setServerOptimizationError(
-          "Server Optimized could not synchronize. Device Original was restored.",
+          exactHandoffPending
+            ? "Server Optimized could not synchronize. Device Original was restored."
+            : "Server Optimized failed after synchronization. Device Original was restored.",
         );
-        recordDiagnostic("player", "server_optimized.handoff_failed", "warning");
+        recordDiagnostic(
+          "player",
+          exactHandoffPending
+            ? "server_optimized.handoff_failed"
+            : "server_optimized.post_handoff_failed",
+          "warning",
+        );
         return;
       }
       const pendingForCurrentOwner = recoveryPendingRef.current?.owner === owner;
@@ -1871,11 +2072,11 @@ export function VideoPlayer({
         onSwitchServerOptimized={switchToServerOptimized}
         onSwitchDeviceOriginal={switchToDeviceOriginal}
         onAbsolutePositionChange={reportAbsolutePosition}
+        onOpenExternalPlayer={externalPlaybackAvailable ? openExternalPlayback : undefined}
+        externalActionStatus={externalPlaybackAvailable ? externalActionStatus : null}
         playbackDecision={playbackDecisionFor(effectiveEngine, effectiveUrl)}
-        onProgress={(current, duration, prefs) =>
-          onProgress?.(current, duration, prefs)
-        }
-        onEnded={onEnded}
+        onProgress={reportProgress}
+        onEnded={reportEnded}
         autoCountdown={autoCountdown}
         scrobbleContext={scrobbleContext}
         onPlayNext={upNext != null ? onPlayNext : undefined}
@@ -2002,19 +2203,30 @@ export function VideoPlayer({
             onOpenShortcuts={() => setDetailsSection("shortcuts")}
             onSourceSize={setSourceSize}
             onTechnicalStats={updateWebTechnicalStats}
-            onProgress={onProgress}
-            onEnded={onEnded}
+            onProgress={reportProgress}
+            onEnded={reportEnded}
             savedPrefs={savedPrefs}
             playerPreferences={playerPreferences}
             startPositionSeconds={effectiveStartPositionSeconds}
             timelineOffsetSeconds={effectiveTimelineOffsetSeconds}
+            knownAbsoluteDurationSeconds={activeKnownAbsoluteDuration}
+            onSourceDurationKnown={activeOptimized == null &&
+              activeFallback == null &&
+              !initialServerOptimizedTimeline
+              ? rememberAbsoluteDuration
+              : undefined}
             sourceSwitchState={activeSourceSwitchState}
             exactHandoff={activeOptimized != null}
+            optimizedTimelineIsPartial={activeOptimized?.partialTimeline ?? initialServerOptimizedTimeline}
             externalHandoffVideoRef={externalHandoffVideoRef}
             serverOptimized={serverOptimized}
             serverAudioOwner={playbackOwner}
-            activeServerOptimizedQuality={activeOptimized?.quality ?? null}
-            activeServerAudioTrack={activeOptimized?.audioTrack ?? 0}
+            initialServerAudioTracks={activeKnownSourceAudio?.tracks}
+            activeServerOptimizedQuality={activeOptimized?.quality ?? initialServerOptimizedQuality}
+            activeServerAudioTrack={activeOptimized?.audioTrack ?? initialServerAudioTrack}
+            initialServerAudioTrackExplicit={
+              activeOptimized == null && explicitInitialServerAudioTrack != null
+            }
             activeServerAudioPreference={activeOptimized?.audioPreference ?? null}
             serverOptimizationPending={serverOptimizationPending}
             serverOptimizationError={serverOptimizationError}
@@ -2119,8 +2331,11 @@ function WebviewPlayer({
   playerPreferences,
   startPositionSeconds,
   timelineOffsetSeconds,
+  knownAbsoluteDurationSeconds,
+  onSourceDurationKnown,
   sourceSwitchState,
   exactHandoff,
+  optimizedTimelineIsPartial,
   externalHandoffVideoRef,
   onPlaybackError,
   onPlaybackStall,
@@ -2144,8 +2359,10 @@ function WebviewPlayer({
   autoCountdown = true,
   serverOptimized,
   serverAudioOwner,
+  initialServerAudioTracks,
   activeServerOptimizedQuality,
   activeServerAudioTrack,
+  initialServerAudioTrackExplicit,
   activeServerAudioPreference,
   serverOptimizationPending,
   serverOptimizationError,
@@ -2190,8 +2407,11 @@ function WebviewPlayer({
   playerPreferences?: PlayerPreferenceDefaults | null;
   startPositionSeconds?: number;
   timelineOffsetSeconds: number;
+  knownAbsoluteDurationSeconds: number | null;
+  onSourceDurationKnown?: (durationSeconds: number) => void;
   sourceSwitchState: PlaybackHandoffState | null;
   exactHandoff: boolean;
+  optimizedTimelineIsPartial: boolean;
   externalHandoffVideoRef: { current: HTMLVideoElement | null };
   onPlaybackError: (message: string, exactHandoffPending: boolean) => void;
   onPlaybackStall: (
@@ -2218,8 +2438,10 @@ function WebviewPlayer({
   autoCountdown?: boolean;
   serverOptimized?: VideoPlayerProps["serverOptimized"];
   serverAudioOwner: string;
+  initialServerAudioTracks?: readonly ServerAudioTrack[];
   activeServerOptimizedQuality: ServerTranscodeQuality | null;
-  activeServerAudioTrack: number;
+  activeServerAudioTrack: number | null;
+  initialServerAudioTrackExplicit: boolean;
   activeServerAudioPreference: AudioPreference | null;
   serverOptimizationPending: boolean;
   serverOptimizationError: string | null;
@@ -2266,6 +2488,7 @@ function WebviewPlayer({
     tearingDown: false,
   });
   const scrubberRef = useRef<WebviewScrubberHandle | null>(null);
+  const absoluteSeekRef = useRef<(targetSeconds: number) => void>(() => {});
   const lastClockSecondRef = useRef(-1);
   const clockRef = useRef<HTMLSpanElement | null>(null);
   const [duration, setDuration] = useState(0);
@@ -2292,6 +2515,22 @@ function WebviewPlayer({
   subtitlePositionRef.current = subtitlePosition;
   const [paused, setPaused] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const normalizedTimelineOffset = Number.isFinite(timelineOffsetSeconds)
+    ? Math.max(0, timelineOffsetSeconds)
+    : 0;
+  const displayedDuration = knownAbsoluteDurationSeconds != null &&
+    Number.isFinite(knownAbsoluteDurationSeconds) &&
+    knownAbsoluteDurationSeconds > 0
+    ? knownAbsoluteDurationSeconds
+    : !optimizedTimelineIsPartial && duration > 0
+      ? duration + normalizedTimelineOffset
+      : null;
+  const displayedPosition = Math.max(0, currentPosition + normalizedTimelineOffset);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video == null || clockRef.current == null) return;
+    clockRef.current.textContent = `${clockLabel(video.currentTime + normalizedTimelineOffset)} / ${durationClockLabel(displayedDuration)}`;
+  }, [displayedDuration, normalizedTimelineOffset]);
   const requiresExactHandoff = exactHandoff || sourceSwitchState != null;
   const requiresExactHandoffRef = useRef(requiresExactHandoff);
   requiresExactHandoffRef.current = requiresExactHandoff;
@@ -2316,12 +2555,12 @@ function WebviewPlayer({
   // Set when the video reaches its natural end - drives the Up-next card.
   const [ended, setEnded] = useState(false);
   const endPrediction = useMemo(() => predictEpisodeEnd({
-    position: currentPosition,
-    duration,
+    position: displayedPosition,
+    duration: displayedDuration ?? 0,
     playing: playing && !paused && !suspended,
     eligible: upNext != null && onPlayNext != null,
     dismissed: upNextDismissed,
-  }), [currentPosition, duration, onPlayNext, paused, playing, suspended, upNext, upNextDismissed]);
+  }), [displayedDuration, displayedPosition, onPlayNext, paused, playing, suspended, upNext, upNextDismissed]);
   useEffect(() => {
     if (endPrediction.show) upNextWarningShownRef.current = true;
   }, [endPrediction.show]);
@@ -2368,6 +2607,10 @@ function WebviewPlayer({
   const serverAudioLoaderRef = useRef(serverOptimized?.loadAudioTracks);
   serverAudioLoaderRef.current = serverOptimized?.loadAudioTracks;
   const serverAudioLoaderAvailable = serverOptimized?.loadAudioTracks != null;
+  const defaultServerAudioTracks = serverAudioTracks.filter((track) => track.isDefault);
+  const resolvedServerAudioTrack = activeServerAudioTrack ?? (
+    defaultServerAudioTracks.length === 1 ? defaultServerAudioTracks[0].index : null
+  );
   const touchLikePointerRef = useRef(false);
   const volumeIsSilent = muted || volume === 0;
   const underTauri = isTauri();
@@ -2376,10 +2619,27 @@ function WebviewPlayer({
 
   useEffect(() => {
     serverAudioLoadSequenceRef.current += 1;
-    setServerAudioTracks([]);
-    setServerAudioInventoryStatus("idle");
-    appliedServerAudioPreferenceRef.current = false;
-  }, [serverAudioOwner]);
+    const choices = normalizedServerAudioTracks(initialServerAudioTracks).map((track) => ({
+      index: track.index,
+      id: String(track.index),
+      label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
+      language: track.language?.trim() || null,
+      isDefault: track.default,
+    }));
+    setServerAudioTracks(choices);
+    setServerAudioInventoryStatus(choices.length > 0 ? "ready" : "idle");
+    // A successful optimized switch carries the audio preference that produced
+    // this exact URL. Treat it like an explicit URL audio selection on remount,
+    // otherwise stale saved preferences can immediately switch the new stream
+    // back to its previous/default track.
+    appliedServerAudioPreferenceRef.current =
+      initialServerAudioTrackExplicit || activeServerAudioPreference != null;
+  }, [
+    activeServerAudioPreference,
+    initialServerAudioTrackExplicit,
+    initialServerAudioTracks,
+    serverAudioOwner,
+  ]);
 
   useEffect(() => {
     const load = serverAudioLoaderRef.current;
@@ -2389,8 +2649,7 @@ function WebviewPlayer({
     void load().then(
       (tracks) => {
         if (serverAudioLoadSequenceRef.current !== request) return;
-        const choices = tracks
-          .filter((track) => Number.isInteger(track.index) && track.index >= 0 && track.index < 32)
+        const choices = normalizedServerAudioTracks(tracks)
           .map((track) => ({
             index: track.index,
             id: String(track.index),
@@ -2409,12 +2668,12 @@ function WebviewPlayer({
     );
   }, [optionsOpen, serverAudioInventoryStatus, serverAudioLoaderAvailable, serverAudioOwner]);
 
-  if (serverAudioLoaderAvailable) {
+  if (serverOptimized != null && resolvedServerAudioTrack != null) {
     const selected = serverAudioTracks.find(
-      (track) => track.index === activeServerAudioTrack,
+      (track) => track.index === resolvedServerAudioTrack,
     );
     audioPreferenceRef.current = {
-      id: activeServerAudioPreference?.id ?? selected?.id ?? String(activeServerAudioTrack),
+      id: activeServerAudioPreference?.id ?? selected?.id ?? String(resolvedServerAudioTrack),
       language: activeServerAudioPreference?.language ?? selected?.language ?? null,
     };
   }
@@ -2700,8 +2959,11 @@ function WebviewPlayer({
     const setPositionState = (force = false) => {
       const now = Date.now();
       if (!force && now - lastPositionUpdate < 1000) return;
-      const mediaDuration = video.duration;
-      const currentTime = video.currentTime;
+      const knownDuration = knownAbsoluteDurationRef.current;
+      if (knownDuration == null && optimizedTimelineIsPartial) return;
+      const offset = knownDuration == null ? 0 : timelineOffsetRef.current;
+      const mediaDuration = knownDuration ?? video.duration;
+      const currentTime = video.currentTime + offset;
       if (
         !Number.isFinite(mediaDuration) ||
         mediaDuration <= 0 ||
@@ -2726,11 +2988,11 @@ function WebviewPlayer({
     };
     const seek = (time: number) => {
       if (!Number.isFinite(time)) return;
-      const mediaDuration = video.duration;
-      video.currentTime = Number.isFinite(mediaDuration) && mediaDuration > 0
-        ? Math.min(Math.max(time, 0), mediaDuration)
-        : Math.max(time, 0);
+      absoluteSeekRef.current(time);
     };
+    const currentAbsolutePosition = () => video.currentTime + (
+      knownAbsoluteDurationRef.current == null ? 0 : timelineOffsetRef.current
+    );
     const setActionHandler = (
       action: MediaSessionAction,
       handler: MediaSessionActionHandler,
@@ -2751,8 +3013,8 @@ function WebviewPlayer({
       void video.play().catch(() => {});
     });
     setActionHandler("pause", () => video.pause());
-    setActionHandler("seekbackward", () => seek(video.currentTime - 10));
-    setActionHandler("seekforward", () => seek(video.currentTime + 10));
+    setActionHandler("seekbackward", () => seek(currentAbsolutePosition() - 10));
+    setActionHandler("seekforward", () => seek(currentAbsolutePosition() + 10));
     setActionHandler("seekto", (details) => {
       if (details.seekTime != null) seek(details.seekTime);
     });
@@ -2787,7 +3049,7 @@ function WebviewPlayer({
         // The session can already be invalidated during a browser teardown.
       }
     };
-  }, [mediaArtist, mediaArtworkUrl, title, url]);
+  }, [mediaArtist, mediaArtworkUrl, optimizedTimelineIsPartial, title, url]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -2940,6 +3202,21 @@ function WebviewPlayer({
   timelineOffsetRef.current = Number.isFinite(timelineOffsetSeconds)
     ? Math.max(0, timelineOffsetSeconds)
     : 0;
+  const knownAbsoluteDurationRef = useRef<number | null>(null);
+  knownAbsoluteDurationRef.current = knownAbsoluteDurationSeconds != null &&
+    Number.isFinite(knownAbsoluteDurationSeconds) &&
+    knownAbsoluteDurationSeconds > 0
+    ? knownAbsoluteDurationSeconds
+    : null;
+  const onSourceDurationKnownRef = useRef(onSourceDurationKnown);
+  onSourceDurationKnownRef.current = onSourceDurationKnown;
+  const absoluteDurationFor = (localDuration: number): number | null => {
+    if (knownAbsoluteDurationRef.current != null) return knownAbsoluteDurationRef.current;
+    if (optimizedTimelineIsPartial) return null;
+    return Number.isFinite(localDuration) && localDuration > 0
+      ? localDuration + timelineOffsetRef.current
+      : null;
+  };
   const didSeekRef = useRef(false);
   useEffect(() => {
     const video = videoRef.current;
@@ -3054,11 +3331,10 @@ function WebviewPlayer({
     onSourceSizeRef.current(null);
 
     const report = () => {
-      const d = Number.isFinite(video.duration) ? video.duration : null;
       const offset = timelineOffsetRef.current;
       onProgressRef.current?.(
         video.currentTime + offset,
-        d == null ? null : d + offset,
+        absoluteDurationFor(video.duration),
         {
         preferredAudioId: audioPreferenceRef.current.id,
         preferredAudioLang: audioPreferenceRef.current.language,
@@ -3122,7 +3398,11 @@ function WebviewPlayer({
         startupReadyRef.current = true;
       }
       onAbsolutePositionChange(video.currentTime + timelineOffsetRef.current);
-      scrubberRef.current?.setCurrentTime(video.currentTime);
+      scrubberRef.current?.setCurrentTime(
+        knownAbsoluteDurationRef.current == null
+          ? video.currentTime
+          : video.currentTime + timelineOffsetRef.current,
+      );
       if (video.currentTime < previousPositionRef.current - 2) {
         upNextDismissedRef.current = false;
         setUpNextDismissed(false);
@@ -3139,7 +3419,7 @@ function WebviewPlayer({
         lastClockSecondRef.current = wholeSecond;
         if (clockRef.current != null) {
           const offset = timelineOffsetRef.current;
-          clockRef.current.textContent = `${clockLabel(video.currentTime + offset)} / ${clockLabel(video.duration + offset)}`;
+          clockRef.current.textContent = `${clockLabel(video.currentTime + offset)} / ${durationClockLabel(absoluteDurationFor(video.duration))}`;
         }
       }
       const now = Date.now();
@@ -3193,10 +3473,14 @@ function WebviewPlayer({
       }
     };
     const onLoadedMeta = () => {
-      if (Number.isFinite(video.duration)) setDuration(video.duration);
+      if (Number.isFinite(video.duration)) {
+        setDuration(video.duration);
+        const sourceDuration = video.duration + timelineOffsetRef.current;
+        if (sourceDuration > 0) onSourceDurationKnownRef.current?.(sourceDuration);
+      }
       if (clockRef.current != null) {
         const offset = timelineOffsetRef.current;
-        clockRef.current.textContent = `${clockLabel(video.currentTime + offset)} / ${clockLabel(video.duration + offset)}`;
+        clockRef.current.textContent = `${clockLabel(video.currentTime + offset)} / ${durationClockLabel(absoluteDurationFor(video.duration))}`;
       }
       const width = video.videoWidth;
       const height = video.videoHeight;
@@ -3206,7 +3490,11 @@ function WebviewPlayer({
       applyResume();
     };
     const onDurationChange = () => {
-      if (Number.isFinite(video.duration)) setDuration(video.duration);
+      if (Number.isFinite(video.duration)) {
+        setDuration(video.duration);
+        const sourceDuration = video.duration + timelineOffsetRef.current;
+        if (sourceDuration > 0) onSourceDurationKnownRef.current?.(sourceDuration);
+      }
       applyResume();
     };
     const onSeekedForResume = () => {
@@ -3217,12 +3505,25 @@ function WebviewPlayer({
       const offset = timelineOffsetRef.current;
       return playbackProgressPct(
         video.currentTime + offset,
-        video.duration + offset,
+        absoluteDurationFor(video.duration) ?? Number.NaN,
       );
     };
     const onVideoEnded = () => {
       if (exactHandoffPendingRef.current) {
         applyResume();
+        return;
+      }
+      const absolutePosition = video.currentTime + timelineOffsetRef.current;
+      const absoluteDuration = absoluteDurationFor(video.duration);
+      if (
+        optimizedTimelineIsPartial &&
+        (absoluteDuration == null || absolutePosition < absoluteDuration - 10)
+      ) {
+        onAbsolutePositionChange(absolutePosition);
+        onPlaybackErrorRef.current(
+          "Server Optimized ended before the original media completed.",
+          false,
+        );
         return;
       }
       // An ended event is also conclusive evidence that this source became
@@ -3235,8 +3536,8 @@ function WebviewPlayer({
       };
       if (onEndedRef.current != null) {
         onEndedRef.current(
-          video.currentTime + timelineOffsetRef.current,
-          Number.isFinite(video.duration) ? video.duration + timelineOffsetRef.current : null,
+          absolutePosition,
+          absoluteDuration,
           terminalProgress,
         );
       } else {
@@ -3680,19 +3981,62 @@ function WebviewPlayer({
 
   const seek = (t: number) => {
     const video = videoRef.current;
-    if (video != null && Number.isFinite(t)) {
-      video.currentTime = t;
-      scrubberRef.current?.setCurrentTime(t);
+    if (video == null || !Number.isFinite(t)) return;
+    const knownDuration = knownAbsoluteDurationRef.current;
+    if (knownDuration == null) {
+      const localDuration = Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : Number.POSITIVE_INFINITY;
+      const localTarget = Math.min(Math.max(t, 0), localDuration);
+      video.currentTime = localTarget;
+      scrubberRef.current?.setCurrentTime(localTarget);
+      return;
     }
+    const absoluteTarget = Math.min(Math.max(t, 0), knownDuration);
+    const windowStart = timelineOffsetRef.current;
+    const windowDuration = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration
+      : 0;
+    const windowEnd = windowStart + windowDuration;
+    if (absoluteTarget >= windowStart && absoluteTarget <= windowEnd) {
+      const localTarget = absoluteTarget - windowStart;
+      video.currentTime = localTarget;
+      scrubberRef.current?.setCurrentTime(absoluteTarget);
+      return;
+    }
+    if (serverOptimized == null || activeServerOptimizedQuality == null) return;
+    const selected = serverAudioTracks.find(
+      (track) => track.index === resolvedServerAudioTrack,
+    );
+    void onSwitchServerOptimized(
+      activeServerOptimizedQuality,
+      absoluteTarget,
+      () => ({
+        paused: video.paused,
+        volume: video.volume,
+        muted: video.muted,
+        playbackRate: video.playbackRate,
+      }),
+      resolvedServerAudioTrack ?? undefined,
+      activeServerAudioPreference ?? (selected == null ? undefined : {
+        id: selected.id,
+        language: selected.language,
+      }),
+    );
   };
+  absoluteSeekRef.current = seek;
 
   const relativeSeek = (delta: number) => {
     const video = videoRef.current;
     if (video == null) return;
-    const limit = Number.isFinite(video.duration) && video.duration > 0
-      ? video.duration
-      : Number.POSITIVE_INFINITY;
-    seek(Math.min(limit, Math.max(0, video.currentTime + delta)));
+    const knownDuration = knownAbsoluteDurationRef.current;
+    const current = video.currentTime + (knownDuration == null ? 0 : timelineOffsetRef.current);
+    const limit = knownDuration ?? (
+      Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : Number.POSITIVE_INFINITY
+    );
+    seek(Math.min(limit, Math.max(0, current + delta)));
   };
 
   const toggleOptions = () => {
@@ -3791,9 +4135,20 @@ function WebviewPlayer({
       if (suspendedRef.current) return;
       onActivity();
       if (shouldIgnoreShortcut(e.target, video)) return;
-      const dur = Number.isFinite(video.duration) ? video.duration : 0;
+      const knownDuration = knownAbsoluteDurationRef.current;
+      const dur = knownDuration ?? (
+        !optimizedTimelineIsPartial && Number.isFinite(video.duration)
+          ? video.duration
+          : 0
+      );
       const seekTo = (t: number) => {
-        video.currentTime = dur > 0 ? Math.min(Math.max(t, 0), dur) : Math.max(t, 0);
+        absoluteSeekRef.current(t);
+      };
+      const seekBy = (delta: number) => {
+        const current = video.currentTime + (
+          knownDuration == null ? 0 : timelineOffsetRef.current
+        );
+        seekTo(current + delta);
       };
       switch (e.key) {
         case " ":
@@ -3805,21 +4160,21 @@ function WebviewPlayer({
           break;
         case "ArrowLeft":
           e.preventDefault();
-          seekTo(video.currentTime - 5);
+          seekBy(-5);
           break;
         case "ArrowRight":
           e.preventDefault();
-          seekTo(video.currentTime + 5);
+          seekBy(5);
           break;
         case "j":
         case "J":
           e.preventDefault();
-          seekTo(video.currentTime - 10);
+          seekBy(-10);
           break;
         case "l":
         case "L":
           e.preventDefault();
-          seekTo(video.currentTime + 10);
+          seekBy(10);
           break;
         case "ArrowUp":
           e.preventDefault();
@@ -3866,7 +4221,7 @@ function WebviewPlayer({
         }
         case "Home":
           e.preventDefault();
-          seekTo(0);
+          if (dur > 0) seekTo(0);
           break;
         case "End":
           e.preventDefault();
@@ -3889,6 +4244,7 @@ function WebviewPlayer({
     onActivity,
     onOpenShortcuts,
     onPlayNext,
+    optimizedTimelineIsPartial,
     subs.activeTrackId,
     subs.setActiveTrack,
     subs.tracks,
@@ -3942,13 +4298,13 @@ function WebviewPlayer({
 
   const selectServerOptimizedQuality = useCallback((quality: ServerTranscodeQuality) => {
     const selected = serverAudioTracks.find(
-      (track) => track.index === activeServerAudioTrack,
+      (track) => track.index === resolvedServerAudioTrack,
     );
     void onSwitchServerOptimized(
       quality,
       absolutePlaybackPosition(),
       playbackHandoffState,
-      serverOptimized?.loadAudioTracks == null ? undefined : activeServerAudioTrack,
+      resolvedServerAudioTrack ?? undefined,
       activeServerAudioPreference ?? (selected == null ? undefined : {
         id: selected.id,
         language: selected.language,
@@ -3957,11 +4313,10 @@ function WebviewPlayer({
   }, [
     absolutePlaybackPosition,
     activeServerAudioPreference,
-    activeServerAudioTrack,
+    resolvedServerAudioTrack,
     onSwitchServerOptimized,
     playbackHandoffState,
     serverAudioTracks,
-    serverOptimized?.loadAudioTracks,
   ]);
 
   const selectDeviceOriginal = useCallback(() => {
@@ -4088,7 +4443,7 @@ function WebviewPlayer({
       serverAudioTracks.find((track) => track.isDefault) ??
       serverAudioTracks[0];
     appliedServerAudioPreferenceRef.current = true;
-    if (selected.index === activeServerAudioTrack || serverOptimized == null) return;
+    if (selected.index === resolvedServerAudioTrack || serverOptimized == null) return;
     const quality = activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
     void onSwitchServerOptimized(
       quality,
@@ -4098,7 +4453,7 @@ function WebviewPlayer({
       { id: selected.id, language: selected.language },
     );
   }, [
-    activeServerAudioTrack,
+    resolvedServerAudioTrack,
     activeServerOptimizedQuality,
     onSwitchServerOptimized,
     savedPrefs,
@@ -4115,7 +4470,7 @@ function WebviewPlayer({
       ? hlsAudioTracks
       : browserAudioTracks;
   const activeAudioTrack = serverAudioInventoryKnown
-    ? activeServerAudioTrack
+    ? resolvedServerAudioTrack
     : hlsAudioInventoryKnown
       ? hlsAudioTrack
       : browserAudioTrack;
@@ -4222,7 +4577,7 @@ function WebviewPlayer({
           key={url}
           ref={scrubberRef}
           active={chromeVisible}
-          duration={duration}
+          duration={displayedDuration ?? 0}
           preview={thumbs.available ? thumbs.preview : null}
           onHover={thumbs.onHover}
           onLeave={thumbs.onLeave}
@@ -4255,7 +4610,7 @@ function WebviewPlayer({
               />
             </label>
             <span ref={clockRef} className="player-time" aria-label="Playback time">
-              0:00 / {clockLabel(duration)}
+              0:00 / {durationClockLabel(displayedDuration)}
             </span>
           </div>
 

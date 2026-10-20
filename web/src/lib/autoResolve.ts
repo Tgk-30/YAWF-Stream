@@ -74,6 +74,8 @@ function hasSameResolutionIdentity(
   return (
     existing.stream.streamURL === next.stream.streamURL &&
     existing.infoHash === next.infoHash &&
+    (existing.fileIndex ?? null) === (next.fileIndex ?? null) &&
+    (existing.fileNameHint ?? null) === (next.fileNameHint ?? null) &&
     existing.debridService === next.debridService
   );
 }
@@ -146,7 +148,12 @@ export async function resolveOne(
     const preferred = chosenRow.cachedOn;
 
     // 4. Resolve to a concrete, ready stream URL.
-    const stream = await debrid.resolveStream(chosen.infoHash, preferred);
+    const exactFileHint = chosen.fileIndex == null
+      ? null
+      : { fileIndex: chosen.fileIndex, fileName: chosen.fileNameHint ?? null };
+    const stream = exactFileHint == null
+      ? await debrid.resolveStream(chosen.infoHash, preferred)
+      : await debrid.resolveStream(chosen.infoHash, preferred, exactFileHint);
 
     const record: CachedResolutionRecord = {
       mediaId: preview.id,
@@ -154,6 +161,12 @@ export async function resolveOne(
       resolvedAt: new Date(now).toISOString(),
       debridService: stream.debridService,
       infoHash: chosen.infoHash,
+      ...(chosen.fileIndex == null
+        ? {}
+        : {
+            fileIndex: chosen.fileIndex,
+            fileNameHint: chosen.fileNameHint ?? null,
+          }),
     };
     if (existing != null && hasSameResolutionIdentity(existing, record)) {
       // resolvedAt is the freshness clock for expiring direct links. Keep an

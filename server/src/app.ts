@@ -674,8 +674,12 @@ const resolveStreamSchema = z.object({
   // largest-file pick, exactly today's behavior.
   season: z.number().int().min(1).max(200).nullable().optional(),
   episode: z.number().int().min(1).max(10_000).nullable().optional(),
+  fileIndex: z.number().int().min(0).max(1_000_000).optional(),
+  fileName: z.string().regex(/^[^\u0000-\u001f\u007f]+$/).trim().min(1).max(1024).optional(),
   backend: z.enum(["debrid", "direct_torrent"]).default("debrid"),
   directTorrentAcknowledged: z.boolean().default(false),
+}).refine((value) => (value.fileIndex == null) === (value.fileName == null), {
+  message: "An exact file selection requires both fileIndex and fileName.",
 });
 
 const profileSettingSchema = z.object({
@@ -2299,6 +2303,8 @@ function adminStreamUsageSummary(db: AppDatabase, days: number) {
 }
 
 function adminActiveStreamSessions(db: AppDatabase) {
+  // A completed HTTP response (including one byte range) does not revoke its
+  // playback grant. Keep valid grants visible so an admin can still stop replay.
   const now = nowISO();
   const rows = db.sqlite
     .prepare(
@@ -2312,6 +2318,7 @@ function adminActiveStreamSessions(db: AppDatabase) {
               stream_sessions.expires_at,
               stream_sessions.bytes_served,
               stream_sessions.last_accessed_at,
+              stream_sessions.completed_at,
               stream_sessions.last_status,
               stream_sessions.last_error
        FROM stream_sessions
@@ -2319,7 +2326,6 @@ function adminActiveStreamSessions(db: AppDatabase) {
        JOIN users ON users.id = profiles.user_id
        WHERE stream_sessions.revoked_at IS NULL
          AND stream_sessions.expires_at > ?
-         AND stream_sessions.completed_at IS NULL
        ORDER BY
          COALESCE(stream_sessions.last_accessed_at, stream_sessions.created_at) DESC
        LIMIT 100`,
@@ -2335,6 +2341,7 @@ function adminActiveStreamSessions(db: AppDatabase) {
     expires_at: string;
     bytes_served: number;
     last_accessed_at: string | null;
+    completed_at: string | null;
     last_status: number | null;
     last_error: string | null;
   }>;
@@ -2351,6 +2358,7 @@ function adminActiveStreamSessions(db: AppDatabase) {
       expiresAt: row.expires_at,
       bytesServed: row.bytes_served,
       lastAccessedAt: row.last_accessed_at,
+      completedAt: row.completed_at,
       lastStatus: row.last_status,
       lastError: row.last_error,
     })),
@@ -2381,8 +2389,7 @@ function adminHealthSummary(db: AppDatabase, config: ServerConfig) {
       `SELECT COUNT(*) AS count
        FROM stream_sessions
        WHERE revoked_at IS NULL
-         AND expires_at > ?
-         AND completed_at IS NULL`,
+         AND expires_at > ?`,
       now,
     ),
     credentials: countScalar(
@@ -5484,6 +5491,12 @@ function registerRoutes(
     requireCsrf(request);
     rateLimit(request, `streams:resolve:${auth.profileId}`, 120, 60 * 1000);
     const body = parseBody(resolveStreamSchema, request.body);
+    const episodeHint = body.season != null && body.episode != null
+      ? { season: body.season, episode: body.episode }
+      : null;
+    const fileHint = body.fileIndex != null && body.fileName != null
+      ? { fileIndex: body.fileIndex, fileName: body.fileName, ...episodeHint }
+      : episodeHint;
     // Kid play-block - the authoritative content gate, FAIL-CLOSED. A capped/kid
     // profile may resolve a title only when (a) it declares its media identity,
     // (b) the title is a MOVIE within the cap, and (c) the infoHash is genuinely a
@@ -5528,6 +5541,10 @@ function registerRoutes(
         body.mediaId,
         body.mediaType,
         body.infoHash,
+        null,
+        null,
+        false,
+        fileHint,
       ).catch(() => false);
       if (!belongs) {
         throw blocked("infohash_unbound", { mediaId: body.mediaId, infoHash: body.infoHash });
@@ -5562,6 +5579,7 @@ function registerRoutes(
         body.season ?? null,
         body.episode ?? null,
         !auth.isKid && auth.maturityMax == null,
+        fileHint,
       ).catch(() => false);
       if (!belongs) {
         throw httpError(403, "This Direct P2P source is not bound to the selected title.");
@@ -5573,10 +5591,7 @@ function registerRoutes(
           profileId: auth.profileId,
           infoHash: body.infoHash,
           expiresInSeconds: body.expiresInSeconds,
-          fileHint:
-            body.season != null && body.episode != null
-              ? { season: body.season, episode: body.episode }
-              : null,
+          fileHint,
         });
         const session = createStreamSession(db, config, auth, {
           id: sessionId,
@@ -5614,10 +5629,7 @@ function registerRoutes(
     const directStream = await resolveServerStream(db, config, auth.profileId, {
       infoHash: body.infoHash,
       preferredService: body.preferredService ?? null,
-      fileHint:
-        body.season != null && body.episode != null
-          ? { season: body.season, episode: body.episode }
-          : null,
+      fileHint,
     });
     const session = createStreamSession(db, config, auth, {
       upstreamUrl: directStream.streamURL,
@@ -6151,11 +6163,12 @@ function registerRoutes(
     rateLimit(request, `stream-audio:${row.id}`, 30, 60 * 1000);
     const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
     await assertSafeUpstream(upstreamUrl, config.allowRawStreamUrls);
-    const tracks = await transcode.registry.audioTracksFor(row.id, upstreamUrl);
+    const sourceInfo = await transcode.registry.sourceInfoFor(row.id, upstreamUrl);
+    const tracks = sourceInfo.audioTracks;
     if (tracks == null) {
       throw httpError(409, "Audio track inventory is unavailable for this stream.");
     }
-    return { tracks };
+    return { tracks, durationSeconds: sourceInfo.durationSeconds };
   });
 
   // HLS manifest: starts/reuses an ffmpeg job and returns the playlist with
@@ -6472,7 +6485,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.setErrorHandler((error, _request, reply) => {
     const zodError = error instanceof z.ZodError;
-    const statusCode = zodError ? 400 : ((error as { statusCode?: number }).statusCode ?? 500);
+    const selectionFailed = error != null && typeof error === "object"
+      && (error as { name?: string }).name === "DebridError"
+      && (error as { kind?: string }).kind === "fileSelectionFailed";
+    const statusCode = zodError ? 400 : selectionFailed ? 422
+      : ((error as { statusCode?: number }).statusCode ?? 500);
     const message = error instanceof Error ? error.message : "Request failed.";
     if (statusCode >= 500) app.log.error(error);
     // Debrid provider failures (invalid token, upstream 5xx) used to collapse
@@ -6485,7 +6502,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       typeof error === "object" &&
       (error as { name?: string }).name === "DebridError";
     reply.status(statusCode).send({
-      error: statusCode >= 500 && !isDebridError ? "Internal server error." : message,
+      error: selectionFailed
+        ? "The selected file is unavailable or does not match this source. Choose another source."
+        : statusCode >= 500 && !isDebridError ? "Internal server error." : message,
       issues: zodError ? error.issues : undefined,
     });
   });

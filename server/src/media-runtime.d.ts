@@ -109,9 +109,16 @@ export function resolveServerStream(
   input: {
     infoHash: string;
     preferredService?: DebridServiceType | null;
-    /** Episode context for season-pack file selection; null/omitted → the
-     *  default (largest-file) pick. */
-    fileHint?: { season: number; episode: number } | null;
+    /** Episode context or an exact Stremio torrent-file request. */
+    fileHint?:
+      | { season: number; episode: number }
+      | {
+          fileIndex: number;
+          fileName: string | null;
+          season?: number;
+          episode?: number;
+        }
+      | null;
   },
 ): Promise<StreamInfo>;
 
@@ -129,6 +136,12 @@ export function titleHasInfoHash(
   season?: number | null,
   episode?: number | null,
   includeTitleMatches?: boolean,
+  fileHint?: { season: number; episode: number } | {
+    fileIndex: number;
+    fileName: string;
+    season?: number;
+    episode?: number;
+  } | null,
 ): Promise<boolean>;
 
 /** Builds a single provider client for the server-side token check

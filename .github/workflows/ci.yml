@@ -5,6 +5,21 @@ on:
   pull_request:
 
 jobs:
+  macos-node-compatibility:
+    name: Bundled Mac Node22 server compatibility
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.3"
+      - run: npm ci
+        working-directory: web
+      - run: npm ci
+        working-directory: server
+      - run: npm test && npm run build
+        working-directory: server
+
   rust:
     name: Rust format, lint, test, and audit
     runs-on: macos-14
@@ -177,6 +192,12 @@ jobs:
 
       - name: Bundle budget verifier tests
         run: node --test scripts/check_bundle_budgets.test.mjs
+
+      - name: macOS bundle minimum verifier tests
+        run: node --test scripts/check_macos_bundle_minimum.test.mjs scripts/bundle_mpv_deployment_minimum.test.mjs scripts/stage_macos_media_runtime.test.mjs scripts/desktop_node_runtime_policy.test.mjs scripts/build_macos_media_runtime.test.mjs scripts/smoke_macos_media_runtime.test.mjs
+
+      - name: macOS media notices and artifact transport tests
+        run: node --test scripts/prepare_macos_media_notices.test.mjs scripts/macos_media_workflow.test.mjs
 
       - name: Generated Android project patch tests
         run: node --test scripts/patch_tauri_android.test.mjs

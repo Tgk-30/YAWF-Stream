@@ -7,7 +7,12 @@
 // of bug the Data Saver clamp comment warns about. Nothing here touches React
 // or the DOM, so the server bundles it cleanly.
 
-import { VideoQuality, type TorrentResult } from "../services/indexers/models";
+import {
+  torrentResultSelectionKey,
+  torrentResultHasUsableFileSelection,
+  VideoQuality,
+  type TorrentResult,
+} from "../services/indexers/models";
 
 /** The human-title query for the NAME-matching indexers (APIBay etc.). They
  * search torrent titles, so an imdb id returns nothing there - an episode needs
@@ -105,7 +110,8 @@ export function releaseYearDisagrees(
   return years.every((year) => Math.abs(year - targetYear) > 1);
 }
 
-/** Merge two result sets: dedupe by infoHash (keep the higher-seeder copy) and
+/** Merge two result sets: dedupe by torrent/file selection (keep the
+ * higher-seeder copy) and
  * sort by year agreement (movies), then quality, then seeders. Lets the
  * imdb-based and title-based passes be combined without double-listing the
  * same torrent. */
@@ -115,18 +121,23 @@ function mergeResults(
   title: string | null,
   movieYear: number | null,
 ): TorrentResult[] {
-  const byHash = new Map<string, TorrentResult>();
+  const bySelection = new Map<string, TorrentResult>();
   for (const r of a.concat(b)) {
-    const key = r.infoHash.toLowerCase();
-    const existing = byHash.get(key);
-    if (existing == null || r.seeders > existing.seeders) byHash.set(key, r);
+    const key = torrentResultSelectionKey(r);
+    const existing = bySelection.get(key);
+    if (
+      existing == null ||
+      (!torrentResultHasUsableFileSelection(existing) && torrentResultHasUsableFileSelection(r)) ||
+      (torrentResultHasUsableFileSelection(existing) === torrentResultHasUsableFileSelection(r) &&
+        r.seeders > existing.seeders)
+    ) bySelection.set(key, r);
   }
   // Year disagreement OUTRANKS quality: a wrong-year release is usually a
   // different film entirely (the v0.9.3 CV QA case - The Odyssey (2026)'s
   // Download menu led with the 1997/2016 adaptations), and a 4K copy of the
   // wrong movie is worse than a 720p copy of the right one. Down-rank only,
   // never drop: releaseYearDisagrees stays neutral on no-year names.
-  return [...byHash.values()]
+  return [...bySelection.values()]
     .map((r) => ({ r, offYear: releaseYearDisagrees(r.title, title, movieYear) }))
     .sort((x, y) => {
       if (x.offYear !== y.offYear) return x.offYear ? 1 : -1;

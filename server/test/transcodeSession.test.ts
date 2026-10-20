@@ -145,6 +145,67 @@ function stagedRegistryFixture(firstSpawnPlayable = true) {
   return { children, dataDir, database, registry, waitForSpawn };
 }
 
+function capacityRegistryFixture(maxTranscodes = 2) {
+  const dataDir = mkdtempSync(join(tmpdir(), "yawf-transcode-capacity-"));
+  const database = new AppDatabase(":memory:");
+  const children: Array<{
+    child: ChildProcess;
+    dir: string;
+    kills: number;
+    running: boolean;
+    finish: (code?: number) => void;
+  }> = [];
+  const transcoder: Transcoder = {
+    async detect() { return true; },
+    spawnHls(args) {
+      const dir = dirname(args.at(-1)!);
+      const child = new EventEmitter() as EventEmitter & {
+        kill: (signal?: NodeJS.Signals | number) => boolean;
+        stderr: null;
+      };
+      const record = {
+        child: child as unknown as ChildProcess,
+        dir,
+        kills: 0,
+        running: true,
+        finish: (code = 0) => {},
+      };
+      record.finish = (code = 0) => {
+        if (!record.running) return;
+        record.running = false;
+        // Node reports process termination first, then stdio closure. The
+        // registry must release capacity once even though both events fire.
+        child.emit("exit", code, null);
+        child.emit("close", code, null);
+      };
+      child.kill = () => {
+        record.kills += 1;
+        // SIGTERM is asynchronous in production. Tests explicitly emit the
+        // later exit/close so cancellation cannot prematurely free capacity.
+        return record.running;
+      };
+      child.stderr = null;
+      children.push(record);
+      writeFileSync(join(dir, "stream.m3u8"), "#EXTM3U\n");
+      for (const quality of ["1080p", "720p", "480p", "360p"]) {
+        writeFileSync(join(dir, `${quality}_seg_00000.ts`), "segment");
+      }
+      return record.child;
+    },
+  };
+  const registry = new TranscodeRegistry(
+    database,
+    {
+      dataDir,
+      maxTranscodes,
+      transcodeVideoEncoder: "libx264",
+      transcodeStartTimeoutMs: 500,
+    } as ServerConfig,
+    transcoder,
+  );
+  return { children, dataDir, database, registry };
+}
+
 describe("transcode staged lifecycle", () => {
   it("kills and removes an initial warm-up when the registry stops", async () => {
     const fixture = stagedRegistryFixture(false);
@@ -185,14 +246,130 @@ describe("transcode staged lifecycle", () => {
         "https://provider.example/video",
         { quality: "360p" },
       );
+      const rejected = expect(pending).rejects.toMatchObject({ statusCode: 410 });
       await fixture.waitForSpawn();
       await fixture.registry.kill("replacement");
-      await expect(pending).rejects.toMatchObject({ statusCode: 410 });
+      await rejected;
       expect(fixture.children).toHaveLength(2);
       expect(fixture.children[1]?.kills).toBeGreaterThan(0);
       expect(existsSync(fixture.children[1]!.dir)).toBe(false);
       expect(existsSync(active)).toBe(false);
     } finally {
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("transcode process capacity", () => {
+  it("frees admission after normal FFmpeg exit while cached output remains playable", async () => {
+    const fixture = capacityRegistryFixture(1);
+    try {
+      const cached = await fixture.registry.ensureJob(
+        "completed",
+        "https://provider.example/first",
+      );
+      fixture.children[0]!.finish(0);
+      expect(existsSync(join(cached, "stream.m3u8"))).toBe(true);
+      expect(fixture.registry.dirFor("completed")).toBe(cached);
+
+      const next = await fixture.registry.ensureJob(
+        "next",
+        "https://provider.example/second",
+      );
+      expect(fixture.children).toHaveLength(2);
+      expect(existsSync(join(next, "stream.m3u8"))).toBe(true);
+      expect(existsSync(join(cached, "stream.m3u8"))).toBe(true);
+      fixture.children[1]!.finish(0);
+    } finally {
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces either of two completed cached jobs without discarding prior assets", async () => {
+    const fixture = capacityRegistryFixture(2);
+    try {
+      const first = await fixture.registry.ensureJob(
+        "first",
+        "https://provider.example/first",
+      );
+      const second = await fixture.registry.ensureJob(
+        "second",
+        "https://provider.example/second",
+      );
+      const firstGeneration = fixture.registry.generationFor("first", first);
+      expect(firstGeneration).not.toBeNull();
+      fixture.children[0]!.finish(0);
+      fixture.children[1]!.finish(0);
+
+      const replacement = await fixture.registry.ensureJob(
+        "first",
+        "https://provider.example/first",
+        { quality: "360p", startSeconds: 60 },
+      );
+      expect(fixture.children).toHaveLength(3);
+      expect(replacement).not.toBe(first);
+      expect(fixture.registry.dirFor("second")).toBe(second);
+      expect(fixture.registry.dirForAsset(
+        "first",
+        "stream.m3u8",
+        firstGeneration!,
+      )).toBe(first);
+      expect(existsSync(join(first, "stream.m3u8"))).toBe(true);
+      fixture.children[2]!.finish(0);
+    } finally {
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("still rejects new and replacement work while two FFmpeg processes are live", async () => {
+    const fixture = capacityRegistryFixture(2);
+    try {
+      await fixture.registry.ensureJob("first", "https://provider.example/first");
+      await fixture.registry.ensureJob("second", "https://provider.example/second");
+
+      await expect(fixture.registry.ensureJob(
+        "third",
+        "https://provider.example/third",
+      )).rejects.toMatchObject({ statusCode: 503 });
+      await expect(fixture.registry.ensureJob(
+        "first",
+        "https://provider.example/first",
+        { quality: "360p" },
+      )).rejects.toMatchObject({ statusCode: 503 });
+      expect(fixture.children).toHaveLength(2);
+      fixture.children.forEach((record) => record.finish(0));
+    } finally {
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not free a cancelled process slot until its exit event arrives", async () => {
+    const fixture = capacityRegistryFixture(1);
+    try {
+      await fixture.registry.ensureJob("cancelled", "https://provider.example/first");
+      await fixture.registry.kill("cancelled");
+      expect(fixture.children[0]!.kills).toBeGreaterThan(0);
+
+      await expect(fixture.registry.ensureJob(
+        "too-early",
+        "https://provider.example/second",
+      )).rejects.toMatchObject({ statusCode: 503 });
+      fixture.children[0]!.finish(0);
+      await expect(fixture.registry.ensureJob(
+        "after-exit",
+        "https://provider.example/second",
+      )).resolves.toEqual(expect.any(String));
+      expect(fixture.children).toHaveLength(2);
+      fixture.children[1]!.finish(0);
+    } finally {
+      await fixture.registry.stop();
       fixture.database.close();
       rmSync(fixture.dataDir, { recursive: true, force: true });
     }
@@ -258,6 +435,7 @@ describe("transcode stream probe admission", () => {
       audio: true,
       subtitle: false,
       audioTracks: [{ index: 0, language: "eng", label: "English", default: true }],
+      durationSeconds: 3600.5,
     }));
     const fixture = probeRegistry(probe, 1);
     try {
@@ -273,4 +451,107 @@ describe("transcode stream probe admission", () => {
       rmSync(fixture.dataDir, { recursive: true, force: true });
     }
   });
+
+  it("coalesces source info and compatibility audio inventory, then invalidates it on kill", async () => {
+    let release: ((value: {
+      audio: boolean;
+      subtitle: boolean;
+      audioTracks: Array<{
+        index: number;
+        language: string;
+        label: string;
+        default: boolean;
+      }>;
+      durationSeconds: number;
+    }) => void) | null = null;
+    const probe = vi.fn(() => new Promise((resolve) => { release = resolve; }));
+    const fixture = probeRegistry(probe, 2);
+    try {
+      const sourceInfo = fixture.registry.sourceInfoFor(
+        "shared",
+        "https://provider.example/video",
+      );
+      const audioTracks = fixture.registry.audioTracksFor(
+        "shared",
+        "https://provider.example/video",
+      );
+      expect(probe).toHaveBeenCalledTimes(1);
+      release!({
+        audio: true,
+        subtitle: false,
+        audioTracks: [{ index: 0, language: "eng", label: "English", default: true }],
+        durationSeconds: 3600.5,
+      });
+      await expect(sourceInfo).resolves.toEqual({
+        audioTracks: [{ index: 0, language: "eng", label: "English", default: true }],
+        durationSeconds: 3600.5,
+      });
+      await expect(audioTracks).resolves.toEqual([
+        { index: 0, language: "eng", label: "English", default: true },
+      ]);
+
+      await fixture.registry.kill("shared");
+      const refreshed = fixture.registry.sourceInfoFor(
+        "shared",
+        "https://provider.example/video",
+      );
+      expect(probe).toHaveBeenCalledTimes(2);
+      release!({
+        audio: true,
+        subtitle: false,
+        audioTracks: [],
+        durationSeconds: 3600.5,
+      });
+      await refreshed;
+    } finally {
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["invalid", Number.NaN],
+    ["infinite", Number.POSITIVE_INFINITY],
+    ["zero", 0],
+    ["negative", -1],
+    ["excessive", 86_400.001],
+    ["unknown", undefined],
+  ])("sanitizes %s fake-probe duration metadata", async (_label, durationSeconds) => {
+    const probe = vi.fn(async () => ({
+      audio: false,
+      subtitle: false,
+      durationSeconds,
+    }));
+    const fixture = probeRegistry(probe, 1);
+    try {
+      await expect(
+        fixture.registry.sourceInfoFor("bounded", "https://provider.example/video"),
+      ).resolves.toEqual({ audioTracks: null, durationSeconds: null });
+    } finally {
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([0.001, 3600.5, 86_400])(
+    "preserves bounded finite fake-probe duration %s",
+    async (durationSeconds) => {
+      const fixture = probeRegistry(async () => ({
+        audio: false,
+        subtitle: false,
+        durationSeconds,
+      }), 1);
+      try {
+        await expect(
+          fixture.registry.sourceInfoFor("finite", "https://provider.example/video"),
+        ).resolves.toEqual({ audioTracks: null, durationSeconds });
+      } finally {
+        await fixture.registry.stop();
+        fixture.database.close();
+        rmSync(fixture.dataDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

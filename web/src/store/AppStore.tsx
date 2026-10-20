@@ -967,6 +967,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
             return (
               p != null &&
               p.infoHash === r.infoHash &&
+              (p.fileIndex ?? null) === (r.fileIndex ?? null) &&
+              (p.fileNameHint ?? null) === (r.fileNameHint ?? null) &&
               p.resolvedAt === r.resolvedAt &&
               p.debridService === r.debridService
             );

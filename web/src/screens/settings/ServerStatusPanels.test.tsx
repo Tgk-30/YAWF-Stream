@@ -165,7 +165,7 @@ describe("ServerHealthPanel", () => {
 describe("ActiveStreamsPanel", () => {
   it("renders empty and then populated stream rows", async () => {
     const { rerender } = render(<ActiveStreamsPanel streams={[]} onRevoke={vi.fn()} />);
-    expect(screen.getByText("No active stream sessions.")).toBeInTheDocument();
+    expect(screen.getByText("No valid stream links.")).toBeInTheDocument();
 
     const streams: ActiveStreamSession[] = [
       {

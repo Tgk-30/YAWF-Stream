@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scope": "one ARM macOS 15 offline replay experiment; no artifact equivalence, publication, older-OS, onscreen, signing-certificate, or licensing claim",
+  "artifact": {
+    "repository": "Tgk-30/YAWF-Stream",
+    "runId": "39304293958",
+    "name": "macos-media-runtime-arm64",
+    "outerFile": "macos-media-runtime-arm64.tar.gz",
+    "outerSha256": "11af8849872ae1c302b6a5fb6ba823e369648be3e9597c1ba2c5150e7a9f4d50"
+  },
+  "source": {
+    "member": "source/yawf-macos-media-runtime-source-ecfa245848515ea49ec9.tar.gz",
+    "sha256": "baf26db61e0e50011f748e2ddfe06a764972d8fd9ff5a562f50da94d2727dbff",
+    "preservedRegularFiles": 37422,
+    "preservedRegularBytes": 991639829,
+    "normalizedLinks": 24
+  },
+  "referenceOnlyFrozenNormalizedSha256": "2ff768a121271a9ab056f6a111b15245a7f84ea3f3f5a165e4f0dd24d4e3ff0c",
+  "normalizedArchivePolicy": "The staged metadata-only provenance sanitization changes the normalized archive SHA-256. The experiment records and freshly admits its generated archive; it must not compare it as equal to the frozen reference archive.",
+  "files": {
+    "scripts/macos-media-replay/replay-plan.json": "dd198746181e38a914172b238a5c31bde66ef55bd67aafbae455fbe20a527898",
+    "scripts/macos-media-replay/replay_macos_media_sources.mjs": "971b19cf98d6b8e5958670b4c1bba33612e04a7e94e35fc64c5a5a8470775a52",
+    "scripts/macos-media-replay/README.md": "19abd4f48fedccc49c812d07410af2fe0403c3039e85bd088636392309dd26ec",
+    "scripts/macos-media-replay/required-runtime-outputs.json": "0729877e06bbef46f45e63f551df1ff2d7107d9dc482a2748e4b08e399a3fe64",
+    "scripts/stage_macos_media_runtime.mjs": "b4736c0d005399f521d7f920a25a98cebd8492055ffdd55e6b51aeeb9f990ff7",
+    "scripts/check_macos_bundle_minimum.mjs": "74e59f73733c49fef73957d526c1841a2feec112ed84522b4c6672be5025e8c8",
+    "scripts/smoke_macos_media_runtime.mjs": "f15267ac8299f091547a8468477d6a12fe2464a99532630e4102a6a9f4bebdf9"
+  }
+}

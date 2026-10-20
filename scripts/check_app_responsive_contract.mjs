@@ -86,6 +86,7 @@ const playerInfoCss = read("web/src/components/player/PlayerInfoPopover.css");
 const setupNudgeCss = read("web/src/components/SetupNudge.css");
 const installPromptCss = read("web/src/components/InstallPrompt.css");
 const profileMenuCss = read("web/src/components/ProfileMenu.css");
+const welcomeCss = read("web/src/components/WelcomeGuide.css");
 const appSource = read("web/src/App.tsx");
 const setupCredentials = read("web/src/lib/serverSetupCredentials.ts");
 const setupInvite = read("web/src/lib/serverSetupInvite.ts");
@@ -147,6 +148,8 @@ const mobileMoreSheetRule = ruleBlock(mobileNavCss, ".nav-rail-more-sheet");
 const extraCompactNavRule = ruleBlock(extraCompactNavCss, ".nav-rail");
 const shortLandscapeNavRule = ruleBlock(shortLandscapeNavCss, ".nav-rail");
 const narrowNavRule = ruleBlock(narrowNavCss, ".nav-rail");
+const welcomeSkipRule = ruleBlock(welcomeCss, ".welcome-skip");
+const welcomeStageRule = ruleBlock(welcomeCss, ".welcome-stage");
 const navMediaBlocks = mediaBlocks(navCss);
 const desktopBottomNavBlocks = navMediaBlocks.filter(({ css }) =>
   css.includes(':root[data-nav-position="bottom"] .nav-rail {'),
@@ -255,6 +258,16 @@ check(
   /@media\s*\(max-width:\s*640px\)[\s\S]*bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(setupNudgeCss) &&
     /@media\s*\(max-width:\s*699px\)[\s\S]*bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)/.test(installPromptCss),
   "SetupNudge.css and InstallPrompt.css must clear the floating nav and keep phone actions within their cards.",
+);
+
+check(
+  "welcome tour Skip stacks above its overlapping stage",
+  /position:\s*absolute/.test(welcomeSkipRule) &&
+    /z-index:\s*1;/.test(welcomeSkipRule) &&
+    /position:\s*relative/.test(welcomeStageRule) &&
+    !/z-index\s*:/.test(welcomeStageRule) &&
+    !/pointer-events:\s*none/.test(welcomeStageRule),
+  "WelcomeGuide.css must stack the positioned Skip above the later stage without disabling stage controls.",
 );
 
 check(
@@ -398,7 +411,8 @@ check(
   "legacy WebViews receive viewport fallbacks before dynamic viewport units",
   /\.full-viewport-boot\s*\{[\s\S]{0,180}min-height:\s*100vh;\s*min-height:\s*100dvh;/.test(appCss) &&
     /@media\s*\(max-width:\s*699px\),\s*\(max-width:\s*950px\)\s*and\s*\(max-height:\s*500px\)[\s\S]{0,320}\.app-content\s*\{[\s\S]{0,260}height:\s*100vh;\s*height:\s*100dvh;/.test(appCss) &&
-    (playerPauseCss.match(/max-height:\s*calc\(\s*100vh[\s\S]{0,360}max-height:\s*calc\(\s*100dvh/g)?.length ?? 0) === 2 &&
+    // Two webview surfaces and the native pause surface each retain a fallback.
+    (playerPauseCss.match(/max-height:\s*calc\(\s*100vh[\s\S]{0,360}max-height:\s*calc\(\s*100dvh/g)?.length ?? 0) === 3 &&
     (playerInfoCss.match(/max-height:\s*calc\(100vh[\s\S]{0,240}max-height:\s*calc\(100dvh/g)?.length ?? 0) === 2 &&
     /\.nav-rail-more-scrim\s*\{[\s\S]{0,320}height:\s*100vh;\s*height:\s*100dvh;/.test(navCss) &&
     mobileMoreSheetRule.includes("max-height: min(") &&

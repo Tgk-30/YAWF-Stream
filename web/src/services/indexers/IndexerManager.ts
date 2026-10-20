@@ -10,7 +10,12 @@
 
 import type { MediaType } from "../../models/media";
 import { IndexerFactory } from "./IndexerFactory";
-import { TorrentResult, VideoQuality } from "./models";
+import {
+  TorrentResult,
+  torrentResultHasUsableFileSelection,
+  torrentResultSelectionKey,
+  VideoQuality,
+} from "./models";
 import {
   defaultFetchImpl,
   type FetchImpl,
@@ -168,16 +173,18 @@ export class IndexerManager {
   }
 }
 
-/** Deduplicate by infoHash (preferring higher seeders) and sort by quality then
- * seeders (both descending). Mirrors the private `deduplicateAndSort`. */
+/** Deduplicate by torrent plus explicit file selection (preferring higher
+ * seeders) and sort by quality then seeders. Different file indices in the
+ * same torrent are independently playable and must not collapse. */
 function deduplicateAndSort(results: TorrentResult[]): TorrentResult[] {
   const grouped = new Map<string, TorrentResult[]>();
   for (const r of results) {
-    const group = grouped.get(r.infoHash);
+    const key = torrentResultSelectionKey(r);
+    const group = grouped.get(key);
     if (group) {
       group.push(r);
     } else {
-      grouped.set(r.infoHash, [r]);
+      grouped.set(key, [r]);
     }
   }
 
@@ -186,7 +193,11 @@ function deduplicateAndSort(results: TorrentResult[]): TorrentResult[] {
     // group.max(by: { $0.seeders < $1.seeders }) - keep the highest-seeder copy.
     let best = group[0];
     for (const r of group) {
-      if (best.seeders < r.seeders) best = r;
+      const bestUsable = torrentResultHasUsableFileSelection(best);
+      const candidateUsable = torrentResultHasUsableFileSelection(r);
+      if ((!bestUsable && candidateUsable) || (bestUsable === candidateUsable && best.seeders < r.seeders)) {
+        best = r;
+      }
     }
     survivors.push(best);
   }

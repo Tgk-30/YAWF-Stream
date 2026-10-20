@@ -27,6 +27,7 @@ let mockCached: any = null;
 let mockContinueWatching: any[] = [];
 let serverModeOn = false;
 let transcodeAvailable = false;
+let transcodeQualities: Array<"480p" | "360p"> = [];
 let pickerSelection = { season: 1, episode: 3 };
 let mockActiveProfile: { id: string } | null = null;
 let mockServerSession: { profileId: string } | null = null;
@@ -113,6 +114,7 @@ vi.mock("../lib/ServerSessionContext", () => ({
   useDirectTorrentAvailable: () => false,
   useTranscodeCapabilities: () => ({
     adaptive: transcodeAvailable,
+    qualities: transcodeQualities,
     seekOffset: transcodeAvailable,
     subtitleSidecar: transcodeAvailable,
     hardwareEncoder: "libx264",
@@ -143,6 +145,9 @@ const serverExternalPlaybackURL = vi.fn(
   (stream: any) => `${stream.streamURL}/external-test` as string | null,
 );
 const serverStreamAudioTracks = vi.fn(async (_stream?: unknown) => []);
+const serverStreamSourceInfo = vi.fn(async (_stream?: unknown) => ({
+  tracks: [], durationSeconds: 600,
+}));
 vi.mock("../lib/serverApi", () => ({
   asServerTranscodeStream: (stream: any) => ({
     ...stream,
@@ -152,6 +157,7 @@ vi.mock("../lib/serverApi", () => ({
     serverOptimizedSource(stream, options),
   serverExternalPlaybackURL: (stream: any) => serverExternalPlaybackURL(stream),
   serverStreamAudioTracks: (stream: any) => serverStreamAudioTracks(stream),
+  serverStreamSourceInfo: (stream: any) => serverStreamSourceInfo(stream),
   createRequest: (...a: unknown[]) => createRequest(...a),
   fetchServerEpisodes: (...a: unknown[]) => fetchServerEpisodes(...a),
   resolveServerStream: (...a: unknown[]) => resolveServerStream(...a),
@@ -291,6 +297,21 @@ vi.mock("../components/StreamPicker", () => ({
       >
         resolve-and-play-stream
       </button>
+      <button
+        data-testid="resolve-exact-stream"
+        onClick={() => {
+          const source = {
+            infoHash: "HASH",
+            title: "collection.mkv",
+            codec: "H.265",
+            fileIndex: 0,
+            fileNameHint: "Requested.Small.mp4",
+          };
+          void resolveStream({ result: source, cachedOn: "torbox" });
+        }}
+      >
+        resolve-exact-stream
+      </button>
     </div>
   ),
 }));
@@ -365,6 +386,7 @@ vi.mock("../components/VideoPlayer", () => ({
     timelineOffsetSeconds,
     externalPlaybackUrl,
     initialHandoffState,
+    serverOptimized,
   }: any) => (
     <div
       data-testid="player"
@@ -395,7 +417,13 @@ vi.mock("../components/VideoPlayer", () => ({
       data-timeline-offset={String(timelineOffsetSeconds ?? 0)}
       data-external-playback-url={externalPlaybackUrl ?? ""}
       data-handoff-rate={String(initialHandoffState?.playbackRate ?? "")}
+      data-has-source-info={String(serverOptimized?.loadSourceInfo != null)}
     >
+      {serverOptimized?.loadSourceInfo != null && (
+        <button type="button" onClick={() => void serverOptimized.loadSourceInfo()}>
+          load-source-info
+        </button>
+      )}
       <button type="button" onClick={() => onProgress?.(80, 100)}>
         report-progress
       </button>
@@ -475,7 +503,12 @@ function streamsState(): StreamsState {
   };
 }
 
-function downloadRow(title: string, sizeBytes: number) {
+function downloadRow(
+  title: string,
+  sizeBytes: number,
+  fileIndex: number | null = null,
+  fileNameHint: string | null = null,
+) {
   return {
     result: TorrentResult.fromSearch({
       infoHash: title,
@@ -484,6 +517,8 @@ function downloadRow(title: string, sizeBytes: number) {
       seeders: 10,
       leechers: 0,
       indexerName: "Test source",
+      fileIndex,
+      fileNameHint,
     }),
     cachedOn: null,
   };
@@ -499,6 +534,7 @@ beforeEach(() => {
   mockContinueWatching = [];
   serverModeOn = false;
   transcodeAvailable = false;
+  transcodeQualities = [];
   tauriState.on = false;
   tauriState.desktop = false;
   pickerSelection = { season: 1, episode: 3 };
@@ -1273,6 +1309,23 @@ describe("Detail play", () => {
     expect(screen.getByTestId("player")).toHaveAttribute("data-handoff-rate", "1.5");
   });
 
+  it("forwards an exact selector, including index zero, to local debrid", async () => {
+    const resolveStream = vi.fn(async () => ({
+      fileName: "Requested.Small.mp4",
+      streamURL: "https://cdn.example/requested.mp4",
+      codec: "H.264",
+    }));
+    mockServices.debrid = { hasServices: true, resolveStream };
+
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("resolve-exact-stream"));
+    await waitFor(() => expect(resolveStream).toHaveBeenCalledWith(
+      "HASH",
+      "torbox",
+      { fileIndex: 0, fileName: "Requested.Small.mp4" },
+    ));
+  });
+
   it("re-resolves cached instant play from provenance when the source list is empty", async () => {
     const resolveStream = vi.fn(async () => ({
       fileName: "movie.mp4",
@@ -1290,6 +1343,8 @@ describe("Detail play", () => {
     mockCached = {
       mediaId: "m1",
       infoHash: "CACHED-HASH",
+      fileIndex: 0,
+      fileNameHint: "movie.mp4",
       debridService: "RD",
       resolvedAt: new Date().toISOString(),
       stream: {
@@ -1312,7 +1367,10 @@ describe("Detail play", () => {
       "data-url",
       "https://cdn.example/cached-fresh.mp4",
     ));
-    expect(resolveStream).toHaveBeenCalledWith("cached-hash", "real_debrid", null);
+    expect(resolveStream).toHaveBeenCalledWith("cached-hash", "real_debrid", {
+      fileIndex: 0,
+      fileName: "movie.mp4",
+    });
     expect(screen.getByTestId("player")).toHaveAttribute("data-start-position", "88");
     expect(screen.getByTestId("player")).toHaveAttribute("data-handoff-rate", "1.5");
   });
@@ -1410,6 +1468,7 @@ describe("Detail play", () => {
   it("automatically uses server HLS for an incompatible source in the hosted web app", async () => {
     serverModeOn = true;
     transcodeAvailable = true;
+    transcodeQualities = ["480p"];
     resolveServerStream.mockResolvedValue({
       fileName: "show.mkv",
       streamURL: "https://server.example/api/stream/session-1",
@@ -1428,6 +1487,12 @@ describe("Detail play", () => {
 
     const player = await screen.findByTestId("player");
     expect(player).toHaveAttribute("data-engine", "webview-hls-transcode");
+    expect(player).toHaveAttribute("data-has-source-info", "true");
+    await userEvent.click(screen.getByText("load-source-info"));
+    expect(serverStreamSourceInfo).toHaveBeenCalledWith(expect.objectContaining({
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "show.mkv",
+    }));
     expect(player).toHaveAttribute(
       "data-url",
       "https://server.example/api/stream/session-1/index.m3u8",
@@ -1662,7 +1727,12 @@ describe("Detail downloads", () => {
       streamCachedOnly: false,
     };
     mockStreams = streamsState();
-    mockStreams.rows = [downloadRow("Movie 2160p", 8_000_000_000)];
+    mockStreams.rows = [downloadRow(
+      "Movie 2160p",
+      8_000_000_000,
+      0,
+      "Requested.Small.mp4",
+    )];
 
     render(<Detail />);
     await userEvent.click(screen.getByRole("button", { name: "download" }));
@@ -1670,7 +1740,11 @@ describe("Detail downloads", () => {
 
     await waitFor(() =>
       expect(downloadsRuntime.enqueue).toHaveBeenCalledWith(
-        expect.objectContaining({ sizeBytes: 8_000_000_000 }),
+        expect.objectContaining({
+          sizeBytes: 8_000_000_000,
+          fileIndex: 0,
+          fileNameHint: "Requested.Small.mp4",
+        }),
       ),
     );
   });

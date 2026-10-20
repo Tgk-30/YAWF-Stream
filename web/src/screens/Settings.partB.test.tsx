@@ -358,7 +358,7 @@ describe("ServerTab member view", () => {
     expect(screen.getByText("Signed-in devices")).toBeInTheDocument();
     // admin-only panels absent for a member
     expect(screen.queryByText("Server health")).not.toBeInTheDocument();
-    expect(screen.queryByText("Active streams")).not.toBeInTheDocument();
+    expect(screen.queryByText("Revocable stream access")).not.toBeInTheDocument();
     expect(screen.queryByText("Audit log")).not.toBeInTheDocument();
     expect(screen.queryByText("Invite link")).not.toBeInTheDocument();
 
@@ -415,8 +415,7 @@ describe("ActiveStreamsPanel terminate", () => {
     renderSettings();
     await gotoServerTab();
 
-    // "Active streams" also appears as a health-count label; target the panel title.
-    const title = (await screen.findAllByText("Active streams")).find((el) =>
+    const title = (await screen.findAllByText("Revocable stream access")).find((el) =>
       el.classList.contains("settings-sources-title"),
     )!;
     const streams = title.closest(".settings-source")!;
@@ -428,6 +427,23 @@ describe("ActiveStreamsPanel terminate", () => {
       ).toBe(true),
     );
     expect(await screen.findByText("Stream terminated.")).toBeInTheDocument();
+  });
+
+  it("keeps a completed but valid stream visibly terminable", async () => {
+    seedRefresh("owner");
+    route("GET", "/api/admin/streams/active", {
+      streams: [{ id: "str1", profileId: "p1", username: "owner", displayName: "Owner", title: "Downloaded movie", contentType: "movie", createdAt: "2026-06-24T10:00:00Z", expiresAt: "2026-06-24T12:00:00Z", bytesServed: 4096, lastAccessedAt: "2026-06-24T11:00:00Z", completedAt: "2026-06-24T11:00:01Z", lastStatus: 200, lastError: null }],
+    });
+    route("POST", "/api/admin/streams/str1/revoke", {});
+    renderSettings();
+    await gotoServerTab();
+    const finished = await screen.findByText("Transfer finished; link still valid");
+    const row = finished.closest(".settings-usage-row") as HTMLElement;
+    expect(within(row).getByText("Downloaded movie")).toBeInTheDocument();
+    await userEvent.click(within(row).getByRole("button", { name: "Terminate" }));
+    await waitFor(() => expect(fetchCalls.some((call) => call.path === "/api/admin/streams/str1/revoke" && call.method === "POST")).toBe(true));
+    expect(screen.getByText("Valid stream links")).toBeInTheDocument();
+    expect(screen.getByText(/already buffered video may continue/)).toBeInTheDocument();
   });
 });
 

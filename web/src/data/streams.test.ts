@@ -38,6 +38,8 @@ function torrent(overrides: Partial<TorrentResultModel>): TorrentResultModel {
     leechers: overrides.leechers ?? 0,
     indexerName: overrides.indexerName ?? "test",
     magnetURI: overrides.magnetURI ?? null,
+    fileIndex: overrides.fileIndex ?? null,
+    fileNameHint: overrides.fileNameHint ?? null,
     isCached: overrides.isCached ?? false,
     cachedOn: overrides.cachedOn ?? null,
   };
@@ -89,6 +91,23 @@ describe("dedupeStreamRows", () => {
     ];
     const out = dedupeStreamRows(rows);
     expect(out).toHaveLength(1);
+  });
+
+  it("preserves distinct explicit file indices for the same torrent", () => {
+    const rows = [
+      rowWith({ infoHash: "same", fileIndex: 0, fileNameHint: "small.mp4" }),
+      rowWith({ infoHash: "SAME", fileIndex: 1, fileNameHint: "large.mkv" }),
+    ];
+    expect(dedupeStreamRows(rows).map((entry) => entry.result.fileIndex)).toEqual([0, 1]);
+  });
+
+  it("keeps a usable filename hint over an unresolvable higher-seeder duplicate", () => {
+    const out = dedupeStreamRows([
+      rowWith({ infoHash: "same", fileIndex: 0, fileNameHint: null, seeders: 999 }),
+      rowWith({ infoHash: "SAME", fileIndex: 0, fileNameHint: "small.avi", seeders: 1 }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].result.fileNameHint).toBe("small.avi");
   });
 
   it("keeps a cached copy over an uncached duplicate", () => {

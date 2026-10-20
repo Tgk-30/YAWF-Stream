@@ -3245,8 +3245,7 @@ describe("DebridStreamer server", () => {
       session: { id: string; playbackUrl: string; playbackAuthorization: string };
     }>(created).session;
 
-    // The fresh session shows up in the admin active-streams list (a full GET
-    // would mark it completed and drop it from the list, so check it first).
+    // The fresh grant is visible before any response has been transferred.
     const active = await request(owner, { method: "GET", url: "/api/admin/streams/active" });
     expect(active.statusCode).toBe(200);
     expect(
@@ -3303,6 +3302,67 @@ describe("DebridStreamer server", () => {
       csrf: true,
     });
     expect(again.statusCode).toBe(404);
+  });
+
+  it.each([200, 206])("keeps completed external %i transfers revocable until expiry", async (status) => {
+    upstream = createServer((_req, res) => {
+      const body = status === 206 ? "cdef" : "abcdefghij";
+      res.writeHead(status, {
+        "content-type": "video/mp4",
+        "content-length": String(body.length),
+        ...(status === 206 ? { "content-range": "bytes 2-5/10" } : {}),
+      });
+      res.end(body);
+    });
+    await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", () => resolve()));
+    const address = upstream.address();
+    if (address == null || typeof address === "string") throw new Error("Expected TCP test server.");
+    const owner = await setupOwner(app);
+    const session = await createRawSession(owner, `http://127.0.0.1:${address.port}/video`);
+    const external = { app, cookies: new Map<string, string>() };
+    const url = `/api/external-stream/${session.id}/${session.playbackAuthorization.slice("Bearer ".length)}`;
+    const response = await request(external, {
+      method: "GET", url,
+      ...(status === 206 ? { headers: { range: "bytes=2-5" } } : {}),
+    });
+    expect(response.statusCode).toBe(status);
+    expect(response.body).toBe(status === 206 ? "cdef" : "abcdefghij");
+
+    const listed = json<{ streams: Array<{ id: string; completedAt: string | null }> }>(
+      await request(owner, { method: "GET", url: "/api/admin/streams/active" }),
+    ).streams;
+    expect(listed.find((stream) => stream.id === session.id)?.completedAt).toEqual(expect.any(String));
+    const health = json<{ counts: { activeStreamSessions: number } }>(
+      await request(owner, { method: "GET", url: "/api/admin/health" }),
+    );
+    expect(health.counts.activeStreamSessions).toBe(1);
+
+    expect((await request(owner, {
+      method: "POST", url: `/api/admin/streams/${session.id}/revoke`, csrf: true,
+    })).statusCode).toBe(200);
+    expect((await request(external, { method: "GET", url })).statusCode).toBe(404);
+    expect(json<{ streams: unknown[] }>(
+      await request(owner, { method: "GET", url: "/api/admin/streams/active" }),
+    ).streams).toEqual([]);
+    expect(json<{ counts: { activeStreamSessions: number } }>(
+      await request(owner, { method: "GET", url: "/api/admin/health" }),
+    ).counts.activeStreamSessions).toBe(0);
+  });
+
+  it("excludes expired playback grants from the revocable list and health count", async () => {
+    const owner = await setupOwner(app);
+    const created = await request(owner, {
+      method: "POST", url: "/api/streams/sessions/raw", csrf: true,
+      payload: { upstreamUrl: "http://127.0.0.1:9/video", contentType: "video/mp4", expiresInSeconds: 1 },
+    });
+    expect(created.statusCode).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(json<{ streams: unknown[] }>(
+      await request(owner, { method: "GET", url: "/api/admin/streams/active" }),
+    ).streams).toEqual([]);
+    expect(json<{ counts: { activeStreamSessions: number } }>(
+      await request(owner, { method: "GET", url: "/api/admin/health" }),
+    ).counts.activeStreamSessions).toBe(0);
   });
 
   // --- Phase 3b: server-side transcoding -------------------------------------
@@ -3623,6 +3683,7 @@ describe("DebridStreamer server", () => {
         return {
           audio: true,
           subtitle: false,
+          durationSeconds: 600,
           audioTracks: [
             { index: 0, language: "eng", label: "English", default: false },
             { index: 1, language: "fra", label: "French", default: true },
@@ -3664,6 +3725,7 @@ describe("DebridStreamer server", () => {
       });
       expect(bearerInventory.statusCode).toBe(200);
       expect(bearerInventory.headers["cache-control"]).toBe("private, no-store");
+      expect(json<{ durationSeconds: number }>(bearerInventory).durationSeconds).toBe(600);
       expect(probes).toBe(1);
       const inventory = await request(owner, {
         method: "GET",
@@ -3671,6 +3733,7 @@ describe("DebridStreamer server", () => {
       });
       expect(inventory.statusCode).toBe(200);
       expect(inventory.headers["cache-control"]).toBe("private, no-store");
+      expect(json<{ durationSeconds: number }>(inventory).durationSeconds).toBe(600);
       expect(json<{ tracks: unknown[] }>(inventory).tracks).toEqual([
         { index: 0, language: "eng", label: "English", default: false },
         { index: 1, language: "fra", label: "French", default: true },

@@ -1,4 +1,4 @@
-import type { EpisodeFileHint, StreamInfo } from "../debrid/models";
+import type { DebridFileHint, StreamInfo } from "../debrid/models";
 import {
   getDownloadsBridge,
   type DownloadProgress,
@@ -20,7 +20,7 @@ export interface DownloadDebridResolver {
   resolveStream(
     infoHash: string,
     cachedOn?: null,
-    fileHint?: EpisodeFileHint | null,
+    fileHint?: DebridFileHint | null,
   ): Promise<Pick<StreamInfo, "streamURL" | "fileName">>;
 }
 
@@ -33,6 +33,8 @@ export interface EnqueueDownloadInput {
   episode?: number | null;
   infoHash: string;
   fileHint?: string | null;
+  fileIndex?: number | null;
+  fileNameHint?: string | null;
   /** Known size of the picked source, used to seed the progress denominator.
    *  The engine refines it from Content-Length when the host sends one; without
    *  this the bar has no total and reads 0% for the whole transfer. */
@@ -70,6 +72,12 @@ export function makeDownloadRecord(
     episode: input.episode ?? null,
     infoHash: input.infoHash,
     fileHint: input.fileHint ?? null,
+    ...(input.fileIndex == null
+      ? {}
+      : {
+          fileIndex: input.fileIndex,
+          fileNameHint: input.fileNameHint ?? null,
+        }),
     mode: input.mode,
     optimizeProfile: input.mode === "optimized" ? input.optimizeProfile ?? "remux" : null,
     keepAudioLangs: input.keepAudioLangs ?? [],
@@ -554,10 +562,17 @@ export class DownloadManager {
         error: null,
       });
       if (!this.isCurrentLaunch(record.jobId, controller)) return;
-      const hint: EpisodeFileHint | null =
+      const episodeHint =
         record.season != null && record.episode != null
           ? { season: record.season, episode: record.episode }
           : null;
+      const hint: DebridFileHint | null = record.fileIndex == null
+        ? episodeHint
+        : {
+            fileIndex: record.fileIndex,
+            fileName: record.fileNameHint ?? null,
+            ...(episodeHint ?? {}),
+          };
       const stream = await abortable(
         this.debrid.resolveStream(record.infoHash, null, hint),
         controller.signal,
@@ -1021,6 +1036,8 @@ function sameDownloadRecord(a: DownloadRecord, b: DownloadRecord): boolean {
     a.episode === b.episode &&
     a.infoHash === b.infoHash &&
     a.fileHint === b.fileHint &&
+    (a.fileIndex ?? null) === (b.fileIndex ?? null) &&
+    (a.fileNameHint ?? null) === (b.fileNameHint ?? null) &&
     a.mode === b.mode &&
     a.optimizeProfile === b.optimizeProfile &&
     a.status === b.status &&

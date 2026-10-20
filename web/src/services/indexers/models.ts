@@ -238,11 +238,12 @@ export const SourceType = {
 
 /**
  * A torrent search result from an indexer. Mirrors Swift `TorrentResult`.
- * `id` is the `infoHash` (Identifiable). `sizeBytes` is held as a JS `number`
+ * `id` is the hash plus an explicit Stremio file index when one exists.
+ * `sizeBytes` is held as a JS `number`
  * (the Swift type is `Int64`; torrent sizes fit comfortably in a double).
  */
 export interface TorrentResult {
-  /** Equals `infoHash` - mirrors the Swift `id` computed property. */
+  /** Stable identity for this torrent/file selection. */
   readonly id: string;
   infoHash: string;
   title: string;
@@ -256,6 +257,10 @@ export interface TorrentResult {
   /** Which indexer found this. Mirrors `indexerName`. */
   indexerName: string;
   magnetURI?: string | null;
+  /** Stremio's zero-based file index within the torrent. */
+  fileIndex?: number | null;
+  /** Optional bounded filename metadata used only to validate an exact pick. */
+  fileNameHint?: string | null;
   /** Whether this torrent is cached on a debrid service. */
   isCached: boolean;
   /** Which debrid service has it cached. */
@@ -275,11 +280,15 @@ export const TorrentResult = {
     leechers: number;
     indexerName: string;
     magnetURI?: string | null;
+    fileIndex?: number | null;
+    fileNameHint?: string | null;
   }): TorrentResult {
     const infoHash = args.infoHash.toLowerCase();
+    const fileIndex = args.fileIndex ?? null;
+    const fileNameHint = args.fileNameHint ?? null;
     return {
       get id() {
-        return infoHash;
+        return fileIndex == null ? infoHash : `${infoHash}:${fileIndex}`;
       },
       infoHash,
       title: args.title,
@@ -292,6 +301,7 @@ export const TorrentResult = {
       leechers: args.leechers,
       indexerName: args.indexerName,
       magnetURI: args.magnetURI ?? null,
+      ...(fileIndex == null ? {} : { fileIndex, fileNameHint }),
       isCached: false,
       cachedOn: null,
     };
@@ -307,3 +317,53 @@ export const TorrentResult = {
     return parts.length === 0 ? "Unknown" : parts.join(" · ");
   },
 } as const;
+
+/** Dedupe identity. Explicit file indices are separate playable selections. */
+export function torrentResultSelectionKey(result: TorrentResult): string {
+  const hash = result.infoHash.toLowerCase();
+  return result.fileIndex == null ? `${hash}:default` : `${hash}:file:${result.fileIndex}`;
+}
+
+export const MAX_TORRENT_FILE_INDEX = 1_000_000;
+export const MAX_TORRENT_FILE_NAME_HINT_LENGTH = 1_024;
+
+/** Validate and normalize untrusted add-on/request filename metadata without
+ * converting it into a provider-native selector. */
+export function normalizeTorrentFileNameHint(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  if (/[\u0000-\u001f\u007f]/.test(value)) return null;
+  const normalized = value
+    .normalize("NFC")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/{2,}/g, "/");
+  return normalized.length > 0 && normalized.length <= MAX_TORRENT_FILE_NAME_HINT_LENGTH
+    ? normalized
+    : null;
+}
+
+/** Whether a row can be resolved without downgrading an explicit selector to
+ * heuristic playback. Legacy no-selector rows remain usable. */
+export function torrentResultHasUsableFileSelection(result: TorrentResult): boolean {
+  return result.fileIndex == null || normalizeTorrentFileNameHint(result.fileNameHint) != null;
+}
+
+/** Exact equality for binding a request back to the selector-bearing source
+ * row. This is separate from provider filename matching, which may use a
+ * unique basename when a provider omits the original folder path. */
+export function torrentResultMatchesExactSelection(
+  result: TorrentResult,
+  fileIndex: number,
+  fileName: unknown,
+): boolean {
+  if (
+    !Number.isSafeInteger(fileIndex) ||
+    fileIndex < 0 ||
+    fileIndex > MAX_TORRENT_FILE_INDEX ||
+    result.fileIndex !== fileIndex
+  ) return false;
+  const requestedName = normalizeTorrentFileNameHint(fileName);
+  const boundName = normalizeTorrentFileNameHint(result.fileNameHint);
+  return requestedName != null && boundName != null && requestedName === boundName;
+}

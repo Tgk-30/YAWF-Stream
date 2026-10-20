@@ -35,6 +35,15 @@ export interface DirectTorrentSession {
   expiresAt: string;
 }
 
+export type DirectTorrentFileHint =
+  | { season: number; episode: number }
+  | {
+      fileIndex: number;
+      fileName: string | null;
+      season?: number;
+      episode?: number;
+    };
+
 interface ActiveTorrent {
   handle: DirectTorrentHandle;
   sessionIds: Set<string>;
@@ -348,13 +357,34 @@ function compareScore(left: DirectTorrentFile, right: DirectTorrentFile): number
  * size priorities as DebridFileSelector and its exact episode-tag rule. */
 export function selectDirectTorrentFile(
   files: DirectTorrentFile[],
-  hint: { season: number; episode: number } | null,
+  hint: DirectTorrentFileHint | null,
 ): DirectTorrentFile | null {
-  let pool = files.filter((file) => {
+  const playable = (file: DirectTorrentFile) => {
     const extension = file.name.toLowerCase().split(".").at(-1) ?? "";
     return file.length > 0 && VIDEO_EXTENSIONS.has(extension);
-  });
+  };
+  let pool = files.filter(playable);
   if (hint != null) {
+    if ("fileIndex" in hint) {
+      if (
+        !Number.isSafeInteger(hint.fileIndex) ||
+        hint.fileIndex < 0 ||
+        hint.fileIndex > 1_000_000
+      ) return null;
+      const selected = files[hint.fileIndex];
+      if (selected == null || !playable(selected)) return null;
+      const requested = normalizeTorrentFileName(hint.fileName ?? "");
+      if (requested.length === 0) return null;
+      if (
+        hint.season != null &&
+        hint.episode != null &&
+        !fileMatchesDirectEpisode(requested, hint.season, hint.episode)
+      ) return null;
+      const actual = normalizeTorrentFileName(selected.name);
+      const requestedBase = requested.slice(requested.lastIndexOf("/") + 1);
+      const actualBase = actual.slice(actual.lastIndexOf("/") + 1);
+      return actual === requested || actualBase === requestedBase ? selected : null;
+    }
     const matching = pool.filter((file) => {
       const tag = episodeTag(file.name);
       return tag?.season === hint.season && tag.episode === hint.episode;
@@ -366,6 +396,24 @@ export function selectDirectTorrentFile(
     (best, file) => best == null || compareScore(file, best) > 0 ? file : best,
     null,
   );
+}
+
+function fileMatchesDirectEpisode(
+  fileName: string,
+  season: number,
+  episode: number,
+): boolean {
+  const tag = episodeTag(fileName);
+  return tag?.season === season && tag.episode === episode;
+}
+
+function normalizeTorrentFileName(value: string): string {
+  return value
+    .normalize("NFC")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/{2,}/g, "/");
 }
 
 export class DirectTorrentRegistry {
@@ -454,7 +502,7 @@ export class DirectTorrentRegistry {
     profileId: string;
     infoHash: string;
     expiresInSeconds: number;
-    fileHint: { season: number; episode: number } | null;
+    fileHint: DirectTorrentFileHint | null;
   }): Promise<DirectTorrentSession> {
     if (!/^[a-f0-9]{40}$/.test(input.infoHash)) throw new Error("Invalid torrent hash.");
     if (this.closed) throw new Error("Direct P2P is shutting down.");
@@ -499,7 +547,7 @@ export class DirectTorrentRegistry {
         throw Object.assign(new Error(
           input.fileHint == null
             ? "The torrent metadata contains no playable file."
-            : "The torrent metadata contains no playable file for the requested episode.",
+            : "The torrent metadata could not match the requested file.",
         ), { statusCode: 422 });
       }
       const now = Date.now();

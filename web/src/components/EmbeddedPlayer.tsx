@@ -147,6 +147,10 @@ interface Props {
     handoffState?: PlaybackHandoffState,
   ) => void;
   onAbsolutePositionChange?: (absolutePositionSeconds: number) => void;
+  /** Owned external-player handoff prepared by VideoPlayer. The native player
+   * only pauses before invoking it; target and credential policy stay upstream. */
+  onOpenExternalPlayer?: () => void | Promise<void>;
+  externalActionStatus?: string | null;
   /** Immutable TMDB playback identity, snapshotted by Detail when Play opens. */
   scrobbleContext?: TraktScrobbleContext | null;
   onClose: () => void;
@@ -568,6 +572,8 @@ export function EmbeddedPlayer({
   onSwitchServerOptimized,
   onSwitchDeviceOriginal,
   onAbsolutePositionChange,
+  onOpenExternalPlayer,
+  externalActionStatus = null,
   scrobbleContext = null,
   onClose,
 }: Props) {
@@ -610,6 +616,8 @@ export function EmbeddedPlayer({
   const [captionsSearchOpen, setCaptionsSearchOpen] = useState(false);
   const [subtitleAttachError, setSubtitleAttachError] = useState<string | null>(null);
   const [playbackSettingError, setPlaybackSettingError] = useState<string | null>(null);
+  const [externalHandoffPending, setExternalHandoffPending] = useState(false);
+  const [externalHandoffError, setExternalHandoffError] = useState<string | null>(null);
   const [nativeReadyUrl, setNativeReadyUrl] = useState<string | null>(null);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [audioDevice, setAudioDevice] = useState("auto");
@@ -701,6 +709,29 @@ export function EmbeddedPlayer({
   const upNextWarningShownRef = useRef(false);
   const autoCountdownRef = useRef(autoCountdown);
   autoCountdownRef.current = autoCountdown;
+  const externalHandoffMountedRef = useRef(false);
+  const externalHandoffUrlRef = useRef(url);
+  const externalHandoffCallbackRef = useRef(onOpenExternalPlayer);
+  const externalHandoffRequestRef = useRef(0);
+  const externalHandoffPendingRef = useRef(false);
+  externalHandoffUrlRef.current = url;
+  externalHandoffCallbackRef.current = onOpenExternalPlayer;
+
+  useEffect(() => {
+    externalHandoffMountedRef.current = true;
+    return () => {
+      externalHandoffMountedRef.current = false;
+      externalHandoffPendingRef.current = false;
+      externalHandoffRequestRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    externalHandoffRequestRef.current += 1;
+    externalHandoffPendingRef.current = false;
+    setExternalHandoffPending(false);
+    setExternalHandoffError(null);
+  }, [onOpenExternalPlayer, url]);
 
   const setPredictiveUpNext = (next: NativeUpNextState | null) => {
     const previous = upNextStateRef.current;
@@ -1787,6 +1818,8 @@ export function EmbeddedPlayer({
   }, [autoCountdown, ended, onPlayNext, paused, upNextDismissed, upNextState]);
 
   const doClose = useCallback(() => {
+    externalHandoffPendingRef.current = false;
+    externalHandoffRequestRef.current += 1;
     if (fullscreen) {
       void getCurrentWindow().setFullscreen(false).catch((error) => {
         setFullscreenError(
@@ -1811,6 +1844,38 @@ export function EmbeddedPlayer({
     }
     onClose();
   }, [onClose, onProgress, fullscreen, scrobbleContext]);
+
+  const openExternalFromSettings = useCallback(() => {
+    const callback = externalHandoffCallbackRef.current;
+    if (callback == null || externalHandoffPendingRef.current) return;
+    const request = ++externalHandoffRequestRef.current;
+    const sourceUrl = externalHandoffUrlRef.current;
+    const ownsRequest = () =>
+      externalHandoffMountedRef.current &&
+      externalHandoffRequestRef.current === request &&
+      externalHandoffUrlRef.current === sourceUrl &&
+      externalHandoffCallbackRef.current === callback;
+    externalHandoffPendingRef.current = true;
+    setExternalHandoffPending(true);
+    setExternalHandoffError(null);
+    void (async () => {
+      try {
+        await setProperty("pause", true);
+        if (!ownsRequest()) return;
+        setPaused(true);
+        await callback();
+      } catch {
+        if (ownsRequest()) {
+          setExternalHandoffError("The external player could not be opened. Try again.");
+        }
+      } finally {
+        if (ownsRequest()) {
+          externalHandoffPendingRef.current = false;
+          setExternalHandoffPending(false);
+        }
+      }
+    })();
+  }, []);
 
   // Keep the current window's real fullscreen state in sync (Esc, green button).
   useEffect(() => {
@@ -2488,6 +2553,35 @@ export function EmbeddedPlayer({
         {menu === "settings" && (
           <Popover onClose={() => setMenu(null)} className="embed-menu-settings">
             <div className="embed-menu-title">Playback settings</div>
+            {onOpenExternalPlayer != null && (
+              <div className="embed-setting">
+                <button
+                  type="button"
+                  className="embed-menu-item"
+                  disabled={externalHandoffPending}
+                  onClick={openExternalFromSettings}
+                >
+                  {externalHandoffPending
+                    ? "Opening external player…"
+                    : "Open in external player"}
+                </button>
+                {externalHandoffPending && (
+                  <p className="embed-menu-status" role="status">
+                    Pausing built-in playback before opening the external player.
+                  </p>
+                )}
+                {!externalHandoffPending && externalActionStatus != null && (
+                  <p className="embed-menu-status" role="status">
+                    {externalActionStatus}
+                  </p>
+                )}
+                {externalHandoffError != null && (
+                  <p className="embed-menu-error" role="alert">
+                    {externalHandoffError}
+                  </p>
+                )}
+              </div>
+            )}
             {serverOptimized != null && onSwitchServerOptimized != null && onSwitchDeviceOriginal != null && (
               <div className="embed-setting">
                 <span className="embed-setting-head">
@@ -2523,7 +2617,7 @@ export function EmbeddedPlayer({
                 </div>
                 <small>Server Optimized reduces data use and switches to webview HLS after the manifest is ready.</small>
                 {serverOptimizationPending && (
-                  <p className="embed-menu-error" role="status">Preparing optimized playback while the current stream continues…</p>
+                  <p className="embed-menu-status" role="status">Preparing optimized playback while the current stream continues…</p>
                 )}
                 {serverOptimizationError != null && (
                   <p className="embed-menu-error" role="alert">{serverOptimizationError}</p>

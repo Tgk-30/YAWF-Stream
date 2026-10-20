@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "artifact": {
+    "repository": "Tgk-30/YAWF-Stream",
+    "runId": "39304293958",
+    "name": "macos-media-runtime-arm64",
+    "outerFile": "macos-media-runtime-arm64.tar.gz",
+    "outerSha256": "11af8849872ae1c302b6a5fb6ba823e369648be3e9597c1ba2c5150e7a9f4d50"
+  },
+  "source": {
+    "member": "source/yawf-macos-media-runtime-source-ecfa245848515ea49ec9.tar.gz",
+    "sha256": "baf26db61e0e50011f748e2ddfe06a764972d8fd9ff5a562f50da94d2727dbff",
+    "preservedRegularFiles": 37422,
+    "preservedRegularBytes": 991639829,
+    "normalizedLinks": 24
+  },
+  "scope": "Exact source seed only. Shipping binaries must be rebuilt by the bundled independent controller; no binary equivalence or licensing clearance is claimed."
+}

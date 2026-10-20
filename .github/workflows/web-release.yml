@@ -35,8 +35,7 @@
 #
 # macOS shipping is PER-ARCH (see web/src-tauri/DEPLOYMENT.md): arm64 builds on
 # an Apple-Silicon runner and x86_64 on an Intel runner, each bundling its NATIVE
-# Homebrew libmpv + full dependency tree (relocated to @rpath by
-# scripts/bundle-mpv-deps.sh) so the in-window player works on a clean Mac.
+# source-built macOS11 libmpv/FFmpeg dependency tree, verified before release.
 # ──────────────────────────────────────────────────────────────────────────
 
 name: web-release
@@ -49,29 +48,37 @@ on:
 
 # tauri-action creates/edits a release and uploads assets.
 permissions:
+  actions: read
   contents: write
 
 jobs:
+  macos-media-runtime:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    uses: ./.github/workflows/macos-media-runtime.yml
+
   release:
     if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: macos-media-runtime
     strategy:
       fail-fast: false
       matrix:
         include:
           # macOS is built PER-ARCH on native runners so each bundles its own
-          # architecture's libmpv (no lipo across two Homebrew installs). PIN the
+          # architecture's source-built libmpv (no cross-architecture merging).
           # runners (NOT `macos-latest` = macOS 26, whose SDK/codesign produces
           # "damaged" bundles): macos-15 = Apple Silicon, macos-15-intel = Intel
           # (macos-13 was retired by GitHub in Dec 2025 - it queues forever).
-          # Both runners' Homebrew bottles carry minos 15.0; bundle-mpv-deps.sh's
-          # vtool min-OS rewrite makes the bundles load on macOS 11+.
+          # Preserve the dependencies' real deployment minima. The final bundle
+          # gate rejects inputs newer than the declared application minimum.
           - platform: macos-15
             os: macos
+            media_arch: arm64
             rust_target: aarch64-apple-darwin
             node_runtime: darwin-arm64
             args: "--target aarch64-apple-darwin"
           - platform: macos-15-intel
             os: macos
+            media_arch: x86_64
             rust_target: x86_64-apple-darwin
             node_runtime: darwin-x64
             args: "--target x86_64-apple-darwin"
@@ -289,6 +296,31 @@ jobs:
       # Import the Developer ID cert into a keychain first (so the relocated
       # dylibs can be signed here); pass p12 to tauri-action later is dropped in
       # favour of this single import. See web/src-tauri/DEPLOYMENT.md.
+      - name: Fetch verified source-built macOS media runtime
+        if: matrix.os == 'macos'
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-media-runtime-${{ matrix.media_arch }}
+          path: ${{ runner.temp }}/media-transfer
+
+      - name: Verify and extract archived macOS media transport
+        if: matrix.os == 'macos'
+        env:
+          MEDIA_ARCH: ${{ matrix.media_arch }}
+        run: |
+          cd "$RUNNER_TEMP/media-transfer"
+          shasum -a 256 -c "macos-media-runtime-$MEDIA_ARCH.tar.gz.sha256"
+          mkdir "$RUNNER_TEMP/media-candidate"
+          tar -xzf "macos-media-runtime-$MEDIA_ARCH.tar.gz" -C "$RUNNER_TEMP/media-candidate"
+          test -x "$RUNNER_TEMP/media-candidate/ffmpeg/ffmpeg"
+          test -x "$RUNNER_TEMP/media-candidate/ffmpeg/ffprobe"
+          test -L "$RUNNER_TEMP/media-candidate/Frameworks/libmpv.dylib"
+          test -e "$RUNNER_TEMP/media-candidate/Frameworks/libmpv.dylib"
+
+      - name: Retest natural media runtime after artifact transport
+        if: matrix.os == 'macos'
+        run: node scripts/smoke_macos_media_runtime.mjs "$RUNNER_TEMP/media-candidate" "$RUNNER_TEMP/media-post-transport-evidence"
+
       - name: Import Developer ID certificate
         if: matrix.os == 'macos'
         uses: apple-actions/import-codesign-certs@v3
@@ -303,10 +335,15 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          brew install mpv jq
+          brew install jq
           FW="$PWD/web/src-tauri/Frameworks"
           rm -rf "$FW"
-          web/src-tauri/scripts/bundle-mpv-deps.sh "$(brew --prefix)/lib/libmpv.2.dylib" "$FW"
+          cp -R "$RUNNER_TEMP/media-candidate/Frameworks" "$FW"
+          mkdir -p web/src-tauri/resources/ffmpeg
+          rm -rf "web/src-tauri/resources/ffmpeg/${{ matrix.node_runtime }}"
+          cp -R "$RUNNER_TEMP/media-candidate/ffmpeg" "web/src-tauri/resources/ffmpeg/${{ matrix.node_runtime }}"
+          cp -R "$RUNNER_TEMP/media-candidate/notices/." web/src-tauri/resources/media-notices/
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
           # Re-sign every bundled dylib with the Developer ID + hardened runtime +
           # secure timestamp so notarization accepts them (the script's ad-hoc
           # sigs are for local use only). Must run AFTER install_name_tool.
@@ -352,11 +389,9 @@ jobs:
 
       - name: Bundle Node runtime (macOS)
         if: matrix.os == 'macos'
+        env:
+          NODE_RUNTIME_VERSION: "22.23.3"
         run: node scripts/download_tauri_node_runtime.mjs ${{ matrix.node_runtime }}
-
-      - name: Bundle ffmpeg (macOS)
-        if: matrix.os == 'macos'
-        run: node scripts/download_ffmpeg.mjs ${{ matrix.node_runtime }}
 
       # Notarization rejects the app if any nested executable is unsigned, so the
       # fetched ffmpeg/ffprobe must be Developer ID signed with hardened runtime
@@ -454,6 +489,31 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }} ${{ env.FW_CONFIG_ARG }} ${{ env.WINDOWS_SIGN_CONFIG_ARG }}
+
+      - name: Verify macOS bundle deployment minima
+        if: matrix.os == 'macos'
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: node scripts/check_macos_bundle_minimum.mjs "web/src-tauri/target/$RUST_TARGET/release/bundle/macos/YAWF Stream.app"
+
+      - name: Attach corresponding media sources to the draft
+        if: matrix.os == 'macos'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MEDIA_ARCH: ${{ matrix.media_arch }}
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/media-candidate/source"
+          provenance="$source_dir/macos-media-provenance-$MEDIA_ARCH.json"
+          test -f "$provenance"
+          gh release upload "$GITHUB_REF_NAME" "$provenance" --clobber --repo "$GITHUB_REPOSITORY"
+          if [ "$MEDIA_ARCH" = arm64 ]; then
+            archives=("$source_dir"/yawf-macos-media-runtime-source-*.tar.gz)
+            test "${#archives[@]}" -eq 1
+            test -f "${archives[0]}"
+            gh release upload "$GITHUB_REF_NAME" "${archives[0]}" --clobber --repo "$GITHUB_REPOSITORY"
+          fi
 
       # tauri-action notarizes + staples the .app but NOT the .dmg container.
       # Notarize + staple the .dmg here, then replace the asset tauri-action
@@ -857,6 +917,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
       - name: Download draft release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -866,6 +928,19 @@ jobs:
           gh release download "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --dir artifacts
+
+      - name: Split desktop updater feeds
+        run: |
+          set -euo pipefail
+          node scripts/split_desktop_updater_manifests.mjs artifacts/latest.json artifacts/latest.json artifacts/latest-macos11.json "$GITHUB_REF_NAME"
+          test ! -e artifacts/latest.json.sig
+
+      - name: Upload desktop updater feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" artifacts/latest.json artifacts/latest-macos11.json --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Create SHA256SUMS
         run: |

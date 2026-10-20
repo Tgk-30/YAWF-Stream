@@ -44,6 +44,39 @@ describe("DirectTorrentRegistry", () => {
     expect(selected?.name).toBe("Show.S02E05.1080p.mp4");
   });
 
+  it("uses the original all-file index and validates a smaller selected video", () => {
+    const files = [
+      file("notes.txt", 50_000),
+      file("Requested.Small.avi", 5_000),
+      file("Large.Movie.mkv", 20_000),
+    ];
+    expect(selectDirectTorrentFile(files, {
+      fileIndex: 1,
+      fileName: "Requested.Small.avi",
+    })?.name).toBe("Requested.Small.avi");
+    expect(selectDirectTorrentFile(files, {
+      fileIndex: 3,
+      fileName: "Requested.Small.avi",
+    })).toBeNull();
+    expect(selectDirectTorrentFile(files, {
+      fileIndex: 1,
+      fileName: "Wrong.mp4",
+    })).toBeNull();
+    expect(selectDirectTorrentFile(files, {
+      fileIndex: 0,
+      fileName: "notes.txt",
+    })).toBeNull();
+    expect(selectDirectTorrentFile(
+      [file("readme.txt", 1), file("Show.S02E08.mp4", 5_000)],
+      {
+        fileIndex: 1,
+        fileName: "Show.S02E08.mp4",
+        season: 2,
+        episode: 7,
+      },
+    )).toBeNull();
+  });
+
   it("never selects a tagged subtitle or other non-video file", () => {
     const selected = selectDirectTorrentFile([
       file("Show.S02E05.en.srt", 50_000),

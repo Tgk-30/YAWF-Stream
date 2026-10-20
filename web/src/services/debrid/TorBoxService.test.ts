@@ -266,6 +266,47 @@ describe("TorBoxService addMagnet", () => {
 // MARK: - getStreamURL
 
 describe("TorBoxService getStreamURL", () => {
+  it("maps an exact Stremio selection by unique filename, not provider file id or size", async () => {
+    let requestdlQuery: URLSearchParams | null = null;
+    const mock = makeMockFetch((req) => {
+      if (req.url.pathname === "/v1/api/torrents/mylist") {
+        return ok(JSON.stringify({ data: {
+          id: 88,
+          download_state: "completed",
+          files: [
+            { id: 17, name: "Large.Movie.mkv", size: 9_000_000_000 },
+            { id: 903, name: "Requested.Small.avi", size: 100_000_000 },
+          ],
+        } }));
+      }
+      if (req.url.pathname === "/v1/api/torrents/requestdl") {
+        requestdlQuery = req.url.searchParams;
+        return ok(JSON.stringify({ data: "https://tb.example/requested" }));
+      }
+      return { status: 404, body: "{}" };
+    });
+    const service = new TorBoxService("tb-token", mock.fetchImpl);
+
+    const stream = await service.getStreamURL("88", {
+      fileIndex: 0,
+      fileName: "Requested.Small.avi",
+    });
+
+    expect(stream.fileName).toBe("Requested.Small.avi");
+    expect(requestdlQuery!.get("file_id")).toBe("903");
+  });
+
+  it("does not fall back to TorBox file zero for an unmatched exact selection", async () => {
+    const mock = makeMockFetch((req) => req.url.pathname.endsWith("/mylist")
+      ? ok(JSON.stringify({ data: { id: 88, download_state: "completed", files: [] } }))
+      : ok(JSON.stringify({ data: "https://tb.example/wrong" })));
+    const service = new TorBoxService("tb-token", mock.fetchImpl);
+
+    await expect(service.getStreamURL("88", {
+      fileIndex: 0,
+      fileName: "Requested.Small.avi",
+    })).rejects.toMatchObject({ kind: "fileSelectionFailed" });
+  });
   it("selects the best video file and returns a parsed StreamInfo", async () => {
     let requestdlQuery: URLSearchParams | null = null;
     const mock = makeMockFetch((req) => {

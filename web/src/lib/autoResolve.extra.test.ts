@@ -201,6 +201,30 @@ describe("resolveOne - cached-source preference", () => {
     expect(putCachedResolution).toHaveBeenCalledWith(record);
   });
 
+  it("resolves and persists the selected file identity for a multi-file source", async () => {
+    const putCachedResolution = vi.fn(async () => {});
+    const resolveStream = vi.fn(async () => ({ debridService: "torbox" }));
+    const selected = {
+      ...torrent("collection", VideoQuality.hd1080p, 4),
+      fileIndex: 0,
+      fileNameHint: "Requested.Small.mp4",
+    };
+    const record = await resolveOne(previewOf("ttFILES"), makeDeps({
+      results: [selected],
+      resolveStream,
+      putCachedResolution,
+    }));
+
+    expect(resolveStream).toHaveBeenCalledWith("collection", null, {
+      fileIndex: 0,
+      fileName: "Requested.Small.mp4",
+    });
+    expect(record).toMatchObject({
+      fileIndex: 0,
+      fileNameHint: "Requested.Small.mp4",
+    });
+  });
+
   it("skips an identical resolution write until its freshness clock reaches half TTL", async () => {
     const now = 2_000_000_000_000;
     const putCachedResolution = vi.fn(async () => {});

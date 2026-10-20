@@ -12,7 +12,8 @@ import {
   type DebridAccountInfo,
   type DebridFileCandidate,
   DebridFileSelector,
-  type EpisodeFileHint,
+  type DebridFileHint,
+  isExactFileHint,
   type DebridServiceType,
   DebridServiceType as DebridServiceTypeNS,
   type DebridTorrent,
@@ -115,7 +116,7 @@ export class RealDebridService implements DebridService {
 
   async getStreamURL(
     torrentId: string,
-    fileHint: EpisodeFileHint | null = null,
+    fileHint: DebridFileHint | null = null,
   ): Promise<StreamInfo> {
     let status = "";
     let json: Record<string, unknown> = {};
@@ -159,11 +160,19 @@ export class RealDebridService implements DebridService {
     const links = Array.isArray(json.links) ? (json.links as unknown[]) : null;
     const stringLinks =
       links?.filter((l): l is string => typeof l === "string") ?? [];
-    if (stringLinks.length === 0) throw DebridError.noFilesAvailable();
+    if (stringLinks.length === 0) {
+      throw fileHint != null && isExactFileHint(fileHint)
+        ? DebridError.fileSelectionFailed()
+        : DebridError.noFilesAvailable();
+    }
 
     const candidates = this.fileCandidates(json, stringLinks);
-    const selected = DebridFileSelector.selectBest(candidates, fileHint);
-    if (selected == null) throw DebridError.noFilesAvailable();
+    const selected = DebridFileSelector.selectForHint(candidates, fileHint);
+    if (selected == null) {
+      throw fileHint != null && isExactFileHint(fileHint)
+        ? DebridError.fileSelectionFailed()
+        : DebridError.noFilesAvailable();
+    }
 
     const unrestricted = await this.unrestrictDetailed(selected.link);
 

@@ -32,6 +32,8 @@ export interface TranscoderStreamProbe {
   audio: boolean;
   subtitle: boolean;
   audioTracks?: TranscoderAudioTrack[];
+  /** Original source-container duration from ffprobe format metadata. */
+  durationSeconds?: number | null;
 }
 
 export interface Transcoder {
@@ -183,7 +185,7 @@ export const realTranscoder: Transcoder = {
             "-v",
             "error",
             "-show_entries",
-            "stream=index,codec_type:stream_tags=language,title:stream_disposition=default",
+            "stream=index,codec_type:stream_tags=language,title:stream_disposition=default:format=duration",
             "-of",
             "json",
             upstreamUrl,
@@ -206,6 +208,7 @@ export const realTranscoder: Transcoder = {
                 tags?: { language?: unknown; title?: unknown };
                 disposition?: { default?: unknown };
               }>;
+              format?: { duration?: unknown };
             };
             const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
             const clean = (value: unknown, maxLength: number): string | null => {
@@ -222,10 +225,21 @@ export const realTranscoder: Transcoder = {
                 label: clean(stream.tags?.title, 128),
                 default: stream.disposition?.default === 1,
               }));
+            const rawDuration = parsed.format?.duration;
+            const duration =
+              typeof rawDuration === "number"
+                ? rawDuration
+                : typeof rawDuration === "string"
+                  ? Number(rawDuration)
+                  : Number.NaN;
             finish({
               audio: audioTracks.length > 0,
               subtitle: streams.some((stream) => stream.codec_type === "subtitle"),
               audioTracks,
+              durationSeconds:
+                Number.isFinite(duration) && duration > 0 && duration <= 86_400
+                  ? duration
+                  : null,
             });
           } catch {
             finish(null);

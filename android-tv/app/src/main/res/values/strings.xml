@@ -13,4 +13,8 @@
     <string name="server_unreachable_status">%1$s answered with HTTP %2$d, so it is reachable but not serving YAWF Stream. Check the port and the address path.</string>
     <string name="try_again">Try again</string>
     <string name="change_server">Change server</string>
+    <string name="web_startup_loading_title">Preparing YAWF Stream</string>
+    <string name="web_startup_loading_copy">Starting the TV browser. This can take a few seconds the first time.</string>
+    <string name="web_startup_error_title">Could not start the TV browser</string>
+    <string name="web_startup_error_copy">The TV browser could not start. Try again or change the server address.</string>
 </resources>

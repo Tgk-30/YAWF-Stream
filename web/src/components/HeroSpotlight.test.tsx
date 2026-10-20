@@ -60,6 +60,61 @@ describe("HeroSpotlight rendering", () => {
     expect(container.querySelector(".hero-backdrop.hero-gradient")).not.toBeNull();
   });
 
+  it("keeps a failed backdrop on the gradient when the carousel revisits it", () => {
+    const { container } = render(<HeroSpotlight items={items} />);
+    fireEvent.error(container.querySelector("img.hero-backdrop")!);
+    fireEvent.click(container.querySelectorAll<HTMLButtonElement>(".hero-dot")[1]);
+    fireEvent.click(container.querySelectorAll<HTMLButtonElement>(".hero-dot")[0]);
+    expect(
+      [...container.querySelectorAll<HTMLImageElement>("img.hero-backdrop")].some((img) =>
+        img.src.includes("/alpha.jpg"),
+      ),
+    ).toBe(false);
+    expect(container.querySelector(".hero-backdrop.hero-gradient")).not.toBeNull();
+  });
+
+  it("evicts the oldest displayed-backdrop failure when the per-mount cache is full", () => {
+    const makeItem = (index: number, id = `display-bound-${index}`): MediaPreview => ({
+      id,
+      type: "movie",
+      title: `Display bound ${index}`,
+      backdropPath: `/display-bound-${index}-regression.jpg`,
+    });
+    const { container, rerender } = render(<HeroSpotlight item={makeItem(0)} />);
+
+    for (let index = 0; index <= 64; index += 1) {
+      if (index > 0) rerender(<HeroSpotlight item={makeItem(index)} />);
+      const displayed = [...container.querySelectorAll<HTMLImageElement>("img.hero-backdrop")]
+        .find((image) => image.src.includes(`/display-bound-${index}-regression.jpg`));
+      expect(displayed, `displayed backdrop ${index}`).toBeDefined();
+      fireEvent.error(displayed!);
+    }
+
+    rerender(<HeroSpotlight item={makeItem(0, "display-bound-return")} />);
+    expect(
+      [...container.querySelectorAll<HTMLImageElement>("img.hero-backdrop")].some((image) =>
+        image.src.includes("/display-bound-0-regression.jpg"),
+      ),
+    ).toBe(true);
+  });
+
+  it("retries a displayed-backdrop failure after the hero remounts", () => {
+    const retryItem: MediaPreview = {
+      id: "display-remount-regression",
+      type: "movie",
+      title: "Display remount",
+      backdropPath: "/display-remount-regression.jpg",
+    };
+    const first = render(<HeroSpotlight item={retryItem} />);
+    fireEvent.error(first.container.querySelector("img.hero-backdrop")!);
+    expect(first.container.querySelector("img.hero-backdrop")).toBeNull();
+    first.unmount();
+
+    const second = render(<HeroSpotlight item={retryItem} />);
+    expect(second.container.querySelector("img.hero-backdrop")?.getAttribute("src"))
+      .toContain("/display-remount-regression.jpg");
+  });
+
   it("renders the overview paragraph only when provided", () => {
     const { rerender, container } = render(<HeroSpotlight items={items} />);
     expect(container.querySelector(".hero-overview")).toBeNull();
@@ -261,21 +316,34 @@ describe("HeroSpotlight Play / More handlers", () => {
 });
 
 describe("HeroSpotlight backdrop preload effect", () => {
-  let created: Array<{ src: string }>;
+  interface TrackedImage {
+    crossOrigin: string;
+    onload: (() => void) | null;
+    onerror: (() => void) | null;
+    requestedUrl: string;
+    src: string;
+  }
+
+  let created: TrackedImage[];
   let OriginalImage: typeof Image;
+  let originalHiddenDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(() => {
     created = [];
     OriginalImage = globalThis.Image;
+    originalHiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
     class FakeImage {
       crossOrigin = "";
       onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      requestedUrl = "";
       private _src = "";
       constructor() {
-        created.push(this as unknown as { src: string });
+        created.push(this);
       }
       set src(v: string) {
         this._src = v;
+        if (v) this.requestedUrl = v;
       }
       get src() {
         return this._src;
@@ -287,6 +355,11 @@ describe("HeroSpotlight backdrop preload effect", () => {
 
   afterEach(() => {
     globalThis.Image = OriginalImage;
+    if (originalHiddenDescriptor) {
+      Object.defineProperty(document, "hidden", originalHiddenDescriptor);
+    } else {
+      delete (document as unknown as Record<string, unknown>).hidden;
+    }
   });
 
   it("preloads the next backdrop when smart-preload is enabled", () => {
@@ -323,6 +396,147 @@ describe("HeroSpotlight backdrop preload effect", () => {
     // No "next backdrop" preload Image should be created (only the accent probe,
     // which uses the active /alpha.jpg, not a next-item backdrop).
     expect(created.some((c) => c.src.includes("/bravo.jpg"))).toBe(false);
+  });
+
+  it("does not probe or preload while suspended, then resumes both once", () => {
+    const parkedItems: MediaPreview[] = [
+      { ...items[0], id: "parked-a", backdropPath: "/parked-a.jpg" },
+      { ...items[1], id: "parked-b", backdropPath: "/parked-b.jpg" },
+    ];
+    const { rerender } = render(<HeroSpotlight items={parkedItems} suspended />);
+    expect(created).toHaveLength(0);
+    rerender(<HeroSpotlight items={parkedItems} />);
+    expect(created.filter((c) => c.src.includes("/parked-a.jpg"))).toHaveLength(1);
+    expect(created.filter((c) => c.src.includes("/parked-b.jpg"))).toHaveLength(1);
+  });
+
+  it("creates no preload or accent-probe Images when initially hidden", () => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    const hiddenItems: MediaPreview[] = [
+      { ...items[0], id: "initially-hidden-a", backdropPath: "/initially-hidden-a-regression.jpg" },
+      { ...items[1], id: "initially-hidden-b", backdropPath: "/initially-hidden-b-regression.jpg" },
+    ];
+
+    render(<HeroSpotlight items={hiddenItems} />);
+
+    expect(created).toHaveLength(0);
+  });
+
+  it("aborts preload and probe work while suspended and resumes exactly one of each", () => {
+    const suspendItems: MediaPreview[] = [
+      { ...items[0], id: "suspend-active-a", backdropPath: "/suspend-active-a-regression.jpg" },
+      { ...items[1], id: "suspend-active-b", backdropPath: "/suspend-active-b-regression.jpg" },
+    ];
+    const { rerender } = render(<HeroSpotlight items={suspendItems} />);
+    const firstProbe = created.find((image) =>
+      image.crossOrigin === "anonymous" &&
+      image.requestedUrl.includes("/suspend-active-a-regression.jpg"));
+    const firstPreload = created.find((image) =>
+      image.crossOrigin === "" &&
+      image.requestedUrl.includes("/suspend-active-b-regression.jpg"));
+    expect(firstProbe).toBeDefined();
+    expect(firstPreload).toBeDefined();
+
+    rerender(<HeroSpotlight items={suspendItems} suspended />);
+    expect(firstProbe).toMatchObject({ src: "", onload: null, onerror: null });
+    expect(firstPreload!.src).toBe("");
+
+    rerender(<HeroSpotlight items={suspendItems} />);
+    expect(created.filter((image) =>
+      image.crossOrigin === "anonymous" &&
+      image.requestedUrl.includes("/suspend-active-a-regression.jpg")))
+      .toHaveLength(2);
+    expect(created.filter((image) =>
+      image.crossOrigin === "" &&
+      image.requestedUrl.includes("/suspend-active-b-regression.jpg")))
+      .toHaveLength(2);
+  });
+
+  it("aborts preload and probe work while hidden and resumes exactly one of each", () => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: false });
+    const visibilityItems: MediaPreview[] = [
+      { ...items[0], id: "visibility-a", backdropPath: "/visibility-a-regression.jpg" },
+      { ...items[1], id: "visibility-b", backdropPath: "/visibility-b-regression.jpg" },
+    ];
+    render(<HeroSpotlight items={visibilityItems} />);
+    const firstProbe = created.find((image) =>
+      image.crossOrigin === "anonymous" &&
+      image.requestedUrl.includes("/visibility-a-regression.jpg"));
+    const firstPreload = created.find((image) =>
+      image.crossOrigin === "" &&
+      image.requestedUrl.includes("/visibility-b-regression.jpg"));
+    expect(firstProbe).toBeDefined();
+    expect(firstPreload).toBeDefined();
+
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(firstProbe).toMatchObject({ src: "", onload: null, onerror: null });
+    expect(firstPreload!.src).toBe("");
+
+    Object.defineProperty(document, "hidden", { configurable: true, value: false });
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(created.filter((image) =>
+      image.crossOrigin === "anonymous" &&
+      image.requestedUrl.includes("/visibility-a-regression.jpg")))
+      .toHaveLength(2);
+    expect(created.filter((image) =>
+      image.crossOrigin === "" &&
+      image.requestedUrl.includes("/visibility-b-regression.jpg")))
+      .toHaveLength(2);
+  });
+
+  it("immediately aborts matching preload and probe work after a display failure", () => {
+    const duplicateBackdropItems: MediaPreview[] = [
+      { ...items[0], id: "matching-work-a", backdropPath: "/matching-work-regression.jpg" },
+      { ...items[1], id: "matching-work-b", backdropPath: "/matching-work-regression.jpg" },
+    ];
+    const { container } = render(<HeroSpotlight items={duplicateBackdropItems} />);
+    const probe = created.find((image) => image.crossOrigin === "anonymous");
+    const preload = created.find((image) => image.crossOrigin === "");
+    expect(probe).toBeDefined();
+    expect(preload).toBeDefined();
+
+    fireEvent.error(container.querySelector("img.hero-backdrop")!);
+
+    expect(probe).toMatchObject({ src: "", onload: null, onerror: null });
+    expect(preload!.src).toBe("");
+    expect(created).toHaveLength(2);
+  });
+
+  it("does not display, prefetch, or probe a failed backdrop when revisited", () => {
+    const failedItems: MediaPreview[] = [
+      { ...items[0], id: "failed-revisit-a", backdropPath: "/failed-revisit-a-regression.jpg" },
+      { ...items[1], id: "failed-revisit-b", backdropPath: "/failed-revisit-b-regression.jpg" },
+      { ...items[2], id: "failed-revisit-c", backdropPath: "/failed-revisit-c-regression.jpg" },
+    ];
+    const { container } = render(<HeroSpotlight items={failedItems} />);
+    const dots = container.querySelectorAll<HTMLButtonElement>(".hero-dot");
+    fireEvent.click(dots[1]);
+    const activeProbe = created.find((image) =>
+      image.crossOrigin === "anonymous" &&
+      image.requestedUrl.includes("/failed-revisit-b-regression.jpg"));
+    expect(activeProbe).toBeDefined();
+    fireEvent.error(
+      [...container.querySelectorAll<HTMLImageElement>("img.hero-backdrop")]
+        .find((image) => image.src.includes("/failed-revisit-b-regression.jpg"))!,
+    );
+    expect(activeProbe).toMatchObject({ src: "", onload: null, onerror: null });
+    const failedRequestCount = created.filter((image) =>
+      image.requestedUrl.includes("/failed-revisit-b-regression.jpg")).length;
+
+    fireEvent.click(dots[2]);
+    fireEvent.click(dots[0]);
+    fireEvent.click(dots[1]);
+
+    expect(created.filter((image) =>
+      image.requestedUrl.includes("/failed-revisit-b-regression.jpg")))
+      .toHaveLength(failedRequestCount);
+    expect(
+      [...container.querySelectorAll<HTMLImageElement>("img.hero-backdrop")].some((image) =>
+        image.src.includes("/failed-revisit-b-regression.jpg"),
+      ),
+    ).toBe(false);
+    expect(container.querySelector(".hero-backdrop.hero-gradient")).not.toBeNull();
   });
 
   it("preloads the following backdrop after advancing", () => {
@@ -386,6 +600,124 @@ describe("HeroSpotlight per-title accent probe", () => {
     } finally {
       globalThis.Image = OriginalImage;
       getContextSpy.mockRestore();
+    }
+  });
+
+  it("does not repeat a failed anonymous probe after rotating away and back", () => {
+    interface ProbeImage {
+      crossOrigin: string;
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+      requestedUrl: string;
+      src: string;
+    }
+    const OriginalImage = globalThis.Image;
+    const created: ProbeImage[] = [];
+    class FakeImage {
+      crossOrigin = "";
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      requestedUrl = "";
+      private _src = "";
+      constructor() {
+        created.push(this);
+      }
+      set src(value: string) {
+        this._src = value;
+        if (value) this.requestedUrl = value;
+      }
+      get src() {
+        return this._src;
+      }
+    }
+    // @ts-expect-error -- test double.
+    globalThis.Image = FakeImage;
+    const probeItems: MediaPreview[] = [
+      { ...items[0], id: "accent-error-a", backdropPath: "/accent-error-a-regression.jpg" },
+      { ...items[1], id: "accent-error-b", backdropPath: "/accent-error-b-regression.jpg" },
+    ];
+
+    try {
+      const { container } = render(<HeroSpotlight items={probeItems} />);
+      const failedProbe = created.find((image) =>
+        image.crossOrigin === "anonymous" &&
+        image.requestedUrl.includes("/accent-error-a-regression.jpg"));
+      expect(failedProbe).toBeDefined();
+      act(() => failedProbe!.onerror?.());
+
+      const dots = container.querySelectorAll<HTMLButtonElement>(".hero-dot");
+      fireEvent.click(dots[1]);
+      fireEvent.click(dots[0]);
+
+      expect(created.filter((image) =>
+        image.crossOrigin === "anonymous" &&
+        image.requestedUrl.includes("/accent-error-a-regression.jpg")))
+        .toHaveLength(1);
+    } finally {
+      globalThis.Image = OriginalImage;
+    }
+  });
+
+  it("evicts the oldest failed anonymous probe when the shared cache is full", () => {
+    interface ProbeImage {
+      crossOrigin: string;
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+      requestedUrl: string;
+      src: string;
+    }
+    const OriginalImage = globalThis.Image;
+    const created: ProbeImage[] = [];
+    class FakeImage {
+      crossOrigin = "";
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      requestedUrl = "";
+      private _src = "";
+      constructor() {
+        created.push(this);
+      }
+      set src(value: string) {
+        this._src = value;
+        if (value) this.requestedUrl = value;
+      }
+      get src() {
+        return this._src;
+      }
+    }
+    // @ts-expect-error -- test double.
+    globalThis.Image = FakeImage;
+    const makeItem = (index: number, id = `accent-bound-${index}`): MediaPreview => ({
+      id,
+      type: "movie",
+      title: `Accent bound ${index}`,
+      backdropPath: `/accent-bound-${index}-regression.jpg`,
+    });
+
+    try {
+      const { rerender } = render(<HeroSpotlight item={makeItem(0)} />);
+      for (let index = 0; index <= 64; index += 1) {
+        if (index > 0) rerender(<HeroSpotlight item={makeItem(index)} />);
+        const probe = [...created].reverse().find((image) =>
+          image.crossOrigin === "anonymous" &&
+          image.requestedUrl.includes(`/accent-bound-${index}-regression.jpg`));
+        expect(probe, `accent probe ${index}`).toBeDefined();
+        act(() => probe!.onerror?.());
+      }
+
+      rerender(<HeroSpotlight item={makeItem(0, "accent-bound-return")} />);
+      expect(created.filter((image) =>
+        image.crossOrigin === "anonymous" &&
+        image.requestedUrl.includes("/accent-bound-0-regression.jpg")))
+        .toHaveLength(2);
+
+      rerender(<HeroSpotlight item={makeItem(64, "accent-bound-latest-return")} />);
+      expect(created.filter((image) =>
+        image.crossOrigin === "anonymous" &&
+        image.requestedUrl.includes("/accent-bound-64-regression.jpg")))
+        .toHaveLength(1);
+    } finally {
+      globalThis.Image = OriginalImage;
     }
   });
 });

@@ -69,6 +69,16 @@ function emitProperty(name: string, data: unknown): void {
   act(() => callback({ name, data }));
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   renderPlayerMock.callback = null;
   renderPlayerMock.init.mockReset();
@@ -187,6 +197,163 @@ describe("EmbeddedPlayer control geometry", () => {
 });
 
 describe("EmbeddedPlayer playback controls", () => {
+  it("pauses native playback before using the owned external-player handoff", async () => {
+    const onOpenExternalPlayer = vi.fn(async () => {});
+    render(
+      <EmbeddedPlayer
+        url="https://server.example/api/stream/session-1"
+        title="Movie"
+        onOpenExternalPlayer={onOpenExternalPlayer}
+        externalActionStatus="Opened in VLC."
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(renderPlayerMock.command).toHaveBeenCalledWith(
+      "loadfile",
+      ["https://server.example/api/stream/session-1"],
+    ));
+    renderPlayerMock.setProperty.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in external player" }));
+
+    await waitFor(() => {
+      expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("pause", true);
+      expect(onOpenExternalPlayer).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Opened in VLC.");
+    expect(screen.getByRole("status")).toHaveClass("embed-menu-status");
+    expect(screen.getByRole("status")).not.toHaveClass("embed-menu-error");
+  });
+
+  it("does not offer an active external-player action without an owned callback", () => {
+    render(
+      <EmbeddedPlayer
+        url="https://server.example/api/stream/session-1"
+        title="Movie"
+        externalActionStatus="A stale status"
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.queryByRole("button", { name: "Open in external player" })).toBeNull();
+    expect(screen.queryByText("A stale status")).toBeNull();
+  });
+
+  it("coalesces duplicate external handoffs while native pause is pending", async () => {
+    const pause = deferred<void>();
+    renderPlayerMock.setProperty.mockImplementation(async (name, value) => {
+      if (name === "pause" && value === true) await pause.promise;
+    });
+    const onOpenExternalPlayer = vi.fn(async () => {});
+    render(
+      <EmbeddedPlayer
+        url="https://server.example/api/stream/session-1"
+        title="Movie"
+        onOpenExternalPlayer={onOpenExternalPlayer}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const action = screen.getByRole("button", { name: "Open in external player" });
+    fireEvent.click(action);
+    fireEvent.click(action);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Opening external player…" })).toBeDisabled();
+
+    await act(async () => pause.resolve());
+    await waitFor(() => expect(onOpenExternalPlayer).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not launch after a pending native pause becomes stale or unmounts", async () => {
+    const stalePause = deferred<void>();
+    renderPlayerMock.setProperty.mockImplementation(async (name, value) => {
+      if (name === "pause" && value === true) await stalePause.promise;
+    });
+    const onOpenExternalPlayer = vi.fn(async () => {});
+    const view = render(
+      <EmbeddedPlayer
+        url="https://server.example/api/stream/session-1"
+        title="Movie"
+        onOpenExternalPlayer={onOpenExternalPlayer}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in external player" }));
+    act(() => {
+      view.rerender(
+        <EmbeddedPlayer
+          url="https://server.example/api/stream/session-2"
+          title="Movie"
+          onOpenExternalPlayer={onOpenExternalPlayer}
+          onClose={() => {}}
+        />,
+      );
+    });
+    await act(async () => stalePause.resolve());
+    expect(onOpenExternalPlayer).not.toHaveBeenCalled();
+
+    const unmountPause = deferred<void>();
+    renderPlayerMock.setProperty.mockImplementation(async (name, value) => {
+      if (name === "pause" && value === true) await unmountPause.promise;
+    });
+    if (screen.queryByRole("button", { name: "Open in external player" }) == null) {
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Open in external player" }));
+    view.unmount();
+    await act(async () => unmountPause.resolve());
+    expect(onOpenExternalPlayer).not.toHaveBeenCalled();
+  });
+
+  it("does not launch after the player closes during a pending native pause", async () => {
+    const pause = deferred<void>();
+    renderPlayerMock.setProperty.mockImplementation(async (name, value) => {
+      if (name === "pause" && value === true) await pause.promise;
+    });
+    const onOpenExternalPlayer = vi.fn(async () => {});
+    const onClose = vi.fn();
+    render(
+      <EmbeddedPlayer
+        url="https://server.example/api/stream/session-1"
+        title="Movie"
+        onOpenExternalPlayer={onOpenExternalPlayer}
+        onClose={onClose}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in external player" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close player" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    await act(async () => pause.resolve());
+    expect(onOpenExternalPlayer).not.toHaveBeenCalled();
+  });
+
+  it("surfaces external handoff failures and allows a retry", async () => {
+    const onOpenExternalPlayer = vi.fn()
+      .mockRejectedValueOnce(new Error("missing app"))
+      .mockResolvedValueOnce(undefined);
+    render(
+      <EmbeddedPlayer
+        url="https://server.example/api/stream/session-1"
+        title="Movie"
+        onOpenExternalPlayer={onOpenExternalPlayer}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in external player" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The external player could not be opened. Try again.",
+    );
+    const retry = screen.getByRole("button", { name: "Open in external player" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(onOpenExternalPlayer).toHaveBeenCalledTimes(2));
+  });
+
   it("offers Server Optimized controls in native playback settings and preserves position", async () => {
     const switchOptimized = vi.fn(async () => {});
     const switchOriginal = vi.fn();
@@ -789,6 +956,105 @@ describe("EmbeddedPlayer playback controls", () => {
     expect(css).toMatch(/\.embed-controls\s*\{[^}]*z-index:\s*7;[^}]*pointer-events:\s*none;/s);
     expect(css).toMatch(
       /\.embed-player\.show-controls \.embed-top,[\s\S]*?\.embed-player\.show-controls \.embed-bottom,[\s\S]*?pointer-events:\s*auto;/,
+    );
+  });
+
+  it("reserves native paused content above the complete native bottom-control stack", () => {
+    const embeddedCss = readFileSync("src/components/EmbeddedPlayer.css", "utf8");
+    const pauseCss = readFileSync(
+      "src/components/player/PlayerPauseOverlay.css",
+      "utf8",
+    );
+    const nativeRoot = embeddedCss.match(/\.embed-player\s*\{([^}]*)\}/)?.[1];
+    const nativePause = pauseCss.match(
+      /\.embed-player \.player-pause-content\s*\{([^}]*)\}/,
+    )?.[1];
+
+    expect(nativeRoot).toBeDefined();
+    expect(nativeRoot).toMatch(
+      /--player-native-osd-reserve:\s*calc\([\s\S]*52px[\s\S]*\+ 24px[\s\S]*\+ calc\(12px[\s\S]*\+ 60px[\s\S]*var\(--safe-area-bottom\)/,
+    );
+    expect(nativePause).toBeDefined();
+    expect(nativePause?.match(/max-height:/g)).toHaveLength(2);
+    expect(nativePause).toMatch(
+      /max-height:\s*calc\(\s*100vh[\s\S]*var\(--player-native-osd-reserve\)/,
+    );
+    expect(nativePause).toMatch(
+      /max-height:\s*calc\(\s*100dvh[\s\S]*var\(--player-native-osd-reserve\)/,
+    );
+    expect(nativePause).toMatch(
+      /margin-bottom:\s*calc\(\s*var\(--player-native-osd-reserve\)\s*\+ calc\(10px \* var\(--density-scale\)\)/,
+    );
+    expect(nativePause).toMatch(/overflow:\s*hidden;/);
+  });
+
+  it("bounds native short-landscape pause copy without clipping the title", () => {
+    const pauseCss = readFileSync(
+      "src/components/player/PlayerPauseOverlay.css",
+      "utf8",
+    );
+    const shortLandscapeStart = pauseCss.indexOf(
+      "@media (min-width: 561px) and (max-width: 950px) and (max-height: 500px)",
+    );
+    const reducedMotionStart = pauseCss.indexOf(
+      "@media (prefers-reduced-motion: reduce)",
+      shortLandscapeStart,
+    );
+    const shortLandscape = pauseCss.slice(shortLandscapeStart, reducedMotionStart);
+
+    expect(shortLandscapeStart).toBeGreaterThanOrEqual(0);
+    expect(reducedMotionStart).toBeGreaterThan(shortLandscapeStart);
+    expect(shortLandscape).toMatch(
+      /\.webview-player \.player-pause-content,\s*\.embed-player \.player-pause-content\s*\{[^}]*width:\s*calc\([^}]*var\(--safe-area-left\)[^}]*var\(--safe-area-right\)/,
+    );
+    expect(shortLandscape).toMatch(
+      /\.embed-player \.player-pause-content\s*\{[^}]*margin:\s*0\s+0\s+calc\(var\(--player-native-osd-reserve\)[^}]*max\(calc\(22px \* var\(--density-scale\)\), var\(--safe-area-left\)\)/,
+    );
+    expect(shortLandscape).toMatch(
+      /\.embed-player \.player-pause-content h2\s*\{[^}]*overflow:\s*hidden;[^}]*line-height:\s*1\.1;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
+    );
+    expect(shortLandscape).toMatch(
+      /\.embed-player \.player-pause-overview\s*\{[^}]*margin-top:[^}]*line-height:\s*1\.4;[^}]*-webkit-line-clamp:\s*1;/,
+    );
+    expect(shortLandscape).not.toMatch(
+      /\.embed-player \.player-pause-(?:content h2|overview)\s*\{[^}]*display:\s*none;/,
+    );
+  });
+
+  it("compacts native pause metadata at 750px-wide short desktop heights", () => {
+    const pauseCss = readFileSync(
+      "src/components/player/PlayerPauseOverlay.css",
+      "utf8",
+    );
+    const shortDesktopStart = pauseCss.indexOf(
+      "@media (min-width: 750px) and (max-height: 700px)",
+    );
+    const reducedMotionStart = pauseCss.indexOf(
+      "@media (prefers-reduced-motion: reduce)",
+      shortDesktopStart,
+    );
+    const shortDesktop = pauseCss.slice(shortDesktopStart, reducedMotionStart);
+
+    expect(shortDesktopStart).toBeGreaterThanOrEqual(0);
+    expect(reducedMotionStart).toBeGreaterThan(shortDesktopStart);
+    expect(shortDesktop).not.toContain(".webview-player");
+    expect(shortDesktop).toMatch(
+      /\.embed-player \.player-pause-content h2\s*\{[^}]*display:\s*-webkit-box;[^}]*overflow:\s*hidden;[^}]*font-size:\s*clamp\(1\.75rem,[^}]*2\.5rem\);[^}]*line-height:\s*1\.08;[^}]*text-overflow:\s*ellipsis;[^}]*-webkit-box-orient:\s*vertical;[^}]*-webkit-line-clamp:\s*2;/,
+    );
+    expect(shortDesktop).toMatch(
+      /\.embed-player \.player-pause-eyebrow\s*\{[^}]*margin-bottom:\s*calc\(8px \* var\(--density-scale\)\);/,
+    );
+    expect(shortDesktop).toMatch(
+      /\.embed-player \.player-pause-meta\s*\{[^}]*gap:\s*calc\(6px \* var\(--density-scale\)\);[^}]*margin-top:\s*calc\(10px \* var\(--density-scale\)\);/,
+    );
+    expect(shortDesktop).toMatch(
+      /\.embed-player \.player-pause-overview\s*\{[^}]*margin-top:\s*calc\(8px \* var\(--density-scale\)\);[^}]*font-size:\s*0\.875rem;[^}]*line-height:\s*1\.4;[^}]*-webkit-line-clamp:\s*2;/,
+    );
+    expect(shortDesktop).not.toMatch(
+      /\.embed-player \.player-pause-(?:eyebrow|meta|overview)\s*\{[^}]*display:\s*none;/,
+    );
+    expect(shortDesktop).not.toMatch(
+      /\.embed-player \.player-pause-content\s*\{/,
     );
   });
 

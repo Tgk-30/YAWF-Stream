@@ -54,8 +54,8 @@ check(
 check(
   "Tauri updater endpoint",
   Array.isArray(updater?.endpoints) &&
-    updater.endpoints.some((url) => /releases\/latest\/download\/latest\.json$/.test(url)),
-  "web/src-tauri/tauri.conf.json must point at latest.json",
+    updater.endpoints.some((url) => /releases\/latest\/download\/latest-macos11\.json$/.test(url)),
+  "web/src-tauri/tauri.conf.json must point at latest-macos11.json",
 );
 check(
   "Tauri updater public key",
@@ -78,6 +78,9 @@ const dockerWorkflow = read(".github/workflows/docker-image.yml");
 const ciWorkflow = read(".github/workflows/ci.yml");
 const cloudflareSiteWorkflow = read(".github/workflows/cloudflare-site.yml");
 const desktopBuildWorkflow = read(".github/workflows/desktop-build.yml");
+const macosMediaWorkflow = read(".github/workflows/macos-media-runtime.yml");
+const macosMediaProducer = read("scripts/ci/produce_macos_media_runtime.py");
+const macosMediaSourcePlan = read("scripts/macos-media-replay/archive-normalizer-plan.json");
 const dockerIgnore = read(".dockerignore");
 const dockerfile = read("Dockerfile");
 const publicRepoPreflight = read("scripts/public_repo_preflight.mjs");
@@ -176,7 +179,7 @@ check(
 check(
   "Release workflow emits updater JSON",
   /includeUpdaterJson:\s*true/.test(releaseWorkflow),
-  ".github/workflows/web-release.yml should publish latest.json",
+  ".github/workflows/web-release.yml should publish both updater manifests",
 );
 check(
   "Release workflow signs updater artifacts",
@@ -551,8 +554,8 @@ check(
   /manifest:/.test(cleanInstallWorkflow) &&
     /darwin-aarch64-app/.test(cleanInstallWorkflow) &&
     /linux-x86_64-appimage/.test(cleanInstallWorkflow) &&
-    /latest\.json is missing an updater signature/.test(cleanInstallWorkflow) &&
-    /Held Windows channel leaked into latest\.json/.test(cleanInstallWorkflow) &&
+    /latest\.json must equal latest-macos11\.json minus Intel targets/.test(cleanInstallWorkflow) &&
+    /latest-macos11\.json is missing an updater signature/.test(cleanInstallWorkflow) &&
     /Held Windows channel leaked an asset into the draft release/.test(cleanInstallWorkflow),
   ".github/workflows/clean-install.yml must require signed macOS and Linux updater entries and reject Windows manifest entries or assets while that channel is held",
 );
@@ -585,9 +588,15 @@ check(
 check(
   "Release workflow bundles ffmpeg binaries",
   // The optimize/remux engine shells out to bundled ffmpeg/ffprobe, so every
-  // desktop target must fetch them exactly like the Node runtime above: macOS
-  // per-arch via matrix.node_runtime, Linux and Windows literally.
-  /download_ffmpeg\.mjs \$\{\{ matrix\.node_runtime \}\}/.test(releaseWorkflow) &&
+  // macOS consumes separately verified source builds; other targets retain
+  // their pinned downloads. All CLIs must be present before packaging.
+  /needs:\s*macos-media-runtime/.test(releaseWorkflow) &&
+    /name:\s*macos-media-runtime-\$\{\{ matrix\.media_arch \}\}/.test(releaseWorkflow) &&
+    /media-candidate\/ffmpeg/.test(releaseWorkflow) &&
+    /produce_macos_media_runtime\.py[\s\S]*--prepare-source/.test(macosMediaWorkflow) &&
+    /produce_macos_media_runtime\.py[\s\S]*--build/.test(macosMediaWorkflow) &&
+    /replay_macos_media_sources\.mjs/.test(macosMediaProducer) &&
+    /smoke_macos_media_runtime\.mjs/.test(macosMediaProducer) &&
     /download_ffmpeg\.mjs\s+linux-x64/.test(releaseWorkflow) &&
     /download_ffmpeg\.mjs\s+win-x64/.test(releaseWorkflow),
   ".github/workflows/web-release.yml must fetch ffmpeg/ffprobe for macOS (per-arch), Linux, and Windows before packaging",
@@ -608,13 +617,25 @@ check(
 );
 check(
   "Local macOS package is self-contained for playback",
-  /download_ffmpeg\.mjs/.test(localPackage) &&
-    /"bundle-mpv-deps\.sh"/.test(localPackage) &&
+  /buildMacosMediaRuntime/.test(localPackage) &&
+    /stageMediaRuntime/.test(localPackage) &&
+    /smokeMediaRuntime/.test(localPackage) &&
+    /prepareMediaNotices/.test(localPackage) &&
+    /check_macos_bundle_minimum\.mjs/.test(localPackage) &&
     /MPV_LIB_DIR/.test(localPackage) &&
     /otool/.test(localPackage) &&
     /\/opt\/homebrew/.test(localPackage) &&
     /\/usr\/local/.test(localPackage),
   "scripts/package_tauri_local.mjs must bundle ffmpeg and libmpv, link through the bundled tree, and reject build-machine paths",
+);
+check(
+  "macOS source-built media notices are bundled",
+  tauri.bundle?.macOS?.minimumSystemVersion === "11.0" &&
+    tauri.bundle.resources.includes("resources/media-notices/**/*") &&
+    /prepare_macos_replay_notices\.mjs/.test(macosMediaProducer) &&
+    /replay-support\/scripts\/prepare_macos_replay_notices\.mjs/.test(macosMediaSourcePlan) &&
+    /Attach corresponding media sources to the draft/.test(releaseWorkflow),
+  "macOS11 packaging must include exact component notices and corresponding media sources",
 );
 check(
   "Local package script creates macOS app zip",

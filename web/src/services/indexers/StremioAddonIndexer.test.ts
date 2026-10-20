@@ -49,6 +49,7 @@ describe("StremioAddonIndexer", () => {
             "Example.Movie.2026.1080p.WEB-DL.x264\n👤 123 💾 2.1 GB ⚙️ ThePirateBay",
           infoHash: "ABCDEF1234567890ABCDEF1234567890ABCDEF12",
           fileIdx: 0,
+          behaviorHints: { filename: "Example.Movie.2026.1080p.WEB-DL.x264.mkv" },
         },
         {
           name: "Torrentio\n720p",
@@ -78,6 +79,11 @@ describe("StremioAddonIndexer", () => {
     expect(first!.sizeBytes).toBe(2_100_000_000);
     expect(first!.quality).toBe(VQ.hd1080p);
     expect(first!.indexerName).toBe("Torrentio");
+    expect(first!.fileIndex).toBe(0);
+    expect(first!.fileNameHint).toBe("Example.Movie.2026.1080p.WEB-DL.x264.mkv");
+    expect(first!.id).toBe(
+      "abcdef1234567890abcdef1234567890abcdef12:0",
+    );
 
     const second = results.find(
       (r) => r.infoHash === "1111111111111111111111111111111111111111",
@@ -115,6 +121,28 @@ describe("StremioAddonIndexer", () => {
     expect(results.some((r) => r.infoHash === "a".repeat(40))).toBe(false);
     // The isolated 40-hex run is extracted as a valid hash.
     expect(results.some((r) => r.infoHash === isolated)).toBe(true);
+  });
+
+  it("drops malformed explicit file indices instead of turning them into heuristic rows", async () => {
+    const hash = "c".repeat(40);
+    const json = JSON.stringify({ streams: [
+      { infoHash: hash, title: "negative", fileIdx: -1 },
+      { infoHash: hash, title: "fractional", fileIdx: 1.5 },
+      { infoHash: hash, title: "string", fileIdx: "0" },
+      { infoHash: hash, title: "huge", fileIdx: 1_000_001 },
+      { infoHash: hash, title: "legacy", fileIdx: null },
+    ] });
+    const mock = makeMockFetch(() => ({ status: 200, body: json }));
+    const indexer = new StremioAddonIndexer(
+      "Torrentio",
+      "https://torrentio.strem.fun",
+      mock.fetchImpl,
+    );
+
+    const results = await indexer.search("tt1234567", "movie", null, null);
+    expect(results).toHaveLength(1);
+    expect(results[0].title).toContain("legacy");
+    expect(results[0].fileIndex).toBeUndefined();
   });
 
   it("series search builds tt:season:episode stream id", async () => {

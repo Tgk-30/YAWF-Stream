@@ -134,10 +134,11 @@ Owners/admins get diagnostics in **Settings → Server**:
 
 - **Usage:** per-profile bandwidth served by the proxy - who is using the hosted
   network path, and how much.
-- **Active streams:** which profiles are streaming right now, bytes sent, HTTP
-  status, and expiry. An admin can **Terminate** any active stream - this revokes
-  its proxy session immediately, so the next request for it is refused (useful to
-  cut off a stuck or unwanted stream).
+- **Revocable stream access:** unexpired, unrevoked playback grants, bytes sent,
+  HTTP status, and expiry. A completed transfer can still allow replay or seeking.
+  An admin can **Terminate** its access so future requests are refused; already
+  buffered video may continue. The panel shows the latest 100 valid grants.
+  Terminating a listed grant reveals older grants when the list is full.
 - **Health & warnings:** session counts, configuration flags (HTTPS cookies,
   proxy trust, etc.), and recent stream errors.
 - **Audit log:** auth, credential changes, profile changes, and stream starts.

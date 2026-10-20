@@ -5,6 +5,7 @@ import { RealDebridService } from "../../web/src/services/debrid/RealDebridServi
 import { TorBoxService } from "../../web/src/services/debrid/TorBoxService.ts";
 import { CacheStatus } from "../../web/src/services/debrid/models.ts";
 import { IndexerManager } from "../../web/src/services/indexers/IndexerManager.ts";
+import { torrentResultMatchesExactSelection } from "../../web/src/services/indexers/models.ts";
 import { IndexerType, makeIndexerConfig } from "../../web/src/services/indexers/types.ts";
 import { decryptSecret } from "./crypto.js";
 import { getServerDetail } from "./metadata-runtime.js";
@@ -438,6 +439,18 @@ function sourceMatchesEpisode(result, mediaType, season, episode) {
 // legitimate in-cap movie. Normal Direct P2P binding also folds in the same
 // title-query pass that discovery uses. Capped profiles leave that pass off so
 // their existing IMDb-exact, fail-closed source binding is preserved.
+function boundSourceMatches(results, target, fileHint) {
+  const matching = results.filter((result) => String(result.infoHash).toLowerCase() === target);
+  const explicit = matching.filter((result) => result.fileIndex != null);
+  const requestedExact = fileHint != null && "fileIndex" in fileHint;
+  if (explicit.length === 0) return !requestedExact && matching.length > 0;
+  // A collection hash alone does not bind an arbitrary file to a rated title.
+  // Older clients must not silently fall back to another file from that pack.
+  if (!requestedExact) return false;
+  return explicit.some((result) =>
+    torrentResultMatchesExactSelection(result, fileHint.fileIndex, fileHint.fileName));
+}
+
 export async function titleHasInfoHash(
   db,
   config,
@@ -448,6 +461,7 @@ export async function titleHasInfoHash(
   season = null,
   episode = null,
   includeTitleMatches = false,
+  fileHint = null,
 ) {
   const target = String(infoHash).toLowerCase();
   const detail = await getServerDetail(db, config, profileId, { id: mediaId, type: mediaType });
@@ -460,7 +474,7 @@ export async function titleHasInfoHash(
     sourceMatchesEpisode(result, mediaType, season, episode));
   const title = detail?.item?.title ?? null;
   if (!includeTitleMatches || typeof title !== "string" || title.trim().length === 0) {
-    return eligibleByImdb.some((r) => String(r.infoHash).toLowerCase() === target);
+    return boundSourceMatches(eligibleByImdb, target, fileHint);
   }
   const titleQuery = buildTitleQuery(title, season, episode);
   const titleIndexers = buildIndexerManager(db, profileId);
@@ -473,5 +487,5 @@ export async function titleHasInfoHash(
     title,
     mediaType === "movie" ? detail.item.year ?? null : null,
   );
-  return results.some((r) => String(r.infoHash).toLowerCase() === target);
+  return boundSourceMatches(results, target, fileHint);
 }

@@ -42,12 +42,14 @@ import { Icon } from "../components/Icon";
 import { isInWatchlist } from "../data/library";
 import {
   VideoCodec,
+  type DebridFileHint,
   type DebridServiceType,
   type StreamInfo,
 } from "../services/debrid/models";
 import { MediaItem as MediaItemNS } from "../models/media";
 import {
   TorrentResult,
+  torrentResultSelectionKey,
   VideoQuality,
   type VideoQuality as VideoQualityValue,
 } from "../services/indexers/models";
@@ -59,6 +61,7 @@ import {
   resolveServerStream,
   serverOptimizedSource,
   serverStreamAudioTracks,
+  serverStreamSourceInfo,
   serverExternalPlaybackURL,
   type ServerTranscodeQuality,
 } from "../lib/serverApi";
@@ -1163,7 +1166,9 @@ export function Detail() {
       source == null
         ? null
         : streams.rows.find(
-            (candidate) => candidate.result.infoHash.toLowerCase() === source.infoHash.toLowerCase(),
+            (candidate) =>
+              torrentResultSelectionKey(candidate.result) ===
+              torrentResultSelectionKey(source),
           ) ?? null
     );
     const timelineOffsetSeconds = stream.timelineOffsetSeconds ?? 0;
@@ -1321,6 +1326,8 @@ export function Detail() {
       seeders: 0,
       leechers: 0,
       indexerName: "cached resolution",
+      fileIndex: cachedResolution.fileIndex ?? null,
+      fileNameHint: cachedResolution.fileNameHint ?? null,
     });
     source.isCached = true;
     source.cachedOn = cachedOn;
@@ -1345,11 +1352,19 @@ export function Detail() {
     // or carry no tag (fallback to the default pick) - always safe to pass.
     // The auto-advance effect passes its target explicitly (hintOverride) so
     // the hint can never depend on which render's `selected` was captured.
-    const fileHint =
+    const episodeHint =
       hintOverride ??
       (detailItem?.type === "series" && selected != null
         ? { season: selected.season, episode: selected.episode }
         : null);
+    const fileHint: DebridFileHint | null =
+      row.result.fileIndex != null
+        ? {
+            fileIndex: row.result.fileIndex,
+            fileName: row.result.fileNameHint ?? null,
+            ...(episodeHint ?? {}),
+          }
+        : episodeHint;
     if (isServerMode()) {
       // Keep Device Original by default unless the existing opt-in is enabled.
       // The title context is required for maturity gating on capped profiles.
@@ -1493,8 +1508,13 @@ export function Detail() {
     const capturedEpoch = playbackEpochRef.current;
     const capturedDetailId = detailItem?.id ?? null;
     const requestGeneration = ++refreshGenerationRef.current;
-    const row = streams.rows.find(
-      (candidate) => candidate.result.infoHash.toLowerCase() === sourceHash,
+    const recoverySelectionKey = activePlayer.recoverySource == null
+      ? null
+      : torrentResultSelectionKey(activePlayer.recoverySource.result);
+    const row = streams.rows.find((candidate) =>
+      recoverySelectionKey == null
+        ? candidate.result.infoHash.toLowerCase() === sourceHash
+        : torrentResultSelectionKey(candidate.result) === recoverySelectionKey,
     ) ?? activePlayer.recoverySource;
     if (row == null) {
       throw new Error("The current source is no longer in the source list.");
@@ -1623,6 +1643,8 @@ export function Detail() {
         episodeContext == null
           ? null
           : episodeIdFor(episodeContext.season, episodeContext.episode),
+      fileIndex: source.fileIndex ?? null,
+      fileNameHint: source.fileNameHint ?? null,
       mode: downloadMode,
       optimizeProfile: downloadMode === "optimized" ? downloadProfile : null,
       // Stream rows have no track inventory before the native ffprobe pass.
@@ -2179,6 +2201,7 @@ export function Detail() {
                 ? {
                     qualities: serverOptimizedQualities,
                     loadAudioTracks: () => serverStreamAudioTracks(player.fallbackStream!),
+                    loadSourceInfo: () => serverStreamSourceInfo(player.fallbackStream!),
                     defaultQuality: settings.transcode
                       ? settings.dataSaver
                         ? "480p"

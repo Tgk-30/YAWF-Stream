@@ -30,6 +30,11 @@ for (const { name, from, to } of [
     to: "androidTvChecksums: releaseAsset(DESKTOP_RELEASE, 'SHA256SUMS')",
   },
   {
+    name: "published server version",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.23', tag: 'v2.3.23' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.22', tag: 'v2.3.23' };",
+  },
+  {
     name: "server checksum channel",
     from: "serverChecksums: releaseAsset(SERVER_RELEASE, 'SHA256SUMS')",
     to: "serverChecksums: releaseAsset(DESKTOP_RELEASE, 'SHA256SUMS')",

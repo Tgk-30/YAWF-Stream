@@ -29,6 +29,7 @@ import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
 import androidx.activity.OnBackPressedCallback;
+import androidx.annotation.OptIn;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
@@ -40,12 +41,17 @@ import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 import androidx.media3.ui.PlayerView;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewStartUpConfig;
 
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @UnstableApi
 public final class MainActivity extends ComponentActivity {
@@ -53,6 +59,10 @@ public final class MainActivity extends ComponentActivity {
     private static final long PROGRESS_INTERVAL_MS = 5_000;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final WebStartupGate webStartupGate = new WebStartupGate();
+    private final ExecutorService webStartupExecutor = Executors.newSingleThreadExecutor(
+        runnable -> new Thread(runnable, "yawf-webview-startup")
+    );
     private FrameLayout root;
     private WebView webView;
     private PlayerView playerView;
@@ -62,6 +72,10 @@ public final class MainActivity extends ComponentActivity {
     // A single failed page load fires several callbacks. Only the first one
     // should swap in the recovery screen.
     private boolean showingConnectionError;
+    private boolean webViewFocusableBeforePlayer;
+    private boolean webViewFocusableInTouchModeBeforePlayer;
+    private int webViewDescendantFocusabilityBeforePlayer = ViewGroup.FOCUS_AFTER_DESCENDANTS;
+    private boolean webViewFocusSuppressedForPlayer;
 
     private final Runnable progressReporter = new Runnable() {
         @Override
@@ -104,13 +118,14 @@ public final class MainActivity extends ComponentActivity {
         serverBase = getPreferences(MODE_PRIVATE).getString(SERVER_URL, null);
         if (serverBase == null) {
             showServerSetup();
+            applyWebStartupDecision(webStartupGate.beginStartup());
         } else {
-            showWebApp();
+            applyWebStartupDecision(webStartupGate.requestWebApp());
         }
     }
 
     @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
-    private void showWebApp() {
+    private void createWebApp() {
         releasePlayer(false);
         root.removeAllViews();
         showingConnectionError = false;
@@ -266,7 +281,7 @@ public final class MainActivity extends ComponentActivity {
             retry.setTextSize(20);
             retry.setTextColor(Color.BLACK);
             retry.setAllCaps(false);
-            retry.setOnClickListener(view -> showWebApp());
+            retry.setOnClickListener(view -> requestWebApp());
             LinearLayout.LayoutParams retryParams = matchWidth(dp(64));
             retryParams.topMargin = dp(24);
             panel.addView(retry, retryParams);
@@ -287,6 +302,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showServerSetup() {
+        webStartupGate.cancelWebApp();
         showingConnectionError = false;
         releasePlayer(false);
         if (webView != null) {
@@ -356,7 +372,7 @@ public final class MainActivity extends ComponentActivity {
                 .edit()
                 .putString(SERVER_URL, normalized)
                 .apply();
-            showWebApp();
+            requestWebApp();
         });
         LinearLayout.LayoutParams connectParams = matchWidth(dp(64));
         connectParams.topMargin = dp(12);
@@ -375,6 +391,153 @@ public final class MainActivity extends ComponentActivity {
 
         root.addView(panel, panelParams);
         address.requestFocus();
+    }
+
+    private void requestWebApp() {
+        applyWebStartupDecision(webStartupGate.requestWebApp());
+    }
+
+    private void applyWebStartupDecision(WebStartupGate.Decision decision) {
+        if (isFinishing() || isDestroyed()) return;
+        switch (decision.presentation) {
+            case LOADING:
+                showWebStartupLoading();
+                break;
+            case WEB_APP:
+                createWebApp();
+                break;
+            case ERROR:
+                showWebStartupError();
+                break;
+            case NONE:
+                break;
+        }
+        if (decision.startStartup) {
+            startWebViewAsync(decision.startupId);
+        }
+    }
+
+    @OptIn(markerClass = WebViewCompat.ExperimentalAsyncStartUp.class)
+    private void startWebViewAsync(long startupId) {
+        Executor guardedExecutor = command -> {
+            try {
+                webStartupExecutor.execute(() -> {
+                    try {
+                        command.run();
+                    } catch (Throwable error) {
+                        notifyWebStartupFailed(startupId);
+                    }
+                });
+            } catch (RuntimeException error) {
+                notifyWebStartupFailed(startupId);
+            }
+        };
+        try {
+            WebViewStartUpConfig config = new WebViewStartUpConfig.Builder(guardedExecutor)
+                .build();
+            WebViewCompat.startUpWebView(
+                getApplicationContext(),
+                config,
+                result -> applyWebStartupDecision(webStartupGate.startupReady(startupId))
+            );
+        } catch (RuntimeException | LinkageError error) {
+            applyWebStartupDecision(webStartupGate.startupFailed(startupId));
+        }
+    }
+
+    private void notifyWebStartupFailed(long startupId) {
+        mainHandler.post(
+            () -> applyWebStartupDecision(webStartupGate.startupFailed(startupId))
+        );
+    }
+
+    private void showWebStartupLoading() {
+        releasePlayer(false);
+        root.removeAllViews();
+
+        LinearLayout panel = nativeStatusPanel();
+        panel.addView(
+            nativeStatusText(R.string.web_startup_loading_title, 30, R.color.yawf_text),
+            matchWidth(dp(58))
+        );
+        panel.addView(
+            nativeStatusText(R.string.web_startup_loading_copy, 18, R.color.yawf_muted),
+            matchWidth(ViewGroup.LayoutParams.WRAP_CONTENT)
+        );
+
+        Button change = nativeStatusButton(R.string.change_server);
+        change.setOnClickListener(view -> showServerSetup());
+        LinearLayout.LayoutParams changeParams = matchWidth(dp(64));
+        changeParams.topMargin = dp(24);
+        panel.addView(change, changeParams);
+        addNativeStatusPanel(panel);
+        change.requestFocus();
+    }
+
+    private void showWebStartupError() {
+        releasePlayer(false);
+        root.removeAllViews();
+
+        LinearLayout panel = nativeStatusPanel();
+        panel.addView(
+            nativeStatusText(R.string.web_startup_error_title, 30, R.color.yawf_text),
+            matchWidth(dp(58))
+        );
+        panel.addView(
+            nativeStatusText(R.string.web_startup_error_copy, 18, R.color.yawf_muted),
+            matchWidth(ViewGroup.LayoutParams.WRAP_CONTENT)
+        );
+
+        Button retry = nativeStatusButton(R.string.try_again);
+        retry.setOnClickListener(view -> requestWebApp());
+        LinearLayout.LayoutParams retryParams = matchWidth(dp(64));
+        retryParams.topMargin = dp(24);
+        panel.addView(retry, retryParams);
+
+        Button change = nativeStatusButton(R.string.change_server);
+        change.setOnClickListener(view -> showServerSetup());
+        LinearLayout.LayoutParams changeParams = matchWidth(dp(64));
+        changeParams.topMargin = dp(12);
+        panel.addView(change, changeParams);
+        addNativeStatusPanel(panel);
+        retry.requestFocus();
+    }
+
+    private LinearLayout nativeStatusPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setGravity(Gravity.CENTER_HORIZONTAL);
+        panel.setPadding(dp(56), dp(36), dp(56), dp(36));
+        return panel;
+    }
+
+    private TextView nativeStatusText(int text, int size, int color) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextColor(getColor(color));
+        view.setTextSize(size);
+        view.setGravity(Gravity.CENTER);
+        return view;
+    }
+
+    private Button nativeStatusButton(int text) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setTextSize(20);
+        button.setTextColor(Color.BLACK);
+        button.setAllCaps(false);
+        return button;
+    }
+
+    private void addNativeStatusPanel(LinearLayout panel) {
+        root.addView(
+            panel,
+            new FrameLayout.LayoutParams(
+                Math.min(getResources().getDisplayMetrics().widthPixels - dp(80), dp(760)),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            )
+        );
     }
 
     private LinearLayout.LayoutParams matchWidth(int height) {
@@ -498,6 +661,19 @@ public final class MainActivity extends ComponentActivity {
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
             );
+            // Keep D-pad focus inside Media3 while the player is on screen. The
+            // WebView remains attached for playback events but must not win focus.
+            if (webView != null) {
+                webViewFocusableBeforePlayer = webView.isFocusable();
+                webViewFocusableInTouchModeBeforePlayer = webView.isFocusableInTouchMode();
+                webViewDescendantFocusabilityBeforePlayer = webView.getDescendantFocusability();
+                webViewFocusSuppressedForPlayer = true;
+                webView.setFocusable(false);
+                webView.setFocusableInTouchMode(false);
+                webView.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+            }
+            playerView.setFocusable(true);
+            playerView.setFocusableInTouchMode(true);
             playerView.bringToFront();
             playerView.requestFocus();
 
@@ -586,6 +762,13 @@ public final class MainActivity extends ComponentActivity {
             root.removeView(playerView);
             playerView = null;
         }
+        if (webViewFocusSuppressedForPlayer && webView != null) {
+            webView.setFocusable(webViewFocusableBeforePlayer);
+            webView.setFocusableInTouchMode(webViewFocusableInTouchModeBeforePlayer);
+            webView.setDescendantFocusability(webViewDescendantFocusabilityBeforePlayer);
+            webView.requestFocus();
+        }
+        webViewFocusSuppressedForPlayer = false;
         if (player != null) {
             player.release();
             player = null;
@@ -593,7 +776,6 @@ public final class MainActivity extends ComponentActivity {
         closingPlayer = false;
         if (notifyWeb) {
             dispatchPlaybackEvent("yawf-android-tv-closed", progress);
-            if (webView != null) webView.requestFocus();
         }
     }
 
@@ -626,7 +808,7 @@ public final class MainActivity extends ComponentActivity {
         super.onPause();
         mainHandler.removeCallbacks(progressReporter);
         if (player != null) player.pause();
-        CookieManager.getInstance().flush();
+        if (webStartupGate.isReady()) CookieManager.getInstance().flush();
     }
 
     @Override
@@ -640,6 +822,7 @@ public final class MainActivity extends ComponentActivity {
 
     @Override
     protected void onDestroy() {
+        webStartupGate.closeAndShutdown(webStartupExecutor);
         releasePlayer(false);
         if (webView != null) {
             webView.removeJavascriptInterface("YawfAndroidTV");

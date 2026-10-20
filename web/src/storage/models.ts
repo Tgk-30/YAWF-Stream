@@ -388,6 +388,9 @@ export interface CachedResolutionRecord {
   debridService: string;
   /** The infoHash the resolution came from (for dedup / provenance). */
   infoHash: string;
+  /** Exact source selector retained so refresh never re-resolves another file. */
+  fileIndex?: number | null;
+  fileNameHint?: string | null;
 }
 
 // MARK: - AI usage (local-only cost/token ledger)
@@ -427,6 +430,8 @@ export interface DownloadRecord {
   episode: number | null;
   infoHash: string;
   fileHint: string | null;
+  fileIndex?: number | null;
+  fileNameHint?: string | null;
   mode: "full" | "optimized";
   optimizeProfile: "remux" | "h265" | null;
   keepAudioLangs: string[];

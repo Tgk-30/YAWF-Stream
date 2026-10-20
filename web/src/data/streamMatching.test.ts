@@ -13,6 +13,8 @@ function tr(
   title: string,
   seeders = 1,
   quality: VideoQuality = VideoQuality.hd1080p,
+  fileIndex: number | null = null,
+  fileNameHint: string | null = null,
 ): TorrentResult {
   return {
     infoHash,
@@ -23,6 +25,8 @@ function tr(
     sizeBytes: 0,
     magnetURI: "",
     source: "test",
+    fileIndex,
+    fileNameHint,
   } as unknown as TorrentResult;
 }
 
@@ -103,6 +107,25 @@ describe("combineStreamResults", () => {
     const merged = combineStreamResults(byImdb, byTitle, "The Bear");
     // Paddington dropped; 4K leads on quality; hash A survives.
     expect(merged.map((r) => r.infoHash)).toEqual(["B", "A"]);
+  });
+
+  it("does not merge different explicit file indices sharing one hash", () => {
+    const merged = combineStreamResults(
+      [tr("same", "The Bear S01E01 small", 1, VideoQuality.hd720p, 0)],
+      [tr("same", "The Bear S01E01 large", 99, VideoQuality.uhd4k, 1)],
+      "The Bear",
+    );
+    expect(merged.map((result) => result.fileIndex)).toEqual([1, 0]);
+  });
+
+  it("prefers a usable selector over a higher-seeder duplicate", () => {
+    const merged = combineStreamResults(
+      [tr("same", "The Bear S01E01", 999, VideoQuality.uhd4k, 0, null)],
+      [tr("same", "The Bear S01E01", 1, VideoQuality.hd720p, 0, "small.avi")],
+      "The Bear",
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0].fileNameHint).toBe("small.avi");
   });
 });
 

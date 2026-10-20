@@ -16,8 +16,8 @@ android {
         applicationId "com.yawf.stream.tv"
         minSdk 23
         targetSdk 36
-        versionCode 20322
-        versionName "2.3.22"
+        versionCode 20324
+        versionName "2.3.24"
     }
 
     signingConfigs {
@@ -55,6 +55,7 @@ android {
 
 dependencies {
     implementation "androidx.activity:activity:1.13.0"
+    implementation "androidx.webkit:webkit:1.15.0"
     implementation "androidx.media3:media3-exoplayer:1.10.1"
     implementation "androidx.media3:media3-exoplayer-hls:1.10.1"
     implementation "androidx.media3:media3-ui:1.10.1"
