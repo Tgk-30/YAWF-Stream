@@ -89,6 +89,42 @@ final class FlowPolicyAssertions {
     }
 
     static void tourDismissalRequiresThreeConsecutiveAbsentSamples() {
+        check(FlowPolicy.WELCOME_TOUR_DIALOG.matches(
+                        "com.tgk30.debridstreamer", "android.app.Dialog", "Welcome tour", ""),
+                "The exact API 30 and API 36 Welcome tour dialog must match");
+        check(!FlowPolicy.WELCOME_TOUR_DIALOG.matches(
+                        "com.tgk30.debridstreamer", "android.app.Dialog", "", "Welcome tour"),
+                "An unverified dialog description representation must not match");
+        check(!FlowPolicy.WELCOME_TOUR_DIALOG.matches(
+                        "com.tgk30.debridstreamer", "android.app.Dialog", "Welcome tour now", ""),
+                "An affixed Welcome tour label must not match");
+        check(!FlowPolicy.WELCOME_TOUR_DIALOG.matches(
+                        "other.package", "android.app.Dialog", "Welcome tour", ""),
+                "A Welcome tour dialog from another package must not match");
+        check(!FlowPolicy.WELCOME_TOUR_DIALOG.matches(
+                        "com.tgk30.debridstreamer", "android.view.View", "Welcome tour", ""),
+                "A Welcome tour label on the wrong node class must not match");
+        check(FlowPolicy.DISCOVER_BUTTON.matches(
+                        "com.tgk30.debridstreamer", "android.widget.Button", "Discover", ""),
+                "The exact visible Discover anchor must match");
+        check(FlowPolicy.STREAMING_SETUP_REMINDER.matches(
+                        "com.tgk30.debridstreamer", "android.view.View",
+                        "Streaming setup reminder", ""),
+                "The exact visible setup reminder anchor must match");
+
+        int samples = FlowPolicy.nextTourDismissalAbsentSamples(0, false, true, true);
+        check(samples == 1, "One complete post-dismissal observation must count once");
+        samples = FlowPolicy.nextTourDismissalAbsentSamples(samples, false, true, true);
+        check(samples == 2, "Two consecutive complete observations must remain unsettled");
+        samples = FlowPolicy.nextTourDismissalAbsentSamples(samples, false, true, true);
+        check(samples == 3, "Three consecutive complete observations must settle");
+        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, true, true, true) == 0,
+                "A visible Welcome tour dialog must reset settlement");
+        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, false, false, true) == 0,
+                "A missing visible Discover anchor must reset settlement");
+        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, false, true, false) == 0,
+                "A missing visible setup reminder must reset settlement");
+
         check(!FlowPolicy.isTourDismissalSettled(0),
                 "No absent observation must not count as settled");
         check(!FlowPolicy.isTourDismissalSettled(1),
