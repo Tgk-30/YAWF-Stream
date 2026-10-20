@@ -15,7 +15,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.uiautomator.By;
 import androidx.test.uiautomator.BySelector;
+import androidx.test.uiautomator.Configurator;
 import androidx.test.uiautomator.Direction;
+import androidx.test.uiautomator.StaleObjectException;
 import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
@@ -41,6 +43,7 @@ public final class RuntimeFlowTest {
     private static final long UI_WAIT_MS = 90_000;
     private static final long UPDATE_WAIT_MS = 120_000;
     private static final long TOUR_MOUNT_WAIT_MS = 5_000;
+    private static final long TOUR_OBSERVATION_IDLE_TIMEOUT_MS = 250;
     private static final String EVIDENCE_SUBDIR = "persistent-flow";
     private static final int MAX_CAPTURES = 20;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
@@ -213,23 +216,97 @@ public final class RuntimeFlowTest {
         object.click();
         log("Clicked one exact labeled ordinary tour Skip button");
 
-        long dismissalDeadline = SystemClock.uptimeMillis() + TOUR_MOUNT_WAIT_MS;
+        Configurator configurator = Configurator.getInstance();
+        long previousIdleTimeout = configurator.getWaitForIdleTimeout();
+        configurator.setWaitForIdleTimeout(TOUR_OBSERVATION_IDLE_TIMEOUT_MS);
+        try {
+            observeOrdinaryTourDismissal();
+        } finally {
+            configurator.setWaitForIdleTimeout(previousIdleTimeout);
+        }
+    }
+
+    private void observeOrdinaryTourDismissal() {
+        long dismissalStarted = SystemClock.uptimeMillis();
+        long dismissalDeadline = dismissalStarted + TOUR_MOUNT_WAIT_MS;
+        int completedSamples = 0;
         int consecutiveAbsentSamples = 0;
         while (SystemClock.uptimeMillis() < dismissalDeadline) {
-            assertNoBindingTerms();
-            object = findWebButtonNow(controls);
-            if (object == null) {
-                consecutiveAbsentSamples++;
-                if (FlowPolicy.isTourDismissalSettled(consecutiveAbsentSamples)) {
-                    log("Observed the ordinary tour absent for a settled bounded interval");
-                    return;
-                }
-            } else {
-                consecutiveAbsentSamples = 0;
+            long sampleStarted = SystemClock.uptimeMillis();
+            TimedNodeQuery dialog = queryExactTourNode(
+                    "welcome-dialog", FlowPolicy.WELCOME_TOUR_DIALOG, false);
+            TimedNodeQuery discover = queryExactTourNode(
+                    "discover", FlowPolicy.DISCOVER_BUTTON, true);
+            TimedNodeQuery reminder = queryExactTourNode(
+                    "setup-reminder", FlowPolicy.STREAMING_SETUP_REMINDER, true);
+            completedSamples++;
+            boolean observationKnown = dialog.known && discover.known && reminder.known;
+            consecutiveAbsentSamples = FlowPolicy.nextTourDismissalAbsentSamples(
+                    consecutiveAbsentSamples,
+                    observationKnown,
+                    dialog.present,
+                    discover.visible,
+                    reminder.visible);
+            log("Tour observation sample=" + completedSamples
+                    + " elapsedMs=" + (SystemClock.uptimeMillis() - sampleStarted)
+                    + " dialogPresent=" + dialog.present
+                    + " discoverVisible=" + discover.visible
+                    + " reminderVisible=" + reminder.visible
+                    + " observationKnown=" + observationKnown
+                    + " consecutiveAbsent=" + consecutiveAbsentSamples);
+            if (FlowPolicy.isTourDismissalSettled(consecutiveAbsentSamples)) {
+                log("Observed the exact Welcome tour dialog absent with Discover and setup reminder"
+                        + " visible for a settled bounded interval");
+                return;
             }
-            SystemClock.sleep(250);
+            long remainingMs = dismissalDeadline - SystemClock.uptimeMillis();
+            if (remainingMs > 0) {
+                SystemClock.sleep(Math.min(250, remainingMs));
+            }
         }
-        fail("Ordinary tour did not settle after one guarded Skip action");
+        fail("Ordinary tour did not settle after one guarded Skip action within "
+                + TOUR_MOUNT_WAIT_MS + "ms; completedSamples=" + completedSamples
+                + ", consecutiveAbsent=" + consecutiveAbsentSamples
+                + ", actualElapsedMs=" + (SystemClock.uptimeMillis() - dismissalStarted));
+    }
+
+    private TimedNodeQuery queryExactTourNode(
+            String queryName,
+            FlowPolicy.ExactTextWebNodeSpec spec,
+            boolean requireVisibleBounds) {
+        long queryStarted = SystemClock.uptimeMillis();
+        try {
+            UiObject2 object = device.findObject(
+                    By.text(spec.label())
+                            .pkg(FlowPolicy.PRODUCT_PACKAGE)
+                            .clazz(spec.className()));
+            boolean present = object != null;
+            boolean visible = present
+                    && (!requireVisibleBounds || !object.getVisibleBounds().isEmpty());
+            log("Tour observation query=" + queryName
+                    + " elapsedMs=" + (SystemClock.uptimeMillis() - queryStarted)
+                    + " known=true"
+                    + " present=" + present
+                    + " visible=" + visible);
+            return new TimedNodeQuery(true, present, visible);
+        } catch (StaleObjectException stale) {
+            log("Tour observation query=" + queryName
+                    + " elapsedMs=" + (SystemClock.uptimeMillis() - queryStarted)
+                    + " known=false stale=true");
+            return new TimedNodeQuery(false, false, false);
+        }
+    }
+
+    private static final class TimedNodeQuery {
+        private final boolean known;
+        private final boolean present;
+        private final boolean visible;
+
+        private TimedNodeQuery(boolean known, boolean present, boolean visible) {
+            this.known = known;
+            this.present = present;
+            this.visible = visible;
+        }
     }
 
     private void waitForSettingsRoute() {

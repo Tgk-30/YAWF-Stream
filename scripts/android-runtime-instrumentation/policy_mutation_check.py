@@ -54,6 +54,46 @@ MUTANTS = {
         "return consecutiveAbsentSamples >= TOUR_SETTLED_ABSENT_SAMPLES;",
         "return consecutiveAbsentSamples >= 1;",
     ),
+    "tourDialogPackageIdentity": (
+        "return PRODUCT_PACKAGE.equals(observedPackage)\n                    && className.equals(observedClass)\n                    && label.equals(observedText);",
+        "return className.equals(observedClass)\n                    && label.equals(observedText);",
+    ),
+    "tourDialogClassIdentity": (
+        "&& className.equals(observedClass)\n                    && label.equals(observedText);",
+        "&& label.equals(observedText);",
+    ),
+    "tourDialogTextRepresentation": (
+        "&& label.equals(observedText);",
+        "&& (label.equals(observedText) || label.equals(observedDescription));",
+    ),
+    "tourDialogLabelExact": (
+        "&& label.equals(observedText);",
+        "&& observedText.contains(label);",
+    ),
+    "tourObservationDialogAbsent": (
+        "                || welcomeTourDialogPresent\n                || !discoverVisible",
+        "                || !discoverVisible",
+    ),
+    "tourObservationDiscoverVisible": (
+        "                || !discoverVisible\n                || !setupReminderVisible",
+        "                || !setupReminderVisible",
+    ),
+    "tourObservationReminderVisible": (
+        "                || !setupReminderVisible) {",
+        ") {",
+    ),
+    "tourObservationKnown": (
+        "if (!observationKnown\n                || welcomeTourDialogPresent",
+        "if (welcomeTourDialogPresent",
+    ),
+    "tourObservationInvalidReset": (
+        "            return 0;\n        }\n        return consecutiveAbsentSamples + 1;",
+        "            return consecutiveAbsentSamples;\n        }\n        return consecutiveAbsentSamples + 1;",
+    ),
+    "tourObservationIncrement": (
+        "return consecutiveAbsentSamples + 1;",
+        "return consecutiveAbsentSamples;",
+    ),
     "settingsNavigationClosedAndAnchored": (
         "if (!moreDialogVisible && settingsAnchorVisible) {",
         "if (settingsAnchorVisible) {",
@@ -117,7 +157,13 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="yawf-policy-mutant-") as temporary:
         temp = Path(temporary)
         baseline_classes = compile_variant(original, temp / "baseline")
-        for index, (test_name, (before, after)) in enumerate(MUTANTS.items(), start=1):
+        for index, (mutation_name, (before, after)) in enumerate(MUTANTS.items(), start=1):
+            test_name = (
+                "tourDismissalSettled"
+                if mutation_name.startswith("tourDialog")
+                or mutation_name.startswith("tourObservation")
+                else mutation_name
+            )
             if original.count(before) != 1:
                 raise RuntimeError(f"Expected exactly one mutation site for {test_name}")
             baseline = run_test(baseline_classes, test_name)
@@ -128,6 +174,7 @@ def main() -> int:
             results.append(
                 {
                     "test": test_name,
+                    "mutation": mutation_name,
                     "baselinePassed": baseline.returncode == 0,
                     "mutantKilled": killed,
                     "mutantExit": mutant.returncode,
