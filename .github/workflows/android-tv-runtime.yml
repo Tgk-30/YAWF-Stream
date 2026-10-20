@@ -219,6 +219,7 @@ jobs:
           sdkmanager "platform-tools" "emulator" "platforms;android-36" \
             "build-tools;36.0.0" "$SYSTEM_IMAGE_PACKAGE"
           sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          test -x "$sdk_root/emulator/emulator"
           image_root="$sdk_root/system-images/android-36/android-tv/x86_64"
           test -f "$image_root/package.xml"
           test -f "$image_root/source.properties"
@@ -227,7 +228,7 @@ jobs:
             > "$EVIDENCE/system-image-metadata-sha256.txt"
           {
             adb version
-            emulator -version
+            "$sdk_root/emulator/emulator" -version
             ffmpeg -version | head -1
             ffprobe -version | head -1
           } > "$EVIDENCE/tool-versions.txt"
