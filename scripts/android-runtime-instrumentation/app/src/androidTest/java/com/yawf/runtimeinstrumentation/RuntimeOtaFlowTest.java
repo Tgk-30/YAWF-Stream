@@ -10,6 +10,7 @@ import android.app.Instrumentation;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -164,10 +165,10 @@ public final class RuntimeOtaFlowTest {
 
         openSettingsAndAssertSimple("before-update");
         openHelpAndUpdates();
-        scrollUntil(By.text("Android APK updates"), "Android APK updates");
-        scrollUntil(By.text("Check for Android updates"), "Check for Android updates");
+        revealPublicBaselineAndroidUpdateControl();
         capture("android-update-card");
-        click(By.text("Check for Android updates"), "Check for Android updates", SHORT_WAIT_MS, true);
+        clickProductSemantic(
+                "Check for Android updates", "android.widget.Button", SHORT_WAIT_MS);
 
         waitFor(By.text("Check for Android updates?"), SHORT_WAIT_MS, "manual update consent");
         UiObject2 weekly = waitFor(
@@ -225,14 +226,20 @@ public final class RuntimeOtaFlowTest {
         capture("updated-product-open");
 
         openSettingsAndAssertSimple("after-update");
-        waitFor(By.text("YAWF Stream v" + OtaFlowPolicy.TARGET_VERSION), UI_WAIT_MS, "updated visible version");
+        scrollUntilVisibleProductSemantic(
+                "YAWF Stream v" + OtaFlowPolicy.TARGET_VERSION,
+                "android.widget.TextView",
+                false,
+                Direction.DOWN);
         assertFalse(
                 "FirstRun returned after OTA",
                 hasAnyWithoutIdleDelay(By.text("How do you want to use YAWF Stream?")));
         assertFalse("Setup reminder returned after OTA", hasSetupReminder());
         openHelpAndUpdates();
-        scrollUntil(By.text("Check for Android updates"), "post-update Android update control");
-        click(By.text("Check for Android updates"), "post-update manual check", SHORT_WAIT_MS, true);
+        scrollUntilVisibleProductSemantic(
+                "Check for Android updates", "android.widget.Button", true, Direction.DOWN);
+        clickProductSemantic(
+                "Check for Android updates", "android.widget.Button", SHORT_WAIT_MS);
 
         waitFor(By.text("YAWF Stream is up to date"), UI_WAIT_MS, "post-update no-newer title");
         String postMessage = "No newer signed Android phone release is available.";
@@ -377,12 +384,15 @@ public final class RuntimeOtaFlowTest {
         assertFalse("Simple navigation exposed Debrid", hasAnyWithoutIdleDelay(By.text("Debrid")));
         click(By.text("Settings"), "Settings", SHORT_WAIT_MS, false);
         waitForSettingsRoute();
-        scrollUntil(By.text("Simple"), "Simple experience option");
-        waitFor(By.desc("Experience tier"), UI_WAIT_MS, "Experience tier radio group");
-        waitFor(
-                By.text("Simple").pkg(OtaFlowPolicy.PRODUCT_PACKAGE).clazz("android.widget.RadioButton"),
-                SHORT_WAIT_MS,
-                "visible Simple experience option");
+        UiObject2 simple = scrollUntilVisibleProductSemantic(
+                "Simple", "android.widget.RadioButton", true, Direction.DOWN);
+        waitForAny(
+                UI_WAIT_MS,
+                productTextOrDescriptionSelectors(
+                        "Experience tier", "android.widget.RadioGroup", false));
+        assertTrue("Simple experience option was disabled", simple.isEnabled());
+        log("Observed the exact visible Simple option; API 36 WebView accessibility did not expose "
+                + "its selected state, so the screenshot retains the visual selection evidence");
         capture("settings-" + phase);
     }
 
@@ -408,37 +418,102 @@ public final class RuntimeOtaFlowTest {
     }
 
     private void openHelpAndUpdates() {
-        UiObject2 direct = device.wait(Until.findObject(By.text("Help & updates")), 2_000);
-        if (direct != null) {
-            click(By.text("Help & updates"), "Help & updates", SHORT_WAIT_MS, true);
+        BySelector[] directSelectors = productTextOrDescriptionSelectors(
+                "Help & updates", "android.widget.Button", true);
+        UiObject2 direct = findAnyNow(directSelectors);
+        if (direct != null && isVisibleAboveBottomNavigation(direct)) {
+            clickProductSemantic("Help & updates", "android.widget.Button", SHORT_WAIT_MS);
             return;
         }
-        BySelector[] categories = {By.text("Install & setup"), By.text("Appearance"), By.desc("Settings category")};
-        UiObject2 category = waitForAny(SHORT_WAIT_MS, categories);
+        UiObject2 category = scrollUntilVisibleProductSemantic(
+                "Install & setup", "android.view.View", true, Direction.UP);
         assertNoBindingTerms();
-        category = findAnyNow(categories);
-        assertNotNull("Settings category disappeared after policy guard", category);
+        category = findAnyNow(productTextOrDescriptionSelectors(
+                "Install & setup", "android.view.View", true));
+        assertNotNull("Install & setup category disappeared after policy guard", category);
         category.click();
         log("Opened semantic Settings category selector");
         device.waitForIdle(1_000);
         click(By.text("Help & updates"), "Help & updates", SHORT_WAIT_MS, true);
     }
 
-    private void scrollUntil(BySelector target, String label) {
-        for (int attempt = 0; attempt < 10; attempt++) {
-            if (device.findObject(target) != null) {
-                return;
+    private void revealPublicBaselineAndroidUpdateControl() {
+        scrollUntilVisibleProductSemantic(
+                "Android APK updates", "android.widget.TextView", false, Direction.DOWN);
+        BySelector[] updateButton = productTextOrDescriptionSelectors(
+                "Check for Android updates", "android.widget.Button", true);
+        UiObject2 direct = findAnyNow(updateButton);
+        if (direct == null || !isVisibleAboveBottomNavigation(direct)) {
+            scrollUntilVisibleProductSemantic(
+                    "Android APK updates", "android.widget.Button", true, Direction.DOWN);
+            clickProductSemantic("Android APK updates", "android.widget.Button", SHORT_WAIT_MS);
+            log("Opened the public 2.3.21 Android updater information through its visible trigger");
+        }
+        scrollUntilVisibleProductSemantic(
+                "Check for Android updates", "android.widget.Button", true, Direction.DOWN);
+    }
+
+    private UiObject2 scrollUntilVisibleProductSemantic(
+            String text, String className, boolean clickable, Direction direction) {
+        BySelector[] selectors = productTextOrDescriptionSelectors(text, className, clickable);
+        for (int attempt = 0; attempt < 12; attempt++) {
+            UiObject2 found = findAnyNow(selectors);
+            if (found != null && isVisibleAboveBottomNavigation(found)) {
+                return found;
             }
             UiObject2 scrollable = device.findObject(By.scrollable(true));
-            assertNotNull("No scrollable container while seeking " + label, scrollable);
+            assertNotNull("No scrollable container while seeking " + text, scrollable);
             assertNoBindingTerms();
             scrollable = device.findObject(By.scrollable(true));
-            assertNotNull("Scrollable container disappeared after policy guard", scrollable);
-            scrollable.scroll(Direction.DOWN, 0.75f);
-            log("Scrolled semantic Settings container while seeking " + label);
+            assertNotNull("Scrollable container disappeared while seeking " + text, scrollable);
+            scrollable.scroll(direction, 0.75f);
+            log("Scrolled semantic Settings container while seeking " + text);
             device.waitForIdle(750);
         }
-        fail("Could not scroll to " + label);
+        fail("Could not place exact " + text + " control above bottom navigation");
+        return null;
+    }
+
+    private boolean isVisibleAboveBottomNavigation(UiObject2 object) {
+        UiObject2 navigation = findAnyNow(productTextOrDescriptionSelectors(
+                "Primary", "android.view.View", false));
+        assertNotNull("Exact bottom navigation container was unavailable", navigation);
+        Rect objectBounds = object.getVisibleBounds();
+        Rect navigationBounds = navigation.getVisibleBounds();
+        return !objectBounds.isEmpty()
+                && !navigationBounds.isEmpty()
+                && objectBounds.bottom <= navigationBounds.top;
+    }
+
+    private UiObject2 clickProductSemantic(String text, String className, long timeoutMs) {
+        BySelector[] selectors = productTextOrDescriptionSelectors(text, className, true);
+        waitForAny(timeoutMs, selectors);
+        assertNoBindingTerms();
+        UiObject2 object = findAnyNow(selectors);
+        assertNotNull(text + " disappeared after policy guard", object);
+        assertTrue(text + " was not safely visible above bottom navigation",
+                isVisibleAboveBottomNavigation(object));
+        object.click();
+        log("Clicked exact text-or-description product control: " + text);
+        device.waitForIdle(750);
+        return object;
+    }
+
+    private BySelector[] productTextOrDescriptionSelectors(
+            String text, String className, boolean clickable) {
+        BySelector byText = By.text(text)
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz(className)
+                .enabled(true);
+        BySelector byDescription = By.desc(text)
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz(className)
+                .enabled(true);
+        if (clickable) {
+            byText = byText.clickable(true);
+            byDescription = byDescription.clickable(true);
+        }
+        return new BySelector[] {byText, byDescription};
     }
 
     private void enterUnknownSourcePermission() throws IOException {
