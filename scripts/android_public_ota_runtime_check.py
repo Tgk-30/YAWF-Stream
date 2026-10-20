@@ -58,6 +58,55 @@ class RuntimeGateError(RuntimeError):
     pass
 
 
+def require_successful_observation(
+    result: subprocess.CompletedProcess[str], label: str
+) -> None:
+    if result.returncode != 0 or result.stderr.strip():
+        raise RuntimeGateError(f"{label} QA observation was unavailable")
+
+
+def validate_unknown_source_observation(result: subprocess.CompletedProcess[str]) -> None:
+    require_successful_observation(result, "Unknown-source app-op")
+    output = result.stdout.strip()
+    if output == "No operations.\nDefault mode: default":
+        return
+    match = re.fullmatch(
+        r"REQUEST_INSTALL_PACKAGES:\s*(allow|default|ignore|deny|errored)(?:;[^\r\n]*)?",
+        output,
+        re.IGNORECASE,
+    )
+    if match is None:
+        raise RuntimeGateError("Unknown-source app-op QA observation was unrecognized")
+    if match.group(1).casefold() == "allow":
+        raise RuntimeGateError("YAWF unknown-source access remained allowed")
+
+
+def validate_no_residual_update_apks(result: subprocess.CompletedProcess[str]) -> None:
+    require_successful_observation(result, "Residual update-file")
+    if result.stdout.strip():
+        raise RuntimeGateError("External update APK remained after relaunch cleanup")
+
+
+def validate_logcat_observation(result: subprocess.CompletedProcess[str]) -> None:
+    require_successful_observation(result, "Logcat")
+    if re.search(
+        r"(?m)^(?:--------- beginning of \S+|\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\s+)",
+        result.stdout,
+    ) is None:
+        raise RuntimeGateError("Logcat QA observation was empty or unrecognized")
+
+
+def validate_dropbox_observation(
+    result: subprocess.CompletedProcess[str], tag: str
+) -> None:
+    require_successful_observation(result, f"Dropbox {tag}")
+    output = result.stdout
+    header = re.search(r"(?m)^Drop box contents: \d+ entries$", output)
+    search = re.search(rf"(?m)^Searching for: {re.escape(tag)}$", output)
+    if header is None or search is None or not output[search.end():].strip():
+        raise RuntimeGateError(f"Dropbox {tag} QA observation was empty or unrecognized")
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -463,6 +512,16 @@ class OtaRuntimeDriver:
             raise RuntimeGateError("Unsafe host evidence write")
         (self.evidence / name).write_text(redact(value), encoding="utf-8")
 
+    def record_adb_observation(
+        self, name: str, result: subprocess.CompletedProcess[str]
+    ) -> None:
+        self.write(name, result.stdout)
+        stem = name.removesuffix(".txt")
+        self.write(
+            f"{stem}-status.txt",
+            f"returnCode={result.returncode}\nstderr:\n{result.stderr}",
+        )
+
     def verify_host_inputs(self) -> None:
         validate_file(self.args.baseline_apk, BASELINE_SHA256, BASELINE_SIZE, "baseline APK")
         validate_file(self.args.target_apk, TARGET_SHA256, TARGET_SIZE, "target APK")
@@ -515,14 +574,34 @@ class OtaRuntimeDriver:
         return match.group(1).replace(":", "").casefold()
 
     def assert_unknown_source_denied(self, phase: str) -> None:
-        value = self.adb.shell(
-            "cmd", "appops", "get", PRODUCT_PACKAGE, "REQUEST_INSTALL_PACKAGES",
+        result = self.adb.run(
+            ["shell", "cmd", "appops", "get", PRODUCT_PACKAGE, "REQUEST_INSTALL_PACKAGES"],
             timeout=30,
             check=False,
         )
-        self.write(f"unknown-source-{phase}.txt", value)
-        if re.search(r"REQUEST_INSTALL_PACKAGES:\s*allow\b", value, re.IGNORECASE):
-            raise RuntimeGateError(f"YAWF unknown-source access remained allowed at {phase}")
+        self.record_adb_observation(f"unknown-source-{phase}.txt", result)
+        try:
+            validate_unknown_source_observation(result)
+        except RuntimeGateError as error:
+            if "remained allowed" in str(error):
+                raise RuntimeGateError(
+                    f"YAWF unknown-source access remained allowed at {phase}"
+                ) from error
+            raise
+
+    def assert_no_residual_update_apks(self) -> None:
+        result = self.adb.run(
+            [
+                "shell",
+                "find",
+                f"/sdcard/Android/data/{PRODUCT_PACKAGE}/files/Download/updates",
+                "-maxdepth", "1", "-type", "f", "-name", "*.apk", "-print",
+            ],
+            timeout=30,
+            check=False,
+        )
+        self.record_adb_observation("update-files.txt", result)
+        validate_no_residual_update_apks(result)
 
     def install_and_record_baseline(self) -> tuple[PackageIdentity, str]:
         self.package_absent()
@@ -624,15 +703,7 @@ class OtaRuntimeDriver:
         if final_signer != baseline_signer or final_signer != SIGNER_PIN:
             raise RuntimeGateError("Final installed signer changed")
         self.assert_unknown_source_denied("after-cleanup")
-        residual = self.adb.shell(
-            "find",
-            f"/sdcard/Android/data/{PRODUCT_PACKAGE}/files/Download/updates",
-            "-maxdepth", "1", "-type", "f", "-name", "*.apk", "-print",
-            timeout=30,
-            check=False,
-        ).strip()
-        if residual:
-            raise RuntimeGateError("External update APK remained after relaunch cleanup")
+        self.assert_no_residual_update_apks()
         self.write("final-identity.json", json.dumps(dataclasses.asdict(final), indent=2) + "\n")
         self.write(
             "installed-byte-identity.txt",
@@ -643,12 +714,28 @@ class OtaRuntimeDriver:
         self.note("Final OS-installed base APK exactly matches public 2.3.25 and retained identity")
 
     def collect_diagnostics(self) -> None:
-        logcat = self.adb.run(["logcat", "-d", "-v", "threadtime"], timeout=60, check=False).stdout
-        anr = self.adb.shell("dumpsys", "dropbox", "--print", "data_app_anr", timeout=60, check=False)
-        crash = self.adb.shell("dumpsys", "dropbox", "--print", "data_app_crash", timeout=60, check=False)
-        self.write("logcat.txt", logcat)
-        self.write("dropbox-anr.txt", anr)
-        self.write("dropbox-crash.txt", crash)
+        logcat_result = self.adb.run(
+            ["logcat", "-d", "-v", "threadtime"], timeout=60, check=False
+        )
+        self.record_adb_observation("logcat.txt", logcat_result)
+        validate_logcat_observation(logcat_result)
+        anr_result = self.adb.run(
+            ["shell", "dumpsys", "dropbox", "--print", "data_app_anr"],
+            timeout=60,
+            check=False,
+        )
+        self.record_adb_observation("dropbox-anr.txt", anr_result)
+        validate_dropbox_observation(anr_result, "data_app_anr")
+        crash_result = self.adb.run(
+            ["shell", "dumpsys", "dropbox", "--print", "data_app_crash"],
+            timeout=60,
+            check=False,
+        )
+        self.record_adb_observation("dropbox-crash.txt", crash_result)
+        validate_dropbox_observation(crash_result, "data_app_crash")
+        logcat = logcat_result.stdout
+        anr = anr_result.stdout
+        crash = crash_result.stdout
         escaped = re.escape(PRODUCT_PACKAGE)
         patterns = [
             re.compile(rf"\bANR in {escaped}(?=\s|$)"),
@@ -960,6 +1047,115 @@ Queries:
         receipt["installerSuccessObserved"] = False
         with self.assertRaises(RuntimeGateError):
             validate_receipt(receipt)
+
+        def observed(
+            stdout: str, *, returncode: int = 0, stderr: str = ""
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                ["adb", "observation"], returncode, stdout, stderr
+            )
+
+        validate_unknown_source_observation(
+            observed("No operations.\nDefault mode: default\n")
+        )
+        for mode in ("default", "ignore", "deny", "errored"):
+            validate_unknown_source_observation(
+                observed(f"REQUEST_INSTALL_PACKAGES: {mode}\n")
+            )
+        rejected_appops = [
+            observed(""),
+            observed("No operations.\n"),
+            observed("REQUEST_INSTALL_PACKAGES: allow\n"),
+            observed("REQUEST_INSTALL_PACKAGES: foreground\n"),
+            observed("", returncode=1),
+            observed("", stderr="appops unavailable"),
+        ]
+        for result in rejected_appops:
+            with self.assertRaises(RuntimeGateError):
+                validate_unknown_source_observation(result)
+
+        validate_no_residual_update_apks(observed(""))
+        for result in (
+            observed("/sdcard/Android/data/com.tgk30.debridstreamer/files/Download/updates/update.apk\n"),
+            observed("", returncode=1),
+            observed("", stderr="find unavailable"),
+        ):
+            with self.assertRaises(RuntimeGateError):
+                validate_no_residual_update_apks(result)
+
+        validate_logcat_observation(
+            observed("--------- beginning of main\n10-20 05:11:18.054  1290  1319 I Tag: line\n")
+        )
+        for result in (
+            observed(""),
+            observed("not logcat output\n"),
+            observed("", returncode=1),
+            observed("", stderr="logcat unavailable"),
+        ):
+            with self.assertRaises(RuntimeGateError):
+                validate_logcat_observation(result)
+
+        for tag in ("data_app_anr", "data_app_crash"):
+            validate_dropbox_observation(
+                observed(
+                    "Drop box contents: 53 entries\n"
+                    "Max entries: 1000\n"
+                    f"Searching for: {tag}\n\n"
+                    "(No entries found.)\n"
+                ),
+                tag,
+            )
+        for result in (
+            observed(""),
+            observed("(No entries found.)\n"),
+            observed("", returncode=1),
+            observed("", stderr="dropbox unavailable"),
+        ):
+            with self.assertRaises(RuntimeGateError):
+                validate_dropbox_observation(result, "data_app_anr")
+
+        class StubAdb:
+            def __init__(self, result: subprocess.CompletedProcess[str]):
+                self.result = result
+                self.commands: list[tuple[str, ...]] = []
+
+            def run(self, args: Sequence[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+                self.commands.append(tuple(args))
+                return self.result
+
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = object.__new__(OtaRuntimeDriver)
+            driver.evidence = Path(temporary)
+            driver.events = []
+            driver.adb = StubAdb(observed("", returncode=1, stderr="failed"))
+            with self.assertRaises(RuntimeGateError):
+                driver.assert_unknown_source_denied("before")
+            self.assertTrue((driver.evidence / "unknown-source-before.txt").is_file())
+            self.assertTrue((driver.evidence / "unknown-source-before-status.txt").is_file())
+            self.assertEqual(
+                driver.adb.commands,
+                [("shell", "cmd", "appops", "get", PRODUCT_PACKAGE, "REQUEST_INSTALL_PACKAGES")],
+            )
+
+            driver.adb = StubAdb(observed("", returncode=1, stderr="failed"))
+            with self.assertRaises(RuntimeGateError):
+                driver.assert_no_residual_update_apks()
+            self.assertTrue((driver.evidence / "update-files.txt").is_file())
+            self.assertTrue((driver.evidence / "update-files-status.txt").is_file())
+            self.assertEqual(
+                driver.adb.commands,
+                [(
+                    "shell", "find",
+                    f"/sdcard/Android/data/{PRODUCT_PACKAGE}/files/Download/updates",
+                    "-maxdepth", "1", "-type", "f", "-name", "*.apk", "-print",
+                )],
+            )
+
+            driver.adb = StubAdb(observed(""))
+            with self.assertRaises(RuntimeGateError):
+                driver.collect_diagnostics()
+            self.assertTrue((driver.evidence / "logcat.txt").is_file())
+            self.assertTrue((driver.evidence / "logcat-status.txt").is_file())
 
     def test_admission_locks_all_product_install_routes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

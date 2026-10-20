@@ -22,7 +22,9 @@ public final class OtaFlowPolicy {
 
     public static final WebButtonSpec NEXT = new WebButtonSpec("Next");
     public static final WebButtonSpec GET_STARTED = new WebButtonSpec("Get started");
-    public static final WebButtonSpec QUICK_SETUP = new WebButtonSpec("Quick setup");
+    public static final WebButtonSpec QUICK_SETUP = new WebButtonSpec(
+            "Quick setup NOT RECOMMENDED Start with public sources without adding your own keys now. "
+                    + "Catalog and playback limits are explained before continuing.");
     public static final WebButtonSpec CONTINUE_QUICK_SETUP =
             new WebButtonSpec("Continue with Quick setup");
     public static final WebButtonSpec DISMISS_SETUP_REMINDER =

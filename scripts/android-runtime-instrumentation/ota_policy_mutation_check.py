@@ -24,6 +24,11 @@ MUTANTS = {
         "return PRODUCT_PACKAGE.equals(observedPackage)\n                    && WEB_BUTTON_CLASS.equals(observedClass)",
         "return WEB_BUTTON_CLASS.equals(observedClass)",
     ),
+    "quickSetupCardIdentity": (
+        '"Quick setup NOT RECOMMENDED Start with public sources without adding your own keys now. "\n'
+        '                    + "Catalog and playback limits are explained before continuing."',
+        '"Quick setup"',
+    ),
     "nativeButtonIdentity": (
         "&& resourceName.equals(observedResource)\n                    && textPattern.matcher",
         "&& textPattern.matcher",

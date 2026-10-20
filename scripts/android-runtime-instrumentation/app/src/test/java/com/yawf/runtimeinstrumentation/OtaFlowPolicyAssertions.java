@@ -10,6 +10,7 @@ public final class OtaFlowPolicyAssertions {
     static {
         TESTS.put("pins", OtaFlowPolicyAssertions::pins);
         TESTS.put("webButtonIdentity", OtaFlowPolicyAssertions::webButtonIdentity);
+        TESTS.put("quickSetupCardIdentity", OtaFlowPolicyAssertions::quickSetupCardIdentity);
         TESTS.put("nativeButtonIdentity", OtaFlowPolicyAssertions::nativeButtonIdentity);
         TESTS.put("bindingTerms", OtaFlowPolicyAssertions::bindingTerms);
         TESTS.put("tourCounts", OtaFlowPolicyAssertions::tourCounts);
@@ -58,6 +59,30 @@ public final class OtaFlowPolicyAssertions {
         check(!OtaFlowPolicy.NEXT.matches(
                         OtaFlowPolicy.PRODUCT_PACKAGE, "android.widget.Button", "Next now", ""),
                 "label affix must fail");
+    }
+
+    private static void quickSetupCardIdentity() {
+        String actualCard =
+                "Quick setup NOT RECOMMENDED Start with public sources without adding your own keys now. "
+                        + "Catalog and playback limits are explained before continuing.";
+        check(OtaFlowPolicy.QUICK_SETUP.matches(
+                        OtaFlowPolicy.PRODUCT_PACKAGE, "android.widget.Button", actualCard, ""),
+                "actual API 36 Quick setup card text must match exactly");
+        check(!OtaFlowPolicy.QUICK_SETUP.matches(
+                        OtaFlowPolicy.PRODUCT_PACKAGE, "android.widget.Button", "Quick setup", ""),
+                "short heading alone must fail");
+        check(!OtaFlowPolicy.QUICK_SETUP.matches(
+                        OtaFlowPolicy.PRODUCT_PACKAGE,
+                        "android.widget.Button",
+                        actualCard.replace("NOT RECOMMENDED", "RECOMMENDED"),
+                        ""),
+                "nearby wrong setup card must fail");
+        check(!OtaFlowPolicy.QUICK_SETUP.matches(
+                        "other.package", "android.widget.Button", actualCard, ""),
+                "wrong Quick setup package must fail");
+        check(!OtaFlowPolicy.QUICK_SETUP.matches(
+                        OtaFlowPolicy.PRODUCT_PACKAGE, "android.view.View", actualCard, ""),
+                "wrong Quick setup class must fail");
     }
 
     private static void nativeButtonIdentity() {

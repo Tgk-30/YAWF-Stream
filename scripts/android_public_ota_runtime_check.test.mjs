@@ -346,6 +346,90 @@ test("each host policy self-test kills a targeted valid-Python semantic mutant",
       );
       assert.notEqual(mutant.status, 0, `identity semantic mutant survived: ${label}`);
     }
+
+    const oracleMutants = [
+      [
+        '    if result.returncode != 0 or result.stderr.strip():',
+        '    if result.returncode == 0 and result.stderr.strip():',
+        "nonzero observation result",
+      ],
+      [
+        '    if result.returncode != 0 or result.stderr.strip():',
+        '    if result.returncode != 0:',
+        "stderr-only observation failure",
+      ],
+      [
+        '    if match is None:\n' +
+          '        raise RuntimeGateError("Unknown-source app-op QA observation was unrecognized")',
+        '    if match is None:\n        return',
+        "unrecognized app-op output",
+      ],
+      [
+        '    if output == "No operations.\\nDefault mode: default":',
+        '    if False and output == "No operations.\\nDefault mode: default":',
+        "API 36 default app-op envelope",
+      ],
+      [
+        '    if match.group(1).casefold() == "allow":',
+        '    if False and match.group(1).casefold() == "allow":',
+        "allowed app-op mode",
+      ],
+      [
+        '    if result.stdout.strip():\n' +
+          '        raise RuntimeGateError("External update APK remained after relaunch cleanup")',
+        '    if False and result.stdout.strip():\n' +
+          '        raise RuntimeGateError("External update APK remained after relaunch cleanup")',
+        "residual APK",
+      ],
+      [
+        '    if re.search(\n' +
+          '        r"(?m)^(?:--------- beginning of \\S+|\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s+)",\n' +
+          '        result.stdout,\n' +
+          '    ) is None:',
+        '    if False and re.search(\n' +
+          '        r"(?m)^(?:--------- beginning of \\S+|\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s+)",\n' +
+          '        result.stdout,\n' +
+          '    ) is None:',
+        "empty logcat",
+      ],
+      [
+        '    if header is None or search is None or not output[search.end():].strip():',
+        '    if False and (header is None or search is None or not output[search.end():].strip()):',
+        "unstructured Dropbox output",
+      ],
+      [
+        '    if header is None or search is None or not output[search.end():].strip():',
+        '    if (header is None or search is None or not output[search.end():].strip()\n' +
+          '            or "(No entries found.)" in output):',
+        "API 36 empty Dropbox envelope",
+      ],
+      [
+        '        self.record_adb_observation(f"unknown-source-{phase}.txt", result)',
+        '        pass  # observation record omitted',
+        "app-op diagnostic retention",
+      ],
+      [
+        '        self.record_adb_observation("update-files.txt", result)',
+        '        pass  # observation record omitted',
+        "residual diagnostic retention",
+      ],
+      [
+        '        self.record_adb_observation("logcat.txt", logcat_result)',
+        '        pass  # observation record omitted',
+        "logcat diagnostic retention",
+      ],
+    ];
+    for (const [before, after, label] of oracleMutants) {
+      assert.equal(original.split(before).length - 1, 1, `oracle mutation site must be unique: ${label}`);
+      const mutatedPath = join(temporary, `oracle-${label.replaceAll(" ", "-")}.py`);
+      await writeFile(mutatedPath, original.replace(before, after));
+      const mutant = spawnSync(
+        "python3",
+        [mutatedPath, "--self-test", "test_receipt_requires_every_transaction_fact"],
+        { encoding: "utf8" },
+      );
+      assert.notEqual(mutant.status, 0, `oracle semantic mutant survived: ${label}`);
+    }
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
