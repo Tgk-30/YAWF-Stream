@@ -163,10 +163,14 @@ public final class FlowPolicy {
 
     public static int nextTourDismissalAbsentSamples(
             int consecutiveAbsentSamples,
+            boolean observationKnown,
             boolean welcomeTourDialogPresent,
             boolean discoverVisible,
             boolean setupReminderVisible) {
-        if (welcomeTourDialogPresent || !discoverVisible || !setupReminderVisible) {
+        if (!observationKnown
+                || welcomeTourDialogPresent
+                || !discoverVisible
+                || !setupReminderVisible) {
             return 0;
         }
         return consecutiveAbsentSamples + 1;

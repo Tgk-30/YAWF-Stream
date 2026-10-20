@@ -112,17 +112,19 @@ final class FlowPolicyAssertions {
                         "Streaming setup reminder", ""),
                 "The exact visible setup reminder anchor must match");
 
-        int samples = FlowPolicy.nextTourDismissalAbsentSamples(0, false, true, true);
+        int samples = FlowPolicy.nextTourDismissalAbsentSamples(0, true, false, true, true);
         check(samples == 1, "One complete post-dismissal observation must count once");
-        samples = FlowPolicy.nextTourDismissalAbsentSamples(samples, false, true, true);
+        samples = FlowPolicy.nextTourDismissalAbsentSamples(samples, true, false, true, true);
         check(samples == 2, "Two consecutive complete observations must remain unsettled");
-        samples = FlowPolicy.nextTourDismissalAbsentSamples(samples, false, true, true);
+        samples = FlowPolicy.nextTourDismissalAbsentSamples(samples, true, false, true, true);
         check(samples == 3, "Three consecutive complete observations must settle");
-        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, true, true, true) == 0,
+        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, false, false, true, true) == 0,
+                "A stale or otherwise unknown observation must reset settlement");
+        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, true, true, true, true) == 0,
                 "A visible Welcome tour dialog must reset settlement");
-        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, false, false, true) == 0,
+        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, true, false, false, true) == 0,
                 "A missing visible Discover anchor must reset settlement");
-        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, false, true, false) == 0,
+        check(FlowPolicy.nextTourDismissalAbsentSamples(samples, true, false, true, false) == 0,
                 "A missing visible setup reminder must reset settlement");
 
         check(!FlowPolicy.isTourDismissalSettled(0),

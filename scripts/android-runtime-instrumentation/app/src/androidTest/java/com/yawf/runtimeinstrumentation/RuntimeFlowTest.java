@@ -17,6 +17,7 @@ import androidx.test.uiautomator.By;
 import androidx.test.uiautomator.BySelector;
 import androidx.test.uiautomator.Configurator;
 import androidx.test.uiautomator.Direction;
+import androidx.test.uiautomator.StaleObjectException;
 import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
@@ -233,14 +234,16 @@ public final class RuntimeFlowTest {
         while (SystemClock.uptimeMillis() < dismissalDeadline) {
             long sampleStarted = SystemClock.uptimeMillis();
             TimedNodeQuery dialog = queryExactTourNode(
-                    "welcome-dialog", FlowPolicy.WELCOME_TOUR_DIALOG);
+                    "welcome-dialog", FlowPolicy.WELCOME_TOUR_DIALOG, false);
             TimedNodeQuery discover = queryExactTourNode(
-                    "discover", FlowPolicy.DISCOVER_BUTTON);
+                    "discover", FlowPolicy.DISCOVER_BUTTON, true);
             TimedNodeQuery reminder = queryExactTourNode(
-                    "setup-reminder", FlowPolicy.STREAMING_SETUP_REMINDER);
+                    "setup-reminder", FlowPolicy.STREAMING_SETUP_REMINDER, true);
             completedSamples++;
+            boolean observationKnown = dialog.known && discover.known && reminder.known;
             consecutiveAbsentSamples = FlowPolicy.nextTourDismissalAbsentSamples(
                     consecutiveAbsentSamples,
+                    observationKnown,
                     dialog.present,
                     discover.visible,
                     reminder.visible);
@@ -249,6 +252,7 @@ public final class RuntimeFlowTest {
                     + " dialogPresent=" + dialog.present
                     + " discoverVisible=" + discover.visible
                     + " reminderVisible=" + reminder.visible
+                    + " observationKnown=" + observationKnown
                     + " consecutiveAbsent=" + consecutiveAbsentSamples);
             if (FlowPolicy.isTourDismissalSettled(consecutiveAbsentSamples)) {
                 log("Observed the exact Welcome tour dialog absent with Discover and setup reminder"
@@ -267,27 +271,39 @@ public final class RuntimeFlowTest {
     }
 
     private TimedNodeQuery queryExactTourNode(
-            String queryName, FlowPolicy.ExactTextWebNodeSpec spec) {
+            String queryName,
+            FlowPolicy.ExactTextWebNodeSpec spec,
+            boolean requireVisibleBounds) {
         long queryStarted = SystemClock.uptimeMillis();
-        UiObject2 object = device.findObject(
-                By.text(spec.label())
-                        .pkg(FlowPolicy.PRODUCT_PACKAGE)
-                        .clazz(spec.className()));
-        long elapsedMs = SystemClock.uptimeMillis() - queryStarted;
-        boolean present = object != null;
-        boolean visible = present && !object.getVisibleBounds().isEmpty();
-        log("Tour observation query=" + queryName
-                + " elapsedMs=" + elapsedMs
-                + " present=" + present
-                + " visible=" + visible);
-        return new TimedNodeQuery(present, visible);
+        try {
+            UiObject2 object = device.findObject(
+                    By.text(spec.label())
+                            .pkg(FlowPolicy.PRODUCT_PACKAGE)
+                            .clazz(spec.className()));
+            boolean present = object != null;
+            boolean visible = present
+                    && (!requireVisibleBounds || !object.getVisibleBounds().isEmpty());
+            log("Tour observation query=" + queryName
+                    + " elapsedMs=" + (SystemClock.uptimeMillis() - queryStarted)
+                    + " known=true"
+                    + " present=" + present
+                    + " visible=" + visible);
+            return new TimedNodeQuery(true, present, visible);
+        } catch (StaleObjectException stale) {
+            log("Tour observation query=" + queryName
+                    + " elapsedMs=" + (SystemClock.uptimeMillis() - queryStarted)
+                    + " known=false stale=true");
+            return new TimedNodeQuery(false, false, false);
+        }
     }
 
     private static final class TimedNodeQuery {
+        private final boolean known;
         private final boolean present;
         private final boolean visible;
 
-        private TimedNodeQuery(boolean present, boolean visible) {
+        private TimedNodeQuery(boolean known, boolean present, boolean visible) {
+            this.known = known;
             this.present = present;
             this.visible = visible;
         }

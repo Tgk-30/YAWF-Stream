@@ -71,16 +71,20 @@ MUTANTS = {
         "&& observedText.contains(label);",
     ),
     "tourObservationDialogAbsent": (
-        "if (welcomeTourDialogPresent || !discoverVisible || !setupReminderVisible) {",
-        "if (!discoverVisible || !setupReminderVisible) {",
+        "                || welcomeTourDialogPresent\n                || !discoverVisible",
+        "                || !discoverVisible",
     ),
     "tourObservationDiscoverVisible": (
-        "if (welcomeTourDialogPresent || !discoverVisible || !setupReminderVisible) {",
-        "if (welcomeTourDialogPresent || !setupReminderVisible) {",
+        "                || !discoverVisible\n                || !setupReminderVisible",
+        "                || !setupReminderVisible",
     ),
     "tourObservationReminderVisible": (
-        "if (welcomeTourDialogPresent || !discoverVisible || !setupReminderVisible) {",
-        "if (welcomeTourDialogPresent || !discoverVisible) {",
+        "                || !setupReminderVisible) {",
+        ") {",
+    ),
+    "tourObservationKnown": (
+        "if (!observationKnown\n                || welcomeTourDialogPresent",
+        "if (welcomeTourDialogPresent",
     ),
     "tourObservationInvalidReset": (
         "            return 0;\n        }\n        return consecutiveAbsentSamples + 1;",
