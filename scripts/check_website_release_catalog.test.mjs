@@ -12,11 +12,11 @@ for (const { name, from, to } of [
   {
     name: "desktop version",
     from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.20-web' };",
-    to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.21', tag: 'v2.3.20-web' };",
+    to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.25', tag: 'v2.3.20-web' };",
   },
   {
     name: "Android phone tag",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.21', tag: 'android-v2.3.21' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.25', tag: 'android-v2.3.25' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.13' };",
   },
   {
@@ -31,8 +31,8 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.24', tag: 'v2.3.24' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.22', tag: 'v2.3.24' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.25', tag: 'v2.3.25' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.22', tag: 'v2.3.25' };",
   },
   {
     name: "server checksum channel",
