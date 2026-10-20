@@ -7,6 +7,12 @@ public final class FlowPolicy {
     public static final String EXPECTED_CANDIDATE_VERSION = "2.3.25";
     public static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
     public static final String WEB_BUTTON_CLASS = "android.widget.Button";
+    public static final ExactTextWebNodeSpec WELCOME_TOUR_DIALOG =
+            new ExactTextWebNodeSpec("Welcome tour", "android.app.Dialog");
+    public static final ExactTextWebNodeSpec DISCOVER_BUTTON =
+            new ExactTextWebNodeSpec("Discover", WEB_BUTTON_CLASS);
+    public static final ExactTextWebNodeSpec STREAMING_SETUP_REMINDER =
+            new ExactTextWebNodeSpec("Streaming setup reminder", "android.view.View");
     public static final LabeledWebButtonSpec MORE_NAVIGATION_BUTTON =
             new LabeledWebButtonSpec("More navigation");
     public static final LabeledWebButtonSpec SKIP_THE_TOUR_BUTTON =
@@ -72,6 +78,35 @@ public final class FlowPolicy {
         }
     }
 
+    /** Exact text identity observed in both the API 30 and API 36 WebView hierarchies. */
+    public static final class ExactTextWebNodeSpec {
+        private final String label;
+        private final String className;
+
+        private ExactTextWebNodeSpec(String label, String className) {
+            this.label = label;
+            this.className = className;
+        }
+
+        public String label() {
+            return label;
+        }
+
+        public String className() {
+            return className;
+        }
+
+        public boolean matches(
+                String observedPackage,
+                String observedClass,
+                String observedText,
+                String observedDescription) {
+            return PRODUCT_PACKAGE.equals(observedPackage)
+                    && className.equals(observedClass)
+                    && label.equals(observedText);
+        }
+    }
+
     public enum OnboardingEntry {
         UPDATE_CONSENT,
         FIRST_RUN,
@@ -124,6 +159,21 @@ public final class FlowPolicy {
 
     public static boolean isTourDismissalSettled(int consecutiveAbsentSamples) {
         return consecutiveAbsentSamples >= TOUR_SETTLED_ABSENT_SAMPLES;
+    }
+
+    public static int nextTourDismissalAbsentSamples(
+            int consecutiveAbsentSamples,
+            boolean observationKnown,
+            boolean welcomeTourDialogPresent,
+            boolean discoverVisible,
+            boolean setupReminderVisible) {
+        if (!observationKnown
+                || welcomeTourDialogPresent
+                || !discoverVisible
+                || !setupReminderVisible) {
+            return 0;
+        }
+        return consecutiveAbsentSamples + 1;
     }
 
     public static boolean isExactUpToDateResult(String title, String message) {
