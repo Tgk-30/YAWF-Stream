@@ -27,13 +27,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CANDIDATE_RUN_ID: "39306282501"
-      CANDIDATE_SOURCE_SHA: d9ff4b4b073b2ed4c445a44b431a01442be3709f
-      CANDIDATE_APK_SHA256: 3165df8cc7bc774cdab81e0049987246255eebb9d1bec47ba0b346a707e3d90c
-      CANDIDATE_VERSION: 2.3.23
-      CANDIDATE_VERSION_CODE: "2003023"
+      CANDIDATE_RUN_ID: "39351580338"
+      CANDIDATE_SOURCE_SHA: 5f26f144696ee47e3109ae35b395a8145b097d50
+      CANDIDATE_APK_SHA256: bea6e80797329859c9e902f75795ba8af69086ea3b5327db584327201e65f39d
+      CANDIDATE_VERSION: 2.3.24
+      CANDIDATE_VERSION_CODE: "2003024"
       PUBLISHED_ANDROID_VERSION: 2.3.21
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.23.apk
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.24.apk
       EVIDENCE: android-runtime-evidence
       AVD_NAME: yawf-phone-api30-runtime
       EMULATOR_SERIAL: emulator-5554
@@ -75,7 +75,7 @@ jobs:
       - name: Download exact signed candidate artifact
         uses: actions/download-artifact@v4
         with:
-          name: android-phone-release-candidate
+          name: android-phone-verification-candidate
           path: candidate
           github-token: ${{ github.token }}
           run-id: ${{ env.CANDIDATE_RUN_ID }}
