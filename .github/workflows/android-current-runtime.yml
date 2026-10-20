@@ -1,0 +1,450 @@
+name: Android current API runtime check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-current-runtime-check-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  api36-current-runtime:
+    if: github.ref_type == 'branch'
+    name: Signed phone APK on one fresh API 36 KVM emulator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      # Replace this fixed block together when a later signed candidate is reviewed.
+      CANDIDATE_RUN_ID: "39365387810"
+      CANDIDATE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd
+      CANDIDATE_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b
+      CANDIDATE_VERSION: 2.3.25
+      CANDIDATE_VERSION_CODE: "2003025"
+      PUBLISHED_ANDROID_VERSION: 2.3.21
+      CANDIDATE_ARTIFACT: android-phone-verification-candidate
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.25.apk
+      SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
+      AVD_NAME: yawf-phone-api36-current-runtime
+      EMULATOR_SERIAL: emulator-5554
+      EMULATOR_GPU: swiftshader_indirect
+      EVIDENCE: android-current-runtime-evidence
+
+    steps:
+      - name: Checkout runtime driver
+        uses: actions/checkout@v4
+
+      - name: Checkout exact candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SOURCE_SHA }}
+          path: candidate-source
+
+      - name: Confirm exact source and evidence scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          actual="$(git -C candidate-source rev-parse HEAD)"
+          test "$actual" = "$CANDIDATE_SOURCE_SHA"
+          {
+            echo "sourceRevision=$actual"
+            echo "candidateRunId=$CANDIDATE_RUN_ID"
+            echo "acceptanceRuns=1-fresh-avd"
+            echo "emulatorImage=$SYSTEM_IMAGE_PACKAGE"
+            echo "gpuBackend=$EMULATOR_GPU"
+            echo "supplementaryCurrentApiCoverage=true"
+            echo "arm16KiBProof=false"
+            echo "otaTransactionProof=false"
+            echo "latestWebViewSecurityProof=false"
+          } > "$EVIDENCE/binding.txt"
+
+      - name: Download exact signed candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT }}
+          path: candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ env.CANDIDATE_RUN_ID }}
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK command line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Set up pinned Gradle for the isolated instrumentation APK
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
+      - name: Verify official API 36 image metadata and install exact tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse0
+          timeout 180s sdkmanager --list --channel=0 > "$EVIDENCE/sdkmanager-official-metadata.txt"
+          SDK_METADATA="$EVIDENCE/sdkmanager-official-metadata.txt" \
+          SDK_ADMISSION_RECEIPT="$EVIDENCE/system-image-metadata-admission.txt" \
+          SYSTEM_IMAGE_PACKAGE="$SYSTEM_IMAGE_PACKAGE" python3 - <<'PY'
+          # BEGIN OFFICIAL_SYSTEM_IMAGE_METADATA_POLICY
+          import os
+          from pathlib import Path
+
+          metadata = Path(os.environ["SDK_METADATA"]).read_text()
+          package = os.environ["SYSTEM_IMAGE_PACKAGE"]
+          sections = set()
+          section = None
+          for line in metadata.splitlines():
+              heading = line.strip().casefold()
+              if heading == "installed packages:":
+                  section = "installed"
+                  continue
+              if heading == "available packages:":
+                  section = "available"
+                  continue
+              if heading == "available updates:":
+                  section = None
+                  continue
+              if section is None or "|" not in line:
+                  continue
+              path = line.split("|", 1)[0].strip()
+              if path == package:
+                  sections.add(section)
+          assert sections, f"official SDK metadata did not advertise exact path {package}"
+          receipt = Path(os.environ["SDK_ADMISSION_RECEIPT"])
+          receipt.write_text(
+              f"package={package}\n"
+              f"metadataSections={','.join(sorted(sections))}\n"
+              "exactPathRow=true\n"
+          )
+          # END OFFICIAL_SYSTEM_IMAGE_METADATA_POLICY
+          PY
+          sdkmanager \
+            "platform-tools" \
+            "emulator" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "$SYSTEM_IMAGE_PACKAGE"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          build_tools="$sdk_root/build-tools/36.0.0"
+          test -x "$build_tools/apksigner"
+          test -x "$build_tools/aapt2"
+          test -x "$sdk_root/emulator/emulator"
+          command -v apkanalyzer
+          timeout 120s sdkmanager --list_installed --channel=0 \
+            > "$EVIDENCE/sdkmanager-installed.txt"
+          grep -F "$SYSTEM_IMAGE_PACKAGE" "$EVIDENCE/sdkmanager-installed.txt"
+          image_root="$sdk_root/system-images/android-36/google_apis/x86_64"
+          test -f "$image_root/package.xml"
+          test -f "$image_root/source.properties"
+          sha256sum "$image_root/package.xml" "$image_root/source.properties" \
+            > "$EVIDENCE/system-image-metadata-sha256.txt"
+          {
+            echo "$build_tools"
+            echo "$sdk_root/emulator"
+            echo "$sdk_root/platform-tools"
+          } >> "$GITHUB_PATH"
+
+      - name: Verify exact APK and production signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$CANDIDATE_APK"
+          printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$CANDIDATE_APK" | sha256sum -c -
+          test "$(apkanalyzer manifest application-id "$CANDIDATE_APK")" = "com.tgk30.debridstreamer"
+          test "$(apkanalyzer manifest version-name "$CANDIDATE_APK")" = "$CANDIDATE_VERSION"
+          test "$(apkanalyzer manifest version-code "$CANDIDATE_APK")" = "$CANDIDATE_VERSION_CODE"
+          python3 candidate-source/scripts/verify_android_apk.py \
+            --apk "$CANDIDATE_APK" \
+            --version "$CANDIDATE_VERSION" \
+            --certificate-pin candidate-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" \
+            | tee "$EVIDENCE/offline-verification.txt"
+          apksigner verify --print-certs "$CANDIDATE_APK" \
+            | sed -n '/certificate SHA-256 digest:/p' \
+            > "$EVIDENCE/apk-signer.txt"
+          test -s "$EVIDENCE/apk-signer.txt"
+          local_metadata_dir="$(pwd)/$EVIDENCE/local-generated-verification-metadata"
+          mkdir -p "$local_metadata_dir"
+          node candidate-source/scripts/build_android_update_manifest.mjs \
+            --apk "$CANDIDATE_APK" \
+            --version "$CANDIDATE_VERSION" \
+            --source "$CANDIDATE_SOURCE_SHA" \
+            --output "$local_metadata_dir/android-update.json"
+          printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$(basename "$CANDIDATE_APK")" \
+            > "$local_metadata_dir/SHA256SUMS"
+          (
+            cd "$(dirname "$CANDIDATE_APK")"
+            sha256sum -c "$local_metadata_dir/SHA256SUMS"
+          )
+          {
+            echo "classification=locally-generated-runtime-verification-metadata"
+            echo "releaseAsset=false"
+            echo "otaPublicationEvidence=false"
+            echo "sourceRevision=$CANDIDATE_SOURCE_SHA"
+            echo "candidateRunId=$CANDIDATE_RUN_ID"
+          } > "$local_metadata_dir/PROVENANCE.txt"
+
+      - name: Test driver policy and build isolated instrumentation APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/android_phone_runtime_check.py --self-test
+          python3 scripts/android-runtime-instrumentation/policy_mutation_check.py \
+            | tee "$EVIDENCE/instrumentation-policy-mutations.json"
+          gradle \
+            --project-dir scripts/android-runtime-instrumentation \
+            --no-daemon \
+            --max-workers=2 \
+            :app:testDebugUnitTest \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest
+          app_apk="scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk"
+          test_apk="scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+          test -f "$app_apk"
+          test -f "$test_apk"
+          sha256sum "$app_apk" "$test_apk" > "$EVIDENCE/instrumentation-apk-sha256.txt"
+          test "$(apkanalyzer manifest application-id "$app_apk")" = "com.yawf.runtimeinstrumentation"
+          test "$(apkanalyzer manifest application-id "$test_apk")" = "com.yawf.runtimeinstrumentation.test"
+          apkanalyzer manifest print "$app_apk" > "$EVIDENCE/instrumentation-app-manifest.xml"
+          apkanalyzer manifest print "$test_apk" > "$EVIDENCE/instrumentation-test-manifest.xml"
+          if grep -Eqi 'INTERNET|BIND_ACCESSIBILITY_SERVICE|MANAGE_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE' \
+            "$EVIDENCE/instrumentation-app-manifest.xml" "$EVIDENCE/instrumentation-test-manifest.xml"; then
+            echo "::error::The isolated instrumentation APK requested a forbidden permission" >&2
+            exit 1
+          fi
+          echo "HARNESS_APP_APK=$app_apk" >> "$GITHUB_ENV"
+          echo "HARNESS_TEST_APK=$test_apk" >> "$GITHUB_ENV"
+
+      - name: Run persistent flow on one fresh stock API 36 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          test -r /dev/kvm -a -w /dev/kvm
+          stat -c 'kvmOwner=%u kvmGroup=%g kvmMode=%a' /dev/kvm > "$EVIDENCE/kvm.txt"
+
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-current-android"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME" "$EVIDENCE/run-1"
+          run_evidence="$EVIDENCE/run-1"
+          emulator_pid=""
+
+          collect_failure() {
+            set +e
+            if [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null)" != "device" ]; then
+              echo "evidenceCollection=emulator-unavailable" > "$run_evidence/workflow-failure-receipt.txt"
+              return 0
+            fi
+            timeout 20s adb -s "$EMULATOR_SERIAL" exec-out screencap -p \
+              > "$run_evidence/workflow-failure.png" || true
+            timeout 20s adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
+              | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+              > "$run_evidence/workflow-failure-activity.txt" || true
+            timeout 20s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime \
+              | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+              > "$run_evidence/workflow-failure-logcat.txt" || true
+            timeout 20s adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print data_app_anr \
+              | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
+              > "$run_evidence/workflow-failure-anr.txt" || true
+            echo "evidenceCollection=attempted" > "$run_evidence/workflow-failure-receipt.txt"
+          }
+
+          stop_owned_emulator() {
+            set +e
+            if [ -z "$emulator_pid" ]; then
+              echo "emulatorStopped=not-started" > "$run_evidence/cleanup.txt"
+              return 0
+            fi
+            timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1 || true
+            for _ in 1 2 3 4 5; do
+              if ! kill -0 "$emulator_pid" 2>/dev/null; then
+                wait "$emulator_pid" 2>/dev/null || true
+                echo "emulatorStopped=true" > "$run_evidence/cleanup.txt"
+                emulator_pid=""
+                return 0
+              fi
+              sleep 2
+            done
+            kill "$emulator_pid" 2>/dev/null || true
+            wait "$emulator_pid" 2>/dev/null || true
+            echo "emulatorStopped=true-forced-owned-pid" > "$run_evidence/cleanup.txt"
+            emulator_pid=""
+          }
+
+          on_exit() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              collect_failure
+            fi
+            stop_owned_emulator
+            exit "$status"
+          }
+          trap on_exit EXIT
+
+          if adb devices | awk 'NR > 1 && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::An Android device was already attached before the owned run." >&2
+            exit 1
+          fi
+          printf 'no\n' | avdmanager create avd \
+            --force \
+            --name "$AVD_NAME" \
+            --package "$SYSTEM_IMAGE_PACKAGE" \
+            --device pixel \
+            --path "$ANDROID_AVD_HOME/$AVD_NAME" \
+            2>&1 | tee "$run_evidence/avd-create.txt"
+          emulator -list-avds | tee "$run_evidence/avd-list.txt"
+          grep -Fx "$AVD_NAME" "$run_evidence/avd-list.txt"
+          emulator -version | tee "$run_evidence/emulator-version.txt"
+
+          nohup emulator \
+            -avd "$AVD_NAME" \
+            -port 5554 \
+            -accel on \
+            -gpu "$EMULATOR_GPU" \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -no-snapshot \
+            -camera-back none \
+            -camera-front none \
+            -cores 2 \
+            -memory 2048 \
+            > "$run_evidence/emulator.log" 2>&1 &
+          emulator_pid=$!
+          printf '%s\n' "$emulator_pid" > "$run_evidence/emulator.pid"
+
+          deadline=$((SECONDS + 300))
+          until [ "$(adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null || true)" = "device" ] && \
+            [ "$(adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::The fresh API 36 emulator did not boot before the deadline" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          api_level="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')"
+          primary_abi="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')"
+          abi_list="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abilist | tr -d '\r')"
+          page_size="$(adb -s "$EMULATOR_SERIAL" shell getconf PAGE_SIZE | tr -d '\r')"
+          build_type="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.type | tr -d '\r')"
+          fingerprint="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.fingerprint | tr -d '\r')"
+          test "$api_level" = "36"
+          test "$primary_abi" = "x86_64"
+          test "$page_size" = "4096"
+          {
+            echo "apiLevel=$api_level"
+            echo "primaryAbi=$primary_abi"
+            echo "abiList=$abi_list"
+            echo "pageSize=$page_size"
+            echo "buildType=$build_type"
+            echo "buildFingerprint=$fingerprint"
+            echo "systemImagePackage=$SYSTEM_IMAGE_PACKAGE"
+            echo "freshOwnedEmulator=true"
+            echo "abiListClassification=informational-only"
+            echo "arm16KiBProof=false"
+          } > "$run_evidence/device-binding.txt"
+
+          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate \
+            > "$run_evidence/stock-webview-provider.txt"
+          PROVIDER_DUMP="$run_evidence/stock-webview-provider.txt" python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          value = Path(os.environ["PROVIDER_DUMP"]).read_text()
+          match = re.search(
+              r"Current WebView package \(name, version\): \(([^,]+),\s*([^)]+)\)",
+              value,
+          )
+          assert match is not None, "current stock WebView provider is missing"
+          package = match.group(1).strip()
+          version = match.group(2).strip()
+          assert re.fullmatch(r"[A-Za-z0-9._]+", package), package
+          assert re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version), version
+          major = int(version.split(".", 1)[0])
+          assert major >= 90, f"stock WebView major {major} is below 90"
+          receipt = {
+              "classification": "stock-system-image-provider",
+              "package": package,
+              "version": version,
+              "major": major,
+              "minimumMajor": 90,
+              "latestSecurityBrowserProof": False,
+          }
+          evidence = Path(os.environ["PROVIDER_DUMP"]).with_name("stock-webview-provider.json")
+          evidence.write_text(json.dumps(receipt, indent=2) + "\n")
+          with Path(os.environ["GITHUB_ENV"]).open("a") as env:
+              env.write(f"CURRENT_WEBVIEW_PACKAGE={package}\n")
+              env.write(f"CURRENT_WEBVIEW_VERSION={version}\n")
+          PY
+          # GITHUB_ENV values become available to later steps, so parse the same
+          # observed values locally for this step's package and payload receipts.
+          current_package="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["package"])' "$run_evidence/stock-webview-provider.json")"
+          current_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$run_evidence/stock-webview-provider.json")"
+          adb -s "$EMULATOR_SERIAL" shell dumpsys package "$current_package" \
+            > "$run_evidence/stock-webview-package.txt"
+          grep -F "versionName=$current_version" "$run_evidence/stock-webview-package.txt"
+          adb -s "$EMULATOR_SERIAL" shell pm path "$current_package" \
+            | tr -d '\r' | sed -n 's/^package://p' \
+            > "$run_evidence/stock-webview-paths.txt"
+          test -s "$run_evidence/stock-webview-paths.txt"
+          : > "$run_evidence/stock-webview-apk-sha256.txt"
+          while IFS= read -r provider_path; do
+            test -n "$provider_path"
+            adb -s "$EMULATOR_SERIAL" shell sha256sum "$provider_path" \
+              >> "$run_evidence/stock-webview-apk-sha256.txt"
+          done < "$run_evidence/stock-webview-paths.txt"
+          grep -Eq '^[0-9a-f]{64}  /' "$run_evidence/stock-webview-apk-sha256.txt"
+
+          timeout 120s adb -s "$EMULATOR_SERIAL" install --no-streaming -r "$HARNESS_APP_APK" \
+            | tee "$run_evidence/instrumentation-app-install.txt"
+          grep -Eq '^Success\r?$' "$run_evidence/instrumentation-app-install.txt"
+          timeout 120s adb -s "$EMULATOR_SERIAL" install --no-streaming -r -t "$HARNESS_TEST_APK" \
+            | tee "$run_evidence/instrumentation-test-install.txt"
+          grep -Eq '^Success\r?$' "$run_evidence/instrumentation-test-install.txt"
+
+          python3 scripts/android_phone_runtime_check.py \
+            --adb adb \
+            --serial "$EMULATOR_SERIAL" \
+            --apk "$CANDIDATE_APK" \
+            --evidence "$run_evidence" \
+            --expected-sha256 "$CANDIDATE_APK_SHA256" \
+            --expected-version "$CANDIDATE_VERSION" \
+            --expected-version-code "$CANDIDATE_VERSION_CODE" \
+            --expected-published-version "$PUBLISHED_ANDROID_VERSION" \
+            --minimum-webview-major 90 \
+            --expected-webview-package "$current_package" \
+            --expected-webview-version "$current_version" \
+            --boot-timeout 60 \
+            --ui-timeout 60 \
+            --update-timeout 120
+
+          trap - EXIT
+          stop_owned_emulator
+
+      - name: Upload bounded runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-current-api36-runtime-evidence
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
