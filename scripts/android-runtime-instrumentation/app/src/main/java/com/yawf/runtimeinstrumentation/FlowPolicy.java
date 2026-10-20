@@ -4,7 +4,7 @@ import java.util.regex.Pattern;
 
 /** Pure policy shared by the host self-tests and the persistent device flow. */
 public final class FlowPolicy {
-    public static final String EXPECTED_CANDIDATE_VERSION = "2.3.24";
+    public static final String EXPECTED_CANDIDATE_VERSION = "2.3.25";
     public static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
     public static final String WEB_BUTTON_CLASS = "android.widget.Button";
     public static final LabeledWebButtonSpec MORE_NAVIGATION_BUTTON =

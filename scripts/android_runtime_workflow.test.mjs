@@ -11,12 +11,12 @@ const workflow = readFileSync(
 );
 
 test("pins the exact verification artifact while retaining the published channel", () => {
-  assert.match(workflow, /CANDIDATE_RUN_ID: "39351580338"/);
-  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 5f26f144696ee47e3109ae35b395a8145b097d50/);
-  assert.match(workflow, /CANDIDATE_APK_SHA256: bea6e80797329859c9e902f75795ba8af69086ea3b5327db584327201e65f39d/);
+  assert.match(workflow, /CANDIDATE_RUN_ID: "39360393490"/);
+  assert.match(workflow, /CANDIDATE_SOURCE_SHA: d9f19d0c3522751d2ef5edfdcf32affabf59c893/);
+  assert.match(workflow, /CANDIDATE_APK_SHA256: c4c9050540a702ee902a9109b726b38dca6ef77998b1ad8af24636a5171b7cf5/);
   assert.match(workflow, /name: android-phone-verification-candidate/);
-  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.24/);
-  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003024"/);
+  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.25/);
+  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003025"/);
   assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.21/);
 });
 
