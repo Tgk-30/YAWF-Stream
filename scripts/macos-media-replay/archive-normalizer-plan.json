@@ -36,6 +36,42 @@
       "role": "canonical staged runtime output inventory"
     },
     {
+      "base": "controller",
+      "source": "normalize_source_archive.py",
+      "destination": "replay-controls/normalize_source_archive.py",
+      "role": "exact source normalizer and admission control"
+    },
+    {
+      "base": "controller",
+      "source": "archive-normalizer-plan.json",
+      "destination": "replay-controls/archive-normalizer-plan.json",
+      "role": "pinned source normalization plan"
+    },
+    {
+      "base": "controller",
+      "source": "shipping-source-pins.json",
+      "destination": "replay-controls/shipping-source-pins.json",
+      "role": "exact original source transport pins"
+    },
+    {
+      "base": "controller",
+      "source": "SOURCE-NOTICES.md",
+      "destination": "replay-controls/SOURCE-NOTICES.md",
+      "role": "independent runtime source notice"
+    },
+    {
+      "base": "project",
+      "source": "scripts/ci/produce_macos_media_runtime.py",
+      "destination": "replay-controls/produce_macos_media_runtime.py",
+      "role": "network and write confined shipping producer"
+    },
+    {
+      "base": "project",
+      "source": "scripts/ci/run_macos_media_replay_experiment.py",
+      "destination": "replay-controls/run_macos_media_replay_experiment.py",
+      "role": "shared source admission, toolchain and confinement implementation"
+    },
+    {
       "base": "project",
       "source": "scripts/stage_macos_media_runtime.mjs",
       "destination": "replay-support/scripts/stage_macos_media_runtime.mjs",
@@ -46,6 +82,30 @@
       "source": "scripts/check_macos_bundle_minimum.mjs",
       "destination": "replay-support/scripts/check_macos_bundle_minimum.mjs",
       "role": "owned bundle minimum checker"
+    },
+    {
+      "base": "project",
+      "source": "scripts/smoke_macos_media_runtime.mjs",
+      "destination": "replay-support/scripts/smoke_macos_media_runtime.mjs",
+      "role": "natural headless runtime smoke"
+    },
+    {
+      "base": "project",
+      "source": "scripts/prepare_macos_replay_notices.mjs",
+      "destination": "replay-support/scripts/prepare_macos_replay_notices.mjs",
+      "role": "hash-verified component notice packager"
+    },
+    {
+      "base": "project",
+      "source": ".github/workflows/macos-media-runtime.yml",
+      "destination": "replay-controls/macos-media-runtime.yml",
+      "role": "native architecture shipping orchestration"
+    },
+    {
+      "base": "project",
+      "source": "LICENSE",
+      "destination": "replay-controls/PROJECT-LICENSE.txt",
+      "role": "project license for owned replay and shipping controls"
     }
   ]
 }

@@ -17,7 +17,7 @@ The source verifier checks the complete checksum inventory, the exact 33 source 
 
 `normalize_source_archive.py` accepts only the SHA-256 pinned in `archive-normalizer-plan.json`. It streams the archive without extracting it, rejects duplicate or escaping paths, hardlinks, special files, unknown link targets, and configured size/count overruns. Absolute links are changed only when their targets are beneath the exact recorded runner-owned `recipe/sources` prefix and the equivalent target exists inside `component-sources`. All other links are rejected. PAX `linkpath` metadata is removed when a link is transformed so it cannot override the contained relative target.
 
-The new archive preserves every original regular member byte except the intentionally regenerated `SHA256SUMS`. It adds `NORMALIZATION-PROVENANCE.json`, `OWNED-FILE-MANIFEST.json`, the independent replay controls, the exact canonical runtime-output inventory, and the owned runtime stager and minimum checker. The original source manifest remains present and continues to state that licensing is not cleared.
+The new archive preserves every original regular member byte except the intentionally regenerated `SHA256SUMS`. It adds `NORMALIZATION-PROVENANCE.json`, `OWNED-FILE-MANIFEST.json`, the independent replay controls, the exact canonical runtime-output inventory, and the owned source, confinement, relocation, notice, minimum and smoke controls used by the shipping producer. The original source manifest remains present and continues to state that licensing is not cleared.
 
 ```sh
 python3 normalize_source_archive.py \
@@ -70,4 +70,24 @@ node --test "$controller/replay_macos_media_sources.test.mjs"
 python3 -m unittest -v "$controller/normalize_source_archive_test.py"
 ```
 
-No full native replay was started while producing this controller.
+The focused tests above do not establish a full native replay. Actual native
+ARM and Intel replay results must be recorded separately.
+
+## Unsigned shipping producer
+
+`scripts/ci/produce_macos_media_runtime.py` first creates one content-addressed
+normalized archive from the exact transport pinned by `shipping-source-pins.json`.
+Both native architecture jobs consume those same bytes. The producer safely
+admits the archive, executes the controller bundled inside it, and derives the
+only staging prefix as `replay-<arch>-macos11/install/<arch>` inside a new marked
+output. The controller, relocation, minimum check, natural smoke and notice copy
+run under one network-denied and exact-child-write sandbox profile.
+
+The raw prefix may contain audited build helpers. The stager retains the exact
+55 canonical top-level dylibs, including libraries not reachable from its three
+root executables, plus `ffmpeg` and `ffprobe`. Other raw-prefix programs are not
+shipped. The producer verifies this exact 57-file binary contract before it
+creates an unsigned transport. Every raw-prefix regular file is hashed in the
+install inventory and every Mach-O is accounted for by the controller audit.
+Developer ID signing, notarization and publication remain separate release
+steps.

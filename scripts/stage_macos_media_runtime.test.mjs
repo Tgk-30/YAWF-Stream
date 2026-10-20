@@ -22,7 +22,7 @@ function fixture() {
   const calls = [];
   const state = (path) => {
     if (!metadata.has(path)) {
-      const original = paths.map((p) => join(prefix, p)).find((p) => basename(p) === basename(path));
+      const original = [...metadata.keys()].find((p) => p.startsWith(prefix) && basename(p) === basename(path));
       metadata.set(path, structuredClone(metadata.get(original)));
     }
     return metadata.get(path);
@@ -51,8 +51,15 @@ function fixture() {
 test("relocation resolves versioned aliases and MuJS without changing input bytes/minima", () => {
   const f = fixture();
   try {
+    const unreferenced = join(f.prefix, "lib/libunreferenced.1.dylib");
+    writeFileSync(unreferenced, "canonical unreferenced runtime library");
+    f.metadata.set(unreferenced, { minimum: "11.0", arch: "arm64", id: unreferenced, deps: [], rpaths: [] });
+    const buildHelper = join(f.prefix, "bin/brotli");
+    writeFileSync(buildHelper, "audited build helper");
     const result = stageMediaRuntime({ ...f, arch: "arm64" });
-    assert.equal(result.files.length, 5);
+    assert.equal(result.files.length, 6);
+    assert.equal(existsSync(join(f.output, "Frameworks/libunreferenced.1.dylib")), true);
+    assert.equal(existsSync(join(f.output, "ffmpeg/brotli")), false);
     assert.equal(result.files.every((file) => file.minimum === "11.0"), true);
     assert.deepEqual(result.files.find((file) => file.name === "libmpv.2.dylib").changes.map(([, to]) => to), ["@loader_path/libcodec.1.2.dylib", "@loader_path/libmujs.dylib"]);
     assert.equal(f.metadata.get(join(f.output, "ffmpeg", "ffmpeg")).deps[0], "@loader_path/../../../../Frameworks/libcodec.1.2.dylib");
@@ -60,7 +67,7 @@ test("relocation resolves versioned aliases and MuJS without changing input byte
     assert.equal(resolve(dirname(finalExecutable), f.metadata.get(join(f.output, "ffmpeg", "ffmpeg")).deps[0].replace("@loader_path/", "")), join(f.root, "Fixture.app/Contents/Frameworks/libcodec.1.2.dylib"));
     assert.equal(f.metadata.get(join(f.output, "Frameworks", "libmpv.2.dylib")).id, "@rpath/libmpv.2.dylib");
     assert.equal(readFileSync(join(f.prefix, "lib/libmpv.2.dylib"), "utf8"), "original:lib/libmpv.2.dylib");
-    assert.equal(f.calls.filter(([command]) => command === "codesign").length, 5);
+    assert.equal(f.calls.filter(([command]) => command === "codesign").length, 6);
     assert.equal(f.calls.some(([command]) => command === "vtool"), false);
     assert.equal(JSON.parse(readFileSync(join(f.output, "relocation.json"))).arch, "arm64");
     assert.equal(JSON.stringify(result).includes(f.root), false);

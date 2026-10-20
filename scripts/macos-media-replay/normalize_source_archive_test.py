@@ -66,6 +66,17 @@ def fixture(base: Path, *, target=OWNED + "/pkg/target.bin", hardlink=False, esc
 
 
 class ArchiveNormalizerTests(unittest.TestCase):
+    def test_identical_inputs_produce_canonical_gzip_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source, controller, project, plan, _ = fixture(base)
+            first = base / "first.tar.gz"
+            second = base / "second.tar.gz"
+            normalize_archive(source, first, plan, controller, project)
+            normalize_archive(source, second, plan, controller, project)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            self.assertEqual(first.read_bytes()[4:8], b"\x00\x00\x00\x00")
+
     def test_preserves_regular_bytes_and_contains_absolute_links(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

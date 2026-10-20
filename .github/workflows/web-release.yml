@@ -48,6 +48,7 @@ on:
 
 # tauri-action creates/edits a release and uploads assets.
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -497,9 +498,22 @@ jobs:
 
       - name: Attach corresponding media sources to the draft
         if: matrix.os == 'macos'
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/media-candidate/source/"* --clobber --repo "$GITHUB_REPOSITORY"
+          MEDIA_ARCH: ${{ matrix.media_arch }}
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/media-candidate/source"
+          provenance="$source_dir/macos-media-provenance-$MEDIA_ARCH.json"
+          test -f "$provenance"
+          gh release upload "$GITHUB_REF_NAME" "$provenance" --clobber --repo "$GITHUB_REPOSITORY"
+          if [ "$MEDIA_ARCH" = arm64 ]; then
+            archives=("$source_dir"/yawf-macos-media-runtime-source-*.tar.gz)
+            test "${#archives[@]}" -eq 1
+            test -f "${archives[0]}"
+            gh release upload "$GITHUB_REF_NAME" "${archives[0]}" --clobber --repo "$GITHUB_REPOSITORY"
+          fi
 
       # tauri-action notarizes + staples the .app but NOT the .dmg container.
       # Notarize + staple the .dmg here, then replace the asset tauri-action

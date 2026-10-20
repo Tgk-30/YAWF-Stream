@@ -79,6 +79,8 @@ const ciWorkflow = read(".github/workflows/ci.yml");
 const cloudflareSiteWorkflow = read(".github/workflows/cloudflare-site.yml");
 const desktopBuildWorkflow = read(".github/workflows/desktop-build.yml");
 const macosMediaWorkflow = read(".github/workflows/macos-media-runtime.yml");
+const macosMediaProducer = read("scripts/ci/produce_macos_media_runtime.py");
+const macosMediaSourcePlan = read("scripts/macos-media-replay/archive-normalizer-plan.json");
 const dockerIgnore = read(".dockerignore");
 const dockerfile = read("Dockerfile");
 const publicRepoPreflight = read("scripts/public_repo_preflight.mjs");
@@ -591,8 +593,10 @@ check(
   /needs:\s*macos-media-runtime/.test(releaseWorkflow) &&
     /name:\s*macos-media-runtime-\$\{\{ matrix\.media_arch \}\}/.test(releaseWorkflow) &&
     /media-candidate\/ffmpeg/.test(releaseWorkflow) &&
-    /buildMacosMediaRuntime/.test(macosMediaWorkflow) &&
-    /smoke_macos_media_runtime\.mjs/.test(macosMediaWorkflow) &&
+    /produce_macos_media_runtime\.py[\s\S]*--prepare-source/.test(macosMediaWorkflow) &&
+    /produce_macos_media_runtime\.py[\s\S]*--build/.test(macosMediaWorkflow) &&
+    /replay_macos_media_sources\.mjs/.test(macosMediaProducer) &&
+    /smoke_macos_media_runtime\.mjs/.test(macosMediaProducer) &&
     /download_ffmpeg\.mjs\s+linux-x64/.test(releaseWorkflow) &&
     /download_ffmpeg\.mjs\s+win-x64/.test(releaseWorkflow),
   ".github/workflows/web-release.yml must fetch ffmpeg/ffprobe for macOS (per-arch), Linux, and Windows before packaging",
@@ -628,7 +632,8 @@ check(
   "macOS source-built media notices are bundled",
   tauri.bundle?.macOS?.minimumSystemVersion === "11.0" &&
     tauri.bundle.resources.includes("resources/media-notices/**/*") &&
-    /prepare_macos_media_notices\.mjs/.test(macosMediaWorkflow) &&
+    /prepare_macos_replay_notices\.mjs/.test(macosMediaProducer) &&
+    /replay-support\/scripts\/prepare_macos_replay_notices\.mjs/.test(macosMediaSourcePlan) &&
     /Attach corresponding media sources to the draft/.test(releaseWorkflow),
   "macOS11 packaging must include exact component notices and corresponding media sources",
 );

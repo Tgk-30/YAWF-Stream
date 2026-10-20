@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gzip
 import hashlib
 import io
 import json
@@ -220,7 +221,10 @@ def normalize_archive(input_path: Path, output_path: Path, plan: dict, controlle
         raise AdmissionError("temporary output already exists")
     replacements = {link["path"]: link["normalizedTarget"] for link in scan["links"] if link["transformed"]}
     try:
-        with tarfile.open(input_path, "r|gz") as source_archive, tarfile.open(temp, "w:gz", format=tarfile.PAX_FORMAT, compresslevel=6) as output_archive:
+        # The normalized archive is a content-addressed release input. Pin the
+        # gzip header as well as tar member metadata so identical admitted
+        # source and controls produce identical bytes across workflow runs.
+        with tarfile.open(input_path, "r|gz") as source_archive, temp.open("xb") as compressed_file, gzip.GzipFile(filename="", mode="wb", fileobj=compressed_file, compresslevel=6, mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as output_archive:
             for member in source_archive:
                 name = safe_member_name(member.name, root, plan["limits"]["pathBytes"])
                 relative = name[len(root) + 1:] if name != root else ""

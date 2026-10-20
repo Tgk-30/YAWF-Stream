@@ -5,21 +5,69 @@ on:
     branches: [main]
     paths:
       - "scripts/*macos*"
-      - "scripts/macos-media-runtime/**"
+      - "scripts/ci/produce_macos_media_runtime.py"
+      - "scripts/ci/produce_macos_media_runtime.test.py"
+      - "scripts/ci/run_macos_media_replay_experiment.py"
+      - "scripts/ci/run_macos_media_replay_experiment.test.py"
+      - "scripts/macos-media-replay/**"
       - "docs/MACOS_MEDIA_RUNTIME.md"
       - ".github/workflows/macos-media-runtime.yml"
   workflow_dispatch:
   workflow_call:
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
+  source:
+    name: Prepare one exact corresponding-source archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      archive_sha256: ${{ steps.source.outputs.archive_sha256 }}
+      archive_file: ${{ steps.source.outputs.archive_file }}
+    env:
+      SOURCE_RUN_ID: "39304293958"
+      SOURCE_ARTIFACT: macos-media-runtime-arm64
+      OUTER_SHA256: 11af8849872ae1c302b6a5fb6ba823e369648be3e9597c1ba2c5150e7a9f4d50
+      INNER_SOURCE_SHA256: baf26db61e0e50011f748e2ddfe06a764972d8fd9ff5a562f50da94d2727dbff
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the exact pinned source transport
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT }}
+          path: ${{ runner.temp }}/source-transport
+          github-token: ${{ github.token }}
+          repository: Tgk-30/YAWF-Stream
+          run-id: ${{ env.SOURCE_RUN_ID }}
+      - name: Prepare and freshly admit the canonical source archive
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum "$RUNNER_TEMP/source-transport/macos-media-runtime-arm64.tar.gz" | awk '{print $1}')" = "$OUTER_SHA256"
+          test "$(python3 -c 'import json; print(json.load(open("scripts/macos-media-replay/shipping-source-pins.json"))["source"]["sha256"])')" = "$INNER_SOURCE_SHA256"
+          python3 -I -B scripts/ci/produce_macos_media_runtime.py \
+            --prepare-source \
+            --candidate-dir "$RUNNER_TEMP/source-transport" \
+            --output-dir "$RUNNER_TEMP/corresponding-source" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Retain the one byte-identical source input for both native jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-media-corresponding-source
+          path: ${{ runner.temp }}/corresponding-source
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
   build:
-    name: Native ${{ matrix.arch }} media runtime
+    needs: source
+    name: Confined native ${{ matrix.arch }} media runtime
     runs-on: ${{ matrix.runner }}
-    # Intel source compilation reached FFmpeg linking at the former 45-minute limit.
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -35,50 +83,68 @@ jobs:
         with:
           node-version: 24
       - name: Install build tools, not host media libraries
+        shell: bash
         run: |
+          set -euo pipefail
           brew install cmake meson ninja autoconf automake libtool nasm pkgconf
           libtool_prefix="$(brew --prefix libtool)"
           test -x "$libtool_prefix/bin/glibtoolize"
           test -f "$libtool_prefix/share/aclocal/libtool.m4"
           echo "ACLOCAL_PATH=$libtool_prefix/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}" >> "$GITHUB_ENV"
-      - name: Test acquisition, relocation and runtime gates
-        run: node --test scripts/build_macos_media_runtime.test.mjs scripts/stage_macos_media_runtime.test.mjs scripts/smoke_macos_media_runtime.test.mjs
-      - name: Compile pinned source for the native architecture
+      - name: Download the canonical source archive
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-media-corresponding-source
+          path: ${{ runner.temp }}/corresponding-source
+      - name: Verify controls and unsigned packaging contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            scripts/macos-media-replay/replay_macos_media_sources.test.mjs \
+            scripts/stage_macos_media_runtime.test.mjs \
+            scripts/smoke_macos_media_runtime.test.mjs \
+            scripts/prepare_macos_replay_notices.test.mjs \
+            scripts/macos_media_workflow.test.mjs
+          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/test-home" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C /usr/bin/python3 -B scripts/macos-media-replay/normalize_source_archive_test.py -v
+          /usr/bin/python3 -I -B scripts/ci/run_macos_media_replay_experiment.test.py -v
+          /usr/bin/python3 -I -B scripts/ci/produce_macos_media_runtime.test.py -v
+      - name: Rebuild, audit, relocate and smoke under one confinement profile
         id: media
+        shell: bash
         env:
           MEDIA_ARCH: ${{ matrix.arch }}
+          EXPECTED_SOURCE_SHA256: ${{ needs.source.outputs.archive_sha256 }}
+          EXPECTED_SOURCE_FILE: ${{ needs.source.outputs.archive_file }}
         run: |
-          node --input-type=module <<'JS'
-          import { appendFileSync } from 'node:fs';
-          import { join } from 'node:path';
-          import { buildMacosMediaRuntime } from './scripts/build_macos_media_runtime.mjs';
-          const result = await buildMacosMediaRuntime({ workspace: join(process.env.RUNNER_TEMP, 'yawf-media-cache'), requestedArch: process.env.MEDIA_ARCH, jobs: 8 });
-          appendFileSync(process.env.GITHUB_OUTPUT, `root=${result.root}\nprefix=${result.buildInstallPrefix}\nsource=${result.sourceBundle}\nprovenance=${result.provenance}\n`);
-          JS
-      - name: Relocate and locally sign media without rewriting minima
+          set -euo pipefail
+          test "$(uname -m)" = "$MEDIA_ARCH"
+          test "$(shasum -a 256 "$RUNNER_TEMP/corresponding-source/$EXPECTED_SOURCE_FILE" | awk '{print $1}')" = "$EXPECTED_SOURCE_SHA256"
+          brew_prefix="$(brew --prefix)"
+          libtool_prefix="$(brew --prefix libtool)"
+          developer_dir="$(/usr/bin/xcode-select -p)"
+          toolchain_bin="$developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          developer_bin="$developer_dir/usr/bin"
+          tool_path="$(dirname "$(command -v node)"):$brew_prefix/bin:$libtool_prefix/bin:$toolchain_bin:$developer_bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          /usr/bin/python3 -I -B scripts/ci/produce_macos_media_runtime.py \
+            --build \
+            --source-dir "$RUNNER_TEMP/corresponding-source" \
+            --workspace "$RUNNER_TEMP/media-shipping-$MEDIA_ARCH" \
+            --arch "$MEDIA_ARCH" \
+            --jobs 8 \
+            --node "$(command -v node)" \
+            --tool-path "$tool_path" \
+            --developer-dir "$developer_dir" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Upload unsigned verification candidate, not a release
         env:
-          MEDIA_PREFIX: ${{ steps.media.outputs.prefix }}
           MEDIA_ARCH: ${{ matrix.arch }}
-        run: node scripts/stage_macos_media_runtime.mjs "$MEDIA_PREFIX" "$RUNNER_TEMP/media-candidate" "$MEDIA_ARCH"
-      - name: Verify natural loading, H264, HLS audio and seek
-        run: node scripts/smoke_macos_media_runtime.mjs "$RUNNER_TEMP/media-candidate" "$RUNNER_TEMP/media-runtime-evidence"
-      - name: Retain exact component sources and provenance
-        env:
-          MEDIA_ROOT: ${{ steps.media.outputs.root }}
-          MEDIA_SOURCE: ${{ steps.media.outputs.source }}
-          MEDIA_PROVENANCE: ${{ steps.media.outputs.provenance }}
-          MEDIA_ARCH: ${{ matrix.arch }}
+          MEDIA_STAGE: ${{ steps.media.outputs.stage }}
+        shell: bash
         run: |
-          node scripts/prepare_macos_media_notices.mjs "$MEDIA_ROOT" "$RUNNER_TEMP/media-candidate/notices"
-          mkdir "$RUNNER_TEMP/media-candidate/source"
-          cp "$MEDIA_SOURCE" "$RUNNER_TEMP/media-candidate/source/"
-          cp "$MEDIA_PROVENANCE" "$RUNNER_TEMP/media-candidate/source/macos-media-provenance-$MEDIA_ARCH.json"
-      - name: Upload verification candidate, not a release
-        env:
-          MEDIA_ARCH: ${{ matrix.arch }}
-        run: |
+          set -euo pipefail
           cd "$RUNNER_TEMP"
-          tar -czf "macos-media-runtime-$MEDIA_ARCH.tar.gz" -C media-candidate .
+          tar -czf "macos-media-runtime-$MEDIA_ARCH.tar.gz" -C "$MEDIA_STAGE" .
           shasum -a 256 "macos-media-runtime-$MEDIA_ARCH.tar.gz" > "macos-media-runtime-$MEDIA_ARCH.tar.gz.sha256"
       - name: Preserve executable modes and aliases in archived transport
         uses: actions/upload-artifact@v4
@@ -88,12 +154,20 @@ jobs:
             ${{ runner.temp }}/macos-media-runtime-${{ matrix.arch }}.tar.gz
             ${{ runner.temp }}/macos-media-runtime-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
+          compression-level: 0
           retention-days: 14
-      - name: Retain runtime failure or success evidence
+      - name: Retain bounded runtime failure or success evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: macos-media-evidence-${{ matrix.arch }}
-          path: ${{ runner.temp }}/media-runtime-evidence
+          path: |
+            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/trusted-logs
+            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/STATUS.json
+            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/TOOLCHAIN-PROBE.json
+            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/INSTALL-AUDIT.json
+            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/INSTALL-INVENTORY.json
+            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/SHIPPING-RESULTS.json
+            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/media-smoke/RESULTS.json
           if-no-files-found: ignore
           retention-days: 14
