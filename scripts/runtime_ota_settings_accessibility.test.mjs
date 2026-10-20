@@ -43,6 +43,30 @@ function validateSettingsAccessibility(source) {
       "bottom-navigation boundary is not the exact Primary container",
     ],
     [
+      /findAnyNow\(productTextOrDescriptionSelectors\(\s*"Settings page", "android\.view\.View", false\)\)/,
+      "scroll gesture region is not derived from the exact Settings page",
+    ],
+    [
+      /Rect gestureBounds = new Rect\(scrollBounds\);[\s\S]*?gestureBounds\.intersect\(settingsBounds\)[\s\S]*?int navigationClearance = navigationBounds\.height\(\);[\s\S]*?gestureBounds\.bottom = Math\.min\(\s*gestureBounds\.bottom, navigationBounds\.top - navigationClearance\)/,
+      "scroll gesture region is not intersected with Settings and capped above the full navigation",
+    ],
+    [
+      /scrollable\.setGestureMargins\(leftMargin, topMargin, rightMargin, bottomMargin\)/,
+      "scrollable does not use margins derived from the bounded Settings region",
+    ],
+    [
+      /int leftMargin = gestureBounds\.left - scrollBounds\.left;\s*int topMargin = gestureBounds\.top - scrollBounds\.top;\s*int rightMargin = scrollBounds\.right - gestureBounds\.right;\s*int bottomMargin = scrollBounds\.bottom - gestureBounds\.bottom;/,
+      "gesture margins are not calculated from all four observed bounds",
+    ],
+    [
+      /boolean canStillScroll = scrollable\.scroll\(direction, 0\.75f\);[\s\S]*?canStillScroll=" \+ canStillScroll/,
+      "scroll return is not retained and logged with its documented can-still-scroll meaning",
+    ],
+    [
+      /for \(int attempt = 0; attempt < 12; attempt\+\+\)/,
+      "bounded 12-attempt Settings scroll limit changed",
+    ],
+    [
       /By\.text\(text\)\s*\.pkg\(OtaFlowPolicy\.PRODUCT_PACKAGE\)\s*\.clazz\(className\)\s*\.enabled\(true\)/,
       "text selector lost exact package, class, or enabled identity",
     ],
@@ -79,8 +103,21 @@ function validateSettingsAccessibility(source) {
   if (/simple\.(?:isChecked|isSelected)\(\)/.test(settingsMethod)) {
     failures.push("harness overclaims a Simple selected state absent from API 36 accessibility");
   }
+  const scrollBoundsMethod = source.match(
+    /private void configureSettingsScrollGesture\([\s\S]*?\n    }\n\n    private /,
+  )?.[0] ?? "";
+  if (!/"Settings page", "android\.view\.View", false/.test(scrollBoundsMethod)
+      || !/"Primary", "android\.view\.View", false/.test(scrollBoundsMethod)) {
+    failures.push("gesture margins are not derived from exact Settings-page and Primary identities");
+  }
   if (/device\.click\s*\(\s*\d/.test(source) || /executeShellCommand/.test(source)) {
     failures.push("runtime introduced coordinate or shell bypasses");
+  }
+  if (/setGestureMargins?\(\s*\d/.test(source)) {
+    failures.push("Settings scroll gesture uses fixed numeric margins");
+  }
+  if (/(?:assertTrue|assertFalse|if)\s*\([^\n]*scrollable\.scroll\(/.test(source)) {
+    failures.push("scroll return is treated as gesture success instead of remaining scroll capacity");
   }
   return failures;
 }
@@ -105,6 +142,30 @@ test("Settings and OTA controls require exact semantic identity and safe visibil
     [
       'findAnyNow(productTextOrDescriptionSelectors(\n                "Primary", "android.view.View", false))',
       "findAnyNow(webButtonSelectors(OtaFlowPolicy.MORE_NAVIGATION))",
+    ],
+    [
+      'findAnyNow(productTextOrDescriptionSelectors(\n                "Settings page", "android.view.View", false))',
+      'findAnyNow(productTextOrDescriptionSelectors(\n                "Settings", "android.view.View", false))',
+    ],
+    [
+      "gestureBounds.intersect(settingsBounds)",
+      "gestureBounds.intersect(scrollBounds)",
+    ],
+    [
+      "gestureBounds.bottom, navigationBounds.top - navigationClearance",
+      "gestureBounds.bottom, navigationBounds.top",
+    ],
+    [
+      "scrollable.setGestureMargins(leftMargin, topMargin, rightMargin, bottomMargin)",
+      "scrollable.setGestureMargin(0)",
+    ],
+    [
+      "int bottomMargin = scrollBounds.bottom - gestureBounds.bottom;",
+      "int bottomMargin = scrollBounds.bottom - navigationBounds.bottom;",
+    ],
+    [
+      "boolean canStillScroll = scrollable.scroll(direction, 0.75f);",
+      "assertTrue(scrollable.scroll(direction, 0.75f));",
     ],
     [
       ".pkg(OtaFlowPolicy.PRODUCT_PACKAGE)\n                .clazz(className)",

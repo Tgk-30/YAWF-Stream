@@ -466,12 +466,45 @@ public final class RuntimeOtaFlowTest {
             assertNoBindingTerms();
             scrollable = device.findObject(By.scrollable(true));
             assertNotNull("Scrollable container disappeared while seeking " + text, scrollable);
-            scrollable.scroll(direction, 0.75f);
-            log("Scrolled semantic Settings container while seeking " + text);
+            configureSettingsScrollGesture(scrollable);
+            boolean canStillScroll = scrollable.scroll(direction, 0.75f);
+            log("Performed bounded semantic Settings scroll gesture while seeking " + text
+                    + "; canStillScroll=" + canStillScroll);
             device.waitForIdle(750);
         }
         fail("Could not place exact " + text + " control above bottom navigation");
         return null;
+    }
+
+    private void configureSettingsScrollGesture(UiObject2 scrollable) {
+        UiObject2 settingsPage = findAnyNow(productTextOrDescriptionSelectors(
+                "Settings page", "android.view.View", false));
+        assertNotNull("Exact Settings page was unavailable for scroll bounds", settingsPage);
+        UiObject2 navigation = findAnyNow(productTextOrDescriptionSelectors(
+                "Primary", "android.view.View", false));
+        assertNotNull("Exact bottom navigation container was unavailable for scroll bounds", navigation);
+
+        Rect scrollBounds = scrollable.getVisibleBounds();
+        Rect settingsBounds = settingsPage.getVisibleBounds();
+        Rect navigationBounds = navigation.getVisibleBounds();
+        assertFalse("Scrollable Settings bounds were empty", scrollBounds.isEmpty());
+        assertFalse("Exact Settings page bounds were empty", settingsBounds.isEmpty());
+        assertFalse("Exact bottom navigation bounds were empty", navigationBounds.isEmpty());
+
+        Rect gestureBounds = new Rect(scrollBounds);
+        assertTrue("Scrollable container did not intersect the exact Settings page",
+                gestureBounds.intersect(settingsBounds));
+        int navigationClearance = navigationBounds.height();
+        gestureBounds.bottom = Math.min(
+                gestureBounds.bottom, navigationBounds.top - navigationClearance);
+        assertFalse("No Settings gesture region remained above bottom navigation",
+                gestureBounds.isEmpty());
+
+        int leftMargin = gestureBounds.left - scrollBounds.left;
+        int topMargin = gestureBounds.top - scrollBounds.top;
+        int rightMargin = scrollBounds.right - gestureBounds.right;
+        int bottomMargin = scrollBounds.bottom - gestureBounds.bottom;
+        scrollable.setGestureMargins(leftMargin, topMargin, rightMargin, bottomMargin);
     }
 
     private boolean isVisibleAboveBottomNavigation(UiObject2 object) {
