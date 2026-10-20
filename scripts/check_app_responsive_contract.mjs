@@ -86,6 +86,7 @@ const playerInfoCss = read("web/src/components/player/PlayerInfoPopover.css");
 const setupNudgeCss = read("web/src/components/SetupNudge.css");
 const installPromptCss = read("web/src/components/InstallPrompt.css");
 const profileMenuCss = read("web/src/components/ProfileMenu.css");
+const welcomeCss = read("web/src/components/WelcomeGuide.css");
 const appSource = read("web/src/App.tsx");
 const setupCredentials = read("web/src/lib/serverSetupCredentials.ts");
 const setupInvite = read("web/src/lib/serverSetupInvite.ts");
@@ -147,6 +148,8 @@ const mobileMoreSheetRule = ruleBlock(mobileNavCss, ".nav-rail-more-sheet");
 const extraCompactNavRule = ruleBlock(extraCompactNavCss, ".nav-rail");
 const shortLandscapeNavRule = ruleBlock(shortLandscapeNavCss, ".nav-rail");
 const narrowNavRule = ruleBlock(narrowNavCss, ".nav-rail");
+const welcomeSkipRule = ruleBlock(welcomeCss, ".welcome-skip");
+const welcomeStageRule = ruleBlock(welcomeCss, ".welcome-stage");
 const navMediaBlocks = mediaBlocks(navCss);
 const desktopBottomNavBlocks = navMediaBlocks.filter(({ css }) =>
   css.includes(':root[data-nav-position="bottom"] .nav-rail {'),
@@ -255,6 +258,16 @@ check(
   /@media\s*\(max-width:\s*640px\)[\s\S]*bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(setupNudgeCss) &&
     /@media\s*\(max-width:\s*699px\)[\s\S]*bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)/.test(installPromptCss),
   "SetupNudge.css and InstallPrompt.css must clear the floating nav and keep phone actions within their cards.",
+);
+
+check(
+  "welcome tour Skip stacks above its overlapping stage",
+  /position:\s*absolute/.test(welcomeSkipRule) &&
+    /z-index:\s*1;/.test(welcomeSkipRule) &&
+    /position:\s*relative/.test(welcomeStageRule) &&
+    !/z-index\s*:/.test(welcomeStageRule) &&
+    !/pointer-events:\s*none/.test(welcomeStageRule),
+  "WelcomeGuide.css must stack the positioned Skip above the later stage without disabling stage controls.",
 );
 
 check(
