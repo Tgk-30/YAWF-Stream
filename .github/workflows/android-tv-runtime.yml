@@ -1,0 +1,395 @@
+name: Android TV signed runtime admission
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-tv-signed-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  transport:
+    if: github.ref_type == 'branch'
+    name: Retrieve only the pinned signed TV draft asset
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      TV_RELEASE_ID: 418070552
+      TV_ASSET_ID: 660632273
+      TV_SOURCE_REVISION: 00c183935cf5ed3410499722320d963ca8ab5346
+      TV_RELEASE_TAG: v2.3.25-web
+      TV_SIGNING_RUN_ID: "39379784253"
+      TV_APK_FILENAME: YAWF.Stream_Android.TV_2.3.25.apk
+      TV_APK_SHA256: fdd2ba7ae2c1badadf6177cde7271628380a7be05a22793fd9d3fb4a51dd6006
+      TV_APK_SIZE: "5056474"
+    steps:
+      - name: Retrieve only fixed asset metadata and bytes without repository checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for value in "$TV_RELEASE_ID" "$TV_ASSET_ID" "$TV_APK_SHA256"; do
+            case "$value" in REPLACE_*|*REPLACE*) exit 1 ;; esac
+          done
+          [[ "$TV_RELEASE_ID" =~ ^[1-9][0-9]+$ ]]
+          [[ "$TV_ASSET_ID" =~ ^[1-9][0-9]+$ ]]
+          [[ "$TV_APK_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$TV_APK_SIZE" =~ ^[1-9][0-9]+$ ]]
+          test "$GITHUB_REPOSITORY" = Tgk-30/YAWF-Stream
+          test "$(gh api "repos/Tgk-30/YAWF-Stream/git/ref/tags/$TV_RELEASE_TAG" --jq .object.sha)" = "$TV_SOURCE_REVISION"
+          run_metadata="$(gh api "repos/Tgk-30/YAWF-Stream/actions/runs/$TV_SIGNING_RUN_ID" --jq '[.head_sha,.event,.name,.conclusion] | @tsv')"
+          test "$run_metadata" = "$(printf '%s\tpush\tweb-release\tsuccess' "$TV_SOURCE_REVISION")"
+          transport="$RUNNER_TEMP/tv-static-transport"
+          mkdir -p "$transport"
+          gh api "repos/Tgk-30/YAWF-Stream/releases/$TV_RELEASE_ID" > "$transport/release-metadata.json"
+          gh api "repos/Tgk-30/YAWF-Stream/releases/assets/$TV_ASSET_ID" > "$transport/asset-metadata.json"
+          gh api "repos/Tgk-30/YAWF-Stream/releases/assets/$TV_ASSET_ID" \
+            -H 'Accept: application/octet-stream' > "$transport/$TV_APK_FILENAME"
+          test "$(wc -c < "$transport/$TV_APK_FILENAME" | tr -d ' ')" = "$TV_APK_SIZE"
+          printf '%s  %s\n' "$TV_APK_SHA256" "$transport/$TV_APK_FILENAME" | sha256sum -c -
+          TRANSPORT_DIR="$transport" python3 -I -B - <<'BINDING'
+          import json, os
+          from pathlib import Path
+          env = os.environ
+          binding = {
+              "schemaVersion": 1,
+              "releaseId": int(env["TV_RELEASE_ID"]),
+              "assetId": int(env["TV_ASSET_ID"]),
+              "releaseTag": env["TV_RELEASE_TAG"],
+              "sourceRevision": env["TV_SOURCE_REVISION"],
+              "assetName": env["TV_APK_FILENAME"],
+              "assetSize": int(env["TV_APK_SIZE"]),
+              "assetSha256": env["TV_APK_SHA256"],
+              "privilegedStaticTransport": True,
+              "credentialValuesPersisted": False,
+          }
+          (Path(env["TRANSPORT_DIR"]) / "transport-binding.json").write_text(json.dumps(binding) + "\n")
+          BINDING
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tv-signed-static-transport
+          path: ${{ runner.temp }}/tv-static-transport
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  signed-tv-api36:
+    needs: transport
+    permissions:
+      contents: read
+      actions: read
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      # Exact production-signed draft bytes verified by release and asset ID.
+      # Do not convert these fixed pins to caller-controlled inputs.
+      TV_RELEASE_ID: 418070552
+      TV_ASSET_ID: 660632273
+      TV_SOURCE_REVISION: 00c183935cf5ed3410499722320d963ca8ab5346
+      TV_RELEASE_TAG: v2.3.25-web
+      TV_APK_FILENAME: YAWF.Stream_Android.TV_2.3.25.apk
+      TV_APK_SHA256: fdd2ba7ae2c1badadf6177cde7271628380a7be05a22793fd9d3fb4a51dd6006
+      TV_APK_SIZE: "5056474"
+      TV_SIGNER_SHA256: 6d8ec5466423e10e5c751132bb0f6a6ddf95a8d9f3378772d7809fce616eec1e
+      TV_VERSION_NAME: 2.3.25
+      TV_VERSION_CODE: "20325"
+      SYSTEM_IMAGE_PACKAGE: system-images;android-36;android-tv;x86_64
+      SYSTEM_IMAGE_REVISION: "4"
+      AVD_NAME: yawf-tv-api36-signed-runtime
+      EMULATOR_SERIAL: emulator-5556
+      EVIDENCE: android-tv-runtime-evidence
+      FIXTURE_PORT: "4190"
+
+    steps:
+      - name: Checkout runtime gate
+        uses: actions/checkout@v4
+
+      - name: Reject unresolved signed artifact pins before setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          for value in "$TV_RELEASE_ID" "$TV_ASSET_ID" "$TV_SOURCE_REVISION" "$TV_RELEASE_TAG" \
+            "$TV_APK_SHA256" "$TV_SIGNER_SHA256"; do
+            case "$value" in REPLACE_*|*REPLACE*)
+              echo "::error::Signed Android TV runtime pins are unresolved" >&2
+              exit 1
+            esac
+          done
+          [[ "$TV_RELEASE_ID" =~ ^[1-9][0-9]+$ ]]
+          [[ "$TV_ASSET_ID" =~ ^[1-9][0-9]+$ ]]
+          [[ "$TV_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TV_APK_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$TV_SIGNER_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$TV_APK_SIZE" =~ ^[1-9][0-9]+$ ]]
+          test "$TV_RELEASE_TAG" = "v2.3.25-web"
+
+      - name: Checkout exact signed source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TV_SOURCE_REVISION }}
+          path: signed-source
+
+      - name: Bind exact signed source without privileged transport access
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C signed-source rev-parse HEAD)" = "$TV_SOURCE_REVISION"
+          source_signer="$(tr -d '[:space:]:' < signed-source/android-tv/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')"
+          test "$source_signer" = "$TV_SIGNER_SHA256"
+          TV_GRADLE=signed-source/android-tv/app/build.gradle \
+          EXPECTED_NAME="$TV_VERSION_NAME" EXPECTED_CODE="$TV_VERSION_CODE" python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          text = Path(os.environ['TV_GRADLE']).read_text()
+          names = re.findall(r'(?m)^\s*versionName\s+["\x27]([^"\x27]+)["\x27]\s*$', text)
+          codes = re.findall(r'(?m)^\s*versionCode\s+(\d+)\s*$', text)
+          assert names == [os.environ['EXPECTED_NAME']], names
+          assert codes == [os.environ['EXPECTED_CODE']], codes
+          PY
+
+      - name: Download the isolated static transport artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tv-signed-static-transport
+          path: ${{ runner.temp }}/tv-static-transport
+
+      - name: Validate root-provided static transport metadata and APK bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          transport="$RUNNER_TEMP/tv-static-transport"
+          mkdir -p candidate
+          python3 scripts/android_tv_runtime_check.py --validate-static-transport \
+            --transport-dir "$transport" --release-id "$TV_RELEASE_ID" \
+            --asset-id "$TV_ASSET_ID" --release-tag "$TV_RELEASE_TAG" \
+            --source-revision "$TV_SOURCE_REVISION" --asset-name "$TV_APK_FILENAME" \
+            --apk-size "$TV_APK_SIZE" --apk-sha256 "$TV_APK_SHA256"
+          cp "$transport/$TV_APK_FILENAME" "candidate/$TV_APK_FILENAME"
+          test "$(wc -c < "candidate/$TV_APK_FILENAME" | tr -d ' ')" = "$TV_APK_SIZE"
+          printf '%s  %s\n' "$TV_APK_SHA256" "candidate/$TV_APK_FILENAME" | sha256sum -c -
+
+      - name: Set up JDK, Android SDK, and isolated Gradle
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
+      - name: Admit exact official Android TV API 36 image revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libpulse0
+          timeout 180s sdkmanager --list --channel=0 > "$EVIDENCE/sdkmanager-official-metadata.txt"
+          METADATA="$EVIDENCE/sdkmanager-official-metadata.txt" \
+          PACKAGE="$SYSTEM_IMAGE_PACKAGE" REVISION="$SYSTEM_IMAGE_REVISION" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          package = os.environ['PACKAGE']
+          revision = os.environ['REVISION']
+          section = None
+          matches = []
+          for line in Path(os.environ['METADATA']).read_text().splitlines():
+              heading = line.strip().casefold()
+              if heading == 'installed packages:': section = 'installed'; continue
+              if heading == 'available packages:': section = 'available'; continue
+              if heading == 'available updates:': section = None; continue
+              if section and '|' in line:
+                  columns = [column.strip() for column in line.split('|')]
+                  if len(columns) >= 2 and columns[0] == package:
+                      matches.append((section, columns[1]))
+          assert matches == [(matches[0][0], revision)] if len(matches) == 1 else False, matches
+          PY
+          sdkmanager "platform-tools" "emulator" "platforms;android-36" \
+            "build-tools;36.0.0" "$SYSTEM_IMAGE_PACKAGE"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          image_root="$sdk_root/system-images/android-36/android-tv/x86_64"
+          test -f "$image_root/package.xml"
+          test -f "$image_root/source.properties"
+          grep -Eq '^Pkg\.Revision[[:space:]]*=[[:space:]]*4([.]0[.]0)?$' "$image_root/source.properties"
+          sha256sum "$image_root/package.xml" "$image_root/source.properties" \
+            > "$EVIDENCE/system-image-metadata-sha256.txt"
+          {
+            adb version
+            emulator -version
+            ffmpeg -version | head -1
+            ffprobe -version | head -1
+          } > "$EVIDENCE/tool-versions.txt"
+          printf '%s\n' "$sdk_root/build-tools/36.0.0" "$sdk_root/emulator" "$sdk_root/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Run policy tests, generate fixture, and build isolated harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/android_tv_runtime_check.py --self-test
+          python3 scripts/android_tv_runtime_fixture.py self-test
+          node --test scripts/android_tv_runtime_check.test.mjs
+          python3 scripts/android_tv_runtime_fixture.py generate \
+            --output "$RUNNER_TEMP/tv-fixture" \
+            > "$EVIDENCE/fixture-generation-stdout.json"
+          cp "$RUNNER_TEMP/tv-fixture/fixture-generation.json" "$EVIDENCE/fixture-generation.json"
+          gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
+            :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+          HARNESS_APP="scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk"
+          HARNESS_TEST="scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+          test -f "$HARNESS_APP" -a -f "$HARNESS_TEST"
+          sha256sum "$HARNESS_APP" "$HARNESS_TEST" > "$EVIDENCE/instrumentation-apk-sha256.txt"
+          apkanalyzer manifest print "$HARNESS_APP" > "$EVIDENCE/harness-app-manifest.xml"
+          apkanalyzer manifest print "$HARNESS_TEST" > "$EVIDENCE/harness-test-manifest.xml"
+          if grep -Eqi 'INTERNET|BIND_ACCESSIBILITY_SERVICE|MANAGE_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE' \
+            "$EVIDENCE/harness-app-manifest.xml" "$EVIDENCE/harness-test-manifest.xml"; then
+            echo "::error::Test-only instrumentation requested a forbidden permission" >&2
+            exit 1
+          fi
+          echo "HARNESS_APP=$HARNESS_APP" >> "$GITHUB_ENV"
+          echo "HARNESS_TEST=$HARNESS_TEST" >> "$GITHUB_ENV"
+
+      - name: Run one fresh owned Android TV transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          test -r /dev/kvm -a -w /dev/kvm
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-tv-runtime"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME" "$EVIDENCE/run-1"
+          test -z "$(adb devices | awk 'NR>1 && $2=="device" {print $1}')"
+
+          echo no | avdmanager create avd --force --name "$AVD_NAME" \
+            --package "$SYSTEM_IMAGE_PACKAGE" --device tv_1080p
+          fixture_pid=""
+          emulator_pid=""
+          capture_failure() {
+            set +e
+            run_evidence="$EVIDENCE/run-1"
+            screenshot_captured=false
+            logcat_captured=false
+            activity_captured=false
+            mkdir -p "$run_evidence"
+            if [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null)" != device ]; then
+              echo 'captureBeforeCleanup=emulator-unavailable' > "$run_evidence/workflow-failure-receipt.txt"
+              return 0
+            fi
+            timeout 20s adb -s "$EMULATOR_SERIAL" exec-out screencap -p \
+              > "$run_evidence/workflow-failure.png.tmp" && \
+              test -s "$run_evidence/workflow-failure.png.tmp" && \
+              mv "$run_evidence/workflow-failure.png.tmp" "$run_evidence/workflow-failure.png" && \
+              screenshot_captured=true
+            timeout 30s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime \
+              | sed -E -e 's#https?://[^ ]+#<redacted-url>#g' \
+                -e 's#Bearer [A-Za-z0-9._~+/-]+#Bearer <redacted>#g' \
+                -e 's#(Authorization:)[^ ]+#\1<redacted>#g' \
+              > "$run_evidence/workflow-failure-logcat.txt.tmp" && \
+              test -s "$run_evidence/workflow-failure-logcat.txt.tmp" && \
+              mv "$run_evidence/workflow-failure-logcat.txt.tmp" "$run_evidence/workflow-failure-logcat.txt" && \
+              logcat_captured=true
+            timeout 20s adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
+              | sed -E -e 's#https?://[^ ]+#<redacted-url>#g' \
+                -e 's#Bearer [A-Za-z0-9._~+/-]+#Bearer <redacted>#g' \
+              > "$run_evidence/workflow-failure-activity.txt.tmp" && \
+              test -s "$run_evidence/workflow-failure-activity.txt.tmp" && \
+              mv "$run_evidence/workflow-failure-activity.txt.tmp" "$run_evidence/workflow-failure-activity.txt" && \
+              activity_captured=true
+            {
+              echo 'captureBeforeCleanup=true'
+              echo "screenshotCaptured=$screenshot_captured"
+              echo "logcatCaptured=$logcat_captured"
+              echo "activityCaptured=$activity_captured"
+            } > "$run_evidence/workflow-failure-receipt.txt"
+          }
+          cleanup() {
+            set +e
+            if [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null)" = device ]; then
+              timeout 10s adb -s "$EMULATOR_SERIAL" reverse --remove "tcp:$FIXTURE_PORT" || true
+              timeout 10s adb -s "$EMULATOR_SERIAL" emu kill || true
+            fi
+            if [ -n "$fixture_pid" ]; then kill "$fixture_pid" 2>/dev/null || true; fi
+            if [ -n "$emulator_pid" ]; then
+              for _ in $(seq 1 30); do kill -0 "$emulator_pid" 2>/dev/null || break; sleep 1; done
+            fi
+          }
+          finish() {
+            result=$?
+            trap - EXIT
+            if [ "$result" -ne 0 ]; then capture_failure; fi
+            cleanup
+            exit "$result"
+          }
+          trap finish EXIT
+
+          python3 scripts/android_tv_runtime_fixture.py serve \
+            --root "$RUNNER_TEMP/tv-fixture" --port "$FIXTURE_PORT" \
+            --ready-file "$RUNNER_TEMP/tv-fixture-ready.json" \
+            --request-log "$EVIDENCE/run-1/fixture-requests.jsonl" \
+            > "$EVIDENCE/fixture-server.log" 2>&1 &
+          fixture_pid=$!
+          for _ in $(seq 1 30); do test -s "$RUNNER_TEMP/tv-fixture-ready.json" && break; sleep 1; done
+          test -s "$RUNNER_TEMP/tv-fixture-ready.json"
+
+          emulator -avd "$AVD_NAME" -port 5556 -no-window -no-snapshot \
+            -no-snapshot-save -no-boot-anim -gpu swiftshader_indirect \
+            -memory 3072 -cores 2 \
+            > "$EVIDENCE/emulator.log" 2>&1 &
+          emulator_pid=$!
+          timeout 360s adb -s "$EMULATOR_SERIAL" wait-for-device
+          boot_deadline=$((SECONDS + 360))
+          while [ "$(adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != 1 ]; do
+            if [ "$SECONDS" -ge "$boot_deadline" ]; then
+              echo "::error::Android TV emulator did not complete boot within 360 seconds" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')" = 36
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" = x86_64
+          adb -s "$EMULATOR_SERIAL" shell wm size > "$EVIDENCE/device-display.txt"
+          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate > "$EVIDENCE/stock-webview.txt"
+          grep -q 'Current WebView package' "$EVIDENCE/stock-webview.txt"
+          WEBVIEW_RECEIPT="$EVIDENCE/stock-webview.txt" python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          text = Path(os.environ['WEBVIEW_RECEIPT']).read_text()
+          match = re.search(r'Current WebView package \(name, version\): \(([^,]+),\s*([0-9]+)(?:\.[^)]+)?\)', text)
+          assert match, 'stock Android TV WebView provider missing'
+          assert int(match.group(2)) >= 90, match.group(0)
+          PY
+          adb -s "$EMULATOR_SERIAL" shell media volume --stream 3 --set 0 >/dev/null
+          adb -s "$EMULATOR_SERIAL" reverse "tcp:$FIXTURE_PORT" "tcp:$FIXTURE_PORT"
+
+          python3 scripts/android_tv_runtime_check.py \
+            --apk "candidate/$TV_APK_FILENAME" \
+            --apk-sha256 "$TV_APK_SHA256" --apk-size "$TV_APK_SIZE" \
+            --signer-sha256 "$TV_SIGNER_SHA256" --source-revision "$TV_SOURCE_REVISION" \
+            --version-name "$TV_VERSION_NAME" --version-code "$TV_VERSION_CODE" \
+            --serial "$EMULATOR_SERIAL" --harness-app "$HARNESS_APP" \
+            --harness-test "$HARNESS_TEST" --evidence "$EVIDENCE/run-1"
+
+      - name: Upload bounded runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-tv-signed-runtime-evidence
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
