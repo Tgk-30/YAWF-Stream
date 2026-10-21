@@ -9,7 +9,7 @@ on:
         required: true
         default: false
       external_player_fixture:
-        description: Test the unchanged public phone27 remote external-player flow on a fresh API30 emulator
+        description: Test the unchanged public phone27 remote external-player flow on a fresh supported API36 emulator
         type: boolean
         required: true
         default: false
@@ -468,7 +468,7 @@ jobs:
 
   external-player-fixture:
     if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true
-    name: Public phone27 remote external player on fresh API30
+    name: Public phone27 remote external player on fresh API36
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -478,9 +478,9 @@ jobs:
       PRODUCT_SOURCE: 9fc94a237d99b849cfc18a01085bb487915dd978
       PRODUCT_VERSION: 2.3.27
       PRODUCT_VERSION_CODE: "2003027"
-      SYSTEM_IMAGE_PACKAGE: system-images;android-30;google_apis;x86_64
+      SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       EMULATOR_SERIAL: emulator-5554
-      AVD_NAME: yawf-external-phone27-api30
+      AVD_NAME: yawf-external-phone27-api36
     steps:
       - name: Checkout runtime fixture and driver
         uses: actions/checkout@v4
@@ -540,11 +540,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libpulse0 ffmpeg fonts-dejavu-core
           timeout 180s sdkmanager --list --channel=0 > "$EVIDENCE/sdk-metadata.txt"
-          grep -E '^ *system-images;android-30;google_apis;x86_64 *\|' "$EVIDENCE/sdk-metadata.txt"
+          grep -E '^ *system-images;android-36;google_apis;x86_64 *\|' "$EVIDENCE/sdk-metadata.txt"
           sdkmanager platform-tools emulator 'platforms;android-36' 'build-tools;36.0.0' "$SYSTEM_IMAGE_PACKAGE"
           sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           test -x "$sdk/emulator/emulator"
-          image="$sdk/system-images/android-30/google_apis/x86_64"
+          image="$sdk/system-images/android-36/google_apis/x86_64"
           test -f "$image/package.xml"
           test -f "$image/source.properties"
           sha256sum "$image/package.xml" "$image/source.properties" > "$EVIDENCE/image-metadata-sha256.txt"
@@ -659,13 +659,28 @@ jobs:
             sleep 2
           done
           test "$(adb -s "$EMULATOR_SERIAL" emu avd name | tr -d '\r' | head -1)" = "$AVD_NAME"
-          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')" = 30
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')" = 36
           test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" = x86_64
           test "$(adb -s "$EMULATOR_SERIAL" shell getconf PAGE_SIZE | tr -d '\r')" = 4096
           adb -s "$EMULATOR_SERIAL" shell dumpsys account | python3 -c \
             'import sys,re; s=sys.stdin.read(); counts=re.findall(r"Accounts: (\d+)",s); assert counts and all(int(x)==0 for x in counts); print("androidAccountCount=0")' \
             > "$EVIDENCE/no-real-accounts.txt"
           adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate > "$EVIDENCE/stock-webview.txt"
+          python3 - <<'PYENGINE'
+          # BEGIN EXTERNAL_STOCK_WEBVIEW_POLICY
+          import json,os,sys
+          from pathlib import Path
+          sys.path.insert(0,str(Path('scripts').resolve()))
+          from android_phone_runtime_check import parse_webview_provider,validate_webview_provider
+          evidence=Path(os.environ['EVIDENCE'])
+          provider=parse_webview_provider((evidence/'stock-webview.txt').read_text())
+          major=validate_webview_provider(provider,minimum_major=90,expected_package='com.google.android.webview',expected_version=None)
+          (evidence/'stock-webview-admission.json').write_text(json.dumps({'package':provider.package_name,'version':provider.version_name,'major':major,'minimumMajor':90,'stockImageProvider':True,'currentSecurityBrowserProof':False},indent=2)+'\n')
+          # END EXTERNAL_STOCK_WEBVIEW_POLICY
+          PYENGINE
+          provider_apk="$(adb -s "$EMULATOR_SERIAL" shell pm path com.google.android.webview | tr -d '\r' | sed -n 's/^package://p' | head -1)"
+          test -n "$provider_apk"
+          adb -s "$EMULATOR_SERIAL" shell sha256sum "$provider_apk" > "$EVIDENCE/stock-webview-apk-sha256.txt"
           adb -s "$EMULATOR_SERIAL" reverse tcp:43120 tcp:43120
           adb -s "$EMULATOR_SERIAL" install "$PRODUCT_APK" | tee "$EVIDENCE/product-install.txt"
           grep -Eq '^Success\r?$' "$EVIDENCE/product-install.txt"

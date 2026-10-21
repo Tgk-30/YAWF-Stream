@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const workflow = readFileSync(new URL('../.github/workflows/android-current-runtime.yml', import.meta.url), 'utf8');
@@ -10,9 +14,11 @@ const job = workflow.slice(workflow.indexOf('  external-player-fixture:\n'));
 function workflowContract(w, j) {
   assert.match(w, /permissions:\n  contents: read\n  actions: read/);
   assert.match(j, /if: github\.ref_type == 'branch' && inputs\.external_player_fixture == true && inputs\.permission_fixture != true/);
-  assert.match(j, /SYSTEM_IMAGE_PACKAGE: system-images;android-30;google_apis;x86_64/);
+  assert.match(j, /SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64/);
   assert.match(j, /PRODUCT_SHA256: f3e983929db9fb32ed42b9779d94f2f8492c1cf4fae3e0cd29eee91a9492e0eb/);
   assert.match(j, /PRODUCT_SOURCE: 9fc94a237d99b849cfc18a01085bb487915dd978/);
+  assert.match(j, /validate_webview_provider\(provider,minimum_major=90,expected_package='com\.google\.android\.webview',expected_version=None\)/);
+  assert.ok(j.indexOf('major=validate_webview_provider') < j.indexOf('adb -s "$EMULATOR_SERIAL" install "$PRODUCT_APK"'));
   assert.match(j, /--certificate-pin public-phone-source\/web\/src-tauri\/SIGNING_CERT_SHA256/);
   assert.match(j, /test "\$installed_sha" = "\$PRODUCT_SHA256"/);
   assert.match(j, /decodedPlaybackClaimed'\] is False/);
@@ -65,6 +71,7 @@ test('driver uses one origin consent and leaves decoding to runtime review', () 
 
 for (const [name, mutate, contract, original] of [
   ['APK hash', s => s.replace('PRODUCT_SHA256: f3e983', 'PRODUCT_SHA256: a3e983'), s => workflowContract(workflow, s), job],
+  ['engine minimum', s => s.replace('minimum_major=90', 'minimum_major=0'), s => workflowContract(workflow, s), job],
   ['installed bytes', s => s.replace('test "$installed_sha" = "$PRODUCT_SHA256"', ':'), s => workflowContract(workflow, s), job],
   ['fourth third-party install', s => s + '\n          adb -s "$EMULATOR_SERIAL" install "third-party.apk"\n', s => workflowContract(workflow, s), job],
   ['alternate package install', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell cmd package install third-party.apk\n', s => workflowContract(workflow, s), job],
@@ -84,3 +91,24 @@ for (const [name, mutate, contract, original] of [
     assert.throws(() => contract(changed));
   });
 }
+
+function enginePolicy(code, providerDump) {
+  const evidence = mkdtempSync(join(tmpdir(), 'yawf-external-engine-'));
+  writeFileSync(join(evidence, 'stock-webview.txt'), providerDump);
+  return spawnSync('python3', ['-c', code], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8',
+    env: {...process.env, EVIDENCE: evidence},
+  });
+}
+test('executes the actual minimum-engine admission before native UI', () => {
+  const code = job.split('# BEGIN EXTERNAL_STOCK_WEBVIEW_POLICY\n')[1].split('# END EXTERNAL_STOCK_WEBVIEW_POLICY')[0]
+    .split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
+  const dump = version => `Current WebView package (name, version): (com.google.android.webview, ${version})`;
+  assert.equal(enginePolicy(code, dump('133.0.6943.49')).status, 0);
+  assert.notEqual(enginePolicy(code, dump('83.0.4103.106')).status, 0);
+  assert.notEqual(enginePolicy(code, dump('133.0.6943.49').replace('com.google.android.webview','unexpected.webview')).status, 0);
+  assert.notEqual(enginePolicy(code, 'provider unavailable').status, 0);
+  const mutant = code.replace('minimum_major=90','minimum_major=0');
+  assert.notEqual(mutant, code);
+  assert.equal(enginePolicy(mutant, dump('83.0.4103.106')).status, 0, 'Floor-removal mutant must visibly admit the rejected engine');
+});
