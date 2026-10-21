@@ -611,6 +611,12 @@ jobs:
             trap - EXIT
             set +e
             if [ -n "$emulator_pid" ]; then
+              if [ "$status" != 0 ] && [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" emu avd name 2>/dev/null | tr -d '\r' | head -1)" = "$AVD_NAME" ]; then
+                timeout 15s adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$EVIDENCE/workflow-failure.png"
+                timeout 20s adb -s "$EMULATOR_SERIAL" shell uiautomator dump /data/local/tmp/yawf-external-failure.xml > "$EVIDENCE/workflow-failure-dump.txt" 2>&1
+                timeout 10s adb -s "$EMULATOR_SERIAL" exec-out cat /data/local/tmp/yawf-external-failure.xml \
+                  | sed -E 's#https?://[^[:space:]"<>]+#[redacted-url]#g' > "$EVIDENCE/workflow-failure.xml"
+              fi
               timeout 10s adb -s "$EMULATOR_SERIAL" reverse --remove tcp:43120 >/dev/null 2>&1
               timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
               kill "$emulator_pid" 2>/dev/null
@@ -714,15 +720,20 @@ jobs:
           a=['adb','-s',os.environ['EMULATOR_SERIAL']]
           base=['exec-out','run-as','com.yawf.runtimeinstrumentation']
           folder='files/persistent-external-player-flow'
-          names=subprocess.check_output(a+base+['ls',folder],text=True).splitlines()
+          names=subprocess.check_output(a+base+['ls','-1',folder],text=True).splitlines()
           assert 0<len(names)<=64
           allowed=re.compile(r'(?:[0-9]{2}-[a-z0-9-]+\.(?:png|xml)|actions\.txt|instrumentation-external-player-receipt\.json)')
           out=Path(os.environ['EVIDENCE'])/'ui'
+          (out/'collector-observation.json').write_text(json.dumps({'filenames':names},indent=2)+'\n')
+          unexpected=[]
           for n in names:
-              assert allowed.fullmatch(n), 'Unexpected driver evidence filename'
+              if not allowed.fullmatch(n):
+                  unexpected.append(n)
+                  continue
               data=subprocess.check_output(a+base+['cat',folder+'/'+n])
               assert 0<len(data)<=8*1024*1024, 'Driver evidence size outside bound'
               (out/n).write_bytes(data)
+          assert not unexpected, 'Unexpected driver evidence filename; known captures retained, see bounded collector observation'
           r=json.loads((out/'instrumentation-external-player-receipt.json').read_text())
           assert r['outcome']=='passed' and r['checks']['openPlayerClicks']==1
           assert r['decodedPlaybackClaimed'] is False and r['decodeClaimRequiresManualScreenshotAndLiveReceiptReview'] is True
