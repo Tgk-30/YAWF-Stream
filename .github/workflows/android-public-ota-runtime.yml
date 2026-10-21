@@ -232,6 +232,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile scripts/android_public_ota_runtime_check.py
+          python3 scripts/android_diagnostics_bounded.test.py 2>&1 \
+            | tee "$EVIDENCE/diagnostic-retention-tests.txt"
           python3 scripts/android_public_ota_runtime_check.py --self-test \
             | tee "$EVIDENCE/host-self-tests.txt"
           node --test scripts/android_public_ota_runtime_check.test.mjs scripts/android_legacy_reconsent_policy.test.mjs \

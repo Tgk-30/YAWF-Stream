@@ -52,6 +52,13 @@ TARGET_TAG = "android-v2.3.26"
 TARGET_APK_NAME = "YAWF.Stream_Android_2.3.26.apk"
 TARGET_VERIFICATION_NAME = "Android_2.3.26_verification.json"
 URL_RE = re.compile(r"https?://[^\s\]\[\"'<>]+", re.IGNORECASE)
+MAX_HOST_EVIDENCE_BYTES = 2 * 1024 * 1024
+BOUNDED_DIAGNOSTIC_STDOUT_NAMES = frozenset(
+    {"logcat.txt", "dropbox-anr.txt", "dropbox-crash.txt"}
+)
+DIAGNOSTIC_TRUNCATION_MARKER = (
+    "\n...[middle of redacted diagnostic omitted by UTF-8 byte bound]...\n"
+)
 SAFE_EVIDENCE_NAME = re.compile(
     r"(?:0[1-9]|[12][0-9]|3[0-9]|40)-[a-z0-9-]+\.(?:png|xml)|"
     r"actions\.txt|instrumentation-receipt\.json"
@@ -121,6 +128,54 @@ def sha256_file(path: Path) -> str:
 
 def redact(value: str) -> str:
     return URL_RE.sub("<redacted-url>", value).replace("\r", "")
+
+
+def bounded_diagnostic_retention(
+    value: str, limit: int = MAX_HOST_EVIDENCE_BYTES
+) -> tuple[str, dict[str, object]]:
+    """Redact, then retain UTF-8-safe head and tail diagnostic evidence."""
+    raw_bytes = value.encode("utf-8")
+    redacted_bytes = redact(value).encode("utf-8")
+    marker_bytes = b""
+    if len(redacted_bytes) <= limit:
+        retained_bytes = redacted_bytes
+        retained_source_bytes = len(redacted_bytes)
+        strategy = "full-redacted-utf8"
+        truncated = False
+    else:
+        marker_bytes = DIAGNOSTIC_TRUNCATION_MARKER.encode("utf-8")
+        if len(marker_bytes) >= limit:
+            raise RuntimeGateError("Diagnostic byte bound is too small")
+        source_budget = limit - len(marker_bytes)
+        head_budget = source_budget // 2
+        tail_budget = source_budget - head_budget
+        head = redacted_bytes[:head_budget].decode("utf-8", "ignore").encode("utf-8")
+        tail = redacted_bytes[-tail_budget:].decode("utf-8", "ignore").encode("utf-8")
+        retained_bytes = head + marker_bytes + tail
+        retained_source_bytes = len(head) + len(tail)
+        strategy = "utf8-safe-head-tail-after-redaction"
+        truncated = True
+
+    receipt: dict[str, object] = {
+        "rawOriginalUtf8Bytes": len(raw_bytes),
+        "rawOriginalSha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "redactedUtf8Bytes": len(redacted_bytes),
+        "retainedSourceUtf8Bytes": retained_source_bytes,
+        "markerUtf8Bytes": len(marker_bytes),
+        "storedUtf8Bytes": len(retained_bytes),
+        "omittedRedactedUtf8Bytes": len(redacted_bytes) - retained_source_bytes,
+        "truncated": truncated,
+        "strategy": strategy,
+    }
+    if (
+        len(retained_bytes) > limit
+        or receipt["retainedSourceUtf8Bytes"] + receipt["markerUtf8Bytes"]
+        != receipt["storedUtf8Bytes"]
+        or receipt["retainedSourceUtf8Bytes"] + receipt["omittedRedactedUtf8Bytes"]
+        != receipt["redactedUtf8Bytes"]
+    ):
+        raise RuntimeGateError("Diagnostic retention invariant failed")
+    return retained_bytes.decode("utf-8", "strict"), receipt
 
 
 def validate_file(path: Path, expected_hash: str, expected_size: int, label: str) -> None:
@@ -527,8 +582,24 @@ class OtaRuntimeDriver:
     def record_adb_observation(
         self, name: str, result: subprocess.CompletedProcess[str]
     ) -> None:
-        self.write(name, result.stdout)
+        if Path(name).name != name:
+            raise RuntimeGateError("Unsafe host evidence write")
         stem = name.removesuffix(".txt")
+        if name in BOUNDED_DIAGNOSTIC_STDOUT_NAMES:
+            retained, receipt = bounded_diagnostic_retention(result.stdout)
+            retained_bytes = retained.encode("utf-8")
+            if (
+                len(retained_bytes) > MAX_HOST_EVIDENCE_BYTES
+                or len(retained_bytes) != receipt["storedUtf8Bytes"]
+            ):
+                raise RuntimeGateError("Diagnostic retention invariant failed")
+            (self.evidence / name).write_bytes(retained_bytes)
+            self.write(
+                f"{stem}-retention.json",
+                json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+            )
+        else:
+            self.write(name, result.stdout)
         self.write(
             f"{stem}-status.txt",
             f"returnCode={result.returncode}\nstderr:\n{result.stderr}",
