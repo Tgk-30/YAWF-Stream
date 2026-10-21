@@ -14,6 +14,10 @@ const javaPath = join(
   scripts,
   "android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeTvFlowTest.java",
 );
+const manifestPath = join(
+  scripts,
+  "android-runtime-instrumentation/app/src/main/AndroidManifest.xml",
+);
 const workflowPath = join(root, ".github/workflows/android-tv-runtime.yml");
 const python = process.env.PYTHON || "python3";
 
@@ -46,6 +50,14 @@ function assertSetupEmulatorPath(source) {
 function assertScopedVolumeCommand(source) {
   assert.ok(source.includes('adb -s "$EMULATOR_SERIAL" shell cmd media_session volume --stream 3 --set 0'));
   assert.doesNotMatch(source, /shell\s+media\s+volume/);
+}
+
+function assertHarnessVisibilityPolicy(source) {
+  const queries = source.match(/<queries>[\s\S]*?<\/queries>/g) ?? [];
+  assert.equal(queries.length, 1, "harness must have one package visibility block");
+  assert.match(queries[0], /<package\s+android:name="com\.yawf\.stream\.tv"\s*\/>/);
+  assert.equal((queries[0].match(/<package\b/g) ?? []).length, 1);
+  assert.doesNotMatch(source, /QUERY_ALL_PACKAGES|<uses-permission\b/);
 }
 
 function assertWorkflowPolicy(source) {
@@ -83,6 +95,7 @@ function assertWorkflowPolicy(source) {
   const finish = source.slice(source.indexOf("finish() {"), source.indexOf("trap finish EXIT"));
   assert.ok(finish.indexOf("capture_failure") < finish.indexOf("cleanup"));
   assert.match(source, /captureBeforeCleanup=true/);
+  assert.match(source, /assert packages == \["com\.yawf\.stream\.tv"\], packages/);
 }
 
 function javaMethod(source, name) {
@@ -202,6 +215,17 @@ test("TV muting uses the media_session service rather than the absent legacy she
   const mutant = source.replace('shell cmd media_session volume', 'shell media volume');
   assert.notEqual(mutant, source);
   assert.throws(() => assertScopedVolumeCommand(mutant));
+});
+
+test("TV harness can discover only the exact signed product package", () => {
+  const source = read(manifestPath);
+  assertHarnessVisibilityPolicy(source);
+  const missing = source.replace(/\s*<queries>[\s\S]*?<\/queries>\s*/, "\n");
+  assert.notEqual(missing, source);
+  assert.throws(() => assertHarnessVisibilityPolicy(missing));
+  const wrongPackage = source.replace("com.yawf.stream.tv", "com.yawf.stream.wrong");
+  assert.notEqual(wrongPackage, source);
+  assert.throws(() => assertHarnessVisibilityPolicy(wrongPackage));
 });
 
 test("position observers cannot toggle or repair playback", () => {
