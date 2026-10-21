@@ -69,6 +69,22 @@ MUTANTS = {
         '"android:id/switch_widget",',
         '"android:id/button1",',
     ),
+    "semanticSwitchActual": (
+        'public static final String UNKNOWN_SOURCE_TOGGLE_CLASS = "android.view.View";',
+        'public static final String UNKNOWN_SOURCE_TOGGLE_CLASS = "android.widget.Switch";',
+    ),
+    "semanticSwitchIdentity": (
+        "return SETTINGS_PACKAGE.equals(togglePackage)\n"
+        "                && UNKNOWN_SOURCE_TOGGLE_CLASS.equals(toggleClass)",
+        "return UNKNOWN_SOURCE_TOGGLE_CLASS.equals(toggleClass)",
+    ),
+    "semanticSwitchState": (
+        "&& toggleEnabled\n"
+        "                && toggleClickable\n"
+        "                && toggleCheckable",
+        "&& toggleEnabled\n"
+        "                && toggleCheckable",
+    ),
     "cleanupSequence": (
         "return installerSuccessObserved && installerOpenObserved && updatedProductObserved;",
         "return installerOpenObserved && updatedProductObserved;",

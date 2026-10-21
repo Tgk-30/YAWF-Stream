@@ -21,6 +21,9 @@ public final class OtaFlowPolicyAssertions {
         TESTS.put("settledAbsence", OtaFlowPolicyAssertions::settledAbsence);
         TESTS.put("systemPackages", OtaFlowPolicyAssertions::systemPackages);
         TESTS.put("switchResources", OtaFlowPolicyAssertions::switchResources);
+        TESTS.put("semanticSwitchActual", OtaFlowPolicyAssertions::semanticSwitchActual);
+        TESTS.put("semanticSwitchIdentity", OtaFlowPolicyAssertions::semanticSwitchIdentity);
+        TESTS.put("semanticSwitchState", OtaFlowPolicyAssertions::semanticSwitchState);
         TESTS.put("cleanupSequence", OtaFlowPolicyAssertions::cleanupSequence);
         TESTS.put("exactDialogs", OtaFlowPolicyAssertions::exactDialogs);
     }
@@ -193,6 +196,113 @@ public final class OtaFlowPolicyAssertions {
                 "Settings switch resource must pass");
         check(!OtaFlowPolicy.isUnknownSourceSwitchResource("android:id/button1"),
                 "generic button must fail");
+    }
+
+    private static void semanticSwitchActual() {
+        check(semanticSwitch(null, true, true, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "actual API 36 direct-parent semantic toggle must pass");
+        check(semanticSwitch("", true, true, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "empty no-resource representation must pass");
+    }
+
+    private static void semanticSwitchIdentity() {
+        check(!OtaFlowPolicy.isUnknownSourceSemanticToggle(
+                        "other.settings", OtaFlowPolicy.UNKNOWN_SOURCE_TOGGLE_CLASS, null,
+                        true, true, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "wrong toggle package must fail");
+        check(!OtaFlowPolicy.isUnknownSourceSemanticToggle(
+                        OtaFlowPolicy.SETTINGS_PACKAGE, "android.widget.Switch", null,
+                        true, true, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "wrong toggle class must fail");
+        check(!semanticSwitch("android:id/unrelated", true, true, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "unreviewed resource-bearing generic view must fail");
+        check(!semanticSwitch(null, true, true, true,
+                        "other.settings",
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "wrong label package must fail");
+        check(!semanticSwitch(null, true, true, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        "android.view.View",
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "wrong label class must fail");
+        check(!semanticSwitch(null, true, true, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        "Allow all unknown apps",
+                        true),
+                "nearby generic label must fail");
+    }
+
+    private static void semanticSwitchState() {
+        check(!semanticSwitch(null, false, true, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "disabled toggle must fail");
+        check(!semanticSwitch(null, true, false, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "nonclickable toggle must fail");
+        check(!semanticSwitch(null, true, true, false,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        true),
+                "noncheckable toggle must fail");
+        check(!semanticSwitch(null, true, true, true,
+                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        false),
+                "disabled exact label must fail");
+    }
+
+    private static boolean semanticSwitch(
+            String resource,
+            boolean enabled,
+            boolean clickable,
+            boolean checkable,
+            String labelPackage,
+            String labelClass,
+            String labelText,
+            boolean labelEnabled) {
+        return OtaFlowPolicy.isUnknownSourceSemanticToggle(
+                OtaFlowPolicy.SETTINGS_PACKAGE,
+                OtaFlowPolicy.UNKNOWN_SOURCE_TOGGLE_CLASS,
+                resource,
+                enabled,
+                clickable,
+                checkable,
+                labelPackage,
+                labelClass,
+                labelText,
+                labelEnabled);
     }
 
     private static void cleanupSequence() {

@@ -19,6 +19,10 @@ public final class OtaFlowPolicy {
     public static final int WELCOME_STEPS = 7;
     public static final int SETTLED_ABSENT_SAMPLES = 3;
     public static final String WEB_BUTTON_CLASS = "android.widget.Button";
+    public static final String SETTINGS_PACKAGE = "com.android.settings";
+    public static final String UNKNOWN_SOURCE_LABEL = "Allow from this source";
+    public static final String UNKNOWN_SOURCE_LABEL_CLASS = "android.widget.TextView";
+    public static final String UNKNOWN_SOURCE_TOGGLE_CLASS = "android.view.View";
     public static final Pattern BINDING_TERMS_PATTERN = Pattern.compile(
             "(?is).*\\b(?:terms of service|license agreement|user agreement|binding terms)\\b.*");
 
@@ -44,7 +48,7 @@ public final class OtaFlowPolicy {
     public static final NativeButtonSpec OK =
             new NativeButtonSpec(PRODUCT_PACKAGE, "button1", "OK");
 
-    private static final Set<String> SETTINGS_PACKAGES = Set.of("com.android.settings");
+    private static final Set<String> SETTINGS_PACKAGES = Set.of(SETTINGS_PACKAGE);
     private static final Set<String> INSTALLER_PACKAGES = Set.of(
             "com.google.android.packageinstaller",
             "com.android.packageinstaller",
@@ -150,6 +154,29 @@ public final class OtaFlowPolicy {
 
     public static boolean isUnknownSourceSwitchResource(String resourceId) {
         return UNKNOWN_SOURCE_SWITCH_RESOURCES.contains(resourceId);
+    }
+
+    public static boolean isUnknownSourceSemanticToggle(
+            String togglePackage,
+            String toggleClass,
+            String toggleResource,
+            boolean toggleEnabled,
+            boolean toggleClickable,
+            boolean toggleCheckable,
+            String labelPackage,
+            String labelClass,
+            String labelText,
+            boolean labelEnabled) {
+        return SETTINGS_PACKAGE.equals(togglePackage)
+                && UNKNOWN_SOURCE_TOGGLE_CLASS.equals(toggleClass)
+                && (toggleResource == null || toggleResource.isEmpty())
+                && toggleEnabled
+                && toggleClickable
+                && toggleCheckable
+                && SETTINGS_PACKAGE.equals(labelPackage)
+                && UNKNOWN_SOURCE_LABEL_CLASS.equals(labelClass)
+                && UNKNOWN_SOURCE_LABEL.equals(labelText)
+                && labelEnabled;
     }
 
     public static boolean cleanupMayOpenSettings(

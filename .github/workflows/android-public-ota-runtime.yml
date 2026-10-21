@@ -223,6 +223,8 @@ jobs:
             | tee "$EVIDENCE/host-self-tests.txt"
           node --test scripts/android_public_ota_runtime_check.test.mjs \
             | tee "$EVIDENCE/workflow-contract-tests.txt"
+          python3 scripts/android-runtime-instrumentation/unknown_source_permission_contract_test.py 2>&1 \
+            | tee "$EVIDENCE/unknown-source-permission-contract.txt"
           python3 scripts/android-runtime-instrumentation/ota_policy_mutation_check.py \
             | tee "$EVIDENCE/ota-policy-mutations.json"
           gradle \

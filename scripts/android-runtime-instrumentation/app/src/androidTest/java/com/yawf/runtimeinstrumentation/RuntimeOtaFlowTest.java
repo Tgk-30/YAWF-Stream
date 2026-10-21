@@ -598,7 +598,7 @@ public final class RuntimeOtaFlowTest {
         capture("unknown-source-before");
         assertNoBindingTerms();
         toggle.click();
-        waitForCheckedState(By.res(toggle.getResourceName()), true, "unknown-source switch on");
+        waitForUnknownSourceSwitchState(true, "unknown-source switch on");
         permissionEnabledByTest = true;
         capture("unknown-source-after");
         device.pressBack();
@@ -616,6 +616,43 @@ public final class RuntimeOtaFlowTest {
                 return object;
             }
         }
+        List<UiObject2> labels = device.findObjects(
+                By.text(OtaFlowPolicy.UNKNOWN_SOURCE_LABEL)
+                        .pkg(OtaFlowPolicy.SETTINGS_PACKAGE)
+                        .clazz(OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS)
+                        .enabled(true));
+        if (labels.size() != 1) {
+            return null;
+        }
+        UiObject2 label = labels.get(0);
+        UiObject2 toggle = label.getParent();
+        if (toggle != null
+                && OtaFlowPolicy.isUnknownSourceSemanticToggle(
+                        toggle.getApplicationPackage(),
+                        toggle.getClassName(),
+                        toggle.getResourceName(),
+                        toggle.isEnabled(),
+                        toggle.isClickable(),
+                        toggle.isCheckable(),
+                        label.getApplicationPackage(),
+                        label.getClassName(),
+                        label.getText(),
+                        label.isEnabled())) {
+            return toggle;
+        }
+        return null;
+    }
+
+    private UiObject2 waitForUnknownSourceSwitchState(boolean expected, String label) {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            UiObject2 toggle = findUnknownSourceSwitch();
+            if (toggle != null && toggle.isChecked() == expected) {
+                return toggle;
+            }
+            SystemClock.sleep(250);
+        }
+        fail("Timed out waiting for " + label);
         return null;
     }
 
@@ -691,7 +728,7 @@ public final class RuntimeOtaFlowTest {
         if (toggle.isChecked()) {
             assertNoBindingTerms();
             toggle.click();
-            waitForCheckedState(By.res(toggle.getResourceName()), false, "unknown-source switch off");
+            waitForUnknownSourceSwitchState(false, "unknown-source switch off");
         }
         capture("permission-cleanup-off");
         permissionCleanupObserved = true;

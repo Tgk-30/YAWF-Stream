@@ -266,6 +266,8 @@ jobs:
           set -euo pipefail
           python3 scripts/android-runtime-instrumentation/policy_mutation_check.py \
             | tee "$EVIDENCE/instrumentation-policy-mutations.json"
+          python3 scripts/android-runtime-instrumentation/unknown_source_permission_contract_test.py 2>&1 \
+            | tee "$EVIDENCE/unknown-source-permission-contract.txt"
           python3 scripts/android-runtime-instrumentation/ota_policy_mutation_check.py \
             | tee "$EVIDENCE/ota-policy-mutations.json"
           gradle \
