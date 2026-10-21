@@ -1,0 +1,398 @@
+name: Android permission-return fixture
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-permission-return-fixture-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  api36-permission-return:
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: positive
+            app_task: :app:assembleDebug
+            test_task: :app:assembleDebugAndroidTest
+            app_apk: app/build/outputs/apk/debug/app-debug.apk
+            test_apk: app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          - mode: return-resume-omitted
+            app_task: :app:assembleNegativeControl
+            test_task: :app:assembleNegativeControlAndroidTest
+            app_apk: app/build/outputs/apk/negativeControl/app-negativeControl.apk
+            test_apk: app/build/outputs/apk/androidTest/negativeControl/app-negativeControl-androidTest.apk
+          - mode: seeded-success
+            app_task: :success-fixture:assembleBaselineDebug
+            test_task: :success-driver:assembleDebugAndroidTest
+            app_apk: success-fixture/build/outputs/apk/baseline/debug/success-fixture-baseline-debug.apk
+            test_apk: success-driver/build/outputs/apk/androidTest/debug/success-driver-debug-androidTest.apk
+    env:
+      CANDIDATE_SOURCE_REVISION: "9fc94a237d99b849cfc18a01085bb487915dd978"
+      CANDIDATE_UPDATER_SHA256: bf42027e5f1aa0715d51ef68b87f4c6c209173465613896357071eebc599b565
+      SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
+      AVD_NAME: yawf-permission-return-api36-${{ matrix.mode }}
+      EMULATOR_SERIAL: emulator-5554
+      EVIDENCE: android-permission-return-fixture-evidence-${{ matrix.mode }}
+      FIXTURE_PROJECT: scripts/android-permission-return-fixture
+
+    steps:
+      - name: Checkout fixture controls
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SOURCE_REVISION }}
+          path: candidate-source
+          persist-credentials: false
+
+      - name: Bind the exact reviewed updater source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          [[ "$CANDIDATE_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          actual="$(git -C candidate-source rev-parse HEAD)"
+          test "$actual" = "$CANDIDATE_SOURCE_REVISION"
+          printf '%s  %s\n' \
+            "$CANDIDATE_UPDATER_SHA256" \
+            candidate-source/scripts/android/YawfAndroidUpdater.kt \
+            | sha256sum -c -
+          CANDIDATE_UPDATER_SOURCE="$(pwd)/candidate-source/scripts/android/YawfAndroidUpdater.kt" \
+            node --test "$FIXTURE_PROJECT/source_contract.test.mjs" \
+            | tee "$EVIDENCE/source-contract-tests.txt"
+          node "$FIXTURE_PROJECT/prepare_fixture_source.mjs" \
+            --checkout candidate-source \
+            --revision "$CANDIDATE_SOURCE_REVISION" \
+            --receipt "$EVIDENCE/source-binding.json"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK command line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Set up pinned Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
+      - name: Install the official API 36 image and build the isolated fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse0
+          sdkmanager \
+            "platform-tools" \
+            "emulator" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "$SYSTEM_IMAGE_PACKAGE"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          build_tools="$sdk_root/build-tools/36.0.0"
+          {
+            echo "$build_tools"
+            echo "$sdk_root/emulator"
+            echo "$sdk_root/platform-tools"
+          } >> "$GITHUB_PATH"
+          extra_args=()
+          if [ "${{ matrix.mode }}" = seeded-success ]; then
+            gradle --project-dir "$FIXTURE_PROJECT" --no-daemon --max-workers=2 \
+              :success-fixture:assembleTargetDebug
+            target="$FIXTURE_PROJECT/success-fixture/build/outputs/apk/target/debug/success-fixture-target-debug.apk"
+            test "$(apkanalyzer manifest application-id "$target")" = com.yawf.permissionreturnfixture
+            test "$(apkanalyzer manifest version-name "$target")" = 90.0.2
+            test "$(apkanalyzer manifest version-code "$target")" = 90000002
+            apkanalyzer manifest print "$target" > "$EVIDENCE/target-manifest.xml"
+            if grep -Fq 'android.permission.INTERNET' "$EVIDENCE/target-manifest.xml"; then
+              echo "::error::The fixture target must not have network permission" >&2
+              exit 1
+            fi
+            unzip -Z1 "$target" > "$EVIDENCE/target-archive-paths.txt"
+            if grep -Fxq 'assets/success-target.apk' "$EVIDENCE/target-archive-paths.txt"; then
+              echo "::error::The target recursively includes its baseline asset" >&2
+              exit 1
+            fi
+            target_sha="$(sha256sum "$target" | awk '{print $1}')"
+            target_size="$(stat -c %s "$target")"
+            node "$FIXTURE_PROJECT/stage_success_target.mjs" \
+              --target "$target" --sha256 "$target_sha" --size "$target_size" \
+              --receipt "$EVIDENCE/success-target-binding.json"
+            "$build_tools/apksigner" verify --print-certs "$target" > "$EVIDENCE/target-certificate.txt"
+            extra_args+=("-PsuccessTargetSha256=$target_sha" "-PsuccessTargetSize=$target_size" :success-driver:assembleDebug)
+            {
+              echo "TARGET_APK=$target"
+              echo "TARGET_SHA256=$target_sha"
+              echo "TARGET_SIZE=$target_size"
+            } >> "$GITHUB_ENV"
+          fi
+          gradle \
+            --project-dir "$FIXTURE_PROJECT" \
+            --no-daemon \
+            --max-workers=2 \
+            "${extra_args[@]}" \
+            "${{ matrix.app_task }}" \
+            "${{ matrix.test_task }}"
+          fixture_apk="$FIXTURE_PROJECT/${{ matrix.app_apk }}"
+          test_apk="$FIXTURE_PROJECT/${{ matrix.test_apk }}"
+          test -f "$fixture_apk"
+          test -f "$test_apk"
+          sha256sum "$fixture_apk" "$test_apk" > "$EVIDENCE/fixture-apk-sha256.txt"
+          test "$(apkanalyzer manifest application-id "$fixture_apk")" = "com.yawf.permissionreturnfixture"
+          apkanalyzer manifest print "$fixture_apk" > "$EVIDENCE/fixture-manifest.xml"
+          apkanalyzer manifest print "$test_apk" > "$EVIDENCE/test-manifest.xml"
+          grep -F 'android.permission.REQUEST_INSTALL_PACKAGES' "$EVIDENCE/fixture-manifest.xml"
+          if grep -Fq 'android.permission.INTERNET' "$EVIDENCE/fixture-manifest.xml"; then
+            echo "::error::The fixture must not have network permission" >&2
+            exit 1
+          fi
+          "$build_tools/apksigner" verify --print-certs "$fixture_apk" > "$EVIDENCE/baseline-certificate.txt"
+          if [ "${{ matrix.mode }}" = seeded-success ]; then
+            test "$(apkanalyzer manifest version-name "$fixture_apk")" = 90.0.1
+            test "$(apkanalyzer manifest version-code "$fixture_apk")" = 90000001
+            target_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/target-certificate.txt")"
+            baseline_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/baseline-certificate.txt")"
+            [[ "$target_cert" =~ ^[0-9a-f]{64}$ ]]
+            test "$baseline_cert" = "$target_cert"
+            host="$FIXTURE_PROJECT/success-driver/build/outputs/apk/debug/success-driver-debug.apk"
+            test "$(apkanalyzer manifest application-id "$host")" = com.yawf.permissionreturndriver
+            apkanalyzer manifest print "$host" > "$EVIDENCE/driver-manifest.xml"
+            if grep -Eq 'android.permission.(INTERNET|REQUEST_INSTALL_PACKAGES)' "$EVIDENCE/driver-manifest.xml"; then
+              echo "::error::The driver must not have network or package-install permission" >&2
+              exit 1
+            fi
+            "$build_tools/apksigner" verify "$host"
+            {
+              echo "HOST_APK=$host"
+              echo 'EVIDENCE_PACKAGE=com.yawf.permissionreturndriver'
+              echo 'EVIDENCE_SUBDIR=permission-return-success-evidence'
+              echo 'TEST_COMPONENT=com.yawf.permissionreturndriver.test/androidx.test.runner.AndroidJUnitRunner'
+              echo 'TEST_CLASS=com.yawf.permissionreturndriver.SuccessPermissionReturnFlowTest'
+            } >> "$GITHUB_ENV"
+          else
+            {
+              echo 'EVIDENCE_PACKAGE=com.yawf.permissionreturnfixture'
+              echo 'EVIDENCE_SUBDIR=permission-return-evidence'
+              echo 'TEST_COMPONENT=com.yawf.permissionreturnfixture.test/androidx.test.runner.AndroidJUnitRunner'
+              echo 'TEST_CLASS=com.yawf.permissionreturnfixture.PermissionReturnFlowTest'
+            } >> "$GITHUB_ENV"
+          fi
+          "$build_tools/apksigner" verify "$test_apk"
+          echo "FIXTURE_APK=$fixture_apk" >> "$GITHUB_ENV"
+          echo "TEST_APK=$test_apk" >> "$GITHUB_ENV"
+
+      - name: Run one fresh API 36 permission-return transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          export ANDROID_USER_HOME
+          ANDROID_USER_HOME="$(mktemp -d "$RUNNER_TEMP/yawf-permission-return.XXXXXX")"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME" "$EVIDENCE/run-1"
+          run_evidence="$EVIDENCE/run-1"
+          emulator_pid=""
+
+          collect_failure() {
+            set +e
+            timeout 15s adb -s "$EMULATOR_SERIAL" exec-out screencap -p \
+              > "$run_evidence/workflow-failure.png" || true
+            timeout 15s adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
+              > "$run_evidence/workflow-failure-activity.txt" || true
+            timeout 15s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime -T 5m \
+              | tail -n 5000 > "$run_evidence/workflow-failure-logcat.txt" || true
+          }
+          stop_owned_emulator() {
+            set +e
+            if [ -n "$emulator_pid" ]; then
+              timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1 || true
+              wait "$emulator_pid" 2>/dev/null || true
+            fi
+          }
+          on_exit() {
+            status=$?
+            if [ "$status" -ne 0 ]; then collect_failure; fi
+            stop_owned_emulator
+            exit "$status"
+          }
+          trap on_exit EXIT
+
+          if adb devices | awk 'NR > 1 && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::An Android device was already attached" >&2
+            exit 1
+          fi
+          printf 'no\n' | avdmanager create avd \
+            --name "$AVD_NAME" \
+            --package "$SYSTEM_IMAGE_PACKAGE" \
+            --device pixel \
+            --path "$ANDROID_AVD_HOME/$AVD_NAME"
+          nohup emulator \
+            -avd "$AVD_NAME" \
+            -port 5554 \
+            -accel on \
+            -gpu swiftshader_indirect \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -no-snapshot \
+            -camera-back none \
+            -camera-front none \
+            -cores 2 \
+            -memory 2048 \
+            > "$run_evidence/emulator.log" 2>&1 &
+          emulator_pid=$!
+
+          deadline=$((SECONDS + 300))
+          until [ "$(adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null || true)" = "device" ] && \
+            [ "$(adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::Fresh API 36 emulator did not boot" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')" = "36"
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" = "x86_64"
+          if adb -s "$EMULATOR_SERIAL" shell pm path com.yawf.permissionreturnfixture | grep -Fq 'package:'; then
+            echo "::error::Fresh emulator already contains the fixture" >&2
+            exit 1
+          fi
+          adb -s "$EMULATOR_SERIAL" install --no-streaming "$FIXTURE_APK" \
+            | tee "$run_evidence/fixture-install.txt"
+          if [ "${{ matrix.mode }}" = seeded-success ]; then
+            adb -s "$EMULATOR_SERIAL" install --no-streaming "$HOST_APK" \
+              | tee "$run_evidence/driver-install.txt"
+            grep -Eq '^Success\r?$' "$run_evidence/driver-install.txt"
+          fi
+          adb -s "$EMULATOR_SERIAL" install --no-streaming -t "$TEST_APK" \
+            | tee "$run_evidence/test-install.txt"
+          grep -Eq '^Success\r?$' "$run_evidence/fixture-install.txt"
+          grep -Eq '^Success\r?$' "$run_evidence/test-install.txt"
+
+          set +e
+          timeout 180s adb -s "$EMULATOR_SERIAL" shell am instrument -w -r \
+            -e class "$TEST_CLASS" "$TEST_COMPONENT" \
+            | tee "$run_evidence/instrumentation.txt"
+          instrument_status=${PIPESTATUS[0]}
+          set -e
+
+          case "$EVIDENCE_PACKAGE/$EVIDENCE_SUBDIR" in
+            com.yawf.permissionreturnfixture/permission-return-evidence|com.yawf.permissionreturndriver/permission-return-success-evidence) ;;
+            *) echo "::error::Unexpected fixture evidence scope" >&2; exit 1 ;;
+          esac
+          timeout 20s adb -s "$EMULATOR_SERIAL" exec-out run-as "$EVIDENCE_PACKAGE" \
+            tar -C files -cf - "$EVIDENCE_SUBDIR" \
+            | head -c 25165825 > "$run_evidence/app-evidence.tar"
+          test "$(stat -c %s "$run_evidence/app-evidence.tar")" -le 25165824
+          ARCHIVE="$run_evidence/app-evidence.tar" OUT="$run_evidence/app-evidence" \
+          SUBDIR="$EVIDENCE_SUBDIR" python3 - <<'PY'
+          import os
+          import re
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          out = Path(os.environ["OUT"])
+          out.mkdir()
+          prefix = os.environ["SUBDIR"]
+          with tarfile.open(os.environ["ARCHIVE"], "r:") as archive:
+              members = archive.getmembers()
+              assert 1 <= len(members) <= 20
+              files = []
+              total = 0
+              for member in members:
+                  path = PurePosixPath(member.name)
+                  if member.isdir() and path.as_posix().rstrip("/") == prefix:
+                      continue
+                  assert member.isfile() and len(path.parts) == 2 and path.parts[0] == prefix
+                  assert re.fullmatch(r"receipt\.json|[0-9]{2}-[a-z0-9-]+\.(?:png|xml)", path.name)
+                  limit = 65536 if path.name == "receipt.json" else 4 * 1024 * 1024
+                  assert 0 < member.size <= limit
+                  total += member.size
+                  assert total <= 24 * 1024 * 1024
+                  files.append((member, path.name))
+              assert len({name for _, name in files}) == len(files)
+              assert "receipt.json" in {name for _, name in files}
+              for member, name in files:
+                  data = archive.extractfile(member).read(member.size + 1)
+                  assert len(data) == member.size
+                  (out / name).write_bytes(data)
+          PY
+          RECEIPT="$run_evidence/app-evidence/receipt.json" \
+          MODE="${{ matrix.mode }}" python3 - <<'PY'
+          import json
+          import os
+
+          receipt = json.load(open(os.environ["RECEIPT"]))
+          assert receipt["outcome"] == "passed", receipt
+          assert receipt["failure"] is None
+          assert receipt["permissionEnabledByTest"] is True
+          assert receipt["permissionVisiblyRevoked"] is True
+          if os.environ["MODE"] == "seeded-success":
+              assert receipt["classification"] == "seeded-fixture-permission-return-install-lifecycle-only"
+              assert receipt["separateDriverPackage"] is True
+              assert receipt["installerObserved"] is True
+              assert receipt["publicDiscoveryProof"] is False
+              assert receipt["productionOtaProof"] is False
+              assert receipt["productionPresentationProof"] is False
+          else:
+              assert receipt["installerObserved"] is False
+              assert receipt["controlReachedTamper"] is True
+              assert receipt["publicOtaProof"] is False
+              assert receipt["installProof"] is False
+              assert receipt["dataPreservationProof"] is False
+          if os.environ["MODE"] == "positive":
+              assert receipt["classification"] == "fixture-lifecycle-and-tamper-rejection-only"
+              assert receipt["negativeControl"] is False
+              assert receipt["verifierRecoveryObserved"] is True
+              assert receipt["stagedFileCleared"] is True
+          elif os.environ["MODE"] == "return-resume-omitted":
+              assert receipt["classification"] == "fixture-negative-control-return-resume-omitted"
+              assert receipt["negativeControl"] is True
+              assert receipt["verifierRecoveryObserved"] is False
+              assert receipt["stagedFileCleared"] is False
+          PY
+          test "$instrument_status" -eq 0
+          grep -F 'OK (1 test)' "$run_evidence/instrumentation.txt"
+
+          if [ "${{ matrix.mode }}" = seeded-success ]; then
+            mapfile -t installed_paths < <(adb -s "$EMULATOR_SERIAL" shell pm path com.yawf.permissionreturnfixture | tr -d '\r' | sed -n 's/^package://p')
+            test "${#installed_paths[@]}" -eq 1
+            [[ "${installed_paths[0]}" = /data/app/*/base.apk ]]
+            adb -s "$EMULATOR_SERIAL" pull "${installed_paths[0]}" "$run_evidence/installed-target.apk"
+            printf '%s  %s\n' "$TARGET_SHA256" "$run_evidence/installed-target.apk" | sha256sum -c -
+            test "$(stat -c %s "$run_evidence/installed-target.apk")" = "$TARGET_SIZE"
+            apksigner verify "$run_evidence/installed-target.apk"
+          fi
+          trap - EXIT
+          stop_owned_emulator
+
+      - name: Upload bounded fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-permission-return-fixture-evidence-${{ matrix.mode }}
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
