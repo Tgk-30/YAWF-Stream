@@ -122,6 +122,106 @@ function validateSettingsAccessibility(source) {
   return failures;
 }
 
+function validateLegacyAccessibilityActivation(source) {
+  const failures = [];
+  const runFlowBeforeConsent = source.match(
+    /private void runFlow\(\) throws Exception \{[\s\S]*?waitFor\(By\.text\("Check for Android updates\?"\)/,
+  )?.[0] ?? "";
+  const method = source.match(
+    /private void activatePublicBaselineAndroidUpdateControl\(\)[\s\S]*?\n    }\n\n    private /,
+  )?.[0] ?? "";
+  const exactNodeMethod = source.match(
+    /private boolean isExactLegacyUpdateAccessibilityNode\([\s\S]*?\n    }\n\n    private /,
+  )?.[0] ?? "";
+
+  const requiredRunFlow = [
+    [
+      /revealPublicBaselineAndroidUpdateControl\(\);[\s\S]*?capture\("android-update-card"\);\s*activatePublicBaselineAndroidUpdateControl\(\);\s*waitFor\(By\.text\("Check for Android updates\?"\)/,
+      "legacy accessibility activation is not immediately followed by the exact native consent assertion",
+    ],
+  ];
+  const requiredActivation = [
+    [
+      /productTextOrDescriptionSelectors\(\s*text, "android\.widget\.Button", true\)/,
+      "legacy control is not freshly located by exact clickable Button identity",
+    ],
+    [/assertNoBindingTerms\(\)/, "legacy activation omitted the existing admission guard"],
+    [
+      /findAnyNow\(selectors\)/,
+      "legacy control is not freshly fetched immediately before activation",
+    ],
+    [
+      /isVisibleAboveBottomNavigation\(visibleControl\)/,
+      "legacy control does not retain the existing safe visible-bounds gate",
+    ],
+    [
+      /Rect expectedBounds = visibleControl\.getVisibleBounds\(\)/,
+      "legacy accessibility match is not tied to the admitted visible control bounds",
+    ],
+    [
+      /instrumentation\.getUiAutomation\(\)\.getRootInActiveWindow\(\)/,
+      "legacy activation does not query a fresh standard accessibility tree",
+    ],
+    [
+      /assertEquals\("Legacy Android update accessibility control was not unique", 1, matches\)/,
+      "legacy accessibility activation does not require exactly one matching node",
+    ],
+    [
+      /getActionList\(\)\.contains\(\s*AccessibilityNodeInfo\.AccessibilityAction\.ACTION_CLICK\)/,
+      "legacy accessibility node does not have to advertise ACTION_CLICK",
+    ],
+    [
+      /assertTrue\(\s*"Legacy Android update accessibility ACTION_CLICK was rejected",\s*control\.performAction\(AccessibilityNodeInfo\.ACTION_CLICK\)\)/,
+      "legacy ACTION_CLICK result is not required to succeed",
+    ],
+    [
+      /Used one legacy accessibility-assisted activation for the exact public 2\.3\.21 [\s\S]*?this is not ordinary touch UX proof/,
+      "legacy activation log does not distinguish accessibility assistance from ordinary touch UX proof",
+    ],
+  ];
+  const requiredNode = [
+    [
+      /node\.getPackageName\(\) == null[\s\S]*?OtaFlowPolicy\.PRODUCT_PACKAGE\.contentEquals\(node\.getPackageName\(\)\)/,
+      "legacy accessibility node is not restricted to the product package",
+    ],
+    [
+      /node\.getClassName\(\) == null[\s\S]*?"android\.widget\.Button"\.contentEquals\(node\.getClassName\(\)\)/,
+      "legacy accessibility node is not restricted to the exact Button class",
+    ],
+    [
+      /text\.contentEquals\(nodeText == null \? "" : nodeText\)[\s\S]*?\|\| text\.contentEquals\(nodeDescription == null \? "" : nodeDescription\)/,
+      "legacy accessibility node is not restricted to exact text or description",
+    ],
+    [/node\.isEnabled\(\)/, "legacy accessibility node is not required to be enabled"],
+    [/node\.isClickable\(\)/, "legacy accessibility node is not required to be clickable"],
+    [/node\.isVisibleToUser\(\)/, "legacy accessibility node is not required to be visible"],
+    [
+      /!nodeBounds\.isEmpty\(\) && nodeBounds\.equals\(expectedBounds\)/,
+      "legacy accessibility node bounds do not exactly match the admitted control",
+    ],
+  ];
+
+  for (const [pattern, message] of requiredRunFlow) {
+    if (!pattern.test(runFlowBeforeConsent)) failures.push(message);
+  }
+  for (const [pattern, message] of requiredActivation) {
+    if (!pattern.test(method)) failures.push(message);
+  }
+  for (const [pattern, message] of requiredNode) {
+    if (!pattern.test(exactNodeMethod)) failures.push(message);
+  }
+  if ((method.match(/performAction\(AccessibilityNodeInfo\.ACTION_CLICK\)/g) ?? []).length !== 1) {
+    failures.push("legacy accessibility ACTION_CLICK must be performed exactly once");
+  }
+  if (/clickProductSemantic\(\s*"Check for Android updates"/.test(runFlowBeforeConsent)) {
+    failures.push("legacy baseline still uses the focus-changing ordinary touch helper");
+  }
+  if (/executeShellCommand|device\.click\s*\(|\b(?:invoke|reflection|setAccessible)\b/i.test(method)) {
+    failures.push("legacy activation introduced a shell, coordinate, reflection, or private invocation bypass");
+  }
+  return failures;
+}
+
 test("Settings and OTA controls require exact semantic identity and safe visibility", async () => {
   const source = await readFile(runtimePath, "utf8");
   assert.deepEqual(validateSettingsAccessibility(source), []);
@@ -206,6 +306,46 @@ test("Settings and OTA controls require exact semantic identity and safe visibil
       validateSettingsAccessibility(source.replace(before, after)),
       [],
       `semantic mutant survived: ${before}`,
+    );
+  }
+});
+
+test("legacy 2.3.21 updater uses one exact accessibility-assisted activation", async () => {
+  const source = await readFile(runtimePath, "utf8");
+  assert.deepEqual(validateLegacyAccessibilityActivation(source), []);
+
+  const mutants = [
+    [
+      "activatePublicBaselineAndroidUpdateControl();",
+      'clickProductSemantic("Check for Android updates", "android.widget.Button", SHORT_WAIT_MS);',
+    ],
+    [
+      'assertEquals("Legacy Android update accessibility control was not unique", 1, matches);',
+      'assertTrue("Legacy Android update accessibility control was present", matches >= 1);',
+    ],
+    [
+      "control.getActionList().contains(\n                            AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)",
+      "true",
+    ],
+    [
+      'assertTrue(\n                    "Legacy Android update accessibility ACTION_CLICK was rejected",\n                    control.performAction(AccessibilityNodeInfo.ACTION_CLICK));',
+      "control.performAction(AccessibilityNodeInfo.ACTION_CLICK);",
+    ],
+    [
+      "|| !node.isVisibleToUser())",
+      ")",
+    ],
+    [
+      "return !nodeBounds.isEmpty() && nodeBounds.equals(expectedBounds);",
+      "return !nodeBounds.isEmpty();",
+    ],
+  ];
+  for (const [before, after] of mutants) {
+    assert.ok(source.includes(before), `mutation site missing: ${before}`);
+    assert.notDeepEqual(
+      validateLegacyAccessibilityActivation(source.replace(before, after)),
+      [],
+      `legacy activation mutant survived: ${before}`,
     );
   }
 });

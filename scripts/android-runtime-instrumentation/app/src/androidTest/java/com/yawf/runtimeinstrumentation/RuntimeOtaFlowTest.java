@@ -16,6 +16,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.view.accessibility.AccessibilityNodeInfo;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -167,8 +168,7 @@ public final class RuntimeOtaFlowTest {
         openHelpAndUpdates();
         revealPublicBaselineAndroidUpdateControl();
         capture("android-update-card");
-        clickProductSemantic(
-                "Check for Android updates", "android.widget.Button", SHORT_WAIT_MS);
+        activatePublicBaselineAndroidUpdateControl();
 
         waitFor(By.text("Check for Android updates?"), SHORT_WAIT_MS, "manual update consent");
         UiObject2 weekly = waitFor(
@@ -451,6 +451,75 @@ public final class RuntimeOtaFlowTest {
         }
         scrollUntilVisibleProductSemantic(
                 "Check for Android updates", "android.widget.Button", true, Direction.DOWN);
+    }
+
+    private void activatePublicBaselineAndroidUpdateControl() {
+        String text = "Check for Android updates";
+        BySelector[] selectors = productTextOrDescriptionSelectors(
+                text, "android.widget.Button", true);
+        assertNoBindingTerms();
+        UiObject2 visibleControl = findAnyNow(selectors);
+        assertNotNull("Legacy Android update control disappeared before activation", visibleControl);
+        assertTrue("Legacy Android update control was not safely visible above bottom navigation",
+                isVisibleAboveBottomNavigation(visibleControl));
+        Rect expectedBounds = visibleControl.getVisibleBounds();
+
+        AccessibilityNodeInfo root =
+                instrumentation.getUiAutomation().getRootInActiveWindow();
+        assertNotNull("Active accessibility root unavailable for legacy Android update control", root);
+        List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+        nodes.add(root);
+        AccessibilityNodeInfo control = null;
+        int matches = 0;
+        try {
+            for (int index = 0; index < nodes.size(); index++) {
+                AccessibilityNodeInfo node = nodes.get(index);
+                if (isExactLegacyUpdateAccessibilityNode(node, text, expectedBounds)) {
+                    control = node;
+                    matches += 1;
+                }
+                for (int childIndex = 0; childIndex < node.getChildCount(); childIndex++) {
+                    AccessibilityNodeInfo child = node.getChild(childIndex);
+                    if (child != null) nodes.add(child);
+                }
+            }
+            assertEquals("Legacy Android update accessibility control was not unique", 1, matches);
+            assertNotNull("Legacy Android update accessibility control unavailable", control);
+            assertTrue(
+                    "Legacy Android update accessibility control did not advertise ACTION_CLICK",
+                    control.getActionList().contains(
+                            AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK));
+            assertTrue(
+                    "Legacy Android update accessibility ACTION_CLICK was rejected",
+                    control.performAction(AccessibilityNodeInfo.ACTION_CLICK));
+            log("Used one legacy accessibility-assisted activation for the exact public 2.3.21 "
+                    + "update control; this is not ordinary touch UX proof");
+        } finally {
+            for (int index = nodes.size() - 1; index >= 0; index--) {
+                nodes.get(index).recycle();
+            }
+        }
+    }
+
+    private boolean isExactLegacyUpdateAccessibilityNode(
+            AccessibilityNodeInfo node, String text, Rect expectedBounds) {
+        CharSequence nodeText = node.getText();
+        CharSequence nodeDescription = node.getContentDescription();
+        boolean exactName = text.contentEquals(nodeText == null ? "" : nodeText)
+                || text.contentEquals(nodeDescription == null ? "" : nodeDescription);
+        if (node.getPackageName() == null
+                || !OtaFlowPolicy.PRODUCT_PACKAGE.contentEquals(node.getPackageName())
+                || node.getClassName() == null
+                || !"android.widget.Button".contentEquals(node.getClassName())
+                || !exactName
+                || !node.isEnabled()
+                || !node.isClickable()
+                || !node.isVisibleToUser()) {
+            return false;
+        }
+        Rect nodeBounds = new Rect();
+        node.getBoundsInScreen(nodeBounds);
+        return !nodeBounds.isEmpty() && nodeBounds.equals(expectedBounds);
     }
 
     private UiObject2 scrollUntilVisibleProductSemantic(
