@@ -63,7 +63,7 @@ const ACTIONS = [
   {
     icon: Download,
     title: 'Install or update problem',
-    body: 'Confirm the package type, architecture, and signature. If you are moving from the older Android 2.3.21 app, install the current APK once in place without uninstalling or resetting app data. Do not assume the older app native OTA check can complete that upgrade; confirm Android\'s install prompt, then use normal update controls when offered. Known issue on Android 2.3.25 and 2.3.26: after granting Android\'s install permission, the native update flow can remain at “Update ready to install”. A permanent fix is being prepared. Manual in-place installation of the current APK avoids relying on that flow.',
+    body: 'Confirm the package type, architecture, and signature. If you are moving from the older Android 2.3.21 app, install the current APK once in place without uninstalling or resetting app data. Do not assume the older app native OTA check can complete that upgrade; confirm Android\'s install prompt, then use normal update controls when offered. On Android 2.3.25 and 2.3.26, the native update flow can remain at “Update ready to install” after Android\'s install permission is granted. Manual in-place installation of the current APK avoids relying on that older flow. Android 2.3.27 repairs the permission-return handoff to the system installer. Weekly automatic checks remain opt-in, and YAWF asks before downloading, and Android confirms installation.',
   },
 ];
 
