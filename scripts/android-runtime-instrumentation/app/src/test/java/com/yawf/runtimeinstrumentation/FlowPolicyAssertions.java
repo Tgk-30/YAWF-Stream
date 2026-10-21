@@ -179,11 +179,11 @@ final class FlowPolicyAssertions {
     }
 
     static void channelVersionsArePinned() {
-        check(FlowPolicy.isExpectedVersionPair("2.3.25", "2.3.21"),
+        check(FlowPolicy.isExpectedVersionPair("2.3.26", "2.3.25"),
                 "The exact candidate and public channel versions must pass");
-        check(!FlowPolicy.isExpectedVersionPair("2.3.24", "2.3.21"),
+        check(!FlowPolicy.isExpectedVersionPair("2.3.25", "2.3.25"),
                 "A changed candidate version must fail closed");
-        check(!FlowPolicy.isExpectedVersionPair("2.3.25", "2.3.22"),
+        check(!FlowPolicy.isExpectedVersionPair("2.3.26", "2.3.21"),
                 "A changed public channel version must fail closed");
     }
 

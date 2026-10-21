@@ -4,7 +4,7 @@ import java.util.regex.Pattern;
 
 /** Pure policy shared by the host self-tests and the persistent device flow. */
 public final class FlowPolicy {
-    public static final String EXPECTED_CANDIDATE_VERSION = "2.3.25";
+    public static final String EXPECTED_CANDIDATE_VERSION = "2.3.26";
     public static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
     public static final String WEB_BUTTON_CLASS = "android.widget.Button";
     public static final ExactTextWebNodeSpec WELCOME_TOUR_DIALOG =
@@ -20,7 +20,7 @@ public final class FlowPolicy {
     public static final LabeledWebButtonSpec SKIP_TOUR_BUTTON =
             new LabeledWebButtonSpec("Skip tour");
     private static final int TOUR_SETTLED_ABSENT_SAMPLES = 3;
-    public static final String EXPECTED_PUBLISHED_VERSION = "2.3.21";
+    public static final String EXPECTED_PUBLISHED_VERSION = "2.3.25";
     public static final String UP_TO_DATE_TITLE = "YAWF Stream is up to date";
     public static final String UP_TO_DATE_MESSAGE =
             "No newer signed Android phone release is available.";
