@@ -8,6 +8,7 @@ import android.app.Instrumentation;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 
@@ -233,6 +234,20 @@ public final class RuntimeFlowTest {
         int consecutiveAbsentSamples = 0;
         while (SystemClock.uptimeMillis() < dismissalDeadline) {
             long sampleStarted = SystemClock.uptimeMillis();
+            long cacheStarted = SystemClock.uptimeMillis();
+            boolean cacheRefreshRequired = Build.VERSION.SDK_INT
+                    >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
+            boolean cacheCleared = false;
+            boolean cacheKnown = true;
+            if (cacheRefreshRequired) {
+                cacheCleared = instrumentation.getUiAutomation().clearCache();
+                cacheKnown = cacheCleared;
+            }
+            log("Tour observation cache elapsedMs="
+                    + (SystemClock.uptimeMillis() - cacheStarted)
+                    + " required=" + cacheRefreshRequired
+                    + " cleared=" + cacheCleared
+                    + " known=" + cacheKnown);
             TimedNodeQuery dialog = queryExactTourNode(
                     "welcome-dialog", FlowPolicy.WELCOME_TOUR_DIALOG, false);
             TimedNodeQuery discover = queryExactTourNode(
@@ -240,7 +255,8 @@ public final class RuntimeFlowTest {
             TimedNodeQuery reminder = queryExactTourNode(
                     "setup-reminder", FlowPolicy.STREAMING_SETUP_REMINDER, true);
             completedSamples++;
-            boolean observationKnown = dialog.known && discover.known && reminder.known;
+            boolean observationKnown = cacheKnown
+                    && dialog.known && discover.known && reminder.known;
             consecutiveAbsentSamples = FlowPolicy.nextTourDismissalAbsentSamples(
                     consecutiveAbsentSamples,
                     observationKnown,
