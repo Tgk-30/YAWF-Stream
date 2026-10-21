@@ -70,7 +70,7 @@ jobs:
             candidate-source/scripts/android/YawfAndroidUpdater.kt \
             | sha256sum -c -
           CANDIDATE_UPDATER_SOURCE="$(pwd)/candidate-source/scripts/android/YawfAndroidUpdater.kt" \
-            node --test "$FIXTURE_PROJECT/source_contract.test.mjs" \
+            node --test "$FIXTURE_PROJECT/source_contract.test.mjs" scripts/android_fixture_cleanup_workflow.test.mjs \
             | tee "$EVIDENCE/source-contract-tests.txt"
           node "$FIXTURE_PROJECT/prepare_fixture_source.mjs" \
             --checkout candidate-source \
@@ -112,7 +112,7 @@ jobs:
             echo "$sdk_root/emulator"
             echo "$sdk_root/platform-tools"
           } >> "$GITHUB_PATH"
-          extra_args=()
+          extra_args=(:success-driver:assembleDebug :success-driver:assembleDebugAndroidTest)
           if [ "${{ matrix.mode }}" = seeded-success ]; then
             gradle --project-dir "$FIXTURE_PROJECT" --no-daemon --max-workers=2 \
               :success-fixture:assembleTargetDebug
@@ -136,7 +136,7 @@ jobs:
               --target "$target" --sha256 "$target_sha" --size "$target_size" \
               --receipt "$EVIDENCE/success-target-binding.json"
             "$build_tools/apksigner" verify --print-certs "$target" > "$EVIDENCE/target-certificate.txt"
-            extra_args+=("-PsuccessTargetSha256=$target_sha" "-PsuccessTargetSize=$target_size" :success-driver:assembleDebug)
+            extra_args+=("-PsuccessTargetSha256=$target_sha" "-PsuccessTargetSize=$target_size")
             {
               echo "TARGET_APK=$target"
               echo "TARGET_SHA256=$target_sha"
@@ -166,6 +166,33 @@ jobs:
             exit 1
           fi
           "$build_tools/apksigner" verify --print-certs "$fixture_apk" > "$EVIDENCE/baseline-certificate.txt"
+          host="$FIXTURE_PROJECT/success-driver/build/outputs/apk/debug/success-driver-debug.apk"
+          test "$(apkanalyzer manifest application-id "$host")" = com.yawf.permissionreturndriver
+          apkanalyzer manifest print "$host" > "$EVIDENCE/driver-manifest.xml"
+          if grep -Eq 'android.permission.(INTERNET|REQUEST_INSTALL_PACKAGES|QUERY_ALL_PACKAGES)' "$EVIDENCE/driver-manifest.xml"; then
+            echo "::error::The driver must not have network or package-install permission" >&2
+            exit 1
+          fi
+          DRIVER_MANIFEST="$EVIDENCE/driver-manifest.xml" python3 - <<'PY_MANIFEST'
+          import os
+          import xml.etree.ElementTree as ET
+
+          manifest = ET.parse(os.environ["DRIVER_MANIFEST"]).getroot()
+          queries = manifest.findall("queries")
+          assert len(queries) == 1
+          children = list(queries[0])
+          assert len(children) == 1 and children[0].tag == "package"
+          assert children[0].attrib == {"{http://schemas.android.com/apk/res/android}name": "com.yawf.permissionreturnfixture"}
+          assert not manifest.findall("uses-permission")
+          PY_MANIFEST
+          "$build_tools/apksigner" verify "$host"
+          cleanup_test="$FIXTURE_PROJECT/success-driver/build/outputs/apk/androidTest/debug/success-driver-debug-androidTest.apk"
+          test -f "$cleanup_test"
+          "$build_tools/apksigner" verify "$cleanup_test"
+          {
+            echo "HOST_APK=$host"
+            echo "CLEANUP_TEST_APK=$cleanup_test"
+          } >> "$GITHUB_ENV"
           if [ "${{ matrix.mode }}" = seeded-success ]; then
             test "$(apkanalyzer manifest version-name "$fixture_apk")" = 90.0.1
             test "$(apkanalyzer manifest version-code "$fixture_apk")" = 90000001
@@ -173,16 +200,7 @@ jobs:
             baseline_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/baseline-certificate.txt")"
             [[ "$target_cert" =~ ^[0-9a-f]{64}$ ]]
             test "$baseline_cert" = "$target_cert"
-            host="$FIXTURE_PROJECT/success-driver/build/outputs/apk/debug/success-driver-debug.apk"
-            test "$(apkanalyzer manifest application-id "$host")" = com.yawf.permissionreturndriver
-            apkanalyzer manifest print "$host" > "$EVIDENCE/driver-manifest.xml"
-            if grep -Eq 'android.permission.(INTERNET|REQUEST_INSTALL_PACKAGES)' "$EVIDENCE/driver-manifest.xml"; then
-              echo "::error::The driver must not have network or package-install permission" >&2
-              exit 1
-            fi
-            "$build_tools/apksigner" verify "$host"
             {
-              echo "HOST_APK=$host"
               echo 'EVIDENCE_PACKAGE=com.yawf.permissionreturndriver'
               echo 'EVIDENCE_SUBDIR=permission-return-success-evidence'
               echo 'TEST_COMPONENT=com.yawf.permissionreturndriver.test/androidx.test.runner.AndroidJUnitRunner'
@@ -223,6 +241,8 @@ jobs:
               > "$run_evidence/workflow-failure.png" || true
             timeout 15s adb -s "$EMULATOR_SERIAL" shell dumpsys activity activities \
               > "$run_evidence/workflow-failure-activity.txt" || true
+            timeout 15s adb -s "$EMULATOR_SERIAL" shell dumpsys activity exit-info \
+              com.yawf.permissionreturnfixture > "$run_evidence/workflow-failure-exit-info.txt" || true
             timeout 15s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime -T 5m \
               | tail -n 5000 > "$run_evidence/workflow-failure-logcat.txt" || true
           }
@@ -283,10 +303,13 @@ jobs:
           fi
           adb -s "$EMULATOR_SERIAL" install --no-streaming "$FIXTURE_APK" \
             | tee "$run_evidence/fixture-install.txt"
-          if [ "${{ matrix.mode }}" = seeded-success ]; then
-            adb -s "$EMULATOR_SERIAL" install --no-streaming "$HOST_APK" \
-              | tee "$run_evidence/driver-install.txt"
-            grep -Eq '^Success\r?$' "$run_evidence/driver-install.txt"
+          adb -s "$EMULATOR_SERIAL" install --no-streaming "$HOST_APK" \
+            | tee "$run_evidence/driver-install.txt"
+          grep -Eq '^Success\r?$' "$run_evidence/driver-install.txt"
+          if [ "${{ matrix.mode }}" != seeded-success ]; then
+            adb -s "$EMULATOR_SERIAL" install --no-streaming -t "$CLEANUP_TEST_APK" \
+              | tee "$run_evidence/cleanup-test-install.txt"
+            grep -Eq '^Success\r?$' "$run_evidence/cleanup-test-install.txt"
           fi
           adb -s "$EMULATOR_SERIAL" install --no-streaming -t "$TEST_APK" \
             | tee "$run_evidence/test-install.txt"
@@ -299,17 +322,63 @@ jobs:
             | tee "$run_evidence/instrumentation.txt"
           instrument_status=${PIPESTATUS[0]}
           set -e
+          printf '%s\n' "$instrument_status" > "$run_evidence/instrumentation-exit-status.txt"
 
-          case "$EVIDENCE_PACKAGE/$EVIDENCE_SUBDIR" in
-            com.yawf.permissionreturnfixture/permission-return-evidence|com.yawf.permissionreturndriver/permission-return-success-evidence) ;;
+          cleanup_status=0
+          if [ "${{ matrix.mode }}" != seeded-success ]; then
+            set +e
+            timeout 180s adb -s "$EMULATOR_SERIAL" shell am instrument -w -r \
+              -e class com.yawf.permissionreturndriver.FixturePermissionCleanupTest \
+              com.yawf.permissionreturndriver.test/androidx.test.runner.AndroidJUnitRunner \
+              | tee "$run_evidence/cleanup-instrumentation.txt"
+            cleanup_status=${PIPESTATUS[0]}
+            set -e
+          fi
+          printf '%s\n' "$cleanup_status" > "$run_evidence/cleanup-exit-status.txt"
+          timeout 15s adb -s "$EMULATOR_SERIAL" shell dumpsys activity exit-info \
+            com.yawf.permissionreturnfixture > "$run_evidence/fixture-exit-info.txt" || true
+
+          archive_collect_status=0
+          for evidence_scope in core cleanup; do
+            evidence_package="$EVIDENCE_PACKAGE"
+            evidence_subdir="$EVIDENCE_SUBDIR"
+            evidence_name=app-evidence
+            if [ "$evidence_scope" = cleanup ]; then
+              if [ "${{ matrix.mode }}" = seeded-success ]; then continue; fi
+              evidence_package=com.yawf.permissionreturndriver
+              evidence_subdir=permission-return-cleanup-evidence
+              evidence_name=cleanup-evidence
+            fi
+          case "$evidence_package/$evidence_subdir" in
+            com.yawf.permissionreturnfixture/permission-return-evidence|com.yawf.permissionreturndriver/permission-return-success-evidence|com.yawf.permissionreturndriver/permission-return-cleanup-evidence) ;;
             *) echo "::error::Unexpected fixture evidence scope" >&2; exit 1 ;;
           esac
-          timeout 20s adb -s "$EMULATOR_SERIAL" exec-out run-as "$EVIDENCE_PACKAGE" \
-            tar -C files -cf - "$EVIDENCE_SUBDIR" \
-            | head -c 25165825 > "$run_evidence/app-evidence.tar"
-          test "$(stat -c %s "$run_evidence/app-evidence.tar")" -le 25165824
-          ARCHIVE="$run_evidence/app-evidence.tar" OUT="$run_evidence/app-evidence" \
-          SUBDIR="$EVIDENCE_SUBDIR" python3 - <<'PY'
+          if ! timeout 20s adb -s "$EMULATOR_SERIAL" exec-out run-as "$evidence_package" \
+            tar -C files -cf - "$evidence_subdir" \
+            | head -c 25165825 > "$run_evidence/${evidence_name}.tar"; then
+            archive_collect_status=1
+          fi
+          if ! test "$(stat -c %s "$run_evidence/${evidence_name}.tar")" -le 25165824; then
+            archive_collect_status=1
+          fi
+          done
+          test "$archive_collect_status" -eq 0
+          for evidence_scope in core cleanup; do
+            evidence_package="$EVIDENCE_PACKAGE"
+            evidence_subdir="$EVIDENCE_SUBDIR"
+            evidence_name=app-evidence
+            if [ "$evidence_scope" = cleanup ]; then
+              if [ "${{ matrix.mode }}" = seeded-success ]; then continue; fi
+              evidence_package=com.yawf.permissionreturndriver
+              evidence_subdir=permission-return-cleanup-evidence
+              evidence_name=cleanup-evidence
+            fi
+          case "$evidence_package/$evidence_subdir" in
+            com.yawf.permissionreturnfixture/permission-return-evidence|com.yawf.permissionreturndriver/permission-return-success-evidence|com.yawf.permissionreturndriver/permission-return-cleanup-evidence) ;;
+            *) echo "::error::Unexpected fixture evidence scope" >&2; exit 1 ;;
+          esac
+          ARCHIVE="$run_evidence/${evidence_name}.tar" OUT="$run_evidence/$evidence_name" \
+          SUBDIR="$evidence_subdir" python3 - <<'PY'
           import os
           import re
           import tarfile
@@ -341,6 +410,7 @@ jobs:
                   assert len(data) == member.size
                   (out / name).write_bytes(data)
           PY
+          done
           RECEIPT="$run_evidence/app-evidence/receipt.json" \
           MODE="${{ matrix.mode }}" python3 - <<'PY'
           import json
@@ -350,8 +420,8 @@ jobs:
           assert receipt["outcome"] == "passed", receipt
           assert receipt["failure"] is None
           assert receipt["permissionEnabledByTest"] is True
-          assert receipt["permissionVisiblyRevoked"] is True
           if os.environ["MODE"] == "seeded-success":
+              assert receipt["permissionVisiblyRevoked"] is True
               assert receipt["classification"] == "seeded-fixture-permission-return-install-lifecycle-only"
               assert receipt["separateDriverPackage"] is True
               assert receipt["installerObserved"] is True
@@ -359,22 +429,51 @@ jobs:
               assert receipt["productionOtaProof"] is False
               assert receipt["productionPresentationProof"] is False
           else:
+              assert receipt["corePassed"] is True
+              assert receipt["externalPermissionCleanupRequired"] is True
+              assert receipt["permissionCleanupPerformedByCore"] is False
               assert receipt["installerObserved"] is False
               assert receipt["controlReachedTamper"] is True
               assert receipt["publicOtaProof"] is False
               assert receipt["installProof"] is False
               assert receipt["dataPreservationProof"] is False
           if os.environ["MODE"] == "positive":
-              assert receipt["classification"] == "fixture-lifecycle-and-tamper-rejection-only"
+              assert receipt["classification"] == "fixture-lifecycle-and-tamper-rejection-core-only"
               assert receipt["negativeControl"] is False
               assert receipt["verifierRecoveryObserved"] is True
               assert receipt["stagedFileCleared"] is True
           elif os.environ["MODE"] == "return-resume-omitted":
-              assert receipt["classification"] == "fixture-negative-control-return-resume-omitted"
+              assert receipt["classification"] == "fixture-negative-control-return-resume-omitted-core-only"
               assert receipt["negativeControl"] is True
               assert receipt["verifierRecoveryObserved"] is False
               assert receipt["stagedFileCleared"] is False
           PY
+          if [ "${{ matrix.mode }}" != seeded-success ]; then
+            RECEIPT="$run_evidence/cleanup-evidence/receipt.json" python3 - <<'PY_CLEANUP'
+          import json
+          import os
+
+          receipt = json.load(open(os.environ["RECEIPT"]))
+          assert receipt["outcome"] == "passed", receipt
+          assert receipt["failure"] is None
+          assert receipt["classification"] == "fixture-external-permission-cleanup-only"
+          assert receipt["separateDriverPackage"] is True
+          assert receipt["fixturePackage"] == "com.yawf.permissionreturnfixture"
+          assert receipt["fixtureLabel"] == "YAWF permission return fixture"
+          assert receipt["fixtureIdentityObserved"] is True
+          assert receipt["scopedSettingsObserved"] is True
+          assert receipt["permissionInitiallyEnabled"] is True
+          assert receipt["cleanupClicked"] is True
+          assert receipt["settledOffSamples"] == 3
+          assert receipt["permissionVisiblyOff"] is True
+          assert receipt["directPermissionMutationUsed"] is False
+          assert receipt["coreFlowProof"] is False
+          assert receipt["publicOtaProof"] is False
+          assert receipt["installProof"] is False
+          PY_CLEANUP
+            test "$cleanup_status" -eq 0
+            grep -F 'OK (1 test)' "$run_evidence/cleanup-instrumentation.txt"
+          fi
           test "$instrument_status" -eq 0
           grep -F 'OK (1 test)' "$run_evidence/instrumentation.txt"
 

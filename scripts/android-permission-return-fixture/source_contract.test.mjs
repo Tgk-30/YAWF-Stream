@@ -45,6 +45,10 @@ const SUCCESS_DRIVER = join(
   ROOT,
   "success-driver/src/androidTest/java/com/yawf/permissionreturndriver/SuccessPermissionReturnFlowTest.java",
 );
+const CLEANUP_DRIVER = join(
+  ROOT,
+  "success-driver/src/androidTest/java/com/yawf/permissionreturndriver/FixturePermissionCleanupTest.java",
+);
 const EXPECTED_UPDATER_PIN = "bf42027e5f1aa0715d51ef68b87f4c6c209173465613896357071eebc599b565";
 const EXPECTED_FIXTURE_PIN = "13204e15181c05d62f492ba074962a314ef2623415c7181528f595a8eca30c93";
 const EXPECTED_SOURCE_REVISION = "9fc94a237d99b849cfc18a01085bb487915dd978";
@@ -133,13 +137,18 @@ function flowFailures(flow, policy) {
     "assertFalse(\"A package installer surface was observed\", installerObserved)",
     "for (String installerPackage : FixturePolicy.installerPackages())",
     "device.hasObject(By.pkg(installerPackage))",
-    "try {\n                revokeUnknownSourcePermissionVisibly();\n            } catch (Throwable cleanupFailure)",
-    "assertTrue(\"Unknown-source permission was not visibly revoked\", permissionRevoked)",
+    'findUniqueNativeDialogButton("button1", "Retry")',
+    'findUniqueNativeDialogButton("button2", "Cancel update")',
+    '"fixture-negative-control-return-resume-omitted-core-only"',
+    '"fixture-lifecycle-and-tamper-rejection-core-only"',
+    'receipt.put("corePassed", failure == null)',
+    'receipt.put("externalPermissionCleanupRequired", permissionEnabled)',
+    'receipt.put("permissionCleanupPerformedByCore", false)',
     "publicOtaProof\", false",
     "installProof\", false",
     "dataPreservationProof\", false",
     'waitFor(By.text(FixturePolicy.READY_TITLE), UI_WAIT_MS, "ready title");\n            capture("ready-to-install");\n            clickNativeDialogButton("button1", "Install");',
-    'By.res("android", resource)\n                .pkg(FixturePolicy.FIXTURE_PACKAGE)\n                .text(exactCaseInsensitiveLabel(text))\n                .clazz("android.widget.Button")\n                .enabled(true)\n                .clickable(true)',
+    'By.res("android", resource)\n                        .pkg(FixturePolicy.FIXTURE_PACKAGE)\n                        .text(exactCaseInsensitiveLabel(text))\n                        .clazz("android.widget.Button")\n                        .enabled(true)\n                        .clickable(true)',
     '"\\\\A" + Pattern.quote(text) + "\\\\z"',
     "Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE",
     '} catch (Throwable caught) {\n            primary = caught;\n            try {\n                capture("failure-before-cleanup");',
@@ -166,8 +175,16 @@ function flowFailures(flow, policy) {
   if (flow.includes("Verifying update")) {
     failures.push("transient verification presentation asserted");
   }
-  if (/\.textContains\s*\(/.test(flow) || flow.includes('.text("Install")')) {
-    failures.push("weak or case-sensitive Install selector");
+  if (/\.textContains\s*\(/.test(flow)
+      || /\.text\("(?:Install|Retry|Cancel update)"\)/.test(flow)) {
+    failures.push("weak or case-sensitive native action selector");
+  }
+  if ((flow.match(/findUniqueNativeDialogButton\("button1", "Retry"\)/g) || []).length < 2
+      || (flow.match(/findUniqueNativeDialogButton\("button2", "Cancel update"\)/g) || []).length < 2) {
+    failures.push("retry and cancel actions are not uniquely observed through the settled dialog");
+  }
+  if (/revokeUnknownSourcePermissionVisibly|permissionVisiblyRevoked|ACTION_MANAGE_UNKNOWN_APP_SOURCES/.test(flow)) {
+    failures.push("same-package core performs or claims external permission cleanup");
   }
   return failures;
 }
@@ -211,7 +228,6 @@ function workflowFailures(source) {
     "app_task: :app:assembleNegativeControl",
     "test_task: :app:assembleNegativeControlAndroidTest",
     "receipt[\"controlReachedTamper\"] is True",
-    "receipt[\"permissionVisiblyRevoked\"] is True",
     "receipt[\"verifierRecoveryObserved\"] is True",
     "receipt[\"stagedFileCleared\"] is True",
     "receipt[\"verifierRecoveryObserved\"] is False",
@@ -221,6 +237,78 @@ function workflowFailures(source) {
   for (const value of required) if (!source.includes(value)) failures.push(value);
   if (/pull_request:|push:|schedule:/.test(source)) failures.push("workflow is not manual-only");
   if (/secrets\.|SIGNING|download-artifact/.test(source)) failures.push("workflow uses release or secret input");
+  return failures;
+}
+
+function externalCleanupFailures(driverManifest, cleanup) {
+  const failures = [];
+  const query = driverManifest.match(/<queries>([\s\S]*?)<\/queries>/);
+  if (!query) {
+    failures.push("missing bounded package visibility query");
+  } else {
+    const packages = [...query[1].matchAll(/<package\s+android:name="([^"]+)"\s*\/>/g)]
+      .map((match) => match[1]);
+    if (packages.length !== 1 || packages[0] !== "com.yawf.permissionreturnfixture") {
+      failures.push("package visibility query is not exactly the fixture package");
+    }
+    const residue = query[1].replace(/<package\s+android:name="[^"]+"\s*\/>/g, "").trim();
+    if (residue !== "") failures.push("package visibility query contains another capability");
+  }
+  if (/<uses-permission\b|QUERY_ALL_PACKAGES/.test(driverManifest)) {
+    failures.push("cleanup driver gained a permission or broad package visibility");
+  }
+
+  const required = [
+    'private static final String DRIVER_PACKAGE = "com.yawf.permissionreturndriver"',
+    'private static final String FIXTURE_PACKAGE = "com.yawf.permissionreturnfixture"',
+    'private static final String FIXTURE_LABEL = "YAWF permission return fixture"',
+    'private static final String SETTINGS_PACKAGE = "com.android.settings"',
+    'private static final String UNKNOWN_SOURCE_LABEL = "Allow from this source"',
+    'public void visiblyRevokesOnlyTheFixtureUnknownSourcePermission()',
+    'PackageInfo fixture = packageManager.getPackageInfo(FIXTURE_PACKAGE, 0)',
+    'String.valueOf(packageManager.getApplicationLabel(fixture.applicationInfo))',
+    'Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES',
+    'Uri.parse("package:" + FIXTURE_PACKAGE)',
+    'SETTINGS_PACKAGE.equals(device.getCurrentPackageName())',
+    'exactSettingsText(FIXTURE_LABEL).size() == 1',
+    'exactSettingsText(UNKNOWN_SOURCE_LABEL).size() == 1',
+    'By.text(text)\n                        .pkg(SETTINGS_PACKAGE)\n                        .clazz(TEXT_VIEW_CLASS)\n                        .enabled(true)',
+    'assertEquals("Unexpected toggle package", SETTINGS_PACKAGE, toggle.getApplicationPackage())',
+    'assertEquals("Unexpected toggle class", SEMANTIC_TOGGLE_CLASS, toggle.getClassName())',
+    'resourceName == null || resourceName.isEmpty()',
+    'assertTrue("Unknown-source toggle was disabled", toggle.isEnabled())',
+    'assertTrue("Unknown-source toggle was not clickable", toggle.isClickable())',
+    'assertTrue("Unknown-source toggle was not checkable", toggle.isCheckable())',
+    'permissionInitiallyEnabled = toggle.isChecked()',
+    'if (permissionInitiallyEnabled) {\n                toggle.click();\n                cleanupClicked = true;',
+    'waitForUnknownSourceState(false, "fixture unknown-source permission visibly off")',
+    'while (settledOffSamples < SETTLED_SAMPLES)',
+    'assertFalse(\n                        "Fixture unknown-source permission did not remain visibly off",\n                        requireExactUnknownSourceToggle().isChecked())',
+    'permissionVisiblyOff = true',
+    'capture("permission-cleanup-off")',
+    'capture("cleanup-failure")',
+    'receipt.put("classification", "fixture-external-permission-cleanup-only")',
+    'receipt.put("permissionInitiallyEnabled", permissionInitiallyEnabled)',
+    'receipt.put("cleanupClicked", cleanupClicked)',
+    'receipt.put("settledOffSamples", settledOffSamples)',
+    'receipt.put("permissionVisiblyOff", permissionVisiblyOff)',
+    'receipt.put("directPermissionMutationUsed", false)',
+    'receipt.put("coreFlowProof", false)',
+    'receipt.put("publicOtaProof", false)',
+    'receipt.put("installProof", false)',
+    'if (primary != null) {',
+    'throw (Exception) primary',
+  ];
+  for (const value of required) if (!cleanup.includes(value)) failures.push(value);
+  if ((cleanup.match(/@Test/g) || []).length !== 1) {
+    failures.push("cleanup driver is not exactly one test");
+  }
+  if (/canRequestPackageInstalls|textContains\s*\(|By\.textMatches|UiAutomation|executeShellCommand|Runtime\.getRuntime|ProcessBuilder|\badb\b|\bappops\b|\bpm\s+(?:grant|revoke)\b|Intent\.ACTION_VIEW/.test(cleanup)) {
+    failures.push("cleanup bypasses exact visible scoped Settings interaction");
+  }
+  if ((cleanup.match(/toggle\.click\(\)/g) || []).length !== 1) {
+    failures.push("cleanup does not contain exactly one conditional visible toggle action");
+  }
   return failures;
 }
 
@@ -418,8 +506,29 @@ test("positive recovery and return-resume-omitted control prove distinct bounded
       flow.replace('assertFalse("A package installer surface was observed", installerObserved);', ""),
       policy,
     ),
-    "cleanup removed": flowFailures(
-      flow.replace("revokeUnknownSourcePermissionVisibly();", "permissionRevoked = true;"),
+    "same-package cleanup restored": flowFailures(
+      flow.replace("writeReceipt(primary);", "revokeUnknownSourcePermissionVisibly();\n            writeReceipt(primary);"),
+      policy,
+    ),
+    "Retry selector casefold removed": flowFailures(
+      flow.replace(
+        'findUniqueNativeDialogButton("button1", "Retry")',
+        'device.findObject(By.text("Retry"))',
+      ),
+      policy,
+    ),
+    "Cancel selector resource identity removed": flowFailures(
+      flow.replace(
+        'findUniqueNativeDialogButton("button2", "Cancel update")',
+        'device.findObject(By.text("Cancel update"))',
+      ),
+      policy,
+    ),
+    "core claims permission cleanup": flowFailures(
+      flow.replace(
+        'receipt.put("permissionCleanupPerformedByCore", false)',
+        'receipt.put("permissionCleanupPerformedByCore", true)',
+      ),
       policy,
     ),
     "Install selector casefold removed": flowFailures(
@@ -428,7 +537,7 @@ test("positive recovery and return-resume-omitted control prove distinct bounded
     ),
     "Install resource identity removed": flowFailures(
       flow.replace(
-        'By.res("android", resource)\n                .pkg(FixturePolicy.FIXTURE_PACKAGE)',
+        'By.res("android", resource)\n                        .pkg(FixturePolicy.FIXTURE_PACKAGE)',
         "By.pkg(FixturePolicy.FIXTURE_PACKAGE)",
       ),
       policy,
@@ -579,6 +688,83 @@ test("success target admission pins bytes and refuses changed, linked, or unrevi
     );
   } finally {
     rmSync(synthetic.root, { recursive: true, force: true });
+  }
+});
+
+test("external cleanup uses one narrowly visible fixture query and exact scoped Settings UI", () => {
+  const driverManifest = readFileSync(DRIVER_MANIFEST, "utf8");
+  const cleanup = readFileSync(CLEANUP_DRIVER, "utf8");
+  assert.deepEqual(externalCleanupFailures(driverManifest, cleanup), []);
+
+  const mutants = {
+    "fixture query removed": {
+      manifest: driverManifest.replace(/\s*<queries>[\s\S]*?<\/queries>\s*/, "\n"),
+      cleanup,
+    },
+    "fixture query broadened": {
+      manifest: driverManifest.replace(
+        '<package android:name="com.yawf.permissionreturnfixture" />',
+        '<uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />',
+      ),
+      cleanup,
+    },
+    "fixture label relaxed": {
+      manifest: driverManifest,
+      cleanup: cleanup.replace(
+        'private static final String FIXTURE_LABEL = "YAWF permission return fixture"',
+        'private static final String FIXTURE_LABEL = "YAWF"',
+      ),
+    },
+    "package identity query removed": {
+      manifest: driverManifest,
+      cleanup: cleanup.replace(
+        'PackageInfo fixture = packageManager.getPackageInfo(FIXTURE_PACKAGE, 0);',
+        'PackageInfo fixture = null;',
+      ),
+    },
+    "direct permission mutation added": {
+      manifest: driverManifest,
+      cleanup: cleanup.replace(
+        'openFixtureScopedUnknownSourceSettings();',
+        'openFixtureScopedUnknownSourceSettings(); // adb shell appops set',
+      ),
+    },
+    "visible toggle removed": {
+      manifest: driverManifest,
+      cleanup: cleanup.replace('                toggle.click();\n', ""),
+    },
+    "initial state forced": {
+      manifest: driverManifest,
+      cleanup: cleanup.replace(
+        'permissionInitiallyEnabled = toggle.isChecked();',
+        'permissionInitiallyEnabled = false;',
+      ),
+    },
+    "settled off assertion removed": {
+      manifest: driverManifest,
+      cleanup: cleanup.replace(
+        'assertFalse(\n                        "Fixture unknown-source permission did not remain visibly off",\n                        requireExactUnknownSourceToggle().isChecked());',
+        'requireExactUnknownSourceToggle();',
+      ),
+    },
+    "cleanup receipt claims direct mutation": {
+      manifest: driverManifest,
+      cleanup: cleanup.replace(
+        'receipt.put("directPermissionMutationUsed", false);',
+        'receipt.put("directPermissionMutationUsed", true);',
+      ),
+    },
+    "cleanup failure swallowed": {
+      manifest: driverManifest,
+      cleanup: cleanup.replace('throw (Exception) primary;', 'return;'),
+    },
+  };
+  for (const [name, mutant] of Object.entries(mutants)) {
+    assert.ok(
+      mutant.manifest !== driverManifest || mutant.cleanup !== cleanup,
+      `${name} did not mutate its source`,
+    );
+    assert.notDeepEqual(externalCleanupFailures(mutant.manifest, mutant.cleanup), [], name);
   }
 });
 

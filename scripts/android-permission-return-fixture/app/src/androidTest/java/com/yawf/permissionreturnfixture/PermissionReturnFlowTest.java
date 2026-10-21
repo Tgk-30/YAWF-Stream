@@ -12,10 +12,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.net.Uri;
 import android.os.Build;
 import android.os.SystemClock;
-import android.provider.Settings;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -54,7 +52,6 @@ public final class PermissionReturnFlowTest {
     private SharedPreferences preferences;
     private int captureCount;
     private boolean permissionEnabled;
-    private boolean permissionRevoked;
     private boolean installerObserved;
     private boolean controlReachedTamper;
     private boolean verifierRecoveryObserved;
@@ -130,15 +127,6 @@ public final class PermissionReturnFlowTest {
                 primary.addSuppressed(captureFailure);
             }
         } finally {
-            try {
-                revokeUnknownSourcePermissionVisibly();
-            } catch (Throwable cleanupFailure) {
-                if (primary == null) {
-                    primary = cleanupFailure;
-                } else {
-                    primary.addSuppressed(cleanupFailure);
-                }
-            }
             writeReceipt(primary);
         }
 
@@ -148,7 +136,6 @@ public final class PermissionReturnFlowTest {
             }
             throw (Error) primary;
         }
-        assertTrue("Unknown-source permission was not visibly revoked", permissionRevoked);
     }
 
     private void prepareStagedCandidate() throws Exception {
@@ -244,10 +231,12 @@ public final class PermissionReturnFlowTest {
         while (SystemClock.uptimeMillis() < deadline) {
             observeInstallerSurfaces();
             UiObject2 reviewedMessage = findReviewedRetryMessage();
+            UiObject2 retry = findUniqueNativeDialogButton("button1", "Retry");
+            UiObject2 cancel = findUniqueNativeDialogButton("button2", "Cancel update");
             if (device.hasObject(By.text(FixturePolicy.RETRY_TITLE))
                     && reviewedMessage != null
-                    && device.hasObject(By.text("Retry"))
-                    && device.hasObject(By.text("Cancel update"))) {
+                    && retry != null
+                    && cancel != null) {
                 assertTrue(
                         "Retry message was outside the reviewed failure set",
                         FixturePolicy.isReviewedRetryMessage(String.valueOf(reviewedMessage.getText())));
@@ -257,7 +246,9 @@ public final class PermissionReturnFlowTest {
                     assertTrue(
                             "Tamper failure dialog did not remain settled",
                             device.hasObject(By.text(FixturePolicy.RETRY_TITLE))
-                                    && findReviewedRetryMessage() != null);
+                                    && findReviewedRetryMessage() != null
+                                    && findUniqueNativeDialogButton("button1", "Retry") != null
+                                    && findUniqueNativeDialogButton("button2", "Cancel update") != null);
                     settled++;
                     SystemClock.sleep(SETTLE_SAMPLE_MS);
                 }
@@ -364,56 +355,33 @@ public final class PermissionReturnFlowTest {
         fail("Timed out waiting for " + label);
     }
 
-    private void revokeUnknownSourcePermissionVisibly() throws Exception {
-        if (!permissionEnabled) {
-            assertFalse(
-                    "Fixture gained unknown-source permission outside the observed toggle",
-                    targetContext.getPackageManager().canRequestPackageInstalls());
-            permissionRevoked = true;
-            return;
-        }
-        Intent intent = new Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.parse("package:" + FixturePolicy.FIXTURE_PACKAGE))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        targetContext.startActivity(intent);
-        waitForUnknownSourcePage();
-        UiObject2 toggle = findUnknownSourceSwitch();
-        assertNotNull("Cleanup unknown-source toggle is unavailable", toggle);
-        if (toggle.isChecked()) {
-            toggle.click();
-            waitForUnknownSourceState(false, "unknown-source permission revoked");
-        }
-        capture("permission-cleanup-off");
-        assertFalse(
-                "Fixture unknown-source permission remained enabled",
-                targetContext.getPackageManager().canRequestPackageInstalls());
-        permissionRevoked = true;
-    }
-
     private UiObject2 waitFor(androidx.test.uiautomator.BySelector selector, long timeout, String label) {
         UiObject2 object = device.wait(Until.findObject(selector), timeout);
         assertNotNull("Timed out waiting for " + label, object);
         return object;
     }
 
+    private UiObject2 findUniqueNativeDialogButton(String resource, String text) {
+        List<UiObject2> matches = device.findObjects(
+                By.res("android", resource)
+                        .pkg(FixturePolicy.FIXTURE_PACKAGE)
+                        .text(exactCaseInsensitiveLabel(text))
+                        .clazz("android.widget.Button")
+                        .enabled(true)
+                        .clickable(true));
+        if (matches.size() > 1) {
+            fail("Native dialog action was ambiguous: " + text);
+        }
+        return matches.size() == 1 ? matches.get(0) : null;
+    }
+
     private void clickNativeDialogButton(String resource, String text) {
-        androidx.test.uiautomator.BySelector selector = By.res("android", resource)
-                .pkg(FixturePolicy.FIXTURE_PACKAGE)
-                .text(exactCaseInsensitiveLabel(text))
-                .clazz("android.widget.Button")
-                .enabled(true)
-                .clickable(true);
         long deadline = SystemClock.uptimeMillis() + UI_WAIT_MS;
         UiObject2 button = null;
         while (SystemClock.uptimeMillis() < deadline) {
-            List<UiObject2> matches = device.findObjects(selector);
-            if (matches.size() == 1) {
-                button = matches.get(0);
+            button = findUniqueNativeDialogButton(resource, text);
+            if (button != null) {
                 break;
-            }
-            if (matches.size() > 1) {
-                fail("Native dialog action was ambiguous: " + text);
             }
             SystemClock.sleep(100L);
         }
@@ -444,8 +412,8 @@ public final class PermissionReturnFlowTest {
         receipt.put(
                 "classification",
                 BuildConfig.OMIT_PERMISSION_RETURN_ON_RESUME
-                        ? "fixture-negative-control-return-resume-omitted"
-                        : "fixture-lifecycle-and-tamper-rejection-only");
+                        ? "fixture-negative-control-return-resume-omitted-core-only"
+                        : "fixture-lifecycle-and-tamper-rejection-core-only");
         receipt.put("updaterSourceSha256", BuildConfig.UPDATER_SOURCE_SHA256);
         receipt.put("candidateParsedByUpdater", captureCount >= 1);
         receipt.put("sameLengthTamper", originalDigest != null && tamperedDigest != null);
@@ -455,7 +423,9 @@ public final class PermissionReturnFlowTest {
         receipt.put("installerObserved", installerObserved);
         receipt.put("stagedFileCleared", stagedFile != null && !stagedFile.exists());
         receipt.put("permissionEnabledByTest", permissionEnabled);
-        receipt.put("permissionVisiblyRevoked", permissionRevoked);
+        receipt.put("corePassed", failure == null);
+        receipt.put("externalPermissionCleanupRequired", permissionEnabled);
+        receipt.put("permissionCleanupPerformedByCore", false);
         receipt.put("publicOtaProof", false);
         receipt.put("installProof", false);
         receipt.put("dataPreservationProof", false);

@@ -63,3 +63,11 @@ gradle --project-dir scripts/android-permission-return-fixture \
 Before dispatch, the root-owned workflow must also verify the baseline and target are signed by the same workflow-controlled default debug signer, verify the baseline identity is 90.0.1/code 90000001, install only the baseline, driver and driver test APKs on a fresh API 36 emulator, and run `SuccessPermissionReturnFlowTest` from `com.yawf.permissionreturndriver.test`. The workflow must not ADB-push or ADB-install the target asset.
 
 A passing success fixture uses the real valid target APK and therefore proves the fixture's successful cryptographic and package-identity verification path, lifecycle continuation, system installer handoff, fixture update identity, private canary preservation, updater cleanup and permission cleanup. It does not prove public discovery, download, production signing, production package update, production presentation, or user-data migration beyond the fixture canary.
+
+## Independent visible permission cleanup
+
+Positive and negative core instrumentation write core-only receipts and do not revoke their own package's install permission. The workflow installs the existing separate driver host and runs `FixturePermissionCleanupTest` after the core command, even if that command fails. The helper can query only the exact fixture package. It opens the real fixture-scoped Android Settings page and visibly turns the reviewed switch off. No shell app-op or permission mutation is used.
+
+Core and cleanup outputs, exit statuses and bounded evidence archives remain separate. Aggregate success requires both instrumentation processes to finish with `OK (1 test)`, a passing core receipt with every existing mode assertion, and a passing cleanup receipt proving the switch was initially enabled, clicked and observed off in three settled samples. An already-off cleanup no-op cannot pass the transaction. Seeded success retains its existing separate-driver test and internal visible cleanup.
+
+These are lifecycle fixture checks, not proof of public OTA discovery, production signing or full platform functionality.
