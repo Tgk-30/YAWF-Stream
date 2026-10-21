@@ -50,7 +50,10 @@ android {
         buildConfig = true
     }
 
-    sourceSets.getByName("main").java.srcDir("../app/src/main/java")
+    sourceSets.getByName("main") {
+        java.directories.add("../app/src/main/java")
+        kotlin.directories.add("../app/src/main/java")
+    }
     sourceSets.getByName("baseline").assets.directories.add(
         "build/generated/successBaselineAssets",
     )

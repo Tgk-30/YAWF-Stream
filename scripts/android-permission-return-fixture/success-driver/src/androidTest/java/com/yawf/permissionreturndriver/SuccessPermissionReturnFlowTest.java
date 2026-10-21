@@ -36,6 +36,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 @RunWith(AndroidJUnit4.class)
 public final class SuccessPermissionReturnFlowTest {
@@ -94,12 +95,7 @@ public final class SuccessPermissionReturnFlowTest {
             launchFixture();
             waitFor(By.text("Update ready to install").pkg(FIXTURE_PACKAGE), UI_WAIT_MS, "ready title");
             capture("ready-to-install");
-            clickUnique(By.res("android", "button1")
-                    .pkg(FIXTURE_PACKAGE)
-                    .text("Install")
-                    .clazz("android.widget.Button")
-                    .enabled(true)
-                    .clickable(true), "fixture Install action");
+            waitForUniqueNativeButton(FIXTURE_PACKAGE, "button1", "Install", UI_WAIT_MS).click();
 
             waitForUnknownSourcePage();
             UiObject2 toggle = findUnknownSourceSwitch();
@@ -132,6 +128,11 @@ public final class SuccessPermissionReturnFlowTest {
             assertTrue("The OS installer was not observed", installerObserved);
         } catch (Throwable caught) {
             primary = caught;
+            try {
+                capture("failure-before-cleanup");
+            } catch (Throwable captureFailure) {
+                primary.addSuppressed(captureFailure);
+            }
         } finally {
             try {
                 revokeUnknownSourcePermissionVisibly();
@@ -234,8 +235,9 @@ public final class SuccessPermissionReturnFlowTest {
             List<UiObject2> matches = new ArrayList<>();
             for (String packageName : INSTALLER_PACKAGES) {
                 matches.addAll(device.findObjects(
-                        By.text(text)
+                        By.res("android", "button1")
                                 .pkg(packageName)
+                                .text(exactCaseInsensitiveLabel(text))
                                 .clazz("android.widget.Button")
                                 .enabled(true)
                                 .clickable(true)));
@@ -248,24 +250,38 @@ public final class SuccessPermissionReturnFlowTest {
         return null;
     }
 
+    private UiObject2 waitForUniqueNativeButton(
+            String packageName,
+            String resource,
+            String text,
+            long timeout) {
+        androidx.test.uiautomator.BySelector selector = By.res("android", resource)
+                .pkg(packageName)
+                .text(exactCaseInsensitiveLabel(text))
+                .clazz("android.widget.Button")
+                .enabled(true)
+                .clickable(true);
+        long deadline = SystemClock.uptimeMillis() + timeout;
+        while (SystemClock.uptimeMillis() < deadline) {
+            List<UiObject2> matches = device.findObjects(selector);
+            if (matches.size() == 1) return matches.get(0);
+            if (matches.size() > 1) fail("Native dialog action was ambiguous: " + text);
+            SystemClock.sleep(100L);
+        }
+        fail("Timed out waiting for exact native dialog action: " + text);
+        return null;
+    }
+
     private UiObject2 waitFor(androidx.test.uiautomator.BySelector selector, long timeout, String label) {
         UiObject2 object = device.wait(Until.findObject(selector), timeout);
         assertNotNull("Timed out waiting for " + label, object);
         return object;
     }
 
-    private void clickUnique(androidx.test.uiautomator.BySelector selector, String label) {
-        long deadline = SystemClock.uptimeMillis() + UI_WAIT_MS;
-        while (SystemClock.uptimeMillis() < deadline) {
-            List<UiObject2> matches = device.findObjects(selector);
-            if (matches.size() == 1) {
-                matches.get(0).click();
-                return;
-            }
-            if (matches.size() > 1) fail(label + " was ambiguous");
-            SystemClock.sleep(100L);
-        }
-        fail("Timed out waiting for " + label);
+    private static Pattern exactCaseInsensitiveLabel(String text) {
+        return Pattern.compile(
+                "\\A" + Pattern.quote(text) + "\\z",
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     }
 
     private void revokeUnknownSourcePermissionVisibly() throws Exception {

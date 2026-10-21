@@ -36,6 +36,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 @RunWith(AndroidJUnit4.class)
 public final class PermissionReturnFlowTest {
@@ -84,7 +85,6 @@ public final class PermissionReturnFlowTest {
             launchFixture();
 
             waitFor(By.text(FixturePolicy.READY_TITLE), UI_WAIT_MS, "ready title");
-            waitFor(By.text("Install"), UI_WAIT_MS, "Install action");
             capture("ready-to-install");
             clickNativeDialogButton("button1", "Install");
 
@@ -124,6 +124,11 @@ public final class PermissionReturnFlowTest {
             assertFalse("A package installer surface was observed", installerObserved);
         } catch (Throwable caught) {
             primary = caught;
+            try {
+                capture("failure-before-cleanup");
+            } catch (Throwable captureFailure) {
+                primary.addSuppressed(captureFailure);
+            }
         } finally {
             try {
                 revokeUnknownSourcePermissionVisibly();
@@ -393,15 +398,33 @@ public final class PermissionReturnFlowTest {
     }
 
     private void clickNativeDialogButton(String resource, String text) {
-        UiObject2 button = waitFor(
-                By.res("android", resource)
-                        .pkg(FixturePolicy.FIXTURE_PACKAGE)
-                        .text(text)
-                        .enabled(true)
-                        .clickable(true),
-                UI_WAIT_MS,
-                text);
+        androidx.test.uiautomator.BySelector selector = By.res("android", resource)
+                .pkg(FixturePolicy.FIXTURE_PACKAGE)
+                .text(exactCaseInsensitiveLabel(text))
+                .clazz("android.widget.Button")
+                .enabled(true)
+                .clickable(true);
+        long deadline = SystemClock.uptimeMillis() + UI_WAIT_MS;
+        UiObject2 button = null;
+        while (SystemClock.uptimeMillis() < deadline) {
+            List<UiObject2> matches = device.findObjects(selector);
+            if (matches.size() == 1) {
+                button = matches.get(0);
+                break;
+            }
+            if (matches.size() > 1) {
+                fail("Native dialog action was ambiguous: " + text);
+            }
+            SystemClock.sleep(100L);
+        }
+        assertNotNull("Timed out waiting for exact native dialog action: " + text, button);
         button.click();
+    }
+
+    private static Pattern exactCaseInsensitiveLabel(String text) {
+        return Pattern.compile(
+                "\\A" + Pattern.quote(text) + "\\z",
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     }
 
     private void capture(String label) throws IOException {

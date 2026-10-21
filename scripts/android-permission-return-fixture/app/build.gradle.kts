@@ -4,9 +4,13 @@ plugins {
     id("com.android.application")
 }
 
+val fixtureTestBuildType = providers.gradleProperty("fixtureTestBuildType")
+    .orElse("debug")
+
 android {
     namespace = "com.yawf.permissionreturnfixture"
     compileSdk = 36
+    testBuildType = fixtureTestBuildType.get()
 
     defaultConfig {
         applicationId = "com.yawf.permissionreturnfixture"

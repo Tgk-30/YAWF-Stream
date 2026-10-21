@@ -138,6 +138,11 @@ function flowFailures(flow, policy) {
     "publicOtaProof\", false",
     "installProof\", false",
     "dataPreservationProof\", false",
+    'waitFor(By.text(FixturePolicy.READY_TITLE), UI_WAIT_MS, "ready title");\n            capture("ready-to-install");\n            clickNativeDialogButton("button1", "Install");',
+    'By.res("android", resource)\n                .pkg(FixturePolicy.FIXTURE_PACKAGE)\n                .text(exactCaseInsensitiveLabel(text))\n                .clazz("android.widget.Button")\n                .enabled(true)\n                .clickable(true)',
+    '"\\\\A" + Pattern.quote(text) + "\\\\z"',
+    "Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE",
+    '} catch (Throwable caught) {\n            primary = caught;\n            try {\n                capture("failure-before-cleanup");',
   ];
   for (const value of requiredFlow) if (!flow.includes(value)) failures.push(value);
   const requiredPolicy = [
@@ -160,6 +165,32 @@ function flowFailures(flow, policy) {
   }
   if (flow.includes("Verifying update")) {
     failures.push("transient verification presentation asserted");
+  }
+  if (/\.textContains\s*\(/.test(flow) || flow.includes('.text("Install")')) {
+    failures.push("weak or case-sensitive Install selector");
+  }
+  return failures;
+}
+
+function fixtureBuildWiringFailures(appBuild, successBuild) {
+  const failures = [];
+  const requiredApp = [
+    'val fixtureTestBuildType = providers.gradleProperty("fixtureTestBuildType")',
+    '.orElse("debug")',
+    "testBuildType = fixtureTestBuildType.get()",
+  ];
+  const requiredSuccess = [
+    'sourceSets.getByName("main") {',
+    'java.directories.add("../app/src/main/java")',
+    'kotlin.directories.add("../app/src/main/java")',
+  ];
+  for (const value of requiredApp) if (!appBuild.includes(value)) failures.push(value);
+  for (const value of requiredSuccess) if (!successBuild.includes(value)) failures.push(value);
+  if (appBuild.includes('.orElse("negativeControl")')) {
+    failures.push("negative instrumentation build type became the positive default");
+  }
+  if (/\.srcDir\s*\(\s*"\.\.\/app\/src\/main\/java"/.test(successBuild)) {
+    failures.push("deprecated Java-only shared source admission");
   }
   return failures;
 }
@@ -206,7 +237,8 @@ function successFixtureFailures({ settings, build, activity, manifest, driverBui
     [build, 'versionName = "90.0.2"'],
     [build, 'sourceSets.getByName("baseline").assets.directories.add'],
     [build, '"build/generated/successBaselineAssets"'],
-    [build, 'sourceSets.getByName("main").java.srcDir("../app/src/main/java")'],
+    [build, 'java.directories.add("../app/src/main/java")'],
+    [build, 'kotlin.directories.add("../app/src/main/java")'],
     [activity, 'assets.open(TARGET_ASSET_NAME)'],
     [activity, 'check(total == BuildConfig.SUCCESS_TARGET_SIZE)'],
     [activity, 'check(digest.digest().toHex() == BuildConfig.SUCCESS_TARGET_SHA256)'],
@@ -219,9 +251,15 @@ function successFixtureFailures({ settings, build, activity, manifest, driverBui
     [driverBuild, 'applicationId = "com.yawf.permissionreturndriver"'],
     [driverManifest, 'android:name=".DriverActivity"'],
     [driver, '"com.yawf.permissionreturndriver", driverContext.getPackageName()'],
-    [driver, 'clickUnique(By.res("android", "button1")'],
+    [driver, 'waitForUniqueNativeButton(FIXTURE_PACKAGE, "button1", "Install", UI_WAIT_MS).click()'],
+    [driver, 'waitFor(By.text("Update ready to install").pkg(FIXTURE_PACKAGE), UI_WAIT_MS, "ready title");\n            capture("ready-to-install");\n            waitForUniqueNativeButton(FIXTURE_PACKAGE, "button1", "Install", UI_WAIT_MS).click();'],
     [driver, 'waitForUniqueInstallerButton("Update", INSTALL_WAIT_MS)'],
     [driver, 'waitForUniqueInstallerButton("Open", INSTALL_WAIT_MS)'],
+    [driver, 'By.res("android", "button1")\n                                .pkg(packageName)\n                                .text(exactCaseInsensitiveLabel(text))'],
+    [driver, 'By.res("android", resource)\n                .pkg(packageName)\n                .text(exactCaseInsensitiveLabel(text))'],
+    [driver, '"\\\\A" + Pattern.quote(text) + "\\\\z"'],
+    [driver, 'Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE'],
+    [driver, '} catch (Throwable caught) {\n            primary = caught;\n            try {\n                capture("failure-before-cleanup");'],
     [driver, 'assertEquals("Fixture UID changed across the update", uidBefore, after.applicationInfo.uid)'],
     [driver, 'assertEquals("Fixture first-install time changed", firstInstallBefore, after.firstInstallTime)'],
     [driver, 'assertEquals("Fixture signer set changed", signersBefore, signerDigests(after))'],
@@ -246,6 +284,13 @@ function successFixtureFailures({ settings, build, activity, manifest, driverBui
   }
   if (/Intent\.ACTION_VIEW|verifyStaged|setAccessible\s*\(|pm install|adb\s/.test(driver)) {
     failures.push("driver bypasses the ordinary fixture and installer UI");
+  }
+  if (/\.textContains\s*\(/.test(driver)
+      || /\.text\("(?:Install|Update|Open)"\)/.test(driver)) {
+    failures.push("weak or case-sensitive action selector");
+  }
+  if ((driver.match(/waitForUniqueNativeButton\(FIXTURE_PACKAGE, "button1", "Install", UI_WAIT_MS\)/g) || []).length !== 1) {
+    failures.push("fixture Install action is not exactly one uniquely identified ordinary UI action");
   }
   return failures;
 }
@@ -377,6 +422,28 @@ test("positive recovery and return-resume-omitted control prove distinct bounded
       flow.replace("revokeUnknownSourcePermissionVisibly();", "permissionRevoked = true;"),
       policy,
     ),
+    "Install selector casefold removed": flowFailures(
+      flow.replace(".text(exactCaseInsensitiveLabel(text))", ".text(text)"),
+      policy,
+    ),
+    "Install resource identity removed": flowFailures(
+      flow.replace(
+        'By.res("android", resource)\n                .pkg(FixturePolicy.FIXTURE_PACKAGE)',
+        "By.pkg(FixturePolicy.FIXTURE_PACKAGE)",
+      ),
+      policy,
+    ),
+    "ready capture moved after Install": flowFailures(
+      flow.replace(
+        'waitFor(By.text(FixturePolicy.READY_TITLE), UI_WAIT_MS, "ready title");\n            capture("ready-to-install");\n            clickNativeDialogButton("button1", "Install");',
+        'waitFor(By.text(FixturePolicy.READY_TITLE), UI_WAIT_MS, "ready title");\n            clickNativeDialogButton("button1", "Install");\n            capture("ready-to-install");',
+      ),
+      policy,
+    ),
+    "pre-cleanup failure capture removed": flowFailures(
+      flow.replace('                capture("failure-before-cleanup");\n', ""),
+      policy,
+    ),
   };
   for (const [name, failures] of Object.entries(mutants)) {
     assert.notDeepEqual(failures, [], name);
@@ -409,6 +476,35 @@ test("AGP 9 uses built-in Kotlin and exposes only the bounded return-resume cont
   assert.match(mutants["external root plugin restored"], /org\.jetbrains\.kotlin\.android/);
   assert.match(mutants["external app plugin restored"], /org\.jetbrains\.kotlin\.android/);
   assert.doesNotMatch(mutants["control variant removed"], /create\("negativeControl"\)/);
+});
+
+test("fixture build wiring selects one instrumentation build type and admits the generated Kotlin source", () => {
+  const appBuild = readFileSync(APP_BUILD, "utf8");
+  const successBuild = readFileSync(SUCCESS_BUILD, "utf8");
+  assert.deepEqual(fixtureBuildWiringFailures(appBuild, successBuild), []);
+
+  const mutants = {
+    "test build type selection removed": {
+      app: appBuild.replace("    testBuildType = fixtureTestBuildType.get()\n", ""),
+      success: successBuild,
+    },
+    "negative control made the default": {
+      app: appBuild.replace('.orElse("debug")', '.orElse("negativeControl")'),
+      success: successBuild,
+    },
+    "Kotlin source admission removed": {
+      app: appBuild,
+      success: successBuild.replace('        kotlin.directories.add("../app/src/main/java")\n', ""),
+    },
+    "Java source admission removed": {
+      app: appBuild,
+      success: successBuild.replace('        java.directories.add("../app/src/main/java")\n', ""),
+    },
+  };
+  for (const [name, mutant] of Object.entries(mutants)) {
+    assert.ok(mutant.app !== appBuild || mutant.success !== successBuild, `${name} did not mutate its source`);
+    assert.notDeepEqual(fixtureBuildWiringFailures(mutant.app, mutant.success), [], name);
+  }
 });
 
 test("workflow is manual, read-only, pinned, and runs both bounded lifecycle outcomes", () => {
@@ -543,6 +639,31 @@ test("success fixture separates target bytes and uses a surviving ordinary-UI dr
     "permission cleanup removed": successFixtureFailures({
       ...sources,
       driver: sources.driver.replace("revokeUnknownSourcePermissionVisibly();", "permissionRevoked = true;"),
+    }),
+    "installer action resource identity removed": successFixtureFailures({
+      ...sources,
+      driver: sources.driver.replace(
+        'By.res("android", "button1")\n                                .pkg(packageName)\n                                .text(exactCaseInsensitiveLabel(text))',
+        'By.text(exactCaseInsensitiveLabel(text))\n                                .pkg(packageName)',
+      ),
+    }),
+    "action casefold removed": successFixtureFailures({
+      ...sources,
+      driver: sources.driver.replaceAll(
+        ".text(exactCaseInsensitiveLabel(text))",
+        ".text(text)",
+      ),
+    }),
+    "ready capture moved after Install": successFixtureFailures({
+      ...sources,
+      driver: sources.driver.replace(
+        'waitFor(By.text("Update ready to install").pkg(FIXTURE_PACKAGE), UI_WAIT_MS, "ready title");\n            capture("ready-to-install");\n            waitForUniqueNativeButton(FIXTURE_PACKAGE, "button1", "Install", UI_WAIT_MS).click();',
+        'waitFor(By.text("Update ready to install").pkg(FIXTURE_PACKAGE), UI_WAIT_MS, "ready title");\n            waitForUniqueNativeButton(FIXTURE_PACKAGE, "button1", "Install", UI_WAIT_MS).click();\n            capture("ready-to-install");',
+      ),
+    }),
+    "pre-cleanup failure capture removed": successFixtureFailures({
+      ...sources,
+      driver: sources.driver.replace('                capture("failure-before-cleanup");\n', ""),
     }),
   };
   for (const [name, failures] of Object.entries(mutants)) {
