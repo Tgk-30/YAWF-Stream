@@ -122,6 +122,30 @@ function assertObservationOnly(source) {
   assert.match(source, /playPauseSelector\("Play"\).*semantic Play state before resuming/s);
 }
 
+function assertImeDismissalPolicy(source) {
+  assert.match(source,
+    /private static final String PINNED_TV_IME = "com\.google\.android\.inputmethod\.latin";/);
+  const flow = javaMethod(source, "runFlow");
+  const addressVerified = flow.indexOf(
+    'assertEquals("Server address was not entered through the visible UI", FIXTURE_URL, address.getText());',
+  );
+  const dismissal = flow.indexOf("dismissVisiblePinnedTvIme();");
+  const connect = flow.indexOf('focusAndActivate(By.text("Connect"), "Connect", 6);');
+  assert.ok(addressVerified >= 0 && addressVerified < dismissal && dismissal < connect,
+    "the exact entered address must be verified before IME dismissal and Connect activation");
+
+  const body = javaMethod(source, "dismissVisiblePinnedTvIme");
+  assert.match(body, /BySelector imeSelector = By\.pkg\(PINNED_TV_IME\);/);
+  assert.match(body,
+    /UiObject2 ime = waitFor\(imeSelector, UI_WAIT, "visible pinned TV input method"\);/);
+  assert.match(body, /!ime\.getVisibleBounds\(\)\.isEmpty\(\)/);
+  assert.equal((body.match(/device\.pressBack\(\)/g) ?? []).length, 1,
+    "IME dismissal must send exactly one remote Back");
+  assert.match(body, /device\.wait\(Until\.gone\(imeSelector\), UI_WAIT\)/);
+  assert.doesNotMatch(body,
+    /executeShellCommand|input\s+keyevent|pressDPad|pressKeyCode|\.click\s*\(|\bfor\s*\(|\bwhile\s*\(/);
+}
+
 function assertJavaSemanticPolicy(source) {
   for (const marker of [
     'assertTrue("Playback position did not advance"',
@@ -226,6 +250,23 @@ test("TV harness can discover only the exact signed product package", () => {
   const wrongPackage = source.replace("com.yawf.stream.tv", "com.yawf.stream.wrong");
   assert.notEqual(wrongPackage, source);
   assert.throws(() => assertHarnessVisibilityPolicy(wrongPackage));
+});
+
+test("TV setup dismisses the exact visible pinned IME once before focusing Connect", () => {
+  const source = read(javaPath);
+  assertImeDismissalPolicy(source);
+  const mutants = [
+    source.replace(
+      '        device.pressBack();\n        assertTrue("Pinned TV input method did not dismiss after one remote Back",',
+      '        assertTrue("Pinned TV input method did not dismiss after one remote Back",',
+    ),
+    source.replace("Until.gone(imeSelector)", "Until.hasObject(imeSelector)"),
+    source.replace("com.google.android.inputmethod.latin", "com.google.android.inputmethod.wrong"),
+  ];
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, source);
+    assert.throws(() => assertImeDismissalPolicy(mutant));
+  }
 });
 
 test("position observers cannot toggle or repair playback", () => {
