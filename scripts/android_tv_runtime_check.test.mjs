@@ -33,7 +33,24 @@ function killedPythonMutant(path, search, replacement, args = ["--self-test"]) {
   assert.notEqual(result.status, 0, `semantic mutant survived:\n${result.stdout}\n${result.stderr}`);
 }
 
+function assertSetupEmulatorPath(source) {
+  const start = source.indexOf("      - name: Admit exact official Android TV API 36 image revision");
+  const end = source.indexOf("      - name: Run policy tests, generate fixture, and build isolated harness", start);
+  assert.ok(start >= 0 && end > start, "SDK admission step must be explicit");
+  const setup = source.slice(start, end);
+  assert.ok(setup.includes('test -x "$sdk_root/emulator/emulator"'));
+  assert.ok(setup.includes('"$sdk_root/emulator/emulator" -version'));
+  assert.doesNotMatch(setup, /^\s*emulator -version/m);
+}
+
+function assertScopedVolumeCommand(source) {
+  assert.ok(source.includes('adb -s "$EMULATOR_SERIAL" shell cmd media_session volume --stream 3 --set 0'));
+  assert.doesNotMatch(source, /shell\s+media\s+volume/);
+}
+
 function assertWorkflowPolicy(source) {
+  assertScopedVolumeCommand(source);
+  assertSetupEmulatorPath(source);
   assert.match(source, /on:\s*\n\s*workflow_dispatch:\s*\n/);
   assert.match(source, /SYSTEM_IMAGE_PACKAGE: system-images;android-36;android-tv;x86_64/);
   assert.match(source, /SYSTEM_IMAGE_REVISION: "4"/);
@@ -169,6 +186,22 @@ test("workflow is manual, fail-closed, revision-4 TV-only, and device scoped", (
   assert.throws(() => assertWorkflowPolicy(source.replace(
     "name: Download the isolated static transport artifact",
     "name: Download the isolated static transport artifact\n        env:\n          GH_TOKEN: forbidden")));
+});
+
+test("SDK admission invokes the newly installed emulator before PATH becomes available", () => {
+  const source = read(workflowPath);
+  assertSetupEmulatorPath(source);
+  const mutant = source.replace('"$sdk_root/emulator/emulator" -version', 'emulator -version');
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertSetupEmulatorPath(mutant));
+});
+
+test("TV muting uses the media_session service rather than the absent legacy shell binary", () => {
+  const source = read(workflowPath);
+  assertScopedVolumeCommand(source);
+  const mutant = source.replace('shell cmd media_session volume', 'shell media volume');
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertScopedVolumeCommand(mutant));
 });
 
 test("position observers cannot toggle or repair playback", () => {

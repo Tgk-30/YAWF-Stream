@@ -219,6 +219,7 @@ jobs:
           sdkmanager "platform-tools" "emulator" "platforms;android-36" \
             "build-tools;36.0.0" "$SYSTEM_IMAGE_PACKAGE"
           sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          test -x "$sdk_root/emulator/emulator"
           image_root="$sdk_root/system-images/android-36/android-tv/x86_64"
           test -f "$image_root/package.xml"
           test -f "$image_root/source.properties"
@@ -227,7 +228,7 @@ jobs:
             > "$EVIDENCE/system-image-metadata-sha256.txt"
           {
             adb version
-            emulator -version
+            "$sdk_root/emulator/emulator" -version
             ffmpeg -version | head -1
             ffprobe -version | head -1
           } > "$EVIDENCE/tool-versions.txt"
@@ -374,7 +375,7 @@ jobs:
           assert match, 'stock Android TV WebView provider missing'
           assert int(match.group(2)) >= 90, match.group(0)
           PY
-          adb -s "$EMULATOR_SERIAL" shell media volume --stream 3 --set 0 >/dev/null
+          adb -s "$EMULATOR_SERIAL" shell cmd media_session volume --stream 3 --set 0 >/dev/null
           adb -s "$EMULATOR_SERIAL" reverse "tcp:$FIXTURE_PORT" "tcp:$FIXTURE_PORT"
 
           python3 scripts/android_tv_runtime_check.py \
