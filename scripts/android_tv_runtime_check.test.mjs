@@ -71,11 +71,15 @@ function assertWorkflowPolicy(source) {
   assert.match(source, /SYSTEM_IMAGE_PACKAGE: system-images;android-36;android-tv;x86_64/);
   assert.match(source, /SYSTEM_IMAGE_REVISION: "4"/);
   assert.match(source, /Reject unresolved signed artifact pins before setup/);
-  assert.match(source, /test "\$TV_RELEASE_TAG" = "v2\.3\.25-web"/);
-  assert.equal((source.match(/TV_RELEASE_ID: 418070552/g) ?? []).length, 2);
-  assert.equal((source.match(/TV_ASSET_ID: 660632273/g) ?? []).length, 2);
-  assert.equal((source.match(/TV_APK_SHA256: fdd2ba7ae2c1badadf6177cde7271628380a7be05a22793fd9d3fb4a51dd6006/g) ?? []).length, 2);
-  assert.equal((source.match(/TV_APK_SIZE: "5056474"/g) ?? []).length, 2);
+  assert.match(source, /test "\$TV_RELEASE_TAG" = "v2\.3\.28-web"/);
+  assert.equal((source.match(/TV_RELEASE_ID: 419588272/g) ?? []).length, 2);
+  assert.equal((source.match(/TV_ASSET_ID: 662821004/g) ?? []).length, 2);
+  assert.equal((source.match(/TV_SOURCE_REVISION: 2aa6a41664756526123a566c062053e15ab646cb/g) ?? []).length, 2);
+  assert.match(source, /TV_SIGNING_RUN_ID: "39607327164"/);
+  assert.match(source, /TV_VERSION_NAME: 2\.3\.28/);
+  assert.match(source, /TV_VERSION_CODE: "20328"/);
+  assert.equal((source.match(/TV_APK_SHA256: f1f6e7f3481a4b461bf2d090a25dc42af9ff1dfb44cdd4760064a12c35d76f4c/g) ?? []).length, 2);
+  assert.equal((source.match(/TV_APK_SIZE: "5056795"/g) ?? []).length, 2);
   assert.match(source, /TV_SIGNER_SHA256: 6d8ec5466423e10e5c751132bb0f6a6ddf95a8d9f3378772d7809fce616eec1e/);
   assert.match(source, /name: tv-signed-static-transport/);
   assert.match(source, /--validate-static-transport/);
@@ -91,6 +95,10 @@ function assertWorkflowPolicy(source) {
   assert.doesNotMatch(privilegedJob, /actions\/checkout|scripts\/|npm |node |gradle |cargo /);
   assert.match(privilegedJob, /contents: write/);
   assert.match(privilegedJob, /git\/ref\/tags\/\$TV_RELEASE_TAG/);
+  assert.match(privilegedJob, /TV_TAG_OBJECT: 3dd4097c4e9c11a2efbf231389b9078a78f635c1/);
+  assert.match(privilegedJob, /git\/tags\/\$TV_TAG_OBJECT/);
+  assert.ok(privilegedJob.indexOf('# END TV_ANNOTATED_TAG_BINDING') < privilegedJob.indexOf('actions/runs/$TV_SIGNING_RUN_ID'));
+  assert.ok(privilegedJob.indexOf('actions/runs/$TV_SIGNING_RUN_ID') < privilegedJob.indexOf("-H 'Accept: application/octet-stream'"));
   assert.match(privilegedJob, /actions\/runs\/\$TV_SIGNING_RUN_ID/);
   assert.match(readOnlyJob, /needs: transport/);
   assert.match(readOnlyJob, /permissions:\s*\n      contents: read\s*\n      actions: read/);
@@ -244,10 +252,14 @@ test("workflow is manual, fail-closed, revision-4 TV-only, and device scoped", (
   const source = read(workflowPath);
   assertWorkflowPolicy(source);
   for (const [before, after] of [
-    ["TV_RELEASE_ID: 418070552", "TV_RELEASE_ID: 1"],
-    ["TV_ASSET_ID: 660632273", "TV_ASSET_ID: 1"],
-    ["TV_APK_SHA256: fdd2ba7ae2c1badadf6177cde7271628380a7be05a22793fd9d3fb4a51dd6006", "TV_APK_SHA256: " + "0".repeat(64)],
-    ['TV_APK_SIZE: "5056474"', 'TV_APK_SIZE: "0"'],
+    ["TV_RELEASE_ID: 419588272", "TV_RELEASE_ID: 1"],
+    ["TV_ASSET_ID: 662821004", "TV_ASSET_ID: 1"],
+    ["TV_SOURCE_REVISION: 2aa6a41664756526123a566c062053e15ab646cb", "TV_SOURCE_REVISION: " + "0".repeat(40)],
+    ['TV_SIGNING_RUN_ID: "39607327164"', 'TV_SIGNING_RUN_ID: "1"'],
+    ['TV_VERSION_NAME: 2.3.28', 'TV_VERSION_NAME: 2.3.25'],
+    ['TV_VERSION_CODE: "20328"', 'TV_VERSION_CODE: "20325"'],
+    ["TV_APK_SHA256: f1f6e7f3481a4b461bf2d090a25dc42af9ff1dfb44cdd4760064a12c35d76f4c", "TV_APK_SHA256: " + "0".repeat(64)],
+    ['TV_APK_SIZE: "5056795"', 'TV_APK_SIZE: "0"'],
     ["TV_SIGNER_SHA256: 6d8ec5466423e10e5c751132bb0f6a6ddf95a8d9f3378772d7809fce616eec1e", "TV_SIGNER_SHA256: " + "0".repeat(64)],
   ]) {
     assert.ok(source.includes(before));
@@ -369,4 +381,41 @@ test("all admission files compile or parse without touching Android SDK", () => 
     "print(json.dumps({'javaBraceBalance':True,'productJavaBraceBalance':True}))",
   ].join(";")], { encoding: "utf8" }));
   assertWorkflowPolicy(read(workflowPath));
+});
+
+function executeTagBinding(code, refMutation = () => {}, tagMutation = () => {}) {
+  const directory = mkdtempSync(join(tmpdir(), "yawf-tv-tag-binding-"));
+  const ref = {ref: "refs/tags/v2.3.28-web", object: {type: "tag", sha: "3dd4097c4e9c11a2efbf231389b9078a78f635c1"}};
+  const tag = {sha: "3dd4097c4e9c11a2efbf231389b9078a78f635c1", tag: "v2.3.28-web", object: {type: "commit", sha: "2aa6a41664756526123a566c062053e15ab646cb"}};
+  refMutation(ref); tagMutation(tag);
+  writeFileSync(join(directory, "tv-tag-ref.json"), JSON.stringify(ref));
+  writeFileSync(join(directory, "tv-annotated-tag.json"), JSON.stringify(tag));
+  return spawnSync(python, ["-I", "-B", "-c", code], {encoding: "utf8", env: {...process.env,
+    RUNNER_TEMP: directory, TV_RELEASE_TAG: "v2.3.28-web",
+    TV_TAG_OBJECT: "3dd4097c4e9c11a2efbf231389b9078a78f635c1", TV_SOURCE_REVISION: "2aa6a41664756526123a566c062053e15ab646cb"}});
+}
+
+test("actual annotated TV tag binding peels only the fixed object to its fixed commit", () => {
+  const source = read(workflowPath);
+  const code = source.split('# BEGIN TV_ANNOTATED_TAG_BINDING\n')[1].split('# END TV_ANNOTATED_TAG_BINDING')[0]
+    .split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
+  const original = executeTagBinding(code);
+  assert.equal(original.status, 0, original.stdout + original.stderr);
+  const cases = [
+    [ref => {ref.ref = "refs/tags/v2.3.27-web";}, () => {}, 'assert tag_ref["ref"] == "refs/tags/" + env["TV_RELEASE_TAG"]'],
+    [ref => {ref.object.type = "commit";}, () => {}, 'assert tag_ref["object"]["type"] == "tag"'],
+    [ref => {ref.object.sha = "0".repeat(40);}, () => {}, 'assert tag_ref["object"]["sha"] == env["TV_TAG_OBJECT"]'],
+    [() => {}, tag => {tag.sha = "0".repeat(40);}, 'assert annotated["sha"] == env["TV_TAG_OBJECT"]'],
+    [() => {}, tag => {tag.tag = "v2.3.27-web";}, 'assert annotated["tag"] == env["TV_RELEASE_TAG"]'],
+    [() => {}, tag => {tag.object.type = "tag";}, 'assert annotated["object"]["type"] == "commit"'],
+    [() => {}, tag => {tag.object.sha = "0".repeat(40);}, 'assert annotated["object"]["sha"] == env["TV_SOURCE_REVISION"]'],
+  ];
+  for (const [refMutation, tagMutation, assertion] of cases) {
+    assert.notEqual(executeTagBinding(code, refMutation, tagMutation).status, 0, assertion);
+    assert.equal(code.split(assertion).length, 2, assertion);
+    const mutant = code.replace(assertion, 'pass');
+    assert.notEqual(mutant, code);
+    const admitted = executeTagBinding(mutant, refMutation, tagMutation);
+    assert.equal(admitted.status, 0, 'The removed binding must admit its otherwise rejected mismatch: ' + assertion);
+  }
 });

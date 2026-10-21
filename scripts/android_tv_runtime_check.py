@@ -87,7 +87,7 @@ def validate_static_transport(
         raise GateError("static transport numeric pins must be positive")
     if not SHA40.fullmatch(source_revision) or not HEX64.fullmatch(asset_sha256):
         raise GateError("static transport source/hash pins must be exact lowercase hashes")
-    if asset_name != Path(asset_name).name or release_tag != "v2.3.25-web":
+    if asset_name != Path(asset_name).name or release_tag != "v2.3.28-web":
         raise GateError("static transport tag or asset name was outside the fixed gate")
     root = root.resolve()
     expected = {asset_name, "release-metadata.json", "asset-metadata.json", "transport-binding.json"}
@@ -377,8 +377,8 @@ def main_run(args: argparse.Namespace) -> None:
 class PolicyTests(unittest.TestCase):
     def args(self):
         return argparse.Namespace(apk_sha256="a" * 64, signer_sha256="b" * 64,
-            source_revision="c" * 40, apk_size=123, version_code=20325,
-            version_name="2.3.25", serial="emulator-5556", fixture_audit=FIXTURE_AUDIT,
+            source_revision="c" * 40, apk_size=123, version_code=20328,
+            version_name="2.3.28", serial="emulator-5556", fixture_audit=FIXTURE_AUDIT,
             apk=Path("/tmp/tv.apk"), apkanalyzer="apkanalyzer", apksigner="apksigner",
             evidence=Path("/tmp/e"), adb="adb", harness_app=Path("/tmp/h.apk"), harness_test=Path("/tmp/ht.apk"))
 
@@ -442,23 +442,23 @@ class PolicyTests(unittest.TestCase):
     def test_static_transport_binds_exact_draft_source_asset_and_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            apk = root / "YAWF.Stream_Android.TV_2.3.25.apk"
+            apk = root / "YAWF.Stream_Android.TV_2.3.28.apk"
             apk.write_bytes(b"signed-tv-fixture")
             digest = file_sha256(apk)
-            release = {"id": 123, "tag_name": "v2.3.25-web", "draft": True,
+            release = {"id": 123, "tag_name": "v2.3.28-web", "draft": True,
                        "prerelease": False, "assets": [{"id": 456, "name": apk.name}]}
             asset = {"id": 456, "name": apk.name, "size": apk.stat().st_size,
                      "url": "https://api.github.com/repos/Tgk-30/YAWF-Stream/releases/assets/456",
                      "digest": f"sha256:{digest}"}
             binding = {"schemaVersion": 1, "releaseId": 123, "assetId": 456,
-                       "releaseTag": "v2.3.25-web", "sourceRevision": "c" * 40,
+                       "releaseTag": "v2.3.28-web", "sourceRevision": "c" * 40,
                        "assetName": apk.name, "assetSize": apk.stat().st_size,
                        "assetSha256": digest, "privilegedStaticTransport": True,
                        "credentialValuesPersisted": False}
             (root / "release-metadata.json").write_text(json.dumps(release))
             (root / "asset-metadata.json").write_text(json.dumps(asset))
             (root / "transport-binding.json").write_text(json.dumps(binding))
-            kwargs = dict(release_id=123, asset_id=456, release_tag="v2.3.25-web",
+            kwargs = dict(release_id=123, asset_id=456, release_tag="v2.3.28-web",
                           source_revision="c" * 40, asset_name=apk.name,
                           asset_size=apk.stat().st_size, asset_sha256=digest)
             validate_static_transport(root, **kwargs)

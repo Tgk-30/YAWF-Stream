@@ -21,14 +21,15 @@ jobs:
       contents: write
       actions: read
     env:
-      TV_RELEASE_ID: 418070552
-      TV_ASSET_ID: 660632273
-      TV_SOURCE_REVISION: 00c183935cf5ed3410499722320d963ca8ab5346
-      TV_RELEASE_TAG: v2.3.25-web
-      TV_SIGNING_RUN_ID: "39379784253"
-      TV_APK_FILENAME: YAWF.Stream_Android.TV_2.3.25.apk
-      TV_APK_SHA256: fdd2ba7ae2c1badadf6177cde7271628380a7be05a22793fd9d3fb4a51dd6006
-      TV_APK_SIZE: "5056474"
+      TV_RELEASE_ID: 419588272
+      TV_ASSET_ID: 662821004
+      TV_SOURCE_REVISION: 2aa6a41664756526123a566c062053e15ab646cb
+      TV_RELEASE_TAG: v2.3.28-web
+      TV_SIGNING_RUN_ID: "39607327164"
+      TV_TAG_OBJECT: 3dd4097c4e9c11a2efbf231389b9078a78f635c1
+      TV_APK_FILENAME: YAWF.Stream_Android.TV_2.3.28.apk
+      TV_APK_SHA256: f1f6e7f3481a4b461bf2d090a25dc42af9ff1dfb44cdd4760064a12c35d76f4c
+      TV_APK_SIZE: "5056795"
     steps:
       - name: Retrieve only fixed asset metadata and bytes without repository checkout
         shell: bash
@@ -44,7 +45,24 @@ jobs:
           [[ "$TV_APK_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$TV_APK_SIZE" =~ ^[1-9][0-9]+$ ]]
           test "$GITHUB_REPOSITORY" = Tgk-30/YAWF-Stream
-          test "$(gh api "repos/Tgk-30/YAWF-Stream/git/ref/tags/$TV_RELEASE_TAG" --jq .object.sha)" = "$TV_SOURCE_REVISION"
+          gh api "repos/Tgk-30/YAWF-Stream/git/ref/tags/$TV_RELEASE_TAG" > "$RUNNER_TEMP/tv-tag-ref.json"
+          gh api "repos/Tgk-30/YAWF-Stream/git/tags/$TV_TAG_OBJECT" > "$RUNNER_TEMP/tv-annotated-tag.json"
+          python3 -I -B - <<'TAGBINDING'
+          # BEGIN TV_ANNOTATED_TAG_BINDING
+          import json, os
+          from pathlib import Path
+          env = os.environ
+          tag_ref = json.loads((Path(env["RUNNER_TEMP"]) / "tv-tag-ref.json").read_text())
+          annotated = json.loads((Path(env["RUNNER_TEMP"]) / "tv-annotated-tag.json").read_text())
+          assert tag_ref["ref"] == "refs/tags/" + env["TV_RELEASE_TAG"]
+          assert tag_ref["object"]["type"] == "tag"
+          assert tag_ref["object"]["sha"] == env["TV_TAG_OBJECT"]
+          assert annotated["sha"] == env["TV_TAG_OBJECT"]
+          assert annotated["tag"] == env["TV_RELEASE_TAG"]
+          assert annotated["object"]["type"] == "commit"
+          assert annotated["object"]["sha"] == env["TV_SOURCE_REVISION"]
+          # END TV_ANNOTATED_TAG_BINDING
+          TAGBINDING
           run_metadata="$(gh api "repos/Tgk-30/YAWF-Stream/actions/runs/$TV_SIGNING_RUN_ID" --jq '[.head_sha,.event,.name,.conclusion] | @tsv')"
           test "$run_metadata" = "$(printf '%s\tpush\tweb-release\tsuccess' "$TV_SOURCE_REVISION")"
           transport="$RUNNER_TEMP/tv-static-transport"
@@ -92,16 +110,16 @@ jobs:
     env:
       # Exact production-signed draft bytes verified by release and asset ID.
       # Do not convert these fixed pins to caller-controlled inputs.
-      TV_RELEASE_ID: 418070552
-      TV_ASSET_ID: 660632273
-      TV_SOURCE_REVISION: 00c183935cf5ed3410499722320d963ca8ab5346
-      TV_RELEASE_TAG: v2.3.25-web
-      TV_APK_FILENAME: YAWF.Stream_Android.TV_2.3.25.apk
-      TV_APK_SHA256: fdd2ba7ae2c1badadf6177cde7271628380a7be05a22793fd9d3fb4a51dd6006
-      TV_APK_SIZE: "5056474"
+      TV_RELEASE_ID: 419588272
+      TV_ASSET_ID: 662821004
+      TV_SOURCE_REVISION: 2aa6a41664756526123a566c062053e15ab646cb
+      TV_RELEASE_TAG: v2.3.28-web
+      TV_APK_FILENAME: YAWF.Stream_Android.TV_2.3.28.apk
+      TV_APK_SHA256: f1f6e7f3481a4b461bf2d090a25dc42af9ff1dfb44cdd4760064a12c35d76f4c
+      TV_APK_SIZE: "5056795"
       TV_SIGNER_SHA256: 6d8ec5466423e10e5c751132bb0f6a6ddf95a8d9f3378772d7809fce616eec1e
-      TV_VERSION_NAME: 2.3.25
-      TV_VERSION_CODE: "20325"
+      TV_VERSION_NAME: 2.3.28
+      TV_VERSION_CODE: "20328"
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;android-tv;x86_64
       SYSTEM_IMAGE_REVISION: "4"
       AVD_NAME: yawf-tv-api36-signed-runtime
@@ -131,7 +149,7 @@ jobs:
           [[ "$TV_APK_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$TV_SIGNER_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$TV_APK_SIZE" =~ ^[1-9][0-9]+$ ]]
-          test "$TV_RELEASE_TAG" = "v2.3.25-web"
+          test "$TV_RELEASE_TAG" = "v2.3.28-web"
 
       - name: Checkout exact signed source
         uses: actions/checkout@v4
