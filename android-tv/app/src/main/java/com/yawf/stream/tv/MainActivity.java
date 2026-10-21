@@ -359,6 +359,16 @@ public final class MainActivity extends ComponentActivity {
         connect.setTextSize(20);
         connect.setTextColor(Color.BLACK);
         connect.setAllCaps(false);
+        address.setOnKeyListener((view, keyCode, event) -> {
+            if (
+                keyCode == KeyEvent.KEYCODE_DPAD_DOWN &&
+                event.getAction() == KeyEvent.ACTION_DOWN
+            ) {
+                connect.requestFocus();
+                return true;
+            }
+            return false;
+        });
         connect.setOnClickListener(view -> {
             String normalized = ServerAddress.normalize(address.getText().toString());
             if (normalized == null) {

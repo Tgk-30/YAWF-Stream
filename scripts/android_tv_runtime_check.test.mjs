@@ -10,6 +10,10 @@ const scripts = dirname(fileURLToPath(import.meta.url));
 const root = resolve(scripts, "..");
 const hostPath = join(scripts, "android_tv_runtime_check.py");
 const fixturePath = join(scripts, "android_tv_runtime_fixture.py");
+const mainActivityPath = join(
+  root,
+  "android-tv/app/src/main/java/com/yawf/stream/tv/MainActivity.java",
+);
 const javaPath = join(
   scripts,
   "android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeTvFlowTest.java",
@@ -130,7 +134,7 @@ function assertImeDismissalPolicy(source) {
     'assertEquals("Server address was not entered through the visible UI", FIXTURE_URL, address.getText());',
   );
   const dismissal = flow.indexOf("dismissVisiblePinnedTvIme();");
-  const connect = flow.indexOf('focusAndActivate(By.text("Connect"), "Connect", 6);');
+  const connect = flow.indexOf("focusConnectWithFirstDpadDownAndActivate();");
   assert.ok(addressVerified >= 0 && addressVerified < dismissal && dismissal < connect,
     "the exact entered address must be verified before IME dismissal and Connect activation");
 
@@ -144,6 +148,43 @@ function assertImeDismissalPolicy(source) {
   assert.match(body, /device\.wait\(Until\.gone\(imeSelector\), UI_WAIT\)/);
   assert.doesNotMatch(body,
     /executeShellCommand|input\s+keyevent|pressDPad|pressKeyCode|\.click\s*\(|\bfor\s*\(|\bwhile\s*\(/);
+}
+
+function assertSetupFocusRoutingPolicy(source) {
+  const setup = javaMethod(source, "showServerSetup");
+  const start = setup.indexOf("address.setOnKeyListener((view, keyCode, event) -> {");
+  const end = setup.indexOf("        });", start);
+  assert.ok(start >= 0 && end > start, "server address must define bounded key routing");
+  const listener = setup.slice(start, end);
+  assert.match(listener, /keyCode == KeyEvent\.KEYCODE_DPAD_DOWN/);
+  assert.match(listener, /event\.getAction\(\) == KeyEvent\.ACTION_DOWN/);
+  assert.match(listener, /connect\.requestFocus\(\);\s*return true;/s);
+  assert.match(listener, /}\s*return false;\s*$/s);
+  assert.equal((listener.match(/connect\.requestFocus\(\)/g) ?? []).length, 1);
+  assert.doesNotMatch(listener,
+    /performClick|callOnClick|setText|dispatchKeyEvent|executeShellCommand|KEYCODE_DPAD_(?:UP|LEFT|RIGHT)/);
+}
+
+function assertFirstDpadConnectPolicy(source) {
+  const flow = javaMethod(source, "runFlow");
+  const imeGone = flow.indexOf("dismissVisiblePinnedTvIme();");
+  const connect = flow.indexOf("focusConnectWithFirstDpadDownAndActivate();");
+  assert.ok(imeGone >= 0 && imeGone < connect,
+    "first Connect navigation must begin only after exact IME dismissal");
+
+  const body = javaMethod(source, "focusConnectWithFirstDpadDownAndActivate");
+  const addressFocused = body.indexOf('By.clazz("android.widget.EditText").focused(true)');
+  const down = body.indexOf("device.pressDPadDown();");
+  const connectFocused = body.indexOf('waitFor(focusedConnect, UI_WAIT, "Connect focused by first D-pad Down");');
+  const center = body.indexOf("device.pressDPadCenter();");
+  assert.ok(addressFocused >= 0 && addressFocused < down && down < connectFocused && connectFocused < center,
+    "focused address, first D-pad Down, exact Connect focus, and center activation must stay ordered");
+  assert.match(body,
+    /BySelector focusedConnect = By\.clazz\("android\.widget\.Button"\)\s*\.text\("Connect"\)\s*\.focused\(true\);/s);
+  assert.equal((body.match(/device\.pressDPadDown\(\)/g) ?? []).length, 1);
+  assert.equal((body.match(/device\.pressDPadCenter\(\)/g) ?? []).length, 1);
+  assert.doesNotMatch(body,
+    /pressBack|pressKeyCode|focusTarget|focusAndActivate|executeShellCommand|\.click\s*\(|\bfor\s*\(|\bwhile\s*\(/);
 }
 
 function assertJavaSemanticPolicy(source) {
@@ -269,6 +310,29 @@ test("TV setup dismisses the exact visible pinned IME once before focusing Conne
   }
 });
 
+test("TV setup routes only first D-pad Down from the address to Connect", () => {
+  const product = read(mainActivityPath);
+  const harness = read(javaPath);
+  assertSetupFocusRoutingPolicy(product);
+  assertFirstDpadConnectPolicy(harness);
+  for (const mutant of [
+    product.replace("KeyEvent.KEYCODE_DPAD_DOWN", "KeyEvent.KEYCODE_DPAD_UP"),
+    product.replace("KeyEvent.ACTION_DOWN", "KeyEvent.ACTION_UP"),
+    product.replace("connect.requestFocus();", "connect.performClick();"),
+  ]) {
+    assert.notEqual(mutant, product);
+    assert.throws(() => assertSetupFocusRoutingPolicy(mutant));
+  }
+  for (const mutant of [
+    harness.replace("        device.pressDPadDown();\n", ""),
+    harness.replace(".focused(true);", ".enabled(true);"),
+    harness.replace("        device.pressDPadCenter();\n", ""),
+  ]) {
+    assert.notEqual(mutant, harness);
+    assert.throws(() => assertFirstDpadConnectPolicy(mutant));
+  }
+});
+
 test("position observers cannot toggle or repair playback", () => {
   const source = read(javaPath);
   assertObservationOnly(source);
@@ -291,7 +355,7 @@ test("instrumentation requires observable playback behavior rather than click-on
   assert.throws(() => assertJavaSemanticPolicy(mutant));
 });
 
-test("all five admission files compile or parse without touching Android SDK", () => {
+test("all admission files compile or parse without touching Android SDK", () => {
   execFileSync(python, ["-c", [
     "from pathlib import Path",
     `compile(Path(${JSON.stringify(hostPath)}).read_text(), ${JSON.stringify(hostPath)}, 'exec')`,
@@ -300,8 +364,9 @@ test("all five admission files compile or parse without touching Android SDK", (
   JSON.parse(execFileSync(python, ["-c", [
     "import json,re,pathlib",
     `s=pathlib.Path(${JSON.stringify(javaPath)}).read_text()`,
-    "assert s.count('{')==s.count('}')",
-    "print(json.dumps({'javaBraceBalance':True}))",
+    `p=pathlib.Path(${JSON.stringify(mainActivityPath)}).read_text()`,
+    "assert s.count('{')==s.count('}') and p.count('{')==p.count('}')",
+    "print(json.dumps({'javaBraceBalance':True,'productJavaBraceBalance':True}))",
   ].join(";")], { encoding: "utf8" }));
   assertWorkflowPolicy(read(workflowPath));
 });

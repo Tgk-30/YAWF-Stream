@@ -95,7 +95,7 @@ public final class RuntimeTvFlowTest {
         assertEquals("Server address was not entered through the visible UI", FIXTURE_URL, address.getText());
         checks.put("serverAddressEnteredThroughUi", true);
         dismissVisiblePinnedTvIme();
-        focusAndActivate(By.text("Connect"), "Connect", 6);
+        focusConnectWithFirstDpadDownAndActivate();
 
         waitFor(By.text("YAWF TV native bridge runtime fixture"), UI_WAIT, "fixture heading");
         waitFor(By.text("Play 4:3 HLS fixture"), UI_WAIT, "fixture play control");
@@ -208,6 +208,19 @@ public final class RuntimeTvFlowTest {
         assertTrue("Pinned TV input method did not dismiss after one remote Back",
                 device.wait(Until.gone(imeSelector), UI_WAIT));
         log("Dismissed the visible pinned TV input method with one remote Back");
+    }
+
+    private void focusConnectWithFirstDpadDownAndActivate() {
+        waitFor(By.clazz("android.widget.EditText").focused(true), UI_WAIT,
+                "focused server address input after IME dismissal");
+        BySelector focusedConnect = By.clazz("android.widget.Button")
+                .text("Connect")
+                .focused(true);
+        device.pressDPadDown();
+        waitFor(focusedConnect, UI_WAIT, "Connect focused by first D-pad Down");
+        device.pressDPadCenter();
+        log("Focused Connect with first DPAD_DOWN and activated it with DPAD_CENTER");
+        SystemClock.sleep(350);
     }
 
     private void launchProduct() {
