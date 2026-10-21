@@ -142,6 +142,68 @@ def policy_failures(source: str, assertions: str, mutation_check: str) -> list[s
     return failures
 
 
+def assertion_fixture_failures(assertions: str) -> list[str]:
+    failures: list[str] = []
+    semantic_scope = section(
+        assertions,
+        r"private static void semanticSwitchActual\(\)",
+        r"private static void cleanupSequence",
+    )
+    methods = {
+        "semanticSwitchActual": section(
+            assertions,
+            r"private static void semanticSwitchActual\(\)",
+            r"private static void semanticSwitchIdentity",
+        ),
+        "semanticSwitchIdentity": section(
+            assertions,
+            r"private static void semanticSwitchIdentity\(\)",
+            r"private static void semanticSwitchState",
+        ),
+        "semanticSwitchState": section(
+            assertions,
+            r"private static void semanticSwitchState\(\)",
+            r"private static boolean semanticSwitch",
+        ),
+    }
+    forbidden = (
+        "OtaFlowPolicy.SETTINGS_PACKAGE",
+        "OtaFlowPolicy.UNKNOWN_SOURCE_TOGGLE_CLASS",
+        "OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS",
+        "OtaFlowPolicy.UNKNOWN_SOURCE_LABEL",
+    )
+    for value in forbidden:
+        if value in semantic_scope:
+            failures.append(f"semantic fixture observes through SUT constant: {value}")
+
+    required_observations = (
+        '"com.android.settings"',
+        '"android.widget.TextView"',
+        '"Allow from this source"',
+    )
+    for name, method in methods.items():
+        if not method:
+            failures.append(f"missing semantic fixture method: {name}")
+            continue
+        for value in required_observations:
+            if value not in method:
+                failures.append(f"{name} lacks independent observed fact: {value}")
+
+    helper = section(
+        assertions,
+        r"private static boolean semanticSwitch\(",
+        r"private static void cleanupSequence",
+    )
+    if not re.search(
+        r"OtaFlowPolicy\.isUnknownSourceSemanticToggle\(\s*"
+        r'"com\.android\.settings",\s*'
+        r'"android\.view\.View",\s*resource,',
+        helper,
+    ):
+        failures.append("semantic helper lacks independent API 36 toggle package and class")
+    return failures
+
+
 class UnknownSourcePermissionContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -156,6 +218,7 @@ class UnknownSourcePermissionContractTests(unittest.TestCase):
             policy_failures(self.policy, self.assertions, self.mutation_check),
             [],
         )
+        self.assertEqual(assertion_fixture_failures(self.assertions), [])
 
     def test_targeted_semantic_mutants_are_rejected(self) -> None:
         runtime_mutants = {
@@ -223,6 +286,45 @@ class UnknownSourcePermissionContractTests(unittest.TestCase):
                     policy_failures(mutant, self.assertions, self.mutation_check),
                     [],
                 )
+
+        assertion_mutants = {
+            "actual label package self-mock": self.assertions.replace(
+                'check(semanticSwitch(null, true, true, true,\n'
+                '                        "com.android.settings",',
+                'check(semanticSwitch(null, true, true, true,\n'
+                '                        OtaFlowPolicy.SETTINGS_PACKAGE,',
+                1,
+            ),
+            "identity toggle class self-mock": self.assertions.replace(
+                '"other.settings", "android.view.View", null,',
+                '"other.settings", OtaFlowPolicy.UNKNOWN_SOURCE_TOGGLE_CLASS, null,',
+                1,
+            ),
+            "state label text self-mock": self.assertions.replace(
+                'private static void semanticSwitchState() {\n'
+                '        check(!semanticSwitch(null, false, true, true,\n'
+                '                        "com.android.settings",\n'
+                '                        "android.widget.TextView",\n'
+                '                        "Allow from this source",',
+                'private static void semanticSwitchState() {\n'
+                '        check(!semanticSwitch(null, false, true, true,\n'
+                '                        "com.android.settings",\n'
+                '                        "android.widget.TextView",\n'
+                '                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,',
+                1,
+            ),
+            "helper toggle class exact revert": self.assertions.replace(
+                '                "android.view.View",\n'
+                '                resource,',
+                '                OtaFlowPolicy.UNKNOWN_SOURCE_TOGGLE_CLASS,\n'
+                '                resource,',
+                1,
+            ),
+        }
+        for name, mutant in assertion_mutants.items():
+            with self.subTest(assertion=name):
+                self.assertNotEqual(mutant, self.assertions)
+                self.assertNotEqual(assertion_fixture_failures(mutant), [])
 
 
 if __name__ == "__main__":

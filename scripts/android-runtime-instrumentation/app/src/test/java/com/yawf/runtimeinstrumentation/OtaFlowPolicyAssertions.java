@@ -200,57 +200,57 @@ public final class OtaFlowPolicyAssertions {
 
     private static void semanticSwitchActual() {
         check(semanticSwitch(null, true, true, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "com.android.settings",
+                        "android.widget.TextView",
+                        "Allow from this source",
                         true),
                 "actual API 36 direct-parent semantic toggle must pass");
         check(semanticSwitch("", true, true, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "com.android.settings",
+                        "android.widget.TextView",
+                        "Allow from this source",
                         true),
                 "empty no-resource representation must pass");
     }
 
     private static void semanticSwitchIdentity() {
         check(!OtaFlowPolicy.isUnknownSourceSemanticToggle(
-                        "other.settings", OtaFlowPolicy.UNKNOWN_SOURCE_TOGGLE_CLASS, null,
+                        "other.settings", "android.view.View", null,
                         true, true, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "com.android.settings",
+                        "android.widget.TextView",
+                        "Allow from this source",
                         true),
                 "wrong toggle package must fail");
         check(!OtaFlowPolicy.isUnknownSourceSemanticToggle(
-                        OtaFlowPolicy.SETTINGS_PACKAGE, "android.widget.Switch", null,
+                        "com.android.settings", "android.widget.Switch", null,
                         true, true, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "com.android.settings",
+                        "android.widget.TextView",
+                        "Allow from this source",
                         true),
                 "wrong toggle class must fail");
         check(!semanticSwitch("android:id/unrelated", true, true, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "com.android.settings",
+                        "android.widget.TextView",
+                        "Allow from this source",
                         true),
                 "unreviewed resource-bearing generic view must fail");
         check(!semanticSwitch(null, true, true, true,
                         "other.settings",
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "android.widget.TextView",
+                        "Allow from this source",
                         true),
                 "wrong label package must fail");
         check(!semanticSwitch(null, true, true, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
+                        "com.android.settings",
                         "android.view.View",
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "Allow from this source",
                         true),
                 "wrong label class must fail");
         check(!semanticSwitch(null, true, true, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
+                        "com.android.settings",
+                        "android.widget.TextView",
                         "Allow all unknown apps",
                         true),
                 "nearby generic label must fail");
@@ -258,27 +258,27 @@ public final class OtaFlowPolicyAssertions {
 
     private static void semanticSwitchState() {
         check(!semanticSwitch(null, false, true, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "com.android.settings",
+                        "android.widget.TextView",
+                        "Allow from this source",
                         true),
                 "disabled toggle must fail");
         check(!semanticSwitch(null, true, false, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "com.android.settings",
+                        "android.widget.TextView",
+                        "Allow from this source",
                         true),
                 "nonclickable toggle must fail");
         check(!semanticSwitch(null, true, true, false,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "com.android.settings",
+                        "android.widget.TextView",
+                        "Allow from this source",
                         true),
                 "noncheckable toggle must fail");
         check(!semanticSwitch(null, true, true, true,
-                        OtaFlowPolicy.SETTINGS_PACKAGE,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL_CLASS,
-                        OtaFlowPolicy.UNKNOWN_SOURCE_LABEL,
+                        "com.android.settings",
+                        "android.widget.TextView",
+                        "Allow from this source",
                         false),
                 "disabled exact label must fail");
     }
@@ -293,8 +293,8 @@ public final class OtaFlowPolicyAssertions {
             String labelText,
             boolean labelEnabled) {
         return OtaFlowPolicy.isUnknownSourceSemanticToggle(
-                OtaFlowPolicy.SETTINGS_PACKAGE,
-                OtaFlowPolicy.UNKNOWN_SOURCE_TOGGLE_CLASS,
+                "com.android.settings",
+                "android.view.View",
                 resource,
                 enabled,
                 clickable,
