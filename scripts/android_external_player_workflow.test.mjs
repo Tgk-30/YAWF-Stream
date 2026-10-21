@@ -55,6 +55,8 @@ function driverContract(d) {
   assert.match(d, /receipt\.put\("decodedPlaybackClaimed", false\)/);
   assert.match(d, /Pattern\.CASE_INSENSITIVE \| Pattern\.UNICODE_CASE/);
   assert.match(d, /Pattern\.quote\(label\)/);
+  assert.match(d, /Connect to a server Already have a server or an invite link\? Paste the address and sign in\./);
+  assert.match(d, /clickLabeled\(CONNECT_SERVER_LABEL, "combined Connect to a server card", UI_WAIT_MS\)/);
   assert.match(d, /device\.findObjects\(By\.text\(labelPattern\)\)/);
   assert.match(d, /device\.findObjects\(By\.desc\(labelPattern\)\)/);
   assert.match(d, /Ambiguous/);
@@ -78,6 +80,8 @@ for (const [name, mutate, contract, original] of [
   ['alternate package grant', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell cmd package grant some.pkg android.permission.INTERNET\n', s => workflowContract(workflow, s), job],
   ['appops permission change', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell appops set some.pkg MANAGE_EXTERNAL_STORAGE allow\n', s => workflowContract(workflow, s), job],
   ['native button case', s => s.replace('Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE', 'Pattern.UNICODE_CASE'), driverContract, driver],
+  ['shortened connect label', s => s.replace('Connect to a server Already have a server or an invite link? Paste the address and sign in.', 'Connect to a server'), driverContract, driver],
+  ['unused connect label', s => s.replace('clickLabeled(CONNECT_SERVER_LABEL,', 'clickLabeled("Connect to a server",'), driverContract, driver],
   ['first-match heading shadow', s => s.replace('device.findObjects(By.text(labelPattern))', 'java.util.Collections.singletonList(device.findObject(By.text(labelPattern)))'), driverContract, driver],
   ['native fake decode claim', s => s.replace('receipt.put("decodedPlaybackClaimed", false)', 'receipt.put("decodedPlaybackClaimed", true)'), driverContract, driver],
   ['lost origin confirmation', s => s.replace('waitFor(By.text(FIXTURE_ORIGIN_MESSAGE)', 'waitFor(By.text("Open external player?")'), driverContract, driver],

@@ -49,6 +49,8 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final String FIXTURE_ORIGIN_MESSAGE =
             "Allow http://127.0.0.1:43120 to open this stream in an external video player?";
     private static final String MOVIE_TITLE = "Synthetic Fixture Movie";
+    private static final String CONNECT_SERVER_LABEL =
+            "Connect to a server Already have a server or an invite link? Paste the address and sign in.";
     private static final String SOURCE_TITLE =
             "Synthetic Fixture Movie 2026 1080p WEB-DL x264";
     private static final String USERNAME = "fixture-owner";
@@ -145,7 +147,7 @@ public final class RuntimeExternalPlayerFlowTest {
         reachFirstRun();
         capture("first-run");
 
-        clickLabeled("Connect to a server", "Connect to a server", UI_WAIT_MS);
+        clickLabeled(CONNECT_SERVER_LABEL, "combined Connect to a server card", UI_WAIT_MS);
         waitFor(By.text("Server address"), UI_WAIT_MS, "Server address label");
         UiObject2 address = singleEditableField("server address", 1, 0);
         address.setText(FIXTURE_URL);
