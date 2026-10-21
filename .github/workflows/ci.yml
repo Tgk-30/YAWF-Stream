@@ -212,6 +212,9 @@ jobs:
       - name: Generated Android project patch tests
         run: node --test scripts/patch_tauri_android.test.mjs
 
+      - name: Android external-player runtime harness contracts
+        run: node --test scripts/android_external_player_workflow.test.mjs
+
       - name: Android artifact compatibility checker tests
         run: node --test scripts/check_android_elf_alignment.test.mjs scripts/check_android_webview_compat.test.mjs
 

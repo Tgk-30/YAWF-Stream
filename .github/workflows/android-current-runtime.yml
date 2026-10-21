@@ -8,18 +8,23 @@ on:
         type: boolean
         required: true
         default: false
+      external_player_fixture:
+        description: Test the unchanged public phone27 remote external-player flow on a fresh API30 emulator
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: android-current-runtime-check-${{ github.ref }}-${{ inputs.permission_fixture && 'fixture' || 'production' }}
+  group: android-current-runtime-check-${{ github.ref }}-${{ inputs.external_player_fixture && 'external' || inputs.permission_fixture && 'fixture' || 'production' }}
   cancel-in-progress: false
 
 jobs:
   api36-current-runtime:
-    if: github.ref_type == 'branch' && inputs.permission_fixture != true
+    if: github.ref_type == 'branch' && inputs.permission_fixture != true && inputs.external_player_fixture != true
     name: Signed phone APK on one fresh API 36 KVM emulator
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -456,7 +461,280 @@ jobs:
           retention-days: 14
 
   permission-return-fixtures:
-    if: github.ref_type == 'branch' && inputs.permission_fixture == true
+    if: github.ref_type == 'branch' && inputs.permission_fixture == true && inputs.external_player_fixture != true
     uses: ./.github/workflows/android-permission-return-fixture.yml
     permissions:
       contents: read
+
+  external-player-fixture:
+    if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true
+    name: Public phone27 remote external player on fresh API30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EVIDENCE: android-external-player-evidence
+      PRODUCT_APK: public-phone27.apk
+      PRODUCT_SHA256: f3e983929db9fb32ed42b9779d94f2f8492c1cf4fae3e0cd29eee91a9492e0eb
+      PRODUCT_SOURCE: 9fc94a237d99b849cfc18a01085bb487915dd978
+      PRODUCT_VERSION: 2.3.27
+      PRODUCT_VERSION_CODE: "2003027"
+      SYSTEM_IMAGE_PACKAGE: system-images;android-30;google_apis;x86_64
+      EMULATOR_SERIAL: emulator-5554
+      AVD_NAME: yawf-external-phone27-api30
+    steps:
+      - name: Checkout runtime fixture and driver
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout immutable public APK verification source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SOURCE }}
+          path: public-phone-source
+          persist-credentials: false
+      - name: Bind exact public APK and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$EVIDENCE"
+          test "$(git -C public-phone-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 \
+            'https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.27/YAWF.Stream_Android_2.3.27.apk' \
+            --output "$PRODUCT_APK"
+          printf '%s  %s\n' "$PRODUCT_SHA256" "$PRODUCT_APK" | sha256sum --check -
+          test "$(wc -c < "$PRODUCT_APK" | tr -d ' ')" = 88558465
+          {
+            echo "driverSource=$(git rev-parse HEAD)"
+            echo "publicApkSource=$PRODUCT_SOURCE"
+            echo "publicApkSha256=$PRODUCT_SHA256"
+            echo "publicApkVersion=$PRODUCT_VERSION"
+            echo "interoperability=original-signed-phone27-with-current-fixture-server-and-compiled-web"
+            echo "productionServerOrProviderProof=false"
+            echo "publicOtaProof=false"
+            echo "arm16KiBProof=false"
+            echo "physicalDeviceProof=false"
+            echo "realAccountOrCredentialUsed=false"
+          } > "$EVIDENCE/binding.txt"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Set up JDK17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Set up isolated driver Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+      - name: Install exact official image and media tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse0 ffmpeg fonts-dejavu-core
+          timeout 180s sdkmanager --list --channel=0 > "$EVIDENCE/sdk-metadata.txt"
+          grep -E '^ *system-images;android-30;google_apis;x86_64 *\|' "$EVIDENCE/sdk-metadata.txt"
+          sdkmanager platform-tools emulator 'platforms;android-36' 'build-tools;36.0.0' "$SYSTEM_IMAGE_PACKAGE"
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          test -x "$sdk/emulator/emulator"
+          image="$sdk/system-images/android-30/google_apis/x86_64"
+          test -f "$image/package.xml"
+          test -f "$image/source.properties"
+          sha256sum "$image/package.xml" "$image/source.properties" > "$EVIDENCE/image-metadata-sha256.txt"
+          {
+            echo "$sdk/build-tools/36.0.0"
+            echo "$sdk/emulator"
+            echo "$sdk/platform-tools"
+          } >> "$GITHUB_PATH"
+      - name: Verify unchanged production-signed APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(apkanalyzer manifest application-id "$PRODUCT_APK")" = com.tgk30.debridstreamer
+          test "$(apkanalyzer manifest version-name "$PRODUCT_APK")" = "$PRODUCT_VERSION"
+          test "$(apkanalyzer manifest version-code "$PRODUCT_APK")" = "$PRODUCT_VERSION_CODE"
+          python3 public-phone-source/scripts/verify_android_apk.py \
+            --apk "$PRODUCT_APK" --version "$PRODUCT_VERSION" \
+            --certificate-pin public-phone-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" | tee "$EVIDENCE/apk-verification.txt"
+      - name: Build current fixture web and isolated driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd web && npm ci && npm run build)
+          (cd server && npm ci)
+          gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
+            :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+          app=scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk
+          tests=scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          sha256sum "$app" "$tests" > "$EVIDENCE/driver-apk-sha256.txt"
+          apkanalyzer manifest print "$app" > "$EVIDENCE/driver-app-manifest.xml"
+          apkanalyzer manifest print "$tests" > "$EVIDENCE/driver-test-manifest.xml"
+          if grep -Eqi 'INTERNET|BIND_ACCESSIBILITY_SERVICE|MANAGE_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE|REQUEST_INSTALL_PACKAGES|QUERY_ALL_PACKAGES' \
+            "$EVIDENCE/driver-app-manifest.xml" "$EVIDENCE/driver-test-manifest.xml"; then
+            echo 'Forbidden driver permission' >&2
+            exit 1
+          fi
+          echo "HARNESS_APP_APK=$app" >> "$GITHUB_ENV"
+          echo "HARNESS_TEST_APK=$tests" >> "$GITHUB_ENV"
+      - name: Run normal remote UI and external handoff on one fresh emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          if adb devices | awk 'NR > 1 && NF > 0 { found = 1 } END { exit !found }'; then
+            echo 'Refusing to reuse an existing emulator/device' >&2
+            exit 1
+          fi
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-external-android"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          test ! -e "$ANDROID_USER_HOME"
+          mkdir -p "$ANDROID_AVD_HOME" "$EVIDENCE/ui"
+          fixture_output="$RUNNER_TEMP/yawf-external-fixture"
+          emulator_pid=""
+          fixture_pid=""
+          cleanup() {
+            status=$?
+            trap - EXIT
+            set +e
+            if [ -n "$emulator_pid" ]; then
+              timeout 10s adb -s "$EMULATOR_SERIAL" reverse --remove tcp:43120 >/dev/null 2>&1
+              timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
+              kill "$emulator_pid" 2>/dev/null
+              wait "$emulator_pid" 2>/dev/null
+            fi
+            if [ -n "$fixture_pid" ]; then
+              kill "$fixture_pid" 2>/dev/null
+              wait "$fixture_pid" 2>/dev/null
+            fi
+            for name in smoke-result.json external-capability-runtime.json; do
+              if [ -f "$fixture_output/$name" ]; then
+                cp "$fixture_output/$name" "$EVIDENCE/$name"
+              fi
+            done
+            printf 'workflowExit=%s\nownedEmulatorStopAttempted=true\nownedFixtureStopAttempted=true\n' "$status" > "$EVIDENCE/cleanup.txt"
+            exit "$status"
+          }
+          trap cleanup EXIT
+          ffmpeg -hide_banner -filters > "$EVIDENCE/ffmpeg-filters.txt" 2>&1
+          grep -E '\bdrawtext\b' "$EVIDENCE/ffmpeg-filters.txt"
+          test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+          node server/node_modules/tsx/dist/cli.mjs scripts/android_external_player_server_fixture.mts \
+            --repo "$GITHUB_WORKSPACE" --output "$fixture_output" > "$EVIDENCE/fixture.log" 2>&1 &
+          fixture_pid=$!
+          deadline=$((SECONDS + 180))
+          until grep -Fq '[fixture] READY server-mode-ui loopback' "$EVIDENCE/fixture.log"; do
+            kill -0 "$fixture_pid"
+            test "$SECONDS" -lt "$deadline"
+            sleep 1
+          done
+          printf 'no\n' | avdmanager create avd --name "$AVD_NAME" --package "$SYSTEM_IMAGE_PACKAGE" --device pixel_2
+          emulator -avd "$AVD_NAME" -port 5554 -no-window -no-audio -no-snapshot -no-boot-anim \
+            -gpu swiftshader_indirect -feature -Vulkan -cores 2 -memory 2048 \
+            > "$EVIDENCE/emulator.log" 2>&1 &
+          emulator_pid=$!
+          deadline=$((SECONDS + 300))
+          until [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+            kill -0 "$emulator_pid"
+            test "$SECONDS" -lt "$deadline"
+            sleep 2
+          done
+          test "$(adb -s "$EMULATOR_SERIAL" emu avd name | tr -d '\r' | head -1)" = "$AVD_NAME"
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')" = 30
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" = x86_64
+          test "$(adb -s "$EMULATOR_SERIAL" shell getconf PAGE_SIZE | tr -d '\r')" = 4096
+          adb -s "$EMULATOR_SERIAL" shell dumpsys account | python3 -c \
+            'import sys,re; s=sys.stdin.read(); counts=re.findall(r"Accounts: (\d+)",s); assert counts and all(int(x)==0 for x in counts); print("androidAccountCount=0")' \
+            > "$EVIDENCE/no-real-accounts.txt"
+          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate > "$EVIDENCE/stock-webview.txt"
+          adb -s "$EMULATOR_SERIAL" reverse tcp:43120 tcp:43120
+          adb -s "$EMULATOR_SERIAL" install "$PRODUCT_APK" | tee "$EVIDENCE/product-install.txt"
+          grep -Eq '^Success\r?$' "$EVIDENCE/product-install.txt"
+          installed="$(adb -s "$EMULATOR_SERIAL" shell pm path com.tgk30.debridstreamer | tr -d '\r' | sed -n 's/^package://p')"
+          test -n "$installed"
+          test "$(printf '%s\n' "$installed" | wc -l | tr -d ' ')" = 1
+          installed_sha="$(adb -s "$EMULATOR_SERIAL" shell sha256sum "$installed" | awk '{print $1}')"
+          test "$installed_sha" = "$PRODUCT_SHA256"
+          printf '%s\n' "$installed_sha" > "$EVIDENCE/installed-product-sha256.txt"
+          adb -s "$EMULATOR_SERIAL" install "$HARNESS_APP_APK"
+          adb -s "$EMULATOR_SERIAL" install "$HARNESS_TEST_APK"
+
+          # Read-only admission of a stock network-video handler. No app is installed or permission granted.
+          adb -s "$EMULATOR_SERIAL" shell cmd package query-activities --brief \
+            -a android.intent.action.VIEW -d http://127.0.0.1:43120/synthetic.mp4 -t 'video/*' \
+            > "$EVIDENCE/stock-video-handlers.txt"
+          handler_label=""
+          handler_package=""
+          for package in com.android.gallery3d com.google.android.apps.photos; do
+            if ! awk -F/ -v expected="$package" '{ gsub(/^[ \t]+|[ \r\t]+$/, "", $1); gsub(/[ \r\t]+$/, "", $2); if ($1 == expected && $2 ~ /^[A-Za-z0-9_.$]+$/) found=1 } END { exit !found }' "$EVIDENCE/stock-video-handlers.txt"; then
+              continue
+            fi
+            system_apk="$(adb -s "$EMULATOR_SERIAL" shell pm path "$package" | tr -d '\r' | sed -n 's/^package://p' | head -1)"
+            case "$system_apk" in /system/app/*|/product/app/*|/system_ext/app/*) ;; *) continue ;; esac
+            adb -s "$EMULATOR_SERIAL" pull "$system_apk" "$RUNNER_TEMP/stock-video-handler.apk" >/dev/null
+            aapt2 dump badging "$RUNNER_TEMP/stock-video-handler.apk" > "$RUNNER_TEMP/stock-video-handler-badging.txt"
+            label="$(sed -n "s/^application-label:'\([^']*\)'$/\1/p" "$RUNNER_TEMP/stock-video-handler-badging.txt" | head -1)"
+            case "$label" in Gallery|Photos) ;; *) continue ;; esac
+            handler_label="$label"
+            handler_package="$package"
+            sha256sum "$RUNNER_TEMP/stock-video-handler.apk" > "$EVIDENCE/stock-handler-apk-sha256.txt"
+            printf 'package=%s\nlabel=%s\nnetworkVideoIntentObserved=true\nsystemPartitionObserved=true\n' \
+              "$handler_package" "$handler_label" > "$EVIDENCE/stock-handler-admission.txt"
+            break
+          done
+          handler_args=()
+          if [ -n "$handler_package" ]; then
+            handler_args=(-e externalHandlerLabel "$handler_label" -e externalHandlerPackage "$handler_package")
+          fi
+          set +e
+          timeout 480s adb -s "$EMULATOR_SERIAL" shell am instrument -w -r \
+            -e class com.yawf.runtimeinstrumentation.RuntimeExternalPlayerFlowTest \
+            -e evidenceSubdir persistent-external-player-flow "${handler_args[@]}" \
+            com.yawf.runtimeinstrumentation.test/androidx.test.runner.AndroidJUnitRunner \
+            | sed -E 's#https?://[^[:space:]"<>]+#[redacted-url]#g' | tee "$EVIDENCE/instrumentation.txt"
+          instrumentation_status=${PIPESTATUS[0]}
+          set -e
+          export INSTRUMENTATION_STATUS="$instrumentation_status"
+          python3 - <<'PY'
+          import json,os,re,subprocess
+          from pathlib import Path
+          a=['adb','-s',os.environ['EMULATOR_SERIAL']]
+          base=['exec-out','run-as','com.yawf.runtimeinstrumentation']
+          folder='files/persistent-external-player-flow'
+          names=subprocess.check_output(a+base+['ls',folder],text=True).splitlines()
+          assert 0<len(names)<=64
+          allowed=re.compile(r'(?:[0-9]{2}-[a-z0-9-]+\.(?:png|xml)|actions\.txt|instrumentation-external-player-receipt\.json)')
+          out=Path(os.environ['EVIDENCE'])/'ui'
+          for n in names:
+              assert allowed.fullmatch(n), 'Unexpected driver evidence filename'
+              data=subprocess.check_output(a+base+['cat',folder+'/'+n])
+              assert 0<len(data)<=8*1024*1024, 'Driver evidence size outside bound'
+              (out/n).write_bytes(data)
+          r=json.loads((out/'instrumentation-external-player-receipt.json').read_text())
+          assert r['outcome']=='passed' and r['checks']['openPlayerClicks']==1
+          assert r['decodedPlaybackClaimed'] is False and r['decodeClaimRequiresManualScreenshotAndLiveReceiptReview'] is True
+          assert os.environ['INSTRUMENTATION_STATUS']=='0'
+          print('Native UI flow passed; decoded playback remains pending root screenshot/live-response review')
+          PY
+          grep -Eq '^OK \(1 test\)\r?$' "$EVIDENCE/instrumentation.txt"
+      - name: Retain bounded external-player runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone27-external-player-runtime-evidence
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
