@@ -11,13 +11,13 @@ const workflow = readFileSync(
 );
 
 test("pins the exact verification artifact while retaining the published channel", () => {
-  assert.match(workflow, /CANDIDATE_RUN_ID: "39365387810"/);
-  assert.match(workflow, /CANDIDATE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd/);
-  assert.match(workflow, /CANDIDATE_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b/);
+  assert.match(workflow, /CANDIDATE_RUN_ID: "39515566836"/);
+  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164/);
+  assert.match(workflow, /CANDIDATE_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c/);
   assert.match(workflow, /name: android-phone-verification-candidate/);
-  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.25/);
-  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003025"/);
-  assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.21/);
+  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.26/);
+  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003026"/);
+  assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.25/);
 });
 
 test("verifies the pinned APK and production invariants before generating local metadata", () => {
