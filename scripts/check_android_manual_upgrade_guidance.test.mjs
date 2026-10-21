@@ -48,11 +48,13 @@ export function validateHelpSeparation(source) {
 
 export function validateKnownUpdateLimitation(source) {
   const required = [
-    /Known issue on Android 2\.3\.25 and 2\.3\.26/i,
-    /after granting Android(?:\\)?'s install permission/i,
+    /On Android 2\.3\.25 and 2\.3\.26, the native update flow can remain at/i,
+    /after Android(?:\\)?'s install permission is granted/i,
     /can remain at [“"]Update ready to install[”"]/i,
-    /A permanent fix is being prepared/i,
-    /Manual in-place installation of the current APK avoids relying on that flow/i,
+    /Android 2\.3\.27 repairs the permission-return handoff to the system installer/i,
+    /Manual in-place installation of the current APK avoids relying on that (?:older )?flow/i,
+    /(?:On Android 2\.3\.27 and later, )?weekly automatic checks remain opt-in/i,
+    /YAWF asks before downloading, and Android confirms installation/i,
   ];
   const missing = required.filter((pattern) => !pattern.test(source));
   if (missing.length) throw new Error(`missing known Android update limitation clauses: ${missing.join(', ')}`);
@@ -68,10 +70,10 @@ test('both pages state the known Android update limitation', () => {
 });
 
 for (const [name, mutate] of [
-  ['permission state', (s) => s.replace(/after granting Android(?:\\)?'s install permission/gi, 'after installation')],
+  ['permission state', (s) => s.replace(/after Android(?:\\)?'s install permission is granted/gi, 'after installation')],
   ['stalled status', (s) => s.replace(/[“"]Update ready to install[”"]/gi, 'Update pending')],
-  ['temporary fix boundary', (s) => s.replace(/A permanent fix is being prepared/gi, 'Updates work automatically')],
-  ['manual fallback', (s) => s.replace(/Manual in-place installation of the current APK avoids relying on that flow/gi, 'Use the native updater')],
+  ['repair boundary', (s) => s.replace(/Android 2\.3\.27 repairs the permission-return handoff to the system installer/gi, 'Updates work automatically')],
+  ['manual fallback', (s) => s.replace(/Manual in-place installation of the current APK avoids relying on that (?:older )?flow/gi, 'Use the native updater')],
 ]) {
   test(`rejects removal of ${name} limitation clause from each page`, () => {
     assert.throws(() => validateKnownUpdateLimitation(mutate(verify)));
