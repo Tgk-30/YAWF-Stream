@@ -13,6 +13,7 @@ function policy(marker, terminator) {
   return body.split('\n').map(line => line.startsWith('          ') ? line.slice(10) : line).join('\n');
 }
 
+const driverManifestPolicy = policy('DRIVER_MANIFEST="$EVIDENCE/driver-manifest.xml" python3 - <<\'PY_MANIFEST\'\n', 'PY_MANIFEST');
 const corePolicy = policy('MODE="${{ matrix.mode }}" python3 - <<\'PY\'\n', 'PY');
 const cleanupPolicy = policy('RECEIPT="$run_evidence/cleanup-evidence/receipt.json" python3 - <<\'PY_CLEANUP\'\n', 'PY_CLEANUP');
 
@@ -24,8 +25,9 @@ results = []
 with tempfile.TemporaryDirectory(prefix='yawf-cleanup-policy-') as directory:
     receipt = Path(directory) / 'receipt.json'
     os.environ['RECEIPT'] = str(receipt)
+    os.environ['DRIVER_MANIFEST'] = str(receipt)
     for case in p['cases']:
-        receipt.write_text(json.dumps(case['receipt']))
+        receipt.write_text(case['xml'] if 'xml' in case else json.dumps(case['receipt']))
         os.environ['MODE'] = case.get('mode', 'positive')
         admitted = True
         try:
@@ -112,4 +114,41 @@ test('the exact core policy cannot claim same-UID cleanup or omit the external c
     { name: 'negativeRecovered', mode: 'return-resume-omitted', receipt: { ...negative, verifierRecoveryObserved: true } },
   ];
   assert.deepEqual(runPolicy(corePolicy, cases), cases.map((c, i) => ({ name: c.name, admitted: i < 2 })));
+});
+
+const generatedOwnPermission = 'com.yawf.permissionreturndriver.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION';
+const actualMergedManifestShape = `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.yawf.permissionreturndriver">
+  <queries><package android:name="com.yawf.permissionreturnfixture" /></queries>
+  <permission android:name="${generatedOwnPermission}" android:protectionLevel="0x2" />
+  <uses-permission android:name="${generatedOwnPermission}" />
+  <application />
+</manifest>`;
+
+test('the exact compiled driver policy admits only its own signature-only receiver permission and one fixture query', () => {
+  const invalid = {
+    wrongDriver: actualMergedManifestShape.replace('package="com.yawf.permissionreturndriver"', 'package="com.yawf.unrelated"'),
+    wrongQuery: actualMergedManifestShape.replace('android:name="com.yawf.permissionreturnfixture"', 'android:name="com.yawf.unrelated"'),
+    extraQuery: actualMergedManifestShape.replace('</queries>', '<package android:name="com.yawf.unrelated" /></queries>'),
+    broadQuery: actualMergedManifestShape.replace('</queries>', '<intent><action android:name="android.intent.action.VIEW" /></intent></queries>'),
+    unsignedOwnPermission: actualMergedManifestShape.replace('android:protectionLevel="0x2"', 'android:protectionLevel="0x0"'),
+    wrongOwnPermission: actualMergedManifestShape.replaceAll(generatedOwnPermission, 'com.yawf.unrelated.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'),
+    missingDefinition: actualMergedManifestShape.replace(/  <permission[^>]+\/>\n/, ''),
+    missingUse: actualMergedManifestShape.replace(/  <uses-permission[^>]+\/>\n/, ''),
+  };
+  for (const permission of ['INTERNET', 'REQUEST_INSTALL_PACKAGES', 'QUERY_ALL_PACKAGES', 'READ_CONTACTS']) {
+    invalid[permission] = actualMergedManifestShape.replace('<application />', `<uses-permission android:name="android.permission.${permission}" /><application />`);
+  }
+  const cases = [{ name: 'actual-reviewed-merged-shape', xml: actualMergedManifestShape }, ...Object.entries(invalid).map(([name, xml]) => ({ name, xml }))];
+  assert.deepEqual(runPolicy(driverManifestPolicy, cases), cases.map((c, i) => ({ name: c.name, admitted: i === 0 })));
+  for (const [guard, caseName] of [
+    ['assert len(uses_permissions) == 1', 'INTERNET'],
+    ['assert uses_permissions[0].attrib == {android_name: own_permission}', 'wrongOwnPermission'],
+  ]) {
+    let mutant = driverManifestPolicy.replace(guard, 'pass');
+    if (caseName === 'wrongOwnPermission') {
+      mutant = mutant.replace('android_name: own_permission,', 'android_name: permissions[0].attrib[android_name],');
+    }
+    assert.notEqual(mutant, driverManifestPolicy);
+    assert.equal(runPolicy(mutant, [cases.find(c => c.name === caseName)])[0].admitted, true);
+  }
 });

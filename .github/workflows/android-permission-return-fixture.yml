@@ -183,7 +183,18 @@ jobs:
           children = list(queries[0])
           assert len(children) == 1 and children[0].tag == "package"
           assert children[0].attrib == {"{http://schemas.android.com/apk/res/android}name": "com.yawf.permissionreturnfixture"}
-          assert not manifest.findall("uses-permission")
+          android_name = "{http://schemas.android.com/apk/res/android}name"
+          own_permission = "com.yawf.permissionreturndriver.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+          assert manifest.attrib["package"] == "com.yawf.permissionreturndriver"
+          uses_permissions = manifest.findall("uses-permission")
+          assert len(uses_permissions) == 1
+          assert uses_permissions[0].attrib == {android_name: own_permission}
+          permissions = manifest.findall("permission")
+          assert len(permissions) == 1
+          assert permissions[0].attrib == {
+              android_name: own_permission,
+              "{http://schemas.android.com/apk/res/android}protectionLevel": "0x2",
+          }
           PY_MANIFEST
           "$build_tools/apksigner" verify "$host"
           cleanup_test="$FIXTURE_PROJECT/success-driver/build/outputs/apk/androidTest/debug/success-driver-debug-androidTest.apk"
