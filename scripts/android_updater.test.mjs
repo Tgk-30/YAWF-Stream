@@ -26,6 +26,90 @@ function section(start, end) {
   return source.slice(from, to);
 }
 
+function sourceSection(subject, start, end) {
+  const from = subject.indexOf(start);
+  const to = subject.indexOf(end, from + start.length);
+  assert.ok(from >= 0, `missing section start: ${start}`);
+  assert.ok(to > from, `missing section end: ${end}`);
+  return subject.slice(from, to);
+}
+
+function permissionReturnFailures(subject) {
+  const failures = [];
+  const readinessRunner = sourceSection(subject, "private val resumeReadiness", "private val pollDownload");
+  const onResume = sourceSection(subject, "fun onResume()", "/** Forward Activity.onPause()");
+  const teardown = sourceSection(
+    subject,
+    "private fun dismissRetainedPermissionDialogOnResume()",
+    "private fun handleForegroundReadiness()",
+  );
+  const foreground = sourceSection(
+    subject,
+    "private fun handleForegroundReadiness()",
+    "private fun resumePersistedUpdate",
+  );
+  const permission = sourceSection(
+    subject,
+    "private fun resumePermissionFlow()",
+    "private fun showPermissionDialog",
+  );
+  const guidance = sourceSection(subject, "private fun showPermissionDialog", "private fun launchInstaller");
+
+  const stopped = readinessRunner.indexOf("if (destroyed || !foreground) return");
+  const teardownCall = readinessRunner.indexOf("dismissRetainedPermissionDialogOnResume()");
+  const activityReady = readinessRunner.indexOf("if (activityReady()) {");
+  if (!(stopped >= 0 && stopped < teardownCall && teardownCall < activityReady)) {
+    failures.push("owned retained dialog teardown is not before the outer activityReady focus gate");
+  }
+  if (!/permissionResumeTeardownPending\s*=\s*\n\s*preferences\.getBoolean\(KEY_AWAITING_INSTALL_PERMISSION, false\)/.test(onResume)) {
+    failures.push("permission return teardown is not armed on the resume edge");
+  }
+  const teardownRequirements = [
+    "!permissionResumeTeardownPending",
+    "destroyed",
+    "!foreground",
+    "activity.isFinishing",
+    "activity.isDestroyed",
+    "activity.window?.decorView?.isAttachedToWindow != true",
+    "operation != null",
+    "!preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)",
+    "dialog == null",
+    "dialogState != DialogState.READY_TO_INSTALL && dialogState != DialogState.AWAITING_PERMISSION",
+  ];
+  for (const requirement of teardownRequirements) {
+    if (!teardown.includes(requirement)) failures.push(`retained dialog teardown lacks guard: ${requirement}`);
+  }
+  const consume = teardown.indexOf("permissionResumeTeardownPending = false");
+  const dismiss = teardown.indexOf("dismissDialog()");
+  if (!(consume >= 0 && consume < dismiss)) {
+    failures.push("resume-edge teardown is not consumed before dismissing the owned dialog");
+  }
+
+  const ready = foreground.indexOf("if (!activityReady()) return");
+  const operation = foreground.indexOf("if (operation != null) return");
+  const awaiting = foreground.indexOf(
+    "if (preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)) {",
+  );
+  const genericDialog = foreground.indexOf("if (dialog != null) return");
+  if (!(ready >= 0 && ready < operation && operation < awaiting && awaiting < genericDialog)) {
+    failures.push("foreground permission recovery and generic dialog guards are misordered");
+  }
+  const awaitingBranch = foreground.slice(awaiting, genericDialog);
+  if (!/dialogState == DialogState\.AWAITING_PERMISSION[\s\S]*!activity\.packageManager\.canRequestPackageInstalls\(\)[\s\S]*return/.test(awaitingBranch)) {
+    failures.push("newly rendered denied-permission guidance is not retained");
+  }
+  if (!/permissionResumeTeardownPending = false[\s\S]*if \(dialog != null\) dismissDialog\(\)[\s\S]*resumePermissionFlow\(\)/.test(awaitingBranch)) {
+    failures.push("ready permission recovery does not consume, dismiss, and resume in order");
+  }
+  if (!/else \{\s*showPermissionDialog\(candidate, settingsAlreadyOpened = true\)\s*\}/.test(permission)) {
+    failures.push("denied permission no longer renders native guidance");
+  }
+  if (!/putBoolean\(KEY_AWAITING_INSTALL_PERMISSION, false\)[\s\S]*deferPhaseUntilNextForeground\(\)[\s\S]*dismissDialog\(\)/.test(guidance)) {
+    failures.push("Later no longer clears awaiting permission and defers the staged update");
+  }
+  return failures;
+}
+
 test("native updater exposes only the bounded Activity-owned API", () => {
   assert.match(source, /class YawfAndroidUpdater private constructor/);
   assert.match(source, /class YawfUpdateFileProvider : FileProvider\(\)/);
@@ -70,6 +154,82 @@ test("network access is consent-gated and automatic results are foreground-defer
   assert.match(source, /showPersistedCheckResultIfReady\(\)/);
   assert.match(source, /KEY_OFFER_NOT_BEFORE_GENERATION/);
   assert.match(source, /scheduleReadiness\(resetAttempts = true\)/);
+});
+
+test("permission return tears down only the owned retained dialog before the focus gate", () => {
+  assert.deepEqual(permissionReturnFailures(source), []);
+
+  const exactBase = source
+    .replace("      dismissRetainedPermissionDialogOnResume()\n", "", 1)
+    .replace(
+      `  private fun handleForegroundReadiness() {
+    if (!activityReady()) return
+    if (operation != null) return
+    if (preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)) {
+      if (
+        dialogState == DialogState.AWAITING_PERMISSION &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        !activity.packageManager.canRequestPackageInstalls()
+      ) {
+        return
+      }
+      permissionResumeTeardownPending = false
+      if (dialog != null) dismissDialog()
+      resumePermissionFlow()
+      return
+    }
+    if (dialog != null) return`,
+      `  private fun handleForegroundReadiness() {
+    if (!activityReady() || dialog != null) return
+    if (operation != null) return
+    if (preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)) {
+      resumePermissionFlow()
+      return
+    }`,
+      1,
+    );
+  const mutants = {
+    "exact focus-gated base": exactBase,
+    "teardown moved behind focus gate": source.replace(
+      "      dismissRetainedPermissionDialogOnResume()\n      if (activityReady()) {",
+      "      if (activityReady()) {\n        dismissRetainedPermissionDialogOnResume()",
+      1,
+    ),
+    "resume edge not armed": source.replace(
+      "      permissionResumeTeardownPending =\n        preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)\n",
+      "",
+      1,
+    ),
+    "destroyed activity allowed": source.replace("      destroyed ||\n", "", 1),
+    "finishing activity allowed": source.replace("      activity.isFinishing ||\n", "", 1),
+    "active operation interrupted": source.replace("      operation != null ||\n", "", 1),
+    "unrelated updater dialog dismissed": source.replace(
+      "      (dialogState != DialogState.READY_TO_INSTALL && dialogState != DialogState.AWAITING_PERMISSION)\n",
+      "      false\n",
+      1,
+    ),
+    "resume edge not consumed": source.replace(
+      "    permissionResumeTeardownPending = false\n    dismissDialog()",
+      "    dismissDialog()",
+      1,
+    ),
+    "denied guidance repeatedly dismissed": source.replace(
+      `      if (
+        dialogState == DialogState.AWAITING_PERMISSION &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        !activity.packageManager.canRequestPackageInstalls()
+      ) {
+        return
+      }
+`,
+      "",
+      1,
+    ),
+  };
+  for (const [name, mutant] of Object.entries(mutants)) {
+    assert.notEqual(mutant, source, `${name} mutation site must exist`);
+    assert.notDeepEqual(permissionReturnFailures(mutant), [], name);
+  }
 });
 
 test("release discovery and manifest contracts are fixed and bounded", () => {

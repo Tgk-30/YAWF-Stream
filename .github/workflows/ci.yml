@@ -199,6 +199,9 @@ jobs:
       - name: macOS media notices and artifact transport tests
         run: node --test scripts/prepare_macos_media_notices.test.mjs scripts/macos_media_workflow.test.mjs
 
+      - name: macOS disk-image retry policy tests
+        run: /bin/bash scripts/macos_hdiutil_retry.test.sh && node --test scripts/macos_hdiutil_workflow.test.mjs
+
       - name: Generated Android project patch tests
         run: node --test scripts/patch_tauri_android.test.mjs
 

@@ -453,6 +453,32 @@ jobs:
             echo "RELEASE_BODY=Signed macOS and Linux desktop builds, Android phone and TV apps, and self-hosted server packages. Windows is held until Authenticode signing is proven. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
           fi
 
+      - name: Select bounded macOS disk-image creator
+        if: matrix.os == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shim_bin="$(mktemp -d "$RUNNER_TEMP/yawf-hdiutil-bin.XXXXXX")"
+          evidence_dir="$(mktemp -d "$RUNNER_TEMP/yawf-hdiutil-evidence.XXXXXX")"
+          install -m 755 scripts/macos_hdiutil_retry.sh "$shim_bin/hdiutil"
+          cmp scripts/macos_hdiutil_retry.sh "$shim_bin/hdiutil"
+          export PATH="$shim_bin:$PATH"
+          test "$(command -v hdiutil)" = "$shim_bin/hdiutil"
+          test -x /usr/bin/hdiutil
+          cli_version="$(node web/node_modules/@tauri-apps/cli/tauri.js --version)"
+          expected_cli="$(node -p "require('./web/package-lock.json').packages['node_modules/@tauri-apps/cli'].version")"
+          test "$cli_version" = "tauri-cli $expected_cli"
+          {
+            printf 'sourceRevision=%s\n' "$GITHUB_SHA"
+            printf 'selectedExecutable=%s\n' "$(command -v hdiutil)"
+            printf 'realExecutable=/usr/bin/hdiutil\n'
+            printf 'tauriCli=%s\n' "$cli_version"
+            shasum -a 256 "$shim_bin/hdiutil"
+          } > "$evidence_dir/binding.txt"
+          echo "$shim_bin" >> "$GITHUB_PATH"
+          echo "HDIUTIL_RETRY_RECEIPT=$RUNNER_TEMP/yawf-hdiutil-${{ matrix.media_arch }}-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.jsonl" >> "$GITHUB_ENV"
+          echo "HDIUTIL_RETRY_EVIDENCE_DIR=$evidence_dir" >> "$GITHUB_ENV"
+
       - name: Build, bundle, sign & release
         if: matrix.os != 'windows' || vars.YAWF_RELEASE_WINDOWS == 'true'
         uses: tauri-apps/tauri-action@v0
@@ -489,6 +515,17 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }} ${{ env.FW_CONFIG_ARG }} ${{ env.WINDOWS_SIGN_CONFIG_ARG }}
+
+      - name: Preserve macOS disk-image creator evidence
+        if: always() && matrix.os == 'macos' && env.HDIUTIL_RETRY_EVIDENCE_DIR != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-hdiutil-${{ matrix.media_arch }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.HDIUTIL_RETRY_EVIDENCE_DIR }}/
+            ${{ env.HDIUTIL_RETRY_RECEIPT }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Verify macOS bundle deployment minima
         if: matrix.os == 'macos'

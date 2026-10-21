@@ -74,10 +74,12 @@ class YawfAndroidUpdater private constructor(
   private var operationSerial = 0L
   private var operation: Operation? = null
   private var manualCheckPending = false
+  private var permissionResumeTeardownPending = false
 
   private val resumeReadiness = object : Runnable {
     override fun run() {
       if (destroyed || !foreground) return
+      dismissRetainedPermissionDialogOnResume()
       if (activityReady()) {
         handleForegroundReadiness()
         return
@@ -173,6 +175,8 @@ class YawfAndroidUpdater private constructor(
       if (destroyed) return@runOnMain
       foreground = true
       windowHasFocus = activity.hasWindowFocus()
+      permissionResumeTeardownPending =
+        preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)
       resumeNumber += 1
       foregroundGeneration = preferences.getLong(KEY_FOREGROUND_GENERATION, 0L) + 1L
       preferences.edit().putLong(KEY_FOREGROUND_GENERATION, foregroundGeneration).commit()
@@ -234,13 +238,42 @@ class YawfAndroidUpdater private constructor(
   private fun shouldRetryReadiness(attempts: Int, isForeground: Boolean, isDestroyed: Boolean): Boolean =
     attempts in 0 until MAX_READINESS_ATTEMPTS && isForeground && !isDestroyed
 
+  private fun dismissRetainedPermissionDialogOnResume() {
+    if (
+      !permissionResumeTeardownPending ||
+      destroyed ||
+      !foreground ||
+      activity.isFinishing ||
+      (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed) ||
+      activity.window?.decorView?.isAttachedToWindow != true ||
+      operation != null ||
+      !preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false) ||
+      dialog == null ||
+      (dialogState != DialogState.READY_TO_INSTALL && dialogState != DialogState.AWAITING_PERMISSION)
+    ) {
+      return
+    }
+    permissionResumeTeardownPending = false
+    dismissDialog()
+  }
+
   private fun handleForegroundReadiness() {
-    if (!activityReady() || dialog != null) return
+    if (!activityReady()) return
     if (operation != null) return
     if (preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)) {
+      if (
+        dialogState == DialogState.AWAITING_PERMISSION &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        !activity.packageManager.canRequestPackageInstalls()
+      ) {
+        return
+      }
+      permissionResumeTeardownPending = false
+      if (dialog != null) dismissDialog()
       resumePermissionFlow()
       return
     }
+    if (dialog != null) return
     val phase = persistedUpdatePhase()
     if (phase != PHASE_NONE || persistedDownloadId() != NO_DOWNLOAD_ID) {
       resumePersistedUpdate(phase)
