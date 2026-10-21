@@ -111,8 +111,8 @@ MUTANTS = {
         "return UP_TO_DATE_TITLE.equals(title);",
     ),
     "versionPins": (
-        "return EXPECTED_CANDIDATE_VERSION.equals(candidateVersion)\n                && EXPECTED_PUBLISHED_VERSION.equals(publishedVersion);",
-        "return EXPECTED_CANDIDATE_VERSION.equals(candidateVersion);",
+        "return (LEGACY_CANDIDATE_VERSION.equals(candidateVersion)\n                        && LEGACY_PUBLISHED_VERSION.equals(publishedVersion))\n                || (CURRENT_CANDIDATE_VERSION.equals(candidateVersion)\n                        && CURRENT_PUBLISHED_VERSION.equals(publishedVersion));",
+        "return (LEGACY_CANDIDATE_VERSION.equals(candidateVersion)\n                        && LEGACY_PUBLISHED_VERSION.equals(publishedVersion));",
     ),
 }
 

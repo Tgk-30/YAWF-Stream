@@ -51,8 +51,8 @@ android {
     }
 
     sourceSets.getByName("main").java.srcDir("../app/src/main/java")
-    sourceSets.getByName("baseline").assets.srcDir(
-        layout.buildDirectory.dir("generated/successBaselineAssets"),
+    sourceSets.getByName("baseline").assets.directories.add(
+        "build/generated/successBaselineAssets",
     )
 
     compileOptions {

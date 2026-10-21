@@ -204,7 +204,8 @@ function successFixtureFailures({ settings, build, activity, manifest, driverBui
     [build, 'create("target")'],
     [build, 'versionCode = 90_000_002'],
     [build, 'versionName = "90.0.2"'],
-    [build, 'sourceSets.getByName("baseline").assets.srcDir'],
+    [build, 'sourceSets.getByName("baseline").assets.directories.add'],
+    [build, '"build/generated/successBaselineAssets"'],
     [build, 'sourceSets.getByName("main").java.srcDir("../app/src/main/java")'],
     [activity, 'assets.open(TARGET_ASSET_NAME)'],
     [activity, 'check(total == BuildConfig.SUCCESS_TARGET_SIZE)'],
@@ -233,6 +234,11 @@ function successFixtureFailures({ settings, build, activity, manifest, driverBui
   if (build.includes('sourceSets.getByName("target").assets')
       || build.includes('sourceSets.getByName("main").assets')) {
     failures.push("target recursively consumes the baseline target asset");
+  }
+  if (build.includes('file("build/generated/successBaselineAssets")')
+      || build.includes('layout.buildDirectory.dir("generated/successBaselineAssets")')
+      || build.includes("android.sourceset.disallowProvider")) {
+    failures.push("non-string Android SourceSet directory or compatibility bypass");
   }
   if (manifest.includes("android.permission.INTERNET")) failures.push("success fixture has network permission");
   if (driverManifest.includes("android.permission.REQUEST_INSTALL_PACKAGES")) {
@@ -495,8 +501,22 @@ test("success fixture separates target bytes and uses a surviving ordinary-UI dr
     "target recursively includes itself": successFixtureFailures({
       ...sources,
       build: sources.build.replace(
-        'sourceSets.getByName("baseline").assets.srcDir',
-        'sourceSets.getByName("main").assets.srcDir',
+        'sourceSets.getByName("baseline").assets.directories.add',
+        'sourceSets.getByName("main").assets.directories.add',
+      ),
+    }),
+    "File source directory restored": successFixtureFailures({
+      ...sources,
+      build: sources.build.replace(
+        '"build/generated/successBaselineAssets"',
+        'file("build/generated/successBaselineAssets")',
+      ),
+    }),
+    "provider source directory restored": successFixtureFailures({
+      ...sources,
+      build: sources.build.replace(
+        '"build/generated/successBaselineAssets"',
+        'layout.buildDirectory.dir("generated/successBaselineAssets")',
       ),
     }),
     "target digest unchecked": successFixtureFailures({
