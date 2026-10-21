@@ -2,6 +2,15 @@ name: Android public native OTA runtime check
 
 on:
   workflow_dispatch:
+    inputs:
+      ota_mode:
+        description: Strict continuation or explicitly labelled recovery for the known 2.3.25 updater issue
+        type: choice
+        required: true
+        default: strict
+        options:
+          - strict
+          - legacy-manual-reconsent
 
 permissions:
   contents: read
@@ -13,7 +22,7 @@ concurrency:
 jobs:
   public-ota-api36:
     if: github.ref_type == 'branch'
-    name: Public 2.3.25 to 2.3.26 native OTA on fresh API 36
+    name: Public 2.3.25 to 2.3.26 native updater (${{ inputs.ota_mode || 'strict' }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -39,6 +48,7 @@ jobs:
       EMULATOR_SERIAL: emulator-5554
       EMULATOR_GPU: swiftshader_indirect
       EVIDENCE: android-public-ota-runtime-evidence
+      OTA_MODE: ${{ inputs.ota_mode || 'strict' }}
 
     steps:
       - name: Checkout runtime gate
@@ -61,7 +71,9 @@ jobs:
             echo "baselineVersion=$BASELINE_VERSION"
             echo "baselineSourceRevision=$BASELINE_SOURCE_SHA"
             echo "targetVersion=$TARGET_VERSION"
-            echo "transaction=public-native-ota"
+            echo "transaction=public-native-update"
+            echo "otaMode=$OTA_MODE"
+            echo "legacyRecoveryDoesNotProveAutomaticContinuation=true"
             echo "freshOwnedEmulator=true"
             echo "arm16KiBProof=false"
             echo "physicalDeviceProof=false"
@@ -206,6 +218,7 @@ jobs:
             | tee "$EVIDENCE/target-offline-verification.txt"
           python3 scripts/android_public_ota_runtime_check.py \
             --verify-inputs-only \
+            --ota-mode "$OTA_MODE" \
             --baseline-apk "$BASELINE_APK" \
             --target-apk "$TARGET_APK" \
             --target-manifest "$TARGET_MANIFEST" \
@@ -221,7 +234,7 @@ jobs:
           python3 -m py_compile scripts/android_public_ota_runtime_check.py
           python3 scripts/android_public_ota_runtime_check.py --self-test \
             | tee "$EVIDENCE/host-self-tests.txt"
-          node --test scripts/android_public_ota_runtime_check.test.mjs \
+          node --test scripts/android_public_ota_runtime_check.test.mjs scripts/android_legacy_reconsent_policy.test.mjs \
             | tee "$EVIDENCE/workflow-contract-tests.txt"
           python3 scripts/android-runtime-instrumentation/unknown_source_permission_contract_test.py 2>&1 \
             | tee "$EVIDENCE/unknown-source-permission-contract.txt"
@@ -422,6 +435,7 @@ jobs:
 
           python3 scripts/android_public_ota_runtime_check.py \
             --adb adb \
+            --ota-mode "$OTA_MODE" \
             --serial "$EMULATOR_SERIAL" \
             --apksigner "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/36.0.0/apksigner" \
             --baseline-apk "$BASELINE_APK" \

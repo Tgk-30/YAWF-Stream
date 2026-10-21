@@ -33,6 +33,8 @@ HARNESS_CLASS = (
     "com.yawf.runtimeinstrumentation.RuntimeOtaFlowTest#"
     "updateOfficialPublicBaselineThroughNativeUi"
 )
+STRICT_OTA_MODE = "strict"
+LEGACY_MANUAL_RECONSENT_MODE = "legacy-manual-reconsent"
 EVIDENCE_SUBDIR = "persistent-ota-flow"
 BASELINE_VERSION = "2.3.25"
 BASELINE_CODE = 2_003_025
@@ -346,7 +348,7 @@ def record_package_identity(write_diagnostic, name: str, value: str) -> PackageI
     return parse_package_identity(value)
 
 
-def validate_receipt(value: dict[str, object]) -> None:
+def validate_receipt(value: dict[str, object], ota_mode: str = STRICT_OTA_MODE) -> None:
     expected = {
         "outcome": "passed",
         "persistentUiAutomationSession": True,
@@ -360,10 +362,18 @@ def validate_receipt(value: dict[str, object]) -> None:
         "installerOpenObserved": True,
         "updatedProductObserved": True,
         "permissionCleanupObserved": True,
+        "permissionBackReturnObserved": True,
     }
     for key, expected_value in expected.items():
         if value.get(key) != expected_value:
             raise RuntimeGateError(f"Instrumentation receipt {key} did not prove the full OTA")
+    if value.get("otaMode") != ota_mode:
+        raise RuntimeGateError("Instrumentation receipt OTA mode did not match the admitted mode")
+    used = value.get("legacyManualReconsentUsed")
+    if ota_mode == STRICT_OTA_MODE and used is not False:
+        raise RuntimeGateError("Strict receipt must prove the legacy reconsent path was unused")
+    if ota_mode == LEGACY_MANUAL_RECONSENT_MODE and used is not True:
+        raise RuntimeGateError("Legacy manual reconsent receipt did not prove its single use")
     if value.get("failure") is not None:
         raise RuntimeGateError("Instrumentation receipt retained a failure")
 
@@ -637,6 +647,7 @@ class OtaRuntimeDriver:
                 "-e", "targetSha256", TARGET_SHA256,
                 "-e", "targetSize", str(TARGET_SIZE),
                 "-e", "signerSha256", SIGNER_PIN,
+                "-e", "otaMode", self.args.ota_mode,
                 HARNESS_INSTRUMENTATION,
             ],
             timeout=self.args.flow_timeout,
@@ -655,9 +666,12 @@ class OtaRuntimeDriver:
         if retrieval_error is not None:
             raise RuntimeGateError("Persistent OTA evidence retrieval failed") from retrieval_error
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        validate_receipt(receipt)
+        validate_receipt(receipt, self.args.ota_mode)
         self.adb.mark_installer_success_receipt()
-        self.note("Persistent UI receipt proves native updater and OS installer success")
+        if self.args.ota_mode == LEGACY_MANUAL_RECONSENT_MODE:
+            self.note("Persistent UI receipt proves the explicitly admitted legacy-manual-reconsent path; this is not an automatic OTA continuation claim")
+        else:
+            self.note("Persistent UI receipt proves native updater and OS installer success")
         return receipt
 
     def retrieve_harness_evidence(self) -> None:
@@ -766,6 +780,7 @@ class OtaRuntimeDriver:
                     "targetSha256": TARGET_SHA256,
                     "adbProductInstalls": 1,
                     "targetTransferredToAdb": False,
+                    "otaMode": self.args.ota_mode,
                     "baselinePull": True,
                     "finalPullAfterInstallerReceipt": True,
                 },
@@ -1052,6 +1067,8 @@ Queries:
             "productPermissionPageObserved": True, "permissionEnabledByTest": True,
             "installerSuccessObserved": True, "installerOpenObserved": True,
             "updatedProductObserved": True, "permissionCleanupObserved": True,
+            "permissionBackReturnObserved": True,
+            "otaMode": STRICT_OTA_MODE, "legacyManualReconsentUsed": False,
             "failure": None,
         }
         validate_receipt(receipt)
@@ -1168,6 +1185,30 @@ Queries:
             self.assertTrue((driver.evidence / "logcat.txt").is_file())
             self.assertTrue((driver.evidence / "logcat-status.txt").is_file())
 
+    def test_receipt_mode_is_explicit_and_strict_cannot_claim_reconsent(self) -> None:
+        receipt = {
+            "outcome": "passed", "persistentUiAutomationSession": True,
+            "productPackage": PRODUCT_PACKAGE, "baselineVersion": BASELINE_VERSION,
+            "targetVersion": TARGET_VERSION, "targetSha256": TARGET_SHA256,
+            "productPermissionPageObserved": True, "permissionEnabledByTest": True,
+            "installerSuccessObserved": True, "installerOpenObserved": True,
+            "updatedProductObserved": True, "permissionCleanupObserved": True,
+            "permissionBackReturnObserved": True,
+            "otaMode": LEGACY_MANUAL_RECONSENT_MODE,
+            "legacyManualReconsentUsed": True, "failure": None,
+        }
+        validate_receipt(receipt, LEGACY_MANUAL_RECONSENT_MODE)
+        receipt["legacyManualReconsentUsed"] = False
+        with self.assertRaises(RuntimeGateError):
+            validate_receipt(receipt, LEGACY_MANUAL_RECONSENT_MODE)
+        with self.assertRaises(RuntimeGateError):
+            validate_receipt(receipt, STRICT_OTA_MODE)
+        receipt["otaMode"] = STRICT_OTA_MODE
+        validate_receipt(receipt, STRICT_OTA_MODE)
+        receipt["legacyManualReconsentUsed"] = True
+        with self.assertRaises(RuntimeGateError):
+            validate_receipt(receipt, STRICT_OTA_MODE)
+
     def test_admission_locks_all_product_install_routes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1264,6 +1305,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--harness-test-sha256")
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--flow-timeout", type=int, default=12 * 60)
+    parser.add_argument(
+        "--ota-mode",
+        choices=(STRICT_OTA_MODE, LEGACY_MANUAL_RECONSENT_MODE),
+        default=STRICT_OTA_MODE,
+        help="strict is the unchanged default; legacy-manual-reconsent admits one exact product tap",
+    )
     args = parser.parse_args(argv)
     if args.self_test is None:
         required = [

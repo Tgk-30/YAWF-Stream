@@ -82,6 +82,9 @@ public final class RuntimeOtaFlowTest {
     private boolean installerOpenObserved;
     private boolean updatedProductObserved;
     private boolean permissionCleanupObserved;
+    private boolean permissionBackReturnObserved;
+    private String otaMode;
+    private boolean legacyManualReconsentUsed;
 
     @Test
     public void updateOfficialPublicBaselineThroughNativeUi() throws Throwable {
@@ -100,6 +103,10 @@ public final class RuntimeOtaFlowTest {
                         arguments.getString("targetSha256", ""),
                         parseLongArgument(arguments, "targetSize"),
                         arguments.getString("signerSha256", "")));
+        otaMode = arguments.getString("otaMode", "strict");
+        assertTrue(
+                "OTA mode must be strict or explicitly legacy-manual-reconsent",
+                "strict".equals(otaMode) || "legacy-manual-reconsent".equals(otaMode));
 
         Context targetContext = instrumentation.getTargetContext();
         File internalFiles = targetContext.getFilesDir();
@@ -216,6 +223,7 @@ public final class RuntimeOtaFlowTest {
         click(nativeProductButton(OtaFlowPolicy.INSTALL), "Install", SHORT_WAIT_MS, true);
 
         enterUnknownSourcePermission();
+        maybeLegacyManualReconsent();
         confirmSystemInstaller();
 
         waitFor(By.pkg(OtaFlowPolicy.PRODUCT_PACKAGE), UI_WAIT_MS, "updated product after system Open");
@@ -602,7 +610,23 @@ public final class RuntimeOtaFlowTest {
         permissionEnabledByTest = true;
         capture("unknown-source-after");
         device.pressBack();
-        log("Returned from the product-opened unknown-source Settings page");
+        waitForPermissionBackReturn();
+        permissionBackReturnObserved = true;
+        log("Returned from the product-opened unknown-source Settings page and observed settled product state");
+    }
+
+    private void waitForPermissionBackReturn() {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            String current = device.getCurrentPackageName();
+            boolean settingsGone = !OtaFlowPolicy.isSettingsPackage(current);
+            boolean productOrInstaller = OtaFlowPolicy.PRODUCT_PACKAGE.equals(current)
+                    || OtaFlowPolicy.isInstallerPackage(current);
+            if (settingsGone && productOrInstaller) return;
+            SystemClock.sleep(250);
+        }
+        fail("Unknown-source Settings Back did not settle to product or installer");
     }
 
     private UiObject2 findUnknownSourceSwitch() {
@@ -699,6 +723,66 @@ public final class RuntimeOtaFlowTest {
                 SHORT_WAIT_MS,
                 true);
         installerOpenObserved = true;
+    }
+
+    private void maybeLegacyManualReconsent() throws IOException {
+        if (!"legacy-manual-reconsent".equals(otaMode)) {
+            return;
+        }
+        assertTrue("Legacy reconsent requires the product permission page", productPermissionPageObserved);
+        assertTrue("Legacy reconsent requires the test-enabled permission", permissionEnabledByTest);
+        assertTrue("Legacy reconsent requires a settled Settings Back return", permissionBackReturnObserved);
+        assertEquals(
+                "Legacy manual reconsent mode is fixed to the reviewed baseline and target",
+                "2.3.26",
+                OtaFlowPolicy.TARGET_VERSION);
+        assertEquals(
+                "Legacy manual reconsent mode is fixed to the reviewed baseline",
+                "2.3.25",
+                OtaFlowPolicy.BASELINE_VERSION);
+        if (!waitForLegacyReadyOrInstaller()
+                || !OtaFlowPolicy.PRODUCT_PACKAGE.equals(device.getCurrentPackageName())
+                || device.hasObject(By.pkg(OtaFlowPolicy.SETTINGS_PACKAGE))
+                || device.hasObject(By.pkg("com.google.android.packageinstaller"))
+                || device.hasObject(By.pkg("com.android.packageinstaller"))) {
+            return;
+        }
+        UiObject2 title = device.findObject(
+                By.text("Update ready to install").pkg(OtaFlowPolicy.PRODUCT_PACKAGE));
+        UiObject2 message = device.findObject(
+                By.text("YAWF Stream 2.3.26 passed all checks. Android will show the system installer.")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE));
+        UiObject2 install = device.findObject(
+                By.res("android", "button1")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .text(OtaFlowPolicy.INSTALL.textPattern()));
+        if (title == null || message == null || install == null || !install.isEnabled()
+                || !install.isClickable()) {
+            return;
+        }
+        assertNoBindingTerms();
+        capture("legacy-manual-reconsent-ready");
+        install.click();
+        legacyManualReconsentUsed = true;
+        log("Used exactly one legacy-manual-reconsent product Install tap after permission Back");
+        device.waitForIdle(750);
+    }
+
+    private boolean waitForLegacyReadyOrInstaller() {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            String current = device.getCurrentPackageName();
+            if (OtaFlowPolicy.isInstallerPackage(current)) return true;
+            if (OtaFlowPolicy.PRODUCT_PACKAGE.equals(current)
+                    && device.hasObject(By.text("Update ready to install")
+                            .pkg(OtaFlowPolicy.PRODUCT_PACKAGE))
+                    && device.hasObject(By.text(
+                            "YAWF Stream 2.3.26 passed all checks. Android will show the system installer.")
+                            .pkg(OtaFlowPolicy.PRODUCT_PACKAGE))) return true;
+            SystemClock.sleep(250);
+        }
+        return false;
     }
 
     private void cleanupUnknownSourcePermission() throws Exception {
@@ -925,6 +1009,9 @@ public final class RuntimeOtaFlowTest {
         receipt.put("installerOpenObserved", installerOpenObserved);
         receipt.put("updatedProductObserved", updatedProductObserved);
         receipt.put("permissionCleanupObserved", permissionCleanupObserved);
+        receipt.put("permissionBackReturnObserved", permissionBackReturnObserved);
+        receipt.put("otaMode", otaMode == null ? "strict" : otaMode);
+        receipt.put("legacyManualReconsentUsed", legacyManualReconsentUsed);
         receipt.put("captures", captureIndex);
         receipt.put(
                 "failure",
