@@ -35,7 +35,7 @@ const FAQ = [
   {
     question: 'How do I install the mobile app?',
     answer:
-      'A running YAWF Stream server is required. Open it in Safari on iPhone or iPad, or Chrome on Android, and use Add to Home Screen or Install app. No standalone iOS package is published. On Android this requires HTTPS: Chrome hides the install option on a plain http:// address, so a LAN IP alone will not work. iPhone and iPad can add to the home screen either way.',
+      'The native Android phone/tablet APK can run standalone or connect to Server Mode. A running YAWF Stream server is required for the mobile browser/PWA and for iPhone or iPad. Open the server in Safari on iPhone or iPad, or Chrome on Android, and use Add to Home Screen or Install app. No standalone iOS package is published. No App Store package is published. For the browser PWA on Android, HTTPS is required: Chrome hides the install option on a plain http:// address, so a LAN IP alone will not work. iPhone and iPad can add the PWA to the home screen either way.',
   },
   {
     question: 'How do I recover an owner account or restore a backup?',
@@ -63,7 +63,7 @@ const ACTIONS = [
   {
     icon: Download,
     title: 'Install or update problem',
-    body: 'Confirm the package type, architecture, signature, and whether that package supports in-app updates.',
+    body: 'Confirm the package type, architecture, and signature. If you are moving from the older Android 2.3.21 app, install the current APK once in place without uninstalling or resetting app data. Do not assume the older app native OTA check can complete that upgrade; confirm Android\'s install prompt, then use normal update controls when offered. Known issue on Android 2.3.25 and 2.3.26: after granting Android\'s install permission, the native update flow can remain at “Update ready to install”. A permanent fix is being prepared. Manual in-place installation of the current APK avoids relying on that flow.',
   },
 ];
 

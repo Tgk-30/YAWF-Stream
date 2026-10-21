@@ -48,6 +48,8 @@ export default function Verify() {
           ))}
         </div>
 
+        <p className="mt-6 leading-relaxed text-ink-2"><span className="text-ink-1">Android phone update bridge.</span> If you are moving from the older Android 2.3.21 app, download the current APK and install it once in place. Do not uninstall or reset the app first, and do not assume the older app's native OTA check can complete this upgrade. After this manual install, use the normal update controls when offered and confirm Android's install prompt. Known issue on Android 2.3.25 and 2.3.26: after granting Android's install permission, the native update flow can remain at “Update ready to install”. A permanent fix is being prepared. Manual in-place installation of the current APK avoids relying on that flow.</p>
+
         <div className="mt-8 flex flex-wrap gap-3">
           <a
             href={RELEASE_LINKS.desktopChecksums}
