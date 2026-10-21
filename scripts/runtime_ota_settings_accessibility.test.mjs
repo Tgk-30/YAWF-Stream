@@ -47,8 +47,8 @@ function validateSettingsAccessibility(source) {
       "scroll gesture region is not derived from the exact Settings page",
     ],
     [
-      /Rect gestureBounds = new Rect\(scrollBounds\);[\s\S]*?gestureBounds\.intersect\(settingsBounds\)[\s\S]*?int navigationClearance = navigationBounds\.height\(\);[\s\S]*?gestureBounds\.bottom = Math\.min\(\s*gestureBounds\.bottom, navigationBounds\.top - navigationClearance\)/,
-      "scroll gesture region is not intersected with Settings and capped above the full navigation",
+      /Rect gestureBounds = new Rect\(scrollBounds\);[\s\S]*?gestureBounds\.intersect\(settingsBounds\)[\s\S]*?int navigationClearance = navigationBounds\.height\(\);[\s\S]*?gestureBounds\.top = gestureBounds\.top \+ navigationClearance;[\s\S]*?gestureBounds\.bottom = Math\.min\(\s*gestureBounds\.bottom, navigationBounds\.top - navigationClearance\)/,
+      "scroll gesture region is not inset from both Settings edges and capped above the full navigation",
     ],
     [
       /scrollable\.setGestureMargins\(leftMargin, topMargin, rightMargin, bottomMargin\)/,
@@ -154,6 +154,10 @@ test("Settings and OTA controls require exact semantic identity and safe visibil
     [
       "gestureBounds.bottom, navigationBounds.top - navigationClearance",
       "gestureBounds.bottom, navigationBounds.top",
+    ],
+    [
+      "gestureBounds.top = gestureBounds.top + navigationClearance;",
+      "gestureBounds.top = settingsBounds.top;",
     ],
     [
       "scrollable.setGestureMargins(leftMargin, topMargin, rightMargin, bottomMargin)",

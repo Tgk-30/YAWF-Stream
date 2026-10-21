@@ -495,6 +495,7 @@ public final class RuntimeOtaFlowTest {
         assertTrue("Scrollable container did not intersect the exact Settings page",
                 gestureBounds.intersect(settingsBounds));
         int navigationClearance = navigationBounds.height();
+        gestureBounds.top = gestureBounds.top + navigationClearance;
         gestureBounds.bottom = Math.min(
                 gestureBounds.bottom, navigationBounds.top - navigationClearance);
         assertFalse("No Settings gesture region remained above bottom navigation",
