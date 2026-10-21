@@ -8,6 +8,7 @@ import android.app.Instrumentation;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 
@@ -43,7 +44,7 @@ public final class RuntimeFlowTest {
     private static final long UI_WAIT_MS = 90_000;
     private static final long UPDATE_WAIT_MS = 120_000;
     private static final long TOUR_MOUNT_WAIT_MS = 5_000;
-    private static final long TOUR_OBSERVATION_IDLE_TIMEOUT_MS = 250;
+    private static final long TOUR_OBSERVATION_IDLE_TIMEOUT_MS = 0;
     private static final String EVIDENCE_SUBDIR = "persistent-flow";
     private static final int MAX_CAPTURES = 20;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
@@ -233,6 +234,20 @@ public final class RuntimeFlowTest {
         int consecutiveAbsentSamples = 0;
         while (SystemClock.uptimeMillis() < dismissalDeadline) {
             long sampleStarted = SystemClock.uptimeMillis();
+            long cacheStarted = SystemClock.uptimeMillis();
+            boolean cacheRefreshRequired = Build.VERSION.SDK_INT
+                    >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
+            boolean cacheCleared = false;
+            boolean cacheKnown = true;
+            if (cacheRefreshRequired) {
+                cacheCleared = instrumentation.getUiAutomation().clearCache();
+                cacheKnown = cacheCleared;
+            }
+            log("Tour observation cache elapsedMs="
+                    + (SystemClock.uptimeMillis() - cacheStarted)
+                    + " required=" + cacheRefreshRequired
+                    + " cleared=" + cacheCleared
+                    + " known=" + cacheKnown);
             TimedNodeQuery dialog = queryExactTourNode(
                     "welcome-dialog", FlowPolicy.WELCOME_TOUR_DIALOG, false);
             TimedNodeQuery discover = queryExactTourNode(
@@ -240,7 +255,8 @@ public final class RuntimeFlowTest {
             TimedNodeQuery reminder = queryExactTourNode(
                     "setup-reminder", FlowPolicy.STREAMING_SETUP_REMINDER, true);
             completedSamples++;
-            boolean observationKnown = dialog.known && discover.known && reminder.known;
+            boolean observationKnown = cacheKnown
+                    && dialog.known && discover.known && reminder.known;
             consecutiveAbsentSamples = FlowPolicy.nextTourDismissalAbsentSamples(
                     consecutiveAbsentSamples,
                     observationKnown,

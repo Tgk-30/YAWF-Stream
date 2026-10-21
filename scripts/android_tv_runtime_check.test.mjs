@@ -10,9 +10,17 @@ const scripts = dirname(fileURLToPath(import.meta.url));
 const root = resolve(scripts, "..");
 const hostPath = join(scripts, "android_tv_runtime_check.py");
 const fixturePath = join(scripts, "android_tv_runtime_fixture.py");
+const mainActivityPath = join(
+  root,
+  "android-tv/app/src/main/java/com/yawf/stream/tv/MainActivity.java",
+);
 const javaPath = join(
   scripts,
   "android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeTvFlowTest.java",
+);
+const manifestPath = join(
+  scripts,
+  "android-runtime-instrumentation/app/src/main/AndroidManifest.xml",
 );
 const workflowPath = join(root, ".github/workflows/android-tv-runtime.yml");
 const python = process.env.PYTHON || "python3";
@@ -33,7 +41,32 @@ function killedPythonMutant(path, search, replacement, args = ["--self-test"]) {
   assert.notEqual(result.status, 0, `semantic mutant survived:\n${result.stdout}\n${result.stderr}`);
 }
 
+function assertSetupEmulatorPath(source) {
+  const start = source.indexOf("      - name: Admit exact official Android TV API 36 image revision");
+  const end = source.indexOf("      - name: Run policy tests, generate fixture, and build isolated harness", start);
+  assert.ok(start >= 0 && end > start, "SDK admission step must be explicit");
+  const setup = source.slice(start, end);
+  assert.ok(setup.includes('test -x "$sdk_root/emulator/emulator"'));
+  assert.ok(setup.includes('"$sdk_root/emulator/emulator" -version'));
+  assert.doesNotMatch(setup, /^\s*emulator -version/m);
+}
+
+function assertScopedVolumeCommand(source) {
+  assert.ok(source.includes('adb -s "$EMULATOR_SERIAL" shell cmd media_session volume --stream 3 --set 0'));
+  assert.doesNotMatch(source, /shell\s+media\s+volume/);
+}
+
+function assertHarnessVisibilityPolicy(source) {
+  const queries = source.match(/<queries>[\s\S]*?<\/queries>/g) ?? [];
+  assert.equal(queries.length, 1, "harness must have one package visibility block");
+  assert.match(queries[0], /<package\s+android:name="com\.yawf\.stream\.tv"\s*\/>/);
+  assert.equal((queries[0].match(/<package\b/g) ?? []).length, 1);
+  assert.doesNotMatch(source, /QUERY_ALL_PACKAGES|<uses-permission\b/);
+}
+
 function assertWorkflowPolicy(source) {
+  assertScopedVolumeCommand(source);
+  assertSetupEmulatorPath(source);
   assert.match(source, /on:\s*\n\s*workflow_dispatch:\s*\n/);
   assert.match(source, /SYSTEM_IMAGE_PACKAGE: system-images;android-36;android-tv;x86_64/);
   assert.match(source, /SYSTEM_IMAGE_REVISION: "4"/);
@@ -66,6 +99,7 @@ function assertWorkflowPolicy(source) {
   const finish = source.slice(source.indexOf("finish() {"), source.indexOf("trap finish EXIT"));
   assert.ok(finish.indexOf("capture_failure") < finish.indexOf("cleanup"));
   assert.match(source, /captureBeforeCleanup=true/);
+  assert.match(source, /assert packages == \["com\.yawf\.stream\.tv"\], packages/);
 }
 
 function javaMethod(source, name) {
@@ -90,6 +124,67 @@ function assertObservationOnly(source) {
   }
   assert.match(source, /playPauseSelector\("Pause"\).*semantic Pause state before pausing/s);
   assert.match(source, /playPauseSelector\("Play"\).*semantic Play state before resuming/s);
+}
+
+function assertImeDismissalPolicy(source) {
+  assert.match(source,
+    /private static final String PINNED_TV_IME = "com\.google\.android\.inputmethod\.latin";/);
+  const flow = javaMethod(source, "runFlow");
+  const addressVerified = flow.indexOf(
+    'assertEquals("Server address was not entered through the visible UI", FIXTURE_URL, address.getText());',
+  );
+  const dismissal = flow.indexOf("dismissVisiblePinnedTvIme();");
+  const connect = flow.indexOf("focusConnectWithFirstDpadDownAndActivate();");
+  assert.ok(addressVerified >= 0 && addressVerified < dismissal && dismissal < connect,
+    "the exact entered address must be verified before IME dismissal and Connect activation");
+
+  const body = javaMethod(source, "dismissVisiblePinnedTvIme");
+  assert.match(body, /BySelector imeSelector = By\.pkg\(PINNED_TV_IME\);/);
+  assert.match(body,
+    /UiObject2 ime = waitFor\(imeSelector, UI_WAIT, "visible pinned TV input method"\);/);
+  assert.match(body, /!ime\.getVisibleBounds\(\)\.isEmpty\(\)/);
+  assert.equal((body.match(/device\.pressBack\(\)/g) ?? []).length, 1,
+    "IME dismissal must send exactly one remote Back");
+  assert.match(body, /device\.wait\(Until\.gone\(imeSelector\), UI_WAIT\)/);
+  assert.doesNotMatch(body,
+    /executeShellCommand|input\s+keyevent|pressDPad|pressKeyCode|\.click\s*\(|\bfor\s*\(|\bwhile\s*\(/);
+}
+
+function assertSetupFocusRoutingPolicy(source) {
+  const setup = javaMethod(source, "showServerSetup");
+  const start = setup.indexOf("address.setOnKeyListener((view, keyCode, event) -> {");
+  const end = setup.indexOf("        });", start);
+  assert.ok(start >= 0 && end > start, "server address must define bounded key routing");
+  const listener = setup.slice(start, end);
+  assert.match(listener, /keyCode == KeyEvent\.KEYCODE_DPAD_DOWN/);
+  assert.match(listener, /event\.getAction\(\) == KeyEvent\.ACTION_DOWN/);
+  assert.match(listener, /connect\.requestFocus\(\);\s*return true;/s);
+  assert.match(listener, /}\s*return false;\s*$/s);
+  assert.equal((listener.match(/connect\.requestFocus\(\)/g) ?? []).length, 1);
+  assert.doesNotMatch(listener,
+    /performClick|callOnClick|setText|dispatchKeyEvent|executeShellCommand|KEYCODE_DPAD_(?:UP|LEFT|RIGHT)/);
+}
+
+function assertFirstDpadConnectPolicy(source) {
+  const flow = javaMethod(source, "runFlow");
+  const imeGone = flow.indexOf("dismissVisiblePinnedTvIme();");
+  const connect = flow.indexOf("focusConnectWithFirstDpadDownAndActivate();");
+  assert.ok(imeGone >= 0 && imeGone < connect,
+    "first Connect navigation must begin only after exact IME dismissal");
+
+  const body = javaMethod(source, "focusConnectWithFirstDpadDownAndActivate");
+  const addressFocused = body.indexOf('By.clazz("android.widget.EditText").focused(true)');
+  const down = body.indexOf("device.pressDPadDown();");
+  const connectFocused = body.indexOf('waitFor(focusedConnect, UI_WAIT, "Connect focused by first D-pad Down");');
+  const center = body.indexOf("device.pressDPadCenter();");
+  assert.ok(addressFocused >= 0 && addressFocused < down && down < connectFocused && connectFocused < center,
+    "focused address, first D-pad Down, exact Connect focus, and center activation must stay ordered");
+  assert.match(body,
+    /BySelector focusedConnect = By\.clazz\("android\.widget\.Button"\)\s*\.text\("Connect"\)\s*\.focused\(true\);/s);
+  assert.equal((body.match(/device\.pressDPadDown\(\)/g) ?? []).length, 1);
+  assert.equal((body.match(/device\.pressDPadCenter\(\)/g) ?? []).length, 1);
+  assert.doesNotMatch(body,
+    /pressBack|pressKeyCode|focusTarget|focusAndActivate|executeShellCommand|\.click\s*\(|\bfor\s*\(|\bwhile\s*\(/);
 }
 
 function assertJavaSemanticPolicy(source) {
@@ -171,6 +266,73 @@ test("workflow is manual, fail-closed, revision-4 TV-only, and device scoped", (
     "name: Download the isolated static transport artifact\n        env:\n          GH_TOKEN: forbidden")));
 });
 
+test("SDK admission invokes the newly installed emulator before PATH becomes available", () => {
+  const source = read(workflowPath);
+  assertSetupEmulatorPath(source);
+  const mutant = source.replace('"$sdk_root/emulator/emulator" -version', 'emulator -version');
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertSetupEmulatorPath(mutant));
+});
+
+test("TV muting uses the media_session service rather than the absent legacy shell binary", () => {
+  const source = read(workflowPath);
+  assertScopedVolumeCommand(source);
+  const mutant = source.replace('shell cmd media_session volume', 'shell media volume');
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertScopedVolumeCommand(mutant));
+});
+
+test("TV harness can discover only the exact signed product package", () => {
+  const source = read(manifestPath);
+  assertHarnessVisibilityPolicy(source);
+  const missing = source.replace(/\s*<queries>[\s\S]*?<\/queries>\s*/, "\n");
+  assert.notEqual(missing, source);
+  assert.throws(() => assertHarnessVisibilityPolicy(missing));
+  const wrongPackage = source.replace("com.yawf.stream.tv", "com.yawf.stream.wrong");
+  assert.notEqual(wrongPackage, source);
+  assert.throws(() => assertHarnessVisibilityPolicy(wrongPackage));
+});
+
+test("TV setup dismisses the exact visible pinned IME once before focusing Connect", () => {
+  const source = read(javaPath);
+  assertImeDismissalPolicy(source);
+  const mutants = [
+    source.replace(
+      '        device.pressBack();\n        assertTrue("Pinned TV input method did not dismiss after one remote Back",',
+      '        assertTrue("Pinned TV input method did not dismiss after one remote Back",',
+    ),
+    source.replace("Until.gone(imeSelector)", "Until.hasObject(imeSelector)"),
+    source.replace("com.google.android.inputmethod.latin", "com.google.android.inputmethod.wrong"),
+  ];
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, source);
+    assert.throws(() => assertImeDismissalPolicy(mutant));
+  }
+});
+
+test("TV setup routes only first D-pad Down from the address to Connect", () => {
+  const product = read(mainActivityPath);
+  const harness = read(javaPath);
+  assertSetupFocusRoutingPolicy(product);
+  assertFirstDpadConnectPolicy(harness);
+  for (const mutant of [
+    product.replace("KeyEvent.KEYCODE_DPAD_DOWN", "KeyEvent.KEYCODE_DPAD_UP"),
+    product.replace("KeyEvent.ACTION_DOWN", "KeyEvent.ACTION_UP"),
+    product.replace("connect.requestFocus();", "connect.performClick();"),
+  ]) {
+    assert.notEqual(mutant, product);
+    assert.throws(() => assertSetupFocusRoutingPolicy(mutant));
+  }
+  for (const mutant of [
+    harness.replace("        device.pressDPadDown();\n", ""),
+    harness.replace(".focused(true);", ".enabled(true);"),
+    harness.replace("        device.pressDPadCenter();\n", ""),
+  ]) {
+    assert.notEqual(mutant, harness);
+    assert.throws(() => assertFirstDpadConnectPolicy(mutant));
+  }
+});
+
 test("position observers cannot toggle or repair playback", () => {
   const source = read(javaPath);
   assertObservationOnly(source);
@@ -193,7 +355,7 @@ test("instrumentation requires observable playback behavior rather than click-on
   assert.throws(() => assertJavaSemanticPolicy(mutant));
 });
 
-test("all five admission files compile or parse without touching Android SDK", () => {
+test("all admission files compile or parse without touching Android SDK", () => {
   execFileSync(python, ["-c", [
     "from pathlib import Path",
     `compile(Path(${JSON.stringify(hostPath)}).read_text(), ${JSON.stringify(hostPath)}, 'exec')`,
@@ -202,8 +364,9 @@ test("all five admission files compile or parse without touching Android SDK", (
   JSON.parse(execFileSync(python, ["-c", [
     "import json,re,pathlib",
     `s=pathlib.Path(${JSON.stringify(javaPath)}).read_text()`,
-    "assert s.count('{')==s.count('}')",
-    "print(json.dumps({'javaBraceBalance':True}))",
+    `p=pathlib.Path(${JSON.stringify(mainActivityPath)}).read_text()`,
+    "assert s.count('{')==s.count('}') and p.count('{')==p.count('}')",
+    "print(json.dumps({'javaBraceBalance':True,'productJavaBraceBalance':True}))",
   ].join(";")], { encoding: "utf8" }));
   assertWorkflowPolicy(read(workflowPath));
 });

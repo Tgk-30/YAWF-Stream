@@ -1555,14 +1555,26 @@ describe("DebridStreamer server", () => {
          VALUES (?, NULL, NULL, 'test', NULL, NULL, NULL, ?)`,
       );
       const createdAt = new Date().toISOString();
-      database.exec("BEGIN IMMEDIATE");
-      try {
-        for (let i = 0; i < 9_999; i += 1) insert.run(`audit-${i}`, createdAt);
-        database.exec("COMMIT");
-      } catch (error) {
-        database.exec("ROLLBACK");
-        throw error;
-      }
+      const seed = database.prepare(
+        `WITH digits(value) AS (
+           VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+         ), audit_ids(value) AS (
+           SELECT ones.value
+                + tens.value * 10
+                + hundreds.value * 100
+                + thousands.value * 1000
+           FROM digits AS ones
+           CROSS JOIN digits AS tens
+           CROSS JOIN digits AS hundreds
+           CROSS JOIN digits AS thousands
+         )
+         INSERT INTO audit_log
+           (id, actor_user_id, actor_profile_id, action, target_type, target_id, metadata_json, created_at)
+         SELECT 'audit-' || value, NULL, NULL, 'test', NULL, NULL, NULL, ?
+         FROM audit_ids
+         WHERE value < 9999`,
+      );
+      expect(seed.run(createdAt).changes).toBe(9_999);
 
       const belowCap = json<{ counts: { auditEvents: number } }>(
         await request(owner, { method: "GET", url: "/api/admin/health" }),

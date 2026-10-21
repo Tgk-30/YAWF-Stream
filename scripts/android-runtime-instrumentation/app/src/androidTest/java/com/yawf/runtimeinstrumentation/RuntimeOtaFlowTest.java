@@ -10,7 +10,9 @@ import android.app.Instrumentation;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Rect;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
@@ -38,7 +40,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
 
-/** One persistent semantic UI session for a real public 2.3.21 to 2.3.25 OTA. */
+/** One persistent semantic UI session for a real public 2.3.25 to 2.3.26 OTA. */
 @RunWith(AndroidJUnit4.class)
 public final class RuntimeOtaFlowTest {
     private static final long SHORT_WAIT_MS = 20_000;
@@ -50,6 +52,7 @@ public final class RuntimeOtaFlowTest {
     private static final int MAX_ACTION_LINES = 260;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
     private static final long MAX_HIERARCHY_BYTES = 1024L * 1024L;
+    private static final int WELCOME_STAGE_SETTLED_SAMPLES = 2;
     private static final Pattern SAFE_SUBDIR = Pattern.compile("[A-Za-z0-9._-]{1,64}");
     private static final Pattern URL = Pattern.compile("https?://\\S+", Pattern.CASE_INSENSITIVE);
     private static final Pattern UPDATE_TEXT = Pattern.compile("\\AUpdate\\z", Pattern.CASE_INSENSITIVE);
@@ -90,12 +93,13 @@ public final class RuntimeOtaFlowTest {
         assertEquals("Unexpected evidence subdirectory", EVIDENCE_SUBDIR, subdir);
         assertTrue(
                 "Fixed OTA arguments do not match the reviewed release",
-                OtaFlowPolicy.expectedArguments(
+                OtaFlowPolicy.matchesVersionPins(
                         arguments.getString("baselineVersion", ""),
                         arguments.getString("targetVersion", ""),
                         parseLongArgument(arguments, "targetVersionCode"),
                         arguments.getString("targetSha256", ""),
-                        parseLongArgument(arguments, "targetSize")));
+                        parseLongArgument(arguments, "targetSize"),
+                        arguments.getString("signerSha256", "")));
 
         Context targetContext = instrumentation.getTargetContext();
         File internalFiles = targetContext.getFilesDir();
@@ -162,10 +166,7 @@ public final class RuntimeOtaFlowTest {
 
         openSettingsAndAssertSimple("before-update");
         openHelpAndUpdates();
-        scrollUntil(By.text("Android APK updates"), "Android APK updates");
-        scrollUntil(By.text("Check for Android updates"), "Check for Android updates");
-        capture("android-update-card");
-        click(By.text("Check for Android updates"), "Check for Android updates", SHORT_WAIT_MS, true);
+        tapVisibleAndroidUpdateCheckCard("android-update-card");
 
         waitFor(By.text("Check for Android updates?"), SHORT_WAIT_MS, "manual update consent");
         UiObject2 weekly = waitFor(
@@ -189,7 +190,7 @@ public final class RuntimeOtaFlowTest {
         String offerTitle = "YAWF Stream " + OtaFlowPolicy.TARGET_VERSION + " is available";
         String offerMessage =
                 "Download the signed Android update now? Android will ask again before installing it.";
-        waitFor(By.text(offerTitle), UI_WAIT_MS, "exact 2.3.25 offer");
+        waitFor(By.text(offerTitle), UI_WAIT_MS, "exact 2.3.26 offer");
         waitFor(By.text(offerMessage), SHORT_WAIT_MS, "exact signed-update offer message");
         assertTrue("Offer policy mismatch", OtaFlowPolicy.isExactOffer(offerTitle, offerMessage));
         weekly = waitFor(
@@ -223,14 +224,17 @@ public final class RuntimeOtaFlowTest {
         capture("updated-product-open");
 
         openSettingsAndAssertSimple("after-update");
-        waitFor(By.text("YAWF Stream v" + OtaFlowPolicy.TARGET_VERSION), UI_WAIT_MS, "updated visible version");
+        scrollUntilVisibleProductSemantic(
+                "YAWF Stream v" + OtaFlowPolicy.TARGET_VERSION,
+                "android.widget.TextView",
+                false,
+                Direction.DOWN);
         assertFalse(
                 "FirstRun returned after OTA",
                 hasAnyWithoutIdleDelay(By.text("How do you want to use YAWF Stream?")));
         assertFalse("Setup reminder returned after OTA", hasSetupReminder());
         openHelpAndUpdates();
-        scrollUntil(By.text("Check for Android updates"), "post-update Android update control");
-        click(By.text("Check for Android updates"), "post-update manual check", SHORT_WAIT_MS, true);
+        tapVisibleAndroidUpdateCheckCard(null);
 
         waitFor(By.text("YAWF Stream is up to date"), UI_WAIT_MS, "post-update no-newer title");
         String postMessage = "No newer signed Android phone release is available.";
@@ -261,13 +265,81 @@ public final class RuntimeOtaFlowTest {
             capture(capturePrefix + "-" + (step + 1));
             clickWebButton(button, capturePrefix + " " + label, SHORT_WAIT_MS);
             if (step + 1 < titles.length) {
-                waitFor(By.text(titles[step + 1]), UI_WAIT_MS, capturePrefix + " next stage");
+                if (titles == WELCOME_TITLES) {
+                    waitForRefreshedWelcomeStage(
+                            titles[step + 1], step + 2, capturePrefix + " next stage");
+                } else {
+                    waitFor(By.text(titles[step + 1]), UI_WAIT_MS, capturePrefix + " next stage");
+                }
             } else {
-                assertTrue(
-                        capturePrefix + " did not close after its final action",
-                        device.wait(Until.gone(By.text(title)), UI_WAIT_MS));
+                if (titles == WELCOME_TITLES) {
+                    waitForRefreshedWelcomeClosed(capturePrefix);
+                } else {
+                    assertTrue(
+                            capturePrefix + " did not close after its final action",
+                            device.wait(Until.gone(By.text(title)), UI_WAIT_MS));
+                }
             }
         }
+    }
+
+    private void waitForRefreshedWelcomeStage(
+            String expectedTitle, int oneBasedStep, String label) {
+        assertTrue(
+                "Accessibility cache refresh requires Android API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        BySelector dialogSelector = By.text("Welcome tour")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.app.Dialog");
+        BySelector titleSelector = By.text(expectedTitle)
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.TextView");
+        BySelector counterSelector = By.text(String.valueOf(oneBasedStep))
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.TextView");
+        long deadline = SystemClock.uptimeMillis() + UI_WAIT_MS;
+        int settled = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+            UiObject2 dialog = cacheCleared ? device.findObject(dialogSelector) : null;
+            boolean exactStage = dialog != null
+                    && dialog.findObject(titleSelector) != null
+                    && dialog.findObject(counterSelector) != null;
+            if (exactStage) {
+                settled++;
+                if (settled >= WELCOME_STAGE_SETTLED_SAMPLES) {
+                    log("Observed refreshed exact Welcome title and counter for " + label);
+                    return;
+                }
+            } else {
+                settled = 0;
+            }
+            SystemClock.sleep(250);
+        }
+        fail("Timed out waiting for refreshed exact Welcome title and counter for " + label);
+    }
+
+    private void waitForRefreshedWelcomeClosed(String label) {
+        BySelector dialogSelector = By.text("Welcome tour")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.app.Dialog");
+        long deadline = SystemClock.uptimeMillis() + UI_WAIT_MS;
+        int settled = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+            boolean dialogGone = cacheCleared && device.findObject(dialogSelector) == null;
+            if (dialogGone && ++settled >= WELCOME_STAGE_SETTLED_SAMPLES) {
+                log("Observed refreshed Welcome dialog closure for " + label);
+                return;
+            }
+            if (!dialogGone) {
+                settled = 0;
+            }
+            SystemClock.sleep(250);
+        }
+        fail(label + " did not settle closed after its final action");
     }
 
     private void dismissSetupReminder() throws IOException {
@@ -307,12 +379,15 @@ public final class RuntimeOtaFlowTest {
         assertFalse("Simple navigation exposed Debrid", hasAnyWithoutIdleDelay(By.text("Debrid")));
         click(By.text("Settings"), "Settings", SHORT_WAIT_MS, false);
         waitForSettingsRoute();
-        scrollUntil(By.text("Simple"), "Simple experience option");
-        waitFor(By.desc("Experience tier"), UI_WAIT_MS, "Experience tier radio group");
-        waitFor(
-                By.text("Simple").pkg(OtaFlowPolicy.PRODUCT_PACKAGE).clazz("android.widget.RadioButton"),
-                SHORT_WAIT_MS,
-                "visible Simple experience option");
+        UiObject2 simple = scrollUntilVisibleProductSemantic(
+                "Simple", "android.widget.RadioButton", true, Direction.DOWN);
+        waitForAny(
+                UI_WAIT_MS,
+                productTextOrDescriptionSelectors(
+                        "Experience tier", "android.widget.RadioGroup", false));
+        assertTrue("Simple experience option was disabled", simple.isEnabled());
+        log("Observed the exact visible Simple option; API 36 WebView accessibility did not expose "
+                + "its selected state, so the screenshot retains the visual selection evidence");
         capture("settings-" + phase);
     }
 
@@ -338,37 +413,169 @@ public final class RuntimeOtaFlowTest {
     }
 
     private void openHelpAndUpdates() {
-        UiObject2 direct = device.wait(Until.findObject(By.text("Help & updates")), 2_000);
-        if (direct != null) {
-            click(By.text("Help & updates"), "Help & updates", SHORT_WAIT_MS, true);
+        BySelector[] directSelectors = productTextOrDescriptionSelectors(
+                "Help & updates", "android.widget.Button", true);
+        UiObject2 direct = findAnyNow(directSelectors);
+        if (direct != null && isVisibleAboveBottomNavigation(direct)) {
+            clickProductSemantic("Help & updates", "android.widget.Button", SHORT_WAIT_MS);
             return;
         }
-        BySelector[] categories = {By.text("Install & setup"), By.text("Appearance"), By.desc("Settings category")};
-        UiObject2 category = waitForAny(SHORT_WAIT_MS, categories);
+        UiObject2 category = scrollUntilVisibleProductSemantic(
+                "Install & setup", "android.view.View", true, Direction.UP);
         assertNoBindingTerms();
-        category = findAnyNow(categories);
-        assertNotNull("Settings category disappeared after policy guard", category);
+        category = findAnyNow(productTextOrDescriptionSelectors(
+                "Install & setup", "android.view.View", true));
+        assertNotNull("Install & setup category disappeared after policy guard", category);
         category.click();
         log("Opened semantic Settings category selector");
         device.waitForIdle(1_000);
         click(By.text("Help & updates"), "Help & updates", SHORT_WAIT_MS, true);
     }
 
-    private void scrollUntil(BySelector target, String label) {
-        for (int attempt = 0; attempt < 10; attempt++) {
-            if (device.findObject(target) != null) {
-                return;
+    private void tapVisibleAndroidUpdateCheckCard(String captureLabel) throws IOException {
+        BySelector title = By.text("Android APK updates")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.TextView")
+                .enabled(true);
+        scrollUntilVisibleExactProduct(title, "Android APK updates title", Direction.DOWN);
+        BySelector check = By.text("Check for Android updates")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.Button")
+                .clickable(true)
+                .enabled(true);
+        UiObject2 button = scrollUntilVisibleExactProduct(
+                check, "Check for Android updates button", Direction.DOWN);
+        if (captureLabel != null) {
+            capture(captureLabel);
+        }
+        assertNoBindingTerms();
+        button = device.findObject(check);
+        assertNotNull("Exact Check for Android updates button disappeared before tap", button);
+        assertTrue(
+                "Exact Check for Android updates button was not safely visible above bottom navigation",
+                isVisibleAboveBottomNavigation(button));
+        button.click();
+        log("Tapped the exact visible Android APK updates card Check for Android updates button");
+        device.waitForIdle(750);
+    }
+
+    private UiObject2 scrollUntilVisibleExactProduct(
+            BySelector selector, String label, Direction direction) {
+        for (int attempt = 0; attempt < 12; attempt++) {
+            UiObject2 found = device.findObject(selector);
+            if (found != null && isVisibleAboveBottomNavigation(found)) {
+                return found;
             }
             UiObject2 scrollable = device.findObject(By.scrollable(true));
             assertNotNull("No scrollable container while seeking " + label, scrollable);
             assertNoBindingTerms();
             scrollable = device.findObject(By.scrollable(true));
-            assertNotNull("Scrollable container disappeared after policy guard", scrollable);
-            scrollable.scroll(Direction.DOWN, 0.75f);
-            log("Scrolled semantic Settings container while seeking " + label);
+            assertNotNull("Scrollable container disappeared while seeking " + label, scrollable);
+            configureSettingsScrollGesture(scrollable);
+            boolean canStillScroll = scrollable.scroll(direction, 0.75f);
+            log("Performed bounded Settings scroll gesture while seeking exact " + label
+                    + "; canStillScroll=" + canStillScroll);
             device.waitForIdle(750);
         }
-        fail("Could not scroll to " + label);
+        fail("Could not place exact " + label + " above bottom navigation");
+        return null;
+    }
+
+    private UiObject2 scrollUntilVisibleProductSemantic(
+            String text, String className, boolean clickable, Direction direction) {
+        BySelector[] selectors = productTextOrDescriptionSelectors(text, className, clickable);
+        for (int attempt = 0; attempt < 12; attempt++) {
+            UiObject2 found = findAnyNow(selectors);
+            if (found != null && isVisibleAboveBottomNavigation(found)) {
+                return found;
+            }
+            UiObject2 scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("No scrollable container while seeking " + text, scrollable);
+            assertNoBindingTerms();
+            scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("Scrollable container disappeared while seeking " + text, scrollable);
+            configureSettingsScrollGesture(scrollable);
+            boolean canStillScroll = scrollable.scroll(direction, 0.75f);
+            log("Performed bounded semantic Settings scroll gesture while seeking " + text
+                    + "; canStillScroll=" + canStillScroll);
+            device.waitForIdle(750);
+        }
+        fail("Could not place exact " + text + " control above bottom navigation");
+        return null;
+    }
+
+    private void configureSettingsScrollGesture(UiObject2 scrollable) {
+        UiObject2 settingsPage = findAnyNow(productTextOrDescriptionSelectors(
+                "Settings page", "android.view.View", false));
+        assertNotNull("Exact Settings page was unavailable for scroll bounds", settingsPage);
+        UiObject2 navigation = findAnyNow(productTextOrDescriptionSelectors(
+                "Primary", "android.view.View", false));
+        assertNotNull("Exact bottom navigation container was unavailable for scroll bounds", navigation);
+
+        Rect scrollBounds = scrollable.getVisibleBounds();
+        Rect settingsBounds = settingsPage.getVisibleBounds();
+        Rect navigationBounds = navigation.getVisibleBounds();
+        assertFalse("Scrollable Settings bounds were empty", scrollBounds.isEmpty());
+        assertFalse("Exact Settings page bounds were empty", settingsBounds.isEmpty());
+        assertFalse("Exact bottom navigation bounds were empty", navigationBounds.isEmpty());
+
+        Rect gestureBounds = new Rect(scrollBounds);
+        assertTrue("Scrollable container did not intersect the exact Settings page",
+                gestureBounds.intersect(settingsBounds));
+        int navigationClearance = navigationBounds.height();
+        gestureBounds.top = gestureBounds.top + navigationClearance;
+        gestureBounds.bottom = Math.min(
+                gestureBounds.bottom, navigationBounds.top - navigationClearance);
+        assertFalse("No Settings gesture region remained above bottom navigation",
+                gestureBounds.isEmpty());
+
+        int leftMargin = gestureBounds.left - scrollBounds.left;
+        int topMargin = gestureBounds.top - scrollBounds.top;
+        int rightMargin = scrollBounds.right - gestureBounds.right;
+        int bottomMargin = scrollBounds.bottom - gestureBounds.bottom;
+        scrollable.setGestureMargins(leftMargin, topMargin, rightMargin, bottomMargin);
+    }
+
+    private boolean isVisibleAboveBottomNavigation(UiObject2 object) {
+        UiObject2 navigation = findAnyNow(productTextOrDescriptionSelectors(
+                "Primary", "android.view.View", false));
+        assertNotNull("Exact bottom navigation container was unavailable", navigation);
+        Rect objectBounds = object.getVisibleBounds();
+        Rect navigationBounds = navigation.getVisibleBounds();
+        return !objectBounds.isEmpty()
+                && !navigationBounds.isEmpty()
+                && objectBounds.bottom <= navigationBounds.top;
+    }
+
+    private UiObject2 clickProductSemantic(String text, String className, long timeoutMs) {
+        BySelector[] selectors = productTextOrDescriptionSelectors(text, className, true);
+        waitForAny(timeoutMs, selectors);
+        assertNoBindingTerms();
+        UiObject2 object = findAnyNow(selectors);
+        assertNotNull(text + " disappeared after policy guard", object);
+        assertTrue(text + " was not safely visible above bottom navigation",
+                isVisibleAboveBottomNavigation(object));
+        object.click();
+        log("Clicked exact text-or-description product control: " + text);
+        device.waitForIdle(750);
+        return object;
+    }
+
+    private BySelector[] productTextOrDescriptionSelectors(
+            String text, String className, boolean clickable) {
+        BySelector byText = By.text(text)
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz(className)
+                .enabled(true);
+        BySelector byDescription = By.desc(text)
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz(className)
+                .enabled(true);
+        if (clickable) {
+            byText = byText.clickable(true);
+            byDescription = byDescription.clickable(true);
+        }
+        return new BySelector[] {byText, byDescription};
     }
 
     private void enterUnknownSourcePermission() throws IOException {

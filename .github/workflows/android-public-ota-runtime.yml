@@ -13,24 +13,25 @@ concurrency:
 jobs:
   public-ota-api36:
     if: github.ref_type == 'branch'
-    name: Public 2.3.21 to 2.3.25 native OTA on fresh API 36
+    name: Public 2.3.25 to 2.3.26 native OTA on fresh API 36
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      BASELINE_VERSION: 2.3.21
-      BASELINE_TAG: android-v2.3.21
-      BASELINE_APK_SHA256: 6b7be775e261db5e400790d7c6d80d0ffeca13aada590ae4c66955003c5163f6
-      BASELINE_APK_SIZE: "88509227"
-      TARGET_VERSION: 2.3.25
-      TARGET_VERSION_CODE: "2003025"
-      TARGET_TAG: android-v2.3.25
-      TARGET_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd
-      TARGET_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b
-      TARGET_APK_SIZE: "88533889"
-      BASELINE_APK: public-assets/YAWF.Stream_Android_2.3.21.apk
-      TARGET_APK: public-assets/YAWF.Stream_Android_2.3.25.apk
+      BASELINE_VERSION: 2.3.25
+      BASELINE_TAG: android-v2.3.25
+      BASELINE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd
+      BASELINE_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b
+      BASELINE_APK_SIZE: "88533889"
+      TARGET_VERSION: 2.3.26
+      TARGET_VERSION_CODE: "2003026"
+      TARGET_TAG: android-v2.3.26
+      TARGET_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164
+      TARGET_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c
+      TARGET_APK_SIZE: "88562561"
+      BASELINE_APK: public-assets/YAWF.Stream_Android_2.3.25.apk
+      TARGET_APK: public-assets/YAWF.Stream_Android_2.3.26.apk
       TARGET_MANIFEST: public-assets/android-update.json
-      TARGET_VERIFICATION: public-assets/Android_2.3.25_verification.json
+      TARGET_VERIFICATION: public-assets/Android_2.3.26_verification.json
       TARGET_CHECKSUMS: public-assets/SHA256SUMS
       RELEASE_PAGES: public-release-pages
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
@@ -58,6 +59,7 @@ jobs:
           {
             echo "sourceRevision=$TARGET_SOURCE_SHA"
             echo "baselineVersion=$BASELINE_VERSION"
+            echo "baselineSourceRevision=$BASELINE_SOURCE_SHA"
             echo "targetVersion=$TARGET_VERSION"
             echo "transaction=public-native-ota"
             echo "freshOwnedEmulator=true"
@@ -186,7 +188,7 @@ jobs:
           printf '%s  %s\n' "$TARGET_APK_SHA256" "$TARGET_APK" | sha256sum -c -
           test "$(apkanalyzer manifest application-id "$BASELINE_APK")" = "com.tgk30.debridstreamer"
           test "$(apkanalyzer manifest version-name "$BASELINE_APK")" = "$BASELINE_VERSION"
-          test "$(apkanalyzer manifest version-code "$BASELINE_APK")" = "2003021"
+          test "$(apkanalyzer manifest version-code "$BASELINE_APK")" = "2003025"
           test "$(apkanalyzer manifest application-id "$TARGET_APK")" = "com.tgk30.debridstreamer"
           test "$(apkanalyzer manifest version-name "$TARGET_APK")" = "$TARGET_VERSION"
           test "$(apkanalyzer manifest version-code "$TARGET_APK")" = "$TARGET_VERSION_CODE"

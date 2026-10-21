@@ -219,6 +219,7 @@ jobs:
           sdkmanager "platform-tools" "emulator" "platforms;android-36" \
             "build-tools;36.0.0" "$SYSTEM_IMAGE_PACKAGE"
           sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          test -x "$sdk_root/emulator/emulator"
           image_root="$sdk_root/system-images/android-36/android-tv/x86_64"
           test -f "$image_root/package.xml"
           test -f "$image_root/source.properties"
@@ -227,7 +228,7 @@ jobs:
             > "$EVIDENCE/system-image-metadata-sha256.txt"
           {
             adb version
-            emulator -version
+            "$sdk_root/emulator/emulator" -version
             ffmpeg -version | head -1
             ffprobe -version | head -1
           } > "$EVIDENCE/tool-versions.txt"
@@ -252,6 +253,19 @@ jobs:
           sha256sum "$HARNESS_APP" "$HARNESS_TEST" > "$EVIDENCE/instrumentation-apk-sha256.txt"
           apkanalyzer manifest print "$HARNESS_APP" > "$EVIDENCE/harness-app-manifest.xml"
           apkanalyzer manifest print "$HARNESS_TEST" > "$EVIDENCE/harness-test-manifest.xml"
+          HARNESS_MANIFEST="$EVIDENCE/harness-app-manifest.xml" python3 - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          android = "{http://schemas.android.com/apk/res/android}"
+          root = ET.parse(os.environ["HARNESS_MANIFEST"]).getroot()
+          queries = root.findall("queries")
+          assert len(queries) == 1, "harness must have one package visibility block"
+          packages = [node.attrib.get(f"{android}name") for node in queries[0].findall("package")]
+          assert packages == ["com.yawf.stream.tv"], packages
+          permissions = [node.attrib.get(f"{android}name") for node in root.findall("uses-permission")]
+          assert "android.permission.QUERY_ALL_PACKAGES" not in permissions
+          PY
           if grep -Eqi 'INTERNET|BIND_ACCESSIBILITY_SERVICE|MANAGE_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE' \
             "$EVIDENCE/harness-app-manifest.xml" "$EVIDENCE/harness-test-manifest.xml"; then
             echo "::error::Test-only instrumentation requested a forbidden permission" >&2
@@ -374,7 +388,7 @@ jobs:
           assert match, 'stock Android TV WebView provider missing'
           assert int(match.group(2)) >= 90, match.group(0)
           PY
-          adb -s "$EMULATOR_SERIAL" shell media volume --stream 3 --set 0 >/dev/null
+          adb -s "$EMULATOR_SERIAL" shell cmd media_session volume --stream 3 --set 0 >/dev/null
           adb -s "$EMULATOR_SERIAL" reverse "tcp:$FIXTURE_PORT" "tcp:$FIXTURE_PORT"
 
           python3 scripts/android_tv_runtime_check.py \

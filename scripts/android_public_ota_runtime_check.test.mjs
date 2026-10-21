@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -12,6 +12,17 @@ const runtimePath = join(
   root,
   "scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeOtaFlowTest.java",
 );
+const otaPolicyPath = join(
+  root,
+  "scripts/android-runtime-instrumentation/app/src/main/java/com/yawf/runtimeinstrumentation/OtaFlowPolicy.java",
+);
+const pythonLookup = spawnSync(
+  "/usr/bin/env",
+  ["python3", "-c", "import sys; print(sys.executable)"],
+  { encoding: "utf8" },
+);
+assert.equal(pythonLookup.status, 0, `python3 lookup failed: ${pythonLookup.stderr}`);
+const pythonExecutable = pythonLookup.stdout.trim();
 
 function validateWorkflow(source) {
   const failures = [];
@@ -22,12 +33,22 @@ function validateWorkflow(source) {
   if (/\n\s+(?:push|pull_request|schedule):/.test(source)) failures.push("unexpected automatic trigger");
   requireText("permissions:\n  contents: read", "least contents permission is missing");
   if (!/^\s{4}timeout-minutes: 30$/m.test(source)) failures.push("finite job timeout is missing");
-  requireText("BASELINE_APK_SHA256: 6b7be775e261db5e400790d7c6d80d0ffeca13aada590ae4c66955003c5163f6", "baseline hash pin is missing");
-  requireText("TARGET_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd", "target source pin is missing");
-  requireText("TARGET_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b", "target hash pin is missing");
-  requireText("TARGET_APK_SIZE: \"88533889\"", "target size pin is missing");
+  requireText("BASELINE_VERSION: 2.3.25", "baseline version pin is missing");
+  requireText("BASELINE_TAG: android-v2.3.25", "baseline tag pin is missing");
+  requireText("BASELINE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd", "baseline source pin is missing");
+  requireText('echo "baselineSourceRevision=$BASELINE_SOURCE_SHA"', "baseline source binding evidence is missing");
+  requireText("BASELINE_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b", "baseline hash pin is missing");
+  requireText("BASELINE_APK_SIZE: \"88533889\"", "baseline size pin is missing");
+  requireText("BASELINE_APK: public-assets/YAWF.Stream_Android_2.3.25.apk", "baseline APK path is missing");
+  requireText("TARGET_VERSION: 2.3.26", "target version pin is missing");
+  requireText("TARGET_VERSION_CODE: \"2003026\"", "target version-code pin is missing");
+  requireText("TARGET_TAG: android-v2.3.26", "target tag pin is missing");
+  requireText("TARGET_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164", "target source pin is missing");
+  requireText("TARGET_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c", "target hash pin is missing");
+  requireText("TARGET_APK_SIZE: \"88562561\"", "target size pin is missing");
+  requireText("TARGET_APK: public-assets/YAWF.Stream_Android_2.3.26.apk", "target APK path is missing");
   requireText(
-    "TARGET_VERIFICATION: public-assets/Android_2.3.25_verification.json",
+    "TARGET_VERIFICATION: public-assets/Android_2.3.26_verification.json",
     "target verification receipt path is missing",
   );
   requireText(
@@ -81,16 +102,56 @@ test("workflow pins public source and bytes and delegates all installs to the lo
   assert.deepEqual(validateWorkflow(workflow), []);
 });
 
+test("host gate pins the exact target and keeps public OTA proof pending", async () => {
+  const source = await readFile(driverPath, "utf8");
+  for (const expected of [
+    'BASELINE_VERSION = "2.3.25"',
+    "BASELINE_CODE = 2_003_025",
+    'BASELINE_SHA256 = "4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b"',
+    "BASELINE_SIZE = 88_533_889",
+    'BASELINE_SOURCE = "e28c593ed680538dca91c01ac6b993fdc25eb6dd"',
+    'TARGET_VERSION = "2.3.26"',
+    "TARGET_CODE = 2_003_026",
+    'TARGET_SHA256 = "2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c"',
+    "TARGET_SIZE = 88_562_561",
+    'TARGET_SOURCE = "21c0509300c8284b41f4cf1bffaabd84da999164"',
+    "TARGET_BUILD_RUN = 39_515_566_836",
+    'SIGNER_PIN = "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a"',
+    'TARGET_TAG = "android-v2.3.26"',
+    'TARGET_APK_NAME = "YAWF.Stream_Android_2.3.26.apk"',
+    'TARGET_VERIFICATION_NAME = "Android_2.3.26_verification.json"',
+    '"workflowRun": 39525625462',
+    '"workflowRun": 39525627751',
+    '"driverSourceRevision": "04d88b2d8a997a945c7b8e13290c553d6560851b"',
+    '"candidateSourceRevision": TARGET_SOURCE',
+    '"apkSha256": TARGET_SHA256',
+    '"publishedChannelVersion": "2.3.25"',
+    '"fullOtaInstall": False',
+    '"Public25-to26 native updater installation."',
+    '"The private signed candidate, API30, and API36 receipts do not prove public release metadata or a public OTA runtime pass."',
+  ]) {
+    assert.ok(source.includes(expected), `missing exact host pin or non-claim: ${expected}`);
+  }
+  assert.doesNotMatch(source, /"fullOtaInstall": True/);
+});
+
 test("workflow contract rejects each targeted semantic regression", async () => {
   const workflow = await readFile(workflowPath, "utf8");
   const mutants = [
     ["workflow_dispatch:", "schedule:\n    - cron: '0 0 * * *'"],
     ["permissions:\n  contents: read", "permissions:\n  contents: write"],
     ["timeout-minutes: 30", "timeout-minutes: 300"],
-    ["TARGET_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd", "TARGET_SOURCE_SHA: 0000000000000000000000000000000000000000"],
-    ["TARGET_APK_SIZE: \"88533889\"", "TARGET_APK_SIZE: \"88533890\""],
+    ["BASELINE_VERSION: 2.3.25", "BASELINE_VERSION: 2.3.24"],
+    ["BASELINE_TAG: android-v2.3.25", "BASELINE_TAG: android-v2.3.24"],
+    ["BASELINE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd", "BASELINE_SOURCE_SHA: 0000000000000000000000000000000000000000"],
+    ["BASELINE_APK_SIZE: \"88533889\"", "BASELINE_APK_SIZE: \"88533890\""],
+    ["TARGET_VERSION: 2.3.26", "TARGET_VERSION: 2.3.27"],
+    ["TARGET_VERSION_CODE: \"2003026\"", "TARGET_VERSION_CODE: \"2003027\""],
+    ["TARGET_TAG: android-v2.3.26", "TARGET_TAG: android-v2.3.27"],
+    ["TARGET_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164", "TARGET_SOURCE_SHA: 0000000000000000000000000000000000000000"],
+    ["TARGET_APK_SIZE: \"88562561\"", "TARGET_APK_SIZE: \"88562562\""],
     [
-      "TARGET_VERIFICATION: public-assets/Android_2.3.25_verification.json",
+      "TARGET_VERIFICATION: public-assets/Android_2.3.26_verification.json",
       "TARGET_VERIFICATION: public-assets/unreviewed.json",
     ],
     ["--proto '=https' --proto-redir '=https'", "--proto '=https'"],
@@ -115,6 +176,68 @@ test("runtime source uses semantic UI only and records genuine installer and cle
   assert.doesNotMatch(source, /device\.click\s*\(\s*\d/);
   assert.doesNotMatch(source, /executeShellCommand/);
   assert.doesNotMatch(source, /appops\s+set|pm\s+(?:grant|revoke)/i);
+});
+
+test("public 25 uses the visible update card and an ordinary exact-button tap", async () => {
+  const [source, policy] = await Promise.all([
+    readFile(runtimePath, "utf8"),
+    readFile(otaPolicyPath, "utf8"),
+  ]);
+  assert.match(policy, /public static final String BASELINE_VERSION = "2\.3\.25";/);
+  assert.match(policy, /public static final String TARGET_VERSION = "2\.3\.26";/);
+  assert.match(policy, /public static final long TARGET_VERSION_CODE = 2_003_026L;/);
+  assert.match(policy, /2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c/);
+  assert.match(policy, /public static final long TARGET_SIZE = 88_562_561L;/);
+  assert.match(policy, /233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a/);
+  assert.equal(policy.match(/public static boolean matchesVersionPins\(/g)?.length, 1);
+  assert.equal(source.match(/OtaFlowPolicy\.matchesVersionPins\(/g)?.length, 1);
+  assert.doesNotMatch(source, /private static final String (?:BASELINE|TARGET)_VERSION/);
+  assert.doesNotMatch(source, /private static boolean (?:expectedArguments|matchesVersionPins)\(/);
+  assert.doesNotMatch(source, /2\.3\.21|ANDROID APK UPDATES|InfoTip|AccessibilityNodeInfo|ACTION_CLICK|performAction/);
+  assert.match(source, /arguments\.getString\("signerSha256", ""\)/);
+  assert.match(
+    source,
+    /By\.text\("Android APK updates"\)\s*\.pkg\(OtaFlowPolicy\.PRODUCT_PACKAGE\)\s*\.clazz\("android\.widget\.TextView"\)/,
+  );
+  assert.match(
+    source,
+    /By\.text\("Check for Android updates"\)\s*\.pkg\(OtaFlowPolicy\.PRODUCT_PACKAGE\)\s*\.clazz\("android\.widget\.Button"\)\s*\.clickable\(true\)/,
+  );
+  const helper = source.slice(
+    source.indexOf("private void tapVisibleAndroidUpdateCheckCard(String captureLabel)"),
+    source.indexOf("private UiObject2 scrollUntilVisibleExactProduct("),
+  );
+  assert.match(helper, /button\.click\(\);/);
+  assert.doesNotMatch(helper, /By\.desc|InfoTip|performAction|ACTION_CLICK|device\.click/);
+  assert.doesNotMatch(source, /ANDROID APK UPDATES|public 2\.3\.21 Android updater information/);
+});
+
+test("host and runtime retain the install, identity, data, and cleanup fences", async () => {
+  const [host, runtime] = await Promise.all([
+    readFile(driverPath, "utf8"),
+    readFile(runtimePath, "utf8"),
+  ]);
+  assert.match(host, /\["install", "--no-streaming", str\(self\.baseline_apk\)\]/);
+  assert.equal(
+    host.match(/\["install", "--no-streaming", str\(self\.baseline_apk\)\]/g)?.length,
+    1,
+  );
+  assert.equal(host.match(/self\.adb\.install_baseline_once\(\)/g)?.length, 1);
+  assert.doesNotMatch(host, /\["install", "--no-streaming", "-r", str\(self\.baseline_apk\)\]/);
+  assert.match(host, /if self\.baseline_installed:/);
+  assert.match(host, /UID or first-install time changed across OTA/);
+  assert.match(host, /Last-update time did not change across OTA/);
+  assert.match(host, /validate_file\(pulled, TARGET_SHA256, TARGET_SIZE, "installed final"\)/);
+  assert.match(host, /YAWF unknown-source access remained allowed/);
+  assert.match(host, /"-e", "signerSha256", SIGNER_PIN/);
+  assert.match(runtime, /installerSuccessObserved = true/);
+  assert.match(runtime, /installerOpenObserved = true/);
+  assert.match(runtime, /updatedProductObserved = true/);
+  assert.match(runtime, /permissionCleanupObserved = true/);
+  assert.match(runtime, /FirstRun returned after OTA/);
+  assert.match(runtime, /Setup reminder returned after OTA/);
+  assert.match(runtime, /Weekly automatic checks did not survive OTA/);
+  assert.match(runtime, /YAWF Stream is up to date/);
 });
 
 test("negative observations scope and restore a short UiAutomator idle timeout", async () => {
@@ -149,8 +272,52 @@ test("negative observations scope and restore a short UiAutomator idle timeout",
   }
 });
 
+async function assertAdbAdmissionEnvironmentIsolation(original) {
+  const mutationBefore = 'if lowered[0].startswith("install") or lowered[0] in {"push", "sync"}:';
+  const mutationAfter = 'if lowered[0].startswith("install") or lowered[0] in {"sync"}:';
+  assert.equal(original.split(mutationBefore).length - 1, 1);
+
+  const temporary = await mkdtemp(join(tmpdir(), "yawf-ota-adb-admission-"));
+  try {
+    const fakeBin = join(temporary, "fake-bin");
+    const absentBin = join(temporary, "absent-bin");
+    const fakeLog = join(temporary, "fake-adb.log");
+    await Promise.all([mkdir(fakeBin), mkdir(absentBin)]);
+    const fakeAdb = join(fakeBin, "adb");
+    await writeFile(
+      fakeAdb,
+      '#!/bin/sh\nprintf "called\\n" >> "$YAWF_FAKE_ADB_LOG"\nexit 0\n',
+    );
+    await chmod(fakeAdb, 0o755);
+    const mutatedPath = join(temporary, "mutated-admission.py");
+    await writeFile(mutatedPath, original.replace(mutationBefore, mutationAfter));
+
+    for (const [label, pathValue] of [["fake-present", fakeBin], ["absent", absentBin]]) {
+      const env = { ...process.env, PATH: pathValue, YAWF_FAKE_ADB_LOG: fakeLog };
+      const baseline = spawnSync(
+        pythonExecutable,
+        [driverPath, "--self-test", "test_admission_locks_all_product_install_routes"],
+        { encoding: "utf8", env },
+      );
+      assert.equal(baseline.status, 0, `${label} baseline failed: ${baseline.stderr}`);
+      const mutant = spawnSync(
+        pythonExecutable,
+        [mutatedPath, "--self-test", "test_admission_locks_all_product_install_routes"],
+        { encoding: "utf8", env },
+      );
+      assert.notEqual(mutant.status, 0, `${label} admission mutant survived`);
+      assert.match(mutant.stderr, /Forbidden admission case reached external ADB dispatch/);
+      const calls = await readFile(fakeLog, "utf8").catch(() => "");
+      assert.equal(calls, "", `${label} invoked external adb`);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
 test("each host policy self-test kills a targeted valid-Python semantic mutant", async () => {
   const original = await readFile(driverPath, "utf8");
+  await assertAdbAdmissionEnvironmentIsolation(original);
   const mutants = new Map([
     ["test_manifest_exact", [
       "for key, expected_value in expected.items():\n        if type(value.get(key))",
@@ -173,8 +340,8 @@ test("each host policy self-test kills a targeted valid-Python semantic mutant",
       'if set(result) != {TARGET_APK_NAME, "android-update.json"}:',
     ]],
     ["test_identity_requires_all_retention_fields", [
-      '"uid": r"\\buserId=(\\d+)",',
-      '"uid": r"\\buser=(\\d+)",',
+      '    modern_app_ids = re.findall(r"(?m)^    appId=(\\d+)\\s*$", package_fields)',
+      "    modern_app_ids = []",
     ]],
     ["test_receipt_requires_every_transaction_fact", [
       "for key, expected_value in expected.items():\n        if value.get(key)",
@@ -203,6 +370,195 @@ test("each host policy self-test kills a targeted valid-Python semantic mutant",
       await writeFile(mutatedPath, original.replace(before, after));
       const mutant = spawnSync("python3", [mutatedPath, "--self-test", name], { encoding: "utf8" });
       assert.notEqual(mutant.status, 0, `semantic mutant survived: ${name}`);
+    }
+
+    const buildRunBefore =
+      "if type(build_run) is not int or build_run != TARGET_BUILD_RUN:";
+    const buildRunAfter =
+      "if type(build_run) is not int or build_run <= 0:";
+    assert.equal(original.split(buildRunBefore).length - 1, 1, "build-run pin must be unique");
+    const buildRunMutant = join(temporary, "verification-build-run.py");
+    await writeFile(buildRunMutant, original.replace(buildRunBefore, buildRunAfter));
+    const buildRunResult = spawnSync(
+      "python3",
+      [buildRunMutant, "--self-test", "test_verification_receipt_matches_actual_asset_shape"],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(buildRunResult.status, 0, "exact signing-run mutant survived");
+
+    const identityMutants = [
+      [
+        '    if bool(legacy_uids) == bool(modern_app_ids):\n' +
+          '        raise RuntimeGateError("Package identity must contain exactly one userId or appId")\n' +
+          '    uid = int((legacy_uids or modern_app_ids)[0])',
+        '    if legacy_uids and modern_app_ids:\n' +
+          '        raise RuntimeGateError("Package identity must contain exactly one userId or appId")\n' +
+          '    uid = int((legacy_uids or modern_app_ids or ["10218"])[0])',
+        "missing application identity",
+      ],
+      [
+        '    if bool(legacy_uids) == bool(modern_app_ids):',
+        '    if not legacy_uids and not modern_app_ids:',
+        "mixed legacy and modern identity",
+      ],
+      [
+        '    if len(legacy_uids) > 1 or len(modern_app_ids) > 1:',
+        '    if len(legacy_uids) > 1:',
+        "duplicate appId",
+      ],
+      [
+        '    if len(package_headers) != 1 or package_headers[0].group(1) != PRODUCT_PACKAGE:',
+        '    if len(package_headers) != 1:',
+        "wrong package",
+      ],
+      [
+        '    if len(package_headers) != 1 or package_headers[0].group(1) != PRODUCT_PACKAGE:',
+        '    if package_headers[0].group(1) != PRODUCT_PACKAGE:',
+        "duplicate package section",
+      ],
+      [
+        '    if len(first_install_times) != 1 or not first_install_times[0].strip():\n' +
+          '        raise RuntimeGateError("Package identity firstInstallTime is missing or ambiguous")',
+        '    if len(first_install_times) > 1:\n' +
+          '        raise RuntimeGateError("Package identity firstInstallTime is missing or ambiguous")\n' +
+          '    if not first_install_times:\n' +
+          '        first_install_times = ["2026-10-20 05:11:15"]',
+        "missing first install time",
+      ],
+      [
+        '        last_update_time=exactly_one(\n' +
+          '            r"^    lastUpdateTime=([^\\r\\n]+)$", "lastUpdateTime"\n' +
+          '        ),',
+        '        last_update_time="2026-10-20 05:11:15",',
+        "missing last update time",
+      ],
+      [
+        '    if re.search(r"(?:^|\\s)installed=true(?:\\s|$)", user_sections[0].group(2)) is None:',
+        '    if False and re.search(r"(?:^|\\s)installed=true(?:\\s|$)", user_sections[0].group(2)) is None:',
+        "User 0 not installed",
+      ],
+      [
+        '    if len(user_sections) != 1 or user_sections[0].group(1) != "0":',
+        '    if len(user_sections) != 1:',
+        "nonzero Android user",
+      ],
+      [
+        '    if not 10_000 <= uid < 100_000:',
+        '    if False and not 10_000 <= uid < 100_000:',
+        "nonapplication appId",
+      ],
+      [
+        '        version_name=exactly_one(r"^    versionName=([^\\s]+)\\s*$", "versionName"),',
+        '        version_name="2.3.26",',
+        "missing versionName",
+      ],
+      [
+        '        version_code=int(exactly_one(r"^    versionCode=(\\d+)(?:\\s+.*)?$", "versionCode")),',
+        '        version_code=2_003_026,',
+        "missing versionCode",
+      ],
+      [
+        '    write_diagnostic(name, value)\n    return parse_package_identity(value)',
+        '    identity = parse_package_identity(value)\n' +
+          '    write_diagnostic(name, value)\n' +
+          '    return identity',
+        "diagnostic written only after parsing",
+      ],
+    ];
+    for (const [before, after, label] of identityMutants) {
+      assert.equal(original.split(before).length - 1, 1, `identity mutation site must be unique: ${label}`);
+      const mutatedPath = join(temporary, `identity-${label.replaceAll(" ", "-")}.py`);
+      await writeFile(mutatedPath, original.replace(before, after));
+      const mutant = spawnSync(
+        "python3",
+        [mutatedPath, "--self-test", "test_identity_requires_all_retention_fields"],
+        { encoding: "utf8" },
+      );
+      assert.notEqual(mutant.status, 0, `identity semantic mutant survived: ${label}`);
+    }
+
+    const oracleMutants = [
+      [
+        '    if result.returncode != 0 or result.stderr.strip():',
+        '    if result.returncode == 0 and result.stderr.strip():',
+        "nonzero observation result",
+      ],
+      [
+        '    if result.returncode != 0 or result.stderr.strip():',
+        '    if result.returncode != 0:',
+        "stderr-only observation failure",
+      ],
+      [
+        '    if match is None:\n' +
+          '        raise RuntimeGateError("Unknown-source app-op QA observation was unrecognized")',
+        '    if match is None:\n        return',
+        "unrecognized app-op output",
+      ],
+      [
+        '    if output == "No operations.\\nDefault mode: default":',
+        '    if False and output == "No operations.\\nDefault mode: default":',
+        "API 36 default app-op envelope",
+      ],
+      [
+        '    if match.group(1).casefold() == "allow":',
+        '    if False and match.group(1).casefold() == "allow":',
+        "allowed app-op mode",
+      ],
+      [
+        '    if result.stdout.strip():\n' +
+          '        raise RuntimeGateError("External update APK remained after relaunch cleanup")',
+        '    if False and result.stdout.strip():\n' +
+          '        raise RuntimeGateError("External update APK remained after relaunch cleanup")',
+        "residual APK",
+      ],
+      [
+        '    if re.search(\n' +
+          '        r"(?m)^(?:--------- beginning of \\S+|\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s+)",\n' +
+          '        result.stdout,\n' +
+          '    ) is None:',
+        '    if False and re.search(\n' +
+          '        r"(?m)^(?:--------- beginning of \\S+|\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s+)",\n' +
+          '        result.stdout,\n' +
+          '    ) is None:',
+        "empty logcat",
+      ],
+      [
+        '    if header is None or search is None or not output[search.end():].strip():',
+        '    if False and (header is None or search is None or not output[search.end():].strip()):',
+        "unstructured Dropbox output",
+      ],
+      [
+        '    if header is None or search is None or not output[search.end():].strip():',
+        '    if (header is None or search is None or not output[search.end():].strip()\n' +
+          '            or "(No entries found.)" in output):',
+        "API 36 empty Dropbox envelope",
+      ],
+      [
+        '        self.record_adb_observation(f"unknown-source-{phase}.txt", result)',
+        '        pass  # observation record omitted',
+        "app-op diagnostic retention",
+      ],
+      [
+        '        self.record_adb_observation("update-files.txt", result)',
+        '        pass  # observation record omitted',
+        "residual diagnostic retention",
+      ],
+      [
+        '        self.record_adb_observation("logcat.txt", logcat_result)',
+        '        pass  # observation record omitted',
+        "logcat diagnostic retention",
+      ],
+    ];
+    for (const [before, after, label] of oracleMutants) {
+      assert.equal(original.split(before).length - 1, 1, `oracle mutation site must be unique: ${label}`);
+      const mutatedPath = join(temporary, `oracle-${label.replaceAll(" ", "-")}.py`);
+      await writeFile(mutatedPath, original.replace(before, after));
+      const mutant = spawnSync(
+        "python3",
+        [mutatedPath, "--self-test", "test_receipt_requires_every_transaction_fact"],
+        { encoding: "utf8" },
+      );
+      assert.notEqual(mutant.status, 0, `oracle semantic mutant survived: ${label}`);
     }
   } finally {
     await rm(temporary, { recursive: true, force: true });

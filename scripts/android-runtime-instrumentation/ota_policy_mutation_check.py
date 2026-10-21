@@ -17,12 +17,33 @@ ASSERTIONS = (
 
 MUTANTS = {
     "pins": (
+        "public static final long TARGET_VERSION_CODE = 2_003_026L;",
+        "public static final long TARGET_VERSION_CODE = 2_003_027L;",
+    ),
+    "wrongBaseline": (
+        "return BASELINE_VERSION.equals(baselineVersion)\n                && TARGET_VERSION.equals(targetVersion)",
+        "return TARGET_VERSION.equals(targetVersion)",
+    ),
+    "wrongTarget": (
         "&& TARGET_VERSION.equals(targetVersion)\n                && TARGET_VERSION_CODE == targetVersionCode",
         "&& TARGET_VERSION_CODE == targetVersionCode",
+    ),
+    "wrongSigner": (
+        "&& TARGET_SIZE == targetSize\n                && SIGNER_SHA256.equals(signerSha256);",
+        "&& TARGET_SIZE == targetSize;",
+    ),
+    "offerDomain": (
+        'return ("YAWF Stream " + TARGET_VERSION + " is available").equals(title)\n                &&',
+        'return title.endsWith(" is available")\n                &&',
     ),
     "webButtonIdentity": (
         "return PRODUCT_PACKAGE.equals(observedPackage)\n                    && WEB_BUTTON_CLASS.equals(observedClass)",
         "return WEB_BUTTON_CLASS.equals(observedClass)",
+    ),
+    "quickSetupCardIdentity": (
+        '"Quick setup NOT RECOMMENDED Start with public sources without adding your own keys now. "\n'
+        '                    + "Catalog and playback limits are explained before continuing."',
+        '"Quick setup"',
     ),
     "nativeButtonIdentity": (
         "&& resourceName.equals(observedResource)\n                    && textPattern.matcher",
@@ -53,8 +74,8 @@ MUTANTS = {
         "return installerOpenObserved && updatedProductObserved;",
     ),
     "exactDialogs": (
-        'return ("YAWF Stream " + TARGET_VERSION + " is available").equals(title)\n                &&',
-        'return title.startsWith("YAWF Stream ")\n                &&',
+        'return "Update ready to install".equals(title)\n                &&',
+        'return title.startsWith("Update ready")\n                &&',
     ),
 }
 

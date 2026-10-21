@@ -9,7 +9,12 @@ public final class OtaFlowPolicyAssertions {
 
     static {
         TESTS.put("pins", OtaFlowPolicyAssertions::pins);
+        TESTS.put("wrongBaseline", OtaFlowPolicyAssertions::wrongBaseline);
+        TESTS.put("wrongTarget", OtaFlowPolicyAssertions::wrongTarget);
+        TESTS.put("wrongSigner", OtaFlowPolicyAssertions::wrongSigner);
+        TESTS.put("offerDomain", OtaFlowPolicyAssertions::offerDomain);
         TESTS.put("webButtonIdentity", OtaFlowPolicyAssertions::webButtonIdentity);
+        TESTS.put("quickSetupCardIdentity", OtaFlowPolicyAssertions::quickSetupCardIdentity);
         TESTS.put("nativeButtonIdentity", OtaFlowPolicyAssertions::nativeButtonIdentity);
         TESTS.put("bindingTerms", OtaFlowPolicyAssertions::bindingTerms);
         TESTS.put("tourCounts", OtaFlowPolicyAssertions::tourCounts);
@@ -31,15 +36,50 @@ public final class OtaFlowPolicyAssertions {
     }
 
     private static void pins() {
-        check(OtaFlowPolicy.expectedArguments(
-                        "2.3.21", "2.3.25", 2_003_025L,
-                        "4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b",
-                        88_533_889L),
+        check(OtaFlowPolicy.matchesVersionPins(
+                        "2.3.25", "2.3.26", 2_003_026L,
+                        "2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c",
+                        88_562_561L,
+                        "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a"),
                 "exact fixed-channel arguments must pass");
-        check(!OtaFlowPolicy.expectedArguments(
-                        "2.3.21", "2.3.26", 2_003_025L,
-                        OtaFlowPolicy.TARGET_SHA256, OtaFlowPolicy.TARGET_SIZE),
+    }
+
+    private static void wrongBaseline() {
+        check(!centralAdmissionAccepts("2.3.24", OtaFlowPolicy.TARGET_VERSION,
+                        OtaFlowPolicy.SIGNER_SHA256),
+                "changed baseline version must fail");
+    }
+
+    private static void wrongTarget() {
+        check(!centralAdmissionAccepts(OtaFlowPolicy.BASELINE_VERSION, "2.3.27",
+                        OtaFlowPolicy.SIGNER_SHA256),
                 "changed target version must fail");
+    }
+
+    private static void wrongSigner() {
+        check(!centralAdmissionAccepts(OtaFlowPolicy.BASELINE_VERSION, OtaFlowPolicy.TARGET_VERSION,
+                        "0000000000000000000000000000000000000000000000000000000000000000"),
+                "changed signer must fail");
+    }
+
+    private static boolean centralAdmissionAccepts(
+            String baselineVersion, String targetVersion, String signerSha256) {
+        return OtaFlowPolicy.matchesVersionPins(
+                baselineVersion,
+                targetVersion,
+                OtaFlowPolicy.TARGET_VERSION_CODE,
+                OtaFlowPolicy.TARGET_SHA256,
+                OtaFlowPolicy.TARGET_SIZE,
+                signerSha256);
+    }
+
+    private static void offerDomain() {
+        String message =
+                "Download the signed Android update now? Android will ask again before installing it.";
+        check(!OtaFlowPolicy.isExactOffer("Other App 2.3.26 is available", message),
+                "offer for another product domain must fail");
+        check(!OtaFlowPolicy.isExactOffer("YAWF Stream 2.3.26 is available now", message),
+                "offer-title affix must fail");
     }
 
     private static void webButtonIdentity() {
@@ -58,6 +98,30 @@ public final class OtaFlowPolicyAssertions {
         check(!OtaFlowPolicy.NEXT.matches(
                         OtaFlowPolicy.PRODUCT_PACKAGE, "android.widget.Button", "Next now", ""),
                 "label affix must fail");
+    }
+
+    private static void quickSetupCardIdentity() {
+        String actualCard =
+                "Quick setup NOT RECOMMENDED Start with public sources without adding your own keys now. "
+                        + "Catalog and playback limits are explained before continuing.";
+        check(OtaFlowPolicy.QUICK_SETUP.matches(
+                        OtaFlowPolicy.PRODUCT_PACKAGE, "android.widget.Button", actualCard, ""),
+                "actual API 36 Quick setup card text must match exactly");
+        check(!OtaFlowPolicy.QUICK_SETUP.matches(
+                        OtaFlowPolicy.PRODUCT_PACKAGE, "android.widget.Button", "Quick setup", ""),
+                "short heading alone must fail");
+        check(!OtaFlowPolicy.QUICK_SETUP.matches(
+                        OtaFlowPolicy.PRODUCT_PACKAGE,
+                        "android.widget.Button",
+                        actualCard.replace("NOT RECOMMENDED", "RECOMMENDED"),
+                        ""),
+                "nearby wrong setup card must fail");
+        check(!OtaFlowPolicy.QUICK_SETUP.matches(
+                        "other.package", "android.widget.Button", actualCard, ""),
+                "wrong Quick setup package must fail");
+        check(!OtaFlowPolicy.QUICK_SETUP.matches(
+                        OtaFlowPolicy.PRODUCT_PACKAGE, "android.view.View", actualCard, ""),
+                "wrong Quick setup class must fail");
     }
 
     private static void nativeButtonIdentity() {
@@ -144,17 +208,21 @@ public final class OtaFlowPolicyAssertions {
 
     private static void exactDialogs() {
         check(OtaFlowPolicy.isExactOffer(
-                        "YAWF Stream 2.3.25 is available",
+                        "YAWF Stream 2.3.26 is available",
                         "Download the signed Android update now? Android will ask again before installing it."),
                 "exact offer must pass");
         check(!OtaFlowPolicy.isExactOffer(
-                        "YAWF Stream 2.3.26 is available",
+                        "YAWF Stream 2.3.25 is available",
                         "Download the signed Android update now? Android will ask again before installing it."),
                 "other candidate must fail");
         check(OtaFlowPolicy.isExactReady(
                         "Update ready to install",
-                        "YAWF Stream 2.3.25 passed all checks. Android will show the system installer."),
+                        "YAWF Stream 2.3.26 passed all checks. Android will show the system installer."),
                 "exact ready dialog must pass");
+        check(!OtaFlowPolicy.isExactReady(
+                        "Update ready",
+                        "YAWF Stream 2.3.26 passed all checks. Android will show the system installer."),
+                "nearby ready title must fail");
         check(OtaFlowPolicy.isExactPostUpdateResult(
                         "YAWF Stream is up to date",
                         "No newer signed Android phone release is available."),

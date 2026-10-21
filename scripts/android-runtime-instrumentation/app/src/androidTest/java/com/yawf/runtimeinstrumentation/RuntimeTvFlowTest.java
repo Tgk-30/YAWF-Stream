@@ -43,6 +43,7 @@ import java.util.regex.Pattern;
 @RunWith(AndroidJUnit4.class)
 public final class RuntimeTvFlowTest {
     private static final String PRODUCT_PACKAGE = "com.yawf.stream.tv";
+    private static final String PINNED_TV_IME = "com.google.android.inputmethod.latin";
     private static final String HARNESS_SUBDIR = "persistent-tv-flow";
     private static final String FIXTURE_URL = "http://127.0.0.1:4190";
     private static final long UI_WAIT = 60_000;
@@ -93,7 +94,8 @@ public final class RuntimeTvFlowTest {
         address.setText(FIXTURE_URL);
         assertEquals("Server address was not entered through the visible UI", FIXTURE_URL, address.getText());
         checks.put("serverAddressEnteredThroughUi", true);
-        focusAndActivate(By.text("Connect"), "Connect", 6);
+        dismissVisiblePinnedTvIme();
+        focusConnectWithFirstDpadDownAndActivate();
 
         waitFor(By.text("YAWF TV native bridge runtime fixture"), UI_WAIT, "fixture heading");
         waitFor(By.text("Play 4:3 HLS fixture"), UI_WAIT, "fixture play control");
@@ -195,6 +197,30 @@ public final class RuntimeTvFlowTest {
         checks.put("fitSelectorSupported", false);
         checks.put("fitGeometryVerified", false);
         checks.put("fitLimitation", "PlayerView exposes no Fit/Fill/Stretch selector; no geometry pass claimed");
+    }
+
+    private void dismissVisiblePinnedTvIme() {
+        BySelector imeSelector = By.pkg(PINNED_TV_IME);
+        UiObject2 ime = waitFor(imeSelector, UI_WAIT, "visible pinned TV input method");
+        assertTrue("Pinned TV input method had empty visible bounds",
+                !ime.getVisibleBounds().isEmpty());
+        device.pressBack();
+        assertTrue("Pinned TV input method did not dismiss after one remote Back",
+                device.wait(Until.gone(imeSelector), UI_WAIT));
+        log("Dismissed the visible pinned TV input method with one remote Back");
+    }
+
+    private void focusConnectWithFirstDpadDownAndActivate() {
+        waitFor(By.clazz("android.widget.EditText").focused(true), UI_WAIT,
+                "focused server address input after IME dismissal");
+        BySelector focusedConnect = By.clazz("android.widget.Button")
+                .text("Connect")
+                .focused(true);
+        device.pressDPadDown();
+        waitFor(focusedConnect, UI_WAIT, "Connect focused by first D-pad Down");
+        device.pressDPadCenter();
+        log("Focused Connect with first DPAD_DOWN and activated it with DPAD_CENTER");
+        SystemClock.sleep(350);
     }
 
     private void launchProduct() {

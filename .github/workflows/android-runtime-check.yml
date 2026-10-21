@@ -27,13 +27,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CANDIDATE_RUN_ID: "39365387810"
-      CANDIDATE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd
-      CANDIDATE_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b
-      CANDIDATE_VERSION: 2.3.25
-      CANDIDATE_VERSION_CODE: "2003025"
-      PUBLISHED_ANDROID_VERSION: 2.3.21
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.25.apk
+      CANDIDATE_RUN_ID: "39515566836"
+      CANDIDATE_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164
+      CANDIDATE_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c
+      CANDIDATE_VERSION: 2.3.26
+      CANDIDATE_VERSION_CODE: "2003026"
+      PUBLISHED_ANDROID_VERSION: 2.3.25
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.26.apk
       EVIDENCE: android-runtime-evidence
       AVD_NAME: yawf-phone-api30-runtime
       EMULATOR_SERIAL: emulator-5554
@@ -266,6 +266,8 @@ jobs:
           set -euo pipefail
           python3 scripts/android-runtime-instrumentation/policy_mutation_check.py \
             | tee "$EVIDENCE/instrumentation-policy-mutations.json"
+          python3 scripts/android-runtime-instrumentation/ota_policy_mutation_check.py \
+            | tee "$EVIDENCE/ota-policy-mutations.json"
           gradle \
             --project-dir scripts/android-runtime-instrumentation \
             --no-daemon \

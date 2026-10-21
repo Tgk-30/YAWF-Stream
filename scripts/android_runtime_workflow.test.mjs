@@ -10,14 +10,36 @@ const workflow = readFileSync(
   "utf8",
 );
 
+const otaPolicyMutationCommand =
+  'python3 scripts/android-runtime-instrumentation/ota_policy_mutation_check.py \\\n' +
+  '            | tee "$EVIDENCE/ota-policy-mutations.json"';
+
+function validateOtaPolicyMutationGate(source) {
+  const failures = [];
+  const generalPolicy = source.indexOf(
+    "python3 scripts/android-runtime-instrumentation/policy_mutation_check.py",
+  );
+  const otaPolicy = source.indexOf(otaPolicyMutationCommand);
+  const gradle = source.indexOf("          gradle \\");
+  if (generalPolicy < 0) failures.push("general policy mutation gate is missing");
+  if (otaPolicy < 0) failures.push("exact OTA policy mutation gate is missing");
+  if ((source.match(/ota_policy_mutation_check\.py/g) ?? []).length !== 1) {
+    failures.push("OTA policy mutation gate must occur exactly once");
+  }
+  if (!(generalPolicy < otaPolicy && otaPolicy < gradle)) {
+    failures.push("OTA policy mutation gate must follow general policy mutants and precede Gradle");
+  }
+  return failures;
+}
+
 test("pins the exact verification artifact while retaining the published channel", () => {
-  assert.match(workflow, /CANDIDATE_RUN_ID: "39365387810"/);
-  assert.match(workflow, /CANDIDATE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd/);
-  assert.match(workflow, /CANDIDATE_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b/);
+  assert.match(workflow, /CANDIDATE_RUN_ID: "39515566836"/);
+  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164/);
+  assert.match(workflow, /CANDIDATE_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c/);
   assert.match(workflow, /name: android-phone-verification-candidate/);
-  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.25/);
-  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003025"/);
-  assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.21/);
+  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.26/);
+  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003026"/);
+  assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.25/);
 });
 
 test("verifies the pinned APK and production invariants before generating local metadata", () => {
@@ -70,4 +92,22 @@ test("checks local metadata while retaining package version source and signer ga
   assert.match(workflow, /apkanalyzer manifest version-code "\$CANDIDATE_APK"/);
   assert.match(workflow, /candidate-source\/scripts\/verify_android_apk\.py/);
   assert.match(workflow, /--certificate-pin candidate-source\/web\/src-tauri\/SIGNING_CERT_SHA256/);
+});
+
+test("runs OTA policy baselines and mutants before Gradle", () => {
+  assert.deepEqual(validateOtaPolicyMutationGate(workflow), []);
+
+  const omission = workflow.replace(otaPolicyMutationCommand, "");
+  assert.notDeepEqual(validateOtaPolicyMutationGate(omission), []);
+
+  const wrongScript = workflow.replace(
+    "ota_policy_mutation_check.py",
+    "ota_policy_assertions_only.py",
+  );
+  assert.notDeepEqual(validateOtaPolicyMutationGate(wrongScript), []);
+
+  const reordered = workflow
+    .replace(otaPolicyMutationCommand + "\n", "")
+    .replace("          gradle \\", "          gradle \\\n" + otaPolicyMutationCommand);
+  assert.notDeepEqual(validateOtaPolicyMutationGate(reordered), []);
 });

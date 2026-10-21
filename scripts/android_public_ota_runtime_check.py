@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host guard for one public 2.3.21 to 2.3.25 native Android OTA transaction.
+"""Host guard for one public 2.3.25 to 2.3.26 native Android OTA transaction.
 
 The target APK is a host-side reference only. After one exact baseline product
 install, every product install, push, sync, package-manager install, and direct
@@ -34,19 +34,21 @@ HARNESS_CLASS = (
     "updateOfficialPublicBaselineThroughNativeUi"
 )
 EVIDENCE_SUBDIR = "persistent-ota-flow"
-BASELINE_VERSION = "2.3.21"
-BASELINE_CODE = 2_003_021
-BASELINE_SHA256 = "6b7be775e261db5e400790d7c6d80d0ffeca13aada590ae4c66955003c5163f6"
-BASELINE_SIZE = 88_509_227
-TARGET_VERSION = "2.3.25"
-TARGET_CODE = 2_003_025
-TARGET_SHA256 = "4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b"
-TARGET_SIZE = 88_533_889
-TARGET_SOURCE = "e28c593ed680538dca91c01ac6b993fdc25eb6dd"
+BASELINE_VERSION = "2.3.25"
+BASELINE_CODE = 2_003_025
+BASELINE_SHA256 = "4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b"
+BASELINE_SIZE = 88_533_889
+BASELINE_SOURCE = "e28c593ed680538dca91c01ac6b993fdc25eb6dd"
+TARGET_VERSION = "2.3.26"
+TARGET_CODE = 2_003_026
+TARGET_SHA256 = "2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c"
+TARGET_SIZE = 88_562_561
+TARGET_SOURCE = "21c0509300c8284b41f4cf1bffaabd84da999164"
+TARGET_BUILD_RUN = 39_515_566_836
 SIGNER_PIN = "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a"
-TARGET_TAG = "android-v2.3.25"
-TARGET_APK_NAME = "YAWF.Stream_Android_2.3.25.apk"
-TARGET_VERIFICATION_NAME = "Android_2.3.25_verification.json"
+TARGET_TAG = "android-v2.3.26"
+TARGET_APK_NAME = "YAWF.Stream_Android_2.3.26.apk"
+TARGET_VERIFICATION_NAME = "Android_2.3.26_verification.json"
 URL_RE = re.compile(r"https?://[^\s\]\[\"'<>]+", re.IGNORECASE)
 SAFE_EVIDENCE_NAME = re.compile(
     r"(?:0[1-9]|[12][0-9]|3[0-9]|40)-[a-z0-9-]+\.(?:png|xml)|"
@@ -56,6 +58,55 @@ SAFE_EVIDENCE_NAME = re.compile(
 
 class RuntimeGateError(RuntimeError):
     pass
+
+
+def require_successful_observation(
+    result: subprocess.CompletedProcess[str], label: str
+) -> None:
+    if result.returncode != 0 or result.stderr.strip():
+        raise RuntimeGateError(f"{label} QA observation was unavailable")
+
+
+def validate_unknown_source_observation(result: subprocess.CompletedProcess[str]) -> None:
+    require_successful_observation(result, "Unknown-source app-op")
+    output = result.stdout.strip()
+    if output == "No operations.\nDefault mode: default":
+        return
+    match = re.fullmatch(
+        r"REQUEST_INSTALL_PACKAGES:\s*(allow|default|ignore|deny|errored)(?:;[^\r\n]*)?",
+        output,
+        re.IGNORECASE,
+    )
+    if match is None:
+        raise RuntimeGateError("Unknown-source app-op QA observation was unrecognized")
+    if match.group(1).casefold() == "allow":
+        raise RuntimeGateError("YAWF unknown-source access remained allowed")
+
+
+def validate_no_residual_update_apks(result: subprocess.CompletedProcess[str]) -> None:
+    require_successful_observation(result, "Residual update-file")
+    if result.stdout.strip():
+        raise RuntimeGateError("External update APK remained after relaunch cleanup")
+
+
+def validate_logcat_observation(result: subprocess.CompletedProcess[str]) -> None:
+    require_successful_observation(result, "Logcat")
+    if re.search(
+        r"(?m)^(?:--------- beginning of \S+|\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\s+)",
+        result.stdout,
+    ) is None:
+        raise RuntimeGateError("Logcat QA observation was empty or unrecognized")
+
+
+def validate_dropbox_observation(
+    result: subprocess.CompletedProcess[str], tag: str
+) -> None:
+    require_successful_observation(result, f"Dropbox {tag}")
+    output = result.stdout
+    header = re.search(r"(?m)^Drop box contents: \d+ entries$", output)
+    search = re.search(rf"(?m)^Searching for: {re.escape(tag)}$", output)
+    if header is None or search is None or not output[search.end():].strip():
+        raise RuntimeGateError(f"Dropbox {tag} QA observation was empty or unrecognized")
 
 
 def sha256_file(path: Path) -> str:
@@ -121,7 +172,7 @@ def validate_target_verification(path: Path) -> dict[str, object]:
     if value.get("version") != TARGET_VERSION or value.get("sourceRevision") != TARGET_SOURCE:
         raise RuntimeGateError("Target verification version/source mismatch")
     build_run = value.get("buildRun")
-    if type(build_run) is not int or build_run <= 0:
+    if type(build_run) is not int or build_run != TARGET_BUILD_RUN:
         raise RuntimeGateError("Target verification build run is invalid")
     if value.get("apk") != {
         "name": TARGET_APK_NAME,
@@ -189,7 +240,7 @@ def validate_release_pages(directory: Path, verification_path: Path) -> dict[str
         raise RuntimeGateError("No stable Android phone releases were found")
     _, newest = max(stable, key=lambda item: item[0])
     if newest.get("tag_name") != TARGET_TAG:
-        raise RuntimeGateError("2.3.25 is not the newest stable Android phone release")
+        raise RuntimeGateError("2.3.26 is not the newest stable Android phone release")
 
     assets = newest.get("assets")
     if not isinstance(assets, list) or len(assets) > 200:
@@ -236,23 +287,63 @@ class PackageIdentity:
 
 
 def parse_package_identity(value: str) -> PackageIdentity:
-    patterns = {
-        "version_name": r"\bversionName=([^\s]+)",
-        "version_code": r"\bversionCode=(\d+)",
-        "uid": r"\buserId=(\d+)",
-        "first_install_time": r"\bfirstInstallTime=([^\n\r]+)",
-        "last_update_time": r"\blastUpdateTime=([^\n\r]+)",
-    }
-    found = {name: re.search(pattern, value) for name, pattern in patterns.items()}
-    if any(match is None for match in found.values()):
-        raise RuntimeGateError("Package identity fields are incomplete")
-    return PackageIdentity(
-        version_name=found["version_name"].group(1),
-        version_code=int(found["version_code"].group(1)),
-        uid=int(found["uid"].group(1)),
-        first_install_time=found["first_install_time"].group(1).strip(),
-        last_update_time=found["last_update_time"].group(1).strip(),
+    if len(re.findall(r"(?m)^Packages:$", value)) != 1:
+        raise RuntimeGateError("Package identity Packages section is missing or ambiguous")
+    package_headers = list(re.finditer(r"(?m)^  Package \[([^\]\r\n]+)\] \([^\r\n)]+\):$", value))
+    if len(package_headers) != 1 or package_headers[0].group(1) != PRODUCT_PACKAGE:
+        raise RuntimeGateError("Package identity target section is missing or ambiguous")
+    header = package_headers[0]
+    section_tail = value[header.end():]
+    next_section = re.search(r"(?m)^[A-Za-z][^\r\n]*:\s*$", section_tail)
+    section = section_tail[:next_section.start()] if next_section is not None else section_tail
+
+    user_sections = list(re.finditer(r"(?m)^    User (\d+):([^\r\n]*)$", section))
+    if len(user_sections) != 1 or user_sections[0].group(1) != "0":
+        raise RuntimeGateError("Package identity must contain exactly one User 0 section")
+    if re.search(r"(?:^|\s)installed=true(?:\s|$)", user_sections[0].group(2)) is None:
+        raise RuntimeGateError("Package identity User 0 installation state is missing")
+    package_fields = section[:user_sections[0].start()]
+    user_zero_fields = section[user_sections[0].end():]
+
+    def exactly_one(pattern: str, label: str, source: str = package_fields) -> str:
+        matches = re.findall(pattern, source, re.MULTILINE)
+        if len(matches) != 1 or not matches[0].strip():
+            raise RuntimeGateError(f"Package identity {label} is missing or ambiguous")
+        return matches[0].strip()
+
+    legacy_uids = re.findall(r"(?m)^    userId=(\d+)\s*$", package_fields)
+    modern_app_ids = re.findall(r"(?m)^    appId=(\d+)\s*$", package_fields)
+    if len(legacy_uids) > 1 or len(modern_app_ids) > 1:
+        raise RuntimeGateError("Package identity application ID is duplicated")
+    if bool(legacy_uids) == bool(modern_app_ids):
+        raise RuntimeGateError("Package identity must contain exactly one userId or appId")
+    uid = int((legacy_uids or modern_app_ids)[0])
+    if not 10_000 <= uid < 100_000:
+        raise RuntimeGateError("Package identity User 0 UID is outside the application range")
+
+    package_first_install = re.findall(
+        r"(?m)^    firstInstallTime=([^\r\n]+)$", package_fields
     )
+    user_first_install = re.findall(
+        r"(?m)^      firstInstallTime=([^\r\n]+)$", user_zero_fields
+    )
+    first_install_times = package_first_install + user_first_install
+    if len(first_install_times) != 1 or not first_install_times[0].strip():
+        raise RuntimeGateError("Package identity firstInstallTime is missing or ambiguous")
+    return PackageIdentity(
+        version_name=exactly_one(r"^    versionName=([^\s]+)\s*$", "versionName"),
+        version_code=int(exactly_one(r"^    versionCode=(\d+)(?:\s+.*)?$", "versionCode")),
+        uid=uid,
+        first_install_time=first_install_times[0].strip(),
+        last_update_time=exactly_one(
+            r"^    lastUpdateTime=([^\r\n]+)$", "lastUpdateTime"
+        ),
+    )
+
+
+def record_package_identity(write_diagnostic, name: str, value: str) -> PackageIdentity:
+    write_diagnostic(name, value)
+    return parse_package_identity(value)
 
 
 def validate_receipt(value: dict[str, object]) -> None:
@@ -423,6 +514,16 @@ class OtaRuntimeDriver:
             raise RuntimeGateError("Unsafe host evidence write")
         (self.evidence / name).write_text(redact(value), encoding="utf-8")
 
+    def record_adb_observation(
+        self, name: str, result: subprocess.CompletedProcess[str]
+    ) -> None:
+        self.write(name, result.stdout)
+        stem = name.removesuffix(".txt")
+        self.write(
+            f"{stem}-status.txt",
+            f"returnCode={result.returncode}\nstderr:\n{result.stderr}",
+        )
+
     def verify_host_inputs(self) -> None:
         validate_file(self.args.baseline_apk, BASELINE_SHA256, BASELINE_SIZE, "baseline APK")
         validate_file(self.args.target_apk, TARGET_SHA256, TARGET_SIZE, "target APK")
@@ -475,30 +576,51 @@ class OtaRuntimeDriver:
         return match.group(1).replace(":", "").casefold()
 
     def assert_unknown_source_denied(self, phase: str) -> None:
-        value = self.adb.shell(
-            "cmd", "appops", "get", PRODUCT_PACKAGE, "REQUEST_INSTALL_PACKAGES",
+        result = self.adb.run(
+            ["shell", "cmd", "appops", "get", PRODUCT_PACKAGE, "REQUEST_INSTALL_PACKAGES"],
             timeout=30,
             check=False,
         )
-        self.write(f"unknown-source-{phase}.txt", value)
-        if re.search(r"REQUEST_INSTALL_PACKAGES:\s*allow\b", value, re.IGNORECASE):
-            raise RuntimeGateError(f"YAWF unknown-source access remained allowed at {phase}")
+        self.record_adb_observation(f"unknown-source-{phase}.txt", result)
+        try:
+            validate_unknown_source_observation(result)
+        except RuntimeGateError as error:
+            if "remained allowed" in str(error):
+                raise RuntimeGateError(
+                    f"YAWF unknown-source access remained allowed at {phase}"
+                ) from error
+            raise
+
+    def assert_no_residual_update_apks(self) -> None:
+        result = self.adb.run(
+            [
+                "shell",
+                "find",
+                f"/sdcard/Android/data/{PRODUCT_PACKAGE}/files/Download/updates",
+                "-maxdepth", "1", "-type", "f", "-name", "*.apk", "-print",
+            ],
+            timeout=30,
+            check=False,
+        )
+        self.record_adb_observation("update-files.txt", result)
+        validate_no_residual_update_apks(result)
 
     def install_and_record_baseline(self) -> tuple[PackageIdentity, str]:
         self.package_absent()
         self.adb.install_harness(self.args.harness_app_sha256, self.args.harness_test_sha256)
         self.adb.install_baseline_once()
-        identity = parse_package_identity(self.package_dump())
+        identity = record_package_identity(
+            self.write, "baseline-package.txt", self.package_dump()
+        )
         if identity.version_name != BASELINE_VERSION or identity.version_code != BASELINE_CODE:
             raise RuntimeGateError("Installed baseline version identity mismatch")
-        pulled = self.evidence / "installed-baseline-2.3.21.apk"
+        pulled = self.evidence / "installed-baseline-2.3.25.apk"
         self.adb.pull_baseline_once(self.base_path(), pulled)
         validate_file(pulled, BASELINE_SHA256, BASELINE_SIZE, "installed baseline")
         signer = self.signer(pulled)
         if signer != SIGNER_PIN:
             raise RuntimeGateError("Installed baseline signer mismatch")
         self.assert_unknown_source_denied("before")
-        self.write("baseline-package.txt", self.package_dump())
         self.write("baseline-identity.json", json.dumps(dataclasses.asdict(identity), indent=2) + "\n")
         self.note("Exactly one official baseline product install and scoped read-only pull passed")
         return identity, signer
@@ -514,6 +636,7 @@ class OtaRuntimeDriver:
                 "-e", "targetVersionCode", str(TARGET_CODE),
                 "-e", "targetSha256", TARGET_SHA256,
                 "-e", "targetSize", str(TARGET_SIZE),
+                "-e", "signerSha256", SIGNER_PIN,
                 HARNESS_INSTRUMENTATION,
             ],
             timeout=self.args.flow_timeout,
@@ -569,30 +692,21 @@ class OtaRuntimeDriver:
             raise RuntimeGateError("Harness receipt is missing")
 
     def verify_final(self, baseline: PackageIdentity, baseline_signer: str) -> None:
-        final = parse_package_identity(self.package_dump())
+        final = record_package_identity(self.write, "final-package.txt", self.package_dump())
         if final.version_name != TARGET_VERSION or final.version_code != TARGET_CODE:
             raise RuntimeGateError("Final installed version identity mismatch")
         if final.uid != baseline.uid or final.first_install_time != baseline.first_install_time:
             raise RuntimeGateError("UID or first-install time changed across OTA")
         if final.last_update_time == baseline.last_update_time:
             raise RuntimeGateError("Last-update time did not change across OTA")
-        pulled = self.evidence / "installed-final-2.3.25.apk"
+        pulled = self.evidence / "installed-final-2.3.26.apk"
         self.adb.pull_final_once(self.base_path(), pulled)
         validate_file(pulled, TARGET_SHA256, TARGET_SIZE, "installed final")
         final_signer = self.signer(pulled)
         if final_signer != baseline_signer or final_signer != SIGNER_PIN:
             raise RuntimeGateError("Final installed signer changed")
         self.assert_unknown_source_denied("after-cleanup")
-        residual = self.adb.shell(
-            "find",
-            f"/sdcard/Android/data/{PRODUCT_PACKAGE}/files/Download/updates",
-            "-maxdepth", "1", "-type", "f", "-name", "*.apk", "-print",
-            timeout=30,
-            check=False,
-        ).strip()
-        if residual:
-            raise RuntimeGateError("External update APK remained after relaunch cleanup")
-        self.write("final-package.txt", self.package_dump())
+        self.assert_no_residual_update_apks()
         self.write("final-identity.json", json.dumps(dataclasses.asdict(final), indent=2) + "\n")
         self.write(
             "installed-byte-identity.txt",
@@ -600,15 +714,31 @@ class OtaRuntimeDriver:
             f"signerSha256={final_signer}\nuidRetained=true\nfirstInstallTimeRetained=true\n"
             "lastUpdateTimeChanged=true\n",
         )
-        self.note("Final OS-installed base APK exactly matches public 2.3.25 and retained identity")
+        self.note("Final OS-installed base APK exactly matches public 2.3.26 and retained identity")
 
     def collect_diagnostics(self) -> None:
-        logcat = self.adb.run(["logcat", "-d", "-v", "threadtime"], timeout=60, check=False).stdout
-        anr = self.adb.shell("dumpsys", "dropbox", "--print", "data_app_anr", timeout=60, check=False)
-        crash = self.adb.shell("dumpsys", "dropbox", "--print", "data_app_crash", timeout=60, check=False)
-        self.write("logcat.txt", logcat)
-        self.write("dropbox-anr.txt", anr)
-        self.write("dropbox-crash.txt", crash)
+        logcat_result = self.adb.run(
+            ["logcat", "-d", "-v", "threadtime"], timeout=60, check=False
+        )
+        self.record_adb_observation("logcat.txt", logcat_result)
+        validate_logcat_observation(logcat_result)
+        anr_result = self.adb.run(
+            ["shell", "dumpsys", "dropbox", "--print", "data_app_anr"],
+            timeout=60,
+            check=False,
+        )
+        self.record_adb_observation("dropbox-anr.txt", anr_result)
+        validate_dropbox_observation(anr_result, "data_app_anr")
+        crash_result = self.adb.run(
+            ["shell", "dumpsys", "dropbox", "--print", "data_app_crash"],
+            timeout=60,
+            check=False,
+        )
+        self.record_adb_observation("dropbox-crash.txt", crash_result)
+        validate_dropbox_observation(crash_result, "data_app_crash")
+        logcat = logcat_result.stdout
+        anr = anr_result.stdout
+        crash = crash_result.stdout
         escaped = re.escape(PRODUCT_PACKAGE)
         patterns = [
             re.compile(rf"\bANR in {escaped}(?=\s|$)"),
@@ -646,40 +776,47 @@ class OtaRuntimeDriver:
 
 
 def actual_verification_fixture() -> dict[str, object]:
-    """Shape copied from the final 2.3.25 release verification asset."""
+    """Proposed 2.3.26 publication receipt shape; public OTA is still pending."""
     return {
-        "version": "2.3.25",
-        "sourceRevision": "e28c593ed680538dca91c01ac6b993fdc25eb6dd",
-        "buildRun": 39365387810,
+        "version": "2.3.26",
+        "sourceRevision": "21c0509300c8284b41f4cf1bffaabd84da999164",
+        "buildRun": TARGET_BUILD_RUN,
         "apk": {
-            "name": "YAWF.Stream_Android_2.3.25.apk",
-            "sha256": "4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b",
-            "size": 88533889,
+            "name": "YAWF.Stream_Android_2.3.26.apk",
+            "sha256": "2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c",
+            "size": 88562561,
         },
         "certificateSha256":
             "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a",
         "checks": {
+            "canonicalSignedCandidateVerified": True,
             "exactApkStructureSignerPermissionsAnd16KiBAlignment": True,
             "fourAbis": True,
-            "api30ProductionSignedFreshFlows": {
-                "driverSource": "c52dc43219017f3bff3b95f7d1a58e82d564fe6f",
-                "run": 39366593051,
-                "sequentialFreshEmulators": 2,
-                "onboardingAndOrdinaryTourSkip": True,
-                "moreNavigationActuallyReachesSettings": True,
-                "installedNativeAndroidUpdateGuidanceVisible": True,
-                "noBrowserInstallInstruction": True,
-                "manualNativeUpToDateCheck": True,
+            "api30ProductionSignedCandidateChecks": {
+                "workflowRun": 39525625462,
+                "driverSourceRevision": "04d88b2d8a997a945c7b8e13290c553d6560851b",
+                "candidateSourceRevision": TARGET_SOURCE,
+                "apkSha256": TARGET_SHA256,
+                "candidateVersion": "2.3.26",
+                "publishedChannelVersion": "2.3.25",
+                "fullOtaInstall": False,
+            },
+            "api36ProductionSignedCandidateChecks": {
+                "workflowRun": 39525627751,
+                "driverSourceRevision": "04d88b2d8a997a945c7b8e13290c553d6560851b",
+                "candidateSourceRevision": TARGET_SOURCE,
+                "apkSha256": TARGET_SHA256,
+                "candidateVersion": "2.3.26",
+                "publishedChannelVersion": "2.3.25",
                 "fullOtaInstall": False,
             },
         },
         "pending": [
-            "Supplementary API36 stock-provider flow.",
-            "Public21-to25 native updater installation.",
+            "Public25-to26 native updater installation.",
             "Full feature-by-feature all-platform audit.",
         ],
         "limits": [
-            "Two API30 x86_64 emulator flows used a pinned CI-only WebView91 compatibility provider. They do not prove every device or a current-security browser.",
+            "The private signed candidate, API30, and API36 receipts do not prove public release metadata or a public OTA runtime pass.",
             "Offline16KiB alignment checks are not ARM16KiB runtime proof.",
             "This receipt does not claim every codec, HDR, DRM, audible audio, physical-device playback or external-player decoding.",
             "Automatic APK checks are opt-in. Android installation still requires confirmation; silent installation is not claimed.",
@@ -784,6 +921,7 @@ class PolicyTests(unittest.TestCase):
             corruptions = [
                 ("version", "2.3.24"),
                 ("sourceRevision", "0" * 40),
+                ("buildRun", TARGET_BUILD_RUN + 1),
                 ("apk", {**actual["apk"], "sha256": "0" * 64}),
             ]
             for key, bad_value in corruptions:
@@ -824,11 +962,87 @@ class PolicyTests(unittest.TestCase):
                 parse_checksums(path)
 
     def test_identity_requires_all_retention_fields(self) -> None:
-        value = "versionName=2.3.21 versionCode=2003021 userId=10123\nfirstInstallTime=2026-10-20 01:02:03\nlastUpdateTime=2026-10-20 01:02:03\n"
-        identity = parse_package_identity(value)
-        self.assertEqual(identity.uid, 10123)
+        api30 = """Permissions:
+  Permission [com.tgk30.debridstreamer.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION] (abc):
+    uid=99999 gids=[] type=0 prot=signature
+Packages:
+  Package [com.tgk30.debridstreamer] (c51a00c):
+    userId=10170
+    versionCode=2003025 minSdk=24 targetSdk=36
+    versionName=2.3.25
+    timeStamp=2026-10-20 01:02:03
+    firstInstallTime=2026-10-20 01:02:03
+    lastUpdateTime=2026-10-20 01:02:03
+    User 0: ceDataInode=131827 installed=true hidden=false stopped=true
+      gids=[3003]
+Queries:
+  system apps queryable: false
+"""
+        api36 = """Permissions:
+  Permission [com.tgk30.debridstreamer.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION] (da31363):
+    uid=10218 gids=[] type=0 prot=signature
+Packages:
+  Package [com.tgk30.debridstreamer] (3a628df):
+    appId=10218
+    versionCode=2003026 minSdk=24 targetSdk=36
+    versionName=2.3.26
+    timeStamp=2026-10-20 05:11:15
+    lastUpdateTime=2026-10-20 05:11:15
+    User 0: ceDataInode=352915 installed=true hidden=false stopped=true
+      firstInstallTime=2026-10-20 05:11:15
+      gids=[3003]
+Queries:
+  system apps queryable: false
+"""
+        legacy = parse_package_identity(api30)
+        modern = parse_package_identity(api36)
+        self.assertEqual((legacy.uid, legacy.first_install_time), (10170, "2026-10-20 01:02:03"))
+        self.assertEqual((modern.uid, modern.first_install_time), (10218, "2026-10-20 05:11:15"))
+
+        invalid = [
+            api36.replace("    appId=10218\n", ""),
+            api36.replace("    appId=10218\n", "    appId=10218\n    appId=10218\n"),
+            api36.replace("    appId=10218\n", "    userId=10218\n    appId=10218\n"),
+            api36.replace("    appId=10218\n", "    userId=10217\n    appId=10218\n"),
+            api36.replace("Package [com.tgk30.debridstreamer]", "Package [other.package]"),
+            api36.replace("    versionCode=2003026 minSdk=24 targetSdk=36\n", ""),
+            api36.replace("    versionName=2.3.26\n", ""),
+            api36.replace("    versionName=2.3.26\n", "    versionName=2.3.26\n    versionName=2.3.26\n"),
+            api36.replace("    lastUpdateTime=2026-10-20 05:11:15\n", ""),
+            api36.replace(
+                "    lastUpdateTime=2026-10-20 05:11:15\n",
+                "    lastUpdateTime=2026-10-20 05:11:15\n"
+                "    lastUpdateTime=2026-10-20 05:11:15\n",
+            ),
+            api36.replace("      firstInstallTime=2026-10-20 05:11:15\n", ""),
+            api36.replace(
+                "      firstInstallTime=2026-10-20 05:11:15\n",
+                "      firstInstallTime=2026-10-20 05:11:15\n"
+                "      firstInstallTime=2026-10-20 05:11:15\n",
+            ),
+            api36.replace("    appId=10218\n", "    appId=999\n"),
+            api36.replace("    User 0:", "    User 10:"),
+            api36.replace(
+                "Queries:\n",
+                "    User 0: ceDataInode=352916 installed=true hidden=false stopped=true\n"
+                "Queries:\n",
+            ),
+            api36.replace(" installed=true", " installed=false"),
+            api36.replace("Queries:\n", "  Package [com.tgk30.debridstreamer] (duplicate):\nQueries:\n"),
+        ]
+        for damaged in invalid:
+            with self.assertRaises(RuntimeGateError):
+                parse_package_identity(damaged)
+
+        writes: list[tuple[str, str]] = []
+        missing_uid = api36.replace("    appId=10218\n", "")
         with self.assertRaises(RuntimeGateError):
-            parse_package_identity(value.replace("userId=10123", ""))
+            record_package_identity(
+                lambda name, payload: writes.append((name, payload)),
+                "baseline-package.txt",
+                missing_uid,
+            )
+        self.assertEqual(writes, [("baseline-package.txt", missing_uid)])
 
     def test_receipt_requires_every_transaction_fact(self) -> None:
         receipt = {
@@ -845,6 +1059,115 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(RuntimeGateError):
             validate_receipt(receipt)
 
+        def observed(
+            stdout: str, *, returncode: int = 0, stderr: str = ""
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                ["adb", "observation"], returncode, stdout, stderr
+            )
+
+        validate_unknown_source_observation(
+            observed("No operations.\nDefault mode: default\n")
+        )
+        for mode in ("default", "ignore", "deny", "errored"):
+            validate_unknown_source_observation(
+                observed(f"REQUEST_INSTALL_PACKAGES: {mode}\n")
+            )
+        rejected_appops = [
+            observed(""),
+            observed("No operations.\n"),
+            observed("REQUEST_INSTALL_PACKAGES: allow\n"),
+            observed("REQUEST_INSTALL_PACKAGES: foreground\n"),
+            observed("", returncode=1),
+            observed("", stderr="appops unavailable"),
+        ]
+        for result in rejected_appops:
+            with self.assertRaises(RuntimeGateError):
+                validate_unknown_source_observation(result)
+
+        validate_no_residual_update_apks(observed(""))
+        for result in (
+            observed("/sdcard/Android/data/com.tgk30.debridstreamer/files/Download/updates/update.apk\n"),
+            observed("", returncode=1),
+            observed("", stderr="find unavailable"),
+        ):
+            with self.assertRaises(RuntimeGateError):
+                validate_no_residual_update_apks(result)
+
+        validate_logcat_observation(
+            observed("--------- beginning of main\n10-20 05:11:18.054  1290  1319 I Tag: line\n")
+        )
+        for result in (
+            observed(""),
+            observed("not logcat output\n"),
+            observed("", returncode=1),
+            observed("", stderr="logcat unavailable"),
+        ):
+            with self.assertRaises(RuntimeGateError):
+                validate_logcat_observation(result)
+
+        for tag in ("data_app_anr", "data_app_crash"):
+            validate_dropbox_observation(
+                observed(
+                    "Drop box contents: 53 entries\n"
+                    "Max entries: 1000\n"
+                    f"Searching for: {tag}\n\n"
+                    "(No entries found.)\n"
+                ),
+                tag,
+            )
+        for result in (
+            observed(""),
+            observed("(No entries found.)\n"),
+            observed("", returncode=1),
+            observed("", stderr="dropbox unavailable"),
+        ):
+            with self.assertRaises(RuntimeGateError):
+                validate_dropbox_observation(result, "data_app_anr")
+
+        class StubAdb:
+            def __init__(self, result: subprocess.CompletedProcess[str]):
+                self.result = result
+                self.commands: list[tuple[str, ...]] = []
+
+            def run(self, args: Sequence[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+                self.commands.append(tuple(args))
+                return self.result
+
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = object.__new__(OtaRuntimeDriver)
+            driver.evidence = Path(temporary)
+            driver.events = []
+            driver.adb = StubAdb(observed("", returncode=1, stderr="failed"))
+            with self.assertRaises(RuntimeGateError):
+                driver.assert_unknown_source_denied("before")
+            self.assertTrue((driver.evidence / "unknown-source-before.txt").is_file())
+            self.assertTrue((driver.evidence / "unknown-source-before-status.txt").is_file())
+            self.assertEqual(
+                driver.adb.commands,
+                [("shell", "cmd", "appops", "get", PRODUCT_PACKAGE, "REQUEST_INSTALL_PACKAGES")],
+            )
+
+            driver.adb = StubAdb(observed("", returncode=1, stderr="failed"))
+            with self.assertRaises(RuntimeGateError):
+                driver.assert_no_residual_update_apks()
+            self.assertTrue((driver.evidence / "update-files.txt").is_file())
+            self.assertTrue((driver.evidence / "update-files-status.txt").is_file())
+            self.assertEqual(
+                driver.adb.commands,
+                [(
+                    "shell", "find",
+                    f"/sdcard/Android/data/{PRODUCT_PACKAGE}/files/Download/updates",
+                    "-maxdepth", "1", "-type", "f", "-name", "*.apk", "-print",
+                )],
+            )
+
+            driver.adb = StubAdb(observed(""))
+            with self.assertRaises(RuntimeGateError):
+                driver.collect_diagnostics()
+            self.assertTrue((driver.evidence / "logcat.txt").is_file())
+            self.assertTrue((driver.evidence / "logcat-status.txt").is_file())
+
     def test_admission_locks_all_product_install_routes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -853,6 +1176,13 @@ class PolicyTests(unittest.TestCase):
                 path.write_bytes(bytes([index + 1]))
             adb = AdmittedAdb("adb", "emulator-5554", *files)
             adb.baseline_installed = True
+            dispatches: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+            def fail_on_dispatch(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+                dispatches.append((args, kwargs))
+                raise AssertionError("Forbidden admission case reached external ADB dispatch")
+
+            adb._execute = fail_on_dispatch
             forbidden = [
                 ["install", str(files[1])],
                 ["install-multiple", str(files[1])],
@@ -865,6 +1195,7 @@ class PolicyTests(unittest.TestCase):
             for command in forbidden:
                 with self.assertRaises(RuntimeGateError, msg=str(command)):
                     adb.run(command)
+            self.assertEqual(dispatches, [], "Every forbidden command must fail before dispatch")
 
     def test_scoped_pulls_require_correct_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -873,16 +1204,31 @@ class PolicyTests(unittest.TestCase):
             for path in files:
                 path.write_bytes(b"x")
             adb = AdmittedAdb("adb", "emulator-5554", *files)
+            rejected_dispatches: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+            def fail_on_dispatch(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+                rejected_dispatches.append((args, kwargs))
+                raise AssertionError("Invalid pull state reached external ADB dispatch")
+
+            adb._execute = fail_on_dispatch
             with self.assertRaises(RuntimeGateError):
                 adb.pull_baseline_once("/base.apk", root / "pulled.apk")
             with self.assertRaises(RuntimeGateError):
                 adb.pull_final_once("/base.apk", root / "final.apk")
+            self.assertEqual(rejected_dispatches, [], "Invalid pull states must fail before dispatch")
             adb.baseline_installed = True
-            adb._execute = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", "")
+            allowed_dispatches: list[tuple[object, ...]] = []
+
+            def successful_dispatch(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+                allowed_dispatches.append(args)
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            adb._execute = successful_dispatch
             adb.pull_baseline_once("/base.apk", root / "pulled.apk")
             adb.mark_installer_success_receipt()
             adb.pull_final_once("/base.apk", root / "final.apk")
             self.assertTrue(adb.baseline_pulled and adb.final_pulled)
+            self.assertEqual(len(allowed_dispatches), 2)
 
     def test_evidence_names_reject_traversal(self) -> None:
         self.assertIsNotNone(SAFE_EVIDENCE_NAME.fullmatch("01-initial-update-consent.png"))
@@ -953,7 +1299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             validate_release_pages(args.release_pages, args.target_verification)
             args.evidence.mkdir(parents=True, exist_ok=True)
             (args.evidence / "public-preflight.txt").write_text(
-                "publicTarget=2.3.25\npublicPreflight=passed\n"
+                "publicTarget=2.3.26\npublicPreflight=passed\n"
             )
             return 0
         except Exception as caught:
