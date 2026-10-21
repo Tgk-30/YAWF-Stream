@@ -16,7 +16,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
-import android.view.accessibility.AccessibilityNodeInfo;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -41,7 +40,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
 
-/** One persistent semantic UI session for a real public 2.3.21 to 2.3.25 OTA. */
+/** One persistent semantic UI session for a real public 2.3.25 to 2.3.26 OTA. */
 @RunWith(AndroidJUnit4.class)
 public final class RuntimeOtaFlowTest {
     private static final long SHORT_WAIT_MS = 20_000;
@@ -94,12 +93,13 @@ public final class RuntimeOtaFlowTest {
         assertEquals("Unexpected evidence subdirectory", EVIDENCE_SUBDIR, subdir);
         assertTrue(
                 "Fixed OTA arguments do not match the reviewed release",
-                OtaFlowPolicy.expectedArguments(
+                OtaFlowPolicy.matchesVersionPins(
                         arguments.getString("baselineVersion", ""),
                         arguments.getString("targetVersion", ""),
                         parseLongArgument(arguments, "targetVersionCode"),
                         arguments.getString("targetSha256", ""),
-                        parseLongArgument(arguments, "targetSize")));
+                        parseLongArgument(arguments, "targetSize"),
+                        arguments.getString("signerSha256", "")));
 
         Context targetContext = instrumentation.getTargetContext();
         File internalFiles = targetContext.getFilesDir();
@@ -166,9 +166,7 @@ public final class RuntimeOtaFlowTest {
 
         openSettingsAndAssertSimple("before-update");
         openHelpAndUpdates();
-        revealPublicBaselineAndroidUpdateControl();
-        capture("android-update-card");
-        activatePublicBaselineAndroidUpdateControl();
+        tapVisibleAndroidUpdateCheckCard("android-update-card");
 
         waitFor(By.text("Check for Android updates?"), SHORT_WAIT_MS, "manual update consent");
         UiObject2 weekly = waitFor(
@@ -192,7 +190,7 @@ public final class RuntimeOtaFlowTest {
         String offerTitle = "YAWF Stream " + OtaFlowPolicy.TARGET_VERSION + " is available";
         String offerMessage =
                 "Download the signed Android update now? Android will ask again before installing it.";
-        waitFor(By.text(offerTitle), UI_WAIT_MS, "exact 2.3.25 offer");
+        waitFor(By.text(offerTitle), UI_WAIT_MS, "exact 2.3.26 offer");
         waitFor(By.text(offerMessage), SHORT_WAIT_MS, "exact signed-update offer message");
         assertTrue("Offer policy mismatch", OtaFlowPolicy.isExactOffer(offerTitle, offerMessage));
         weekly = waitFor(
@@ -236,10 +234,7 @@ public final class RuntimeOtaFlowTest {
                 hasAnyWithoutIdleDelay(By.text("How do you want to use YAWF Stream?")));
         assertFalse("Setup reminder returned after OTA", hasSetupReminder());
         openHelpAndUpdates();
-        scrollUntilVisibleProductSemantic(
-                "Check for Android updates", "android.widget.Button", true, Direction.DOWN);
-        clickProductSemantic(
-                "Check for Android updates", "android.widget.Button", SHORT_WAIT_MS);
+        tapVisibleAndroidUpdateCheckCard(null);
 
         waitFor(By.text("YAWF Stream is up to date"), UI_WAIT_MS, "post-update no-newer title");
         String postMessage = "No newer signed Android phone release is available.";
@@ -437,89 +432,53 @@ public final class RuntimeOtaFlowTest {
         click(By.text("Help & updates"), "Help & updates", SHORT_WAIT_MS, true);
     }
 
-    private void revealPublicBaselineAndroidUpdateControl() {
-        scrollUntilVisibleProductSemantic(
-                "ANDROID APK UPDATES", "android.widget.TextView", false, Direction.UP);
-        BySelector[] updateButton = productTextOrDescriptionSelectors(
-                "Check for Android updates", "android.widget.Button", true);
-        UiObject2 direct = findAnyNow(updateButton);
-        if (direct == null || !isVisibleAboveBottomNavigation(direct)) {
-            scrollUntilVisibleProductSemantic(
-                    "Android APK updates", "android.widget.Button", true, Direction.DOWN);
-            clickProductSemantic("Android APK updates", "android.widget.Button", SHORT_WAIT_MS);
-            log("Opened the public 2.3.21 Android updater information through its visible trigger");
+    private void tapVisibleAndroidUpdateCheckCard(String captureLabel) throws IOException {
+        BySelector title = By.text("Android APK updates")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.TextView")
+                .enabled(true);
+        scrollUntilVisibleExactProduct(title, "Android APK updates title", Direction.DOWN);
+        BySelector check = By.text("Check for Android updates")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.Button")
+                .clickable(true)
+                .enabled(true);
+        UiObject2 button = scrollUntilVisibleExactProduct(
+                check, "Check for Android updates button", Direction.DOWN);
+        if (captureLabel != null) {
+            capture(captureLabel);
         }
-        scrollUntilVisibleProductSemantic(
-                "Check for Android updates", "android.widget.Button", true, Direction.DOWN);
-    }
-
-    private void activatePublicBaselineAndroidUpdateControl() {
-        String text = "Check for Android updates";
-        BySelector[] selectors = productTextOrDescriptionSelectors(
-                text, "android.widget.Button", true);
         assertNoBindingTerms();
-        UiObject2 visibleControl = findAnyNow(selectors);
-        assertNotNull("Legacy Android update control disappeared before activation", visibleControl);
-        assertTrue("Legacy Android update control was not safely visible above bottom navigation",
-                isVisibleAboveBottomNavigation(visibleControl));
-        Rect expectedBounds = visibleControl.getVisibleBounds();
-
-        AccessibilityNodeInfo root =
-                instrumentation.getUiAutomation().getRootInActiveWindow();
-        assertNotNull("Active accessibility root unavailable for legacy Android update control", root);
-        List<AccessibilityNodeInfo> nodes = new ArrayList<>();
-        nodes.add(root);
-        AccessibilityNodeInfo control = null;
-        int matches = 0;
-        try {
-            for (int index = 0; index < nodes.size(); index++) {
-                AccessibilityNodeInfo node = nodes.get(index);
-                if (isExactLegacyUpdateAccessibilityNode(node, text, expectedBounds)) {
-                    control = node;
-                    matches += 1;
-                }
-                for (int childIndex = 0; childIndex < node.getChildCount(); childIndex++) {
-                    AccessibilityNodeInfo child = node.getChild(childIndex);
-                    if (child != null) nodes.add(child);
-                }
-            }
-            assertEquals("Legacy Android update accessibility control was not unique", 1, matches);
-            assertNotNull("Legacy Android update accessibility control unavailable", control);
-            assertTrue(
-                    "Legacy Android update accessibility control did not advertise ACTION_CLICK",
-                    control.getActionList().contains(
-                            AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK));
-            assertTrue(
-                    "Legacy Android update accessibility ACTION_CLICK was rejected",
-                    control.performAction(AccessibilityNodeInfo.ACTION_CLICK));
-            log("Used one legacy accessibility-assisted activation for the exact public 2.3.21 "
-                    + "update control; this is not ordinary touch UX proof");
-        } finally {
-            for (int index = nodes.size() - 1; index >= 0; index--) {
-                nodes.get(index).recycle();
-            }
-        }
+        button = device.findObject(check);
+        assertNotNull("Exact Check for Android updates button disappeared before tap", button);
+        assertTrue(
+                "Exact Check for Android updates button was not safely visible above bottom navigation",
+                isVisibleAboveBottomNavigation(button));
+        button.click();
+        log("Tapped the exact visible Android APK updates card Check for Android updates button");
+        device.waitForIdle(750);
     }
 
-    private boolean isExactLegacyUpdateAccessibilityNode(
-            AccessibilityNodeInfo node, String text, Rect expectedBounds) {
-        CharSequence nodeText = node.getText();
-        CharSequence nodeDescription = node.getContentDescription();
-        boolean exactName = text.contentEquals(nodeText == null ? "" : nodeText)
-                || text.contentEquals(nodeDescription == null ? "" : nodeDescription);
-        if (node.getPackageName() == null
-                || !OtaFlowPolicy.PRODUCT_PACKAGE.contentEquals(node.getPackageName())
-                || node.getClassName() == null
-                || !"android.widget.Button".contentEquals(node.getClassName())
-                || !exactName
-                || !node.isEnabled()
-                || !node.isClickable()
-                || !node.isVisibleToUser()) {
-            return false;
+    private UiObject2 scrollUntilVisibleExactProduct(
+            BySelector selector, String label, Direction direction) {
+        for (int attempt = 0; attempt < 12; attempt++) {
+            UiObject2 found = device.findObject(selector);
+            if (found != null && isVisibleAboveBottomNavigation(found)) {
+                return found;
+            }
+            UiObject2 scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("No scrollable container while seeking " + label, scrollable);
+            assertNoBindingTerms();
+            scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("Scrollable container disappeared while seeking " + label, scrollable);
+            configureSettingsScrollGesture(scrollable);
+            boolean canStillScroll = scrollable.scroll(direction, 0.75f);
+            log("Performed bounded Settings scroll gesture while seeking exact " + label
+                    + "; canStillScroll=" + canStillScroll);
+            device.waitForIdle(750);
         }
-        Rect nodeBounds = new Rect();
-        node.getBoundsInScreen(nodeBounds);
-        return !nodeBounds.isEmpty() && nodeBounds.equals(expectedBounds);
+        fail("Could not place exact " + label + " above bottom navigation");
+        return null;
     }
 
     private UiObject2 scrollUntilVisibleProductSemantic(

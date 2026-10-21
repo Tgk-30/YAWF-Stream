@@ -7,12 +7,14 @@ import java.util.regex.Pattern;
 public final class OtaFlowPolicy {
     public static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
     public static final String PRODUCT_ACTIVITY = PRODUCT_PACKAGE + ".MainActivity";
-    public static final String BASELINE_VERSION = "2.3.21";
-    public static final String TARGET_VERSION = "2.3.25";
-    public static final long TARGET_VERSION_CODE = 2_003_025L;
+    public static final String BASELINE_VERSION = "2.3.25";
+    public static final String TARGET_VERSION = "2.3.26";
+    public static final long TARGET_VERSION_CODE = 2_003_026L;
     public static final String TARGET_SHA256 =
-            "4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b";
-    public static final long TARGET_SIZE = 88_533_889L;
+            "2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c";
+    public static final long TARGET_SIZE = 88_562_561L;
+    public static final String SIGNER_SHA256 =
+            "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a";
     public static final int TIER_STEPS = 3;
     public static final int WELCOME_STEPS = 7;
     public static final int SETTLED_ABSENT_SAMPLES = 3;
@@ -108,17 +110,19 @@ public final class OtaFlowPolicy {
         }
     }
 
-    public static boolean expectedArguments(
+    public static boolean matchesVersionPins(
             String baselineVersion,
             String targetVersion,
             long targetVersionCode,
             String targetSha256,
-            long targetSize) {
+            long targetSize,
+            String signerSha256) {
         return BASELINE_VERSION.equals(baselineVersion)
                 && TARGET_VERSION.equals(targetVersion)
                 && TARGET_VERSION_CODE == targetVersionCode
                 && TARGET_SHA256.equals(targetSha256)
-                && TARGET_SIZE == targetSize;
+                && TARGET_SIZE == targetSize
+                && SIGNER_SHA256.equals(signerSha256);
     }
 
     public static boolean isBindingTerms(String value) {

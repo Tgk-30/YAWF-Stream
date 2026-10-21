@@ -12,6 +12,10 @@ const runtimePath = join(
   root,
   "scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeOtaFlowTest.java",
 );
+const otaPolicyPath = join(
+  root,
+  "scripts/android-runtime-instrumentation/app/src/main/java/com/yawf/runtimeinstrumentation/OtaFlowPolicy.java",
+);
 const pythonLookup = spawnSync(
   "/usr/bin/env",
   ["python3", "-c", "import sys; print(sys.executable)"],
@@ -29,12 +33,22 @@ function validateWorkflow(source) {
   if (/\n\s+(?:push|pull_request|schedule):/.test(source)) failures.push("unexpected automatic trigger");
   requireText("permissions:\n  contents: read", "least contents permission is missing");
   if (!/^\s{4}timeout-minutes: 30$/m.test(source)) failures.push("finite job timeout is missing");
-  requireText("BASELINE_APK_SHA256: 6b7be775e261db5e400790d7c6d80d0ffeca13aada590ae4c66955003c5163f6", "baseline hash pin is missing");
-  requireText("TARGET_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd", "target source pin is missing");
-  requireText("TARGET_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b", "target hash pin is missing");
-  requireText("TARGET_APK_SIZE: \"88533889\"", "target size pin is missing");
+  requireText("BASELINE_VERSION: 2.3.25", "baseline version pin is missing");
+  requireText("BASELINE_TAG: android-v2.3.25", "baseline tag pin is missing");
+  requireText("BASELINE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd", "baseline source pin is missing");
+  requireText('echo "baselineSourceRevision=$BASELINE_SOURCE_SHA"', "baseline source binding evidence is missing");
+  requireText("BASELINE_APK_SHA256: 4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b", "baseline hash pin is missing");
+  requireText("BASELINE_APK_SIZE: \"88533889\"", "baseline size pin is missing");
+  requireText("BASELINE_APK: public-assets/YAWF.Stream_Android_2.3.25.apk", "baseline APK path is missing");
+  requireText("TARGET_VERSION: 2.3.26", "target version pin is missing");
+  requireText("TARGET_VERSION_CODE: \"2003026\"", "target version-code pin is missing");
+  requireText("TARGET_TAG: android-v2.3.26", "target tag pin is missing");
+  requireText("TARGET_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164", "target source pin is missing");
+  requireText("TARGET_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c", "target hash pin is missing");
+  requireText("TARGET_APK_SIZE: \"88562561\"", "target size pin is missing");
+  requireText("TARGET_APK: public-assets/YAWF.Stream_Android_2.3.26.apk", "target APK path is missing");
   requireText(
-    "TARGET_VERIFICATION: public-assets/Android_2.3.25_verification.json",
+    "TARGET_VERIFICATION: public-assets/Android_2.3.26_verification.json",
     "target verification receipt path is missing",
   );
   requireText(
@@ -88,16 +102,56 @@ test("workflow pins public source and bytes and delegates all installs to the lo
   assert.deepEqual(validateWorkflow(workflow), []);
 });
 
+test("host gate pins the exact target and keeps public OTA proof pending", async () => {
+  const source = await readFile(driverPath, "utf8");
+  for (const expected of [
+    'BASELINE_VERSION = "2.3.25"',
+    "BASELINE_CODE = 2_003_025",
+    'BASELINE_SHA256 = "4f8cb6defe54e128f01790fafd84b6f3fd545d7c6734458d24543edcfa4bc58b"',
+    "BASELINE_SIZE = 88_533_889",
+    'BASELINE_SOURCE = "e28c593ed680538dca91c01ac6b993fdc25eb6dd"',
+    'TARGET_VERSION = "2.3.26"',
+    "TARGET_CODE = 2_003_026",
+    'TARGET_SHA256 = "2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c"',
+    "TARGET_SIZE = 88_562_561",
+    'TARGET_SOURCE = "21c0509300c8284b41f4cf1bffaabd84da999164"',
+    "TARGET_BUILD_RUN = 39_515_566_836",
+    'SIGNER_PIN = "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a"',
+    'TARGET_TAG = "android-v2.3.26"',
+    'TARGET_APK_NAME = "YAWF.Stream_Android_2.3.26.apk"',
+    'TARGET_VERIFICATION_NAME = "Android_2.3.26_verification.json"',
+    '"workflowRun": 39525625462',
+    '"workflowRun": 39525627751',
+    '"driverSourceRevision": "04d88b2d8a997a945c7b8e13290c553d6560851b"',
+    '"candidateSourceRevision": TARGET_SOURCE',
+    '"apkSha256": TARGET_SHA256',
+    '"publishedChannelVersion": "2.3.25"',
+    '"fullOtaInstall": False',
+    '"Public25-to26 native updater installation."',
+    '"The private signed candidate, API30, and API36 receipts do not prove public release metadata or a public OTA runtime pass."',
+  ]) {
+    assert.ok(source.includes(expected), `missing exact host pin or non-claim: ${expected}`);
+  }
+  assert.doesNotMatch(source, /"fullOtaInstall": True/);
+});
+
 test("workflow contract rejects each targeted semantic regression", async () => {
   const workflow = await readFile(workflowPath, "utf8");
   const mutants = [
     ["workflow_dispatch:", "schedule:\n    - cron: '0 0 * * *'"],
     ["permissions:\n  contents: read", "permissions:\n  contents: write"],
     ["timeout-minutes: 30", "timeout-minutes: 300"],
-    ["TARGET_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd", "TARGET_SOURCE_SHA: 0000000000000000000000000000000000000000"],
-    ["TARGET_APK_SIZE: \"88533889\"", "TARGET_APK_SIZE: \"88533890\""],
+    ["BASELINE_VERSION: 2.3.25", "BASELINE_VERSION: 2.3.24"],
+    ["BASELINE_TAG: android-v2.3.25", "BASELINE_TAG: android-v2.3.24"],
+    ["BASELINE_SOURCE_SHA: e28c593ed680538dca91c01ac6b993fdc25eb6dd", "BASELINE_SOURCE_SHA: 0000000000000000000000000000000000000000"],
+    ["BASELINE_APK_SIZE: \"88533889\"", "BASELINE_APK_SIZE: \"88533890\""],
+    ["TARGET_VERSION: 2.3.26", "TARGET_VERSION: 2.3.27"],
+    ["TARGET_VERSION_CODE: \"2003026\"", "TARGET_VERSION_CODE: \"2003027\""],
+    ["TARGET_TAG: android-v2.3.26", "TARGET_TAG: android-v2.3.27"],
+    ["TARGET_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164", "TARGET_SOURCE_SHA: 0000000000000000000000000000000000000000"],
+    ["TARGET_APK_SIZE: \"88562561\"", "TARGET_APK_SIZE: \"88562562\""],
     [
-      "TARGET_VERIFICATION: public-assets/Android_2.3.25_verification.json",
+      "TARGET_VERIFICATION: public-assets/Android_2.3.26_verification.json",
       "TARGET_VERIFICATION: public-assets/unreviewed.json",
     ],
     ["--proto '=https' --proto-redir '=https'", "--proto '=https'"],
@@ -122,6 +176,68 @@ test("runtime source uses semantic UI only and records genuine installer and cle
   assert.doesNotMatch(source, /device\.click\s*\(\s*\d/);
   assert.doesNotMatch(source, /executeShellCommand/);
   assert.doesNotMatch(source, /appops\s+set|pm\s+(?:grant|revoke)/i);
+});
+
+test("public 25 uses the visible update card and an ordinary exact-button tap", async () => {
+  const [source, policy] = await Promise.all([
+    readFile(runtimePath, "utf8"),
+    readFile(otaPolicyPath, "utf8"),
+  ]);
+  assert.match(policy, /public static final String BASELINE_VERSION = "2\.3\.25";/);
+  assert.match(policy, /public static final String TARGET_VERSION = "2\.3\.26";/);
+  assert.match(policy, /public static final long TARGET_VERSION_CODE = 2_003_026L;/);
+  assert.match(policy, /2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c/);
+  assert.match(policy, /public static final long TARGET_SIZE = 88_562_561L;/);
+  assert.match(policy, /233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a/);
+  assert.equal(policy.match(/public static boolean matchesVersionPins\(/g)?.length, 1);
+  assert.equal(source.match(/OtaFlowPolicy\.matchesVersionPins\(/g)?.length, 1);
+  assert.doesNotMatch(source, /private static final String (?:BASELINE|TARGET)_VERSION/);
+  assert.doesNotMatch(source, /private static boolean (?:expectedArguments|matchesVersionPins)\(/);
+  assert.doesNotMatch(source, /2\.3\.21|ANDROID APK UPDATES|InfoTip|AccessibilityNodeInfo|ACTION_CLICK|performAction/);
+  assert.match(source, /arguments\.getString\("signerSha256", ""\)/);
+  assert.match(
+    source,
+    /By\.text\("Android APK updates"\)\s*\.pkg\(OtaFlowPolicy\.PRODUCT_PACKAGE\)\s*\.clazz\("android\.widget\.TextView"\)/,
+  );
+  assert.match(
+    source,
+    /By\.text\("Check for Android updates"\)\s*\.pkg\(OtaFlowPolicy\.PRODUCT_PACKAGE\)\s*\.clazz\("android\.widget\.Button"\)\s*\.clickable\(true\)/,
+  );
+  const helper = source.slice(
+    source.indexOf("private void tapVisibleAndroidUpdateCheckCard(String captureLabel)"),
+    source.indexOf("private UiObject2 scrollUntilVisibleExactProduct("),
+  );
+  assert.match(helper, /button\.click\(\);/);
+  assert.doesNotMatch(helper, /By\.desc|InfoTip|performAction|ACTION_CLICK|device\.click/);
+  assert.doesNotMatch(source, /ANDROID APK UPDATES|public 2\.3\.21 Android updater information/);
+});
+
+test("host and runtime retain the install, identity, data, and cleanup fences", async () => {
+  const [host, runtime] = await Promise.all([
+    readFile(driverPath, "utf8"),
+    readFile(runtimePath, "utf8"),
+  ]);
+  assert.match(host, /\["install", "--no-streaming", str\(self\.baseline_apk\)\]/);
+  assert.equal(
+    host.match(/\["install", "--no-streaming", str\(self\.baseline_apk\)\]/g)?.length,
+    1,
+  );
+  assert.equal(host.match(/self\.adb\.install_baseline_once\(\)/g)?.length, 1);
+  assert.doesNotMatch(host, /\["install", "--no-streaming", "-r", str\(self\.baseline_apk\)\]/);
+  assert.match(host, /if self\.baseline_installed:/);
+  assert.match(host, /UID or first-install time changed across OTA/);
+  assert.match(host, /Last-update time did not change across OTA/);
+  assert.match(host, /validate_file\(pulled, TARGET_SHA256, TARGET_SIZE, "installed final"\)/);
+  assert.match(host, /YAWF unknown-source access remained allowed/);
+  assert.match(host, /"-e", "signerSha256", SIGNER_PIN/);
+  assert.match(runtime, /installerSuccessObserved = true/);
+  assert.match(runtime, /installerOpenObserved = true/);
+  assert.match(runtime, /updatedProductObserved = true/);
+  assert.match(runtime, /permissionCleanupObserved = true/);
+  assert.match(runtime, /FirstRun returned after OTA/);
+  assert.match(runtime, /Setup reminder returned after OTA/);
+  assert.match(runtime, /Weekly automatic checks did not survive OTA/);
+  assert.match(runtime, /YAWF Stream is up to date/);
 });
 
 test("negative observations scope and restore a short UiAutomator idle timeout", async () => {
@@ -256,6 +372,20 @@ test("each host policy self-test kills a targeted valid-Python semantic mutant",
       assert.notEqual(mutant.status, 0, `semantic mutant survived: ${name}`);
     }
 
+    const buildRunBefore =
+      "if type(build_run) is not int or build_run != TARGET_BUILD_RUN:";
+    const buildRunAfter =
+      "if type(build_run) is not int or build_run <= 0:";
+    assert.equal(original.split(buildRunBefore).length - 1, 1, "build-run pin must be unique");
+    const buildRunMutant = join(temporary, "verification-build-run.py");
+    await writeFile(buildRunMutant, original.replace(buildRunBefore, buildRunAfter));
+    const buildRunResult = spawnSync(
+      "python3",
+      [buildRunMutant, "--self-test", "test_verification_receipt_matches_actual_asset_shape"],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(buildRunResult.status, 0, "exact signing-run mutant survived");
+
     const identityMutants = [
       [
         '    if bool(legacy_uids) == bool(modern_app_ids):\n' +
@@ -319,12 +449,12 @@ test("each host policy self-test kills a targeted valid-Python semantic mutant",
       ],
       [
         '        version_name=exactly_one(r"^    versionName=([^\\s]+)\\s*$", "versionName"),',
-        '        version_name="2.3.25",',
+        '        version_name="2.3.26",',
         "missing versionName",
       ],
       [
         '        version_code=int(exactly_one(r"^    versionCode=(\\d+)(?:\\s+.*)?$", "versionCode")),',
-        '        version_code=2_003_025,',
+        '        version_code=2_003_026,',
         "missing versionCode",
       ],
       [
