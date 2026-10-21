@@ -91,7 +91,7 @@ function validateSettingsAccessibility(source) {
   const baselineReveal = source.match(
     /private void revealPublicBaselineAndroidUpdateControl\([\s\S]*?\n    }\n\n    private /,
   )?.[0] ?? "";
-  if (!/"Android APK updates", "android\.widget\.TextView", false, Direction\.DOWN/.test(baselineReveal)
+  if (!/"ANDROID APK UPDATES", "android\.widget\.TextView", false, Direction\.UP/.test(baselineReveal)
       || !/"Android APK updates", "android\.widget\.Button", true, Direction\.DOWN/.test(baselineReveal)
       || !/clickProductSemantic\("Android APK updates", "android\.widget\.Button", SHORT_WAIT_MS\)/.test(baselineReveal)
       || !/"Check for Android updates", "android\.widget\.Button", true, Direction\.DOWN/.test(baselineReveal)) {
@@ -186,6 +186,14 @@ test("Settings and OTA controls require exact semantic identity and safe visibil
     [
       'clickProductSemantic("Android APK updates", "android.widget.Button", SHORT_WAIT_MS)',
       'log("Skipped baseline disclosure")',
+    ],
+    [
+      '"ANDROID APK UPDATES", "android.widget.TextView", false, Direction.UP',
+      '"Android APK updates", "android.widget.TextView", false, Direction.UP',
+    ],
+    [
+      '"ANDROID APK UPDATES", "android.widget.TextView", false, Direction.UP',
+      '"ANDROID APK UPDATES", "android.widget.TextView", false, Direction.DOWN',
     ],
     [
       "simple.isEnabled()",

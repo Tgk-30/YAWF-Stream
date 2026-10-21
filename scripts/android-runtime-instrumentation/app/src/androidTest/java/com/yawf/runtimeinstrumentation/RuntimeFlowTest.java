@@ -43,7 +43,7 @@ public final class RuntimeFlowTest {
     private static final long UI_WAIT_MS = 90_000;
     private static final long UPDATE_WAIT_MS = 120_000;
     private static final long TOUR_MOUNT_WAIT_MS = 5_000;
-    private static final long TOUR_OBSERVATION_IDLE_TIMEOUT_MS = 250;
+    private static final long TOUR_OBSERVATION_IDLE_TIMEOUT_MS = 0;
     private static final String EVIDENCE_SUBDIR = "persistent-flow";
     private static final int MAX_CAPTURES = 20;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;

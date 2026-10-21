@@ -439,7 +439,7 @@ public final class RuntimeOtaFlowTest {
 
     private void revealPublicBaselineAndroidUpdateControl() {
         scrollUntilVisibleProductSemantic(
-                "Android APK updates", "android.widget.TextView", false, Direction.DOWN);
+                "ANDROID APK UPDATES", "android.widget.TextView", false, Direction.UP);
         BySelector[] updateButton = productTextOrDescriptionSelectors(
                 "Check for Android updates", "android.widget.Button", true);
         UiObject2 direct = findAnyNow(updateButton);
