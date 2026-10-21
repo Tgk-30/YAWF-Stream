@@ -75,6 +75,7 @@ class YawfAndroidUpdater private constructor(
   private var operation: Operation? = null
   private var manualCheckPending = false
   private var permissionResumeTeardownPending = false
+  private var pendingInstallerLaunch: PendingInstallerLaunch? = null
 
   private val resumeReadiness = object : Runnable {
     override fun run() {
@@ -200,6 +201,7 @@ class YawfAndroidUpdater private constructor(
     runOnMain {
       foreground = false
       windowHasFocus = false
+      clearPendingInstallerLaunch()
       main.removeCallbacks(resumeReadiness)
       main.removeCallbacks(pollDownload)
     }
@@ -273,6 +275,7 @@ class YawfAndroidUpdater private constructor(
       resumePermissionFlow()
       return
     }
+    if (launchPendingVerifiedInstallerIfReady()) return
     if (dialog != null) return
     val phase = persistedUpdatePhase()
     if (phase != PHASE_NONE || persistedDownloadId() != NO_DOWNLOAD_ID) {
@@ -380,6 +383,7 @@ class YawfAndroidUpdater private constructor(
       operationFuture?.cancel(true)
       operationFuture = null
       operation = null
+      clearPendingInstallerLaunch()
       dismissDialog()
       worker.shutdownNow()
     }
@@ -940,6 +944,7 @@ class YawfAndroidUpdater private constructor(
       clearPersistedDownload(removeManagerEntry = true, removeFile = true)
       dismissDialog()
     }
+    val verificationResumeNumber = resumeNumber
     submit(
       operation = Operation.VERIFY,
       work = { verifyStagedPackage(candidate, staged) },
@@ -948,9 +953,112 @@ class YawfAndroidUpdater private constructor(
         showRetryOrDefer("The verified update changed or became unavailable.", candidate)
       },
     ) {
+      if (foreground && resumeNumber == verificationResumeNumber) {
+        armPendingInstallerLaunch(candidate, staged, verificationResumeNumber)
+      }
       dismissDialog()
-      if (activityReady()) launchInstaller(candidate)
+      if (foreground) {
+        scheduleReadiness(resetAttempts = true)
+      }
     }
+  }
+
+  private fun armPendingInstallerLaunch(
+    candidate: Candidate,
+    verifiedFile: File,
+    verificationResumeNumber: Long,
+  ): Boolean {
+    if (
+      !foreground ||
+      destroyed ||
+      resumeNumber != verificationResumeNumber ||
+      activity.isFinishing ||
+      (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed) ||
+      activity.window?.decorView?.isAttachedToWindow != true
+    ) {
+      return false
+    }
+    return try {
+      val expected = stagedFile(candidate)?.canonicalFile ?: return false
+      val verified = verifiedFile.canonicalFile
+      if (
+        verified != expected ||
+        !verified.isFile ||
+        verified.length() != candidate.size ||
+        verified.lastModified() <= 0L
+      ) {
+        return false
+      }
+      pendingInstallerLaunch =
+        PendingInstallerLaunch(
+          candidate = candidate,
+          canonicalPath = verified.path,
+          length = verified.length(),
+          lastModified = verified.lastModified(),
+          resumeNumber = verificationResumeNumber,
+        )
+      true
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  private fun launchPendingVerifiedInstallerIfReady(): Boolean {
+    val pending = pendingInstallerLaunch ?: return false
+    val ready = activityReady()
+    if (!foreground || !ready || operation != null) return true
+    val persisted = loadCandidate(KEY_DOWNLOAD_CANDIDATE)
+    val staged = stagedFile(pending.candidate)
+    val fileMatches =
+      try {
+        val canonical = staged?.canonicalFile
+        canonical != null &&
+          canonical.path == pending.canonicalPath &&
+          canonical.isFile &&
+          canonical.length() == pending.length &&
+          canonical.length() == pending.candidate.size &&
+          canonical.lastModified() == pending.lastModified
+      } catch (_: Exception) {
+        false
+      }
+    val mayLaunch =
+      pendingInstallerMayLaunch(
+        isForeground = foreground,
+        isActivityReady = ready,
+        hasOperation = operation != null,
+        resumeMatches = pending.resumeNumber == resumeNumber,
+        phase = persistedUpdatePhase(),
+        candidateMatches = persisted == pending.candidate,
+        fileMatches = fileMatches,
+        upgradeStillValid = candidateStillNewer(pending.candidate),
+      )
+    clearPendingInstallerLaunch()
+    if (!mayLaunch) return false
+    launchInstaller(pending.candidate)
+    return true
+  }
+
+  private fun pendingInstallerMayLaunch(
+    isForeground: Boolean,
+    isActivityReady: Boolean,
+    hasOperation: Boolean,
+    resumeMatches: Boolean,
+    phase: Int,
+    candidateMatches: Boolean,
+    fileMatches: Boolean,
+    upgradeStillValid: Boolean,
+  ): Boolean =
+    isForeground &&
+      isActivityReady &&
+      !hasOperation &&
+      resumeMatches &&
+      phase == PHASE_STAGED &&
+      candidateMatches &&
+      fileMatches &&
+      upgradeStillValid
+
+  private fun clearPendingInstallerLaunch() {
+    pendingInstallerLaunch = null
   }
 
   private fun verifyStagedPackage(candidate: Candidate, target: File) {
@@ -1337,6 +1445,7 @@ class YawfAndroidUpdater private constructor(
   }
 
   private fun cleanupAfterUpgrade() {
+    clearPendingInstallerLaunch()
     val installed = try {
       installedIdentity()
     } catch (_: Exception) {
@@ -1410,6 +1519,7 @@ class YawfAndroidUpdater private constructor(
     candidate: Candidate,
     resolvedUrlHash: String?,
   ): Boolean {
+    clearPendingInstallerLaunch()
     if (phase !in setOf(PHASE_PREPARING, PHASE_DOWNLOADING, PHASE_STAGED)) return false
     val editor = preferences.edit()
       .putInt(KEY_UPDATE_PHASE, phase)
@@ -1421,8 +1531,9 @@ class YawfAndroidUpdater private constructor(
     return editor.commit()
   }
 
-  private fun persistDownload(id: Long, candidate: Candidate): Boolean =
-    preferences.edit()
+  private fun persistDownload(id: Long, candidate: Candidate): Boolean {
+    clearPendingInstallerLaunch()
+    return preferences.edit()
       .putLong(KEY_DOWNLOAD_ID, id)
       .putInt(KEY_UPDATE_PHASE, PHASE_DOWNLOADING)
       .putString(KEY_DOWNLOAD_CANDIDATE, candidate.toJson().toString())
@@ -1430,21 +1541,25 @@ class YawfAndroidUpdater private constructor(
       .remove(KEY_RESOLVED_URL_HASH)
       .putBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)
       .commit()
+  }
 
-  private fun persistStaged(candidate: Candidate): Boolean =
-    preferences.edit()
+  private fun persistStaged(candidate: Candidate): Boolean {
+    clearPendingInstallerLaunch()
+    return preferences.edit()
       .putInt(KEY_UPDATE_PHASE, PHASE_STAGED)
       .putString(KEY_DOWNLOAD_CANDIDATE, candidate.toJson().toString())
       .putLong(KEY_PHASE_NOT_BEFORE_GENERATION, foregroundGeneration)
       .remove(KEY_RESOLVED_URL_HASH)
       .putBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)
       .commit()
+  }
 
   private fun persistedUpdatePhase(): Int =
     preferences.getInt(KEY_UPDATE_PHASE, PHASE_NONE)
       .takeIf { it in PHASE_NONE..PHASE_STAGED } ?: PHASE_NONE
 
   private fun deferPhaseUntilNextForeground() {
+    clearPendingInstallerLaunch()
     preferences.edit()
       .putLong(KEY_PHASE_NOT_BEFORE_GENERATION, foregroundGeneration + 1L)
       .commit()
@@ -1454,6 +1569,7 @@ class YawfAndroidUpdater private constructor(
     preferences.getLong(KEY_DOWNLOAD_ID, NO_DOWNLOAD_ID).takeIf { it > 0L } ?: NO_DOWNLOAD_ID
 
   private fun clearPersistedDownload(removeManagerEntry: Boolean, removeFile: Boolean) {
+    clearPendingInstallerLaunch()
     main.removeCallbacks(pollDownload)
     val id = persistedDownloadId()
     val candidate = loadCandidate(KEY_DOWNLOAD_CANDIDATE)
@@ -2151,6 +2267,7 @@ class YawfAndroidUpdater private constructor(
   }
 
   private fun cancelOperation() {
+    clearPendingInstallerLaunch()
     operationSerial += 1
     operationFuture?.cancel(true)
     operationFuture = null
@@ -2226,6 +2343,14 @@ class YawfAndroidUpdater private constructor(
         .put("browserDownloadUrl", browserDownloadUrl)
         .also { if (releaseDigest != null) it.put("releaseDigest", releaseDigest) }
   }
+
+  private data class PendingInstallerLaunch(
+    val candidate: Candidate,
+    val canonicalPath: String,
+    val length: Long,
+    val lastModified: Long,
+    val resumeNumber: Long,
+  )
 
   private data class InstalledIdentity(
     val packageName: String,

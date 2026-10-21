@@ -110,6 +110,130 @@ function permissionReturnFailures(subject) {
   return failures;
 }
 
+function pendingInstallerLifecycleFailures(subject) {
+  const failures = [];
+  const fields = sourceSection(subject, "private var destroyed", "private val resumeReadiness");
+  const foreground = sourceSection(
+    subject,
+    "private fun handleForegroundReadiness()",
+    "private fun resumePersistedUpdate",
+  );
+  const verify = sourceSection(subject, "private fun verifyStagedForInstall", "private fun verifyStagedPackage");
+  const arm = sourceSection(subject, "private fun armPendingInstallerLaunch", "private fun launchPendingVerifiedInstallerIfReady");
+  const consume = sourceSection(subject, "private fun launchPendingVerifiedInstallerIfReady", "private fun pendingInstallerMayLaunch");
+  const policy = sourceSection(subject, "private fun pendingInstallerMayLaunch", "private fun clearPendingInstallerLaunch");
+  const pendingData = sourceSection(subject, "private data class PendingInstallerLaunch", "private data class InstalledIdentity");
+  const onResume = sourceSection(subject, "fun onResume()", "/** Forward Activity.onPause()");
+  const onPause = sourceSection(subject, "fun onPause()", "/** Forward Activity.onWindowFocusChanged()");
+  const onDestroy = sourceSection(subject, "fun onDestroy()", "private fun startCheck");
+  const cancel = sourceSection(subject, "private fun cancelOperation()", "private fun cancelOperationAndDismiss");
+  const cleanup = sourceSection(subject, "private fun cleanupAfterUpgrade()", "private fun automaticCheckIsDue()");
+  const persistPhase = sourceSection(subject, "private fun persistUpdatePhase", "private fun persistDownload");
+  const persistDownload = sourceSection(subject, "private fun persistDownload", "private fun persistStaged");
+  const persistStaged = sourceSection(subject, "private fun persistStaged", "private fun persistedUpdatePhase");
+  const deferPhase = sourceSection(subject, "private fun deferPhaseUntilNextForeground", "private fun persistedDownloadId");
+  const clearPersisted = sourceSection(subject, "private fun clearPersistedDownload", "private fun removePersistedDownloadManagerEntry");
+
+  if (!fields.includes("private var pendingInstallerLaunch: PendingInstallerLaunch? = null")) {
+    failures.push("transient pending installer candidate is missing");
+  }
+  if (!pendingData.includes("val resumeNumber: Long")) {
+    failures.push("pending installer candidate is not bound to its foreground resume");
+  }
+  if (!onResume.includes("resumeNumber += 1")) {
+    failures.push("foreground resume identity is not advanced on resume");
+  }
+  const capture = verify.indexOf("val verificationResumeNumber = resumeNumber");
+  const submit = verify.indexOf("submit(", capture);
+  const armGuard = verify.indexOf("if (foreground && resumeNumber == verificationResumeNumber) {", submit);
+  const armCall = verify.indexOf(
+    "armPendingInstallerLaunch(candidate, staged, verificationResumeNumber)",
+    armGuard,
+  );
+  const dismiss = verify.indexOf("dismissDialog()", armCall);
+  const schedule = verify.indexOf("scheduleReadiness(resetAttempts = true)", dismiss);
+  if (!(capture >= 0 && capture < submit && submit < armGuard && armGuard < armCall && armCall < dismiss && dismiss < schedule)) {
+    failures.push("verified current-resume result is not armed before dismissal and readiness scheduling");
+  }
+  if (subject.match(/pendingInstallerLaunch\s*=\s*PendingInstallerLaunch/g)?.length !== 1) {
+    failures.push("pending installer candidate is assigned outside the single verifier-success arm path");
+  }
+  const pendingBeforeDialog = foreground.indexOf("if (launchPendingVerifiedInstallerIfReady()) return");
+  const genericDialog = foreground.indexOf("if (dialog != null) return");
+  if (!(pendingBeforeDialog >= 0 && pendingBeforeDialog < genericDialog)) {
+    failures.push("verified installer launch is not resumed before the generic dialog guard");
+  }
+
+  const policyConditions = [
+    "isForeground &&",
+    "isActivityReady &&",
+    "!hasOperation &&",
+    "resumeMatches &&",
+    "phase == PHASE_STAGED &&",
+    "candidateMatches &&",
+    "fileMatches &&",
+    "fileMatches &&\n      upgradeStillValid",
+  ];
+  for (const condition of policyConditions) {
+    if (!policy.includes(condition)) failures.push(`pending installer policy lacks: ${condition}`);
+  }
+  const consumeRequirements = [
+    "persisted == pending.candidate",
+    "canonical.path == pending.canonicalPath",
+    "canonical.isFile",
+    "canonical.length() == pending.length",
+    "canonical.length() == pending.candidate.size",
+    "canonical.lastModified() == pending.lastModified",
+    "resumeMatches = pending.resumeNumber == resumeNumber",
+    "candidateStillNewer(pending.candidate)",
+  ];
+  for (const requirement of consumeRequirements) {
+    if (!consume.includes(requirement)) failures.push(`pending installer identity check lacks: ${requirement}`);
+  }
+  const clear = consume.indexOf("clearPendingInstallerLaunch()");
+  const launch = consume.indexOf("launchInstaller(pending.candidate)");
+  if (!(clear >= 0 && clear < launch)) failures.push("pending installer is not consumed before launch");
+  if (consume.includes("verifyStagedForInstall(")) {
+    failures.push("focus recovery re-enters verification instead of consuming its verified result");
+  }
+  const armRequirements = [
+    "!foreground ||",
+    "destroyed ||",
+    "resumeNumber != verificationResumeNumber",
+    "activity.isFinishing",
+    "activity.isDestroyed",
+    "activity.window?.decorView?.isAttachedToWindow != true",
+    "verified != expected",
+    "!verified.isFile",
+    "verified.length() != candidate.size",
+    "verified.lastModified() <= 0L",
+  ];
+  for (const requirement of armRequirements) {
+    if (!arm.includes(requirement)) failures.push(`verifier-success arm lacks: ${requirement}`);
+  }
+  if (arm.includes("windowHasFocus") || arm.includes("activity.hasWindowFocus()")) {
+    failures.push("verifier-success arm incorrectly requires focus instead of waiting for readiness");
+  }
+
+  const clearScopes = [
+    [onPause, "pause"],
+    [onDestroy, "destroy"],
+    [cancel, "cancel"],
+    [cleanup, "upgrade cleanup"],
+    [persistPhase, "generic phase change"],
+    [persistDownload, "download phase change"],
+    [persistStaged, "staged phase change"],
+    [deferPhase, "phase deferral"],
+    [clearPersisted, "persisted download cleanup"],
+  ];
+  for (const [scope, label] of clearScopes) {
+    if (!scope.includes("clearPendingInstallerLaunch()")) {
+      failures.push(`pending installer is not cleared on ${label}`);
+    }
+  }
+  return failures;
+}
+
 test("native updater exposes only the bounded Activity-owned API", () => {
   assert.match(source, /class YawfAndroidUpdater private constructor/);
   assert.match(source, /class YawfUpdateFileProvider : FileProvider\(\)/);
@@ -229,6 +353,124 @@ test("permission return tears down only the owned retained dialog before the foc
   for (const [name, mutant] of Object.entries(mutants)) {
     assert.notEqual(mutant, source, `${name} mutation site must exist`);
     assert.notDeepEqual(permissionReturnFailures(mutant), [], name);
+  }
+});
+
+test("pending verified installer policy waits for focus and rejects lifecycle or identity mismatches", () => {
+  assert.deepEqual(pendingInstallerLifecycleFailures(source), []);
+  const mutants = {
+    "background allowed": source.replace("    isForeground &&\n", "    true &&\n", 1),
+    "missing focus allowed": source.replace("      isActivityReady &&\n", "      true &&\n", 1),
+    "active operation allowed": source.replace("      !hasOperation &&\n", "      true &&\n", 1),
+    "prior resume allowed": source.replace("      resumeMatches &&\n", "      true &&\n", 1),
+    "non-staged phase allowed": source.replace("      phase == PHASE_STAGED &&\n", "      true &&\n", 1),
+    "candidate mismatch allowed": source.replace("      candidateMatches &&\n", "      true &&\n", 1),
+    "file mismatch allowed": source.replace("      fileMatches &&\n", "      true &&\n", 1),
+    "obsolete candidate allowed": source.replace(
+      "      fileMatches &&\n      upgradeStillValid",
+      "      fileMatches &&\n      true",
+      1,
+    ),
+    "pending resume identity ignored": source.replace(
+      "        resumeMatches = pending.resumeNumber == resumeNumber,\n",
+      "        resumeMatches = true,\n",
+      1,
+    ),
+  };
+  for (const [name, mutant] of Object.entries(mutants)) {
+    assert.notEqual(mutant, source, `${name} mutation site must exist`);
+    assert.notDeepEqual(pendingInstallerLifecycleFailures(mutant), [], name);
+  }
+});
+
+test("verifier success arms only for the live foreground resume and schedules after dismissing verification", () => {
+  assert.deepEqual(pendingInstallerLifecycleFailures(source), []);
+  const verifiedSuccess = `      if (foreground && resumeNumber == verificationResumeNumber) {
+        armPendingInstallerLaunch(candidate, staged, verificationResumeNumber)
+      }
+      dismissDialog()
+      if (foreground) {
+        scheduleReadiness(resetAttempts = true)
+      }`;
+  const exactBase = `      dismissDialog()
+      if (activityReady()) launchInstaller(candidate)`;
+  const mutants = {
+    "exact single activityReady base": source.replace(verifiedSuccess, exactBase, 1),
+    "resumed callback arms installer": source.replace(
+      "      if (foreground && resumeNumber == verificationResumeNumber) {",
+      "      if (foreground) {",
+      1,
+    ),
+    "resume identity is not advanced": source.replace("      resumeNumber += 1\n", "      resumeNumber += 0\n", 1),
+    "arm accepts mismatched resume": source.replace(
+      "      resumeNumber != verificationResumeNumber ||\n",
+      "",
+      1,
+    ),
+    "finishing owner can arm": source.replace(
+      `      resumeNumber != verificationResumeNumber ||
+      activity.isFinishing ||
+      (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed) ||`,
+      `      resumeNumber != verificationResumeNumber ||
+      false ||
+      (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed) ||`,
+      1,
+    ),
+    "detached owner can arm": source.replace(
+      "      activity.window?.decorView?.isAttachedToWindow != true\n",
+      "      false\n",
+      1,
+    ),
+    "readiness scheduled before verification dialog dismissal": source.replace(
+      verifiedSuccess,
+      `      if (foreground && resumeNumber == verificationResumeNumber) {
+        armPendingInstallerLaunch(candidate, staged, verificationResumeNumber)
+      }
+      if (foreground) {
+        scheduleReadiness(resetAttempts = true)
+      }
+      dismissDialog()`,
+      1,
+    ),
+  };
+  for (const [name, mutant] of Object.entries(mutants)) {
+    assert.notEqual(mutant, source, `${name} mutation site must exist`);
+    assert.notDeepEqual(pendingInstallerLifecycleFailures(mutant), [], name);
+  }
+});
+
+test("pending installer is one shot and cleared by pause, cancellation, cleanup, and phase changes", () => {
+  assert.deepEqual(pendingInstallerLifecycleFailures(source), []);
+  const mutants = {
+    "launch before consume": source.replace(
+      "    clearPendingInstallerLaunch()\n    if (!mayLaunch) return false\n    launchInstaller(pending.candidate)",
+      "    if (!mayLaunch) return false\n    launchInstaller(pending.candidate)\n    clearPendingInstallerLaunch()",
+      1,
+    ),
+    "pause retains armed installer": source.replace(
+      "      windowHasFocus = false\n      clearPendingInstallerLaunch()",
+      "      windowHasFocus = false",
+      1,
+    ),
+    "cancel retains armed installer": source.replace(
+      "  private fun cancelOperation() {\n    clearPendingInstallerLaunch()",
+      "  private fun cancelOperation() {",
+      1,
+    ),
+    "upgrade cleanup retains armed installer": source.replace(
+      "  private fun cleanupAfterUpgrade() {\n    clearPendingInstallerLaunch()",
+      "  private fun cleanupAfterUpgrade() {",
+      1,
+    ),
+    "phase transition retains armed installer": source.replace(
+      "  private fun persistUpdatePhase(\n    phase: Int,\n    candidate: Candidate,\n    resolvedUrlHash: String?,\n  ): Boolean {\n    clearPendingInstallerLaunch()",
+      "  private fun persistUpdatePhase(\n    phase: Int,\n    candidate: Candidate,\n    resolvedUrlHash: String?,\n  ): Boolean {",
+      1,
+    ),
+  };
+  for (const [name, mutant] of Object.entries(mutants)) {
+    assert.notEqual(mutant, source, `${name} mutation site must exist`);
+    assert.notDeepEqual(pendingInstallerLifecycleFailures(mutant), [], name);
   }
 });
 
@@ -530,7 +772,7 @@ test("actual Kotlin parser, redirect, replay, state, and cancellation behavior",
       { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
     );
     assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
-    assert.match(run.stdout, /YawfAndroidUpdater behavior assertions passed: 83/);
+    assert.match(run.stdout, /YawfAndroidUpdater behavior assertions passed: 92/);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }

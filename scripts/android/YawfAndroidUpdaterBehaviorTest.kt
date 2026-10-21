@@ -430,6 +430,40 @@ private fun testCancellationInvalidatesResults() {
   assertThat(Subject.get("operation") == null, "operation state cleared")
 }
 
+private fun testPendingInstallerLaunchPolicy() {
+  fun mayLaunch(
+    foreground: Boolean = true,
+    ready: Boolean = true,
+    activeOperation: Boolean = false,
+    resumeMatches: Boolean = true,
+    phase: Int = 3,
+    candidateMatches: Boolean = true,
+    fileMatches: Boolean = true,
+    upgradeStillValid: Boolean = true,
+  ): Boolean =
+    Subject.invoke(
+      "pendingInstallerMayLaunch",
+      foreground,
+      ready,
+      activeOperation,
+      resumeMatches,
+      phase,
+      candidateMatches,
+      fileMatches,
+      upgradeStillValid,
+    ) as Boolean
+
+  assertThat(!mayLaunch(ready = false), "delayed focus cannot launch installer")
+  assertThat(mayLaunch(ready = true), "restored focus permits verified installer launch")
+  assertThat(!mayLaunch(activeOperation = true), "active operation blocks installer launch")
+  assertThat(!mayLaunch(foreground = false), "background callback cannot launch installer")
+  assertThat(!mayLaunch(resumeMatches = false), "a prior foreground result cannot launch after resume")
+  assertThat(!mayLaunch(phase = 2), "non-staged phase cannot launch installer")
+  assertThat(!mayLaunch(candidateMatches = false), "persisted candidate mismatch blocks installer")
+  assertThat(!mayLaunch(fileMatches = false), "private staged file mismatch blocks installer")
+  assertThat(!mayLaunch(upgradeStillValid = false), "obsolete verified candidate cannot launch installer")
+}
+
 fun main() {
   testValidReleaseAndManifest()
   testReleaseFilteringAndBinding()
@@ -441,5 +475,6 @@ fun main() {
   testOrphanDownloadIdentity()
   testRedirectPolicy()
   testCancellationInvalidatesResults()
+  testPendingInstallerLaunchPolicy()
   println("YawfAndroidUpdater behavior assertions passed: $assertions")
 }
