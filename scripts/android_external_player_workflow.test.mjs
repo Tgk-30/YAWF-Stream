@@ -308,6 +308,28 @@ function driverContract(d) {
 }
 
 test('workflow pins and admits only the exact official VLC fixture handler', () => workflowContract(workflow, job));
+test('executes the VLC minimum SDK admission against aapt2 badging', () => {
+  const line = job.split('\n').find(value => value.includes('minSdkVersion:'))?.trim();
+  assert.ok(line, 'Missing exact minimum SDK admission');
+  const directory = mkdtempSync(join(tmpdir(), 'yawf-vlc-badging-'));
+  const path = join(directory, 'vlc-badging.txt');
+  function admit(contents, command = line) {
+    writeFileSync(path, contents);
+    return spawnSync('bash', ['-c', command], {
+      encoding: 'utf8', env: { ...process.env, EVIDENCE: directory },
+    }).status;
+  }
+  const actualFormat = "package: name='org.videolan.vlc' versionCode='13070108' versionName='3.7.1'\nminSdkVersion:'17'\ntargetSdkVersion:'36'\nnative-code: 'x86_64'\n";
+  assert.equal(admit(actualFormat), 0);
+  for (const invalid of [
+    actualFormat.replace("minSdkVersion:'17'", "minSdkVersion:'18'"),
+    actualFormat.replace("minSdkVersion:'17'\n", ''),
+    actualFormat.replace("minSdkVersion:'17'", "prefix-minSdkVersion:'17'"),
+    actualFormat.replace("minSdkVersion:'17'", "minSdkVersion:'17' trailing"),
+    actualFormat.replace("minSdkVersion:'17'", "sdkVersion:'17'"),
+  ]) assert.notEqual(admit(invalid), 0);
+  assert.notEqual(admit(actualFormat, line.replace('minSdkVersion:', 'sdkVersion:')), 0);
+});
 test('fixture emits bounded token-free media and HTTP diagnostics', () => fixtureContract(fixture));
 test('driver preserves the strict product, chooser, VLC, seek, and Back flow', () => driverContract(driver));
 

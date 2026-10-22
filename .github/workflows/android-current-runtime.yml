@@ -598,7 +598,7 @@ jobs:
           test "$(apkanalyzer manifest version-name "$VLC_APK")" = "$VLC_VERSION"
           test "$(apkanalyzer manifest version-code "$VLC_APK")" = "$VLC_VERSION_CODE"
           aapt2 dump badging "$VLC_APK" > "$EVIDENCE/vlc-badging.txt"
-          grep -Fq "sdkVersion:'17'" "$EVIDENCE/vlc-badging.txt"
+          grep -Fxq "minSdkVersion:'17'" "$EVIDENCE/vlc-badging.txt"
           grep -Fq "targetSdkVersion:'36'" "$EVIDENCE/vlc-badging.txt"
           grep -Fq "native-code: 'x86_64'" "$EVIDENCE/vlc-badging.txt"
           test "$(sed -n "s/^application-label:'\([^']*\)'$/\1/p" "$EVIDENCE/vlc-badging.txt" | head -1)" = VLC
