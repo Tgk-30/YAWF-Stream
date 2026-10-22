@@ -319,6 +319,30 @@ function shouldUseNativeHls(video: HTMLVideoElement): boolean {
   );
 }
 
+const WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS = 0.001;
+
+function nativeHlsSourceWithExactStart(
+  url: string,
+  startPositionSeconds: number | null | undefined,
+): string {
+  const target = Number.isFinite(startPositionSeconds)
+    ? Math.max(0, startPositionSeconds as number)
+    : 0;
+  // WebKit applies a temporal media fragment after HAVE_CURRENT_DATA, but its
+  // media element implementation ignores a fragment whose start is exactly 0.
+  // Clamp sub-millisecond targets to a decimal NPT value that WebKit accepts;
+  // one millisecond remains within the exact handoff tolerance.
+  const fragmentTarget = target < WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS
+    ? WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS
+    : target;
+  const hashIndex = url.indexOf("#");
+  if (hashIndex < 0) return `${url}#t=${fragmentTarget}`;
+  const separator = hashIndex === url.length - 1 || url.endsWith("&") ? "" : "&";
+  // Keep existing non-time fragment parameters. Media fragment processing
+  // uses the last valid temporal parameter, so this exact target wins.
+  return `${url}${separator}t=${fragmentTarget}`;
+}
+
 interface WebKitPlaybackTargetAvailabilityEvent extends Event {
   availability?: "available" | "not-available";
 }
@@ -3200,6 +3224,7 @@ function WebviewPlayer({
   // once, when metadata first loads, without re-subscribing the effect.
   const startPositionRef = useRef(startPositionSeconds);
   startPositionRef.current = startPositionSeconds;
+  const nativeExactHlsFragmentRef = useRef(false);
   const sourceSwitchStateRef = useRef(sourceSwitchState);
   sourceSwitchStateRef.current = sourceSwitchState;
   const timelineOffsetRef = useRef(
@@ -3455,6 +3480,11 @@ function WebviewPlayer({
         if (confirmExactHandoff()) return;
         setPlaybackStatus("seeking");
         video.pause();
+        // Native WebKit HLS gets its exact initial position through a temporal
+        // media fragment. Let WebKit apply that fragment once current data is
+        // available instead of issuing an earlier seek that HLS startup can
+        // overwrite with the live edge.
+        if (nativeExactHlsFragmentRef.current) return;
         if (!targetIsAvailable(start)) return;
         try {
           video.currentTime = start;
@@ -3746,6 +3776,7 @@ function WebviewPlayer({
   useEffect(() => {
     const video = videoRef.current;
     if (video == null) return;
+    nativeExactHlsFragmentRef.current = false;
 
     if (!isHls) {
       setNativeHlsPlayback(false);
@@ -3763,7 +3794,11 @@ function WebviewPlayer({
       } else {
         video.removeAttribute("crossorigin");
       }
-      if (video.src !== url) video.src = url;
+      const sourceUrl = requiresExactHandoffRef.current
+        ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
+        : url;
+      nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
+      if (video.src !== sourceUrl) video.src = sourceUrl;
       return;
     }
 
@@ -3823,7 +3858,11 @@ function WebviewPlayer({
           } else {
             element.removeAttribute("crossorigin");
           }
-          if (element.src !== url) element.src = url;
+          const sourceUrl = requiresExactHandoffRef.current
+            ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
+            : url;
+          nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
+          if (element.src !== sourceUrl) element.src = sourceUrl;
           return;
         }
         onPlaybackErrorRef.current(

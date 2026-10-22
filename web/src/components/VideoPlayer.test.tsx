@@ -2131,6 +2131,300 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it("pins an exact zero native HLS handoff with a WebKit media fragment", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=9",
+      timelineOffsetSeconds: 9,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native zero movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 9));
+      const player = screen.getByRole("dialog", { name: "Playing Native zero movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe(
+        "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=9#t=0.001",
+      ));
+      expect(hlsInstances).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("pins a nonzero exact native HLS handoff with a WebKit media fragment", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=4",
+      timelineOffsetSeconds: 4,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native nonzero movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 9));
+      const player = screen.getByRole("dialog", { name: "Playing Native nonzero movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe(
+        "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=4#t=5",
+      ));
+      expect(hlsInstances).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses the decimal zero anchor for a sub-millisecond exact native HLS target", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0.0000001",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native near-zero movie"
+          startPositionSeconds={0.0000001}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0.0000001));
+      const player = screen.getByRole("dialog", { name: "Playing Native near-zero movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe(
+        "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0.0000001#t=0.001",
+      ));
+      expect(hlsInstances).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves native HLS query and fragment bytes before the exact target", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const optimizedUrl =
+      "https://server.example/api/stream/session-1/index.m3u8?quality=480p&capability=A%2BB%2F%3D#track=audio&t=7";
+    const request = vi.fn(async () => ({
+      url: optimizedUrl,
+      timelineOffsetSeconds: 9,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const fetchMock = vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native fragment preservation movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      const player = screen.getByRole("dialog", {
+        name: "Playing Native fragment preservation movie",
+      });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe(`${optimizedUrl}&t=0.001`));
+      expect(fetchMock).toHaveBeenCalledWith(
+        optimizedUrl,
+        expect.objectContaining({ credentials: "include" }),
+      );
+      expect(hlsInstances).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("waits for the native WebKit fragment seek without assigning currentTime", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=9",
+      timelineOffsetSeconds: 9,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native gate movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      const player = screen.getByRole("dialog", { name: "Playing Native gate movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toContain("/index.m3u8?quality=480p&start=9"));
+
+      const video = player.querySelector("video.player-video") as HTMLVideoElement;
+      const assignedTimes: number[] = [];
+      let currentTime = 0;
+      let readyState: number = HTMLMediaElement.HAVE_METADATA;
+      let seeking = true;
+      Object.defineProperties(video, {
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (value: number) => { assignedTimes.push(value); },
+        },
+        duration: { configurable: true, value: Number.POSITIVE_INFINITY },
+        paused: { configurable: true, value: true },
+        readyState: { configurable: true, get: () => readyState },
+        seeking: { configurable: true, get: () => seeking },
+        seekable: {
+          configurable: true,
+          value: {
+            length: 1,
+            start: () => 0,
+            end: () => Number.POSITIVE_INFINITY,
+          },
+        },
+      });
+      vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+
+      fireEvent.loadedMetadata(video);
+      expect(assignedTimes).toEqual([]);
+      expect(within(player).getByRole("status").textContent).toContain("Synchronizing playback");
+
+      currentTime = 9;
+      readyState = HTMLMediaElement.HAVE_CURRENT_DATA;
+      seeking = false;
+      fireEvent.loadedData(video);
+      expect(assignedTimes).toEqual([]);
+      expect(within(player).getByRole("status").textContent).toContain("Synchronizing playback");
+
+      currentTime = 0.001;
+      seeking = true;
+      fireEvent.seeking(video);
+      fireEvent.loadedData(video);
+      expect(within(player).getByRole("status").textContent).toContain("Synchronizing playback");
+
+      seeking = false;
+      fireEvent.seeked(video);
+      expect(within(player).queryByText("Synchronizing playback…")).toBeNull();
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("restores Device Original when an exact native HLS handoff fails", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=9",
+      timelineOffsetSeconds: 9,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native fallback movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      const player = screen.getByRole("dialog", { name: "Playing Native fallback movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toContain("#t=0.001"));
+
+      fireMediaError(player.querySelector("video.player-video") as HTMLVideoElement);
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe("https://server.example/api/stream/session-1"));
+      expect(recordDiagnosticMock).toHaveBeenCalledWith(
+        "player",
+        "server_optimized.handoff_failed",
+        "warning",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not complete exact handoff before current data or while a seek is active", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const request = vi.fn(async () => ({
@@ -5394,7 +5688,7 @@ describe("HLS source attach", () => {
     );
   });
 
-  it("keeps native HLS in the iOS app", () => {
+  it("leaves ordinary nonexact native HLS startup unchanged in the iOS app", () => {
     deviceKindMock.mockReturnValue("ios");
     Object.defineProperty(window, "__YAWF_TAURI_MOBILE__", {
       configurable: true,
@@ -5405,12 +5699,18 @@ describe("HLS source attach", () => {
     );
 
     render(
-      <VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />,
+      <VideoPlayer
+        url="https://x/stream.m3u8?quality=auto"
+        title="Ordinary native HLS"
+        startPositionSeconds={120}
+        onClose={() => {}}
+      />,
     );
 
     expect(hlsInstances).toHaveLength(0);
-    const video = document.querySelector("video.player-video") as HTMLVideoElement;
-    expect(video.src).toBe("https://x/stream.m3u8");
+    const player = screen.getByRole("dialog", { name: "Playing Ordinary native HLS" });
+    const video = player.querySelector("video.player-video") as HTMLVideoElement;
+    expect(video.src).toBe("https://x/stream.m3u8?quality=auto");
   });
 
   it("destroys the hls.js instance on unmount", async () => {
