@@ -13,7 +13,7 @@ function assertVersionPairContract(value) {
   assert.match(value, /LEGACY_PUBLISHED_VERSION = "2\.3\.25"/);
   assert.match(value, /CURRENT_CANDIDATE_VERSION = "2\.3\.27"/);
   assert.match(value, /CURRENT_PUBLISHED_VERSION = "2\.3\.26"/);
-  assert.match(value, /NEXT_CANDIDATE_VERSION = "2\.3\.29"/);
+  assert.match(value, /NEXT_CANDIDATE_VERSION = "2\.3\.30"/);
   assert.match(value, /NEXT_PUBLISHED_VERSION = "2\.3\.27"/);
   assert.match(value, legacyPair);
   assert.match(value, currentPair);
@@ -21,14 +21,14 @@ function assertVersionPairContract(value) {
   assert.match(value, exactVersionPairOracle);
 }
 
-test('admits only exact 26/25, 27/26, and 29/27 version pairs', () => {
+test('admits only exact 26/25, 27/26, and 30/27 version pairs', () => {
   assertVersionPairContract(source);
 });
 
 for (const [name, mutate] of [
   ['current 27/26 pair', (s) => s.replace(/CURRENT_PUBLISHED_VERSION = "2\.3\.26"/, 'CURRENT_PUBLISHED_VERSION = "2.3.25"')],
   ['legacy 26/25 pair', (s) => s.replace(/LEGACY_PUBLISHED_VERSION = "2\.3\.25"/, 'LEGACY_PUBLISHED_VERSION = "2.3.24"')],
-  ['next 29 candidate literal to 27', (s) => s.replace(/NEXT_CANDIDATE_VERSION = "2\.3\.29"/, 'NEXT_CANDIDATE_VERSION = "2.3.27"')],
+  ['next 30 candidate literal to 29', (s) => s.replace(/NEXT_CANDIDATE_VERSION = "2\.3\.30"/, 'NEXT_CANDIDATE_VERSION = "2.3.29"')],
   ['next 27 stable literal to 26', (s) => s.replace(/NEXT_PUBLISHED_VERSION = "2\.3\.27"/, 'NEXT_PUBLISHED_VERSION = "2.3.26"')],
   ['next 27 stable literal to 28', (s) => s.replace(/NEXT_PUBLISHED_VERSION = "2\.3\.27"/, 'NEXT_PUBLISHED_VERSION = "2.3.28"')],
   ['next pair oracle removal', (s) => s.replace(nextPair, 'false')],
