@@ -23,6 +23,7 @@ function assertCandidateContract(source) {
   assert.match(source, /push:\n    branches:\n      - codex\/qa-platform-release-2326\n    paths:\n      - \.github\/workflows\/android-tv-candidate-runtime\.yml/);
   assert.doesNotMatch(source, /\n  (?:pull_request|schedule):/);
   assert.match(source, /permissions:\n  contents: read\n  actions: read/);
+  assert.match(source, /timeout-minutes: 45/);
   assert.match(source, /if: github\.repository == 'Tgk-30\/YAWF-Stream' && github\.actor == 'Tgk-30' && github\.ref_type == 'branch' && \(github\.event_name == 'workflow_dispatch' \|\| \(github\.event_name == 'push' && github\.ref == 'refs\/heads\/codex\/qa-platform-release-2326'\)\)/);
   assert.doesNotMatch(source, /contents:\s*write|packages:\s*write|secrets\.|GH_TOKEN|gh\s+(?:api|release)|git\s+push/);
 
@@ -107,6 +108,7 @@ test("historical API36 fixture harness media and cleanup runtime body is unchang
 });
 
 for (const [name, mutate] of [
+  ["outer provisioning budget", (s) => s.replace("timeout-minutes: 45", "timeout-minutes: 35")],
   ["candidate run", (s) => s.replace("39836999127", "39836999126")],
   ["candidate source", (s) => s.replace("30a0ccbc0a71a9cf27019e0b35c543e0783179ae", "0".repeat(40))],
   ["APK hash", (s) => s.replace("69673ca2998dd2b05b64a0a39544d7bc664240178616d117f8312dba5a247d93", "0".repeat(64))],
