@@ -4,11 +4,12 @@ import test from 'node:test';
 
 const source = readFileSync(new URL('../.github/workflows/android-tv-candidate.yml', import.meta.url), 'utf8');
 
-test('TV candidate dispatch is private, branch-only and never publishes', () => {
+test('TV candidate producer is owner-only, branch-only and never publishes', () => {
   assert.match(source, /on:\n  workflow_dispatch:\n/);
-  assert.doesNotMatch(source, /\n  (?:push|pull_request|schedule):/);
+  assert.doesNotMatch(source, /\n  (?:pull_request|schedule):/);
+  assert.match(source, /push:\n    branches:\n      - codex\/qa-platform-release-2326\n    paths:\n      - \.github\/workflows\/android-tv-candidate\.yml/);
   assert.match(source, /permissions:\n  contents: read/);
-  assert.match(source, /if: github\.event_name == 'workflow_dispatch' && github\.ref_type == 'branch'/);
+  assert.match(source, /if: github\.repository == 'Tgk-30\/YAWF-Stream' && github\.actor == 'Tgk-30' && github\.ref_type == 'branch' && \(github\.event_name == 'workflow_dispatch' \|\| \(github\.event_name == 'push' && github\.ref == 'refs\/heads\/codex\/qa-platform-release-2326'\)\)/);
   assert.doesNotMatch(source, /contents: write|packages: write|gh release|git push|gh api|GH_TOKEN|TAURI_SIGNING|ANDROID_APP_KEY/);
   assert.match(source, /name: android-tv-verification-candidate/);
   assert.match(source, /"published": False/);

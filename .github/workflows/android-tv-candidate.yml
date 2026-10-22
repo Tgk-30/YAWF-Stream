@@ -2,13 +2,20 @@ name: Android TV private signed candidate
 
 on:
   workflow_dispatch:
+  # A new workflow cannot be dispatched until it exists on the default branch.
+  # Admit only this owned preparation branch and only changes to this producer.
+  push:
+    branches:
+      - codex/qa-platform-release-2326
+    paths:
+      - .github/workflows/android-tv-candidate.yml
 
 permissions:
   contents: read
 
 jobs:
   candidate:
-    if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+    if: github.repository == 'Tgk-30/YAWF-Stream' && github.actor == 'Tgk-30' && github.ref_type == 'branch' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/codex/qa-platform-release-2326'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
