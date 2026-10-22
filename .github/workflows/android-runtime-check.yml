@@ -744,7 +744,7 @@ jobs:
             --certificate-pin candidate-source/web/src-tauri/SIGNING_CERT_SHA256 --sdk "$sdk_root" \
             | tee "$EVIDENCE/apk-verification.txt"
           test "$(apkanalyzer manifest version-code "$CANDIDATE_APK")" = "$CANDIDATE_VERSION_CODE"
-          node --test scripts/android_webview83_runtime_driver.test.mjs
+          node --test scripts/android_webview83_runtime_driver.test.mjs scripts/runtime_webview_hierarchy_redaction.test.mjs
           gradle --no-daemon -p scripts/android-runtime-instrumentation :app:assembleDebug :app:assembleDebugAndroidTest
           image_root="$sdk_root/system-images/android-30/google_apis/x86_64"
           cp "$image_root/source.properties" "$EVIDENCE/image-source.properties"

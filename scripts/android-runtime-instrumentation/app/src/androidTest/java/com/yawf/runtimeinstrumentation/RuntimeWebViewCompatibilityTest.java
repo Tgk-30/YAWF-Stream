@@ -67,9 +67,28 @@ public final class RuntimeWebViewCompatibilityTest {
     private static final Pattern SAFE_LABEL = Pattern.compile("[\\p{L}\\p{N} ._+&()'/-]{1,80}");
     private static final Pattern BINDING_TERMS = Pattern.compile(
             "(?is).*\\b(?:terms of service|license agreement|user agreement|binding terms)\\b.*");
+    // BEGIN STRUCTURED_HIERARCHY_REDACTION
     private static final Pattern URL = Pattern.compile("(?i)https?://[^\\s\\\"'<>]+");
     private static final Pattern SENSITIVE = Pattern.compile(
             "(?i)(authorization|cookie|session|csrf|bearer|password)[^\\s\\\"'<>]*");
+    private static final Pattern XML_ATTRIBUTE = Pattern.compile(
+            "(\\s+[A-Za-z_:][A-Za-z0-9_.:-]*=)([\\\"'])(.*?)(\\2)", Pattern.DOTALL);
+
+    static String redactHierarchyXml(String xml) {
+        Matcher attributes = XML_ATTRIBUTE.matcher(xml);
+        StringBuffer output = new StringBuffer(xml.length());
+        while (attributes.find()) {
+            String value = attributes.group(3);
+            String redacted = URL.matcher(value).replaceAll("[redacted-url]");
+            redacted = SENSITIVE.matcher(redacted).replaceAll("[redacted-sensitive]");
+            String replacement = attributes.group(1) + attributes.group(2)
+                    + redacted + attributes.group(4);
+            attributes.appendReplacement(output, Matcher.quoteReplacement(replacement));
+        }
+        attributes.appendTail(output);
+        return output.toString();
+    }
+    // END STRUCTURED_HIERARCHY_REDACTION
 
     private Instrumentation instrumentation;
     private UiDevice device;
@@ -345,9 +364,9 @@ public final class RuntimeWebViewCompatibilityTest {
         device.dumpWindowHierarchy(hierarchy);
         assertTrue("Hierarchy was empty", hierarchy.length() > 0);
         assertTrue("Hierarchy exceeded bound", hierarchy.length() <= MAX_HIERARCHY_BYTES);
-        String redacted = new String(Files.readAllBytes(hierarchy.toPath()), StandardCharsets.UTF_8);
-        redacted = URL.matcher(redacted).replaceAll("[redacted-url]");
-        redacted = SENSITIVE.matcher(redacted).replaceAll("[redacted-sensitive]");
+        String serializedXml = new String(
+                Files.readAllBytes(hierarchy.toPath()), StandardCharsets.UTF_8);
+        String redacted = redactHierarchyXml(serializedXml);
         writeBounded(hierarchy, redacted, (int) MAX_HIERARCHY_BYTES);
         log("Captured bounded screenshot and redacted hierarchy: " + label);
     }

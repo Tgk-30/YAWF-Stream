@@ -26,6 +26,7 @@ function validate(source) {
   assert.match(job, /providers==\[\('com.google.android.webview','83.0.4103.106'\)\]/);
   assert.match(job, /RuntimeWebViewCompatibilityTest#unsupportedStockWebViewShowsNativeRecoveryOnly/);
   assert.match(job, /node --test scripts\/android_webview83_runtime_driver.test.mjs/);
+  assert.match(job, /node --test scripts\/android_webview83_runtime_driver.test.mjs scripts\/runtime_webview_hierarchy_redaction.test.mjs/);
   assert.match(job, /:app:assembleDebug :app:assembleDebugAndroidTest/);
   assert.match(job, /timeout 240s adb/);
   assert.match(job, /hostTaskRemovalCheckRequired'\] is True/);
@@ -80,6 +81,7 @@ for (const [name, mutate] of [
   ["false OTA claim", (s) => s.replace("assert receipt[key] is False", "assert receipt[key] is True")],
   ["unbounded evidence", (s) => s.replace("assert 0<len(data)<=8*1024*1024", "assert len(data)>0")],
   ["provider replacement", (s) => s + "\n          adb shell cmd webviewupdate set-webview-implementation com.android.webview\n"],
+  ["XML redaction gate omitted", (s) => s.replace(" scripts/runtime_webview_hierarchy_redaction.test.mjs", "")],
 ]) {
   test(`rejects mutated ${name}`, () => {
     const changed = mutate(workflow);
