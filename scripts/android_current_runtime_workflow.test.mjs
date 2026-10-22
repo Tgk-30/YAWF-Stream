@@ -11,6 +11,18 @@ const workflowPath = process.env.ANDROID_CURRENT_RUNTIME_WORKFLOW
   ?? join(root, ".github/workflows/android-current-runtime.yml");
 const workflow = readFileSync(workflowPath, "utf8");
 
+function assertExternalPlayerOuterTimeout(source) {
+  const marker = "\n  external-player-fixture:\n";
+  assert.equal(source.split(marker).length, 2);
+  const externalPlayerJob = source.slice(source.indexOf(marker));
+  const externalLimits = [...externalPlayerJob.matchAll(/^    timeout-minutes: (\d+)$/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(externalLimits, ["45"]);
+  const allJobLimits = [...source.matchAll(/^    timeout-minutes: (\d+)$/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(allJobLimits, ["25", "45"]);
+}
+
 function extractSystemImageMetadataPolicy() {
   const lines = workflow.split("\n");
   const start = lines.findIndex((line) =>
@@ -133,4 +145,19 @@ test("states the proof limits in the durable evidence", () => {
   assert.match(workflow, /latestWebViewSecurityProof=false/);
   assert.match(workflow, /classification=locally-generated-runtime-verification-metadata/);
   assert.match(workflow, /otaPublicationEvidence=false/);
+});
+
+test("external player fixture has a scoped 45-minute outer job budget", () => {
+  assertExternalPlayerOuterTimeout(workflow);
+});
+
+test("external player outer timeout guard rejects the previous 30-minute cutoff", () => {
+  const marker = "\n  external-player-fixture:\n";
+  const [head, externalPlayerJob] = workflow.split(marker);
+  const mutant = head + marker + externalPlayerJob.replace(
+    "    timeout-minutes: 45",
+    "    timeout-minutes: 30",
+  );
+  assert.notEqual(mutant, workflow);
+  assert.throws(() => assertExternalPlayerOuterTimeout(mutant));
 });

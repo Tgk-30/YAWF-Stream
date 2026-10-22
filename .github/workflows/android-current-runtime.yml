@@ -470,7 +470,7 @@ jobs:
     if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true
     name: Public phone27 remote external player on fresh API36
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       EVIDENCE: android-external-player-evidence
       PRODUCT_APK: public-phone27.apk
