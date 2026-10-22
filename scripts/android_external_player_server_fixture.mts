@@ -109,13 +109,40 @@ const MOVIE_URL = `${MEDIA_ORIGIN}/media/synthetic.mp4`;
 const EXTERNAL_CAPABILITY_PATH = /^\/api\/external-stream\/[A-Za-z0-9_-]{1,120}\/[A-Za-z0-9_-]{32,128}(?:\/[a-f0-9]{64}\.[a-z0-9]{1,8})?$/;
 const EXTERNAL_RECEIPT_LIMIT = 128;
 const EXTERNAL_RECEIPT_PATH = join(ARTIFACT_DIR, "external-capability-runtime.json");
+const MEDIA_PROBE_PATH = join(ARTIFACT_DIR, "media-probe.json");
 const externalReceiptStarted = process.hrtime.bigint();
 let externalReceiptSequence = 0;
 let externalReceiptPhase: "smoke" | "live" = "smoke";
 let externalSmokeCompleted = false;
 let externalLivePhaseStartedAtMs: number | null = null;
 let externalReceiptDropped = 0;
-const externalReceiptEvents: Array<Record<string, unknown>> = [];
+type ExternalReceiptEvent = {
+  sequence: number;
+  elapsedMs: number;
+  phase: "smoke" | "live";
+  method: "GET" | "HEAD";
+  request: {
+    range: { present: false } | { present: true; valid: false } |
+      { present: true; valid: true; start: number | null; end: number | null };
+    acceptClass: "absent" | "video-mp4" | "video-wildcard" | "wildcard" | "other";
+    userAgentClass: "absent" | "vlc-android" | "google-photos" | "fixture-inject" | "other";
+  };
+  response: null | {
+    status: number;
+    contentLength: number | null;
+    range: { start: number; end: number; total: number } | null;
+    contentTypeClass: "absent" | "video-mp4" | "hls" | "video-mp2t" | "other";
+    acceptRangesClass: "absent" | "bytes" | "other";
+  };
+  lifecycle: {
+    finishObserved: boolean;
+    closeObserved: boolean;
+    requestAbortedObserved: boolean;
+    prematureCloseObserved: boolean;
+  };
+};
+const externalReceiptEvents: ExternalReceiptEvent[] = [];
+const externalReceiptRequests = new WeakMap<object, ExternalReceiptEvent>();
 
 const allowedMedia = new Set([
   "synthetic.mp4",
@@ -135,6 +162,40 @@ function runFfmpeg(label: string, args: string[]): void {
   });
   if (result.error != null) throw new Error(`${label} could not execute the installed ffmpeg.`);
   if (result.status !== 0) throw new Error(`${label} failed with exit ${String(result.status)}.`);
+}
+
+function writeMediaProbe(): void {
+  const result = spawnSync("ffprobe", [
+    "-v", "error",
+    "-show_entries",
+    "format=format_name,duration,size:stream=index,codec_type,codec_name,profile,level,codec_tag_string,pix_fmt,width,height,r_frame_rate,sample_rate,channels",
+    "-of", "json",
+    MOVIE_PATH,
+  ], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error != null || result.status !== 0) {
+    throw new Error("ffprobe could not inspect the synthetic MP4.");
+  }
+  const probe = JSON.parse(result.stdout) as {
+    streams?: Array<Record<string, unknown>>;
+    format?: Record<string, unknown>;
+  };
+  if (!Array.isArray(probe.streams) || probe.streams.length !== 2 || probe.format == null) {
+    throw new Error("ffprobe did not report exactly the expected bounded audio/video streams.");
+  }
+  const video = probe.streams.find((stream) => stream.codec_type === "video");
+  const audio = probe.streams.find((stream) => stream.codec_type === "audio");
+  if (
+    video?.codec_name !== "h264" || video.pix_fmt !== "yuv420p" ||
+    video.width !== 1280 || video.height !== 720 || video.r_frame_rate !== "30/1" ||
+    audio?.codec_name !== "aac" || audio.sample_rate !== "48000"
+  ) {
+    throw new Error("Synthetic MP4 codec probe did not match the Android compatibility fixture.");
+  }
+  writeFileSync(MEDIA_PROBE_PATH, `${JSON.stringify(probe, null, 2)}\n`, { mode: 0o600 });
 }
 
 function generateFixtureMedia(): void {
@@ -199,6 +260,7 @@ function generateFixtureMedia(): void {
     "-hls_segment_filename", join(MEDIA_DIR, "segment%03d.ts"),
     join(MEDIA_DIR, "index.m3u8"),
   ]);
+  writeMediaProbe();
 
   const expectedSegments = Array.from({ length: 12 }, (_, index) =>
     `segment${String(index).padStart(3, "0")}.ts`);
@@ -269,26 +331,113 @@ function writeExternalReceipt(): void {
   renameSync(temporary, EXTERNAL_RECEIPT_PATH);
 }
 
-function recordExternalCapabilityResponse(request: any, reply: any): void {
+function requestRangeClass(value: unknown): ExternalReceiptEvent["request"]["range"] {
+  if (value == null) return { present: false };
+  if (typeof value !== "string") return { present: true, valid: false };
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
+  if (match == null || (match[1] === "" && match[2] === "")) {
+    return { present: true, valid: false };
+  }
+  const start = match[1] === "" ? null : boundedHeaderInteger(match[1]);
+  const end = match[2] === "" ? null : boundedHeaderInteger(match[2]);
+  if (
+    (match[1] !== "" && start == null) ||
+    (match[2] !== "" && end == null) ||
+    (start != null && end != null && end < start)
+  ) {
+    return { present: true, valid: false };
+  }
+  return { present: true, valid: true, start, end };
+}
+
+function acceptClass(value: unknown): ExternalReceiptEvent["request"]["acceptClass"] {
+  if (typeof value !== "string" || value.trim() === "") return "absent";
+  const tokens = value.toLowerCase().split(",").map((part) => part.trim().split(";", 1)[0]);
+  if (tokens.includes("video/mp4")) return "video-mp4";
+  if (tokens.includes("video/*")) return "video-wildcard";
+  if (tokens.includes("*/*")) return "wildcard";
+  return "other";
+}
+
+function userAgentClass(value: unknown): ExternalReceiptEvent["request"]["userAgentClass"] {
+  if (typeof value !== "string" || value.trim() === "") return "absent";
+  if (/\b(?:vlc|libvlc)\b/i.test(value)) return "vlc-android";
+  if (/\b(?:google photos|photos)\b/i.test(value)) return "google-photos";
+  if (/\blightmyrequest\b/i.test(value)) return "fixture-inject";
+  return "other";
+}
+
+function contentTypeClass(value: unknown): NonNullable<ExternalReceiptEvent["response"]>["contentTypeClass"] {
+  if (typeof value !== "string" || value.trim() === "") return "absent";
+  const type = value.toLowerCase().split(";", 1)[0].trim();
+  if (type === "video/mp4") return "video-mp4";
+  if (type === "application/vnd.apple.mpegurl" || type === "application/x-mpegurl") return "hls";
+  if (type === "video/mp2t") return "video-mp2t";
+  return "other";
+}
+
+function acceptRangesClass(value: unknown): NonNullable<ExternalReceiptEvent["response"]>["acceptRangesClass"] {
+  if (typeof value !== "string" || value.trim() === "") return "absent";
+  return value.trim().toLowerCase() === "bytes" ? "bytes" : "other";
+}
+
+function recordExternalCapabilityRequest(request: any, reply: any): void {
   const rawUrl = typeof request?.raw?.url === "string" ? request.raw.url : "";
-  const method = typeof request?.method === "string" ? request.method : "";
-  if (!EXTERNAL_CAPABILITY_PATH.test(rawUrl) || (method !== "GET" && method !== "HEAD")) return;
+  const methodValue = typeof request?.method === "string" ? request.method : "";
+  if (!EXTERNAL_CAPABILITY_PATH.test(rawUrl) || (methodValue !== "GET" && methodValue !== "HEAD")) return;
+  const method: "GET" | "HEAD" = methodValue;
   if (externalReceiptEvents.length >= EXTERNAL_RECEIPT_LIMIT) {
     externalReceiptDropped += 1;
     writeExternalReceipt();
     return;
   }
-  const rawRange = reply.getHeader("content-range");
-  const range = boundedContentRange(rawRange);
-  externalReceiptEvents.push({
+  const event: ExternalReceiptEvent = {
     sequence: ++externalReceiptSequence,
     elapsedMs: monotonicElapsedMs(),
     phase: externalReceiptPhase,
     method,
+    request: {
+      range: requestRangeClass(request.headers?.range),
+      acceptClass: acceptClass(request.headers?.accept),
+      userAgentClass: userAgentClass(request.headers?.["user-agent"]),
+    },
+    response: null,
+    lifecycle: {
+      finishObserved: false,
+      closeObserved: false,
+      requestAbortedObserved: false,
+      prematureCloseObserved: false,
+    },
+  };
+  externalReceiptEvents.push(event);
+  externalReceiptRequests.set(request, event);
+  request.raw.once("aborted", () => {
+    event.lifecycle.requestAbortedObserved = true;
+    writeExternalReceipt();
+  });
+  reply.raw.once("finish", () => {
+    event.lifecycle.finishObserved = true;
+    writeExternalReceipt();
+  });
+  reply.raw.once("close", () => {
+    event.lifecycle.closeObserved = true;
+    event.lifecycle.prematureCloseObserved = !event.lifecycle.finishObserved;
+    writeExternalReceipt();
+  });
+  writeExternalReceipt();
+}
+
+function recordExternalCapabilityResponse(request: any, reply: any): void {
+  const event = externalReceiptRequests.get(request);
+  if (event == null) return;
+  event.response = {
     status: reply.statusCode,
     contentLength: boundedHeaderInteger(reply.getHeader("content-length")),
-    ...(range == null ? {} : { range }),
-  });
+    range: boundedContentRange(reply.getHeader("content-range")),
+    contentTypeClass: contentTypeClass(reply.getHeader("content-type")),
+    acceptRangesClass: acceptRangesClass(reply.getHeader("accept-ranges")),
+  };
+  event.lifecycle.finishObserved = event.lifecycle.finishObserved || reply.raw.writableFinished === true;
   writeExternalReceipt();
 }
 
@@ -742,6 +891,14 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
   const externalFull = await inject(app, externalClient, { method: "GET", url: externalPath });
   expectStatus(externalFull, 200, "external capability full response");
   if (
+    externalFull.headers["content-type"] !== "video/mp4" ||
+    externalFull.headers["accept-ranges"] !== "bytes" ||
+    externalFull.headers["content-length"] !== String(expected.length) ||
+    externalFull.headers["content-disposition"] != null
+  ) {
+    throw new Error("External capability full response did not preserve the exact playable MP4 headers.");
+  }
+  if (
     externalFull.rawPayload.length !== expected.length ||
     createHash("sha256").update(externalFull.rawPayload as Buffer).digest("hex") !==
       createHash("sha256").update(expected).digest("hex")
@@ -786,6 +943,7 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
       "proxy-full-body-sha256",
       "proxy-range",
       "external-capability-full-body-sha256",
+      "external-capability-playable-response-headers",
       "external-capability-range-byte-identity",
       "compiled-web-root",
     ],
@@ -845,6 +1003,9 @@ async function main(): Promise<void> {
         enableDirectTorrent: false,
         enableTranscode: false,
       },
+    });
+    app.addHook("onRequest", async (request: any, reply: any) => {
+      recordExternalCapabilityRequest(request, reply);
     });
     app.addHook("onResponse", async (request: any, reply: any) => {
       recordExternalCapabilityResponse(request, reply);

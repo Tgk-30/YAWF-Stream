@@ -40,7 +40,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
 
-/** One persistent semantic UI session for a real public 2.3.25 to 2.3.26 OTA. */
+/** One persistent semantic UI session for an admitted real public Android OTA. */
 @RunWith(AndroidJUnit4.class)
 public final class RuntimeOtaFlowTest {
     private static final long SHORT_WAIT_MS = 20_000;
@@ -57,6 +57,26 @@ public final class RuntimeOtaFlowTest {
     private static final Pattern URL = Pattern.compile("https?://\\S+", Pattern.CASE_INSENSITIVE);
     private static final Pattern UPDATE_TEXT = Pattern.compile("\\AUpdate\\z", Pattern.CASE_INSENSITIVE);
     private static final Pattern OPEN_TEXT = Pattern.compile("\\AOpen\\z", Pattern.CASE_INSENSITIVE);
+    private static final Pattern LOWER_SHA256 = Pattern.compile("[0-9a-f]{64}");
+    private static final Pattern LOWER_REVISION = Pattern.compile("[0-9a-f]{40}");
+    private static final Pattern VERSION = Pattern.compile("\\d+\\.\\d+\\.\\d+");
+    private static final String AUTOMATIC_OTA_MODE = "automatic-initial-cancel-due-resume";
+    private static final String AUTOMATIC_EVIDENCE_SUBDIR = "automatic-public-ota-flow";
+    private static final String AUTOMATIC_BASELINE_VERSION = "2.3.27";
+    private static final long AUTOMATIC_BASELINE_VERSION_CODE = 2_003_027L;
+    private static final String AUTOMATIC_BASELINE_SHA256 =
+            "f3e983929db9fb32ed42b9779d94f2f8492c1cf4fae3e0cd29eee91a9492e0eb";
+    private static final long AUTOMATIC_BASELINE_SIZE = 88_558_465L;
+    private static final long MINIMUM_AUTOMATIC_TARGET_VERSION_CODE = 2_003_031L;
+    private static final String AUTOMATIC_PROFILE_NAME = "Auto OTA Profile";
+    private static final String AUTOMATIC_APPEARANCE = "Apply Quiet focus style";
+    private static final String AUTOMATIC_SAMPLE_TITLE = "Blade Runner 2049";
+    private static final String AUTOMATIC_FOLDER_NAME = "Automatic OTA public upgrade";
+    private static final String DETAIL_DIALOG_CLASS = "android.app.Dialog";
+    private static final long AUTOMATIC_CHECK_BOUND_MS = 55_000L;
+    private static final int ABSENT_SETTLED_SAMPLES = 3;
+    private static final String QUICK_SETUP_ACKNOWLEDGEMENT =
+            "I understand the privacy, reliability, catalog, and playback limits and want to use Quick setup.";
 
     private static final String[] TIER_TITLES = {
             "Welcome to YAWF Stream", "Bring your own keys", "You're set"
@@ -85,28 +105,73 @@ public final class RuntimeOtaFlowTest {
     private boolean permissionBackReturnObserved;
     private String otaMode;
     private boolean legacyManualReconsentUsed;
+    private String admittedBaselineVersion;
+    private String admittedTargetVersion;
+    private String admittedTargetSha256;
+    private long admittedTargetVersionCode;
+    private long admittedTargetSize;
+    private String admittedTargetSourceRevision;
+    private String admittedTargetManifestSha256;
+    private String admittedTargetVerificationSha256;
+    private long admittedTargetBuildRun;
+    private boolean targetIdentityAdmitted;
+    private boolean initialManualProgressObserved;
+    private boolean initialManualCancelWon;
+    private boolean automaticOfferAbsentSameForeground;
+    private boolean deferredAutomaticOfferObserved;
+    private boolean automaticDiscoveryObserved;
+    private boolean sampleCatalogFixtureUsed;
+    private boolean profilePersistedWarm;
+    private boolean appearancePersistedWarm;
+    private boolean watchlistPersistedWarm;
+    private boolean folderPersistedWarm;
+    private boolean profilePersistedAfterTaskRelaunch;
+    private boolean appearancePersistedAfterTaskRelaunch;
+    private boolean watchlistPersistedAfterTaskRelaunch;
+    private boolean folderPersistedAfterTaskRelaunch;
+    private boolean visibleTaskDismissalObserved;
+    private int visibleTaskDismissalSwipes;
+    private int visibleLauncherReturnOrdinal;
+    private int automaticTriggerReturnOrdinal;
+    private int deferredOfferReturnOrdinal;
+    private String profileNameBeforeUpdate;
+    private int permissionCleanupToggleSelections;
+    private int productInstallSelections;
+    private int systemUpdateSelections;
+    private int systemOpenSelections;
 
     @Test
     public void updateOfficialPublicBaselineThroughNativeUi() throws Throwable {
         instrumentation = InstrumentationRegistry.getInstrumentation();
         device = UiDevice.getInstance(instrumentation);
         Bundle arguments = InstrumentationRegistry.getArguments();
-        String subdir = arguments.getString("evidenceSubdir", EVIDENCE_SUBDIR);
-        assertTrue("Unsafe evidence subdirectory", SAFE_SUBDIR.matcher(subdir).matches());
-        assertEquals("Unexpected evidence subdirectory", EVIDENCE_SUBDIR, subdir);
-        assertTrue(
-                "Fixed OTA arguments do not match the reviewed release",
-                OtaFlowPolicy.matchesVersionPins(
-                        arguments.getString("baselineVersion", ""),
-                        arguments.getString("targetVersion", ""),
-                        parseLongArgument(arguments, "targetVersionCode"),
-                        arguments.getString("targetSha256", ""),
-                        parseLongArgument(arguments, "targetSize"),
-                        arguments.getString("signerSha256", "")));
         otaMode = arguments.getString("otaMode", "strict");
-        assertTrue(
-                "OTA mode must be strict or explicitly legacy-manual-reconsent",
-                "strict".equals(otaMode) || "legacy-manual-reconsent".equals(otaMode));
+        String expectedSubdir = isAutomaticMode() ? AUTOMATIC_EVIDENCE_SUBDIR : EVIDENCE_SUBDIR;
+        String subdir = arguments.getString("evidenceSubdir", expectedSubdir);
+        assertTrue("Unsafe evidence subdirectory", SAFE_SUBDIR.matcher(subdir).matches());
+        assertEquals("Unexpected evidence subdirectory", expectedSubdir, subdir);
+        if (isAutomaticMode()) {
+            admitAutomaticTargetIdentity(arguments);
+        } else {
+            assertTrue(
+                    "Fixed OTA arguments do not match the reviewed release",
+                    OtaFlowPolicy.matchesVersionPins(
+                            arguments.getString("baselineVersion", ""),
+                            arguments.getString("targetVersion", ""),
+                            parseLongArgument(arguments, "targetVersionCode"),
+                            arguments.getString("targetSha256", ""),
+                            parseLongArgument(arguments, "targetSize"),
+                            arguments.getString("signerSha256", "")));
+            assertTrue(
+                    "OTA mode must be strict or explicitly legacy-manual-reconsent",
+                    "strict".equals(otaMode) || "legacy-manual-reconsent".equals(otaMode));
+            admittedBaselineVersion = OtaFlowPolicy.BASELINE_VERSION;
+            admittedTargetVersion = OtaFlowPolicy.TARGET_VERSION;
+            admittedTargetVersionCode = OtaFlowPolicy.TARGET_VERSION_CODE;
+            admittedTargetSha256 = OtaFlowPolicy.TARGET_SHA256;
+            admittedTargetSize = OtaFlowPolicy.TARGET_SIZE;
+            targetIdentityAdmitted = true;
+        }
 
         Context targetContext = instrumentation.getTargetContext();
         File internalFiles = targetContext.getFilesDir();
@@ -116,7 +181,11 @@ public final class RuntimeOtaFlowTest {
 
         Throwable primary = null;
         try {
-            runFlow();
+            if (isAutomaticMode()) {
+                runAutomaticFlow();
+            } else {
+                runHistoricalFlow();
+            }
         } catch (Throwable caught) {
             primary = caught;
             try {
@@ -127,7 +196,11 @@ public final class RuntimeOtaFlowTest {
         }
 
         try {
-            cleanupUnknownSourcePermission();
+            if (isAutomaticMode()) {
+                cleanupUnknownSourcePermissionThroughVisibleSettings();
+            } else {
+                cleanupUnknownSourcePermission();
+            }
         } catch (Throwable cleanupFailure) {
             log("Permission cleanup failed: " + safe(cleanupFailure.getMessage()));
             if (primary == null) {
@@ -144,7 +217,236 @@ public final class RuntimeOtaFlowTest {
         assertTrue("YAWF unknown-source permission was not visibly cleaned up", permissionCleanupObserved);
     }
 
-    private void runFlow() throws Exception {
+    private boolean isAutomaticMode() {
+        return AUTOMATIC_OTA_MODE.equals(otaMode);
+    }
+
+    private void admitAutomaticTargetIdentity(Bundle arguments) {
+        admittedBaselineVersion = arguments.getString("baselineVersion", "");
+        admittedTargetVersion = arguments.getString("targetVersion", "");
+        admittedTargetVersionCode = parseLongArgument(arguments, "targetVersionCode");
+        admittedTargetSha256 = arguments.getString("targetSha256", "");
+        admittedTargetSize = parseLongArgument(arguments, "targetSize");
+        admittedTargetSourceRevision = arguments.getString("targetSourceRevision", "");
+        admittedTargetManifestSha256 = arguments.getString("targetManifestSha256", "");
+        admittedTargetVerificationSha256 = arguments.getString("targetVerificationSha256", "");
+        admittedTargetBuildRun = parseLongArgument(arguments, "targetBuildRun");
+
+        assertEquals("Automatic baseline version mismatch",
+                AUTOMATIC_BASELINE_VERSION, admittedBaselineVersion);
+        assertEquals("Automatic baseline versionCode mismatch",
+                AUTOMATIC_BASELINE_VERSION_CODE,
+                parseLongArgument(arguments, "baselineVersionCode"));
+        assertEquals("Automatic baseline APK digest mismatch",
+                AUTOMATIC_BASELINE_SHA256, arguments.getString("baselineSha256", ""));
+        assertEquals("Automatic baseline APK size mismatch",
+                AUTOMATIC_BASELINE_SIZE, parseLongArgument(arguments, "baselineSize"));
+        assertTrue("Automatic target version was not independently supplied",
+                VERSION.matcher(admittedTargetVersion).matches());
+        assertTrue("Automatic target versionCode does not follow immutable 2.3.30",
+                admittedTargetVersionCode >= MINIMUM_AUTOMATIC_TARGET_VERSION_CODE);
+        assertEquals("Automatic target versionCode mapping mismatch",
+                versionCodeFor(admittedTargetVersion), admittedTargetVersionCode);
+        assertEquals("Automatic target APK name mismatch",
+                "YAWF.Stream_Android_" + admittedTargetVersion + ".apk",
+                arguments.getString("targetApkName", ""));
+        assertTrue("Automatic target APK digest was not independently supplied",
+                LOWER_SHA256.matcher(admittedTargetSha256).matches()
+                        && !AUTOMATIC_BASELINE_SHA256.equals(admittedTargetSha256));
+        assertTrue("Automatic target APK size was not independently supplied", admittedTargetSize > 0L);
+        assertEquals("Automatic target signer continuity mismatch",
+                OtaFlowPolicy.SIGNER_SHA256, arguments.getString("signerSha256", ""));
+        assertTrue("Automatic target source revision was not independently supplied",
+                LOWER_REVISION.matcher(admittedTargetSourceRevision).matches());
+        assertTrue("Automatic target manifest asset digest was not independently supplied",
+                LOWER_SHA256.matcher(admittedTargetManifestSha256).matches());
+        assertTrue("Automatic target verification asset digest was not independently supplied",
+                LOWER_SHA256.matcher(admittedTargetVerificationSha256).matches());
+        assertTrue("Automatic target build run was not independently supplied",
+                admittedTargetBuildRun > 0L);
+        assertEquals("Automatic public release admission was not explicit",
+                "true", arguments.getString("targetPublicRelease", ""));
+        targetIdentityAdmitted = true;
+    }
+
+    private void runAutomaticFlow() throws Exception {
+        assertNoBindingTerms();
+        device.wakeUp();
+        launchProductFromVisibleLauncher("public 2.3.27 baseline");
+
+        waitFor(By.text("Enable Android update checks?"), UI_WAIT_MS,
+                "initial native update consent");
+        capture("automatic-initial-consent");
+        click(
+                By.res("android", "button1")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .text(Pattern.compile("\\AEnable\\z", Pattern.CASE_INSENSITIVE)),
+                "Enable",
+                SHORT_WAIT_MS,
+                true);
+        cancelInitialManualCheckBeforeResult();
+
+        completeNormalSetupExact();
+        seedMeaningfulLocalState();
+        assertMeaningfulLocalState("before-update", false);
+
+        automaticTriggerReturnOrdinal =
+                returnToProductThroughVisibleLauncher("automatic-check-trigger");
+        assertAutomaticOfferAbsentForBoundedCheck();
+        deferredOfferReturnOrdinal =
+                returnToProductThroughVisibleLauncher("deferred-offer-return");
+
+        String offerTitle = "YAWF Stream " + admittedTargetVersion + " is available";
+        String offerMessage =
+                "Download the signed Android update now? Android will ask again before installing it.";
+        waitFor(By.text(offerTitle), UI_WAIT_MS, "deferred exact public target offer");
+        waitFor(By.text(offerMessage), SHORT_WAIT_MS, "deferred exact offer message");
+        deferredAutomaticOfferObserved = true;
+        automaticDiscoveryObserved = initialManualCancelWon
+                && deferredAutomaticOfferObserved
+                && AutomaticOtaDriverChecks.deferredOfferIsFromLaterReturn(
+                        automaticTriggerReturnOrdinal,
+                        deferredOfferReturnOrdinal,
+                        automaticOfferAbsentSameForeground,
+                        false);
+        UiObject2 weekly = waitFor(
+                By.text("Check automatically each week")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.CheckBox"),
+                SHORT_WAIT_MS,
+                "retained weekly checkbox on deferred offer");
+        assertTrue("Initial Enable did not retain automatic checks", weekly.isChecked());
+        capture("automatic-deferred-target-offer");
+        click(nativeProductButton(OtaFlowPolicy.UPDATE), "Update", SHORT_WAIT_MS, true);
+
+        waitFor(By.text("Downloading update"), UI_WAIT_MS, "DownloadManager progress dialog");
+        waitFor(By.textContains("Android is downloading the signed APK."),
+                SHORT_WAIT_MS, "signed APK progress");
+        capture("automatic-downloading");
+
+        String readyMessage = "YAWF Stream " + admittedTargetVersion
+                + " passed all checks. Android will show the system installer.";
+        waitFor(By.text("Update ready to install"), DOWNLOAD_WAIT_MS,
+                "verified automatic update ready dialog");
+        waitFor(By.text(readyMessage), SHORT_WAIT_MS, "verified automatic update ready message");
+        capture("automatic-ready-to-install");
+        productInstallSelections++;
+        assertEquals("Product Install must be selected exactly once", 1, productInstallSelections);
+        click(nativeProductButton(OtaFlowPolicy.INSTALL), "Install", SHORT_WAIT_MS, true);
+
+        enterUnknownSourcePermission();
+        assertFalse("Automatic mode forbids legacy manual reconsent", legacyManualReconsentUsed);
+        assertEquals("Permission Back must not require another product Install",
+                1, productInstallSelections);
+        confirmSystemInstaller();
+
+        waitFor(By.pkg(OtaFlowPolicy.PRODUCT_PACKAGE), UI_WAIT_MS,
+                "updated product after system Open");
+        waitFor(By.text("Discover"), UI_WAIT_MS, "updated Discover");
+        updatedProductObserved = true;
+        capture("automatic-updated-product-open");
+        assertMeaningfulLocalState("warm-after-update", true);
+
+        dismissVisibleRecentTaskAndRelaunchThroughLauncher();
+        assertMeaningfulLocalState("after-task-relaunch", true);
+        assertFalse("FirstRun returned after automatic OTA",
+                hasAnyWithoutIdleDelay(By.text("How do you want to use YAWF Stream?")));
+        assertFalse("Setup reminder returned after automatic OTA", hasSetupReminder());
+        assertTrue("Automatic discovery evidence was incomplete", automaticDiscoveryObserved);
+        assertTrue("Bundled Sample catalog classification was not retained", sampleCatalogFixtureUsed);
+        assertTrue("Warm local persistence evidence was incomplete",
+                profilePersistedWarm && appearancePersistedWarm
+                        && watchlistPersistedWarm && folderPersistedWarm);
+        assertTrue("Task-relaunch local persistence evidence was incomplete",
+                visibleTaskDismissalObserved
+                        && profilePersistedAfterTaskRelaunch
+                        && appearancePersistedAfterTaskRelaunch
+                        && watchlistPersistedAfterTaskRelaunch
+                        && folderPersistedAfterTaskRelaunch);
+    }
+
+    private void cancelInitialManualCheckBeforeResult() throws IOException {
+        String progressTitle = "Checking for updates";
+        String progressMessage = "Checking the official YAWF Stream Android release channel.";
+        waitFor(By.text(progressTitle), SHORT_WAIT_MS, "initial manual progress title");
+        waitFor(By.text(progressMessage), SHORT_WAIT_MS, "initial manual progress message");
+        initialManualProgressObserved = true;
+        assertNoInitialManualResultVisible();
+        capture("automatic-initial-manual-check");
+        click(
+                By.res("android", "button2")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .text(Pattern.compile("\\ACancel\\z", Pattern.CASE_INSENSITIVE)),
+                "Cancel initial manual check",
+                SHORT_WAIT_MS,
+                true);
+        assertTrue("Initial manual progress dialog did not close after Cancel",
+                device.wait(Until.gone(By.text(progressTitle)), SHORT_WAIT_MS));
+        int absent = 0;
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoInitialManualResultVisible();
+            if (++absent >= ABSENT_SETTLED_SAMPLES) {
+                initialManualCancelWon = true;
+                log("Initial Enable manual check was visibly cancelled before any result");
+                return;
+            }
+            SystemClock.sleep(250);
+        }
+        fail("Initial manual cancellation did not settle");
+    }
+
+    private void assertNoInitialManualResultVisible() {
+        assertFalse("Initial manual check returned up-to-date before Cancel",
+                hasAnyWithoutIdleDelay(By.text("YAWF Stream is up to date")));
+        assertFalse("Initial manual check returned failure before Cancel",
+                hasAnyWithoutIdleDelay(By.text("Update check unavailable")));
+        assertFalse("Initial manual check returned target offer before Cancel",
+                hasAnyWithoutIdleDelay(By.text(
+                        "YAWF Stream " + admittedTargetVersion + " is available")));
+    }
+
+    private void completeNormalSetupExact() throws IOException {
+        advanceFixedTour(TIER_TITLES, "automatic-tier");
+        waitFor(By.text("How do you want to use YAWF Stream?"), UI_WAIT_MS,
+                "automatic FirstRun question");
+        capture("automatic-first-run");
+        clickWebButton(OtaFlowPolicy.QUICK_SETUP, "Quick setup", SHORT_WAIT_MS);
+        waitFor(By.text("Continue without adding credentials"), UI_WAIT_MS,
+                "automatic Quick setup notice");
+        capture("automatic-quick-setup-notice");
+        click(By.text(QUICK_SETUP_ACKNOWLEDGEMENT),
+                "exact nonbinding Quick setup acknowledgement", SHORT_WAIT_MS, false);
+        clickWebButton(OtaFlowPolicy.CONTINUE_QUICK_SETUP,
+                "Continue with Quick setup", SHORT_WAIT_MS);
+        waitFor(By.text("Discover"), UI_WAIT_MS, "Discover after automatic setup");
+        advanceFixedTour(WELCOME_TITLES, "automatic-welcome");
+        dismissSetupReminder();
+        waitFor(By.text("Sample catalog"), UI_WAIT_MS, "clearly labelled bundled Sample catalog");
+        sampleCatalogFixtureUsed = true;
+        capture("automatic-sample-catalog");
+    }
+
+    private void assertAutomaticOfferAbsentForBoundedCheck() throws IOException {
+        String offerTitle = "YAWF Stream " + admittedTargetVersion + " is available";
+        long deadline = SystemClock.uptimeMillis() + AUTOMATIC_CHECK_BOUND_MS;
+        int absent = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            if (hasAnyWithoutIdleDelay(By.text(offerTitle))) {
+                fail("Automatic offer appeared in the triggering foreground instead of being deferred");
+            }
+            absent++;
+            SystemClock.sleep(500);
+        }
+        assertTrue("Automatic same-foreground absence did not receive settled samples",
+                absent >= ABSENT_SETTLED_SAMPLES);
+        automaticOfferAbsentSameForeground = true;
+        capture("automatic-offer-absent-trigger-foreground");
+        log("Automatic offer remained absent for the bounded official check in its trigger foreground");
+    }
+
+    private void runHistoricalFlow() throws Exception {
         assertNoBindingTerms();
         device.wakeUp();
         launchProduct();
@@ -259,6 +561,326 @@ public final class RuntimeOtaFlowTest {
         assertTrue("Weekly automatic checks did not survive OTA", weekly.isChecked());
         capture("post-update-up-to-date");
         click(nativeProductButton(OtaFlowPolicy.OK), "OK", SHORT_WAIT_MS, true);
+    }
+
+    private void seedMeaningfulLocalState() throws IOException {
+        openProfileDialog();
+        UiObject2 name = waitFor(
+                By.desc("Your name")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.EditText")
+                        .enabled(true),
+                SHORT_WAIT_MS,
+                "Your name input");
+        name.setText(AUTOMATIC_PROFILE_NAME);
+        waitForExactTextValue(name, AUTOMATIC_PROFILE_NAME, "seeded profile name");
+        clickProductExact("Close", "android.widget.Button", SHORT_WAIT_MS);
+
+        openSettingsFromProductNavigation();
+        UiObject2 appearance = scrollUntilVisibleProductSemantic(
+                "Appearance", "android.widget.Button", true, Direction.DOWN);
+        appearance.click();
+        log("Opened exact Appearance settings category");
+        device.waitForIdle(750);
+        UiObject2 quiet = scrollUntilVisibleProductSemantic(
+                AUTOMATIC_APPEARANCE, "android.widget.Button", true, Direction.DOWN);
+        quiet.click();
+        waitForCheckedState(
+                By.desc(AUTOMATIC_APPEARANCE)
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.Button"),
+                true,
+                "Quiet focus pressed state");
+        navigateProductRoute("Discover");
+
+        waitFor(By.text("Sample catalog"), UI_WAIT_MS, "Sample catalog classification");
+        UiObject2 title = scrollUntilVisibleProductSemanticOnAnyRoute(
+                AUTOMATIC_SAMPLE_TITLE, "android.widget.Button", true, Direction.DOWN);
+        title.click();
+        log("Opened complete bundled sample title: " + AUTOMATIC_SAMPLE_TITLE);
+        device.waitForIdle(750);
+        waitFor(By.text(AUTOMATIC_SAMPLE_TITLE), UI_WAIT_MS, "complete detail title");
+        String detailDialogIdentity = AUTOMATIC_SAMPLE_TITLE + " details";
+        waitForUniqueExactProductDialog(detailDialogIdentity, SHORT_WAIT_MS);
+        UiObject2 watchlist = scrollUntilVisibleInExactDialog(
+                detailDialogIdentity, "Watchlist", "android.widget.Button", Direction.DOWN);
+        int detailEventOrdinal = 0;
+        int dialogWatchlistClickOrdinal = ++detailEventOrdinal;
+        watchlist.click();
+        waitForCheckedState(
+                By.text("In watchlist")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.Button"),
+                true,
+                "In watchlist pressed state");
+
+        int backOrdinal = ++detailEventOrdinal;
+        device.pressBack();
+        assertTrue("Exact sample detail dialog did not close after Back",
+                waitForUniqueExactProductDialogGone(detailDialogIdentity, SHORT_WAIT_MS));
+        int dialogGoneOrdinal = ++detailEventOrdinal;
+        waitForAny(SHORT_WAIT_MS, productTextOrDescriptionSelectors(
+                "Primary", "android.view.View", false));
+        int primaryNavigationOrdinal = ++detailEventOrdinal;
+        assertTrue("Detail dialog transition did not precede primary navigation",
+                AutomaticOtaDriverChecks.detailClosedBeforePrimaryNavigation(
+                        dialogWatchlistClickOrdinal,
+                        backOrdinal,
+                        dialogGoneOrdinal,
+                        primaryNavigationOrdinal));
+        log("Closed the exact sample detail dialog before using primary navigation");
+        navigateProductRoute("Watchlist");
+        waitForAny(UI_WAIT_MS, productTextOrDescriptionSelectors(
+                AUTOMATIC_SAMPLE_TITLE, "android.widget.Button", true));
+        clickProductExact("+ New folder", "android.widget.Button", SHORT_WAIT_MS);
+        UiObject2 folderName = waitFor(
+                By.desc("New watchlist folder name")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.EditText")
+                        .enabled(true),
+                SHORT_WAIT_MS,
+                "new watchlist folder name input");
+        folderName.setText(AUTOMATIC_FOLDER_NAME);
+        waitForExactTextValue(folderName, AUTOMATIC_FOLDER_NAME, "seeded folder name");
+        clickProductExact("Save", "android.widget.Button", SHORT_WAIT_MS);
+        waitForAny(SHORT_WAIT_MS, productTextOrDescriptionSelectors(
+                AUTOMATIC_FOLDER_NAME, "android.widget.Button", true));
+
+        String moveLabel = "Move " + AUTOMATIC_SAMPLE_TITLE + " to folder";
+        UiObject2 folderSelect = scrollUntilVisibleProductSemanticOnAnyRoute(
+                moveLabel, "android.widget.Spinner", true, Direction.DOWN);
+        folderSelect.click();
+        click(By.text(AUTOMATIC_FOLDER_NAME), AUTOMATIC_FOLDER_NAME, SHORT_WAIT_MS, true);
+        waitForSelectedFolder(moveLabel, AUTOMATIC_FOLDER_NAME);
+        capture("automatic-local-data-seeded");
+    }
+
+    private void assertMeaningfulLocalState(String phase, boolean afterUpdate) throws IOException {
+        navigateProductRoute("Discover");
+        openProfileDialog();
+        UiObject2 name = waitFor(
+                By.desc("Your name")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.EditText")
+                        .enabled(true),
+                SHORT_WAIT_MS,
+                phase + " profile name");
+        String observedProfileName = name.getText();
+        if (!afterUpdate) {
+            assertEquals(phase + " profile seed mismatch",
+                    AUTOMATIC_PROFILE_NAME, observedProfileName);
+            profileNameBeforeUpdate = observedProfileName;
+        } else {
+            assertTrue(phase + " profile value was not preserved from the observed baseline",
+                    AutomaticOtaDriverChecks.exactValueWasPreserved(
+                            profileNameBeforeUpdate, observedProfileName));
+        }
+        clickProductExact("Close", "android.widget.Button", SHORT_WAIT_MS);
+
+        openSettingsFromProductNavigation();
+        UiObject2 appearance = scrollUntilVisibleProductSemantic(
+                "Appearance", "android.widget.Button", true, Direction.DOWN);
+        appearance.click();
+        UiObject2 quiet = scrollUntilVisibleProductSemantic(
+                AUTOMATIC_APPEARANCE, "android.widget.Button", true, Direction.DOWN);
+        assertTrue(phase + " Quiet focus was not pressed", quiet.isChecked());
+
+        navigateProductRoute("Watchlist");
+        waitForAny(UI_WAIT_MS, productTextOrDescriptionSelectors(
+                AUTOMATIC_SAMPLE_TITLE, "android.widget.Button", true));
+        waitForAny(UI_WAIT_MS, productTextOrDescriptionSelectors(
+                AUTOMATIC_FOLDER_NAME, "android.widget.Button", true));
+        String moveLabel = "Move " + AUTOMATIC_SAMPLE_TITLE + " to folder";
+        waitForSelectedFolder(moveLabel, AUTOMATIC_FOLDER_NAME);
+        capture("automatic-state-" + phase);
+
+        if (afterUpdate && phase.startsWith("warm")) {
+            profilePersistedWarm = true;
+            appearancePersistedWarm = true;
+            watchlistPersistedWarm = true;
+            folderPersistedWarm = true;
+        } else if (afterUpdate && phase.startsWith("after-task-relaunch")) {
+            profilePersistedAfterTaskRelaunch = true;
+            appearancePersistedAfterTaskRelaunch = true;
+            watchlistPersistedAfterTaskRelaunch = true;
+            folderPersistedAfterTaskRelaunch = true;
+        }
+    }
+
+    private void openProfileDialog() {
+        UiObject2 profile = waitForAny(
+                UI_WAIT_MS,
+                productTextOrDescriptionSelectors("Your profile", "android.widget.Button", true));
+        assertNoBindingTerms();
+        profile.click();
+        waitForAny(
+                SHORT_WAIT_MS,
+                By.desc("Profile").pkg(OtaFlowPolicy.PRODUCT_PACKAGE),
+                By.text("Profile").pkg(OtaFlowPolicy.PRODUCT_PACKAGE));
+        log("Opened exact Your profile dialog");
+    }
+
+    private void openSettingsFromProductNavigation() {
+        clickWebButton(OtaFlowPolicy.MORE_NAVIGATION, "More navigation", UI_WAIT_MS);
+        waitFor(By.res("mobile-nav-more"), SHORT_WAIT_MS, "More dialog");
+        click(By.text("Settings"), "Settings", SHORT_WAIT_MS, false);
+        waitForSettingsRoute();
+    }
+
+    private void navigateProductRoute(String label) {
+        UiObject2 route = waitForAny(
+                UI_WAIT_MS,
+                productTextOrDescriptionSelectors(label, "android.widget.Button", true));
+        assertNoBindingTerms();
+        route.click();
+        log("Opened exact product route: " + label);
+        device.waitForIdle(750);
+    }
+
+    private UiObject2 clickProductExact(String label, String className, long timeoutMs) {
+        UiObject2 object = waitForAny(
+                timeoutMs, productTextOrDescriptionSelectors(label, className, true));
+        assertNoBindingTerms();
+        object.click();
+        log("Clicked exact product control: " + label);
+        device.waitForIdle(750);
+        return object;
+    }
+
+    private void waitForExactTextValue(UiObject2 object, String expected, String label) {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (expected.equals(object.getText())) return;
+            SystemClock.sleep(200);
+        }
+        fail("Timed out waiting for exact " + label);
+    }
+
+    private void waitForSelectedFolder(String moveLabel, String expectedFolder) {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            UiObject2 select = findAnyNow(productTextOrDescriptionSelectors(
+                    moveLabel, "android.widget.Spinner", true));
+            if (select != null && expectedFolder.equals(select.getText())) return;
+            SystemClock.sleep(200);
+        }
+        fail("Timed out waiting for exact folder membership: " + expectedFolder);
+    }
+
+    private int returnToProductThroughVisibleLauncher(String phase) {
+        device.pressHome();
+        assertTrue("Home did not hide product before " + phase,
+                device.wait(Until.gone(By.pkg(OtaFlowPolicy.PRODUCT_PACKAGE)), SHORT_WAIT_MS));
+        launchProductFromVisibleLauncher(phase);
+        visibleLauncherReturnOrdinal++;
+        return visibleLauncherReturnOrdinal;
+    }
+
+    private void launchProductFromVisibleLauncher(String phase) {
+        launchVisibleAppFromLauncher("YAWF Stream", OtaFlowPolicy.PRODUCT_PACKAGE, phase);
+    }
+
+    private void launchVisibleAppFromLauncher(String appLabel, String expectedPackage, String phase) {
+        device.pressHome();
+        device.waitForIdle(1_000);
+        String launcherPackage = device.getCurrentPackageName();
+        assertNotNull("Launcher package was unavailable for " + appLabel, launcherPackage);
+        assertFalse("Product remained foreground while seeking launcher icon",
+                OtaFlowPolicy.PRODUCT_PACKAGE.equals(launcherPackage));
+        UiObject2 icon = findUniqueLauncherObject(appLabel, launcherPackage, true);
+        if (icon == null) {
+            int width = device.getDisplayWidth();
+            int height = device.getDisplayHeight();
+            device.swipe(width / 2, height - 2, width / 2, height / 4, 30);
+            device.waitForIdle(1_000);
+            launcherPackage = device.getCurrentPackageName();
+            icon = findUniqueLauncherObject(appLabel, launcherPackage, true);
+        }
+        assertNotNull("Visible launcher icon was unavailable for " + appLabel, icon);
+        assertNoBindingTerms();
+        icon.click();
+        assertTrue(appLabel + " package did not become visible for " + phase,
+                device.wait(Until.hasObject(By.pkg(expectedPackage)), UI_WAIT_MS));
+        device.waitForIdle(2_000);
+        log("Opened " + appLabel + " through its exact visible launcher icon for " + phase);
+    }
+
+    private UiObject2 findUniqueLauncherObject(
+            String appLabel, String launcherPackage, boolean clickable) {
+        BySelector text = By.text(appLabel).pkg(launcherPackage);
+        BySelector description = By.desc(appLabel).pkg(launcherPackage);
+        if (clickable) {
+            text = text.clickable(true);
+            description = description.clickable(true);
+        }
+        List<UiObject2> matches = new ArrayList<>();
+        addDistinctUiObjects(matches, device.findObjects(text));
+        addDistinctUiObjects(matches, device.findObjects(description));
+        if (matches.isEmpty()) return null;
+        assertEquals("Expected one exact launcher object for " + appLabel, 1, matches.size());
+        return matches.get(0);
+    }
+
+    private void addDistinctUiObjects(List<UiObject2> destination, List<UiObject2> candidates) {
+        for (UiObject2 candidate : candidates) {
+            boolean duplicate = false;
+            for (UiObject2 existing : destination) {
+                if (sameUiIdentity(existing, candidate)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) destination.add(candidate);
+        }
+    }
+
+    private boolean sameUiIdentity(UiObject2 first, UiObject2 second) {
+        return first.getVisibleBounds().equals(second.getVisibleBounds())
+                && String.valueOf(first.getApplicationPackage())
+                        .equals(String.valueOf(second.getApplicationPackage()))
+                && String.valueOf(first.getClassName())
+                        .equals(String.valueOf(second.getClassName()))
+                && String.valueOf(first.getResourceName())
+                        .equals(String.valueOf(second.getResourceName()));
+    }
+
+    private void dismissVisibleRecentTaskAndRelaunchThroughLauncher() throws Exception {
+        device.pressRecentApps();
+        device.waitForIdle(1_000);
+        String launcherPackage = device.getCurrentPackageName();
+        assertNotNull("Launcher package was unavailable in recents", launcherPackage);
+        assertFalse("Product package remained foreground in recents",
+                OtaFlowPolicy.PRODUCT_PACKAGE.equals(launcherPackage));
+        UiObject2 title = null;
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (title == null && SystemClock.uptimeMillis() < deadline) {
+            title = findUniqueLauncherObject("YAWF Stream", launcherPackage, false);
+            if (title == null) SystemClock.sleep(250);
+        }
+        assertNotNull("Unique visible YAWF Stream recents card was unavailable", title);
+        Rect card = title.getVisibleBounds();
+        UiObject2 parent = title.getParent();
+        for (int depth = 0; depth < 4 && parent != null; depth++) {
+            Rect parentBounds = parent.getVisibleBounds();
+            if (parentBounds.height() > card.height()) card = parentBounds;
+            parent = parent.getParent();
+        }
+        assertFalse("Visible YAWF Stream recents card bounds were empty", card.isEmpty());
+        capture("automatic-recents-before-task-dismissal");
+        visibleTaskDismissalSwipes++;
+        device.swipe(card.centerX(), card.centerY(), card.centerX(), 0, 35);
+        boolean exactTextAbsent = device.wait(
+                Until.gone(By.text("YAWF Stream").pkg(launcherPackage)), SHORT_WAIT_MS);
+        boolean exactDescriptionAbsent = device.wait(
+                Until.gone(By.desc("YAWF Stream").pkg(launcherPackage)), SHORT_WAIT_MS);
+        assertTrue("YAWF Stream recents card did not visibly dismiss by both identities",
+                AutomaticOtaDriverChecks.visibleTaskDismissalCompleted(
+                        visibleTaskDismissalSwipes,
+                        exactTextAbsent,
+                        exactDescriptionAbsent));
+        visibleTaskDismissalObserved = true;
+        launchProductFromVisibleLauncher("task-relaunch persistence check");
+        waitFor(By.text("Discover"), UI_WAIT_MS, "task-relaunch Discover");
     }
 
     private void advanceFixedTour(String[] titles, String capturePrefix) throws IOException {
@@ -512,6 +1134,108 @@ public final class RuntimeOtaFlowTest {
         return null;
     }
 
+    private UiObject2 findUniqueExactProductDialog(String exactIdentity) {
+        List<UiObject2> dialogs = device.findObjects(
+                By.clazz(DETAIL_DIALOG_CLASS).pkg(OtaFlowPolicy.PRODUCT_PACKAGE));
+        AutomaticOtaDriverChecks.DialogCandidate[] candidates =
+                new AutomaticOtaDriverChecks.DialogCandidate[dialogs.size()];
+        for (int index = 0; index < dialogs.size(); index++) {
+            UiObject2 dialog = dialogs.get(index);
+            candidates[index] = new AutomaticOtaDriverChecks.DialogCandidate(
+                    dialog.getApplicationPackage(),
+                    dialog.getClassName(),
+                    dialog.getText(),
+                    dialog.getContentDescription());
+        }
+        int selected = AutomaticOtaDriverChecks.uniqueExactDialogIndex(
+                OtaFlowPolicy.PRODUCT_PACKAGE,
+                DETAIL_DIALOG_CLASS,
+                exactIdentity,
+                candidates);
+        assertFalse("Expected at most one exact product detail dialog for " + exactIdentity,
+                selected == AutomaticOtaDriverChecks.AMBIGUOUS_DIALOG_INDEX);
+        return selected == AutomaticOtaDriverChecks.NO_DIALOG_INDEX
+                ? null
+                : dialogs.get(selected);
+    }
+
+    private UiObject2 waitForUniqueExactProductDialog(String exactIdentity, long timeoutMs) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            UiObject2 dialog = findUniqueExactProductDialog(exactIdentity);
+            if (dialog != null) return dialog;
+            SystemClock.sleep(250);
+        }
+        fail("Timed out waiting for exact product detail dialog " + exactIdentity);
+        return null;
+    }
+
+    private boolean waitForUniqueExactProductDialogGone(String exactIdentity, long timeoutMs) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (findUniqueExactProductDialog(exactIdentity) == null) return true;
+            SystemClock.sleep(200);
+        }
+        return false;
+    }
+
+    private UiObject2 scrollUntilVisibleInExactDialog(
+            String dialogIdentity, String text, String className, Direction direction) {
+        for (int attempt = 0; attempt < 16; attempt++) {
+            UiObject2 dialog = findUniqueExactProductDialog(dialogIdentity);
+            assertNotNull("Exact detail dialog was unavailable while seeking " + text, dialog);
+            BySelector[] selectors = productTextOrDescriptionSelectors(text, className, true);
+            UiObject2 textMatch = dialog.findObject(selectors[0]);
+            UiObject2 descriptionMatch = dialog.findObject(selectors[1]);
+            if (textMatch != null && descriptionMatch != null) {
+                assertTrue("Detail dialog exposed conflicting exact " + text + " controls",
+                        sameUiIdentity(textMatch, descriptionMatch));
+            }
+            UiObject2 found = textMatch != null ? textMatch : descriptionMatch;
+            if (found != null && dialog.getVisibleBounds().contains(found.getVisibleBounds())) {
+                return found;
+            }
+            UiObject2 scrollable = dialog.findObject(By.scrollable(true));
+            assertNotNull("No exact detail dialog scroll container while seeking " + text, scrollable);
+            assertNoBindingTerms();
+            scrollable.scroll(direction, 0.75f);
+            device.waitForIdle(600);
+        }
+        fail("Could not find exact " + text + " inside the exact detail dialog");
+        return null;
+    }
+
+    private UiObject2 scrollUntilVisibleProductSemanticOnAnyRoute(
+            String text, String className, boolean clickable, Direction direction) {
+        BySelector[] selectors = productTextOrDescriptionSelectors(text, className, clickable);
+        for (int attempt = 0; attempt < 16; attempt++) {
+            UiObject2 found = findAnyNow(selectors);
+            if (found != null && isVisibleAboveBottomNavigation(found)) return found;
+            UiObject2 scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("No product scroll container while seeking " + text, scrollable);
+            UiObject2 navigation = findAnyNow(productTextOrDescriptionSelectors(
+                    "Primary", "android.view.View", false));
+            assertNotNull("Exact bottom navigation was unavailable while seeking " + text, navigation);
+            Rect scrollBounds = scrollable.getVisibleBounds();
+            Rect navigationBounds = navigation.getVisibleBounds();
+            assertFalse("Product scroll bounds were empty while seeking " + text, scrollBounds.isEmpty());
+            assertFalse("Bottom navigation bounds were empty while seeking " + text,
+                    navigationBounds.isEmpty());
+            int leftMargin = 0;
+            int topMargin = 0;
+            int rightMargin = 0;
+            int bottomMargin = Math.max(0, scrollBounds.bottom - navigationBounds.top
+                    + navigationBounds.height());
+            scrollable.setGestureMargins(leftMargin, topMargin, rightMargin, bottomMargin);
+            assertNoBindingTerms();
+            scrollable.scroll(direction, 0.75f);
+            device.waitForIdle(600);
+        }
+        fail("Could not place exact " + text + " above bottom navigation on product route");
+        return null;
+    }
+
     private void configureSettingsScrollGesture(UiObject2 scrollable) {
         UiObject2 settingsPage = findAnyNow(productTextOrDescriptionSelectors(
                 "Settings page", "android.view.View", false));
@@ -702,6 +1426,8 @@ public final class RuntimeOtaFlowTest {
                 question.getResourceName() != null
                         && question.getResourceName().endsWith(":id/install_confirm_question_update"));
         capture("installer-confirm");
+        systemUpdateSelections++;
+        assertEquals("System Update must be selected exactly once", 1, systemUpdateSelections);
         click(
                 By.res("android", "button1").pkg(installerPackage).text(UPDATE_TEXT),
                 "system Update",
@@ -717,6 +1443,8 @@ public final class RuntimeOtaFlowTest {
                 success.getResourceName() != null && success.getResourceName().endsWith(":id/install_success"));
         installerSuccessObserved = true;
         capture("installer-success");
+        systemOpenSelections++;
+        assertEquals("System Open must be selected exactly once", 1, systemOpenSelections);
         click(
                 By.res("android", "button1").pkg(installerPackage).text(OPEN_TEXT),
                 "system Open",
@@ -785,6 +1513,70 @@ public final class RuntimeOtaFlowTest {
         return false;
     }
 
+    private void cleanupUnknownSourcePermissionThroughVisibleSettings() throws Exception {
+        boolean coreTransactionPassed = updatedProductObserved
+                && installerSuccessObserved
+                && installerOpenObserved
+                && systemUpdateSelections == 1
+                && systemOpenSelections == 1;
+        if (!AutomaticOtaDriverChecks.permissionCleanupMustRun(
+                permissionEnabledByTest, coreTransactionPassed)) {
+            permissionCleanupObserved = true;
+            log("Unknown-source permission was never enabled by this test");
+            return;
+        }
+        launchVisibleAppFromLauncher("Settings", OtaFlowPolicy.SETTINGS_PACKAGE,
+                "visible unknown-source cleanup");
+        clickSystemText("Apps", UI_WAIT_MS);
+        scrollUntilVisibleSystemText("Special app access", Direction.DOWN).click();
+        device.waitForIdle(750);
+        scrollUntilVisibleSystemText("Install unknown apps", Direction.DOWN).click();
+        device.waitForIdle(750);
+        scrollUntilVisibleSystemText("YAWF Stream", Direction.DOWN).click();
+        waitFor(By.text("Allow from this source"), SHORT_WAIT_MS,
+                "visible cleanup unknown-source title");
+        waitFor(By.text("YAWF Stream"), SHORT_WAIT_MS, "visible cleanup YAWF label");
+        UiObject2 toggle = findUnknownSourceSwitch();
+        assertNotNull("Visible cleanup switch was unavailable", toggle);
+        assertTrue("Unknown-source permission was already off before visible cleanup", toggle.isChecked());
+        assertNoBindingTerms();
+        permissionCleanupToggleSelections++;
+        toggle.click();
+        UiObject2 revoked = waitForUnknownSourceSwitchState(
+                false, "visible unknown-source switch off");
+        assertTrue("Visible permission revocation was incomplete",
+                AutomaticOtaDriverChecks.permissionRevocationCompleted(
+                        true, permissionCleanupToggleSelections, revoked.isChecked()));
+        capture("automatic-permission-cleanup-off");
+        permissionCleanupObserved = true;
+        log("Revoked YAWF unknown-source access through launcher-opened visible Android Settings");
+    }
+
+    private UiObject2 scrollUntilVisibleSystemText(String text, Direction direction) {
+        for (int attempt = 0; attempt < 16; attempt++) {
+            UiObject2 found = device.findObject(By.text(text).pkg(OtaFlowPolicy.SETTINGS_PACKAGE));
+            if (found != null && found.isEnabled()) return found;
+            UiObject2 scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("No visible system Settings scroll container while seeking " + text, scrollable);
+            assertNoBindingTerms();
+            scrollable.scroll(direction, 0.75f);
+            device.waitForIdle(600);
+        }
+        fail("Could not find exact visible system Settings text: " + text);
+        return null;
+    }
+
+    private void clickSystemText(String text, long timeoutMs) {
+        UiObject2 object = waitFor(
+                By.text(text).pkg(OtaFlowPolicy.SETTINGS_PACKAGE).enabled(true),
+                timeoutMs,
+                "system Settings " + text);
+        assertNoBindingTerms();
+        object.click();
+        log("Clicked exact visible system Settings control: " + text);
+        device.waitForIdle(750);
+    }
+
     private void cleanupUnknownSourcePermission() throws Exception {
         if (!permissionEnabledByTest) {
             permissionCleanupObserved = true;
@@ -837,6 +1629,22 @@ public final class RuntimeOtaFlowTest {
         String value = arguments.getString(name, "");
         try {
             return Long.parseLong(value);
+        } catch (NumberFormatException ignored) {
+            return -1L;
+        }
+    }
+
+    private static long versionCodeFor(String version) {
+        String[] parts = version.split("\\.", -1);
+        if (parts.length != 3) return -1L;
+        try {
+            long major = Long.parseLong(parts[0]);
+            long minor = Long.parseLong(parts[1]);
+            long patch = Long.parseLong(parts[2]);
+            if (major < 0L || major > 999L
+                    || minor < 0L || minor > 999L
+                    || patch < 0L || patch > 999L) return -1L;
+            return major * 1_000_000L + minor * 1_000L + patch;
         } catch (NumberFormatException ignored) {
             return -1L;
         }
@@ -1000,9 +1808,12 @@ public final class RuntimeOtaFlowTest {
         receipt.put("outcome", outcome);
         receipt.put("persistentUiAutomationSession", true);
         receipt.put("productPackage", OtaFlowPolicy.PRODUCT_PACKAGE);
-        receipt.put("baselineVersion", OtaFlowPolicy.BASELINE_VERSION);
-        receipt.put("targetVersion", OtaFlowPolicy.TARGET_VERSION);
-        receipt.put("targetSha256", OtaFlowPolicy.TARGET_SHA256);
+        receipt.put("baselineVersion", admittedBaselineVersion);
+        receipt.put("targetVersion", admittedTargetVersion);
+        receipt.put("targetVersionCode", admittedTargetVersionCode);
+        receipt.put("targetSha256", admittedTargetSha256);
+        receipt.put("targetSize", admittedTargetSize);
+        receipt.put("targetIdentityAdmitted", targetIdentityAdmitted);
         receipt.put("productPermissionPageObserved", productPermissionPageObserved);
         receipt.put("permissionEnabledByTest", permissionEnabledByTest);
         receipt.put("installerSuccessObserved", installerSuccessObserved);
@@ -1012,6 +1823,35 @@ public final class RuntimeOtaFlowTest {
         receipt.put("permissionBackReturnObserved", permissionBackReturnObserved);
         receipt.put("otaMode", otaMode == null ? "strict" : otaMode);
         receipt.put("legacyManualReconsentUsed", legacyManualReconsentUsed);
+        receipt.put("productInstallSelections", productInstallSelections);
+        receipt.put("systemUpdateSelections", systemUpdateSelections);
+        receipt.put("systemOpenSelections", systemOpenSelections);
+        if (isAutomaticMode()) {
+            receipt.put("targetSourceRevision", admittedTargetSourceRevision);
+            receipt.put("targetManifestSha256", admittedTargetManifestSha256);
+            receipt.put("targetVerificationSha256", admittedTargetVerificationSha256);
+            receipt.put("targetBuildRun", admittedTargetBuildRun);
+            receipt.put("initialManualProgressObserved", initialManualProgressObserved);
+            receipt.put("initialManualCancelWon", initialManualCancelWon);
+            receipt.put("automaticOfferAbsentSameForeground", automaticOfferAbsentSameForeground);
+            receipt.put("deferredAutomaticOfferObserved", deferredAutomaticOfferObserved);
+            receipt.put("automaticDiscoveryObserved", automaticDiscoveryObserved);
+            receipt.put("weeklyElapsedSchedulingProven", false);
+            receipt.put("sampleCatalogFixtureUsed", sampleCatalogFixtureUsed);
+            receipt.put("liveCatalogProviderProof", false);
+            receipt.put("profilePersistedWarm", profilePersistedWarm);
+            receipt.put("appearancePersistedWarm", appearancePersistedWarm);
+            receipt.put("watchlistPersistedWarm", watchlistPersistedWarm);
+            receipt.put("folderPersistedWarm", folderPersistedWarm);
+            receipt.put("visibleTaskDismissalObserved", visibleTaskDismissalObserved);
+            receipt.put("visibleTaskDismissalSwipes", visibleTaskDismissalSwipes);
+            receipt.put("independentColdProcessProof", false);
+            receipt.put("profilePersistedAfterTaskRelaunch", profilePersistedAfterTaskRelaunch);
+            receipt.put("appearancePersistedAfterTaskRelaunch", appearancePersistedAfterTaskRelaunch);
+            receipt.put("watchlistPersistedAfterTaskRelaunch", watchlistPersistedAfterTaskRelaunch);
+            receipt.put("folderPersistedAfterTaskRelaunch", folderPersistedAfterTaskRelaunch);
+            receipt.put("permissionCleanupToggleSelections", permissionCleanupToggleSelections);
+        }
         receipt.put("captures", captureIndex);
         receipt.put(
                 "failure",

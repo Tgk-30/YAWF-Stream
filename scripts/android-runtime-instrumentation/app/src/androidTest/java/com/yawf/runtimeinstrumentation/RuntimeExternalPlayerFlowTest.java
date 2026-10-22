@@ -60,9 +60,17 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final String FULLSCREEN_TIP_DESCRIPTION =
             "To exit, swipe down from the top of your screen";
     private static final String FULLSCREEN_TIP_BUTTON = "Got it";
-    private static final String DIRECT_HANDLER_PACKAGE = "com.google.android.apps.photos";
-    private static final String DIRECT_HANDLER_ACTIVITY =
-            "com.google.android.apps.photos.pager.HostPhotoPagerActivity";
+    private static final String VLC_PACKAGE = "org.videolan.vlc";
+    private static final String VLC_INTENT_ACTIVITY = "org.videolan.vlc.StartActivity";
+    private static final String VLC_PLAYBACK_ACTIVITY =
+            "org.videolan.vlc.gui.video.VideoPlayerActivity";
+    private static final String VLC_WELCOME_TITLE = "Welcome to VLC!";
+    private static final String VLC_START = "Start VLC";
+    private static final String VLC_PERMISSION_TITLE = "Permission";
+    private static final String VLC_NO_FILE_ACCESS = "No file access";
+    private static final String VLC_THEME_TITLE = "Make yourself at home";
+    private static final String VLC_NOTIFICATION_TITLE = "Notification permission";
+    private static final String VLC_ALL_SET_TITLE = "VLC is all set!";
     private static final String CONNECT_SERVER_LABEL =
             "Connect to a server Already have a server or an invite link? Paste the address and sign in.";
     private static final String SOURCE_CONTROL_LABEL =
@@ -103,6 +111,7 @@ public final class RuntimeExternalPlayerFlowTest {
     private String handlerLabel = "";
     private String handlerPackage = "";
     private String handlerActivity = "";
+    private String handlerPlaybackActivity = "";
     private int handlerActivityCount;
     private boolean realAndroidChooserObserved;
     private boolean soleHandlerDirectLaunchObserved;
@@ -120,6 +129,7 @@ public final class RuntimeExternalPlayerFlowTest {
         handlerLabel = arguments.getString("externalHandlerLabel", "").trim();
         handlerPackage = arguments.getString("externalHandlerPackage", "").trim();
         handlerActivity = arguments.getString("externalHandlerActivity", "").trim();
+        handlerPlaybackActivity = arguments.getString("externalHandlerPlaybackActivity", "").trim();
         String handlerActivityCountValue =
                 arguments.getString("externalHandlerActivityCount", "").trim();
         assertTrue("Handler label and package must be supplied together",
@@ -129,10 +139,13 @@ public final class RuntimeExternalPlayerFlowTest {
                         handlerLabel,
                         handlerPackage,
                         handlerActivity,
+                        handlerPlaybackActivity,
                         handlerActivityCountValue));
         if (!handlerLabel.isEmpty()) {
             assertTrue("Unsafe external handler label", SAFE_LABEL.matcher(handlerLabel).matches());
             assertTrue("Unsafe external handler package", SAFE_PACKAGE.matcher(handlerPackage).matches());
+            assertTrue("Unsafe external handler activity", SAFE_PACKAGE.matcher(handlerActivity).matches());
+            assertTrue("Unsafe external playback activity", SAFE_PACKAGE.matcher(handlerPlaybackActivity).matches());
             assertTrue("Unsafe external handler activity count",
                     handlerActivityCountValue.matches("[1-9][0-9]?") && handlerActivityCountValue.length() <= 2);
             handlerActivityCount = Integer.parseInt(handlerActivityCountValue);
@@ -151,6 +164,9 @@ public final class RuntimeExternalPlayerFlowTest {
         checks.put("realAndroidChooserObserved", false);
         checks.put("soleHandlerDirectLaunchObserved", false);
         checks.put("nonbindingFullscreenTipDismissed", false);
+        checks.put("vlcOnboardingObserved", false);
+        checks.put("vlcStorageAccessDenied", false);
+        checks.put("vlcOptionalPermissionDenied", false);
 
         String outcome = "failed";
         String failure = null;
@@ -247,8 +263,11 @@ public final class RuntimeExternalPlayerFlowTest {
         transition("external-destination-resolving");
         resolveExternalDestination();
         assertTrue(
-                "Exactly one external destination path must be observed",
-                realAndroidChooserObserved ^ soleHandlerDirectLaunchObserved);
+                "The admitted VLC path requires the real Android chooser and forbids a direct-launch receipt",
+                realAndroidChooserObserved && !soleHandlerDirectLaunchObserved);
+
+        transition("vlc-first-run-settling");
+        settleVlcFirstRunAndReachPlayer();
 
         transition("handler-visible");
         waitForForegroundPackage(handlerPackage, MEDIA_WAIT_MS);
@@ -290,14 +309,11 @@ public final class RuntimeExternalPlayerFlowTest {
 
     private void resolveExternalDestination() throws Exception {
         long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
-        boolean fullscreenTipDismissed = false;
         while (SystemClock.uptimeMillis() < deadline) {
             assertNoOutOfScopeApproval();
 
             UiObject2 chooser = findTextOrDescription("Open external player");
             if (chooser != null) {
-                assertTrue("Chooser was observed after a direct-launch receipt",
-                        !soleHandlerDirectLaunchObserved);
                 if (!realAndroidChooserObserved) {
                     realAndroidChooserObserved = true;
                     checks.put("realAndroidChooserObserved", true);
@@ -306,16 +322,9 @@ public final class RuntimeExternalPlayerFlowTest {
                 requireHandlerAdmission();
             }
             UiObject2 handler = chooser == null ? null : findLabeledClickable(handlerLabel);
-            UiObject2 fullscreenTipButton = findExactFullscreenTipButton();
-            boolean anyFullscreenTipResource = hasAnyFullscreenTipResource();
             String action = chooseExternalDestinationAction(
                     chooser != null,
-                    handler != null,
-                    fullscreenTipButton != null,
-                    anyFullscreenTipResource,
-                    fullscreenTipDismissed,
-                    !realAndroidChooserObserved && isSolePhotosDirectLaunchAdmission(),
-                    handlerPackage.equals(currentPackage()));
+                    handler != null);
 
             if ("select-chooser-handler".equals(action)) {
                 capture("chooser-handler-observed");
@@ -334,63 +343,30 @@ public final class RuntimeExternalPlayerFlowTest {
                 }
                 return;
             }
-
-            if ("dismiss-fullscreen-tip".equals(action)) {
-                assertNoOutOfScopeApproval();
-                capture("nonbinding-fullscreen-tip");
-                fullscreenTipButton.click();
-                fullscreenTipDismissed = true;
-                checks.put("nonbindingFullscreenTipDismissed", true);
-                log("Dismissed the exact nonbinding SystemUI fullscreen tip once");
-                SystemClock.sleep(250);
-                continue;
-            }
-
-            if ("accept-sole-handler-direct-launch".equals(action)) {
-                assertTrue("Direct launch was observed after a chooser receipt",
-                        !realAndroidChooserObserved);
-                soleHandlerDirectLaunchObserved = true;
-                checks.put("soleHandlerDirectLaunchObserved", true);
-                checks.put("handlerAdmissionProvided", true);
-                capture("sole-handler-direct-launch");
-                log("Observed the independently admitted sole Photos handler in the foreground");
-                return;
-            }
             SystemClock.sleep(250);
         }
-        fail("Timed out waiting for an exact Android chooser or the independently admitted sole Photos handler");
+        fail("Timed out waiting for the exact Android chooser and admitted VLC destination");
     }
 
     private static String chooseExternalDestinationAction(
             boolean chooserVisible,
-            boolean chooserHandlerVisible,
-            boolean exactFullscreenTipVisible,
-            boolean anyFullscreenTipResourceVisible,
-            boolean fullscreenTipDismissed,
-            boolean soleDirectAdmission,
-            boolean expectedHandlerForeground) {
-        if (exactFullscreenTipVisible) {
-            return fullscreenTipDismissed ? "wait" : "dismiss-fullscreen-tip";
-        }
+            boolean chooserHandlerVisible) {
         if (chooserVisible && chooserHandlerVisible) return "select-chooser-handler";
-        if (!chooserVisible
-                && !anyFullscreenTipResourceVisible
-                && soleDirectAdmission
-                && expectedHandlerForeground) {
-            return "accept-sole-handler-direct-launch";
-        }
         return "wait";
     }
 
     private static boolean hasCompleteHandlerMetadata(
-            String label, String packageName, String activity, String activityCount) {
+            String label, String packageName, String activity,
+            String playbackActivity, String activityCount) {
         boolean noneProvided = label.isEmpty()
                 && packageName.isEmpty()
                 && activity.isEmpty()
+                && playbackActivity.isEmpty()
                 && activityCount.isEmpty();
         boolean allProvided = !label.isEmpty()
                 && !packageName.isEmpty()
                 && !activity.isEmpty()
+                && !playbackActivity.isEmpty()
                 && !activityCount.isEmpty();
         return noneProvided || allProvided;
     }
@@ -399,15 +375,154 @@ public final class RuntimeExternalPlayerFlowTest {
         if (handlerLabel.isEmpty()) {
             checks.put("handlerAdmissionProvided", false);
             fail("No exact external handler metadata was admitted. "
-                    + "The chooser was retained for honest inspection; do not install a third-party handler.");
+                    + "The chooser was retained for honest inspection.");
         }
+        assertEquals("Unexpected admitted external handler label", "VLC", handlerLabel);
+        assertEquals("Unexpected admitted external handler package", VLC_PACKAGE, handlerPackage);
+        assertEquals("Unexpected admitted external intent activity", VLC_INTENT_ACTIVITY, handlerActivity);
+        assertEquals("Unexpected manifest-derived VLC playback activity",
+                VLC_PLAYBACK_ACTIVITY, handlerPlaybackActivity);
+        assertTrue("VLC was not independently admitted alongside another handler",
+                handlerActivityCount >= 2);
         checks.put("handlerAdmissionProvided", true);
     }
 
-    private boolean isSolePhotosDirectLaunchAdmission() {
-        return handlerActivityCount == 1
-                && DIRECT_HANDLER_PACKAGE.equals(handlerPackage)
-                && DIRECT_HANDLER_ACTIVITY.equals(handlerActivity);
+    private void settleVlcFirstRunAndReachPlayer() throws Exception {
+        requireHandlerAdmission();
+        long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
+        boolean fullscreenTipDismissed = false;
+        boolean welcomeAdvanced = false;
+        boolean noFileAccessSelected = false;
+        boolean noFileAccessAdvanced = false;
+        boolean themeAdvanced = false;
+        boolean notificationSkipped = false;
+        boolean allSetStarted = false;
+        while (SystemClock.uptimeMillis() < deadline) {
+            UiObject2 fullscreenTip = findExactFullscreenTipButton();
+            if (fullscreenTip != null) {
+                assertTrue("The exact fullscreen tip reappeared after its one allowed dismissal",
+                        !fullscreenTipDismissed);
+                capture("nonbinding-fullscreen-tip");
+                fullscreenTip.click();
+                fullscreenTipDismissed = true;
+                checks.put("nonbindingFullscreenTipDismissed", true);
+                log("Dismissed the exact nonbinding SystemUI fullscreen tip once");
+                SystemClock.sleep(250);
+                continue;
+            }
+            if (hasAnyFullscreenTipResource()) {
+                SystemClock.sleep(250);
+                continue;
+            }
+            if (denyExactOptionalVlcPermissionIfPresent()) {
+                checks.put("vlcOptionalPermissionDenied", true);
+                SystemClock.sleep(250);
+                continue;
+            }
+            assertNoOutOfScopeApproval();
+            if (!VLC_PACKAGE.equals(currentPackage())) {
+                SystemClock.sleep(250);
+                continue;
+            }
+            if (device.hasObject(By.res(VLC_PACKAGE, "player_root").pkg(VLC_PACKAGE))) {
+                checks.put("vlcPlayerSurfaceObserved", true);
+                return;
+            }
+            if (device.hasObject(By.text(exactLabel(VLC_WELCOME_TITLE)))) {
+                assertTrue("VLC welcome page repeated", !welcomeAdvanced);
+                checks.put("vlcOnboardingObserved", true);
+                capture("vlc-onboarding-welcome");
+                clickVlcOnboardingControl("Next", "VLC welcome Next");
+                welcomeAdvanced = true;
+                continue;
+            }
+            if (device.hasObject(By.text(exactLabel(VLC_PERMISSION_TITLE)))) {
+                checks.put("vlcOnboardingObserved", true);
+                if (!noFileAccessSelected) {
+                    capture("vlc-onboarding-permission");
+                    clickVlcOnboardingControl(VLC_NO_FILE_ACCESS, "VLC No file access option");
+                    noFileAccessSelected = true;
+                    checks.put("vlcStorageAccessDenied", true);
+                } else {
+                    assertTrue("VLC permission page repeated after denial", !noFileAccessAdvanced);
+                    clickVlcOnboardingControl("Next", "VLC permission Next after No file access");
+                    noFileAccessAdvanced = true;
+                }
+                continue;
+            }
+            if (device.hasObject(By.text(exactLabel(VLC_NO_FILE_ACCESS)))) {
+                assertTrue("VLC no-file-access explanation repeated", !noFileAccessAdvanced);
+                capture("vlc-onboarding-no-file-access");
+                clickVlcOnboardingControl("Next", "VLC no-file-access Next");
+                noFileAccessAdvanced = true;
+                checks.put("vlcStorageAccessDenied", true);
+                continue;
+            }
+            if (device.hasObject(By.text(exactLabel(VLC_THEME_TITLE)))) {
+                assertTrue("VLC theme page repeated", !themeAdvanced);
+                capture("vlc-onboarding-theme");
+                clickVlcOnboardingControl("Next", "VLC nonbinding theme Next");
+                themeAdvanced = true;
+                continue;
+            }
+            if (device.hasObject(By.text(exactLabel(VLC_NOTIFICATION_TITLE)))) {
+                assertTrue("VLC notification page repeated", !notificationSkipped);
+                capture("vlc-onboarding-notification");
+                clickVlcOnboardingControl("Skip", "VLC optional notification Skip");
+                notificationSkipped = true;
+                checks.put("vlcOptionalPermissionDenied", true);
+                continue;
+            }
+            if (device.hasObject(By.text(exactLabel(VLC_ALL_SET_TITLE)))) {
+                assertTrue("VLC all-set page repeated", !allSetStarted);
+                capture("vlc-onboarding-all-set");
+                clickVlcOnboardingControl(VLC_START, "VLC onboarding Start VLC");
+                allSetStarted = true;
+                continue;
+            }
+            SystemClock.sleep(250);
+        }
+        fail("Timed out waiting for VLC's manifest-derived video player surface");
+    }
+
+    private void clickVlcOnboardingControl(String label, String description) {
+        UiObject2 control = findLabeledClickableInPackage(label, VLC_PACKAGE, description);
+        assertNotNull("Missing exact " + description, control);
+        assertNoOutOfScopeApproval();
+        control.click();
+        log("Clicked semantic nonbinding control: " + description);
+        SystemClock.sleep(500);
+    }
+
+    private boolean denyExactOptionalVlcPermissionIfPresent() throws IOException {
+        String foreground = currentPackage();
+        if (!foreground.equals("com.android.permissioncontroller")
+                && !foreground.equals("com.google.android.permissioncontroller")) {
+            return false;
+        }
+        String[] allowedMessages = {
+                "Allow VLC to send you notifications?",
+                "Allow VLC to access photos and videos on this device?",
+                "Allow VLC to access music and audio on this device?"
+        };
+        boolean exactAllowedMessage = false;
+        for (String message : allowedMessages) {
+            if (device.hasObject(By.text(exactLabel(message)))) {
+                exactAllowedMessage = true;
+                break;
+            }
+        }
+        assertTrue("Refusing an unexpected permission-controller surface", exactAllowedMessage);
+        List<UiObject2> denyButtons = device.findObjects(
+                By.res(foreground, "permission_deny_button")
+                        .pkg(foreground)
+                        .clickable(true)
+                        .enabled(true));
+        assertEquals("Expected one exact permission denial button", 1, denyButtons.size());
+        capture("vlc-optional-permission-denial");
+        denyButtons.get(0).click();
+        log("Denied one exact optional VLC permission without granting access");
+        return true;
     }
 
     private UiObject2 findExactFullscreenTipButton() {
@@ -666,6 +781,24 @@ public final class RuntimeExternalPlayerFlowTest {
         collectClickableAncestors(candidates, device.findObjects(By.desc(labelPattern)));
         if (candidates.size() > 1) {
             fail("Ambiguous enabled clickable controls for exact label: " + description);
+        }
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private UiObject2 findLabeledClickableInPackage(
+            String label, String packageName, String description) {
+        Pattern labelPattern = exactLabel(label);
+        List<UiObject2> candidates = new ArrayList<>();
+        collectClickableAncestors(
+                candidates, device.findObjects(By.text(labelPattern).pkg(packageName)));
+        collectClickableAncestors(
+                candidates, device.findObjects(By.desc(labelPattern).pkg(packageName)));
+        for (UiObject2 candidate : candidates) {
+            assertEquals(description + " escaped the expected package",
+                    packageName, candidate.getApplicationPackage());
+        }
+        if (candidates.size() > 1) {
+            fail("Ambiguous enabled clickable controls for exact package-owned label: " + description);
         }
         return candidates.isEmpty() ? null : candidates.get(0);
     }
@@ -940,6 +1073,8 @@ public final class RuntimeExternalPlayerFlowTest {
         receipt.put("expectedHandlerLabel", handlerLabel.isEmpty() ? JSONObject.NULL : handlerLabel);
         receipt.put("expectedHandlerPackage", handlerPackage.isEmpty() ? JSONObject.NULL : handlerPackage);
         receipt.put("expectedHandlerActivity", handlerActivity.isEmpty() ? JSONObject.NULL : handlerActivity);
+        receipt.put("manifestDeclaredPlaybackActivity",
+                handlerPlaybackActivity.isEmpty() ? JSONObject.NULL : handlerPlaybackActivity);
         receipt.put("externalHandlerActivityCount", handlerActivityCount);
         receipt.put("phases", new JSONArray(phases));
         receipt.put("checks", new JSONObject(checks));

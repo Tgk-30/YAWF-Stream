@@ -11,7 +11,7 @@ function validatePolicy(javaSource, hostSource) {
     /if \(!"legacy-manual-reconsent"\.equals\(otaMode\)\) \{\s*return;/s,
     /By\.text\("Update ready to install"\)\.pkg\(OtaFlowPolicy\.PRODUCT_PACKAGE\)/,
     /By\.text\("YAWF Stream 2\.3\.26 passed all checks\. Android will show the system installer\."\)/,
-    /By\.res\("android", "button1"\)\s*\.pkg\(OtaFlowPolicy\.PRODUCT_PACKAGE\)/s,
+    /UiObject2 install = device\.findObject\(\s*By\.res\("android", "button1"\)\s*\.pkg\(OtaFlowPolicy\.PRODUCT_PACKAGE\)\s*\.text\(OtaFlowPolicy\.INSTALL\.textPattern\(\)\)\);/s,
     /legacyManualReconsentUsed = true/,
     /permissionBackReturnObserved = true/,
     /assertTrue\("Legacy reconsent requires a settled Settings Back return", permissionBackReturnObserved\)/,
