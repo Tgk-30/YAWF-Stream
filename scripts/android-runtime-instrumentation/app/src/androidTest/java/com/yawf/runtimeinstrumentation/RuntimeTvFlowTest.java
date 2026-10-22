@@ -129,10 +129,10 @@ public final class RuntimeTvFlowTest {
         focusNativeAndActivate(playPauseSelector("Pause"), "Pause", 14);
         waitForNative(playPauseSelector("Play"), 5_000, "semantic Play state after pausing");
         long pausedStart = readPositionSeconds();
-        String pausedFrame = centerFrameHash();
+        String pausedFrame = centerFrameHash("pause-hash-before", pausedStart);
         SystemClock.sleep(3_000);
         long pausedEnd = readPositionSeconds();
-        String pausedFrameAfter = centerFrameHash();
+        String pausedFrameAfter = centerFrameHash("pause-hash-after", pausedEnd);
         assertTrue("Position advanced materially while paused", Math.abs(pausedEnd - pausedStart) <= 1);
         assertEquals("Decoded content changed while paused", pausedFrame, pausedFrameAfter);
         checks.put("pauseStable", true);
@@ -884,7 +884,13 @@ public final class RuntimeTvFlowTest {
     }
 
     private String centerFrameHash() throws Exception {
+        return centerFrameHash(null, -1);
+    }
+
+    private String centerFrameHash(String evidenceLabel, long observedPositionSeconds) throws Exception {
+        long screenshotStartedAt = SystemClock.uptimeMillis();
         Bitmap image = instrumentation.getUiAutomation().takeScreenshot();
+        long screenshotCompletedAt = SystemClock.uptimeMillis();
         assertNotNull("UiAutomation screenshot unavailable", image);
         int left = image.getWidth() / 4;
         int top = image.getHeight() / 4;
@@ -895,7 +901,26 @@ public final class RuntimeTvFlowTest {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         ByteBuffer bytes = ByteBuffer.allocate(pixels.length * 4);
         for (int pixel : pixels) bytes.putInt(pixel);
-        return hex(digest.digest(bytes.array()));
+        String hash = hex(digest.digest(bytes.array()));
+        if (evidenceLabel != null) {
+            assertTrue("Unexpected frame evidence label",
+                    "pause-hash-before".equals(evidenceLabel) || "pause-hash-after".equals(evidenceLabel));
+            try (FileOutputStream stream = new FileOutputStream(new File(evidenceDir, evidenceLabel + ".png"))) {
+                assertTrue("Frame PNG encoding failed", image.compress(Bitmap.CompressFormat.PNG, 100, stream));
+            }
+            JSONObject sample = new JSONObject();
+            sample.put("screenshotStartedAtUptimeMillis", screenshotStartedAt);
+            sample.put("screenshotCompletedAtUptimeMillis", screenshotCompletedAt);
+            sample.put("precedingNativePositionSeconds", observedPositionSeconds);
+            sample.put("centerArgbSha256", hash);
+            sample.put("cropLeft", left);
+            sample.put("cropTop", top);
+            sample.put("cropWidth", width);
+            sample.put("cropHeight", height);
+            sample.put("stateObservationScope", "Exact native Play required before first sample; sampler performs no additional UI reads");
+            writeText(evidenceLabel + ".json", sample.toString(2) + "\n");
+        }
+        return hash;
     }
 
     private void capture(String label) throws Exception {
