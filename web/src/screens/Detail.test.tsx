@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
 import type { MediaPreview, MediaItem } from "../models/media";
 import type { DetailState } from "../data/detail";
 import type { StreamsState } from "../data/streams";
@@ -200,7 +201,6 @@ vi.mock("../components/DetailHero", () => ({
   DetailHero: ({
     item,
     inWatchlist,
-    onClose,
     onToggleWatchlist,
     onRequest,
     requestState,
@@ -234,7 +234,6 @@ vi.mock("../components/DetailHero", () => ({
           download
         </button>
       )}
-      <button onClick={onClose}>close</button>
       <button onClick={onToggleWatchlist}>toggle-wl</button>
       <button onClick={() => onTasteSignal?.("liked")}>like</button>
       <button onClick={() => onTasteSignal?.("disliked")}>dislike</button>
@@ -660,6 +659,28 @@ describe("Detail base render", () => {
     expect(episodeTrigger).toHaveFocus();
   });
 
+  it("inerts and restores both Detail content regions around the streams portal", async () => {
+    mockDetailItem = preview("s1", { type: "series", title: "The Series", tmdbId: 200 });
+    mockDetail = detailState({ item: mediaItem({ type: "series", id: "s1", tmdbId: 200 }) });
+    render(<Detail />);
+
+    const detailDialog = screen.getByRole("dialog", { name: "The Series details" });
+    const stickyChrome = detailDialog.querySelector<HTMLElement>(
+      ":scope > .detail-sticky-chrome",
+    );
+    const detailInner = detailDialog.querySelector<HTMLElement>(":scope > .detail-inner");
+    expect(stickyChrome).not.toHaveAttribute("inert");
+    expect(detailInner).not.toHaveAttribute("inert");
+
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    expect(stickyChrome).toHaveAttribute("inert");
+    expect(detailInner).toHaveAttribute("inert");
+
+    await userEvent.click(screen.getByRole("button", { name: /Episodes/ }));
+    expect(stickyChrome).not.toHaveAttribute("inert");
+    expect(detailInner).not.toHaveAttribute("inert");
+  });
+
   it("closes the streams page before the player opens", async () => {
     mockDetailItem = preview("s1", { type: "series", title: "The Series", tmdbId: 200 });
     mockDetail = detailState({ item: mediaItem({ type: "series", id: "s1", tmdbId: 200 }) });
@@ -767,10 +788,40 @@ describe("Detail base render", () => {
 });
 
 describe("Detail actions", () => {
-  it("closes via the hero back/close button", async () => {
+  it("owns one accessible Back control as direct sticky chrome and closes through it", async () => {
     render(<Detail />);
-    await userEvent.click(screen.getByText("close"));
+    const dialog = screen.getByRole("dialog", { name: "Selected details" });
+    const backButtons = screen.getAllByRole("button", { name: "Back" });
+    const back = backButtons[0];
+    const stickyChrome = back.parentElement;
+
+    expect(backButtons).toHaveLength(1);
+    expect(stickyChrome).toHaveClass("detail-sticky-chrome");
+    expect(stickyChrome?.parentElement).toBe(dialog);
+    expect(dialog.firstElementChild).toBe(stickyChrome);
+
+    await userEvent.click(back);
     expect(closeDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("declares sticky safe-area placement in the Detail scroll container", () => {
+    const detailCss = readFileSync("src/screens/Detail.css", "utf8");
+    const detailRule = detailCss.match(/\.detail\s*\{([^}]*)\}/)?.[1] ?? "";
+    const chromeRule = detailCss.match(/\.detail-sticky-chrome\s*\{([^}]*)\}/)?.[1] ?? "";
+    const backRule = detailCss.match(/\.detail-back\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(detailRule).toMatch(/overflow-y:\s*auto;/);
+    expect(chromeRule).toMatch(/position:\s*sticky;/);
+    expect(chromeRule).toMatch(
+      /top:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-top\)\);/,
+    );
+    expect(chromeRule).toMatch(
+      /left:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\);/,
+    );
+    expect(chromeRule).toMatch(/z-index:\s*[1-9]\d*;/);
+    expect(chromeRule).toMatch(/height:\s*0;/);
+    expect(chromeRule).toMatch(/pointer-events:\s*none;/);
+    expect(backRule).toMatch(/pointer-events:\s*auto;/);
   });
 
   it("toggles the watchlist for the selected item", async () => {
@@ -1277,7 +1328,7 @@ describe("Detail play", () => {
     };
     render(<Detail />);
     await userEvent.click(screen.getByText("play"));
-    await userEvent.click(screen.getByText("close"));
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
     resolveTranscode("https://cdn/stale-close.m3u8");
     await act(async () => { await Promise.resolve(); });
 

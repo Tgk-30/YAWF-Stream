@@ -27,6 +27,40 @@
   outline: none;
 }
 
+/* Detail owns its navigation chrome so it remains pinned to the scrollport,
+   rather than scrolling away with the hero. The zero-height wrapper avoids
+   changing the existing content layout. */
+.detail-sticky-chrome {
+  position: sticky;
+  top: max(var(--sp-lg), var(--safe-area-top));
+  left: max(var(--sp-lg), var(--safe-area-left));
+  z-index: 5;
+  width: 38px;
+  height: 0;
+  pointer-events: none;
+}
+.detail-back {
+  display: inline-grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  border-radius: 50%;
+  background: rgba(10, 12, 22, 0.68);
+  backdrop-filter: blur(16px) saturate(1.35);
+  -webkit-backdrop-filter: blur(16px) saturate(1.35);
+  color: #fff;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34);
+  transition: transform 0.18s, background 0.2s, border-color 0.2s;
+}
+.detail-back:hover {
+  transform: scale(1.06);
+  background: rgba(10, 12, 22, 0.72);
+  border-color: rgba(var(--accent-rgb), 0.6);
+}
+
 /* No-TMDB-key hint under the hero: why the page looks sparse + the fix. */
 .detail-nokey-hint {
   margin: 0;

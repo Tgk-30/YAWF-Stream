@@ -39,7 +39,6 @@ describe("DetailHero backdrop", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     const img = container.querySelector("img.detail-hero-backdrop") as HTMLImageElement;
@@ -55,7 +54,6 @@ describe("DetailHero backdrop", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     const img = container.querySelector("img.detail-hero-backdrop") as HTMLImageElement;
@@ -71,7 +69,6 @@ describe("DetailHero backdrop", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     fireEvent.error(container.querySelector("img.detail-hero-backdrop")!);
@@ -82,7 +79,6 @@ describe("DetailHero backdrop", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
 
@@ -98,7 +94,6 @@ describe("DetailHero backdrop", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     expect(container.querySelector("img.detail-hero-backdrop")).toBeNull();
@@ -114,7 +109,6 @@ describe("DetailHero backdrop", () => {
         onPlay={onPlay}
         playLabel="Set up streaming"
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
 
@@ -129,7 +123,6 @@ describe("DetailHero backdrop", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     const firstContent = container.querySelector(".detail-hero-content");
@@ -141,7 +134,6 @@ describe("DetailHero backdrop", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
 
@@ -158,7 +150,6 @@ describe("DetailHero content", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     const poster = container.querySelector("img.detail-hero-poster") as HTMLImageElement;
@@ -174,7 +165,6 @@ describe("DetailHero content", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     expect(container.querySelector("img.detail-hero-poster")).toBeNull();
@@ -187,7 +177,6 @@ describe("DetailHero content", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     fireEvent.error(container.querySelector("img.detail-hero-poster")!);
@@ -202,7 +191,6 @@ describe("DetailHero content", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Blade Runner");
@@ -226,7 +214,6 @@ describe("DetailHero content", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         externalRatings={<span data-testid="external-ratings">IMDb 8.2</span>}
       />,
     );
@@ -244,7 +231,6 @@ describe("DetailHero content", () => {
           inWatchlist={false}
           onPlay={noop}
           onToggleWatchlist={noop}
-          onClose={noop}
           completionLabel={completionLabel}
         />,
       );
@@ -261,7 +247,6 @@ describe("DetailHero content", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     expect(container.querySelector(".detail-hero-rating")).toBeNull();
@@ -274,7 +259,6 @@ describe("DetailHero content", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     expect(container.querySelectorAll(".detail-genre-chip")).toHaveLength(4);
@@ -287,7 +271,6 @@ describe("DetailHero content", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     expect(container.querySelector(".detail-hero-genres")).toBeNull();
@@ -301,7 +284,6 @@ describe("DetailHero content", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     expect(container.querySelectorAll(".detail-hero-metabit")).toHaveLength(0);
@@ -317,26 +299,22 @@ describe("DetailHero primary actions", () => {
         inWatchlist={false}
         onPlay={onPlay}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /Play/ }));
     expect(onPlay).toHaveBeenCalledTimes(1);
   });
 
-  it("calls onClose when the Back button is clicked", () => {
-    const onClose = vi.fn();
+  it("does not own the Detail overlay Back control", () => {
     render(
       <DetailHero
         item={makeItem()}
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={onClose}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
   });
 
   it("shows 'Watchlist' and calls onToggleWatchlist when not in the watchlist", () => {
@@ -347,7 +325,6 @@ describe("DetailHero primary actions", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={onToggle}
-        onClose={noop}
       />,
     );
     const btn = screen.getByRole("button", { name: /Watchlist/ });
@@ -364,7 +341,6 @@ describe("DetailHero primary actions", () => {
         inWatchlist={true}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     const btn = screen.getByRole("button", { name: /In watchlist/ });
@@ -381,7 +357,6 @@ describe("DetailHero request button", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     expect(container.querySelector(".detail-request")).toBeNull();
@@ -395,7 +370,6 @@ describe("DetailHero request button", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         onRequest={onRequest}
         requestState="idle"
       />,
@@ -414,7 +388,6 @@ describe("DetailHero request button", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         onRequest={noop}
         requestState="requesting"
       />,
@@ -431,7 +404,6 @@ describe("DetailHero request button", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         onRequest={noop}
         requestState="requested"
       />,
@@ -449,7 +421,6 @@ describe("DetailHero request button", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         onRequest={noop}
         requestState="already"
       />,
@@ -469,7 +440,6 @@ describe("DetailHero taste signal", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
       />,
     );
     expect(container.querySelector(".detail-taste")).toBeNull();
@@ -482,7 +452,6 @@ describe("DetailHero taste signal", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         onTasteSignal={noop}
       />,
     );
@@ -502,7 +471,6 @@ describe("DetailHero taste signal", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         onTasteSignal={onTaste}
       />,
     );
@@ -518,7 +486,6 @@ describe("DetailHero taste signal", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         onTasteSignal={onTaste}
       />,
     );
@@ -533,7 +500,6 @@ describe("DetailHero taste signal", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         onTasteSignal={noop}
         tasteSignal="liked"
       />,
@@ -550,7 +516,6 @@ describe("DetailHero taste signal", () => {
         inWatchlist={false}
         onPlay={noop}
         onToggleWatchlist={noop}
-        onClose={noop}
         onTasteSignal={noop}
         tasteSignal="disliked"
       />,

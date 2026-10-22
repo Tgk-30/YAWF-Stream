@@ -7,6 +7,7 @@ const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const generatedAndroidRelativePath = "web/src-tauri/gen/android";
 const cleartextPlaceholder = 'manifestPlaceholders["usesCleartextTraffic"]';
 const webkitDependency = 'implementation("androidx.webkit:webkit:1.14.0")';
+const minimumWebViewMajorVersion = 90;
 const leanbackFeatureTemplate = `    <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
@@ -704,7 +705,7 @@ class MainActivity : TauriActivity() {
 }
 `;
 }
-function patchedMainActivity(packageName) {
+function previousPatchedMainActivity(packageName) {
   return serverPlayerPatchedMainActivity(packageName)
     .replace('class MainActivity : TauriActivity() {', 'class MainActivity : TauriActivity() {\n  private lateinit var androidUpdater: YawfAndroidUpdater')
     .replace('    super.onCreate(savedInstanceState)\n  }', '    super.onCreate(savedInstanceState)\n    androidUpdater = YawfAndroidUpdater.attach(this)\n  }')
@@ -730,6 +731,256 @@ function patchedMainActivity(packageName) {
 
   override fun onDestroy() {
     if (::androidUpdater.isInitialized) androidUpdater.onDestroy()`);
+}
+
+function webViewCompatibleServerPlayerMainActivity(packageName) {
+  return serverPlayerPatchedMainActivity(packageName)
+    .replace(
+      'import android.content.Intent\n',
+      `import android.content.ComponentName
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+`,
+    )
+    .replace(
+      'import android.os.SystemClock\n',
+      'import android.os.SystemClock\nimport android.provider.Settings\n',
+    )
+    .replace(
+      'private const val EMPTY_SAFE_AREA = "{\\"top\\":0,\\"right\\":0,\\"bottom\\":0,\\"left\\":0}"\n',
+      `private const val EMPTY_SAFE_AREA = "{\\"top\\":0,\\"right\\":0,\\"bottom\\":0,\\"left\\":0}"
+private const val MINIMUM_WEBVIEW_MAJOR_VERSION = ${minimumWebViewMajorVersion}
+private val WEBVIEW_LEADING_MAJOR = Regex("^([0-9]+)(?:[.][0-9A-Za-z][0-9A-Za-z._-]*)?$")
+private val WEBVIEW_PROVIDER_PACKAGE =
+  Regex("^[A-Za-z][A-Za-z0-9_]*(?:[.][A-Za-z][A-Za-z0-9_]*)+$")
+`,
+    )
+    .replace(
+      'private data class ServerPlayerOrigin(\n',
+      `private data class WebViewStartupCompatibility(
+  val packageName: String?,
+  val versionName: String?,
+  val majorVersion: Int?,
+) {
+  val supported: Boolean
+    get() =
+      packageName != null &&
+        majorVersion != null &&
+        majorVersion >= MINIMUM_WEBVIEW_MAJOR_VERSION
+}
+
+private data class ServerPlayerOrigin(
+`,
+    )
+    .replace(
+      'class MainActivity : TauriActivity() {\n',
+      `class MainActivity : TauriActivity() {
+  private lateinit var webViewCompatibility: WebViewStartupCompatibility
+  private var webViewCompatibilityDialog: AlertDialog? = null
+  private var webViewSettingsUnavailable = false
+`,
+    )
+    .replace(
+      '  override fun onCreate(savedInstanceState: Bundle?) {\n    enableEdgeToEdge(',
+      `  override fun onCreate(savedInstanceState: Bundle?) {
+    webViewCompatibility = inspectWebViewCompatibility()
+    enableEdgeToEdge(`,
+    )
+    .replace(
+      '  override fun onWebViewCreate(webView: WebView) {\n    detachSafeAreaBridge()',
+      `  override fun onWebViewCreate(webView: WebView) {
+    if (!webViewCompatibility.supported) {
+      webView.visibility = View.INVISIBLE
+      super.onWebViewCreate(webView)
+      return
+    }
+    detachSafeAreaBridge()`,
+    )
+    .replace(
+      '  override fun onConfigurationChanged(newConfig: Configuration) {',
+      `  override fun onResume() {
+    super.onResume()
+    showWebViewCompatibilityDialog()
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) {`,
+    )
+    .replace(
+      '  override fun onDestroy() {\n    detachSafeAreaBridge()',
+      `  override fun onDestroy() {
+    webViewCompatibilityDialog?.dismiss()
+    webViewCompatibilityDialog = null
+    detachSafeAreaBridge()`,
+    )
+    .replace(
+      '  private fun refreshSafeAreaInsets(webView: WebView) {',
+      `  private fun inspectWebViewCompatibility(): WebViewStartupCompatibility {
+    val packageInfo = try {
+      WebViewCompat.getCurrentWebViewPackage(this)
+    } catch (_: Exception) {
+      null
+    }
+    val packageName = packageInfo?.packageName?.takeIf(WEBVIEW_PROVIDER_PACKAGE::matches)
+    val versionName = packageInfo?.versionName
+    return WebViewStartupCompatibility(
+      packageName = packageName,
+      versionName = versionName,
+      majorVersion = parseLeadingWebViewMajor(versionName),
+    )
+  }
+
+  private fun parseLeadingWebViewMajor(versionName: String?): Int? {
+    if (versionName == null || versionName != versionName.trim()) return null
+    val match = WEBVIEW_LEADING_MAJOR.find(versionName) ?: return null
+    return match.groupValues[1].toIntOrNull()
+  }
+
+  private fun selectedWebViewAppInfoIntent(): Intent? {
+    if (webViewSettingsUnavailable) return null
+    val packageName = webViewCompatibility.packageName ?: return null
+    return try {
+      val installed = packageManager.getApplicationInfo(packageName, 0)
+      if (installed.packageName != packageName) return null
+      val implicitIntent = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", packageName, null),
+      )
+      val resolved = packageManager.resolveActivity(
+        implicitIntent,
+        PackageManager.MATCH_SYSTEM_ONLY,
+      ) ?: return null
+      val activityInfo = resolved.activityInfo ?: return null
+      if (!activityInfo.exported) return null
+      if (activityInfo.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM == 0) return null
+      implicitIntent.setComponent(ComponentName(activityInfo.packageName, activityInfo.name))
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  private fun webViewCompatibilityMessage(settingsAvailable: Boolean): String {
+    val packageName = webViewCompatibility.packageName
+    val versionName = webViewCompatibility.versionName
+      ?.takeIf { value ->
+        value.length in 1..80 && value.all { character -> character.code in 0x20..0x7e }
+      }
+      ?: "unknown"
+    val provider = if (packageName == null) {
+      "Android did not report a valid active WebView provider."
+    } else {
+      "Selected provider: " + packageName + ", version " + versionName + "."
+    }
+    val nextStep = if (settingsAvailable) {
+      "Open that exact provider's App info and update or enable it."
+    } else {
+      "App info for the exact selected provider is unavailable. Open Android Settings and update or enable Android System WebView."
+    }
+    return "YAWF needs Android System WebView version " +
+      MINIMUM_WEBVIEW_MAJOR_VERSION + " or newer. " + provider + " " + nextStep +
+      " Then close and reopen YAWF."
+  }
+
+  private fun showWebViewCompatibilityDialog() {
+    if (webViewCompatibility.supported || isFinishing || isDestroyed) return
+    if (webViewCompatibilityDialog?.isShowing == true) return
+    val settingsIntent = selectedWebViewAppInfoIntent()
+    val builder = AlertDialog.Builder(this)
+      .setTitle("Update Android System WebView")
+      .setMessage(webViewCompatibilityMessage(settingsIntent != null))
+      .setCancelable(false)
+      .setNegativeButton("Close YAWF") { _, _ -> finishAndRemoveTask() }
+    if (settingsIntent != null) {
+      builder.setPositiveButton("Open provider App info") { _, _ ->
+        try {
+          startActivity(settingsIntent)
+        } catch (_: Exception) {
+          webViewSettingsUnavailable = true
+          window.decorView.post { showWebViewCompatibilityDialog() }
+        }
+      }
+    }
+    val dialog = builder.create()
+    dialog.setCanceledOnTouchOutside(false)
+    dialog.setOnDismissListener {
+      if (webViewCompatibilityDialog === dialog) webViewCompatibilityDialog = null
+    }
+    webViewCompatibilityDialog = dialog
+    dialog.show()
+  }
+
+  private fun refreshSafeAreaInsets(webView: WebView) {`,
+    );
+}
+
+function patchedMainActivity(packageName) {
+  return webViewCompatibleServerPlayerMainActivity(packageName)
+    .replace(
+      'class MainActivity : TauriActivity() {',
+      'class MainActivity : TauriActivity() {\n  private lateinit var androidUpdater: YawfAndroidUpdater',
+    )
+    .replace(
+      '    super.onCreate(savedInstanceState)\n  }',
+      `    super.onCreate(savedInstanceState)
+    if (webViewCompatibility.supported) {
+      androidUpdater = YawfAndroidUpdater.attach(this)
+    }
+  }`,
+    )
+    .replace(
+      `  override fun onResume() {
+    super.onResume()
+    showWebViewCompatibilityDialog()
+  }`,
+      `  override fun onResume() {
+    super.onResume()
+    showWebViewCompatibilityDialog()
+    if (::androidUpdater.isInitialized) androidUpdater.onResume()
+  }`,
+    )
+    .replace('  override fun onDestroy() {', `  override fun onPause() {
+    if (::androidUpdater.isInitialized) androidUpdater.onPause()
+    super.onPause()
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    if (::androidUpdater.isInitialized) androidUpdater.onWindowFocusChanged(hasFocus)
+  }
+
+  @Keep
+  fun checkAndroidUpdates() {
+    runOnUiThread { if (::androidUpdater.isInitialized) androidUpdater.checkManually() }
+  }
+
+  override fun onDestroy() {
+    if (::androidUpdater.isInitialized) androidUpdater.onDestroy()`);
+}
+
+export function parseLeadingWebViewMajorForTest(versionName) {
+  if (typeof versionName !== "string" || versionName !== versionName.trim()) return null;
+  const match = /^([0-9]+)(?:[.][0-9A-Za-z][0-9A-Za-z._-]*)?$/.exec(versionName);
+  if (match == null) return null;
+  const majorVersion = Number(match[1]);
+  return Number.isSafeInteger(majorVersion) && majorVersion <= 2_147_483_647
+    ? majorVersion
+    : null;
+}
+
+export function webViewStartupSupportedForTest(packageName, versionName) {
+  return (
+    typeof packageName === "string" &&
+    /^[A-Za-z][A-Za-z0-9_]*(?:[.][A-Za-z][A-Za-z0-9_]*)+$/.test(packageName) &&
+    (parseLeadingWebViewMajorForTest(versionName) ?? -1) >= minimumWebViewMajorVersion
+  );
+}
+
+export function patchedMainActivityForWebViewCompatibilityTest(packageName) {
+  return patchedMainActivity(packageName);
+}
+
+export function previousPatchedMainActivityForWebViewCompatibilityTest(packageName) {
+  return previousPatchedMainActivity(packageName);
 }
 
 const updatePaths = '<?xml version="1.0" encoding="utf-8"?>\n<paths xmlns:android="http://schemas.android.com/apk/res/android">\n    <files-path name="updates" path="updates/" />\n</paths>\n';
@@ -848,7 +1099,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     activity === legacyActivity ||
     activity === darkSystemBarActivity ||
     activity === safeAreaActivity ||
-    activity === serverPlayerPatchedMainActivity(packageName);
+    activity === serverPlayerPatchedMainActivity(packageName) ||
+    activity === previousPatchedMainActivity(packageName);
   if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",

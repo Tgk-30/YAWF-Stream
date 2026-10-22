@@ -23,7 +23,6 @@ interface DetailHeroProps {
    * are missing so phone users get an actionable control instead of a no-op. */
   playLabel?: string;
   onToggleWatchlist: () => void;
-  onClose: () => void;
   /** Server Mode only - file a title request for this item. Omitted (and the
    *  button hidden) in Local Mode. */
   onRequest?: () => void;
@@ -57,7 +56,6 @@ export function DetailHero({
   onPlay,
   playLabel = "Play",
   onToggleWatchlist,
-  onClose,
   onRequest,
   requestState = "idle",
   tasteSignal = null,
@@ -106,16 +104,6 @@ export function DetailHero({
       </div>
       <div className="detail-hero-scrim" />
       <div className="detail-hero-vignette" />
-
-      <button
-        type="button"
-        className="detail-hero-close"
-        onClick={onClose}
-        aria-label="Back"
-        title="Back"
-      >
-        <Icon name="xmark" size={17} />
-      </button>
 
       <div
         key={`content:${itemKey}`}
