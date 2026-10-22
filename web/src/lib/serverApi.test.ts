@@ -537,6 +537,14 @@ describe("resolveServerStream", () => {
     expect(lastCall().url).toBe(
       "https://server.example/api/stream/session-1/audio-tracks",
     );
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ tracks: [] }) as never);
+    await expect(api.serverStreamAudioTracks(direct, {
+      retryFailed: true,
+    })).resolves.toEqual([]);
+    expect(lastCall().url).toBe(
+      "https://server.example/api/stream/session-1/audio-tracks?retry=1",
+    );
   });
 
   it("returns validated source tracks and original duration from the existing endpoint", async () => {
@@ -604,7 +612,7 @@ describe("resolveServerStream", () => {
   it("refuses to probe audio tracks on an unconfigured stream origin", async () => {
     await expect(api.serverStreamAudioTracks({
       streamURL: "https://provider.example/api/stream/session-1",
-    } as never)).rejects.toThrow("does not belong");
+    } as never, { retryFailed: true })).rejects.toThrow("does not belong");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

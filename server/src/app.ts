@@ -561,6 +561,10 @@ const streamUsageQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(365).default(30),
 });
 
+const streamAudioTracksQuerySchema = z.object({
+  retry: z.literal("1").optional(),
+}).strict();
+
 const auditLogQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
@@ -6161,9 +6165,12 @@ function registerRoutes(
       throw httpError(409, "Audio track selection is not available for Direct P2P playback.");
     }
     rateLimit(request, `stream-audio:${row.id}`, 30, 60 * 1000);
+    const query = parseBody(streamAudioTracksQuerySchema, request.query);
     const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
     await assertSafeUpstream(upstreamUrl, config.allowRawStreamUrls);
-    const sourceInfo = await transcode.registry.sourceInfoFor(row.id, upstreamUrl);
+    const sourceInfo = await transcode.registry.sourceInfoFor(row.id, upstreamUrl, {
+      retryFailed: query.retry === "1",
+    });
     const tracks = sourceInfo.audioTracks;
     if (tracks == null) {
       throw httpError(409, "Audio track inventory is unavailable for this stream.");

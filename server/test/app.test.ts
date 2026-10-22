@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { buildApp } from "../src/app.js";
 import { AppDatabase } from "../src/db.js";
@@ -3874,6 +3874,117 @@ describe("DebridStreamer server", () => {
         url: `/api/stream/${session.id}/index.m3u8?audio=../../etc/passwd`,
       })).statusCode).toBe(400);
     } finally {
+      await on.close();
+    }
+  });
+
+  it("transcode: retries failed audio inventory only for an exact authorized gesture", async () => {
+    const base = makeFakeTranscoder();
+    let probes = 0;
+    let releaseReplacement: ((value: {
+      audio: boolean;
+      subtitle: boolean;
+      audioTracks: Array<{
+        index: number;
+        language: string;
+        label: string;
+        default: boolean;
+      }>;
+      durationSeconds: number;
+    }) => void) | null = null;
+    let replacementStarted: (() => void) | null = null;
+    const replacementPending = new Promise<void>((resolve) => {
+      replacementStarted = resolve;
+    });
+    const retryTranscoder: Transcoder = {
+      ...base,
+      async capabilities() {
+        return {
+          toneMapping: false,
+          videoEncoders: ["libx264"],
+          subtitleSidecar: false,
+          audioTrackSelection: true,
+        };
+      },
+      probeStreams() {
+        probes += 1;
+        if (probes === 1) return Promise.resolve(null);
+        replacementStarted!();
+        return new Promise((resolve) => {
+          releaseReplacement = resolve;
+        });
+      },
+    };
+    const on = await buildTranscodeApp({ enableTranscode: true }, retryTranscoder);
+    let nowSpy: ReturnType<typeof vi.spyOn> | null = null;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const external = { app: on, cookies: new Map<string, string>() };
+
+      expect((await request(external, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks?retry=1`,
+        headers: { authorization: `Bearer ${"Z".repeat(43)}` },
+      })).statusCode).toBe(404);
+      expect(probes).toBe(0);
+
+      for (const query of ["retry=0", "retry=true", "retry=1&retry=1", "retry=1&extra=1"]) {
+        expect((await request(owner, {
+          method: "GET",
+          url: `/api/stream/${session.id}/audio-tracks?${query}`,
+        })).statusCode).toBe(400);
+      }
+      expect(probes).toBe(0);
+
+      let now = Date.now();
+      nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      })).statusCode).toBe(409);
+      expect(probes).toBe(1);
+
+      now += 5_001;
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      })).statusCode).toBe(409);
+      expect(probes).toBe(1);
+
+      const firstRetry = request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks?retry=1`,
+      });
+      const sharedRetry = request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks?retry=1`,
+      });
+      await replacementPending;
+      expect(probes).toBe(2);
+      releaseReplacement!({
+        audio: true,
+        subtitle: false,
+        audioTracks: [
+          { index: 0, language: "eng", label: "English", default: true },
+        ],
+        durationSeconds: 600,
+      });
+      const responses = await Promise.all([firstRetry, sharedRetry]);
+      expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
+      expect(responses.map((response) => json<{ tracks: unknown[] }>(response).tracks)).toEqual([
+        [{ index: 0, language: "eng", label: "English", default: true }],
+        [{ index: 0, language: "eng", label: "English", default: true }],
+      ]);
+
+      now += 60_000;
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks?retry=1`,
+      })).statusCode).toBe(200);
+      expect(probes).toBe(2);
+    } finally {
+      nowSpy?.mockRestore();
       await on.close();
     }
   });

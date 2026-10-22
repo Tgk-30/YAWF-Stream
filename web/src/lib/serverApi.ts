@@ -524,6 +524,10 @@ export interface ServerStreamSourceInfo {
   durationSeconds: number | null;
 }
 
+export interface ServerAudioInventoryLoadOptions {
+  retryFailed?: boolean;
+}
+
 export function serverOptimizedSource(
   stream: StreamInfo,
   options: Omit<ServerTranscodeOptions, "profile"> & {
@@ -618,12 +622,14 @@ function serverStreamSessionId(stream: StreamInfo): string | null {
 
 export async function serverStreamSourceInfo(
   stream: StreamInfo,
+  options: ServerAudioInventoryLoadOptions = {},
 ): Promise<ServerStreamSourceInfo> {
   const sessionId = serverStreamSessionId(stream);
   if (sessionId == null) throw new Error("This stream does not belong to the configured server.");
+  const query = options.retryFailed === true ? "?retry=1" : "";
   const response = await serverRequest<{ tracks?: unknown; durationSeconds?: unknown }>(
     "GET",
-    `/api/stream/${encodeURIComponent(sessionId)}/audio-tracks`,
+    `/api/stream/${encodeURIComponent(sessionId)}/audio-tracks${query}`,
   );
   const tracks = Array.isArray(response.tracks)
     ? response.tracks.filter((track): track is ServerAudioTrack => {
@@ -647,8 +653,9 @@ export async function serverStreamSourceInfo(
 
 export async function serverStreamAudioTracks(
   stream: StreamInfo,
+  options: ServerAudioInventoryLoadOptions = {},
 ): Promise<ServerAudioTrack[]> {
-  return (await serverStreamSourceInfo(stream)).tracks;
+  return (await serverStreamSourceInfo(stream, options)).tracks;
 }
 
 /** Build the capability URL consumed by native players launched from a hosted

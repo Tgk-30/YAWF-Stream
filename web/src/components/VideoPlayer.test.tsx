@@ -2592,6 +2592,176 @@ describe("WebviewPlayer", () => {
     expect(screen.queryByText("Loading audio tracks…")).toBeNull();
   });
 
+  it("retries failed server audio inventory only after one explicit gesture", async () => {
+    const replacement = deferred<Array<{
+      index: number;
+      language: string;
+      label: string;
+      default: boolean;
+    }>>();
+    const loadAudioTracks = vi.fn()
+      .mockRejectedValueOnce(new Error("probe unavailable"))
+      .mockImplementationOnce(() => replacement.promise);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(await screen.findByText("Audio track inventory is temporarily unavailable.")).toBeInTheDocument();
+    expect(loadAudioTracks.mock.calls).toEqual([[]]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(loadAudioTracks).toHaveBeenCalledTimes(1);
+
+    const retry = screen.getByRole("button", { name: "Retry audio tracks" });
+    act(() => {
+      retry.click();
+      retry.click();
+    });
+    expect(loadAudioTracks.mock.calls).toEqual([
+      [],
+      [{ retryFailed: true }],
+    ]);
+    expect(screen.getByText("Loading audio tracks…")).toBeInTheDocument();
+
+    await act(async () => {
+      replacement.resolve([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+      await replacement.promise;
+    });
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry audio tracks" })).toBeNull();
+  });
+
+  it("keeps a failed explicit audio retry terminal without starting a loop", async () => {
+    const loadAudioTracks = vi.fn(async () => {
+      throw new Error("probe unavailable");
+    });
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await screen.findByText("Audio track inventory is temporarily unavailable.");
+    await userEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    await waitFor(() => expect(loadAudioTracks).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Audio track inventory is temporarily unavailable.")).toBeInTheDocument();
+    await act(async () => Promise.resolve());
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+
+    await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a successful empty server inventory as known instead of retryable", async () => {
+    const loadAudioTracks = vi.fn(async () => []);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(await screen.findByText("This stream does not report selectable audio tracks.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry audio tracks" })).toBeNull();
+    expect(loadAudioTracks.mock.calls).toEqual([[]]);
+  });
+
+  it("ignores stale audio inventory when the playback owner changes", async () => {
+    const first = deferred<Array<{
+      index: number;
+      language: string;
+      label: string;
+      default: boolean;
+    }>>();
+    const second = deferred<Array<{
+      index: number;
+      language: string;
+      label: string;
+      default: boolean;
+    }>>();
+    const firstLoad = vi.fn(() => first.promise);
+    const secondLoad = vi.fn(() => second.promise);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        engine="webview-direct"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks: firstLoad, request }}
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(firstLoad).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        engine="webview-hls-transcode"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks: secondLoad, request }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(secondLoad).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve([
+        { index: 0, language: "eng", label: "Old owner", default: true },
+      ]);
+      await first.promise;
+    });
+    expect(screen.queryByRole("button", { name: "Old owner" })).toBeNull();
+
+    await act(async () => {
+      second.resolve([
+        { index: 0, language: "fra", label: "Current owner", default: true },
+      ]);
+      await second.promise;
+    });
+    expect(await screen.findByRole("button", { name: "Current owner" })).toBeInTheDocument();
+  });
+
   it("uses the server-reported non-first default audio after optimized activation", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const request = vi.fn(async () => ({

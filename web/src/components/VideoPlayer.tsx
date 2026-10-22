@@ -102,6 +102,7 @@ import {
   type AndroidTVPlaybackProgress,
 } from "../lib/androidTV";
 import type {
+  ServerAudioInventoryLoadOptions,
   ServerAudioTrack,
   ServerOptimizedSource,
   ServerTranscodeQuality,
@@ -235,7 +236,9 @@ interface VideoPlayerProps {
    * original-device player without rendering unavailable controls. */
   serverOptimized?: {
     qualities: readonly ServerTranscodeQuality[];
-    loadAudioTracks?: () => Promise<ServerAudioTrack[]>;
+    loadAudioTracks?: (
+      options?: ServerAudioInventoryLoadOptions,
+    ) => Promise<ServerAudioTrack[]>;
     loadSourceInfo?: () => Promise<{
       durationSeconds: number | null;
       tracks?: ServerAudioTrack[];
@@ -2636,6 +2639,7 @@ function WebviewPlayer({
     "idle" | "loading" | "ready" | "unavailable"
   >("idle");
   const serverAudioLoadSequenceRef = useRef(0);
+  const serverAudioLoadPendingRef = useRef(false);
   const serverAudioLoaderRef = useRef(serverOptimized?.loadAudioTracks);
   serverAudioLoaderRef.current = serverOptimized?.loadAudioTracks;
   const serverAudioLoaderAvailable = serverOptimized?.loadAudioTracks != null;
@@ -2649,8 +2653,49 @@ function WebviewPlayer({
   const mediaArtist = nowPlaying?.episodeLabel ?? subtitle ?? "";
   const mediaArtworkUrl = nowPlaying?.posterUrl ?? "";
 
+  const startServerAudioInventoryLoad = useCallback((retryFailed: boolean) => {
+    const load = serverAudioLoaderRef.current;
+    if (load == null || serverAudioLoadPendingRef.current) return;
+    const request = ++serverAudioLoadSequenceRef.current;
+    serverAudioLoadPendingRef.current = true;
+    setServerAudioInventoryStatus("loading");
+    let loading: Promise<ServerAudioTrack[]>;
+    try {
+      loading = retryFailed ? load({ retryFailed: true }) : load();
+    } catch {
+      serverAudioLoadPendingRef.current = false;
+      if (serverAudioLoadSequenceRef.current === request) {
+        setServerAudioInventoryStatus("unavailable");
+      }
+      return;
+    }
+    void loading.then(
+      (tracks) => {
+        if (serverAudioLoadSequenceRef.current !== request) return;
+        serverAudioLoadPendingRef.current = false;
+        const choices = normalizedServerAudioTracks(tracks)
+          .map((track) => ({
+            index: track.index,
+            id: String(track.index),
+            label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
+            language: track.language?.trim() || null,
+            isDefault: track.default,
+          }));
+        setServerAudioTracks(choices);
+        setServerAudioInventoryStatus("ready");
+      },
+      () => {
+        if (serverAudioLoadSequenceRef.current === request) {
+          serverAudioLoadPendingRef.current = false;
+          setServerAudioInventoryStatus("unavailable");
+        }
+      },
+    );
+  }, []);
+
   useEffect(() => {
     serverAudioLoadSequenceRef.current += 1;
+    serverAudioLoadPendingRef.current = false;
     const choices = normalizedServerAudioTracks(initialServerAudioTracks).map((track) => ({
       index: track.index,
       id: String(track.index),
@@ -2674,31 +2719,15 @@ function WebviewPlayer({
   ]);
 
   useEffect(() => {
-    const load = serverAudioLoaderRef.current;
-    if (!optionsOpen || load == null || serverAudioInventoryStatus !== "idle") return;
-    const request = ++serverAudioLoadSequenceRef.current;
-    setServerAudioInventoryStatus("loading");
-    void load().then(
-      (tracks) => {
-        if (serverAudioLoadSequenceRef.current !== request) return;
-        const choices = normalizedServerAudioTracks(tracks)
-          .map((track) => ({
-            index: track.index,
-            id: String(track.index),
-            label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
-            language: track.language?.trim() || null,
-            isDefault: track.default,
-          }));
-        setServerAudioTracks(choices);
-        setServerAudioInventoryStatus("ready");
-      },
-      () => {
-        if (serverAudioLoadSequenceRef.current === request) {
-          setServerAudioInventoryStatus("unavailable");
-        }
-      },
-    );
-  }, [optionsOpen, serverAudioInventoryStatus, serverAudioLoaderAvailable, serverAudioOwner]);
+    if (!optionsOpen || !serverAudioLoaderAvailable || serverAudioInventoryStatus !== "idle") return;
+    startServerAudioInventoryLoad(false);
+  }, [
+    optionsOpen,
+    serverAudioInventoryStatus,
+    serverAudioLoaderAvailable,
+    serverAudioOwner,
+    startServerAudioInventoryLoad,
+  ]);
 
   if (serverOptimized != null && resolvedServerAudioTrack != null) {
     const selected = serverAudioTracks.find(
@@ -5039,6 +5068,19 @@ function WebviewPlayer({
               <p className="player-options-status" role="status">
                 Loading audio tracks…
               </p>
+            ) : serverAudioInventoryStatus === "unavailable" && serverAudioLoaderAvailable ? (
+              <>
+                <p className="player-options-status" role="status">
+                  Audio track inventory is temporarily unavailable.
+                </p>
+                <button
+                  type="button"
+                  className="player-options-action"
+                  onClick={() => startServerAudioInventoryLoad(true)}
+                >
+                  Retry audio tracks
+                </button>
+              </>
             ) : audioChoices.length === 1 ? (
               <p className="player-options-status" role="status">
                 This stream reports one audio track.

@@ -2221,7 +2221,8 @@ export function Detail() {
               serverOptimizedQualities.length > 0
                 ? {
                     qualities: serverOptimizedQualities,
-                    loadAudioTracks: () => serverStreamAudioTracks(player.fallbackStream!),
+                    loadAudioTracks: (options) =>
+                      serverStreamAudioTracks(player.fallbackStream!, options),
                     loadSourceInfo: () => serverStreamSourceInfo(player.fallbackStream!),
                     defaultQuality: settings.transcode
                       ? settings.dataSaver

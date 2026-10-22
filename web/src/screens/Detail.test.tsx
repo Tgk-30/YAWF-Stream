@@ -149,7 +149,10 @@ const serverOptimizedSource = vi.fn((stream: any, options: any) => ({
 const serverExternalPlaybackURL = vi.fn(
   (stream: any) => `${stream.streamURL}/external-test` as string | null,
 );
-const serverStreamAudioTracks = vi.fn(async (_stream?: unknown) => []);
+const serverStreamAudioTracks = vi.fn(async (
+  _stream?: unknown,
+  _options?: { retryFailed?: boolean },
+) => []);
 const serverStreamSourceInfo = vi.fn(async (_stream?: unknown) => ({
   tracks: [], durationSeconds: 600,
 }));
@@ -161,7 +164,8 @@ vi.mock("../lib/serverApi", () => ({
   serverOptimizedSource: (stream: any, options: any) =>
     serverOptimizedSource(stream, options),
   serverExternalPlaybackURL: (stream: any) => serverExternalPlaybackURL(stream),
-  serverStreamAudioTracks: (stream: any) => serverStreamAudioTracks(stream),
+  serverStreamAudioTracks: (stream: any, options?: { retryFailed?: boolean }) =>
+    serverStreamAudioTracks(stream, options),
   serverStreamSourceInfo: (stream: any) => serverStreamSourceInfo(stream),
   createRequest: (...a: unknown[]) => createRequest(...a),
   fetchServerEpisodes: (...a: unknown[]) => fetchServerEpisodes(...a),
@@ -427,6 +431,14 @@ vi.mock("../components/VideoPlayer", () => ({
       {serverOptimized?.loadSourceInfo != null && (
         <button type="button" onClick={() => void serverOptimized.loadSourceInfo()}>
           load-source-info
+        </button>
+      )}
+      {serverOptimized?.loadAudioTracks != null && (
+        <button
+          type="button"
+          onClick={() => void serverOptimized.loadAudioTracks({ retryFailed: true })}
+        >
+          retry-audio-tracks
         </button>
       )}
       <button type="button" onClick={() => onProgress?.(80, 100)}>
@@ -1600,6 +1612,14 @@ describe("Detail play", () => {
       streamURL: "https://server.example/api/stream/session-1",
       fileName: "show.mkv",
     }));
+    await userEvent.click(screen.getByText("retry-audio-tracks"));
+    expect(serverStreamAudioTracks).toHaveBeenCalledWith(
+      expect.objectContaining({
+        streamURL: "https://server.example/api/stream/session-1",
+        fileName: "show.mkv",
+      }),
+      { retryFailed: true },
+    );
     expect(player).toHaveAttribute(
       "data-url",
       "https://server.example/api/stream/session-1/index.m3u8",
