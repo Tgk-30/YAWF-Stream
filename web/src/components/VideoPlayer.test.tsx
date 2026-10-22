@@ -2487,6 +2487,80 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it("preserves pause when an unreachable optimized handoff falls back after 45 seconds", async () => {
+    vi.useFakeTimers();
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const originalVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(originalVideo, "duration", { configurable: true, value: 3_600 });
+      Object.defineProperty(originalVideo, "paused", { configurable: true, value: true });
+      originalVideo.currentTime = 25;
+      fireEvent.canPlay(originalVideo);
+      fireEvent.timeUpdate(originalVideo);
+
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "480p" }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const optimizedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(optimizedVideo).not.toBe(originalVideo);
+      Object.defineProperty(optimizedVideo, "duration", { configurable: true, value: 6 });
+      Object.defineProperty(optimizedVideo, "paused", { configurable: true, value: true });
+      Object.defineProperty(optimizedVideo, "currentTime", {
+        configurable: true,
+        get: () => 0,
+        set: () => {},
+      });
+      fireEvent.loadedMetadata(optimizedVideo);
+      fireEvent.canPlay(optimizedVideo);
+      expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+
+      await act(async () => {
+        vi.advanceTimersByTime(45_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const restoredVideo = document.querySelector<HTMLVideoElement>("video.player-video");
+      expect(restoredVideo).not.toBeNull();
+      if (restoredVideo == null) throw new Error("Device Original was not restored");
+      expect(restoredVideo.src).toBe("https://server.example/api/stream/session-1");
+      Object.defineProperty(restoredVideo, "duration", { configurable: true, value: 3_600 });
+      Object.defineProperty(restoredVideo, "paused", { configurable: true, value: true });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+      fireEvent.loadedMetadata(restoredVideo);
+
+      expect(restoredVideo.currentTime).toBe(25);
+      expect(play).not.toHaveBeenCalled();
+      fireEvent.pointerMove(restoredVideo);
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Server Optimized could not synchronize. Device Original was restored.",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
   it("restores Device Original with a user pause made after exact optimized sync", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const request = vi.fn(async () => ({
@@ -2736,6 +2810,105 @@ describe("WebviewPlayer", () => {
       if (secondScrub == null) throw new Error("Replacement scrub bar props were not captured");
       act(() => secondScrub.onSeek(800));
       await waitFor(() => expect(request).toHaveBeenNthCalledWith(3, "480p", 800));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("pins a deferred paused Back 10 seek against late progress from the old window", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const replacement = deferred<{
+      url: string;
+      timelineOffsetSeconds: number;
+      startPositionSeconds: number;
+      quality: "480p";
+    }>();
+    let requestCount = 0;
+    const request = vi.fn((_quality: string, _position: number) => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return Promise.resolve({
+          url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=395",
+          timelineOffsetSeconds: 395,
+          startPositionSeconds: 0,
+          quality: "480p" as const,
+        });
+      }
+      return replacement.promise;
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const originalVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(originalVideo, "duration", { configurable: true, value: 1_000 });
+      Object.defineProperty(originalVideo, "paused", { configurable: true, value: true });
+      originalVideo.currentTime = 395;
+      fireEvent.loadedMetadata(originalVideo);
+      fireEvent.timeUpdate(originalVideo);
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "480p" }));
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(1, "480p", 395));
+
+      const firstWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+      let firstWindowTime = 0;
+      Object.defineProperty(firstWindow, "duration", { configurable: true, value: 12 });
+      Object.defineProperty(firstWindow, "currentTime", {
+        configurable: true,
+        get: () => firstWindowTime,
+        set: (value: number) => { firstWindowTime = value; },
+      });
+      Object.defineProperty(firstWindow, "paused", { configurable: true, value: true });
+      fireEvent.loadedMetadata(firstWindow);
+      fireEvent.canPlay(firstWindow);
+      firstWindowTime = 7;
+      fireEvent.timeUpdate(firstWindow);
+
+      fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(2, "480p", 392));
+
+      // The old media can report one final clock event while the replacement
+      // manifest warms. It must not replace the explicit seek target.
+      firstWindowTime = 8;
+      fireEvent.timeUpdate(firstWindow);
+      await act(async () => {
+        replacement.resolve({
+          url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=392",
+          timelineOffsetSeconds: 392,
+          startPositionSeconds: 0,
+          quality: "480p",
+        });
+        await replacement.promise;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const secondWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(secondWindow).not.toBe(firstWindow);
+      let secondWindowTime = 0;
+      Object.defineProperty(secondWindow, "duration", { configurable: true, value: 12 });
+      Object.defineProperty(secondWindow, "currentTime", {
+        configurable: true,
+        get: () => secondWindowTime,
+        set: (value: number) => { secondWindowTime = value; },
+      });
+      Object.defineProperty(secondWindow, "paused", { configurable: true, value: true });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+      fireEvent.loadedMetadata(secondWindow);
+
+      expect(secondWindowTime).toBe(0);
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+      expect(play).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }

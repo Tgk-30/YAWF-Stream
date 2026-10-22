@@ -131,6 +131,8 @@ export interface PlaybackHandoffState {
   playbackRate: number;
 }
 
+type ServerOptimizedPositionIntent = "follow-current" | "fixed";
+
 function applyMediaPlaybackRate(video: HTMLMediaElement, playbackRate: number): void {
   // The media load algorithm can reset playbackRate to defaultPlaybackRate.
   // Keep both aligned so an asynchronous HLS attachment cannot discard the
@@ -1368,6 +1370,7 @@ export function VideoPlayer({
       handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
       audioTrack?: number,
       audioPreference?: AudioPreference,
+      positionIntent: ServerOptimizedPositionIntent = "follow-current",
     ) => {
       const owner = playbackOwner;
       if (
@@ -1378,6 +1381,9 @@ export function VideoPlayer({
       ) {
         return;
       }
+      const position = Number.isFinite(absolutePositionSeconds)
+        ? Math.max(0, absolutePositionSeconds)
+        : 0;
       const request = ++optimizationRequestSequenceRef.current;
       const controller = new AbortController();
       optimizationPendingRef.current?.controller.abort();
@@ -1390,9 +1396,6 @@ export function VideoPlayer({
       setServerOptimizationPending(true);
       setServerOptimizationError(null);
       try {
-        const position = Number.isFinite(absolutePositionSeconds)
-          ? Math.max(0, absolutePositionSeconds)
-          : 0;
         latestAbsolutePositionRef.current = position;
         // Resolve the job URL quickly, then give the trusted server manifest
         // the same cold-start budget as hls.js. Device Original remains active
@@ -1469,12 +1472,16 @@ export function VideoPlayer({
           throw new Error("The server did not return a playable HLS manifest.");
         }
         if (!ownsRequest()) return;
-        // Playback can advance while the manifest is warming. Keep the one
-        // server job and seek within its timeline at activation, rather than
-        // replacing it with a second transcode request.
+        // Ordinary quality switches follow playback while the manifest warms.
+        // An explicit out-of-window seek instead owns its requested position;
+        // a late clock event from the old media must not undo that user action.
+        const activationPosition = positionIntent === "fixed"
+          ? position
+          : latestAbsolutePositionRef.current;
+        latestAbsolutePositionRef.current = activationPosition;
         const activationStart = Math.max(
           0,
-          latestAbsolutePositionRef.current - next.timelineOffsetSeconds,
+          activationPosition - next.timelineOffsetSeconds,
         );
         const requestedHandoffState = typeof handoffState === "function"
           ? handoffState()
@@ -1484,7 +1491,7 @@ export function VideoPlayer({
         setFallbackSource(null);
         setSourceSwitchPosition({
           originOwner: owner,
-          position: latestAbsolutePositionRef.current,
+          position: activationPosition,
         });
         setSourceSwitchState(activationHandoffState);
         setOptimizedSource({
@@ -2451,6 +2458,7 @@ function WebviewPlayer({
     handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
     audioTrack?: number,
     audioPreference?: AudioPreference,
+    positionIntent?: ServerOptimizedPositionIntent,
   ) => Promise<void>;
   onSwitchDeviceOriginal: (
     absolutePositionSeconds: number,
@@ -4022,6 +4030,7 @@ function WebviewPlayer({
         id: selected.id,
         language: selected.language,
       }),
+      "fixed",
     );
   };
   absoluteSeekRef.current = seek;
