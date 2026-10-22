@@ -57,9 +57,28 @@ preflight_namespace_absent=true
 node_path="$(readlink -f -- "${YAWF_UPDATER_TEST_NODE:-$(command -v node)}")"
 [[ -n "$node_path" && "$node_path" = /* && ! -L "$node_path" && -f "$node_path" && -x "$node_path" ]] || die "a canonical Node.js 24 candidate is required"
 [[ "$($node_path -p 'process.versions.node.split(".")[0]')" -ge 24 ]] || die "the private runtime candidate must be Node.js 24 or newer"
-system_node_hash_before="$(sha256sum /usr/bin/node | awk '{print $1}')"
-system_node_major_before="$(/usr/bin/node -p 'process.versions.node.split(".")[0]')"
-system_node_identity_before="$(stat -c '%F:%u:%g:%a:%N' /usr/bin/node)"
+# Hosted runners may have only the setup-node toolcache executable. Preserve
+# the global path's absence just as strictly as an existing runtime's identity.
+system_node_present_before=false
+system_node_hash_before=""
+system_node_major_before=""
+system_node_identity_before=""
+if [[ -e /usr/bin/node || -L /usr/bin/node ]]; then
+  system_node_present_before=true
+  system_node_hash_before="$(sha256sum /usr/bin/node | awk '{print $1}')"
+  system_node_major_before="$(/usr/bin/node -p 'process.versions.node.split(".")[0]')"
+  system_node_identity_before="$(stat -c '%F:%u:%g:%a:%N' /usr/bin/node)"
+fi
+
+assert_system_node_preserved() {
+  if [[ "$system_node_present_before" == false ]]; then
+    [[ ! -e /usr/bin/node && ! -L /usr/bin/node ]]
+    return
+  fi
+  [[ "$system_node_hash_before" == "$(sha256sum /usr/bin/node | awk '{print $1}')" ]] || return 1
+  [[ "$system_node_major_before" == "$(/usr/bin/node -p 'process.versions.node.split(".")[0]')" ]] || return 1
+  [[ "$system_node_identity_before" == "$(stat -c '%F:%u:%g:%a:%N' /usr/bin/node)" ]] || return 1
+}
 installer_node_args=(--node-runtime "$node_path")
 
 runtime_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/yawf-updater-install-runtime.XXXXXX")"
@@ -497,6 +516,7 @@ assert_no_registration() {
   [[ ! -e "$policy_path" && ! -L "$policy_path" ]]
   [[ ! -e "$state_root" && ! -L "$state_root" ]]
   assert_timer disabled
+  assert_system_node_preserved
 }
 
 create_protected_compose() {
@@ -571,7 +591,8 @@ assert_no_installer_issued_transaction() {
 }
 
 expect_runtime_rejection_before_install() {
-  local label="$1" candidate="$2" output="$runtime_root/runtime-reject-$label.log" status
+  local label="$1" candidate="$2" status
+  local output="$runtime_root/runtime-reject-$label.log"
   set +e
   bash "$installer" --node-runtime "$candidate" --unattended >"$output" 2>&1
   status=$?
@@ -696,13 +717,13 @@ assert_timer enabled
 # state unchanged unless the caller supplies explicit replacement scope.
 policy_before="$(sha256sum "$policy_path" | awk '{print $1}')"
 private_node_before="$(sha256sum "$install_directory/runtime/node" | awk '{print $1}')"
-system_node_before_reuse="$(stat -c '%F:%u:%g:%a:%N' /usr/bin/node):$(sha256sum /usr/bin/node | awk '{print $1}')"
+assert_system_node_preserved
 bash "$installer" </dev/null > "$runtime_root/reinstall.log" 2>&1
 grep -q 'Existing updater registration preserved' "$runtime_root/reinstall.log"
 grep -q 'Private Node runtime reused' "$runtime_root/reinstall.log"
 [[ "$policy_before" == "$(sha256sum "$policy_path" | awk '{print $1}')" ]]
 [[ "$private_node_before" == "$(sha256sum "$install_directory/runtime/node" | awk '{print $1}')" ]]
-[[ "$system_node_before_reuse" == "$(stat -c '%F:%u:%g:%a:%N' /usr/bin/node):$(sha256sum /usr/bin/node | awk '{print $1}')" ]]
+assert_system_node_preserved
 assert_timer enabled
 remove_owned_registration
 assert_timer disabled
@@ -786,23 +807,26 @@ assert_absent_before_test \
   "$fake_docker" "$fake_systemctl" "$fixture_root"
 
 [[ "$source_hash" == "$(sha256sum "$installer" | awk '{print $1}')" ]]
-[[ "$system_node_hash_before" == "$(sha256sum /usr/bin/node | awk '{print $1}')" ]]
-[[ "$system_node_major_before" == "$(/usr/bin/node -p 'process.versions.node.split(".")[0]')" ]]
-[[ "$system_node_identity_before" == "$(stat -c '%F:%u:%g:%a:%N' /usr/bin/node)" ]]
+assert_system_node_preserved
 if grep -q 'DS_SERVER_SECRET_KEY=' "$raw"; then
   echo "installer runtime output exposed an environment value" >&2
   exit 1
 fi
-"$node_path" - "$receipt" "$source_hash" "$partial_registration_cleanup_observed" "$runtime_lock_cleanup_observed" "$continued_cleanup_after_error_observed" "$system_node_major_before" <<'NODE'
+"$node_path" - "$receipt" "$source_hash" "$partial_registration_cleanup_observed" "$runtime_lock_cleanup_observed" "$continued_cleanup_after_error_observed" "$system_node_present_before" "$system_node_major_before" "$system_node_hash_before" "$system_node_identity_before" <<'NODE'
 const fs = require("fs");
-const [receipt, sourceHash, partialRegistrationCleanupObserved, runtimeLockCleanupObserved, continuedCleanupAfterErrorObserved, systemNodeMajor] = process.argv.slice(2);
+const [receipt, sourceHash, partialRegistrationCleanupObserved, runtimeLockCleanupObserved, continuedCleanupAfterErrorObserved, systemNodePresent, systemNodeMajor, systemNodeHash, systemNodeIdentity] = process.argv.slice(2);
+if (!["true", "false"].includes(systemNodePresent)) process.exit(1);
+if (systemNodePresent === "true" ? !/^\d+$/.test(systemNodeMajor) || !/^[a-f0-9]{64}$/.test(systemNodeHash) || !systemNodeIdentity : systemNodeMajor !== "" || systemNodeHash !== "" || systemNodeIdentity !== "") process.exit(1);
 if (partialRegistrationCleanupObserved !== "true" || runtimeLockCleanupObserved !== "true" || continuedCleanupAfterErrorObserved !== "true") process.exit(1);
 fs.writeFileSync(receipt, `${JSON.stringify({
   ok: true,
   mode: "installer-pty-runtime",
   sourceSha256: sourceHash,
   systemNodePreserved: true,
-  systemNodeMajor,
+  systemNodeState: systemNodePresent === "true" ? "present" : "absent",
+  systemNodeMajor: systemNodePresent === "true" ? systemNodeMajor : null,
+  systemNodeSha256: systemNodePresent === "true" ? systemNodeHash : null,
+  systemNodeIdentity: systemNodePresent === "true" ? systemNodeIdentity : null,
   privateNode24Installed: true,
   privateNodeReinstallReuseVerified: true,
   cases: 23,

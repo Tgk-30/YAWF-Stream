@@ -475,3 +475,134 @@ test("Compose copier proof retains minimal capabilities and protected multi-chun
   assert.match(integration, /createHash\('sha256'\)\.update\(f\.readFileSync\(p\)\)\.digest\('hex'\)/);
   assert.match(integration, /protectedFilesPreserved: true/);
 });
+
+test("installer global Node preservation rejects absent-path creation and existing-runtime mutations", () => {
+  const snapshot = uniqueSlice(installerRuntime, "system_node_present_before=false\n", "\ninstaller_node_args=", "global Node snapshot");
+  const hashCheck = '[[ "$system_node_hash_before" == "$(sha256sum /usr/bin/node | awk \'{print $1}\')" ]]';
+  const majorCheck = '[[ "$system_node_major_before" == "$(/usr/bin/node -p \'process.versions.node.split(".")[0]\')" ]]';
+  const identityCheck = '[[ "$system_node_identity_before" == "$(stat -c \'%F:%u:%g:%a:%N\' /usr/bin/node)" ]]';
+  for (const check of [hashCheck, majorCheck, identityCheck]) assert.ok(snapshot.includes(check));
+  assert.match(uniqueShellFunction(installerRuntime, "assert_no_registration").text, /\n  assert_system_node_preserved\n/);
+  const reinstall = uniqueSlice(installerRuntime, '# Reinstall with a registered enabled timer', '\n# An unsafe symlink target', "reinstall global Node checks");
+  assert.match(reinstall, /assert_system_node_preserved\nbash "\$installer" <\/dev\/null/);
+  assert.match(reinstall, /assert_system_node_preserved\nassert_timer enabled/);
+  assert.match(installerRuntime, /\nassert_system_node_preserved\nif grep -q 'DS_SERVER_SECRET_KEY='/);
+
+  const fixture = mkdtempSync(resolve(tmpdir(), "yawf-system-node-preservation-"));
+  try {
+    function probe(name, source = snapshot) {
+      const directory = mkdtempSync(resolve(fixture, `${name}-`));
+      const node = resolve(directory, "node");
+      const candidate = resolve(directory, "candidate");
+      const script = resolve(directory, "probe.sh");
+      writeFileSync(candidate, '#!/bin/sh\nprintf \'%s\\n\' "$NODE_MAJOR"\n', { mode: 0o700 });
+      const statCompatibility = process.platform === "darwin" ? 'stat() { command stat -f "%HT:%u:%g:%Lp:%N:%Y" "$3"; }' : "";
+      writeFileSync(script, `#!/usr/bin/env bash
+set -euo pipefail
+export NODE_MAJOR=22
+${statCompatibility}
+case "$1" in
+  present-*) cp "$NODE_CANDIDATE" "$FIXTURE_NODE"; chmod 0700 "$FIXTURE_NODE" ;;
+esac
+if [[ "$1" == present-target ]]; then
+  mv "$FIXTURE_NODE" "$FIXTURE_NODE.original"
+  cp "$FIXTURE_NODE.original" "$FIXTURE_NODE.other"
+  ln -s "$FIXTURE_NODE.original" "$FIXTURE_NODE"
+fi
+${source.replaceAll("/usr/bin/node", '"$FIXTURE_NODE"')}
+case "$1" in
+  absent-file) cp "$NODE_CANDIDATE" "$FIXTURE_NODE" ;;
+  absent-link) ln -s "$NODE_CANDIDATE" "$FIXTURE_NODE" ;;
+  absent-broken-link) ln -s "$FIXTURE_NODE.missing" "$FIXTURE_NODE" ;;
+  present-remove) rm "$FIXTURE_NODE" ;;
+  present-bytes) printf '\\n# changed\\n' >> "$FIXTURE_NODE" ;;
+  present-major) export NODE_MAJOR=23 ;;
+  present-mode) chmod 0755 "$FIXTURE_NODE" ;;
+  present-target) rm "$FIXTURE_NODE"; ln -s "$FIXTURE_NODE.other" "$FIXTURE_NODE" ;;
+esac
+assert_system_node_preserved
+`);
+      return spawnSync("bash", [script, name], {
+        encoding: "utf8", env: { ...process.env, FIXTURE_NODE: node, NODE_CANDIDATE: candidate },
+      });
+    }
+    for (const name of ["absent-unchanged", "present-unchanged"]) {
+      const result = probe(name);
+      assert.equal(result.status, 0, `${name}: ${result.stdout}\n${result.stderr}`);
+    }
+    for (const name of ["absent-file", "absent-link", "absent-broken-link", "present-remove", "present-bytes", "present-major", "present-mode", "present-target"]) {
+      assert.notEqual(probe(name).status, 0, `${name} must fail preservation`);
+    }
+    for (const [name, from, to] of [
+      ["absent-file", "[[ ! -e /usr/bin/node && ! -L /usr/bin/node ]]", "true"],
+      ["absent-broken-link", "&& ! -L /usr/bin/node", ""],
+      ["present-bytes", hashCheck, "true"],
+      ["present-major", majorCheck, "true"],
+      ["present-mode", identityCheck, "true"],
+    ]) {
+      assert.ok(snapshot.includes(from), `${name} mutation target missing`);
+      assert.equal(probe(name, snapshot.replace(from, to)).status, 0, `${name} control must demonstrate the omitted check`);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("installer receipt records explicit present or absent global Node identity without invented versions", () => {
+  const start = installerRuntime.lastIndexOf("<<'NODE'\nconst fs = require(\"fs\");\nconst [receipt, sourceHash,");
+  assert.notEqual(start, -1, "receipt writer must be present");
+  const end = installerRuntime.indexOf("\nNODE\n", start);
+  assert.notEqual(end, -1);
+  const writer = installerRuntime.slice(start + "<<'NODE'\n".length, end);
+  const fixture = mkdtempSync(resolve(tmpdir(), "yawf-system-node-receipt-"));
+  try {
+    function emit(present, major, hash, identity) {
+      const receipt = resolve(fixture, "receipt.json");
+      const result = spawnSync(process.execPath, ["-", receipt, "a".repeat(64), "true", "true", "true", present, major, hash, identity], {
+        encoding: "utf8", input: writer,
+      });
+      return { result, receipt };
+    }
+    for (const present of [false, true]) {
+      const hash = "b".repeat(64);
+      const identity = "regular file:0:0:755:/usr/bin/node";
+      const { result, receipt } = emit(String(present), present ? "22" : "", present ? hash : "", present ? identity : "");
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      const value = JSON.parse(readFileSync(receipt, "utf8"));
+      assert.equal(value.systemNodePreserved, true);
+      assert.equal(value.systemNodeState, present ? "present" : "absent");
+      assert.equal(value.systemNodeMajor, present ? "22" : null);
+      assert.equal(value.systemNodeSha256, present ? hash : null);
+      assert.equal(value.systemNodeIdentity, present ? identity : null);
+      assert.equal(value.cases, 23);
+    }
+    for (const args of [["false", "22", "", ""], ["true", "", "", ""], ["unknown", "", "", ""]]) {
+      assert.notEqual(emit(...args).result.status, 0, "incoherent global Node identity must fail receipt creation");
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("runtime rejection fixture labels are initialized before dependent local paths", () => {
+  const rejection = uniqueShellFunction(installerRuntime, "expect_runtime_rejection_before_install").text;
+  const end = rejection.indexOf("\n  set +e");
+  assert.notEqual(end, -1);
+  const declarations = rejection.slice(0, end);
+  function probe(source) {
+    return spawnSync("bash", ["-c", `set -euo pipefail
+runtime_root=/unused-fixture
+${source}
+  printf '%s\\n' "$label" "$candidate" "$output"
+}
+expect_runtime_rejection_before_install relative relative-node
+`], { encoding: "utf8" });
+  }
+  const result = probe(declarations);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stdout, "relative\nrelative-node\n/unused-fixture/runtime-reject-relative.log\n");
+  const separate = 'local label="$1" candidate="$2" status\n  local output="$runtime_root/runtime-reject-$label.log"';
+  assert.ok(declarations.includes(separate));
+  const combined = declarations.replace(separate, 'local label="$1" candidate="$2" output="$runtime_root/runtime-reject-$label.log" status');
+  assert.notEqual(probe(combined).status, 0, "same-local expansion must fail the scalar regression");
+});
