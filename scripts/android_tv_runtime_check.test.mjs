@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,10 @@ const javaPath = join(
   scripts,
   "android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeTvFlowTest.java",
 );
+const clockJavaPath = join(
+  scripts,
+  "android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeTvClock.java",
+);
 const manifestPath = join(
   scripts,
   "android-runtime-instrumentation/app/src/main/AndroidManifest.xml",
@@ -27,9 +31,15 @@ const retainedPlayerXmlPath = join(
   scripts,
   "android-runtime-instrumentation/fixtures/runtime-tv-media3-hidden-controls.xml",
 );
+const retainedTimeBarXmlPath = join(
+  scripts,
+  "android-runtime-instrumentation/fixtures/runtime-tv-media3-visible-timebar.xml",
+);
 const workflowPath = join(root, ".github/workflows/android-tv-runtime.yml");
 const python = process.env.PYTHON || "python3";
 const productPackage = "com.yawf.stream.tv";
+const javac = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin/javac") : "javac";
+const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin/java") : "java";
 
 const read = (path) => readFileSync(path, "utf8");
 
@@ -45,6 +55,83 @@ function killedPythonMutant(path, search, replacement, args = ["--self-test"]) {
   writeFileSync(mutant, original.replace(search, replacement));
   const result = spawnSync(python, [mutant, ...args], { encoding: "utf8" });
   assert.notEqual(result.status, 0, `semantic mutant survived:\n${result.stdout}\n${result.stderr}`);
+}
+
+const clockProbeSource = `
+package com.yawf.runtimeinstrumentation;
+
+import java.util.List;
+
+public final class RuntimeTvClockProbe {
+    private record FakeTimeBar(boolean visible, String contentDescription) { }
+
+    private static void equal(long actual, long expected, String label) {
+        if (actual != expected) throw new AssertionError(label + ": " + actual + " != " + expected);
+    }
+
+    private static void rejects(Runnable action, String label) {
+        try {
+            action.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError("Expected rejection: " + label);
+    }
+
+    public static void main(String[] arguments) {
+        equal(RuntimeTvClock.parsePositionClock("00:02"), 2, "MM:SS short position");
+        equal(RuntimeTvClock.parsePositionClock("01:02"), 62, "MM:SS position");
+        equal(RuntimeTvClock.parsePositionClock("1:02:03"), 3723, "H:MM:SS position");
+        equal(RuntimeTvClock.parsePositionClock("00:06"), 6, "retained time bar position");
+        for (String invalid : new String[] {
+                null, "", "position 00:02", "00:02 remaining", "1:2:03", "00:60", "1:60:00",
+                "999999999999999999999999:00:00"
+        }) {
+            rejects(() -> RuntimeTvClock.parsePositionClock(invalid), "invalid clock " + invalid);
+        }
+
+        FakeTimeBar hidden = new FakeTimeBar(false, "00:01");
+        FakeTimeBar visible = new FakeTimeBar(true, "00:02");
+        equal(RuntimeTvClock.readUniqueVisibleTimeBar(
+                List.of(hidden, visible), FakeTimeBar::visible, FakeTimeBar::contentDescription),
+                2, "one visible time bar");
+        rejects(() -> RuntimeTvClock.readUniqueVisibleTimeBar(
+                List.<FakeTimeBar>of(), FakeTimeBar::visible, FakeTimeBar::contentDescription),
+                "missing time bar");
+        rejects(() -> RuntimeTvClock.readUniqueVisibleTimeBar(
+                List.of(visible, new FakeTimeBar(true, "00:03")),
+                FakeTimeBar::visible, FakeTimeBar::contentDescription),
+                "duplicate visible time bars");
+        rejects(() -> RuntimeTvClock.readUniqueVisibleTimeBar(
+                List.of(new FakeTimeBar(true, "prefix 00:02")),
+                FakeTimeBar::visible, FakeTimeBar::contentDescription),
+                "malformed time bar description");
+    }
+}
+`;
+
+function runJavaClockProbe(clockSource = read(clockJavaPath)) {
+  const directory = mkdtempSync(join(tmpdir(), "yawf-tv-clock-"));
+  const packageDirectory = join(directory, "com/yawf/runtimeinstrumentation");
+  mkdirSync(packageDirectory, { recursive: true });
+  const clockSourcePath = join(packageDirectory, "RuntimeTvClock.java");
+  const probeSourcePath = join(packageDirectory, "RuntimeTvClockProbe.java");
+  writeFileSync(clockSourcePath, clockSource);
+  writeFileSync(probeSourcePath, clockProbeSource);
+  const compile = spawnSync(javac, ["-d", directory, clockSourcePath, probeSourcePath], {
+    encoding: "utf8",
+  });
+  if (compile.status !== 0) return compile;
+  return spawnSync(java, ["-cp", directory, "com.yawf.runtimeinstrumentation.RuntimeTvClockProbe"], {
+    encoding: "utf8",
+  });
+}
+
+function killedJavaClockMutant(search, replacement) {
+  const original = read(clockJavaPath);
+  assert.equal(original.split(search).length, 2, `clock mutation anchor must be unique: ${search}`);
+  const result = runJavaClockProbe(original.replace(search, replacement));
+  assert.notEqual(result.status, 0, `Java clock mutant survived:\n${result.stdout}\n${result.stderr}`);
 }
 
 function assertSetupEmulatorPath(source) {
@@ -202,6 +289,15 @@ function retainedXmlAdmitsNativeSurface(xml, mutant = {}) {
   return videoSurfaces.length === 1;
 }
 
+function retainedXmlVisibleTimeBars(xml) {
+  return descendants(parseUiHierarchy(xml)).filter(node =>
+    node.attributes.package === productPackage
+      && node.attributes["resource-id"] === `${productPackage}:id/exo_progress`
+      && node.attributes.class === "android.widget.SeekBar"
+      && node.attributes.enabled === "true"
+      && isVisibleNode(node));
+}
+
 function assertNativeSurfacePolicy(source) {
   assert.match(source,
     /Pattern\.compile\("\^\(\?:Show\|Hide\) player controls\$"\);/);
@@ -236,6 +332,26 @@ function assertNativeSurfacePolicy(source) {
     assert.ok(surfaceIndex >= 0 && surfaceIndex < revealIndex && revealIndex < clockIndex,
       `${surface} must precede ordinary D-pad reveal and hidden clock observation`);
   }
+}
+
+function assertClockDriverPolicy(source) {
+  const selector = javaMethod(source, "positionTimeBarSelector");
+  assert.match(selector,
+    /By\.res\(PRODUCT_PACKAGE, "exo_progress"\)\s*\.pkg\(PRODUCT_PACKAGE\)\s*\.clazz\("android\.widget\.SeekBar"\)\s*\.enabled\(true\)/s);
+
+  const reader = javaMethod(source, "readPositionSeconds");
+  assert.match(reader,
+    /List<UiObject2> timeBars = device\.findObjects\(positionTimeBarSelector\(\)\);/);
+  assert.match(reader, /return RuntimeTvClock\.readUniqueVisibleTimeBar\(/);
+  assert.match(reader, /timeBar -> !timeBar\.getVisibleBounds\(\)\.isEmpty\(\)/);
+  assert.match(reader, /UiObject2::getContentDescription/);
+  assert.doesNotMatch(reader,
+    /getText|exo_position|By\.text|fixture|status|press(?:DPad|KeyCode)|revealControls|focusAndActivate|focusTarget/);
+
+  const observer = javaMethod(source, "waitForPositionAtLeast");
+  assert.match(observer, /long value = readPositionSeconds\(\);/);
+  assert.doesNotMatch(observer,
+    /getText|getContentDescription|press(?:DPad|KeyCode)|revealControls|focusAndActivate|focusTarget/);
 }
 
 function assertImeDismissalPolicy(source) {
@@ -458,6 +574,123 @@ test("position observers cannot toggle or repair playback", () => {
     "while (SystemClock.uptimeMillis() < deadline) { device.pressDPadCenter();",
   ));
   assert.throws(() => assertObservationOnly(mutant));
+});
+
+test("actual Java clock reader accepts exact clocks and rejects malformed or ambiguous inputs", () => {
+  const result = runJavaClockProbe();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test("actual Java clock tests kill prefix acceptance", () => {
+  killedJavaClockMutant("if (!matcher.matches()) {", "if (!matcher.find()) {");
+});
+
+test("actual Java clock tests kill out-of-range field acceptance", () => {
+  killedJavaClockMutant(
+    "if (minutes > 59 || seconds > 59) {",
+    "if (minutes > 60 || seconds > 60) {",
+  );
+});
+
+test("actual Java clock tests kill duplicate visible time-bar acceptance", () => {
+  killedJavaClockMutant(
+    "if (visibleCandidates.size() != 1) {",
+    "if (visibleCandidates.isEmpty()) {",
+  );
+});
+
+test("actual Java clock tests kill visible filtering bypass", () => {
+  killedJavaClockMutant(
+    "if (visible.test(candidate)) visibleCandidates.add(candidate);",
+    "visibleCandidates.add(candidate);",
+  );
+});
+
+test("actual Java clock tests kill content-description accessor bypass", () => {
+  killedJavaClockMutant(
+    "return parsePositionClock(contentDescription.apply(visibleCandidates.get(0)));",
+    "return parsePositionClock(\"00:02\");",
+  );
+});
+
+test("retained Media3 XML has one exact visible product time bar", () => {
+  const retained = read(retainedTimeBarXmlPath);
+  assert.equal(
+    createHash("sha256").update(retained).digest("hex"),
+    "1859fa733ffc9c6f9bc3167e762c32c7590077725c3a777b03783b1f932fbf6a",
+    "the positive fixture must remain the LF-normalized retained run-39852077335 XML",
+  );
+  const admitted = retainedXmlVisibleTimeBars(retained);
+  assert.equal(admitted.length, 1);
+  assert.equal(admitted[0].attributes["content-desc"], "00:06");
+
+  const timeBarPackage = 'resource-id="com.yawf.stream.tv:id/exo_progress" class="android.widget.SeekBar" package="com.yawf.stream.tv"';
+  assert.equal(retained.split(timeBarPackage).length, 2, "retained time-bar package anchor");
+  const wrongPackage = retained.replace(
+    timeBarPackage,
+    'resource-id="com.yawf.stream.tv:id/exo_progress" class="android.widget.SeekBar" package="com.example.lookalike"',
+  );
+  assert.equal(retainedXmlVisibleTimeBars(wrongPackage).length, 0);
+
+  const timeBarNode = /\s*<node\b[^>]*resource-id="com\.yawf\.stream\.tv:id\/exo_progress"[^>]*\/>/;
+  assert.match(retained, timeBarNode);
+  assert.equal(retainedXmlVisibleTimeBars(retained.replace(timeBarNode, "")).length, 0);
+
+  const duplicate = retained.replace("</hierarchy>", [
+    '  <node text="" resource-id="com.yawf.stream.tv:id/exo_progress"',
+    ' class="android.widget.SeekBar" package="com.yawf.stream.tv" content-desc="00:07"',
+    ' clickable="false" enabled="true" focusable="true"',
+    ' visible-to-user="true" bounds="[0,996][1920,1080]" />',
+    "</hierarchy>",
+  ].join(""));
+  assert.equal(retainedXmlVisibleTimeBars(duplicate).length, 2);
+});
+
+test("TV clock driver uses the exact product time bar and content description", () => {
+  assertClockDriverPolicy(read(javaPath));
+});
+
+test("TV clock driver tests kill getText accessor substitution", () => {
+  const source = read(javaPath);
+  const mutant = source.replace("UiObject2::getContentDescription", "UiObject2::getText");
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertClockDriverPolicy(mutant));
+});
+
+test("TV clock driver tests kill product-scope omission", () => {
+  const source = read(javaPath);
+  const selector = javaMethod(source, "positionTimeBarSelector");
+  const mutant = source.replace(selector, selector.replace("                .pkg(PRODUCT_PACKAGE)\n", ""));
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertClockDriverPolicy(mutant));
+});
+
+test("TV clock driver tests kill SeekBar-class omission", () => {
+  const source = read(javaPath);
+  const selector = javaMethod(source, "positionTimeBarSelector");
+  const mutant = source.replace(selector, selector.replace('                .clazz("android.widget.SeekBar")\n', ""));
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertClockDriverPolicy(mutant));
+});
+
+test("TV clock driver tests kill enabled-state omission", () => {
+  const source = read(javaPath);
+  const selector = javaMethod(source, "positionTimeBarSelector");
+  const mutant = source.replace(selector, selector.replace("                .enabled(true);", ";"));
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertClockDriverPolicy(mutant));
+});
+
+test("TV clock driver tests kill exo_progress resource omission", () => {
+  const source = read(javaPath);
+  const selector = javaMethod(source, "positionTimeBarSelector");
+  const mutantSelector = selector.replace(
+    'return By.res(PRODUCT_PACKAGE, "exo_progress")\n                .pkg(PRODUCT_PACKAGE)',
+    "return By.pkg(PRODUCT_PACKAGE)",
+  );
+  const mutant = source.replace(selector, mutantSelector);
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertClockDriverPolicy(mutant));
 });
 
 test("retained Media3 XML admits only one exact product native video surface", () => {

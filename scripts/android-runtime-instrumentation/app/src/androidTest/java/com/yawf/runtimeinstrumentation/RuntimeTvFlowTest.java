@@ -36,7 +36,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Persistent, remote-only UI transaction for the signed Android TV package. */
@@ -49,7 +48,6 @@ public final class RuntimeTvFlowTest {
     private static final long UI_WAIT = 60_000;
     private static final long MEDIA_WAIT = 45_000;
     private static final int MAX_CAPTURES = 32;
-    private static final Pattern CLOCK = Pattern.compile("(?:(\\d+):)?(\\d{1,2}):(\\d{2})");
     private static final Pattern PLAYER_CONTROLS_SURFACE =
             Pattern.compile("^(?:Show|Hide) player controls$");
 
@@ -247,6 +245,13 @@ public final class RuntimeTvFlowTest {
         return By.res(PRODUCT_PACKAGE, "exo_play_pause").desc(semanticState);
     }
 
+    private BySelector positionTimeBarSelector() {
+        return By.res(PRODUCT_PACKAGE, "exo_progress")
+                .pkg(PRODUCT_PACKAGE)
+                .clazz("android.widget.SeekBar")
+                .enabled(true);
+    }
+
     private BySelector nativePlayerSurfaceSelector() {
         return By.clazz("android.widget.FrameLayout")
                 .pkg(PRODUCT_PACKAGE)
@@ -404,11 +409,11 @@ public final class RuntimeTvFlowTest {
     }
 
     private long readPositionSeconds() {
-        UiObject2 position = waitFor(By.res(PRODUCT_PACKAGE, "exo_position"), 5_000, "Media3 position");
-        Matcher matcher = CLOCK.matcher(position.getText() == null ? "" : position.getText());
-        assertTrue("Media3 position was not a clock", matcher.find());
-        long hours = matcher.group(1) == null ? 0 : Long.parseLong(matcher.group(1));
-        return hours * 3600 + Long.parseLong(matcher.group(2)) * 60 + Long.parseLong(matcher.group(3));
+        List<UiObject2> timeBars = device.findObjects(positionTimeBarSelector());
+        return RuntimeTvClock.readUniqueVisibleTimeBar(
+                timeBars,
+                timeBar -> !timeBar.getVisibleBounds().isEmpty(),
+                UiObject2::getContentDescription);
     }
 
     private String centerFrameHash() throws Exception {

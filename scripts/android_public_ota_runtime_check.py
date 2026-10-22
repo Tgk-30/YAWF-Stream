@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Host guard for one public 2.3.25 to 2.3.26 native Android OTA transaction.
+"""Host guard for one admitted public native Android OTA transaction.
 
 The target APK is a host-side reference only. After one exact baseline product
 install, every product install, push, sync, package-manager install, and direct
 installer intent is rejected. One read-only baseline pull and one final pull
 after the instrumentation installer-success receipt are admitted explicitly.
+
+The historical 2.3.25 to 2.3.26 binding remains the default. A separate
+admission file can bind the reviewed automatic 2.3.27 to strictly post-2.3.30
+mode after the official public release exists.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ HARNESS_CLASS = (
 )
 STRICT_OTA_MODE = "strict"
 LEGACY_MANUAL_RECONSENT_MODE = "legacy-manual-reconsent"
+AUTOMATIC_OTA_MODE = "automatic-initial-cancel-due-resume"
 EVIDENCE_SUBDIR = "persistent-ota-flow"
 BASELINE_VERSION = "2.3.25"
 BASELINE_CODE = 2_003_025
@@ -51,6 +56,14 @@ SIGNER_PIN = "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a"
 TARGET_TAG = "android-v2.3.26"
 TARGET_APK_NAME = "YAWF.Stream_Android_2.3.26.apk"
 TARGET_VERIFICATION_NAME = "Android_2.3.26_verification.json"
+AUTOMATIC_BASELINE_VERSION = "2.3.27"
+AUTOMATIC_BASELINE_CODE = 2_003_027
+AUTOMATIC_BASELINE_SHA256 = "f3e983929db9fb32ed42b9779d94f2f8492c1cf4fae3e0cd29eee91a9492e0eb"
+AUTOMATIC_BASELINE_SIZE = 88_558_465
+AUTOMATIC_BASELINE_SOURCE = "9fc94a237d99b849cfc18a01085bb487915dd978"
+AUTOMATIC_BASELINE_TAG = "android-v2.3.27"
+AUTOMATIC_BASELINE_APK_NAME = "YAWF.Stream_Android_2.3.27.apk"
+MINIMUM_AUTOMATIC_TARGET_CODE = 2_003_031
 URL_RE = re.compile(r"https?://[^\s\]\[\"'<>]+", re.IGNORECASE)
 MAX_HOST_EVIDENCE_BYTES = 2 * 1024 * 1024
 BOUNDED_DIAGNOSTIC_STDOUT_NAMES = frozenset(
@@ -67,6 +80,153 @@ SAFE_EVIDENCE_NAME = re.compile(
 
 class RuntimeGateError(RuntimeError):
     pass
+
+
+@dataclasses.dataclass(frozen=True)
+class RuntimeBinding:
+    automatic: bool
+    ota_mode: str
+    evidence_subdir: str
+    baseline_version: str
+    baseline_code: int
+    baseline_sha256: str
+    baseline_size: int
+    baseline_source: str
+    baseline_tag: str
+    baseline_apk_name: str
+    target_version: str
+    target_code: int
+    target_sha256: str
+    target_size: int
+    target_source: str
+    target_build_run: int
+    target_tag: str
+    target_apk_name: str
+    target_verification_name: str
+    signer_pin: str
+    target_manifest_sha256: str | None = None
+    target_verification_sha256: str | None = None
+
+
+LEGACY_BINDING = RuntimeBinding(
+    automatic=False,
+    ota_mode=STRICT_OTA_MODE,
+    evidence_subdir=EVIDENCE_SUBDIR,
+    baseline_version=BASELINE_VERSION,
+    baseline_code=BASELINE_CODE,
+    baseline_sha256=BASELINE_SHA256,
+    baseline_size=BASELINE_SIZE,
+    baseline_source=BASELINE_SOURCE,
+    baseline_tag="android-v2.3.25",
+    baseline_apk_name="YAWF.Stream_Android_2.3.25.apk",
+    target_version=TARGET_VERSION,
+    target_code=TARGET_CODE,
+    target_sha256=TARGET_SHA256,
+    target_size=TARGET_SIZE,
+    target_source=TARGET_SOURCE,
+    target_build_run=TARGET_BUILD_RUN,
+    target_tag=TARGET_TAG,
+    target_apk_name=TARGET_APK_NAME,
+    target_verification_name=TARGET_VERIFICATION_NAME,
+    signer_pin=SIGNER_PIN,
+)
+
+
+def _exact_string(value: object, pattern: str, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+        raise RuntimeGateError(f"Automatic admission {label} is invalid")
+    return value
+
+
+def _decimal_string(value: object, label: str) -> int:
+    if not isinstance(value, str) or re.fullmatch(r"[1-9]\d*", value) is None:
+        raise RuntimeGateError(f"Automatic admission {label} is invalid")
+    parsed = int(value)
+    if parsed > 9_007_199_254_740_991:
+        raise RuntimeGateError(f"Automatic admission {label} is outside the safe range")
+    return parsed
+
+
+def load_automatic_binding(path: Path) -> RuntimeBinding:
+    """Load only the exact output of admitAutomaticPublicTuple."""
+    if not path.is_file() or path.stat().st_size > 16 * 1024:
+        raise RuntimeGateError("Automatic admission file is missing or oversized")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeGateError("Automatic admission file is invalid JSON") from error
+    expected_keys = {
+        "evidenceSubdir", "otaMode", "baselineVersion", "baselineVersionCode",
+        "baselineSha256", "baselineSize", "targetVersion", "targetVersionCode",
+        "targetApkName", "targetSha256", "targetSize", "signerSha256",
+        "targetSourceRevision", "targetManifestSha256", "targetVerificationSha256",
+        "targetBuildRun", "targetPublicRelease",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise RuntimeGateError("Automatic admission keys are not exact")
+    fixed = {
+        "evidenceSubdir": "automatic-public-ota-flow",
+        "otaMode": AUTOMATIC_OTA_MODE,
+        "baselineVersion": AUTOMATIC_BASELINE_VERSION,
+        "baselineVersionCode": str(AUTOMATIC_BASELINE_CODE),
+        "baselineSha256": AUTOMATIC_BASELINE_SHA256,
+        "baselineSize": str(AUTOMATIC_BASELINE_SIZE),
+        "signerSha256": SIGNER_PIN,
+        "targetPublicRelease": "true",
+    }
+    for key, expected in fixed.items():
+        if value.get(key) != expected:
+            raise RuntimeGateError(f"Automatic admission {key} mismatch")
+    target_version = _exact_string(
+        value.get("targetVersion"), r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)",
+        "targetVersion",
+    )
+    components = [int(part) for part in target_version.split(".")]
+    if any(part > 999 for part in components):
+        raise RuntimeGateError("Automatic admission targetVersion component is too large")
+    target_code = _decimal_string(value.get("targetVersionCode"), "targetVersionCode")
+    mapped_code = components[0] * 1_000_000 + components[1] * 1_000 + components[2]
+    if target_code != mapped_code or target_code < MINIMUM_AUTOMATIC_TARGET_CODE:
+        raise RuntimeGateError("Automatic admission target version/code is not strictly post-2.3.30")
+    target_apk_name = f"YAWF.Stream_Android_{target_version}.apk"
+    if value.get("targetApkName") != target_apk_name:
+        raise RuntimeGateError("Automatic admission target APK name mismatch")
+    target_sha256 = _exact_string(
+        value.get("targetSha256"), r"[0-9a-f]{64}", "targetSha256"
+    )
+    if target_sha256 == AUTOMATIC_BASELINE_SHA256:
+        raise RuntimeGateError("Automatic admission target APK equals the baseline")
+    return RuntimeBinding(
+        automatic=True,
+        ota_mode=AUTOMATIC_OTA_MODE,
+        evidence_subdir="automatic-public-ota-flow",
+        baseline_version=AUTOMATIC_BASELINE_VERSION,
+        baseline_code=AUTOMATIC_BASELINE_CODE,
+        baseline_sha256=AUTOMATIC_BASELINE_SHA256,
+        baseline_size=AUTOMATIC_BASELINE_SIZE,
+        baseline_source=AUTOMATIC_BASELINE_SOURCE,
+        baseline_tag=AUTOMATIC_BASELINE_TAG,
+        baseline_apk_name=AUTOMATIC_BASELINE_APK_NAME,
+        target_version=target_version,
+        target_code=target_code,
+        target_sha256=target_sha256,
+        target_size=_decimal_string(value.get("targetSize"), "targetSize"),
+        target_source=_exact_string(
+            value.get("targetSourceRevision"), r"[0-9a-f]{40}", "targetSourceRevision"
+        ),
+        target_build_run=_decimal_string(value.get("targetBuildRun"), "targetBuildRun"),
+        target_tag=f"android-v{target_version}",
+        target_apk_name=target_apk_name,
+        target_verification_name=f"Android_{target_version}_verification.json",
+        signer_pin=SIGNER_PIN,
+        target_manifest_sha256=_exact_string(
+            value.get("targetManifestSha256"), r"[0-9a-f]{64}", "targetManifestSha256"
+        ),
+        target_verification_sha256=_exact_string(
+            value.get("targetVerificationSha256"), r"[0-9a-f]{64}",
+            "targetVerificationSha256",
+        ),
+    )
 
 
 def require_successful_observation(
@@ -185,7 +345,9 @@ def validate_file(path: Path, expected_hash: str, expected_size: int, label: str
         raise RuntimeGateError(f"{label} SHA-256 mismatch")
 
 
-def validate_target_manifest(path: Path) -> dict[str, object]:
+def validate_target_manifest(
+    path: Path, binding: RuntimeBinding = LEGACY_BINDING
+) -> dict[str, object]:
     if not path.is_file() or path.stat().st_size > 16 * 1024:
         raise RuntimeGateError("Target manifest is missing or oversized")
     try:
@@ -201,20 +363,30 @@ def validate_target_manifest(path: Path) -> dict[str, object]:
         raise RuntimeGateError("Target manifest APK keys are not exact")
     expected = {
         "schemaVersion": 1,
-        "version": TARGET_VERSION,
-        "versionCode": TARGET_CODE,
+        "version": binding.target_version,
+        "versionCode": binding.target_code,
         "packageName": PRODUCT_PACKAGE,
-        "sourceRevision": TARGET_SOURCE,
+        "sourceRevision": binding.target_source,
     }
     for key, expected_value in expected.items():
         if type(value.get(key)) is not type(expected_value) or value.get(key) != expected_value:
             raise RuntimeGateError(f"Target manifest {key} mismatch")
-    if apk != {"name": TARGET_APK_NAME, "sha256": TARGET_SHA256, "size": TARGET_SIZE}:
+    if apk != {
+        "name": binding.target_apk_name,
+        "sha256": binding.target_sha256,
+        "size": binding.target_size,
+    }:
         raise RuntimeGateError("Target manifest APK identity mismatch")
+    if binding.target_manifest_sha256 is not None:
+        validate_file(
+            path, binding.target_manifest_sha256, path.stat().st_size, "target manifest"
+        )
     return value
 
 
-def validate_target_verification(path: Path) -> dict[str, object]:
+def validate_target_verification(
+    path: Path, binding: RuntimeBinding = LEGACY_BINDING
+) -> dict[str, object]:
     if not path.is_file() or path.stat().st_size > 64 * 1024:
         raise RuntimeGateError("Target verification receipt is missing or oversized")
     try:
@@ -226,30 +398,52 @@ def validate_target_verification(path: Path) -> dict[str, object]:
         "checks", "pending", "limits",
     }:
         raise RuntimeGateError("Target verification receipt keys are not exact")
-    if value.get("version") != TARGET_VERSION or value.get("sourceRevision") != TARGET_SOURCE:
+    if not binding.automatic:
+        if value.get("version") != TARGET_VERSION or value.get("sourceRevision") != TARGET_SOURCE:
+            raise RuntimeGateError("Target verification version/source mismatch")
+    elif (value.get("version") != binding.target_version
+          or value.get("sourceRevision") != binding.target_source):
         raise RuntimeGateError("Target verification version/source mismatch")
     build_run = value.get("buildRun")
-    if type(build_run) is not int or build_run != TARGET_BUILD_RUN:
+    if not binding.automatic:
+        if type(build_run) is not int or build_run != TARGET_BUILD_RUN:
+            raise RuntimeGateError("Target verification build run is invalid")
+    elif type(build_run) is not int or build_run != binding.target_build_run:
         raise RuntimeGateError("Target verification build run is invalid")
     if value.get("apk") != {
-        "name": TARGET_APK_NAME,
-        "sha256": TARGET_SHA256,
-        "size": TARGET_SIZE,
+        "name": binding.target_apk_name,
+        "sha256": binding.target_sha256,
+        "size": binding.target_size,
     }:
         raise RuntimeGateError("Target verification APK identity mismatch")
-    if value.get("certificateSha256") != SIGNER_PIN:
+    if value.get("certificateSha256") != binding.signer_pin:
         raise RuntimeGateError("Target verification signer mismatch")
     if not isinstance(value.get("checks"), dict) or not value["checks"]:
         raise RuntimeGateError("Target verification checks are missing")
+    if binding.automatic:
+        provenance = value["checks"].get("buildProvenance")
+        if not isinstance(provenance, dict) or provenance.get("workflowRun") != binding.target_build_run:
+            raise RuntimeGateError("Target verification provenance run mismatch")
+        if provenance.get("sourceRevision") != binding.target_source:
+            raise RuntimeGateError("Target verification provenance source mismatch")
+        if provenance.get("canonicalSignedCandidateUnchanged") is not True:
+            raise RuntimeGateError("Target verification canonical candidate state mismatch")
     for name in ("pending", "limits"):
         entries = value.get(name)
         if (not isinstance(entries, list) or len(entries) > 32
                 or any(not isinstance(entry, str) or not entry for entry in entries)):
             raise RuntimeGateError(f"Target verification {name} is invalid")
+    if binding.target_verification_sha256 is not None:
+        validate_file(
+            path, binding.target_verification_sha256, path.stat().st_size,
+            "target verification receipt",
+        )
     return value
 
 
-def parse_checksums(path: Path) -> dict[str, str]:
+def parse_checksums(
+    path: Path, binding: RuntimeBinding = LEGACY_BINDING
+) -> dict[str, str]:
     if not path.is_file() or path.stat().st_size > 16 * 1024:
         raise RuntimeGateError("SHA256SUMS is missing or oversized")
     result: dict[str, str] = {}
@@ -258,21 +452,55 @@ def parse_checksums(path: Path) -> dict[str, str]:
         if match is None or match.group(2) in result:
             raise RuntimeGateError("SHA256SUMS has an invalid or duplicate row")
         result[match.group(2)] = match.group(1)
-    if set(result) != {TARGET_APK_NAME, "android-update.json", TARGET_VERIFICATION_NAME}:
-        raise RuntimeGateError("SHA256SUMS asset set is not exact")
-    if result[TARGET_APK_NAME] != TARGET_SHA256:
-        raise RuntimeGateError("SHA256SUMS target APK hash mismatch")
+    if not binding.automatic:
+        if set(result) != {TARGET_APK_NAME, "android-update.json", TARGET_VERIFICATION_NAME}:
+            raise RuntimeGateError("SHA256SUMS asset set is not exact")
+        if result[TARGET_APK_NAME] != TARGET_SHA256:
+            raise RuntimeGateError("SHA256SUMS target APK hash mismatch")
+    else:
+        if set(result) != {
+            binding.target_apk_name, "android-update.json", binding.target_verification_name
+        }:
+            raise RuntimeGateError("SHA256SUMS asset set is not exact")
+        if result[binding.target_apk_name] != binding.target_sha256:
+            raise RuntimeGateError("SHA256SUMS target APK hash mismatch")
     return result
 
 
-def validate_release_pages(directory: Path, verification_path: Path) -> dict[str, object]:
-    pages = sorted(directory.glob("page-*.json"))
-    if not pages or len(pages) > 10:
+def _ordered_release_pages(paths: Sequence[Path]) -> list[Path]:
+    """Admit only canonical, unique, contiguous page-1.json through page-10.json."""
+    if not paths or len(paths) > 10:
         raise RuntimeGateError("Release history page count is outside bounds")
+    numbered: dict[int, Path] = {}
+    for page in paths:
+        match = re.fullmatch(r"page-(\d+)\.json", page.name)
+        if match is None:
+            raise RuntimeGateError("Release history page identity is invalid")
+        number = int(match.group(1))
+        if page.name != f"page-{number}.json" or not 1 <= number <= 10:
+            raise RuntimeGateError("Release history page identity is invalid")
+        if number in numbered:
+            raise RuntimeGateError("Release history page number is duplicated")
+        numbered[number] = page
+    if sorted(numbered) != list(range(1, len(numbered) + 1)):
+        raise RuntimeGateError("Release history pages are not contiguous")
+    return [numbered[number] for number in range(1, len(numbered) + 1)]
+
+
+def validate_release_pages(
+    directory: Path,
+    verification_path: Path,
+    binding: RuntimeBinding = LEGACY_BINDING,
+    *,
+    baseline_path: Path | None = None,
+    manifest_path: Path | None = None,
+    checksums_path: Path | None = None,
+) -> dict[str, object]:
+    pages = _ordered_release_pages(list(directory.glob("page-*.json")))
     releases: list[dict[str, object]] = []
     reached_end = False
-    for index, page in enumerate(pages, start=1):
-        if page.name != f"page-{index}.json" or page.stat().st_size > 1024 * 1024:
+    for page in pages:
+        if not page.is_file() or page.stat().st_size > 1024 * 1024:
             raise RuntimeGateError("Release history page identity is invalid")
         value = json.loads(page.read_text(encoding="utf-8"))
         if not isinstance(value, list) or len(value) > 20:
@@ -296,8 +524,23 @@ def validate_release_pages(directory: Path, verification_path: Path) -> dict[str
     if not stable:
         raise RuntimeGateError("No stable Android phone releases were found")
     _, newest = max(stable, key=lambda item: item[0])
-    if newest.get("tag_name") != TARGET_TAG:
-        raise RuntimeGateError("2.3.26 is not the newest stable Android phone release")
+    if newest.get("tag_name") != binding.target_tag:
+        raise RuntimeGateError(
+            f"{binding.target_version} is not the newest stable Android phone release"
+        )
+
+    if binding.automatic:
+        if sum(
+            1 for release in releases if release.get("tag_name") == binding.target_tag
+        ) != 1:
+            raise RuntimeGateError("Target public release is missing or ambiguous")
+        required_paths = (baseline_path, manifest_path, checksums_path)
+        if any(path is None for path in required_paths):
+            raise RuntimeGateError("Automatic release validation requires every downloaded asset")
+        if newest.get("published_at") in {None, ""}:
+            raise RuntimeGateError("Target public release publication metadata is absent")
+        if newest.get("target_commitish") != binding.target_source:
+            raise RuntimeGateError("Target public release source revision mismatch")
 
     assets = newest.get("assets")
     if not isinstance(assets, list) or len(assets) > 200:
@@ -305,33 +548,185 @@ def validate_release_pages(directory: Path, verification_path: Path) -> dict[str
     selected: dict[str, dict[str, object]] = {}
     for asset in assets:
         if not isinstance(asset, dict) or asset.get("name") not in {
-            TARGET_APK_NAME, "android-update.json", TARGET_VERIFICATION_NAME, "SHA256SUMS"
+            binding.target_apk_name, "android-update.json",
+            binding.target_verification_name, "SHA256SUMS"
         }:
             continue
         name = str(asset["name"])
         if name in selected:
             raise RuntimeGateError("Target release has duplicate required assets")
-        expected_url = f"https://github.com/Tgk-30/YAWF-Stream/releases/download/{TARGET_TAG}/{name}"
+        expected_url = (
+            "https://github.com/Tgk-30/YAWF-Stream/releases/download/"
+            f"{binding.target_tag}/{name}"
+        )
         if asset.get("browser_download_url") != expected_url:
             raise RuntimeGateError("Target release asset URL is not exact")
+        if binding.automatic and asset.get("state") != "uploaded":
+            raise RuntimeGateError("Target release asset upload state is not exact")
         selected[name] = asset
     if set(selected) != {
-        TARGET_APK_NAME, "android-update.json", TARGET_VERIFICATION_NAME, "SHA256SUMS"
+        binding.target_apk_name, "android-update.json",
+        binding.target_verification_name, "SHA256SUMS"
     }:
         raise RuntimeGateError("Target release required assets are incomplete")
-    apk = selected[TARGET_APK_NAME]
-    if apk.get("size") != TARGET_SIZE:
+    apk = selected[binding.target_apk_name]
+    if apk.get("size") != binding.target_size:
         raise RuntimeGateError("Target release APK size mismatch")
     digest = apk.get("digest")
-    if digest is not None and digest != f"sha256:{TARGET_SHA256}":
+    if (binding.automatic and digest != f"sha256:{binding.target_sha256}") or (
+        not binding.automatic
+        and digest is not None
+        and digest != f"sha256:{binding.target_sha256}"
+    ):
         raise RuntimeGateError("Target release APK digest mismatch")
-    verification = selected[TARGET_VERIFICATION_NAME]
+    verification = selected[binding.target_verification_name]
     verification_hash = sha256_file(verification_path)
     if verification.get("size") != verification_path.stat().st_size:
         raise RuntimeGateError("Target release verification receipt size mismatch")
     if verification.get("digest") != f"sha256:{verification_hash}":
         raise RuntimeGateError("Target release verification receipt digest mismatch")
+
+    if binding.automatic:
+        assert baseline_path is not None and manifest_path is not None and checksums_path is not None
+        target_files = {
+            binding.target_apk_name: None,
+            "android-update.json": manifest_path,
+            binding.target_verification_name: verification_path,
+            "SHA256SUMS": checksums_path,
+        }
+        for name, path in target_files.items():
+            asset = selected[name]
+            expected_hash = binding.target_sha256 if path is None else sha256_file(path)
+            expected_size = binding.target_size if path is None else path.stat().st_size
+            if asset.get("size") != expected_size:
+                raise RuntimeGateError(f"Target release {name} size mismatch")
+            if asset.get("digest") != f"sha256:{expected_hash}":
+                raise RuntimeGateError(f"Target release {name} digest mismatch")
+
+        baseline_matches = [
+            release for release in releases if release.get("tag_name") == binding.baseline_tag
+        ]
+        if len(baseline_matches) != 1:
+            raise RuntimeGateError("Baseline public release is missing or ambiguous")
+        baseline_release = baseline_matches[0]
+        if (
+            baseline_release.get("draft") is not False
+            or baseline_release.get("prerelease") is not False
+            or baseline_release.get("published_at") in {None, ""}
+            or baseline_release.get("target_commitish") != binding.baseline_source
+        ):
+            raise RuntimeGateError("Baseline public release metadata is invalid")
+        baseline_assets = baseline_release.get("assets")
+        if not isinstance(baseline_assets, list) or len(baseline_assets) > 200:
+            raise RuntimeGateError("Baseline public release assets are invalid")
+        baseline_apks = [
+            asset for asset in baseline_assets
+            if isinstance(asset, dict) and asset.get("name") == binding.baseline_apk_name
+        ]
+        if len(baseline_apks) != 1:
+            raise RuntimeGateError("Baseline public APK asset is missing or ambiguous")
+        baseline_asset = baseline_apks[0]
+        expected_baseline_url = (
+            "https://github.com/Tgk-30/YAWF-Stream/releases/download/"
+            f"{binding.baseline_tag}/{binding.baseline_apk_name}"
+        )
+        if (
+            baseline_asset.get("state") != "uploaded"
+            or baseline_asset.get("browser_download_url") != expected_baseline_url
+            or baseline_asset.get("size") != binding.baseline_size
+            or baseline_asset.get("digest") != f"sha256:{binding.baseline_sha256}"
+        ):
+            raise RuntimeGateError("Baseline public APK asset identity mismatch")
+        validate_file(
+            baseline_path, binding.baseline_sha256, binding.baseline_size,
+            "downloaded baseline APK",
+        )
     return newest
+
+
+def validate_host_inputs(args: argparse.Namespace, binding: RuntimeBinding) -> None:
+    """Bind the actual downloaded bytes to the admitted public release tuple."""
+    validate_file(
+        args.baseline_apk, binding.baseline_sha256, binding.baseline_size, "baseline APK"
+    )
+    validate_file(args.target_apk, binding.target_sha256, binding.target_size, "target APK")
+    validate_target_manifest(args.target_manifest, binding)
+    validate_target_verification(args.target_verification, binding)
+    checksums = parse_checksums(args.target_checksums, binding)
+    if checksums["android-update.json"] != sha256_file(args.target_manifest):
+        raise RuntimeGateError("SHA256SUMS manifest hash mismatch")
+    if (
+        checksums[binding.target_verification_name]
+        != sha256_file(args.target_verification)
+    ):
+        raise RuntimeGateError("SHA256SUMS verification receipt hash mismatch")
+    validate_release_pages(
+        args.release_pages,
+        args.target_verification,
+        binding,
+        baseline_path=args.baseline_apk if binding.automatic else None,
+        manifest_path=args.target_manifest if binding.automatic else None,
+        checksums_path=args.target_checksums if binding.automatic else None,
+    )
+
+
+def _run_apk_tool(command: list[str], label: str) -> str:
+    result = subprocess.run(
+        command, capture_output=True, text=True, timeout=120, check=False
+    )
+    if result.returncode != 0:
+        raise RuntimeGateError(f"{label} failed")
+    return result.stdout.strip()
+
+
+def _apk_signer(path: Path, apksigner: str) -> str:
+    output = _run_apk_tool(
+        [apksigner, "verify", "--print-certs", str(path)], "apksigner verification"
+    )
+    matches = re.findall(
+        r"certificate SHA-256 digest:\s*([0-9a-fA-F:]+)", output
+    )
+    if len(matches) != 1:
+        raise RuntimeGateError("APK signer digest is missing or ambiguous")
+    return matches[0].replace(":", "").casefold()
+
+
+def verify_downloaded_apk_identities(
+    baseline_apk: Path,
+    target_apk: Path,
+    apksigner: str,
+    apkanalyzer: str,
+    binding: RuntimeBinding,
+) -> None:
+    """Verify both downloaded APKs without ever transferring the target to ADB."""
+    for label, path, version, code in (
+        ("baseline", baseline_apk, binding.baseline_version, binding.baseline_code),
+        ("target", target_apk, binding.target_version, binding.target_code),
+    ):
+        if _apk_signer(path, apksigner) != binding.signer_pin:
+            raise RuntimeGateError(f"Downloaded {label} APK signer mismatch")
+        commands = (
+            ("application-id", PRODUCT_PACKAGE),
+            ("version-name", version),
+            ("version-code", str(code)),
+        )
+        for field, expected in commands:
+            observed = _run_apk_tool(
+                [apkanalyzer, "manifest", field, str(path)],
+                f"apkanalyzer {label} {field}",
+            )
+            if observed != expected:
+                raise RuntimeGateError(f"Downloaded {label} APK {field} mismatch")
+
+
+def binding_from_args(args: argparse.Namespace) -> RuntimeBinding:
+    admission = getattr(args, "automatic_binding", None)
+    if admission is None:
+        return LEGACY_BINDING
+    binding = load_automatic_binding(admission)
+    if args.ota_mode != STRICT_OTA_MODE:
+        raise RuntimeGateError("Automatic admission cannot be combined with legacy recovery mode")
+    return binding
 
 
 @dataclasses.dataclass(frozen=True)
@@ -403,14 +798,31 @@ def record_package_identity(write_diagnostic, name: str, value: str) -> PackageI
     return parse_package_identity(value)
 
 
-def validate_receipt(value: dict[str, object], ota_mode: str = STRICT_OTA_MODE) -> None:
+def validate_final_identity(
+    baseline: PackageIdentity,
+    final: PackageIdentity,
+    binding: RuntimeBinding = LEGACY_BINDING,
+) -> None:
+    if final.version_name != binding.target_version or final.version_code != binding.target_code:
+        raise RuntimeGateError("Final installed version identity mismatch")
+    if final.uid != baseline.uid or final.first_install_time != baseline.first_install_time:
+        raise RuntimeGateError("UID or first-install time changed across OTA")
+    if final.last_update_time == baseline.last_update_time:
+        raise RuntimeGateError("Last-update time did not change across OTA")
+
+
+def validate_receipt(
+    value: dict[str, object],
+    ota_mode: str = STRICT_OTA_MODE,
+    binding: RuntimeBinding = LEGACY_BINDING,
+) -> None:
     expected = {
         "outcome": "passed",
         "persistentUiAutomationSession": True,
         "productPackage": PRODUCT_PACKAGE,
-        "baselineVersion": BASELINE_VERSION,
-        "targetVersion": TARGET_VERSION,
-        "targetSha256": TARGET_SHA256,
+        "baselineVersion": binding.baseline_version,
+        "targetVersion": binding.target_version,
+        "targetSha256": binding.target_sha256,
         "productPermissionPageObserved": True,
         "permissionEnabledByTest": True,
         "installerSuccessObserved": True,
@@ -429,8 +841,76 @@ def validate_receipt(value: dict[str, object], ota_mode: str = STRICT_OTA_MODE) 
         raise RuntimeGateError("Strict receipt must prove the legacy reconsent path was unused")
     if ota_mode == LEGACY_MANUAL_RECONSENT_MODE and used is not True:
         raise RuntimeGateError("Legacy manual reconsent receipt did not prove its single use")
+    if ota_mode == AUTOMATIC_OTA_MODE:
+        if not binding.automatic:
+            raise RuntimeGateError("Automatic receipt requires an admitted automatic binding")
+        automatic_expected = {
+            "targetVersionCode": binding.target_code,
+            "targetSize": binding.target_size,
+            "targetIdentityAdmitted": True,
+            "legacyManualReconsentUsed": False,
+            "productInstallSelections": 1,
+            "systemUpdateSelections": 1,
+            "systemOpenSelections": 1,
+            "targetSourceRevision": binding.target_source,
+            "targetManifestSha256": binding.target_manifest_sha256,
+            "targetVerificationSha256": binding.target_verification_sha256,
+            "targetBuildRun": binding.target_build_run,
+            "initialManualProgressObserved": True,
+            "initialManualCancelWon": True,
+            "automaticOfferAbsentSameForeground": True,
+            "deferredAutomaticOfferObserved": True,
+            "automaticDiscoveryObserved": True,
+            "weeklyElapsedSchedulingProven": False,
+            "sampleCatalogFixtureUsed": True,
+            "liveCatalogProviderProof": False,
+            "profilePersistedWarm": True,
+            "appearancePersistedWarm": True,
+            "watchlistPersistedWarm": True,
+            "folderPersistedWarm": True,
+            "visibleTaskDismissalObserved": True,
+            "visibleTaskDismissalSwipes": 1,
+            "independentColdProcessProof": False,
+            "profilePersistedAfterTaskRelaunch": True,
+            "appearancePersistedAfterTaskRelaunch": True,
+            "watchlistPersistedAfterTaskRelaunch": True,
+            "folderPersistedAfterTaskRelaunch": True,
+            "permissionCleanupToggleSelections": 1,
+        }
+        for key, expected_value in automatic_expected.items():
+            if value.get(key) != expected_value:
+                raise RuntimeGateError(
+                    f"Automatic instrumentation receipt {key} mismatch"
+                )
     if value.get("failure") is not None:
         raise RuntimeGateError("Instrumentation receipt retained a failure")
+
+
+def automatic_instrumentation_arguments(binding: RuntimeBinding) -> list[str]:
+    if not binding.automatic:
+        raise RuntimeGateError("Automatic instrumentation requires an automatic binding")
+    return [
+        "shell", "am", "instrument", "-w", "-r",
+        "-e", "class", HARNESS_CLASS,
+        "-e", "evidenceSubdir", binding.evidence_subdir,
+        "-e", "baselineVersion", binding.baseline_version,
+        "-e", "targetVersion", binding.target_version,
+        "-e", "targetVersionCode", str(binding.target_code),
+        "-e", "targetSha256", binding.target_sha256,
+        "-e", "targetSize", str(binding.target_size),
+        "-e", "signerSha256", binding.signer_pin,
+        "-e", "otaMode", binding.ota_mode,
+        "-e", "baselineVersionCode", str(binding.baseline_code),
+        "-e", "baselineSha256", binding.baseline_sha256,
+        "-e", "baselineSize", str(binding.baseline_size),
+        "-e", "targetApkName", binding.target_apk_name,
+        "-e", "targetSourceRevision", binding.target_source,
+        "-e", "targetManifestSha256", binding.target_manifest_sha256 or "",
+        "-e", "targetVerificationSha256", binding.target_verification_sha256 or "",
+        "-e", "targetBuildRun", str(binding.target_build_run),
+        "-e", "targetPublicRelease", "true",
+        HARNESS_INSTRUMENTATION,
+    ]
 
 
 class AdmittedAdb:
@@ -444,6 +924,8 @@ class AdmittedAdb:
         target_apk: Path,
         harness_app: Path,
         harness_test: Path,
+        *,
+        automatic_binding: RuntimeBinding | None = None,
     ):
         self.executable = executable
         self.serial = serial
@@ -451,10 +933,16 @@ class AdmittedAdb:
         self.target_apk = target_apk.resolve()
         self.harness_app = harness_app.resolve()
         self.harness_test = harness_test.resolve()
+        if automatic_binding is not None and not automatic_binding.automatic:
+            raise RuntimeGateError("Automatic ADB admission requires an automatic binding")
+        self.automatic_binding = automatic_binding
+        self.harness_install_count = 0
+        self.baseline_install_count = 0
         self.baseline_installed = False
         self.baseline_pulled = False
         self.installer_success_receipt = False
         self.final_pulled = False
+        self.automatic_instrumentation_started = False
         self.commands: list[tuple[str, ...]] = []
 
     def _execute(
@@ -491,6 +979,11 @@ class AdmittedAdb:
             return
         if lowered[0].startswith("install") or lowered[0] in {"push", "sync"}:
             raise RuntimeGateError("ADB package transfer/install is locked")
+        if lowered[0] in {
+            "uninstall", "root", "remount", "disable-verity", "enable-verity",
+            "reverse", "forward", "restore",
+        }:
+            raise RuntimeGateError("ADB privileged mutation is locked")
         if lowered[0] == "shell":
             shell = lowered[1:]
             if len(shell) >= 2 and shell[0] == "pm" and shell[1].startswith("install"):
@@ -504,9 +997,93 @@ class AdmittedAdb:
                 or ".apk" in joined
             ):
                 raise RuntimeGateError("Direct installer intent is locked")
+            mutation = False
+            if shell:
+                mutation = (
+                    shell[0] in {"settings", "device_config", "setprop", "date"}
+                    or shell[:2] in (["toybox", "date"], ["service", "call"])
+                    or shell[:2] in (["cmd", "alarm"], ["am", "broadcast"])
+                    or (shell[0] == "content" and len(shell) >= 2
+                        and shell[1] in {"insert", "update", "delete", "call"})
+                    or (shell[0] == "run-as" and len(shell) >= 2
+                        and shell[1] == PRODUCT_PACKAGE.casefold())
+                    or (shell[0] == "pm" and len(shell) >= 2
+                        and shell[1] in {"grant", "revoke", "clear", "uninstall"})
+                    or (shell[:2] == ["cmd", "package"] and len(shell) >= 3
+                        and shell[2] in {"grant", "revoke", "clear"})
+                    or (shell[:2] == ["cmd", "permission"] and len(shell) >= 3
+                        and shell[2] in {"grant", "revoke"})
+                    or (shell[:2] in (["appops", "set"], ["appops", "reset"])
+                        or shell[:3] in (["cmd", "appops", "set"], ["cmd", "appops", "reset"]))
+                    or (shell[:2] == ["am", "force-stop"]
+                        and PRODUCT_PACKAGE.casefold() in shell[2:])
+                )
+            if mutation:
+                raise RuntimeGateError("Privileged product, feed, permission, or clock mutation is locked")
+        if any(
+            token in joined
+            for token in (
+                "http://", "https://", "android-update.json", "update-feed",
+                "update_feed", "ota-feed",
+            )
+        ):
+            raise RuntimeGateError("Updater feed mutation material must never be passed to ADB")
+
+    def _require_automatic_read_only_command(self, args: Sequence[str]) -> None:
+        binding = self.automatic_binding
+        if binding is None:
+            raise RuntimeGateError("Automatic ADB admission is not active")
+        command = tuple(args)
+        if not command or any(not isinstance(part, str) for part in command):
+            raise RuntimeGateError("Automatic ADB command shape is invalid")
+        exact_commands = {
+            ("shell", "pm", "path", PRODUCT_PACKAGE),
+            ("shell", "dumpsys", "package", PRODUCT_PACKAGE),
+            (
+                "shell", "cmd", "appops", "get", PRODUCT_PACKAGE,
+                "REQUEST_INSTALL_PACKAGES",
+            ),
+            (
+                "shell", "find",
+                f"/sdcard/Android/data/{PRODUCT_PACKAGE}/files/Download/updates",
+                "-maxdepth", "1", "-type", "f", "-name", "*.apk", "-print",
+            ),
+            ("logcat", "-d", "-v", "threadtime"),
+            ("shell", "dumpsys", "dropbox", "--print", "data_app_anr"),
+            ("shell", "dumpsys", "dropbox", "--print", "data_app_crash"),
+        }
+        if command in exact_commands:
+            return
+
+        remote = f"files/{binding.evidence_subdir}"
+        if command == ("exec-out", "run-as", HARNESS_PACKAGE, "ls", "-1", remote):
+            return
+        evidence_name: str | None = None
+        if command[:6] == (
+            "exec-out", "run-as", HARNESS_PACKAGE, "stat", "-c", "%s"
+        ) and len(command) == 7:
+            evidence_name = command[6].removeprefix(f"{remote}/")
+            if command[6] != f"{remote}/{evidence_name}":
+                evidence_name = None
+        elif command[:4] == (
+            "exec-out", "run-as", HARNESS_PACKAGE, "cat"
+        ) and len(command) == 5:
+            evidence_name = command[4].removeprefix(f"{remote}/")
+            if command[4] != f"{remote}/{evidence_name}":
+                evidence_name = None
+        if (
+            evidence_name is not None
+            and evidence_name == Path(evidence_name).name
+            and SAFE_EVIDENCE_NAME.fullmatch(evidence_name) is not None
+        ):
+            return
+        raise RuntimeGateError("Automatic ADB command is outside the exact allowlist")
 
     def run(self, args: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
-        self._reject_transfer_or_install(args)
+        if self.automatic_binding is None:
+            self._reject_transfer_or_install(args)
+        else:
+            self._require_automatic_read_only_command(args)
         return self._execute(args, **kwargs)
 
     def shell(self, *args: str, timeout: float = 30, check: bool = True) -> str:
@@ -515,9 +1092,38 @@ class AdmittedAdb:
     def exec_out(self, *args: str, timeout: float = 30) -> bytes:
         return self.run(["exec-out", *args], timeout=timeout, text=False).stdout
 
+    def run_automatic_instrumentation_once(
+        self,
+        args: Sequence[str],
+        *,
+        timeout: float,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess:
+        binding = self.automatic_binding
+        if binding is None:
+            raise RuntimeGateError("Automatic instrumentation admission is not active")
+        if (
+            self.harness_install_count != 2
+            or self.baseline_install_count != 1
+            or not self.baseline_installed
+            or not self.baseline_pulled
+        ):
+            raise RuntimeGateError(
+                "Automatic instrumentation requires the exact baseline install and pull state"
+            )
+        if self.automatic_instrumentation_started or self.installer_success_receipt:
+            raise RuntimeGateError("Automatic instrumentation may run exactly once")
+        expected = automatic_instrumentation_arguments(binding)
+        if tuple(args) != tuple(expected):
+            raise RuntimeGateError("Automatic instrumentation arguments are not exact")
+        self.automatic_instrumentation_started = True
+        return self._execute(expected, timeout=timeout, check=check)
+
     def install_harness(self, app_hash: str, test_hash: str) -> None:
         if self.baseline_installed:
             raise RuntimeGateError("Harness installation is forbidden after baseline")
+        if self.harness_install_count != 0:
+            raise RuntimeGateError("Harness APKs may be installed exactly once each")
         if sha256_file(self.harness_app) != app_hash or sha256_file(self.harness_test) != test_hash:
             raise RuntimeGateError("Harness APK hash mismatch")
         for path, flags in (
@@ -527,15 +1133,23 @@ class AdmittedAdb:
             result = self._execute([*flags, str(path)], timeout=120)
             if "Success" not in result.stdout:
                 raise RuntimeGateError("Harness install did not report Success")
+            self.harness_install_count += 1
+        if self.harness_install_count != 2:
+            raise RuntimeGateError("Exactly two harness APK installs are required")
 
     def install_baseline_once(self) -> None:
         if self.baseline_installed:
             raise RuntimeGateError("Baseline product install may occur exactly once")
+        if self.baseline_install_count != 0:
+            raise RuntimeGateError("Baseline product install count is invalid")
+        if self.harness_install_count != 2:
+            raise RuntimeGateError("Both harness APKs must be installed before the baseline")
         result = self._execute(
             ["install", "--no-streaming", str(self.baseline_apk)], timeout=180
         )
         if "Success" not in result.stdout:
             raise RuntimeGateError("Baseline install did not report Success")
+        self.baseline_install_count = 1
         self.baseline_installed = True
 
     def pull_baseline_once(self, remote: str, destination: Path) -> None:
@@ -545,6 +1159,11 @@ class AdmittedAdb:
         self.baseline_pulled = True
 
     def mark_installer_success_receipt(self) -> None:
+        if self.automatic_binding is not None and (
+            not self.automatic_instrumentation_started
+            or self.installer_success_receipt
+        ):
+            raise RuntimeGateError("Automatic installer receipt state is invalid")
         self.installer_success_receipt = True
 
     def pull_final_once(self, remote: str, destination: Path) -> None:
@@ -557,6 +1176,8 @@ class AdmittedAdb:
 class OtaRuntimeDriver:
     def __init__(self, args: argparse.Namespace):
         self.args = args
+        self.binding = binding_from_args(args)
+        self.ota_mode = self.binding.ota_mode if self.binding.automatic else args.ota_mode
         self.evidence = args.evidence
         self.evidence.mkdir(parents=True, exist_ok=True)
         self.adb = AdmittedAdb(
@@ -566,6 +1187,7 @@ class OtaRuntimeDriver:
             args.target_apk,
             args.harness_app,
             args.harness_test,
+            automatic_binding=self.binding if self.binding.automatic else None,
         )
         self.events: list[str] = []
 
@@ -606,16 +1228,15 @@ class OtaRuntimeDriver:
         )
 
     def verify_host_inputs(self) -> None:
-        validate_file(self.args.baseline_apk, BASELINE_SHA256, BASELINE_SIZE, "baseline APK")
-        validate_file(self.args.target_apk, TARGET_SHA256, TARGET_SIZE, "target APK")
-        validate_target_manifest(self.args.target_manifest)
-        validate_target_verification(self.args.target_verification)
-        checksums = parse_checksums(self.args.target_checksums)
-        if checksums["android-update.json"] != sha256_file(self.args.target_manifest):
-            raise RuntimeGateError("SHA256SUMS manifest hash mismatch")
-        if checksums[TARGET_VERIFICATION_NAME] != sha256_file(self.args.target_verification):
-            raise RuntimeGateError("SHA256SUMS verification receipt hash mismatch")
-        validate_release_pages(self.args.release_pages, self.args.target_verification)
+        validate_host_inputs(self.args, self.binding)
+        if self.binding.automatic:
+            verify_downloaded_apk_identities(
+                self.args.baseline_apk,
+                self.args.target_apk,
+                self.args.apksigner,
+                self.args.apkanalyzer,
+                self.binding,
+            )
         self.note(
             "Public release, manifest, verification receipt, checksum, source, size, and hash pins passed"
         )
@@ -642,19 +1263,23 @@ class OtaRuntimeDriver:
         return paths[0]
 
     def signer(self, apk: Path) -> str:
-        result = subprocess.run(
-            [self.args.apksigner, "verify", "--print-certs", str(apk)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeGateError("apksigner rejected an installed APK")
-        match = re.search(r"certificate SHA-256 digest:\s*([0-9a-fA-F:]+)", result.stdout)
-        if match is None:
-            raise RuntimeGateError("Installed APK signer digest is missing")
-        return match.group(1).replace(":", "").casefold()
+        if not self.binding.automatic:
+            result = subprocess.run(
+                [self.args.apksigner, "verify", "--print-certs", str(apk)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeGateError("apksigner rejected an installed APK")
+            match = re.search(
+                r"certificate SHA-256 digest:\s*([0-9a-fA-F:]+)", result.stdout
+            )
+            if match is None:
+                raise RuntimeGateError("Installed APK signer digest is missing")
+            return match.group(1).replace(":", "").casefold()
+        return _apk_signer(apk, self.args.apksigner)
 
     def assert_unknown_source_denied(self, phase: str) -> None:
         result = self.adb.run(
@@ -693,13 +1318,21 @@ class OtaRuntimeDriver:
         identity = record_package_identity(
             self.write, "baseline-package.txt", self.package_dump()
         )
-        if identity.version_name != BASELINE_VERSION or identity.version_code != BASELINE_CODE:
+        if (
+            identity.version_name != self.binding.baseline_version
+            or identity.version_code != self.binding.baseline_code
+        ):
             raise RuntimeGateError("Installed baseline version identity mismatch")
-        pulled = self.evidence / "installed-baseline-2.3.25.apk"
+        pulled = self.evidence / f"installed-baseline-{self.binding.baseline_version}.apk"
         self.adb.pull_baseline_once(self.base_path(), pulled)
-        validate_file(pulled, BASELINE_SHA256, BASELINE_SIZE, "installed baseline")
+        validate_file(
+            pulled,
+            self.binding.baseline_sha256,
+            self.binding.baseline_size,
+            "installed baseline",
+        )
         signer = self.signer(pulled)
-        if signer != SIGNER_PIN:
+        if signer != self.binding.signer_pin:
             raise RuntimeGateError("Installed baseline signer mismatch")
         self.assert_unknown_source_denied("before")
         self.write("baseline-identity.json", json.dumps(dataclasses.asdict(identity), indent=2) + "\n")
@@ -707,8 +1340,9 @@ class OtaRuntimeDriver:
         return identity, signer
 
     def run_instrumentation(self) -> dict[str, object]:
-        result = self.adb.run(
-            [
+        binding = self.binding
+        if not binding.automatic:
+            arguments = [
                 "shell", "am", "instrument", "-w", "-r",
                 "-e", "class", HARNESS_CLASS,
                 "-e", "evidenceSubdir", EVIDENCE_SUBDIR,
@@ -718,12 +1352,21 @@ class OtaRuntimeDriver:
                 "-e", "targetSha256", TARGET_SHA256,
                 "-e", "targetSize", str(TARGET_SIZE),
                 "-e", "signerSha256", SIGNER_PIN,
-                "-e", "otaMode", self.args.ota_mode,
+                "-e", "otaMode", self.ota_mode,
                 HARNESS_INSTRUMENTATION,
-            ],
-            timeout=self.args.flow_timeout,
-            check=False,
-        )
+            ]
+            result = self.adb.run(
+                arguments,
+                timeout=self.args.flow_timeout,
+                check=False,
+            )
+        else:
+            arguments = automatic_instrumentation_arguments(binding)
+            result = self.adb.run_automatic_instrumentation_once(
+                arguments,
+                timeout=self.args.flow_timeout,
+                check=False,
+            )
         self.write("instrumentation-output.txt", result.stdout + result.stderr)
         retrieval_error: Exception | None = None
         try:
@@ -731,24 +1374,29 @@ class OtaRuntimeDriver:
         except Exception as error:
             retrieval_error = error
             self.write("instrumentation-retrieval-error.txt", f"{type(error).__name__}: {error}\n")
-        receipt_path = self.evidence / "persistent-ota-flow" / "instrumentation-receipt.json"
+        receipt_path = (
+            self.evidence / binding.evidence_subdir / "instrumentation-receipt.json"
+        )
         if result.returncode != 0 or "OK (1 test)" not in result.stdout:
             raise RuntimeGateError("Persistent OTA instrumentation failed; runner output retained")
         if retrieval_error is not None:
             raise RuntimeGateError("Persistent OTA evidence retrieval failed") from retrieval_error
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        validate_receipt(receipt, self.args.ota_mode)
+        if binding.automatic:
+            validate_receipt(receipt, self.ota_mode, binding)
+        else:
+            validate_receipt(receipt, self.args.ota_mode)
         self.adb.mark_installer_success_receipt()
-        if self.args.ota_mode == LEGACY_MANUAL_RECONSENT_MODE:
+        if self.ota_mode == LEGACY_MANUAL_RECONSENT_MODE:
             self.note("Persistent UI receipt proves the explicitly admitted legacy-manual-reconsent path; this is not an automatic OTA continuation claim")
         else:
             self.note("Persistent UI receipt proves native updater and OS installer success")
         return receipt
 
     def retrieve_harness_evidence(self) -> None:
-        destination = self.evidence / "persistent-ota-flow"
+        destination = self.evidence / self.binding.evidence_subdir
         destination.mkdir(exist_ok=True)
-        remote = f"files/{EVIDENCE_SUBDIR}"
+        remote = f"files/{self.binding.evidence_subdir}"
         listing = self.adb.exec_out(
             "run-as", HARNESS_PACKAGE, "ls", "-1", remote, timeout=30
         ).decode("utf-8", "strict")
@@ -778,28 +1426,33 @@ class OtaRuntimeDriver:
 
     def verify_final(self, baseline: PackageIdentity, baseline_signer: str) -> None:
         final = record_package_identity(self.write, "final-package.txt", self.package_dump())
-        if final.version_name != TARGET_VERSION or final.version_code != TARGET_CODE:
-            raise RuntimeGateError("Final installed version identity mismatch")
-        if final.uid != baseline.uid or final.first_install_time != baseline.first_install_time:
-            raise RuntimeGateError("UID or first-install time changed across OTA")
-        if final.last_update_time == baseline.last_update_time:
-            raise RuntimeGateError("Last-update time did not change across OTA")
-        pulled = self.evidence / "installed-final-2.3.26.apk"
+        validate_final_identity(baseline, final, self.binding)
+        pulled = self.evidence / f"installed-final-{self.binding.target_version}.apk"
         self.adb.pull_final_once(self.base_path(), pulled)
-        validate_file(pulled, TARGET_SHA256, TARGET_SIZE, "installed final")
+        if self.binding.automatic:
+            validate_file(
+                pulled, self.binding.target_sha256, self.binding.target_size,
+                "installed final",
+            )
+        else:
+            validate_file(pulled, TARGET_SHA256, TARGET_SIZE, "installed final")
         final_signer = self.signer(pulled)
-        if final_signer != baseline_signer or final_signer != SIGNER_PIN:
+        if final_signer != baseline_signer or final_signer != self.binding.signer_pin:
             raise RuntimeGateError("Final installed signer changed")
         self.assert_unknown_source_denied("after-cleanup")
         self.assert_no_residual_update_apks()
         self.write("final-identity.json", json.dumps(dataclasses.asdict(final), indent=2) + "\n")
         self.write(
             "installed-byte-identity.txt",
-            f"baselineSha256={BASELINE_SHA256}\nfinalSha256={TARGET_SHA256}\n"
+            f"baselineSha256={self.binding.baseline_sha256}\n"
+            f"finalSha256={self.binding.target_sha256}\n"
             f"signerSha256={final_signer}\nuidRetained=true\nfirstInstallTimeRetained=true\n"
             "lastUpdateTimeChanged=true\n",
         )
-        self.note("Final OS-installed base APK exactly matches public 2.3.26 and retained identity")
+        self.note(
+            f"Final OS-installed base APK exactly matches public {self.binding.target_version} "
+            "and retained identity"
+        )
 
     def collect_diagnostics(self) -> None:
         logcat_result = self.adb.run(
@@ -839,25 +1492,29 @@ class OtaRuntimeDriver:
         self.run_instrumentation()
         self.verify_final(baseline, signer)
         self.collect_diagnostics()
+        if self.adb.harness_install_count != 2 or self.adb.baseline_install_count != 1:
+            raise RuntimeGateError("ADB install budget was not exactly two harness plus one baseline")
         self.write("events.txt", "\n".join(self.events) + "\n")
+        result_receipt: dict[str, object] = {
+            "outcome": "passed",
+            "transaction": "public-native-ota",
+            "baseline": self.binding.baseline_version,
+            "target": self.binding.target_version,
+            "targetSha256": self.binding.target_sha256,
+            "adbProductInstalls": 1,
+            "targetTransferredToAdb": False,
+            "otaMode": self.ota_mode,
+            "baselinePull": True,
+            "finalPullAfterInstallerReceipt": True,
+        }
+        if self.binding.automatic:
+            result_receipt.update({
+                "persistenceProof": "task-relaunch-only",
+                "independentColdProcessProof": False,
+            })
         self.write(
             "RESULT.json",
-            json.dumps(
-                {
-                    "outcome": "passed",
-                    "transaction": "public-native-ota",
-                    "baseline": BASELINE_VERSION,
-                    "target": TARGET_VERSION,
-                    "targetSha256": TARGET_SHA256,
-                    "adbProductInstalls": 1,
-                    "targetTransferredToAdb": False,
-                    "otaMode": self.args.ota_mode,
-                    "baselinePull": True,
-                    "finalPullAfterInstallerReceipt": True,
-                },
-                indent=2,
-            )
-            + "\n",
+            json.dumps(result_receipt, indent=2) + "\n",
         )
 
 
@@ -1360,10 +2017,14 @@ def run_self_tests(name: str | None) -> int:
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", nargs="?", const="", default=None)
-    parser.add_argument("--verify-inputs-only", action="store_true")
+    verification_mode = parser.add_mutually_exclusive_group()
+    verification_mode.add_argument("--verify-inputs-only", action="store_true")
+    verification_mode.add_argument("--verify-apks-only", action="store_true")
     parser.add_argument("--adb", default="adb")
     parser.add_argument("--serial")
     parser.add_argument("--apksigner")
+    parser.add_argument("--apkanalyzer")
+    parser.add_argument("--automatic-binding", type=Path)
     parser.add_argument("--baseline-apk", type=Path)
     parser.add_argument("--target-apk", type=Path)
     parser.add_argument("--target-manifest", type=Path)
@@ -1380,22 +2041,35 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--ota-mode",
         choices=(STRICT_OTA_MODE, LEGACY_MANUAL_RECONSENT_MODE),
         default=STRICT_OTA_MODE,
-        help="strict is the unchanged default; legacy-manual-reconsent admits one exact product tap",
+        help=(
+            "strict is the unchanged default; legacy-manual-reconsent admits one exact "
+            "product tap; --automatic-binding selects the admitted automatic mode"
+        ),
     )
     args = parser.parse_args(argv)
     if args.self_test is None:
-        required = [
-            "baseline_apk", "target_apk", "target_manifest", "target_verification", "target_checksums",
-            "release_pages", "evidence",
-        ]
-        if not args.verify_inputs_only:
+        if args.verify_apks_only:
+            required = [
+                "baseline_apk", "target_apk", "apksigner", "apkanalyzer",
+                "automatic_binding", "evidence",
+            ]
+        else:
+            required = [
+                "baseline_apk", "target_apk", "target_manifest", "target_verification",
+                "target_checksums", "release_pages", "evidence",
+            ]
+        if not args.verify_inputs_only and not args.verify_apks_only:
             required += [
                 "serial", "apksigner", "harness_app", "harness_test",
                 "harness_app_sha256", "harness_test_sha256",
             ]
+            if args.automatic_binding is not None:
+                required.append("apkanalyzer")
         missing = [name for name in required if getattr(args, name) in {None, ""}]
         if missing:
-            parser.error("missing required runtime arguments: " + ", ".join(missing))
+            parser.error("missing required runtime arguments: " + ", ".join(sorted(set(missing))))
+        if args.automatic_binding is not None and args.ota_mode != STRICT_OTA_MODE:
+            parser.error("--automatic-binding cannot be combined with legacy recovery mode")
     return args
 
 
@@ -1405,19 +2079,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_self_tests(args.self_test or None)
     if args.verify_inputs_only:
         try:
-            validate_file(args.baseline_apk, BASELINE_SHA256, BASELINE_SIZE, "baseline APK")
-            validate_file(args.target_apk, TARGET_SHA256, TARGET_SIZE, "target APK")
-            validate_target_manifest(args.target_manifest)
-            validate_target_verification(args.target_verification)
-            checksums = parse_checksums(args.target_checksums)
-            if checksums["android-update.json"] != sha256_file(args.target_manifest):
-                raise RuntimeGateError("SHA256SUMS manifest hash mismatch")
-            if checksums[TARGET_VERIFICATION_NAME] != sha256_file(args.target_verification):
-                raise RuntimeGateError("SHA256SUMS verification receipt hash mismatch")
-            validate_release_pages(args.release_pages, args.target_verification)
+            binding = binding_from_args(args)
+            validate_host_inputs(args, binding)
             args.evidence.mkdir(parents=True, exist_ok=True)
-            (args.evidence / "public-preflight.txt").write_text(
-                "publicTarget=2.3.26\npublicPreflight=passed\n"
+            if binding.automatic:
+                preflight = (
+                    f"publicBaseline={binding.baseline_version}\n"
+                    f"publicTarget={binding.target_version}\n"
+                    f"otaMode={binding.ota_mode}\n"
+                    "publicPreflight=passed\n"
+                )
+            else:
+                preflight = "publicTarget=2.3.26\npublicPreflight=passed\n"
+            (args.evidence / "public-preflight.txt").write_text(preflight)
+            return 0
+        except Exception as caught:
+            print(f"{type(caught).__name__}: {caught}", file=sys.stderr)
+            return 1
+    if args.verify_apks_only:
+        try:
+            binding = binding_from_args(args)
+            if not binding.automatic:
+                raise RuntimeGateError("APK-only verification is reserved for automatic mode")
+            validate_file(
+                args.baseline_apk, binding.baseline_sha256, binding.baseline_size,
+                "baseline APK",
+            )
+            validate_file(args.target_apk, binding.target_sha256, binding.target_size, "target APK")
+            verify_downloaded_apk_identities(
+                args.baseline_apk, args.target_apk, args.apksigner, args.apkanalyzer, binding
+            )
+            args.evidence.mkdir(parents=True, exist_ok=True)
+            (args.evidence / "downloaded-apk-identities.txt").write_text(
+                f"baseline={binding.baseline_version}\n"
+                f"target={binding.target_version}\n"
+                f"signerSha256={binding.signer_pin}\n"
+                "downloadedApkIdentities=passed\n"
             )
             return 0
         except Exception as caught:
