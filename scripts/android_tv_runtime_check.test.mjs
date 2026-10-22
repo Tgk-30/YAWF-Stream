@@ -505,8 +505,11 @@ function assertNativeSurfacePolicy(source, surfaceSource = read(nativeSurfaceJav
   assert.match(reader, /if \(admitted > 1\)/);
   assert.match(reader,
     /if \(admitted == 1\) return NativeSurfaceSnapshot\.complete\(admittedFocus\);/);
-  assert.match(reader, /UiObject2 currentFocus = device\.findObject\(By\.focused\(true\)\);/);
-  assert.match(reader, /currentFocus\.getVisibleBounds\(\)/);
+  assert.match(reader, /readCurrentNativeFocus\(root, 1\)/);
+  assert.match(reader, /BoundsSnapshot\.from\(currentFocus\.bounds\)/);
+  assert.doesNotMatch(reader, /device\.findObjects?\(By\.focused\(true\)\)/);
+  const focusReader = javaMethod(source, "readCurrentNativeFocus");
+  assert.match(focusReader, /playerRoot\.findObjects\(By\.focused\(true\)\)/);
   assert.match(reader, /root\.isFocused\(\)/);
   assert.match(reader, /BoundsSnapshot\.from\(root\.getVisibleBounds\(\)\)/);
 

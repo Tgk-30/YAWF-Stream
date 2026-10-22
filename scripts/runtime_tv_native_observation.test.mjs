@@ -13,6 +13,7 @@ const javaDirectory = join(
 );
 const helperPath = join(javaDirectory, "RuntimeTvNativeObservation.java");
 const keyHelperPath = join(javaDirectory, "RuntimeTvNativeKey.java");
+const focusHelperPath = join(javaDirectory, "RuntimeTvNativeFocus.java");
 const surfaceHelperPath = join(javaDirectory, "RuntimeTvNativeSurface.java");
 const flowPath = join(javaDirectory, "RuntimeTvFlowTest.java");
 const javac = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin/javac") : "javac";
@@ -222,6 +223,331 @@ function assertExecutableMutantKilled(helperSource) {
   assert.ok(result.run, "semantic mutant did not run");
   assert.notEqual(result.run.status, 0,
     `semantic mutant survived:\n${result.run.stdout}${result.run.stderr}`);
+}
+
+const nativeFocusProbeSource = `
+package com.yawf.runtimeinstrumentation;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.util.List;
+
+public final class RuntimeTvNativeFocusProbe {
+    private static final String PRODUCT_PACKAGE = "com.yawf.stream.tv";
+    private static final String SETTINGS_LIST_RESOURCE =
+            "com.yawf.stream.tv:id/exo_settings_listview";
+    private static final RuntimeTvNativeFocus.Bounds PLAYER_ROOT =
+            new RuntimeTvNativeFocus.Bounds(0, 0, 1920, 1080);
+    private static final RuntimeTvNativeFocus.Bounds PAUSE =
+            new RuntimeTvNativeFocus.Bounds(908, 488, 1012, 592);
+    private static final RuntimeTvNativeFocus.Bounds WEB_PLAY =
+            new RuntimeTvNativeFocus.Bounds(152, 684, 842, 850);
+    private static final RuntimeTvNativeFocus.Bounds NATIVE_CC =
+            new RuntimeTvNativeFocus.Bounds(1716, 972, 1812, 1068);
+    private static final RuntimeTvNativeFocus.Bounds NATIVE_SETTINGS =
+            new RuntimeTvNativeFocus.Bounds(1820, 972, 1916, 1068);
+    private static final RuntimeTvNativeFocus.Bounds SETTINGS_LIST =
+            new RuntimeTvNativeFocus.Bounds(720, 180, 1200, 900);
+    private static final RuntimeTvNativeFocus.Bounds AUDIO_TARGET =
+            new RuntimeTvNativeFocus.Bounds(900, 450, 1100, 550);
+    private static final RuntimeTvNativeFocus.Bounds POPUP_ROW_BELOW =
+            new RuntimeTvNativeFocus.Bounds(900, 650, 1100, 750);
+
+    private static void check(boolean value, String label) {
+        if (!value) throw new AssertionError(label);
+    }
+
+    private static void expectAssertion(Runnable action, String label) {
+        try {
+            action.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError("Expected AssertionError: " + label);
+    }
+
+    private static RuntimeTvNativeFocus.FocusedNode focused(
+            String packageName,
+            RuntimeTvNativeFocus.Bounds bounds) {
+        return new RuntimeTvNativeFocus.FocusedNode(packageName, bounds);
+    }
+
+    private static RuntimeTvNativeFocus.FocusedNode focused(
+            RuntimeTvNativeFocus.ScopeKind kind,
+            String packageName,
+            RuntimeTvNativeFocus.Bounds bounds) {
+        return new RuntimeTvNativeFocus.FocusedNode(kind, packageName, bounds);
+    }
+
+    private static RuntimeTvNativeFocus.TargetNode target(
+            String packageName,
+            boolean enabled,
+            RuntimeTvNativeFocus.Bounds bounds) {
+        return new RuntimeTvNativeFocus.TargetNode(packageName, enabled, bounds);
+    }
+
+    private static RuntimeTvNativeFocus.ScopeNode player(
+            String packageName,
+            RuntimeTvNativeFocus.Bounds bounds) {
+        return RuntimeTvNativeFocus.ScopeNode.playerView(packageName, true, bounds);
+    }
+
+    private static RuntimeTvNativeFocus.ScopeNode settings(
+            String packageName,
+            String resourceName,
+            RuntimeTvNativeFocus.Bounds bounds) {
+        return RuntimeTvNativeFocus.ScopeNode.settingsList(
+                packageName, resourceName,
+                RuntimeTvNativeFocus.SETTINGS_LIST_CLASS, true, bounds);
+    }
+
+    private static void retainedDualFocusCoordinatesUseTheNativeDescendant() {
+        check(RuntimeTvNativeFocus.direction(PAUSE, WEB_PLAY)
+                        == RuntimeTvNativeFocus.Direction.RIGHT,
+                "legacy global Web focus did not reproduce wrong RIGHT steering");
+
+        RuntimeTvNativeFocus.Selection cc = RuntimeTvNativeFocus.select(
+                1, PRODUCT_PACKAGE, List.of(focused(PRODUCT_PACKAGE, NATIVE_CC)));
+        check(cc.present, "scoped native CC focus missing");
+        check(RuntimeTvNativeFocus.direction(PAUSE, cc.bounds)
+                        == RuntimeTvNativeFocus.Direction.LEFT,
+                "scoped native CC focus did not steer LEFT toward Pause");
+
+        RuntimeTvNativeFocus.Selection settings = RuntimeTvNativeFocus.select(
+                1, PRODUCT_PACKAGE, List.of(focused(PRODUCT_PACKAGE, NATIVE_SETTINGS)));
+        check(settings.present, "scoped native Settings focus missing");
+        check(RuntimeTvNativeFocus.direction(PAUSE, settings.bounds)
+                        == RuntimeTvNativeFocus.Direction.LEFT,
+                "scoped native Settings focus did not steer LEFT toward Pause");
+    }
+
+    private static RuntimeTvNativeFocus.Ownership popupOwnership() {
+        RuntimeTvNativeFocus.ScopeNode player = player(PRODUCT_PACKAGE, PLAYER_ROOT);
+        RuntimeTvNativeFocus.ScopeNode popup =
+                settings(PRODUCT_PACKAGE, SETTINGS_LIST_RESOURCE, SETTINGS_LIST);
+        return RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(target(PRODUCT_PACKAGE, true, AUDIO_TARGET)),
+                List.of(player),
+                List.of(popup),
+                List.of(popup));
+    }
+
+    private static void popupTargetUsesOnlyItsSiblingSettingsListFocus() {
+        check(RuntimeTvNativeFocus.direction(AUDIO_TARGET, WEB_PLAY)
+                        == RuntimeTvNativeFocus.Direction.RIGHT,
+                "stale Web focus did not reproduce wrong RIGHT steering");
+        check(RuntimeTvNativeFocus.direction(AUDIO_TARGET, NATIVE_SETTINGS)
+                        == RuntimeTvNativeFocus.Direction.LEFT,
+                "stale controller focus did not reproduce wrong LEFT steering");
+
+        RuntimeTvNativeFocus.Ownership ownership = popupOwnership();
+        check(ownership.targetPresent
+                        && ownership.scopeKind == RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
+                "popup target did not select its sibling Media3 settings list");
+        RuntimeTvNativeFocus.Selection popupFocus = RuntimeTvNativeFocus.selectFocused(
+                ownership,
+                List.of(focused(
+                        RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
+                        PRODUCT_PACKAGE,
+                        POPUP_ROW_BELOW)));
+        check(popupFocus.present, "popup row focus was not selected");
+        check(RuntimeTvNativeFocus.direction(AUDIO_TARGET, popupFocus.bounds)
+                        == RuntimeTvNativeFocus.Direction.UP,
+                "popup row below the target did not steer UP");
+        RuntimeTvNativeFocus.Selection noPopupFocus =
+                RuntimeTvNativeFocus.selectFocused(ownership, List.of());
+        check(!noPopupFocus.present && noPopupFocus.bounds == null,
+                "zero popup focus did not preserve the no-focus fallback state");
+    }
+
+    private static void zeroFocusPreservesFallbackState() {
+        RuntimeTvNativeFocus.Selection selection = RuntimeTvNativeFocus.select(
+                1, PRODUCT_PACKAGE, List.of());
+        check(!selection.present && selection.bounds == null,
+                "zero native focus did not preserve the no-focus fallback state");
+    }
+
+    private static void invalidScopesFailClosed() {
+        expectAssertion(() -> RuntimeTvNativeFocus.select(
+                0, PRODUCT_PACKAGE, List.of()), "missing admitted root");
+        expectAssertion(() -> RuntimeTvNativeFocus.select(
+                2, PRODUCT_PACKAGE, List.of()), "multiple admitted roots");
+        expectAssertion(() -> RuntimeTvNativeFocus.select(
+                1, "example.wrong", List.of()), "wrong root package");
+        expectAssertion(() -> RuntimeTvNativeFocus.select(
+                1, PRODUCT_PACKAGE, List.of(focused("example.wrong", NATIVE_CC))),
+                "wrong focused package");
+        expectAssertion(() -> RuntimeTvNativeFocus.select(
+                1, PRODUCT_PACKAGE, List.of(
+                        focused(PRODUCT_PACKAGE, NATIVE_CC),
+                        focused(PRODUCT_PACKAGE, NATIVE_SETTINGS))),
+                "ambiguous native focus");
+        expectAssertion(() -> RuntimeTvNativeFocus.select(
+                1, PRODUCT_PACKAGE, List.of(focused(
+                        PRODUCT_PACKAGE,
+                        new RuntimeTvNativeFocus.Bounds(4, 4, 4, 8)))),
+                "empty focused bounds");
+
+        RuntimeTvNativeFocus.ScopeNode player = player(PRODUCT_PACKAGE, PLAYER_ROOT);
+        RuntimeTvNativeFocus.ScopeNode popup =
+                settings(PRODUCT_PACKAGE, SETTINGS_LIST_RESOURCE, SETTINGS_LIST);
+        RuntimeTvNativeFocus.TargetNode audio = target(PRODUCT_PACKAGE, true, AUDIO_TARGET);
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                "example.wrong", List.of(audio), List.of(player), List.of(popup), List.of(popup)),
+                "wrong foreground package");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE, List.of(audio), List.of(), List.of(popup), List.of(popup)),
+                "missing admitted PlayerView");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(audio),
+                List.of(player, player),
+                List.of(popup),
+                List.of(popup)),
+                "duplicate admitted PlayerView");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(audio),
+                List.of(player("example.wrong", PLAYER_ROOT)),
+                List.of(popup),
+                List.of(popup)),
+                "wrong PlayerView package");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(target("example.wrong", true, AUDIO_TARGET)),
+                List.of(player),
+                List.of(popup),
+                List.of(popup)),
+                "wrong target package");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(audio, audio),
+                List.of(player),
+                List.of(popup),
+                List.of(popup)),
+                "duplicate exact target");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(target(PRODUCT_PACKAGE, false, AUDIO_TARGET)),
+                List.of(player),
+                List.of(popup),
+                List.of(popup)),
+                "disabled exact target");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(target(PRODUCT_PACKAGE, true,
+                        new RuntimeTvNativeFocus.Bounds(9, 9, 9, 10))),
+                List.of(player),
+                List.of(popup),
+                List.of(popup)),
+                "empty target bounds");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE, List.of(audio), List.of(player), List.of(popup), List.of()),
+                "missing target ownership ancestor");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(audio),
+                List.of(player),
+                List.of(settings("example.wrong", SETTINGS_LIST_RESOURCE, SETTINGS_LIST)),
+                List.of(popup)),
+                "wrong settings-list package");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(audio),
+                List.of(player),
+                List.of(popup, popup),
+                List.of(popup)),
+                "duplicate settings-list scopes");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(audio),
+                List.of(player),
+                List.of(settings(PRODUCT_PACKAGE, "example:id/list", SETTINGS_LIST)),
+                List.of(settings(PRODUCT_PACKAGE, "example:id/list", SETTINGS_LIST))),
+                "wrong settings-list resource");
+        for (String wrongClass : new String[] { "android.webkit.WebView", "android.view.View", null }) {
+            RuntimeTvNativeFocus.ScopeNode lookalike = RuntimeTvNativeFocus.ScopeNode.settingsList(
+                    PRODUCT_PACKAGE, SETTINGS_LIST_RESOURCE, wrongClass, true, SETTINGS_LIST);
+            expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                    PRODUCT_PACKAGE, List.of(audio), List.of(player),
+                    List.of(lookalike), List.of(lookalike)),
+                    "wrong native settings-list class in visible scope");
+            expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                    PRODUCT_PACKAGE, List.of(audio), List.of(player),
+                    List.of(popup), List.of(lookalike)),
+                    "wrong native settings-list class in actual ancestor");
+        }
+
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(audio),
+                List.of(player),
+                List.of(popup),
+                List.of(settings(
+                        PRODUCT_PACKAGE,
+                        SETTINGS_LIST_RESOURCE,
+                        new RuntimeTvNativeFocus.Bounds(721, 180, 1200, 900)))),
+                "target outside unique settings-list scope");
+
+        RuntimeTvNativeFocus.Ownership popupOwnership = popupOwnership();
+        expectAssertion(() -> RuntimeTvNativeFocus.selectFocused(
+                popupOwnership,
+                List.of(focused(
+                        RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW,
+                        PRODUCT_PACKAGE,
+                        NATIVE_SETTINGS))),
+                "focus outside target-owned popup scope");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectFocused(
+                popupOwnership,
+                List.of(
+                        focused(RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
+                                PRODUCT_PACKAGE, POPUP_ROW_BELOW),
+                        focused(RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
+                                PRODUCT_PACKAGE, AUDIO_TARGET))),
+                "ambiguous popup focus");
+    }
+
+    private static void immutableSnapshots() {
+        for (Class<?> type : new Class<?>[] {
+                RuntimeTvNativeFocus.Bounds.class,
+                RuntimeTvNativeFocus.TargetNode.class,
+                RuntimeTvNativeFocus.ScopeNode.class,
+                RuntimeTvNativeFocus.FocusedNode.class,
+                RuntimeTvNativeFocus.Ownership.class,
+                RuntimeTvNativeFocus.Selection.class
+        }) {
+            for (Field field : type.getDeclaredFields()) {
+                check(Modifier.isFinal(field.getModifiers()),
+                        "mutable native focus snapshot field: " + field);
+            }
+        }
+    }
+
+    public static void main(String[] arguments) {
+        retainedDualFocusCoordinatesUseTheNativeDescendant();
+        popupTargetUsesOnlyItsSiblingSettingsListFocus();
+        zeroFocusPreservesFallbackState();
+        invalidScopesFailClosed();
+        immutableSnapshots();
+    }
+}
+`;
+
+function runNativeFocusProbe(focusSource = read(focusHelperPath)) {
+  return runJavaSources({
+    "RuntimeTvNativeFocus.java": focusSource,
+    "RuntimeTvNativeFocusProbe.java": nativeFocusProbeSource,
+  }, "com.yawf.runtimeinstrumentation.RuntimeTvNativeFocusProbe");
+}
+
+function assertNativeFocusMutantKilled(focusSource) {
+  const result = runNativeFocusProbe(focusSource);
+  assert.equal(result.compile.status, 0,
+    `native focus mutant did not compile:\n${result.compile.stdout}${result.compile.stderr}`);
+  assert.ok(result.run, "native focus mutant did not run");
+  assert.notEqual(result.run.status, 0,
+    `native focus mutant survived:\n${result.run.stdout}${result.run.stderr}`);
 }
 
 const androidKeyStubSources = {
@@ -710,7 +1036,11 @@ ${positionMethod}
   }, "com.yawf.runtimeinstrumentation.RuntimeTvPositionCallsiteProbe");
 }
 
-function assertNativeReadSourceContract(source, surfaceSource = read(surfaceHelperPath)) {
+function assertNativeReadSourceContract(
+  source,
+  surfaceSource = read(surfaceHelperPath),
+  focusSource = read(focusHelperPath),
+) {
   const surfaceWaiter = method(source, "waitForNativePlayerSurface");
   const surfaceReader = method(source, "readNativePlayerSurfaceSnapshot");
   const surfaceCandidateReader = method(source, "readNativePlayerSurfaceCandidate");
@@ -718,6 +1048,9 @@ function assertNativeReadSourceContract(source, surfaceSource = read(surfaceHelp
   const audio = method(source, "selectAudioTrack");
   const nativeFocus = method(source, "focusNativeTarget");
   const focusReader = method(source, "readNativeFocusSnapshot");
+  const scopedFocusReader = method(source, "readCurrentNativeFocus");
+  const targetOwnedFocusReader = method(source, "readTargetOwnedNativeFocus");
+  const settingsListSelector = method(source, "nativeSettingsListSelector");
   const focusedRight = method(source, "pressNativeFocusedRight");
   const nativeWait = method(source, "waitForNativePresence");
   const clock = method(source, "readPositionSeconds");
@@ -731,8 +1064,8 @@ function assertNativeReadSourceContract(source, surfaceSource = read(surfaceHelp
     /RuntimeTvNativeSurface\.Candidate candidate = readNativePlayerSurfaceCandidate\(root\);/);
   assert.match(surfaceReader, /RuntimeTvNativeSurface\.admits\(candidate\)/);
   assert.match(surfaceReader, /if \(admitted > 1\)/);
-  assert.match(surfaceReader, /device\.findObject\(By\.focused\(true\)\)/);
-  assert.match(surfaceReader, /currentFocus\.getVisibleBounds\(\)/);
+  assert.match(surfaceReader, /readCurrentNativeFocus\(root, 1\)/);
+  assert.doesNotMatch(surfaceReader, /device\.findObject\(By\.focused\(true\)\)/);
   assert.match(surfaceReader, /root\.isFocused\(\)/);
   assert.match(surfaceReader, /root\.getVisibleBounds\(\)/);
   assert.match(surfaceCandidateReader,
@@ -778,13 +1111,63 @@ function assertNativeReadSourceContract(source, surfaceSource = read(surfaceHelp
   assert.equal((flow.match(/waitForNative\(playPauseSelector\(/g) ?? []).length, 4);
 
   assert.match(nativeFocus, /observeFreshNative\(\(\) -> readNativeFocusSnapshot\(selector\)\)/);
-  assert.match(focusReader, /device\.findObject\(selector\)/);
-  assert.match(focusReader, /activation\.getParent\(\)/);
+  assert.match(nativeFocus, /for \(int index = 0; index < maxSteps; index\+\+\)/);
+  assert.match(nativeFocus, /SystemClock\.sleep\(180\);/);
+  assert.match(nativeFocus, /RuntimeTvNativeFocus\.direction\(/);
+  assert.equal((nativeFocus.match(/sendNativeDpadKey\(/g) ?? []).length, 2);
+  assert.doesNotMatch(nativeFocus,
+    /device\.find|UiObject2|\.getVisibleBounds\(|\.isFocused\(|\.isFocusable\(|\.getParent\(/);
+  assert.match(settingsListSelector,
+    /By\.res\(PRODUCT_PACKAGE, "exo_settings_listview"\)/);
+  assert.match(settingsListSelector, /\.pkg\(PRODUCT_PACKAGE\)/);
+  assert.match(settingsListSelector, /\.enabled\(true\)/);
+  assert.match(settingsListSelector, /\.clazz\(RuntimeTvNativeFocus\.SETTINGS_LIST_CLASS\)/);
+  assert.match(focusReader, /settingsList\.getClassName\(\)/);
+  assert.match(focusReader, /current\.getClassName\(\)/);
+
+  assert.match(focusReader, /String foregroundPackage = device\.getCurrentPackageName\(\);/);
+  assert.match(focusReader, /List<UiObject2> targets = device\.findObjects\(selector\);/);
+  assert.match(focusReader, /new RuntimeTvNativeFocus\.TargetNode\(/);
+  assert.match(focusReader, /target\.getApplicationPackage\(\)/);
+  assert.match(focusReader, /target\.isEnabled\(\)/);
+  assert.match(focusReader, /target\.getVisibleBounds\(\)/);
   assert.match(focusReader, /activation\.isFocusable\(\)/);
   assert.match(focusReader, /activation\.isFocused\(\)/);
   assert.match(focusReader, /activation\.getVisibleBounds\(\)/);
-  assert.match(focusReader, /device\.findObject\(By\.focused\(true\)\)/);
-  assert.match(focusReader, /currentFocus\.getVisibleBounds\(\)/);
+  assert.match(focusReader, /activation\.getApplicationPackage\(\)/);
+  assert.match(focusReader, /device\.findObjects\(nativePlayerSurfaceRootSelector\(\)\)/);
+  assert.match(focusReader,
+    /RuntimeTvNativeSurface\.Candidate candidate = readNativePlayerSurfaceCandidate\(root\);/);
+  assert.equal((focusReader.match(
+    /if \(RuntimeTvNativeSurface\.admits\(candidate\)\) \{/g) ?? []).length, 2);
+  assert.match(focusReader,
+    /device\.findObjects\(nativeSettingsListSelector\(\)\)/);
+  assert.match(focusReader,
+    /RuntimeTvNativeFocus\.SETTINGS_LIST_RESOURCE\.equals\(resourceName\)/);
+  assert.match(focusReader,
+    /depth < MAX_NATIVE_OWNERSHIP_DEPTH && current != null/);
+  assert.match(focusReader, /depth <= MAX_NATIVE_ACTIVATION_DEPTH/);
+  assert.match(focusReader, /current = current\.getParent\(\);/);
+  assert.match(focusReader, /RuntimeTvNativeFocus\.selectOwnership\(/);
+  assert.match(focusReader,
+    /UiObject2 focusScope = ownershipScopes\.get\(ownership\.ancestorIndex\);/);
+  assert.match(focusReader,
+    /UiObject2 activation = activationTargets\.get\(ownership\.ancestorIndex\);/);
+  assert.match(focusReader, /readTargetOwnedNativeFocus\(focusScope, ownership\)/);
+  assert.doesNotMatch(focusReader, /device\.findObjects?\(By\.focused\(true\)\)/);
+  assert.match(scopedFocusReader, /playerRoot\.findObjects\(By\.focused\(true\)\)/);
+  assert.match(scopedFocusReader, /playerRoot\.getApplicationPackage\(\)/);
+  assert.match(scopedFocusReader, /focused\.getApplicationPackage\(\)/);
+  assert.match(scopedFocusReader, /focused\.getVisibleBounds\(\)/);
+  assert.match(scopedFocusReader, /RuntimeTvNativeFocus\.select\(/);
+  assert.doesNotMatch(scopedFocusReader, /device\.|WebView/);
+  assert.match(targetOwnedFocusReader,
+    /focusScope\.findObjects\(By\.focused\(true\)\)/);
+  assert.match(targetOwnedFocusReader, /ownership\.scopeKind/);
+  assert.match(targetOwnedFocusReader, /focused\.getApplicationPackage\(\)/);
+  assert.match(targetOwnedFocusReader, /focused\.getVisibleBounds\(\)/);
+  assert.match(targetOwnedFocusReader, /RuntimeTvNativeFocus\.selectFocused\(/);
+  assert.doesNotMatch(targetOwnedFocusReader, /device\.|WebView/);
   assert.match(focusedRight, /observeFreshNative\(\(\) -> readNativeFocusSnapshot\(selector\)\)/);
   assert.ok(focusedRight.indexOf("observeFreshNative")
     < focusedRight.indexOf("sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_RIGHT)"));
@@ -807,7 +1190,14 @@ function assertNativeReadSourceContract(source, surfaceSource = read(surfaceHelp
   assert.match(clockReader, /UiObject2::getContentDescription/);
   assert.match(clockReader, /RuntimeTvClock\.readUniqueVisibleTimeBar\(/);
 
-  for (const reader of [surfaceReader, surfaceCandidateReader, focusReader, clockReader]) {
+  for (const reader of [
+    surfaceReader,
+    surfaceCandidateReader,
+    focusReader,
+    scopedFocusReader,
+    targetOwnedFocusReader,
+    clockReader,
+  ]) {
     assert.doesNotMatch(reader,
       /press(?:DPad|KeyCode|Back)|sendNativeDpadKey|\.click\s*\(|setText\(|capture\(|centerFrameHash\(|log\(|SystemClock\.sleep/);
   }
@@ -847,6 +1237,22 @@ function assertNativeReadSourceContract(source, surfaceSource = read(surfaceHelp
   )) assert.match(field[0], /\bfinal\b/);
   assert.doesNotMatch(surfaceSource,
     /press(?:DPad|KeyCode|Back)|sendNativeDpadKey|\.click\s*\(|setText\(|capture\(|SystemClock\.sleep/);
+  assert.doesNotMatch(focusSource, /UiObject2|android\.graphics\.Rect|BySelector/);
+  assert.match(focusSource, /static Ownership selectOwnership\(/);
+  assert.match(focusSource, /static Selection selectFocused\(/);
+  assert.match(focusSource, /static Selection select\(/);
+  assert.match(focusSource, /static Direction direction\(/);
+  assert.match(focusSource, /if \(!PRODUCT_PACKAGE\.equals\(foregroundPackage\)\)/);
+  assert.match(focusSource, /if \(admittedPlayerRoots\.size\(\) != 1\)/);
+  assert.match(focusSource, /if \(settingsLists\.size\(\) > 1\)/);
+  assert.match(focusSource, /if \(targets\.size\(\) != 1\)/);
+  assert.match(focusSource, /SETTINGS_LIST_RESOURCE\.equals\(scope\.resourceName\)/);
+  assert.match(focusSource, /focused\.scopeKind != ownership\.scopeKind/);
+  assert.match(focusSource, /if \(admittedRootCount != 1\)/);
+  assert.match(focusSource, /if \(focusedDescendants\.size\(\) > 1\)/);
+  assert.match(focusSource, /if \(focusedDescendants\.isEmpty\(\)\) return Selection\.none\(\);/);
+  assert.doesNotMatch(focusSource,
+    /press(?:DPad|KeyCode|Back)|sendNativeDpadKey|\.click\s*\(|setText\(|capture\(|SystemClock\.sleep/);
 
   assert.equal((flow.match(/revealControls\(\);/g) ?? []).length, 6);
   assert.equal((audio.match(/revealControls\(\);/g) ?? []).length, 1);
@@ -856,11 +1262,17 @@ function assertNativeReadSourceContract(source, surfaceSource = read(surfaceHelp
   }
   assert.match(source, /private static final long UI_WAIT = 60_000;/);
   assert.match(source, /private static final long MEDIA_WAIT = 45_000;/);
+  assert.match(source, /private static final int MAX_CAPTURES = 32;/);
+  assert.match(source, /private static final int MAX_NATIVE_ACTIVATION_DEPTH = 4;/);
+  assert.match(source, /private static final int MAX_NATIVE_OWNERSHIP_DEPTH = 16;/);
 
   for (const unchanged of [
     'waitFor(By.text("Connect this TV"), UI_WAIT, "native setup title");',
     'waitFor(By.text("YAWF TV native bridge runtime fixture"), UI_WAIT, "fixture heading");',
     'focusAndActivate(By.text("Play 4:3 HLS fixture"), "Play fixture", 10);',
+    'focusNativeAndActivate(playPauseSelector("Pause"), "Pause", 14);',
+    'focusNativeTarget(timeline, "timeline", 18);',
+    'focusNativeAndActivate(playPauseSelector("Play"), "Resume", 14);',
     'waitFor(closedStatus(), UI_WAIT, "closed event status");',
     'webView.isFocused() || webView.findObject(By.focused(true)) != null',
     'waitFor(closedStatus(), UI_WAIT, "second close event");',
@@ -891,10 +1303,12 @@ function assertNativeKeySourceContract(flowSource, keySource) {
   assert.match(reveal, /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_DOWN\);/);
   assert.match(activate, /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_CENTER\);/);
   assert.match(focus, /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_DOWN\);/);
-  assert.match(focus,
-    /sendNativeDpadKey\(vertical >= 0\s*\? KeyEvent\.KEYCODE_DPAD_DOWN : KeyEvent\.KEYCODE_DPAD_UP\);/s);
-  assert.match(focus,
-    /sendNativeDpadKey\(horizontal >= 0\s*\? KeyEvent\.KEYCODE_DPAD_RIGHT : KeyEvent\.KEYCODE_DPAD_LEFT\);/s);
+  assert.match(focus, /switch \(RuntimeTvNativeFocus\.direction\(/);
+  for (const direction of ["DOWN", "UP", "LEFT", "RIGHT"]) {
+    assert.match(focus,
+      new RegExp(`case ${direction}:[\\s\\S]*keyCode = KeyEvent\\.KEYCODE_DPAD_${direction};`));
+  }
+  assert.match(focus, /sendNativeDpadKey\(keyCode\);/);
   assert.match(focusedRight, /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_RIGHT\);/);
   for (const nativeAction of [reveal, activate, focus, focusedRight]) {
     assert.doesNotMatch(nativeAction, /device\.press(?:DPad|KeyCode)/);
@@ -924,6 +1338,134 @@ function assertNativeKeySourceContract(flowSource, keySource) {
     "KEYCODE_DPAD_UP",
   ]);
 }
+
+test("native focus helper executes main and popup ownership, direction, zero, and rejection contracts", () => {
+  assertProbePasses(runNativeFocusProbe());
+});
+
+test("native focus probe kills player-focus ambiguity, package, zero, and direction mutants", () => {
+  const source = read(focusHelperPath);
+  const mutants = [
+    source.replace(
+      "if (admittedRootCount != 1) {",
+      "if (false && admittedRootCount != 1) {",
+    ),
+    source.replace(
+      "if (!PRODUCT_PACKAGE.equals(rootPackage)) {",
+      "if (false && !PRODUCT_PACKAGE.equals(rootPackage)) {",
+    ),
+    source.replace(
+      "if (focusedDescendants.size() > 1) {",
+      "if (false && focusedDescendants.size() > 1) {",
+    ),
+    source.replace(
+      "if (!PRODUCT_PACKAGE.equals(focused.packageName)) {",
+      "if (false && !PRODUCT_PACKAGE.equals(focused.packageName)) {",
+    ),
+    source.replace(
+      "if (focusedDescendants.isEmpty()) return Selection.none();",
+      "if (focusedDescendants.isEmpty()) return Selection.present(new Bounds(0, 0, 1, 1));",
+    ),
+    source.replace(
+      "return horizontal >= 0 ? Direction.RIGHT : Direction.LEFT;",
+      "return horizontal >= 0 ? Direction.LEFT : Direction.RIGHT;",
+    ),
+  ];
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, source);
+    assertNativeFocusMutantKilled(mutant);
+  }
+});
+
+test("native focus probe kills popup ownership, scope, and foreground mutants", () => {
+  const source = read(focusHelperPath);
+  const mutants = [
+    source.replace(
+      "&& !SETTINGS_LIST_CLASS.equals(scope.className)) {",
+      "&& false && !SETTINGS_LIST_CLASS.equals(scope.className)) {",
+    ),
+    source.replace(
+      "if (!PRODUCT_PACKAGE.equals(foregroundPackage)) {",
+      "if (false && !PRODUCT_PACKAGE.equals(foregroundPackage)) {",
+    ),
+    source.replace(
+      "if (admittedPlayerRoots.size() != 1) {",
+      "if (false && admittedPlayerRoots.size() != 1) {",
+    ),
+    source.replace(
+      "if (settingsLists.size() > 1) {",
+      "if (false && settingsLists.size() > 1) {",
+    ).replace(
+      "if (settingsLists.size() != 1 || !sameScope(owner, settingsLists.get(0))) {",
+      "if (!sameScope(owner, settingsLists.get(0))) {",
+    ),
+    source.replace(
+      "if (targets.size() != 1) {",
+      "if (false && targets.size() != 1) {",
+    ),
+    source.replace(
+      "&& !SETTINGS_LIST_RESOURCE.equals(scope.resourceName)) {",
+      "&& false && !SETTINGS_LIST_RESOURCE.equals(scope.resourceName)) {",
+    ),
+    source.replace(
+      "if (settingsLists.size() != 1 || !sameScope(owner, settingsLists.get(0))) {",
+      "if (settingsLists.size() != 1) {",
+    ),
+    source.replace(
+      "if (focused.scopeKind != ownership.scopeKind) {",
+      "if (false && focused.scopeKind != ownership.scopeKind) {",
+    ),
+  ];
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, source);
+    assertNativeFocusMutantKilled(mutant);
+  }
+});
+
+test("focus source guards kill admission, global-focus, popup-scope, target, and live-getter mutants", () => {
+  const source = read(flowPath);
+  const focusReader = method(source, "readNativeFocusSnapshot");
+  const globalFocusMutant = source.replace(
+    "focusScope.findObjects(By.focused(true))",
+    "device.findObjects(By.focused(true))",
+  );
+  const admissionBypassMutant = source.replace(
+    focusReader,
+    focusReader.replace(
+      "if (RuntimeTvNativeSurface.admits(candidate)) {",
+      "if (true || RuntimeTvNativeSurface.admits(candidate)) {",
+    ),
+  );
+  const scopedTargetMutant = source.replace(
+    "List<UiObject2> targets = device.findObjects(selector);",
+    "List<UiObject2> targets = device.findObjects(nativePlayerSurfaceRootSelector())"
+      + ".get(0).findObjects(selector);",
+  );
+  const chosenScopeBypassMutant = source.replace(
+    "UiObject2 focusScope = ownershipScopes.get(ownership.ancestorIndex);",
+    "UiObject2 focusScope = roots.get(0);",
+  );
+  const broadSettingsScopeMutant = source.replace(
+    'return By.res(PRODUCT_PACKAGE, "exo_settings_listview")',
+    "return By.pkg(PRODUCT_PACKAGE)",
+  );
+  const liveGetterMutant = source.replace(
+    "            snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));",
+    "            snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));\n"
+      + "            device.findObject(By.focused(true)).getVisibleBounds();",
+  );
+  for (const mutant of [
+    globalFocusMutant,
+    admissionBypassMutant,
+    scopedTargetMutant,
+    chosenScopeBypassMutant,
+    broadSettingsScopeMutant,
+    liveGetterMutant,
+  ]) {
+    assert.notEqual(mutant, source);
+    assert.throws(() => assertNativeReadSourceContract(mutant));
+  }
+});
 
 test("fresh native helper executes zero-cache-query-restore and immutable snapshot contract", () => {
   assertProbePasses(runHelperProbe());

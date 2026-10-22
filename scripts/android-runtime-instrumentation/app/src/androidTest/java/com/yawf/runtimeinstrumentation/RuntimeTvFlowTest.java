@@ -54,6 +54,8 @@ public final class RuntimeTvFlowTest {
     private static final long UI_WAIT = 60_000;
     private static final long MEDIA_WAIT = 45_000;
     private static final int MAX_CAPTURES = 32;
+    private static final int MAX_NATIVE_ACTIVATION_DEPTH = 4;
+    private static final int MAX_NATIVE_OWNERSHIP_DEPTH = 16;
     private Instrumentation instrumentation;
     private UiDevice device;
     private File evidenceDir;
@@ -287,6 +289,13 @@ public final class RuntimeTvFlowTest {
         return By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE);
     }
 
+    private BySelector nativeSettingsListSelector() {
+        return By.res(PRODUCT_PACKAGE, "exo_settings_listview")
+                .pkg(PRODUCT_PACKAGE)
+                .clazz(RuntimeTvNativeFocus.SETTINGS_LIST_CLASS)
+                .enabled(true);
+    }
+
     private void waitForNativePlayerSurface(String label) {
         long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT;
         String incomplete = "no exact product-scoped Media3 control surface";
@@ -311,14 +320,15 @@ public final class RuntimeTvFlowTest {
             RuntimeTvNativeSurface.Candidate candidate = readNativePlayerSurfaceCandidate(root);
             if (RuntimeTvNativeSurface.admits(candidate)) {
                 admitted++;
-                UiObject2 currentFocus = device.findObject(By.focused(true));
-                BoundsSnapshot currentFocusBounds = currentFocus == null
-                        ? null
-                        : BoundsSnapshot.from(currentFocus.getVisibleBounds());
+                RuntimeTvNativeFocus.Selection currentFocus =
+                        readCurrentNativeFocus(root, 1);
+                BoundsSnapshot currentFocusBounds = currentFocus.present
+                        ? BoundsSnapshot.from(currentFocus.bounds)
+                        : null;
                 admittedFocus = NativeFocusSnapshot.present(
                         root.isFocused(),
                         BoundsSnapshot.from(root.getVisibleBounds()),
-                        currentFocus != null,
+                        currentFocus.present,
                         currentFocusBounds);
             }
         }
@@ -453,17 +463,26 @@ public final class RuntimeTvFlowTest {
             if (!snapshot.targetPresent || !snapshot.currentFocusPresent) {
                 sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_DOWN);
             } else {
-                int horizontal = snapshot.activationBounds.centerX()
-                        - snapshot.currentFocusBounds.centerX();
-                int vertical = snapshot.activationBounds.centerY()
-                        - snapshot.currentFocusBounds.centerY();
-                if (Math.abs(vertical) >= Math.abs(horizontal)) {
-                    sendNativeDpadKey(vertical >= 0
-                            ? KeyEvent.KEYCODE_DPAD_DOWN : KeyEvent.KEYCODE_DPAD_UP);
-                } else {
-                    sendNativeDpadKey(horizontal >= 0
-                            ? KeyEvent.KEYCODE_DPAD_RIGHT : KeyEvent.KEYCODE_DPAD_LEFT);
+                int keyCode;
+                switch (RuntimeTvNativeFocus.direction(
+                        snapshot.activationBounds.toNativeFocusBounds(),
+                        snapshot.currentFocusBounds.toNativeFocusBounds())) {
+                    case DOWN:
+                        keyCode = KeyEvent.KEYCODE_DPAD_DOWN;
+                        break;
+                    case UP:
+                        keyCode = KeyEvent.KEYCODE_DPAD_UP;
+                        break;
+                    case LEFT:
+                        keyCode = KeyEvent.KEYCODE_DPAD_LEFT;
+                        break;
+                    case RIGHT:
+                        keyCode = KeyEvent.KEYCODE_DPAD_RIGHT;
+                        break;
+                    default:
+                        throw new AssertionError("Unknown native focus direction");
                 }
+                sendNativeDpadKey(keyCode);
             }
             SystemClock.sleep(180);
         }
@@ -503,29 +522,157 @@ public final class RuntimeTvFlowTest {
     }
 
     private NativeFocusSnapshot readNativeFocusSnapshot(BySelector selector) {
-        UiObject2 currentFocus = device.findObject(By.focused(true));
-        BoundsSnapshot currentFocusBounds = currentFocus == null
-                ? null
-                : BoundsSnapshot.from(currentFocus.getVisibleBounds());
-        UiObject2 target = device.findObject(selector);
-        if (target == null) {
-            return NativeFocusSnapshot.missingTarget(
-                    currentFocus != null, currentFocusBounds);
+        String foregroundPackage = device.getCurrentPackageName();
+
+        List<UiObject2> targets = device.findObjects(selector);
+        List<RuntimeTvNativeFocus.TargetNode> targetSnapshots = new ArrayList<>();
+        for (UiObject2 target : targets) {
+            Rect bounds = target.getVisibleBounds();
+            targetSnapshots.add(new RuntimeTvNativeFocus.TargetNode(
+                    target.getApplicationPackage(),
+                    target.isEnabled(),
+                    new RuntimeTvNativeFocus.Bounds(
+                            bounds.left, bounds.top, bounds.right, bounds.bottom)));
         }
-        UiObject2 activation = target;
-        for (int depth = 0; depth < 4 && activation != null && !activation.isFocusable(); depth++) {
-            activation = activation.getParent();
+
+        List<RuntimeTvNativeFocus.ScopeNode> admittedRootSnapshots = new ArrayList<>();
+        List<UiObject2> roots = device.findObjects(nativePlayerSurfaceRootSelector());
+        for (UiObject2 root : roots) {
+            RuntimeTvNativeSurface.Candidate candidate = readNativePlayerSurfaceCandidate(root);
+            if (RuntimeTvNativeSurface.admits(candidate)) {
+                Rect bounds = root.getVisibleBounds();
+                admittedRootSnapshots.add(RuntimeTvNativeFocus.ScopeNode.playerView(
+                        root.getApplicationPackage(),
+                        root.isEnabled(),
+                        new RuntimeTvNativeFocus.Bounds(
+                                bounds.left, bounds.top, bounds.right, bounds.bottom)));
+            }
         }
+
+        List<UiObject2> settingsLists = device.findObjects(nativeSettingsListSelector());
+        List<RuntimeTvNativeFocus.ScopeNode> settingsListSnapshots = new ArrayList<>();
+        for (UiObject2 settingsList : settingsLists) {
+            Rect bounds = settingsList.getVisibleBounds();
+            settingsListSnapshots.add(RuntimeTvNativeFocus.ScopeNode.settingsList(
+                    settingsList.getApplicationPackage(),
+                    settingsList.getResourceName(),
+                    settingsList.getClassName(),
+                    settingsList.isEnabled(),
+                    new RuntimeTvNativeFocus.Bounds(
+                            bounds.left, bounds.top, bounds.right, bounds.bottom)));
+        }
+
+        List<UiObject2> ownershipScopes = new ArrayList<>();
+        List<UiObject2> activationTargets = new ArrayList<>();
+        List<RuntimeTvNativeFocus.ScopeNode> ownershipSnapshots = new ArrayList<>();
+        if (targets.size() == 1) {
+            UiObject2 current = targets.get(0);
+            UiObject2 activation = null;
+            for (int depth = 0;
+                    depth < MAX_NATIVE_OWNERSHIP_DEPTH && current != null;
+                    depth++) {
+                if (depth <= MAX_NATIVE_ACTIVATION_DEPTH
+                        && activation == null
+                        && current.isFocusable()) {
+                    activation = current;
+                }
+                String resourceName = current.getResourceName();
+                if (RuntimeTvNativeFocus.SETTINGS_LIST_RESOURCE.equals(resourceName)) {
+                    Rect bounds = current.getVisibleBounds();
+                    ownershipScopes.add(current);
+                    activationTargets.add(activation);
+                    ownershipSnapshots.add(RuntimeTvNativeFocus.ScopeNode.settingsList(
+                            current.getApplicationPackage(),
+                            resourceName,
+                            current.getClassName(),
+                            current.isEnabled(),
+                            new RuntimeTvNativeFocus.Bounds(
+                                    bounds.left, bounds.top, bounds.right, bounds.bottom)));
+                    break;
+                }
+                RuntimeTvNativeSurface.Candidate candidate =
+                        readNativePlayerSurfaceCandidate(current);
+                if (RuntimeTvNativeSurface.admits(candidate)) {
+                    Rect bounds = current.getVisibleBounds();
+                    ownershipScopes.add(current);
+                    activationTargets.add(activation);
+                    ownershipSnapshots.add(RuntimeTvNativeFocus.ScopeNode.playerView(
+                            current.getApplicationPackage(),
+                            current.isEnabled(),
+                            new RuntimeTvNativeFocus.Bounds(
+                                    bounds.left, bounds.top, bounds.right, bounds.bottom)));
+                    break;
+                }
+                current = current.getParent();
+            }
+        }
+
+        RuntimeTvNativeFocus.Ownership ownership = RuntimeTvNativeFocus.selectOwnership(
+                foregroundPackage,
+                targetSnapshots,
+                admittedRootSnapshots,
+                settingsListSnapshots,
+                ownershipSnapshots);
+        if (!ownership.targetPresent) {
+            return NativeFocusSnapshot.missingTarget(false, null);
+        }
+        UiObject2 focusScope = ownershipScopes.get(ownership.ancestorIndex);
+        UiObject2 activation = activationTargets.get(ownership.ancestorIndex);
         assertNotNull("Labeled semantic node had no focusable activation ancestor", activation);
         assertTrue("Semantic activation ancestor was not focusable", activation.isFocusable());
+        assertEquals("Semantic activation ancestor had the wrong package",
+                PRODUCT_PACKAGE, activation.getApplicationPackage());
         boolean activationFocused = activation.isFocused();
-        BoundsSnapshot activationBounds = BoundsSnapshot.from(activation.getVisibleBounds());
-        if (currentFocus == null) {
+        Rect activationRect = activation.getVisibleBounds();
+        assertTrue("Semantic activation ancestor had empty bounds", !activationRect.isEmpty());
+        BoundsSnapshot activationBounds = BoundsSnapshot.from(activationRect);
+        RuntimeTvNativeFocus.Selection currentFocus =
+                readTargetOwnedNativeFocus(focusScope, ownership);
+        BoundsSnapshot currentFocusBounds = currentFocus.present
+                ? BoundsSnapshot.from(currentFocus.bounds)
+                : null;
+        if (!currentFocus.present) {
             return NativeFocusSnapshot.present(
                     activationFocused, activationBounds, false, null);
         }
         return NativeFocusSnapshot.present(
                 activationFocused, activationBounds, true, currentFocusBounds);
+    }
+
+    private RuntimeTvNativeFocus.Selection readTargetOwnedNativeFocus(
+            UiObject2 focusScope,
+            RuntimeTvNativeFocus.Ownership ownership) {
+        List<RuntimeTvNativeFocus.FocusedNode> focusedSnapshots = new ArrayList<>();
+        List<UiObject2> focusedDescendants = focusScope.findObjects(By.focused(true));
+        for (UiObject2 focused : focusedDescendants) {
+            Rect bounds = focused.getVisibleBounds();
+            focusedSnapshots.add(new RuntimeTvNativeFocus.FocusedNode(
+                    ownership.scopeKind,
+                    focused.getApplicationPackage(),
+                    new RuntimeTvNativeFocus.Bounds(
+                            bounds.left, bounds.top, bounds.right, bounds.bottom)));
+        }
+        return RuntimeTvNativeFocus.selectFocused(ownership, focusedSnapshots);
+    }
+
+    private RuntimeTvNativeFocus.Selection readCurrentNativeFocus(
+            UiObject2 playerRoot,
+            int admittedRootCount) {
+        String rootPackage = null;
+        List<RuntimeTvNativeFocus.FocusedNode> focusedSnapshots = new ArrayList<>();
+        if (playerRoot != null) {
+            rootPackage = playerRoot.getApplicationPackage();
+            List<UiObject2> focusedDescendants = playerRoot.findObjects(By.focused(true));
+            for (UiObject2 focused : focusedDescendants) {
+                Rect bounds = focused.getVisibleBounds();
+                focusedSnapshots.add(new RuntimeTvNativeFocus.FocusedNode(
+                        focused.getApplicationPackage(),
+                        new RuntimeTvNativeFocus.Bounds(
+                                bounds.left, bounds.top, bounds.right, bounds.bottom)));
+            }
+        }
+        return RuntimeTvNativeFocus.select(
+                admittedRootCount, rootPackage, focusedSnapshots);
     }
 
     private void focusTarget(BySelector selector, String label, int maxSteps) {
@@ -686,12 +833,12 @@ public final class RuntimeTvFlowTest {
             return new BoundsSnapshot(bounds.left, bounds.top, bounds.right, bounds.bottom);
         }
 
-        int centerX() {
-            return (left + right) / 2;
+        static BoundsSnapshot from(RuntimeTvNativeFocus.Bounds bounds) {
+            return new BoundsSnapshot(bounds.left, bounds.top, bounds.right, bounds.bottom);
         }
 
-        int centerY() {
-            return (top + bottom) / 2;
+        RuntimeTvNativeFocus.Bounds toNativeFocusBounds() {
+            return new RuntimeTvNativeFocus.Bounds(left, top, right, bottom);
         }
     }
 
