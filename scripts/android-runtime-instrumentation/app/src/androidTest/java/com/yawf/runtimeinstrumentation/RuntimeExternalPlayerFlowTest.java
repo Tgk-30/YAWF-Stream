@@ -10,7 +10,6 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Rect;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 
@@ -231,8 +230,7 @@ public final class RuntimeExternalPlayerFlowTest {
 
         transition("production-player-visible");
         capture("production-player");
-        UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();
-        clickObservedControlImmediately(playbackSettings, PLAYBACK_SETTINGS_LABEL);
+        openPlaybackSettingsTransaction();
         waitForUniquePlaybackSettingsDialog();
         capture("playback-settings-panel");
         UiObject2 external = scrollPlaybackSettingsUntilLabeledClickable(
@@ -662,37 +660,45 @@ public final class RuntimeExternalPlayerFlowTest {
         return null;
     }
 
-    private UiObject2 waitForRefreshedPlaybackSettings() {
-        assertTrue(
-                "Accessibility cache refresh requires Android API 34 or newer",
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
-        long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
-        boolean revealTapPerformed = false;
-        while (SystemClock.uptimeMillis() < deadline) {
-            assertTrue(
-                    "Accessibility cache refresh failed",
-                    instrumentation.getUiAutomation().clearCache());
-            assertNoOutOfScopeApproval();
-            UiObject2 playerDialog = findUniqueExactProductDialog(PLAYER_DIALOG_LABEL);
-            if (playerDialog == null || !hasVisibleBounds(playerDialog)) {
-                SystemClock.sleep(250);
-                continue;
-            }
-            UiObject2 found = findLabeledClickableWithin(
-                    playerDialog, PLAYBACK_SETTINGS_LABEL, PLAYBACK_SETTINGS_LABEL);
-            if (found != null && hasVisibleBounds(found)) {
-                assertVisibleBounds(found, PLAYBACK_SETTINGS_LABEL);
-                return found;
-            }
-            if (!revealTapPerformed) {
-                playerDialog.click();
-                revealTapPerformed = true;
-                log("Tapped the exact observed playing dialog surface once to reveal controls");
-            }
-            SystemClock.sleep(250);
+    private void openPlaybackSettingsTransaction() {
+        RuntimeExternalSettingsTransaction.open(
+                new RuntimeExternalSettingsTransaction.Environment() {
+                    @Override
+                    public boolean clearAccessibilityCache() {
+                        return instrumentation.getUiAutomation().clearCache();
+                    }
+
+                    @Override
+                    public void assertNoOutOfScopeApproval() {
+                        RuntimeExternalPlayerFlowTest.this.assertNoOutOfScopeApproval();
+                    }
+
+                    @Override
+                    public RuntimeExternalSettingsTransaction.Observation observePlaybackSettings() {
+                        return observePlaybackSettingsTransaction();
+                    }
+
+                    @Override
+                    public void log(String message) {
+                        RuntimeExternalPlayerFlowTest.this.log(message);
+                    }
+                },
+                MEDIA_WAIT_MS);
+    }
+
+    private RuntimeExternalSettingsTransaction.Observation observePlaybackSettingsTransaction() {
+        UiObject2 playerDialog = findUniqueExactProductDialog(PLAYER_DIALOG_LABEL);
+        if (playerDialog == null || !hasVisibleBounds(playerDialog)) {
+            return RuntimeExternalSettingsTransaction.Observation.waiting();
         }
-        fail("Timed out waiting for Playback settings");
-        return null;
+        UiObject2 settings = findLabeledClickableWithin(
+                playerDialog, PLAYBACK_SETTINGS_LABEL, PLAYBACK_SETTINGS_LABEL);
+        if (settings != null && hasVisibleBounds(settings)) {
+            assertVisibleBounds(settings, PLAYBACK_SETTINGS_LABEL);
+            return RuntimeExternalSettingsTransaction.Observation.settings(settings::click);
+        }
+        assertVisibleBounds(playerDialog, "playing movie dialog");
+        return RuntimeExternalSettingsTransaction.Observation.reveal(playerDialog::click);
     }
 
     private UiObject2 waitForUniquePlaybackSettingsDialog() {
@@ -941,12 +947,6 @@ public final class RuntimeExternalPlayerFlowTest {
         object.click();
         log("Clicked semantic control: " + description);
         SystemClock.sleep(500);
-    }
-
-    private void clickObservedControlImmediately(UiObject2 object, String description) {
-        assertNotNull(description + " disappeared", object);
-        object.click();
-        log("Clicked freshly observed semantic control: " + description);
     }
 
     private UiObject2 waitForTextOrDescription(String label, long timeoutMs, String description) {

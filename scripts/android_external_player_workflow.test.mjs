@@ -9,6 +9,7 @@ import test from 'node:test';
 const workflow = readFileSync(new URL('../.github/workflows/android-current-runtime.yml', import.meta.url), 'utf8');
 const fixture = readFileSync(new URL('./android_external_player_server_fixture.mts', import.meta.url), 'utf8');
 const driver = readFileSync(new URL('./android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalPlayerFlowTest.java', import.meta.url), 'utf8');
+const settingsTransaction = readFileSync(new URL('./android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalSettingsTransaction.java', import.meta.url), 'utf8');
 const job = workflow.slice(workflow.indexOf('  external-player-fixture:\n'));
 
 function methodBody(source, signature) {
@@ -157,38 +158,64 @@ function fixtureContract(f) {
   assert.doesNotMatch(f, /\/Volumes\/Work\/|\/private\/tmp\/ds-/);
 }
 
-function playbackSettingsObservation(d) {
-  assert.equal((d.match(/UiObject2 playbackSettings = waitForRefreshedPlaybackSettings\(\);/g) ?? []).length, 1);
+function playbackSettingsObservation(d, transactionSource) {
+  assert.equal((d.match(/openPlaybackSettingsTransaction\(\);/g) ?? []).length, 1);
   assert.match(d, /MEDIA_WAIT_MS = 60_000/);
   assert.match(d, /PLAYER_DIALOG_LABEL =\s*\n?\s*"Playing Synthetic Fixture Movie \(2026\)"/);
   assert.match(d, /PLAYBACK_SETTINGS_LABEL = "Playback settings"/);
-  const body = methodBody(d, 'private UiObject2 waitForRefreshedPlaybackSettings()');
-  assert.match(body, /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.UPSIDE_DOWN_CAKE/);
-  assert.match(body, /long deadline = SystemClock\.uptimeMillis\(\) \+ MEDIA_WAIT_MS/);
-  assert.match(body, /boolean revealTapPerformed = false/);
-  assert.match(body, /instrumentation\.getUiAutomation\(\)\.clearCache\(\)\);\s*assertNoOutOfScopeApproval\(\)/);
-  assert.match(body, /UiObject2 playerDialog = findUniqueExactProductDialog\(PLAYER_DIALOG_LABEL\);\s*if \(playerDialog == null \|\| !hasVisibleBounds\(playerDialog\)\) \{\s*SystemClock\.sleep\(250\);\s*continue;/);
-  assert.doesNotMatch(body, /requireUniqueExactProductDialog\(\s*PLAYER_DIALOG_LABEL/);
-  assert.match(body, /findLabeledClickableWithin\(\s*playerDialog, PLAYBACK_SETTINGS_LABEL, PLAYBACK_SETTINGS_LABEL\)/);
-  assert.match(body, /if \(found != null && hasVisibleBounds\(found\)\) \{\s*assertVisibleBounds\(found, PLAYBACK_SETTINGS_LABEL\);\s*return found;/);
-  assert.match(body, /if \(!revealTapPerformed\) \{\s*playerDialog\.click\(\);\s*revealTapPerformed = true;/);
-  assert.equal((body.match(/playerDialog\.click\(\)/g) ?? []).length, 1);
-  assert.doesNotMatch(body, /device\.click|capture\(/);
+  const call = methodBody(d, 'private void openPlaybackSettingsTransaction()');
+  assert.match(call, /RuntimeExternalSettingsTransaction\.open\(/);
+  assert.match(call, /return instrumentation\.getUiAutomation\(\)\.clearCache\(\)/);
+  assert.match(call, /RuntimeExternalPlayerFlowTest\.this\.assertNoOutOfScopeApproval\(\)/);
+  assert.match(call, /return observePlaybackSettingsTransaction\(\)/);
+  assert.match(call, /RuntimeExternalPlayerFlowTest\.this\.log\(message\)/);
+  assert.match(call, /MEDIA_WAIT_MS/);
+
+  const observation = methodBody(
+    d,
+    'private RuntimeExternalSettingsTransaction.Observation observePlaybackSettingsTransaction()',
+  );
+  assert.match(observation, /UiObject2 playerDialog = findUniqueExactProductDialog\(PLAYER_DIALOG_LABEL\)/);
+  assert.match(observation, /playerDialog == null \|\| !hasVisibleBounds\(playerDialog\)/);
+  assert.match(observation, /findLabeledClickableWithin\(\s*playerDialog, PLAYBACK_SETTINGS_LABEL, PLAYBACK_SETTINGS_LABEL\)/);
+  assert.match(observation, /settings != null && hasVisibleBounds\(settings\)/);
+  assert.match(observation, /assertVisibleBounds\(settings, PLAYBACK_SETTINGS_LABEL\)/);
+  assert.match(observation, /Observation\.settings\(settings::click\)/);
+  assert.match(observation, /assertVisibleBounds\(playerDialog, "playing movie dialog"\)/);
+  assert.match(observation, /Observation\.reveal\(playerDialog::click\)/);
+  assert.doesNotMatch(observation, /\.click\s*\(|device\.click|capture\(/);
+
+  const helperBody = methodBody(
+    transactionSource,
+    'static void open(Environment environment, long timeoutMs)',
+  );
+  assert.match(helperBody, /configurator\.setWaitForIdleTimeout\(TRANSACTION_IDLE_TIMEOUT_MS\)/);
+  assert.match(helperBody, /Build\.VERSION\.SDK_INT < Build\.VERSION_CODES\.UPSIDE_DOWN_CAKE/);
+  assert.match(helperBody, /if \(!environment\.clearAccessibilityCache\(\)\)/);
+  assert.match(helperBody, /environment\.assertNoOutOfScopeApproval\(\);\s*Observation observation = environment\.observePlaybackSettings\(\)/);
+  const apiGuard = helperBody.indexOf('Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE');
+  const cacheRefresh = helperBody.indexOf('environment.clearAccessibilityCache()');
+  const policyGuard = helperBody.indexOf('environment.assertNoOutOfScopeApproval()');
+  const freshObservation = helperBody.indexOf('environment.observePlaybackSettings()');
+  assert.ok(apiGuard < cacheRefresh && cacheRefresh < policyGuard && policyGuard < freshObservation);
+  assert.match(helperBody, /observation\.revealTarget != null && !revealTapPerformed/);
+  assert.equal((helperBody.match(/observation\.revealTarget\.click\(\)/g) ?? []).length, 1);
+  assert.equal((helperBody.match(/observation\.settingsTarget\.click\(\)/g) ?? []).length, 1);
+  assert.match(helperBody, /finally \{\s*configurator\.setWaitForIdleTimeout\(previousIdleTimeoutMs\)/);
 }
 
 function playbackSettingsPanelObservation(d) {
   assert.match(d, /EXTERNAL_PLAYER_LABEL =\s*\n?\s*"Open in external player Choose VLC or another installed video app"/);
   const runFlow = methodBody(d, 'private void runFlow()');
-  assert.match(runFlow, /transition\("production-player-visible"\);\s*capture\("production-player"\);\s*UiObject2 playbackSettings = waitForRefreshedPlaybackSettings\(\);\s*clickObservedControlImmediately\(playbackSettings, PLAYBACK_SETTINGS_LABEL\);/);
+  assert.match(runFlow, /transition\("production-player-visible"\);\s*capture\("production-player"\);\s*openPlaybackSettingsTransaction\(\);\s*waitForUniquePlaybackSettingsDialog\(\);/);
   const capturePlayer = runFlow.indexOf('capture("production-player")');
-  const acquireButton = runFlow.indexOf('waitForRefreshedPlaybackSettings()');
-  const clickButton = runFlow.indexOf('clickObservedControlImmediately(playbackSettings, PLAYBACK_SETTINGS_LABEL)');
+  const transaction = runFlow.indexOf('openPlaybackSettingsTransaction()');
   const requirePanel = runFlow.indexOf('waitForUniquePlaybackSettingsDialog()');
   const capturePanel = runFlow.indexOf('capture("playback-settings-panel")');
   const scopedScroll = runFlow.indexOf('scrollPlaybackSettingsUntilLabeledClickable(');
   const captureExternal = runFlow.indexOf('capture("external-control-visible")');
-  assert.ok(capturePlayer < acquireButton && acquireButton < clickButton);
-  assert.ok(clickButton < requirePanel && requirePanel < capturePanel && capturePanel < scopedScroll);
+  assert.ok(capturePlayer < transaction && transaction < requirePanel);
+  assert.ok(requirePanel < capturePanel && capturePanel < scopedScroll);
   assert.ok(scopedScroll < captureExternal);
   assert.match(runFlow, /scrollPlaybackSettingsUntilLabeledClickable\(\s*EXTERNAL_PLAYER_LABEL, EXTERNAL_PLAYER_LABEL\)/);
   assert.doesNotMatch(runFlow, /scrollUntilLabeledClickable\(\s*(?:"Open in external player"|EXTERNAL_PLAYER_LABEL)/);
@@ -198,10 +225,6 @@ function playbackSettingsPanelObservation(d) {
   assert.match(scopedLabel, /boundary\.findObjects\(By\.text\(labelPattern\)\)/);
   assert.match(scopedLabel, /boundary\.findObjects\(By\.desc\(labelPattern\)\)/);
   assert.match(scopedLabel, /if \(candidates\.size\(\) > 1\)/);
-
-  const immediateClick = methodBody(d, 'private void clickObservedControlImmediately(');
-  assert.equal((immediateClick.match(/object\.click\(\)/g) ?? []).length, 1);
-  assert.doesNotMatch(immediateClick, /assertNoOutOfScopeApproval|capture\(|SystemClock\.sleep|isClickable\(|isEnabled\(|getVisibleBounds/);
 
   const dialogFinder = methodBody(d, 'private UiObject2 findUniqueExactProductDialog(String label)');
   assert.match(dialogFinder, /By\.clazz\("android\.app\.Dialog"\)\s*\.pkg\(PRODUCT_PACKAGE\)\s*\.text\(exactLabel\(label\)\)/);
@@ -228,8 +251,8 @@ function playbackSettingsPanelObservation(d) {
   assert.doesNotMatch(scrollable, /device\.findObject|device\.findObjects/);
 }
 
-function driverContract(d) {
-  playbackSettingsObservation(d);
+function driverContract(d, transactionSource = settingsTransaction) {
+  playbackSettingsObservation(d, transactionSource);
   playbackSettingsPanelObservation(d);
   assert.match(d, /VLC_PACKAGE = "org\.videolan\.vlc"/);
   assert.match(d, /VLC_INTENT_ACTIVITY = "org\.videolan\.vlc\.StartActivity"/);
@@ -358,29 +381,34 @@ for (const [name, original, mutate, contract] of [
   ['unbounded chooser resolver', driver, s => s.replace('while (SystemClock.uptimeMillis() < deadline)', 'while (true)'), driverContract],
   ['partial playback metadata', driver, s => s.replace('                && !playbackActivity.isEmpty()\n', ''), driverContract],
   ['multiple handler count weakened', driver, s => s.replace('handlerActivityCount >= 2', 'handlerActivityCount >= 1'), driverContract],
-  ['refreshed settings callsite', driver, s => s.replace('UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();', 'UiObject2 playbackSettings = waitForLabeledClickable("Playback settings", MEDIA_WAIT_MS, "Playback settings");'), driverContract],
-  ['settings refresh API guard', driver, s => s.replace('Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE', 'true'), driverContract],
-  ['settings cache refresh result', driver, s => s.replace('instrumentation.getUiAutomation().clearCache());', 'true);'), driverContract],
-  ['ignored accessibility cache result', driver, s => s.replace(
-    'assertTrue(\n                    "Accessibility cache refresh failed",\n                    instrumentation.getUiAutomation().clearCache());',
-    'instrumentation.getUiAutomation().clearCache();'), driverContract],
-  ['settings cache refresh ordering', driver, s => s.replace(
-    '            assertTrue(\n                    "Accessibility cache refresh failed",\n                    instrumentation.getUiAutomation().clearCache());\n            assertNoOutOfScopeApproval();',
-    '            assertNoOutOfScopeApproval();\n            assertTrue(\n                    "Accessibility cache refresh failed",\n                    instrumentation.getUiAutomation().clearCache());'), driverContract],
+  ['settings transaction callsite bypass', driver, s => s.replace(
+    'openPlaybackSettingsTransaction();',
+    'waitForLabeledClickable(PLAYBACK_SETTINGS_LABEL, MEDIA_WAIT_MS, PLAYBACK_SETTINGS_LABEL).click();'), driverContract],
+  ['settings refresh API guard', settingsTransaction, s => s.replace(
+    'Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE',
+    'false'), h => driverContract(driver, h)],
+  ['ignored accessibility cache result', settingsTransaction, s => s.replace(
+    'if (!environment.clearAccessibilityCache())',
+    'if (false)'), h => driverContract(driver, h)],
+  ['settings cache refresh ordering', settingsTransaction, s => s.replace(
+    '                if (!environment.clearAccessibilityCache()) {\n                    throw new AssertionError("Accessibility cache refresh failed");\n                }\n                environment.assertNoOutOfScopeApproval();',
+    '                environment.assertNoOutOfScopeApproval();\n                if (!environment.clearAccessibilityCache()) {\n                    throw new AssertionError("Accessibility cache refresh failed");\n                }'), h => driverContract(driver, h)],
   ['settings refresh exact label', driver, s => s.replace('PLAYBACK_SETTINGS_LABEL = "Playback settings"', 'PLAYBACK_SETTINGS_LABEL = "Settings"'), driverContract],
-  ['settings observation input replay', driver, s => s.replace('UiObject2 found = findLabeledClickableWithin(', 'device.click(500, 500);\n            UiObject2 found = findLabeledClickableWithin('), driverContract],
+  ['settings observation input replay', driver, s => s.replace('UiObject2 settings = findLabeledClickableWithin(', 'device.click(500, 500);\n        UiObject2 settings = findLabeledClickableWithin('), driverContract],
   ['settings deadline relaxation', driver, s => s.replace('MEDIA_WAIT_MS = 60_000', 'MEDIA_WAIT_MS = 600_000'), driverContract],
-  ['capture inserted after refreshed settings wait', driver, s => s.replace(
-    'UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();\n        clickObservedControlImmediately(playbackSettings, PLAYBACK_SETTINGS_LABEL);',
-    'UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();\n        capture("post-settings-wait");\n        clickObservedControlImmediately(playbackSettings, PLAYBACK_SETTINGS_LABEL);'), driverContract],
+  ['capture inserted after settings transaction', driver, s => s.replace(
+    'openPlaybackSettingsTransaction();\n        waitForUniquePlaybackSettingsDialog();',
+    'openPlaybackSettingsTransaction();\n        capture("post-settings-transaction");\n        waitForUniquePlaybackSettingsDialog();'), driverContract],
   ['player capture moved after settings acquisition', driver, s => s.replace(
-    'capture("production-player");\n        UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();',
-    'UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();\n        capture("production-player");'), driverContract],
+    'capture("production-player");\n        openPlaybackSettingsTransaction();',
+    'openPlaybackSettingsTransaction();\n        capture("production-player");'), driverContract],
   ['player dialog readiness made fail-fast', driver, s => s.replace(
     'UiObject2 playerDialog = findUniqueExactProductDialog(PLAYER_DIALOG_LABEL);',
     'UiObject2 playerDialog = requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "playing movie dialog");'), driverContract],
   ['invisible player dialog admitted', driver, s => s.replace('playerDialog == null || !hasVisibleBounds(playerDialog)', 'false'), driverContract],
-  ['repeated reveal tap', driver, s => s.replace('if (!revealTapPerformed)', 'if (true)'), driverContract],
+  ['repeated reveal tap', settingsTransaction, s => s.replace(
+    'observation.revealTarget != null && !revealTapPerformed',
+    'observation.revealTarget != null'), h => driverContract(driver, h)],
   ['unscoped playing dialog', driver, s => s.replace(
     '.pkg(PRODUCT_PACKAGE)\n                        .text(exactLabel(label))',
     '.text(exactLabel(label))'), driverContract],
