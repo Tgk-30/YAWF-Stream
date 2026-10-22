@@ -50,6 +50,8 @@ public final class RuntimeTvFlowTest {
     private static final long MEDIA_WAIT = 45_000;
     private static final int MAX_CAPTURES = 32;
     private static final Pattern CLOCK = Pattern.compile("(?:(\\d+):)?(\\d{1,2}):(\\d{2})");
+    private static final Pattern PLAYER_CONTROLS_SURFACE =
+            Pattern.compile("^(?:Show|Hide) player controls$");
 
     private Instrumentation instrumentation;
     private UiDevice device;
@@ -103,9 +105,10 @@ public final class RuntimeTvFlowTest {
         checks.put("normalConnectFlowReachedFixture", true);
         focusAndActivate(By.text("Play 4:3 HLS fixture"), "Play fixture", 10);
 
-        waitFor(By.desc("YAWF Android TV 4:3 runtime fixture"), MEDIA_WAIT, "native PlayerView");
+        waitForNativePlayerSurface("native PlayerView");
         capture("native-player");
         checks.put("nativePlayerOpened", true);
+        revealControls();
         long first = waitForPositionAtLeast(2, MEDIA_WAIT);
         String firstFrame = centerFrameHash();
         SystemClock.sleep(2_500);
@@ -168,7 +171,8 @@ public final class RuntimeTvFlowTest {
         capture("back-to-fixture");
 
         focusAndActivate(By.text("Play 4:3 HLS fixture"), "second Play fixture", 10);
-        waitFor(By.desc("YAWF Android TV 4:3 runtime fixture"), MEDIA_WAIT, "reentered native PlayerView");
+        waitForNativePlayerSurface("reentered native PlayerView");
+        revealControls();
         waitForPositionAtLeast(2, MEDIA_WAIT);
         checks.put("nativePlayerReentered", true);
         capture("reentered-player");
@@ -180,7 +184,8 @@ public final class RuntimeTvFlowTest {
         checks.put("nativeErrorSurfaced", true);
         capture("error-surfaced");
         focusAndActivate(By.text("Play 4:3 HLS fixture"), "recovery fixture", 12);
-        waitFor(By.desc("YAWF Android TV 4:3 runtime fixture"), MEDIA_WAIT, "recovery PlayerView");
+        waitForNativePlayerSurface("recovery PlayerView");
+        revealControls();
         waitForPositionAtLeast(2, MEDIA_WAIT);
         checks.put("playbackRecoveredAfterError", true);
         capture("recovered-player");
@@ -240,6 +245,62 @@ public final class RuntimeTvFlowTest {
 
     private BySelector playPauseSelector(String semanticState) {
         return By.res(PRODUCT_PACKAGE, "exo_play_pause").desc(semanticState);
+    }
+
+    private BySelector nativePlayerSurfaceSelector() {
+        return By.clazz("android.widget.FrameLayout")
+                .pkg(PRODUCT_PACKAGE)
+                .desc(PLAYER_CONTROLS_SURFACE)
+                .clickable(true)
+                .enabled(true)
+                .focusable(true);
+    }
+
+    private UiObject2 waitForNativePlayerSurface(String label) {
+        long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT;
+        String incomplete = "no exact product-scoped Media3 control surface";
+        while (SystemClock.uptimeMillis() < deadline) {
+            List<UiObject2> surfaces = device.findObjects(nativePlayerSurfaceSelector());
+            if (surfaces.size() > 1) {
+                fail("Multiple exact product-scoped Media3 control surfaces appeared for " + label);
+            }
+            if (surfaces.size() == 1) {
+                UiObject2 surface = surfaces.get(0);
+                if (surface.getVisibleBounds().isEmpty()) {
+                    incomplete = "exact Media3 control surface had empty visible bounds";
+                } else {
+                    List<UiObject2> contentFrames = surface.findObjects(
+                            By.res(PRODUCT_PACKAGE, "exo_content_frame")
+                                    .clazz("android.widget.FrameLayout")
+                                    .pkg(PRODUCT_PACKAGE));
+                    if (contentFrames.size() > 1) {
+                        fail("Multiple exact product-scoped Media3 content frames appeared for " + label);
+                    }
+                    if (contentFrames.size() == 1) {
+                        UiObject2 contentFrame = contentFrames.get(0);
+                        List<UiObject2> videoSurfaces = contentFrame.findObjects(
+                                By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE));
+                        if (videoSurfaces.size() > 1) {
+                            fail("Multiple exact product-scoped video surfaces appeared for " + label);
+                        }
+                        if (videoSurfaces.size() == 1
+                                && !contentFrame.getVisibleBounds().isEmpty()
+                                && !videoSurfaces.get(0).getVisibleBounds().isEmpty()) {
+                            log("Observed unique product-scoped Media3 control, content, and video surfaces");
+                            return surface;
+                        }
+                        incomplete = videoSurfaces.isEmpty()
+                                ? "exact Media3 content frame had no product-scoped SurfaceView"
+                                : "exact Media3 content or video surface had empty visible bounds";
+                    } else {
+                        incomplete = "exact Media3 control surface had no product-scoped content frame";
+                    }
+                }
+            }
+            SystemClock.sleep(100);
+        }
+        fail("Timed out waiting for " + label + ": " + incomplete);
+        return null;
     }
 
     private void revealControls() {

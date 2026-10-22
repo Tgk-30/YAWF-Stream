@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -22,8 +23,13 @@ const manifestPath = join(
   scripts,
   "android-runtime-instrumentation/app/src/main/AndroidManifest.xml",
 );
+const retainedPlayerXmlPath = join(
+  scripts,
+  "android-runtime-instrumentation/fixtures/runtime-tv-media3-hidden-controls.xml",
+);
 const workflowPath = join(root, ".github/workflows/android-tv-runtime.yml");
 const python = process.env.PYTHON || "python3";
+const productPackage = "com.yawf.stream.tv";
 
 const read = (path) => readFileSync(path, "utf8");
 
@@ -132,6 +138,104 @@ function assertObservationOnly(source) {
   }
   assert.match(source, /playPauseSelector\("Pause"\).*semantic Pause state before pausing/s);
   assert.match(source, /playPauseSelector\("Play"\).*semantic Play state before resuming/s);
+}
+
+function parseUiHierarchy(xml) {
+  const document = { attributes: {}, children: [] };
+  const stack = [document];
+  const tokens = xml.match(/<node\b[^>]*?\/?\s*>|<\/node>/g) ?? [];
+  for (const token of tokens) {
+    if (token === "</node>") {
+      assert.ok(stack.length > 1, "retained hierarchy has an unmatched node close");
+      stack.pop();
+      continue;
+    }
+    const attributes = {};
+    for (const match of token.matchAll(/([a-z-]+)="([^"]*)"/g)) {
+      attributes[match[1]] = match[2];
+    }
+    const node = { attributes, children: [] };
+    stack.at(-1).children.push(node);
+    if (!/\/\s*>$/.test(token)) stack.push(node);
+  }
+  assert.equal(stack.length, 1, "retained hierarchy has an unclosed node");
+  return document;
+}
+
+function descendants(node) {
+  return node.children.flatMap(child => [child, ...descendants(child)]);
+}
+
+function isVisibleNode(node) {
+  const bounds = node.attributes.bounds ?? "";
+  return node.attributes["visible-to-user"] === "true"
+    && bounds !== ""
+    && bounds !== "[0,0][0,0]";
+}
+
+function retainedXmlAdmitsNativeSurface(xml, mutant = {}) {
+  const hierarchy = parseUiHierarchy(xml);
+  const allNodes = descendants(hierarchy);
+  const surfaces = allNodes.filter(node => {
+    const attributes = node.attributes;
+    return attributes.class === "android.widget.FrameLayout"
+      && (mutant.unscoped || attributes.package === productPackage)
+      && /^(?:Show|Hide) player controls$/.test(attributes["content-desc"] ?? "")
+      && attributes.clickable === "true"
+      && attributes.enabled === "true"
+      && attributes.focusable === "true"
+      && isVisibleNode(node);
+  });
+  if (surfaces.length === 0 || (!mutant.allowDuplicates && surfaces.length !== 1)) return false;
+  const surface = surfaces[0];
+  const contentFrames = descendants(surface).filter(node =>
+    node.attributes.package === productPackage
+      && node.attributes.class === "android.widget.FrameLayout"
+      && node.attributes["resource-id"] === `${productPackage}:id/exo_content_frame`
+      && isVisibleNode(node));
+  if (contentFrames.length !== 1) return false;
+  if (mutant.allowMissingSurfaceView) return true;
+  const videoSurfaces = descendants(contentFrames[0]).filter(node =>
+    node.attributes.package === productPackage
+      && node.attributes.class === "android.view.SurfaceView"
+      && isVisibleNode(node));
+  return videoSurfaces.length === 1;
+}
+
+function assertNativeSurfacePolicy(source) {
+  assert.match(source,
+    /Pattern\.compile\("\^\(\?:Show\|Hide\) player controls\$"\);/);
+  const selector = javaMethod(source, "nativePlayerSurfaceSelector");
+  assert.match(selector,
+    /By\.clazz\("android\.widget\.FrameLayout"\)\s*\.pkg\(PRODUCT_PACKAGE\)\s*\.desc\(PLAYER_CONTROLS_SURFACE\)\s*\.clickable\(true\)\s*\.enabled\(true\)\s*\.focusable\(true\)/s);
+
+  const waiter = javaMethod(source, "waitForNativePlayerSurface");
+  assert.match(waiter, /long deadline = SystemClock\.uptimeMillis\(\) \+ MEDIA_WAIT;/);
+  assert.match(waiter, /List<UiObject2> surfaces = device\.findObjects\(nativePlayerSurfaceSelector\(\)\);/);
+  assert.match(waiter, /if \(surfaces\.size\(\) > 1\) \{\s*fail\("Multiple exact product-scoped Media3 control surfaces appeared for " \+ label\);/s);
+  assert.match(waiter,
+    /By\.res\(PRODUCT_PACKAGE, "exo_content_frame"\)\s*\.clazz\("android\.widget\.FrameLayout"\)\s*\.pkg\(PRODUCT_PACKAGE\)/s);
+  assert.match(waiter, /if \(contentFrames\.size\(\) > 1\)/);
+  assert.match(waiter,
+    /By\.clazz\("android\.view\.SurfaceView"\)\.pkg\(PRODUCT_PACKAGE\)/);
+  assert.match(waiter, /if \(videoSurfaces\.size\(\) > 1\)/);
+  assert.match(waiter,
+    /if \(videoSurfaces\.size\(\) == 1\s*&& !contentFrame\.getVisibleBounds\(\)\.isEmpty\(\)\s*&& !videoSurfaces\.get\(0\)\.getVisibleBounds\(\)\.isEmpty\(\)\)/s);
+
+  const flow = javaMethod(source, "runFlow");
+  assert.equal((flow.match(/waitForNativePlayerSurface\(/g) ?? []).length, 3);
+  assert.doesNotMatch(flow, /By\.desc\("YAWF Android TV 4:3 runtime fixture"\)/);
+  for (const [surface, clock] of [
+    ['waitForNativePlayerSurface("native PlayerView");', "long first = waitForPositionAtLeast(2, MEDIA_WAIT);"],
+    ['waitForNativePlayerSurface("reentered native PlayerView");', "waitForPositionAtLeast(2, MEDIA_WAIT);"],
+    ['waitForNativePlayerSurface("recovery PlayerView");', "waitForPositionAtLeast(2, MEDIA_WAIT);"],
+  ]) {
+    const surfaceIndex = flow.indexOf(surface);
+    const revealIndex = flow.indexOf("revealControls();", surfaceIndex);
+    const clockIndex = flow.indexOf(clock, surfaceIndex);
+    assert.ok(surfaceIndex >= 0 && surfaceIndex < revealIndex && revealIndex < clockIndex,
+      `${surface} must precede ordinary D-pad reveal and hidden clock observation`);
+  }
 }
 
 function assertImeDismissalPolicy(source) {
@@ -348,11 +452,74 @@ test("TV setup routes only first D-pad Down from the address to Connect", () => 
 test("position observers cannot toggle or repair playback", () => {
   const source = read(javaPath);
   assertObservationOnly(source);
-  const mutant = source.replace(
+  const observer = javaMethod(source, "waitForPositionAtLeast");
+  const mutant = source.replace(observer, observer.replace(
     "while (SystemClock.uptimeMillis() < deadline) {",
     "while (SystemClock.uptimeMillis() < deadline) { device.pressDPadCenter();",
-  );
+  ));
   assert.throws(() => assertObservationOnly(mutant));
+});
+
+test("retained Media3 XML admits only one exact product native video surface", () => {
+  const retained = read(retainedPlayerXmlPath);
+  assert.equal(
+    createHash("sha256").update(retained).digest("hex"),
+    "8c73f6a050335672b50f042a744cc789d98cefd98888bf6d9e789788aa301aae",
+    "the executable positive fixture must remain the LF-normalized retained run-39845934272 XML",
+  );
+  assert.equal(retainedXmlAdmitsNativeSurface(retained), true);
+
+  const surfacePackage = 'class="android.widget.FrameLayout" package="com.yawf.stream.tv" content-desc="Show player controls"';
+  assert.equal(retained.split(surfacePackage).length, 2, "retained surface mutation anchor");
+  const wrongPackage = retained.replace(
+    surfacePackage,
+    'class="android.widget.FrameLayout" package="com.example.lookalike" content-desc="Show player controls"',
+  );
+  assert.equal(retainedXmlAdmitsNativeSurface(wrongPackage), false);
+  assert.equal(retainedXmlAdmitsNativeSurface(wrongPackage, { unscoped: true }), true,
+    "an unscoped selector mutant must admit the wrong-package lookalike");
+
+  const duplicate = retained.replace("</hierarchy>", [
+    '  <node text="" resource-id="" class="android.widget.FrameLayout"',
+    ' package="com.yawf.stream.tv" content-desc="Hide player controls"',
+    ' clickable="true" enabled="true" focusable="true"',
+    ' visible-to-user="true" bounds="[0,0][1920,1080]" />',
+    "</hierarchy>",
+  ].join(""));
+  assert.equal(retainedXmlAdmitsNativeSurface(duplicate), false);
+  assert.equal(retainedXmlAdmitsNativeSurface(duplicate, { allowDuplicates: true }), true,
+    "a first-match selector mutant must admit duplicate product surfaces");
+
+  const surfaceView = /\s*<node\b[^>]*class="android\.view\.SurfaceView"[^>]*\/>/;
+  assert.match(retained, surfaceView);
+  const missingSurfaceView = retained.replace(surfaceView, "");
+  assert.equal(retainedXmlAdmitsNativeSurface(missingSurfaceView), false);
+  assert.equal(retainedXmlAdmitsNativeSurface(missingSurfaceView, { allowMissingSurfaceView: true }), true,
+    "a missing-SurfaceView acceptance mutant must admit the incomplete player tree");
+});
+
+test("TV driver uses the unique product-scoped Media3 surface and reveals hidden clocks", () => {
+  const source = read(javaPath);
+  assertNativeSurfacePolicy(source);
+  const selector = javaMethod(source, "nativePlayerSurfaceSelector");
+  const waiter = javaMethod(source, "waitForNativePlayerSurface");
+  const mutants = [
+    source.replace(selector, selector.replace("                .pkg(PRODUCT_PACKAGE)\n", "")),
+    source.replace(selector, selector.replace(
+      ".pkg(PRODUCT_PACKAGE)", '.pkg("com.yawf.stream.wrong")')),
+    source.replace(waiter, waiter.replace(
+      "if (surfaces.size() > 1) {", "if (false) {")),
+    source.replace(waiter, waiter.replace(
+      'By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE)',
+      'By.clazz("android.widget.FrameLayout").pkg(PRODUCT_PACKAGE)')),
+    source.replace(
+      'waitForNativePlayerSurface("reentered native PlayerView");\n        revealControls();',
+      'waitForNativePlayerSurface("reentered native PlayerView");'),
+  ];
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, source, "native surface mutant anchor must exist");
+    assert.throws(() => assertNativeSurfacePolicy(mutant));
+  }
 });
 
 test("instrumentation requires observable playback behavior rather than click-only success", () => {
