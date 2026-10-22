@@ -4374,7 +4374,7 @@ function registerRoutes(
          DO UPDATE SET
            episode_id = excluded.episode_id,
            progress_seconds = excluded.progress_seconds,
-           duration_seconds = excluded.duration_seconds,
+           duration_seconds = COALESCE(excluded.duration_seconds, watch_history.duration_seconds),
            completed = excluded.completed,
            queued_next = excluded.queued_next,
            last_watched = excluded.last_watched,

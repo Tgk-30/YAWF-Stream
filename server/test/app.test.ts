@@ -1407,6 +1407,98 @@ describe("DebridStreamer server", () => {
     ]);
   });
 
+  it.each([
+    ["an explicit null duration", { durationSeconds: null }, "durationnull"],
+    ["an omitted duration", {}, "durationomitted"],
+  ])("preserves a known duration when a progress write has %s", async (
+    _label,
+    unknownDuration,
+    profileName,
+  ) => {
+    const owner = await setupOwner(app);
+    await createProfile(owner, profileName, "viewer-password");
+    const other = await login(app, profileName, "viewer-password");
+    const save = async (
+      client: TestClient,
+      id: string,
+      payload: Record<string, unknown>,
+    ) => {
+      const response = await request(client, {
+        method: "PUT",
+        url: `/api/history/${id}`,
+        csrf: true,
+        payload: { ...payload, preview: { id } },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+    };
+    const read = async (client: TestClient, id: string, episodeId?: string) =>
+      json<{
+        item: {
+          progressSeconds: number;
+          durationSeconds: number | null;
+        } | null;
+      }>(await request(client, {
+        method: "GET",
+        url: `/api/history/${id}${episodeId == null ? "" : `?episodeId=${episodeId}`}`,
+      })).item;
+
+    const unknownId = `unknown-start-${profileName}`;
+    await save(owner, unknownId, { progressSeconds: 1, ...unknownDuration });
+    expect(await read(owner, unknownId)).toMatchObject({ durationSeconds: null });
+
+    const replacementId = `duration-replacement-${profileName}`;
+    await save(owner, replacementId, { progressSeconds: 10, durationSeconds: 100 });
+    await save(owner, replacementId, { progressSeconds: 30, durationSeconds: 300 });
+    expect(await read(owner, replacementId)).toMatchObject({ durationSeconds: 300 });
+
+    const zero = await request(owner, {
+      method: "PUT",
+      url: `/api/history/invalid-zero-${profileName}`,
+      csrf: true,
+      payload: {
+        progressSeconds: 1,
+        durationSeconds: 0,
+        preview: { id: `invalid-zero-${profileName}` },
+      },
+    });
+    expect(zero.statusCode).toBe(400);
+
+    const scopedId = `episode-scope-${profileName}`;
+    await save(owner, scopedId, {
+      episodeId: "s1e1",
+      progressSeconds: 10,
+      durationSeconds: 222,
+    });
+    await save(owner, scopedId, {
+      episodeId: "s1e2",
+      progressSeconds: 2,
+      ...unknownDuration,
+    });
+    expect(await read(owner, scopedId, "s1e1")).toMatchObject({ durationSeconds: 222 });
+    expect(await read(owner, scopedId, "s1e2")).toMatchObject({ durationSeconds: null });
+
+    const isolatedId = `profile-isolated-${profileName}`;
+    await save(owner, isolatedId, { progressSeconds: 10, durationSeconds: 111 });
+    await save(other, isolatedId, { progressSeconds: 2, ...unknownDuration });
+    expect(await read(owner, isolatedId)).toMatchObject({ durationSeconds: 111 });
+    expect(await read(other, isolatedId)).toMatchObject({ durationSeconds: null });
+
+    const retainedId = `duration-retained-${profileName}`;
+    await save(owner, retainedId, { progressSeconds: 10, durationSeconds: 200 });
+    await save(owner, retainedId, { progressSeconds: 20, ...unknownDuration });
+    expect(await read(owner, retainedId)).toMatchObject({
+      progressSeconds: 20,
+      durationSeconds: 200,
+    });
+    const continueRows = json<{ items: Array<{ mediaId: string }> }>(
+      await request(owner, {
+        method: "GET",
+        url: "/api/history?view=continue-watching&limit=20",
+      }),
+    );
+    expect(continueRows.items.some((item) => item.mediaId === retainedId)).toBe(true);
+  });
+
   it("returns the newest 20 continue-watching rows at the strict resume boundaries", async () => {
     const owner = await setupOwner(app);
     const saveHistory = async (

@@ -3023,7 +3023,9 @@ function WebviewPlayer({
       absoluteSeekRef.current(time);
     };
     const currentAbsolutePosition = () => video.currentTime + (
-      knownAbsoluteDurationRef.current == null ? 0 : timelineOffsetRef.current
+      knownAbsoluteDurationRef.current != null || optimizedTimelineIsPartial
+        ? timelineOffsetRef.current
+        : 0
     );
     const setActionHandler = (
       action: MediaSessionAction,
@@ -4044,11 +4046,11 @@ function WebviewPlayer({
     }
   }, [subs.tracks, subs.activeTrackId]);
 
-  const seek = (t: number) => {
+  const seekAbsolute = (t: number) => {
     const video = videoRef.current;
     if (video == null || !Number.isFinite(t)) return;
     const knownDuration = knownAbsoluteDurationRef.current;
-    if (knownDuration == null) {
+    if (knownDuration == null && !optimizedTimelineIsPartial) {
       const localDuration = Number.isFinite(video.duration) && video.duration > 0
         ? video.duration
         : Number.POSITIVE_INFINITY;
@@ -4057,16 +4059,45 @@ function WebviewPlayer({
       scrubberRef.current?.setCurrentTime(localTarget);
       return;
     }
-    const absoluteTarget = Math.min(Math.max(t, 0), knownDuration);
+    const absoluteTarget = knownDuration == null
+      ? Math.max(t, 0)
+      : Math.min(Math.max(t, 0), knownDuration);
     const windowStart = timelineOffsetRef.current;
+    const localTarget = absoluteTarget - windowStart;
     const windowDuration = Number.isFinite(video.duration) && video.duration > 0
       ? video.duration
-      : 0;
-    const windowEnd = windowStart + windowDuration;
-    if (absoluteTarget >= windowStart && absoluteTarget <= windowEnd) {
-      const localTarget = absoluteTarget - windowStart;
+      : null;
+    let hasSeekableRanges = false;
+    let withinSeekableRange = false;
+    if (localTarget >= 0) {
+      try {
+        hasSeekableRanges = video.seekable.length > 0;
+        for (let index = 0; index < video.seekable.length; index += 1) {
+          if (
+            localTarget >= video.seekable.start(index) &&
+            localTarget <= video.seekable.end(index)
+          ) {
+            withinSeekableRange = true;
+            break;
+          }
+        }
+      } catch {
+        // A source swap can invalidate TimeRanges between length and access.
+      }
+    }
+    if (
+      localTarget >= 0 &&
+      (
+        (!hasSeekableRanges && localTarget === 0) ||
+        (hasSeekableRanges
+          ? withinSeekableRange
+          : windowDuration != null && localTarget <= windowDuration)
+      )
+    ) {
       video.currentTime = localTarget;
-      scrubberRef.current?.setCurrentTime(absoluteTarget);
+      scrubberRef.current?.setCurrentTime(
+        knownDuration == null ? localTarget : absoluteTarget,
+      );
       return;
     }
     if (serverOptimized == null || activeServerOptimizedQuality == null) return;
@@ -4090,19 +4121,34 @@ function WebviewPlayer({
       "fixed",
     );
   };
-  absoluteSeekRef.current = seek;
+
+  const seek = (t: number) => {
+    const video = videoRef.current;
+    if (video == null || !Number.isFinite(t)) return;
+    if (knownAbsoluteDurationRef.current != null) {
+      seekAbsolute(t);
+      return;
+    }
+    const localDuration = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration
+      : Number.POSITIVE_INFINITY;
+    const localTarget = Math.min(Math.max(t, 0), localDuration);
+    video.currentTime = localTarget;
+    scrubberRef.current?.setCurrentTime(localTarget);
+  };
+  absoluteSeekRef.current = seekAbsolute;
 
   const relativeSeek = (delta: number) => {
     const video = videoRef.current;
     if (video == null) return;
     const knownDuration = knownAbsoluteDurationRef.current;
-    const current = video.currentTime + (knownDuration == null ? 0 : timelineOffsetRef.current);
-    const limit = knownDuration ?? (
-      Number.isFinite(video.duration) && video.duration > 0
-        ? video.duration
-        : Number.POSITIVE_INFINITY
+    const current = video.currentTime + (
+      knownDuration != null || optimizedTimelineIsPartial
+        ? timelineOffsetRef.current
+        : 0
     );
-    seek(Math.min(limit, Math.max(0, current + delta)));
+    const target = Math.max(0, current + delta);
+    seekAbsolute(knownDuration == null ? target : Math.min(knownDuration, target));
   };
 
   const toggleOptions = () => {
@@ -4212,7 +4258,9 @@ function WebviewPlayer({
       };
       const seekBy = (delta: number) => {
         const current = video.currentTime + (
-          knownDuration == null ? 0 : timelineOffsetRef.current
+          knownDuration != null || optimizedTimelineIsPartial
+            ? timelineOffsetRef.current
+            : 0
         );
         seekTo(current + delta);
       };
