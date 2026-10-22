@@ -27,13 +27,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CANDIDATE_RUN_ID: "39834571270"
-      CANDIDATE_SOURCE_SHA: 72bd21cf466d495349617bc3fab7a1ec59687c84
-      CANDIDATE_APK_SHA256: 5029ad310fb15a93c2e2c29cb814e6a0c2dde2d2b0cfb239402553c77097c058
-      CANDIDATE_VERSION: 2.3.30
-      CANDIDATE_VERSION_CODE: "2003030"
+      CANDIDATE_RUN_ID: "39857024891"
+      CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a
+      CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3
+      CANDIDATE_VERSION: 2.3.31
+      CANDIDATE_VERSION_CODE: "2003031"
       PUBLISHED_ANDROID_VERSION: 2.3.27
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.30.apk
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.31.apk
       EVIDENCE: android-runtime-evidence
       AVD_NAME: yawf-phone-api30-runtime
       EMULATOR_SERIAL: emulator-5554
@@ -689,12 +689,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CANDIDATE_RUN_ID: "39834571270"
-      CANDIDATE_SOURCE_SHA: 72bd21cf466d495349617bc3fab7a1ec59687c84
-      CANDIDATE_APK_SHA256: 5029ad310fb15a93c2e2c29cb814e6a0c2dde2d2b0cfb239402553c77097c058
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.30.apk
-      CANDIDATE_VERSION: 2.3.30
-      CANDIDATE_VERSION_CODE: "2003030"
+      CANDIDATE_RUN_ID: "39857024891"
+      CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a
+      CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.31.apk
+      CANDIDATE_VERSION: 2.3.31
+      CANDIDATE_VERSION_CODE: "2003031"
       EVIDENCE: android-stock-webview-guide-evidence
       SYSTEM_IMAGE_PACKAGE: system-images;android-30;google_apis;x86_64
       EMULATOR_SERIAL: emulator-5554

@@ -10,6 +10,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.view.KeyEvent;
@@ -18,6 +19,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.uiautomator.By;
 import androidx.test.uiautomator.BySelector;
+import androidx.test.uiautomator.Configurator;
 import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
@@ -36,6 +38,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
+import java.util.function.LongConsumer;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /** Persistent, remote-only UI transaction for the signed Android TV package. */
@@ -120,9 +126,9 @@ public final class RuntimeTvFlowTest {
         capture("playing-advanced");
 
         revealControls();
-        waitFor(playPauseSelector("Pause"), 5_000, "semantic Pause state before pausing");
-        focusAndActivate(playPauseSelector("Pause"), "Pause", 14);
-        waitFor(playPauseSelector("Play"), 5_000, "semantic Play state after pausing");
+        waitForNative(playPauseSelector("Pause"), 5_000, "semantic Pause state before pausing");
+        focusNativeAndActivate(playPauseSelector("Pause"), "Pause", 14);
+        waitForNative(playPauseSelector("Play"), 5_000, "semantic Play state after pausing");
         long pausedStart = readPositionSeconds();
         String pausedFrame = centerFrameHash();
         SystemClock.sleep(3_000);
@@ -134,11 +140,12 @@ public final class RuntimeTvFlowTest {
         capture("paused");
 
         revealControls();
-        focusTarget(By.res(PRODUCT_PACKAGE, "exo_progress"), "timeline", 18);
+        BySelector timeline = By.res(PRODUCT_PACKAGE, "exo_progress");
+        focusNativeTarget(timeline, "timeline", 18);
         long beforeSeek = readPositionSeconds();
-        device.pressDPadRight();
-        device.pressDPadRight();
-        device.pressDPadRight();
+        pressNativeFocusedRight(timeline, "timeline");
+        pressNativeFocusedRight(timeline, "timeline");
+        pressNativeFocusedRight(timeline, "timeline");
         SystemClock.sleep(1_000);
         long afterSeek = readPositionSeconds();
         assertTrue("D-pad seek did not move by a meaningful delta", afterSeek >= beforeSeek + 10);
@@ -153,9 +160,9 @@ public final class RuntimeTvFlowTest {
         capture("audio-french");
 
         revealControls();
-        waitFor(playPauseSelector("Play"), 5_000, "semantic Play state before resuming");
-        focusAndActivate(playPauseSelector("Play"), "Resume", 14);
-        waitFor(playPauseSelector("Pause"), 5_000, "semantic Pause state after resuming");
+        waitForNative(playPauseSelector("Play"), 5_000, "semantic Play state before resuming");
+        focusNativeAndActivate(playPauseSelector("Play"), "Resume", 14);
+        waitForNative(playPauseSelector("Pause"), 5_000, "semantic Pause state after resuming");
         long resumed = waitForPositionAtLeast(afterSeek + 1, MEDIA_WAIT);
         assertTrue("Playback did not resume after track selection", resumed > afterSeek);
         checks.put("resumedAfterTrackSelection", true);
@@ -261,69 +268,81 @@ public final class RuntimeTvFlowTest {
                 .focusable(true);
     }
 
-    private UiObject2 waitForNativePlayerSurface(String label) {
+    private void waitForNativePlayerSurface(String label) {
         long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT;
         String incomplete = "no exact product-scoped Media3 control surface";
         while (SystemClock.uptimeMillis() < deadline) {
-            List<UiObject2> surfaces = device.findObjects(nativePlayerSurfaceSelector());
-            if (surfaces.size() > 1) {
-                fail("Multiple exact product-scoped Media3 control surfaces appeared for " + label);
+            NativeSurfaceSnapshot snapshot = observeFreshNative(
+                    () -> readNativePlayerSurfaceSnapshot(label));
+            if (snapshot.complete) {
+                log("Observed unique product-scoped Media3 control, content, and video surfaces");
+                return;
             }
-            if (surfaces.size() == 1) {
-                UiObject2 surface = surfaces.get(0);
-                if (surface.getVisibleBounds().isEmpty()) {
-                    incomplete = "exact Media3 control surface had empty visible bounds";
-                } else {
-                    List<UiObject2> contentFrames = surface.findObjects(
-                            By.res(PRODUCT_PACKAGE, "exo_content_frame")
-                                    .clazz("android.widget.FrameLayout")
-                                    .pkg(PRODUCT_PACKAGE));
-                    if (contentFrames.size() > 1) {
-                        fail("Multiple exact product-scoped Media3 content frames appeared for " + label);
-                    }
-                    if (contentFrames.size() == 1) {
-                        UiObject2 contentFrame = contentFrames.get(0);
-                        List<UiObject2> videoSurfaces = contentFrame.findObjects(
-                                By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE));
-                        if (videoSurfaces.size() > 1) {
-                            fail("Multiple exact product-scoped video surfaces appeared for " + label);
-                        }
-                        if (videoSurfaces.size() == 1
-                                && !contentFrame.getVisibleBounds().isEmpty()
-                                && !videoSurfaces.get(0).getVisibleBounds().isEmpty()) {
-                            log("Observed unique product-scoped Media3 control, content, and video surfaces");
-                            return surface;
-                        }
-                        incomplete = videoSurfaces.isEmpty()
-                                ? "exact Media3 content frame had no product-scoped SurfaceView"
-                                : "exact Media3 content or video surface had empty visible bounds";
-                    } else {
-                        incomplete = "exact Media3 control surface had no product-scoped content frame";
-                    }
-                }
-            }
+            incomplete = snapshot.incomplete;
             SystemClock.sleep(100);
         }
         fail("Timed out waiting for " + label + ": " + incomplete);
-        return null;
+    }
+
+    private NativeSurfaceSnapshot readNativePlayerSurfaceSnapshot(String label) {
+        List<UiObject2> surfaces = device.findObjects(nativePlayerSurfaceSelector());
+        if (surfaces.size() > 1) {
+            fail("Multiple exact product-scoped Media3 control surfaces appeared for " + label);
+        }
+        if (surfaces.isEmpty()) {
+            return NativeSurfaceSnapshot.incomplete("no exact product-scoped Media3 control surface");
+        }
+        UiObject2 surface = surfaces.get(0);
+        if (surface.getVisibleBounds().isEmpty()) {
+            return NativeSurfaceSnapshot.incomplete(
+                    "exact Media3 control surface had empty visible bounds");
+        }
+        List<UiObject2> contentFrames = surface.findObjects(
+                By.res(PRODUCT_PACKAGE, "exo_content_frame")
+                        .clazz("android.widget.FrameLayout")
+                        .pkg(PRODUCT_PACKAGE));
+        if (contentFrames.size() > 1) {
+            fail("Multiple exact product-scoped Media3 content frames appeared for " + label);
+        }
+        if (contentFrames.isEmpty()) {
+            return NativeSurfaceSnapshot.incomplete(
+                    "exact Media3 control surface had no product-scoped content frame");
+        }
+        UiObject2 contentFrame = contentFrames.get(0);
+        List<UiObject2> videoSurfaces = contentFrame.findObjects(
+                By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE));
+        if (videoSurfaces.size() > 1) {
+            fail("Multiple exact product-scoped video surfaces appeared for " + label);
+        }
+        if (videoSurfaces.isEmpty()) {
+            return NativeSurfaceSnapshot.incomplete(
+                    "exact Media3 content frame had no product-scoped SurfaceView");
+        }
+        if (contentFrame.getVisibleBounds().isEmpty()
+                || videoSurfaces.get(0).getVisibleBounds().isEmpty()) {
+            return NativeSurfaceSnapshot.incomplete(
+                    "exact Media3 content or video surface had empty visible bounds");
+        }
+        return NativeSurfaceSnapshot.complete();
     }
 
     private void revealControls() {
-        device.pressDPadDown();
+        observeFreshNative(() -> readNativeFocusSnapshot(nativePlayerSurfaceSelector()));
+        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_DOWN);
         assertTrue("Media3 controls did not become visible",
-                device.wait(Until.hasObject(playPauseSelector()), 5_000));
+                waitForNativePresence(playPauseSelector(), 5_000));
     }
 
     private void selectAudioTrack(String language) {
         revealControls();
-        focusAndActivate(By.res(PRODUCT_PACKAGE, "exo_settings"), "Media3 settings", 18);
-        waitFor(By.text("Audio"), 10_000, "Audio settings row");
-        focusAndActivate(By.text("Audio"), "Audio settings", 12);
+        focusNativeAndActivate(By.res(PRODUCT_PACKAGE, "exo_settings"), "Media3 settings", 18);
+        waitForNative(By.text("Audio"), 10_000, "Audio settings row");
+        focusNativeAndActivate(By.text("Audio"), "Audio settings", 12);
         BySelector english = audioLabel("English");
         BySelector french = audioLabel("French");
-        waitFor(english, 10_000, "English audio track");
-        waitFor(french, 10_000, "French audio track");
-        focusAndActivate(audioLabel(language), language + " audio", 12);
+        waitForNative(english, 10_000, "English audio track");
+        waitForNative(french, 10_000, "French audio track");
+        focusNativeAndActivate(audioLabel(language), language + " audio", 12);
         SystemClock.sleep(1_000);
         log("Selected exact native audio label " + language);
     }
@@ -341,6 +360,105 @@ public final class RuntimeTvFlowTest {
         device.pressDPadCenter();
         log("Activated " + label + " with DPAD_CENTER");
         SystemClock.sleep(350);
+    }
+
+    private void focusNativeAndActivate(BySelector selector, String label, int steps) {
+        NativeFocusSnapshot focused = focusNativeTarget(selector, label, steps);
+        assertTrue("Could not focus target with bounded D-pad navigation: " + label,
+                focused.activationFocused);
+        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER);
+        log("Activated " + label + " with DPAD_CENTER");
+        SystemClock.sleep(350);
+    }
+
+    private NativeFocusSnapshot focusNativeTarget(
+            BySelector selector,
+            String label,
+            int maxSteps) {
+        NativeFocusSnapshot snapshot = waitForNativeFocusSnapshot(selector, UI_WAIT, label);
+        if (snapshot.activationFocused) return snapshot;
+        for (int index = 0; index < maxSteps; index++) {
+            snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));
+            if (snapshot.activationFocused) {
+                log("Focused " + label + " using D-pad navigation");
+                return snapshot;
+            }
+            if (!snapshot.targetPresent || !snapshot.currentFocusPresent) {
+                sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_DOWN);
+            } else {
+                int horizontal = snapshot.activationBounds.centerX()
+                        - snapshot.currentFocusBounds.centerX();
+                int vertical = snapshot.activationBounds.centerY()
+                        - snapshot.currentFocusBounds.centerY();
+                if (Math.abs(vertical) >= Math.abs(horizontal)) {
+                    sendNativeDpadKey(vertical >= 0
+                            ? KeyEvent.KEYCODE_DPAD_DOWN : KeyEvent.KEYCODE_DPAD_UP);
+                } else {
+                    sendNativeDpadKey(horizontal >= 0
+                            ? KeyEvent.KEYCODE_DPAD_RIGHT : KeyEvent.KEYCODE_DPAD_LEFT);
+                }
+            }
+            SystemClock.sleep(180);
+        }
+        snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));
+        assertTrue("Target disappeared while focusing: " + label, snapshot.targetPresent);
+        assertTrue("Could not focus target with bounded D-pad navigation: " + label,
+                snapshot.activationFocused);
+        return snapshot;
+    }
+
+    private void pressNativeFocusedRight(BySelector selector, String label) {
+        NativeFocusSnapshot snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));
+        assertTrue("Target disappeared before native key input: " + label,
+                snapshot.targetPresent);
+        assertTrue("Native target was not focused before key input: " + label,
+                snapshot.activationFocused);
+        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_RIGHT);
+    }
+
+    private void sendNativeDpadKey(int keyCode) {
+        RuntimeTvNativeKey.send(instrumentation.getUiAutomation(), keyCode);
+    }
+
+    private NativeFocusSnapshot waitForNativeFocusSnapshot(
+            BySelector selector,
+            long timeout,
+            String label) {
+        long deadline = SystemClock.uptimeMillis() + timeout;
+        while (SystemClock.uptimeMillis() < deadline) {
+            NativeFocusSnapshot snapshot = observeFreshNative(
+                    () -> readNativeFocusSnapshot(selector));
+            if (snapshot.targetPresent) return snapshot;
+            SystemClock.sleep(100);
+        }
+        fail("Timed out waiting for " + label);
+        return null;
+    }
+
+    private NativeFocusSnapshot readNativeFocusSnapshot(BySelector selector) {
+        UiObject2 currentFocus = device.findObject(By.focused(true));
+        BoundsSnapshot currentFocusBounds = currentFocus == null
+                ? null
+                : BoundsSnapshot.from(currentFocus.getVisibleBounds());
+        UiObject2 target = device.findObject(selector);
+        if (target == null) {
+            return NativeFocusSnapshot.missingTarget(
+                    currentFocus != null, currentFocusBounds);
+        }
+        UiObject2 activation = target;
+        for (int depth = 0; depth < 4 && activation != null && !activation.isFocusable(); depth++) {
+            activation = activation.getParent();
+        }
+        assertNotNull("Labeled semantic node had no focusable activation ancestor", activation);
+        assertTrue("Semantic activation ancestor was not focusable", activation.isFocusable());
+        boolean activationFocused = activation.isFocused();
+        BoundsSnapshot activationBounds = BoundsSnapshot.from(activation.getVisibleBounds());
+        if (currentFocus == null) {
+            return NativeFocusSnapshot.present(
+                    activationFocused, activationBounds, false, null);
+        }
+        return NativeFocusSnapshot.present(
+                activationFocused, activationBounds, true, currentFocusBounds);
     }
 
     private void focusTarget(BySelector selector, String label, int maxSteps) {
@@ -395,6 +513,21 @@ public final class RuntimeTvFlowTest {
         return object;
     }
 
+    private void waitForNative(BySelector selector, long timeout, String label) {
+        assertTrue("Timed out waiting for " + label,
+                waitForNativePresence(selector, timeout));
+    }
+
+    private boolean waitForNativePresence(BySelector selector, long timeout) {
+        long deadline = SystemClock.uptimeMillis() + timeout;
+        while (SystemClock.uptimeMillis() < deadline) {
+            boolean present = observeFreshNative(() -> device.findObject(selector) != null);
+            if (present) return true;
+            SystemClock.sleep(100);
+        }
+        return false;
+    }
+
     private long waitForPositionAtLeast(long minimum, long timeout) {
         long deadline = SystemClock.uptimeMillis() + timeout;
         while (SystemClock.uptimeMillis() < deadline) {
@@ -409,11 +542,126 @@ public final class RuntimeTvFlowTest {
     }
 
     private long readPositionSeconds() {
+        return observeFreshNative(this::readPositionSecondsSnapshot);
+    }
+
+    private long readPositionSecondsSnapshot() {
         List<UiObject2> timeBars = device.findObjects(positionTimeBarSelector());
         return RuntimeTvClock.readUniqueVisibleTimeBar(
                 timeBars,
                 timeBar -> !timeBar.getVisibleBounds().isEmpty(),
                 UiObject2::getContentDescription);
+    }
+
+    private <T> T observeFreshNative(Supplier<T> reader) {
+        assertTrue("Fresh native accessibility observation requires Android API 34+",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        Configurator configurator = Configurator.getInstance();
+        return observeFreshNative(
+                Build.VERSION.SDK_INT,
+                configurator::getWaitForIdleTimeout,
+                configurator::setWaitForIdleTimeout,
+                () -> instrumentation.getUiAutomation().clearCache(),
+                reader);
+    }
+
+    static <T> T observeFreshNative(
+            int apiLevel,
+            LongSupplier idleTimeoutReader,
+            LongConsumer idleTimeoutWriter,
+            BooleanSupplier cacheClearer,
+            Supplier<T> reader) {
+        return RuntimeTvNativeObservation.readFresh(
+                apiLevel,
+                idleTimeoutReader,
+                idleTimeoutWriter,
+                cacheClearer,
+                reader);
+    }
+
+    private static final class NativeSurfaceSnapshot {
+        final boolean complete;
+        final String incomplete;
+
+        private NativeSurfaceSnapshot(boolean complete, String incomplete) {
+            this.complete = complete;
+            this.incomplete = incomplete;
+        }
+
+        static NativeSurfaceSnapshot complete() {
+            return new NativeSurfaceSnapshot(true, "");
+        }
+
+        static NativeSurfaceSnapshot incomplete(String reason) {
+            return new NativeSurfaceSnapshot(false, reason);
+        }
+    }
+
+    private static final class BoundsSnapshot {
+        final int left;
+        final int top;
+        final int right;
+        final int bottom;
+
+        private BoundsSnapshot(int left, int top, int right, int bottom) {
+            this.left = left;
+            this.top = top;
+            this.right = right;
+            this.bottom = bottom;
+        }
+
+        static BoundsSnapshot from(Rect bounds) {
+            return new BoundsSnapshot(bounds.left, bounds.top, bounds.right, bounds.bottom);
+        }
+
+        int centerX() {
+            return (left + right) / 2;
+        }
+
+        int centerY() {
+            return (top + bottom) / 2;
+        }
+    }
+
+    private static final class NativeFocusSnapshot {
+        final boolean targetPresent;
+        final boolean activationFocused;
+        final BoundsSnapshot activationBounds;
+        final boolean currentFocusPresent;
+        final BoundsSnapshot currentFocusBounds;
+
+        private NativeFocusSnapshot(
+                boolean targetPresent,
+                boolean activationFocused,
+                BoundsSnapshot activationBounds,
+                boolean currentFocusPresent,
+                BoundsSnapshot currentFocusBounds) {
+            this.targetPresent = targetPresent;
+            this.activationFocused = activationFocused;
+            this.activationBounds = activationBounds;
+            this.currentFocusPresent = currentFocusPresent;
+            this.currentFocusBounds = currentFocusBounds;
+        }
+
+        static NativeFocusSnapshot missingTarget(
+                boolean currentFocusPresent,
+                BoundsSnapshot currentFocusBounds) {
+            return new NativeFocusSnapshot(
+                    false, false, null, currentFocusPresent, currentFocusBounds);
+        }
+
+        static NativeFocusSnapshot present(
+                boolean activationFocused,
+                BoundsSnapshot activationBounds,
+                boolean currentFocusPresent,
+                BoundsSnapshot currentFocusBounds) {
+            return new NativeFocusSnapshot(
+                    true,
+                    activationFocused,
+                    activationBounds,
+                    currentFocusPresent,
+                    currentFocusBounds);
+        }
     }
 
     private String centerFrameHash() throws Exception {

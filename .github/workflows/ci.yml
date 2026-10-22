@@ -209,11 +209,26 @@ jobs:
       - name: macOS stapler workflow tests
         run: node --test scripts/macos_stapler_workflow.test.mjs
 
+      - name: Set up JDK17 for native runtime harness contracts
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Generated Android project patch tests
         run: node --test scripts/patch_tauri_android.test.mjs
 
       - name: Android external-player runtime harness contracts
-        run: node --test scripts/android_external_player_workflow.test.mjs
+        run: node --test scripts/android_external_player_workflow.test.mjs scripts/runtime_external_settings_transaction.test.mjs
+
+      - name: Android TV native observation and candidate contracts
+        run: node --test scripts/android_tv_runtime_check.test.mjs scripts/runtime_tv_native_observation.test.mjs scripts/android_tv_candidate_runtime_workflow.test.mjs
+
+      - name: Public automatic Android updater host and driver contracts
+        run: |
+          node --test scripts/android_public_automatic_ota_driver.test.mjs scripts/android_public_automatic_ota_workflow.test.mjs
+          python3 scripts/android_public_ota_runtime_check.py --self-test
+          python3 scripts/android_public_automatic_ota_host.test.py
 
       - name: Android artifact compatibility checker tests
         run: node --test scripts/check_android_elf_alignment.test.mjs scripts/check_android_webview_compat.test.mjs

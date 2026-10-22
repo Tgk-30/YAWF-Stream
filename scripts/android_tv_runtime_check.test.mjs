@@ -221,7 +221,8 @@ function javaMethod(source, name) {
 function assertObservationOnly(source) {
   for (const name of ["waitForPositionAtLeast", "readPositionSeconds"]) {
     const body = javaMethod(source, name);
-    assert.doesNotMatch(body, /press(?:DPad|KeyCode)|revealControls|focusAndActivate|focusTarget/);
+    assert.doesNotMatch(body,
+      /press(?:DPad|KeyCode)|sendNativeDpadKey|revealControls|focusAndActivate|focusTarget/);
   }
   assert.match(source, /playPauseSelector\("Pause"\).*semantic Pause state before pausing/s);
   assert.match(source, /playPauseSelector\("Play"\).*semantic Play state before resuming/s);
@@ -307,16 +308,19 @@ function assertNativeSurfacePolicy(source) {
 
   const waiter = javaMethod(source, "waitForNativePlayerSurface");
   assert.match(waiter, /long deadline = SystemClock\.uptimeMillis\(\) \+ MEDIA_WAIT;/);
-  assert.match(waiter, /List<UiObject2> surfaces = device\.findObjects\(nativePlayerSurfaceSelector\(\)\);/);
-  assert.match(waiter, /if \(surfaces\.size\(\) > 1\) \{\s*fail\("Multiple exact product-scoped Media3 control surfaces appeared for " \+ label\);/s);
   assert.match(waiter,
+    /observeFreshNative\(\s*\(\) -> readNativePlayerSurfaceSnapshot\(label\)\)/s);
+  const reader = javaMethod(source, "readNativePlayerSurfaceSnapshot");
+  assert.match(reader, /List<UiObject2> surfaces = device\.findObjects\(nativePlayerSurfaceSelector\(\)\);/);
+  assert.match(reader, /if \(surfaces\.size\(\) > 1\) \{\s*fail\("Multiple exact product-scoped Media3 control surfaces appeared for " \+ label\);/s);
+  assert.match(reader,
     /By\.res\(PRODUCT_PACKAGE, "exo_content_frame"\)\s*\.clazz\("android\.widget\.FrameLayout"\)\s*\.pkg\(PRODUCT_PACKAGE\)/s);
-  assert.match(waiter, /if \(contentFrames\.size\(\) > 1\)/);
-  assert.match(waiter,
+  assert.match(reader, /if \(contentFrames\.size\(\) > 1\)/);
+  assert.match(reader,
     /By\.clazz\("android\.view\.SurfaceView"\)\.pkg\(PRODUCT_PACKAGE\)/);
-  assert.match(waiter, /if \(videoSurfaces\.size\(\) > 1\)/);
-  assert.match(waiter,
-    /if \(videoSurfaces\.size\(\) == 1\s*&& !contentFrame\.getVisibleBounds\(\)\.isEmpty\(\)\s*&& !videoSurfaces\.get\(0\)\.getVisibleBounds\(\)\.isEmpty\(\)\)/s);
+  assert.match(reader, /if \(videoSurfaces\.size\(\) > 1\)/);
+  assert.match(reader,
+    /if \(contentFrame\.getVisibleBounds\(\)\.isEmpty\(\)\s*\|\| videoSurfaces\.get\(0\)\.getVisibleBounds\(\)\.isEmpty\(\)\)/s);
 
   const flow = javaMethod(source, "runFlow");
   assert.equal((flow.match(/waitForNativePlayerSurface\(/g) ?? []).length, 3);
@@ -340,12 +344,14 @@ function assertClockDriverPolicy(source) {
     /By\.res\(PRODUCT_PACKAGE, "exo_progress"\)\s*\.pkg\(PRODUCT_PACKAGE\)\s*\.clazz\("android\.widget\.SeekBar"\)\s*\.enabled\(true\)/s);
 
   const reader = javaMethod(source, "readPositionSeconds");
-  assert.match(reader,
+  assert.match(reader, /return observeFreshNative\(this::readPositionSecondsSnapshot\);/);
+  const snapshotReader = javaMethod(source, "readPositionSecondsSnapshot");
+  assert.match(snapshotReader,
     /List<UiObject2> timeBars = device\.findObjects\(positionTimeBarSelector\(\)\);/);
-  assert.match(reader, /return RuntimeTvClock\.readUniqueVisibleTimeBar\(/);
-  assert.match(reader, /timeBar -> !timeBar\.getVisibleBounds\(\)\.isEmpty\(\)/);
-  assert.match(reader, /UiObject2::getContentDescription/);
-  assert.doesNotMatch(reader,
+  assert.match(snapshotReader, /return RuntimeTvClock\.readUniqueVisibleTimeBar\(/);
+  assert.match(snapshotReader, /timeBar -> !timeBar\.getVisibleBounds\(\)\.isEmpty\(\)/);
+  assert.match(snapshotReader, /UiObject2::getContentDescription/);
+  assert.doesNotMatch(snapshotReader,
     /getText|exo_position|By\.text|fixture|status|press(?:DPad|KeyCode)|revealControls|focusAndActivate|focusTarget/);
 
   const observer = javaMethod(source, "waitForPositionAtLeast");
@@ -735,14 +741,14 @@ test("TV driver uses the unique product-scoped Media3 surface and reveals hidden
   const source = read(javaPath);
   assertNativeSurfacePolicy(source);
   const selector = javaMethod(source, "nativePlayerSurfaceSelector");
-  const waiter = javaMethod(source, "waitForNativePlayerSurface");
+  const reader = javaMethod(source, "readNativePlayerSurfaceSnapshot");
   const mutants = [
     source.replace(selector, selector.replace("                .pkg(PRODUCT_PACKAGE)\n", "")),
     source.replace(selector, selector.replace(
       ".pkg(PRODUCT_PACKAGE)", '.pkg("com.yawf.stream.wrong")')),
-    source.replace(waiter, waiter.replace(
+    source.replace(reader, reader.replace(
       "if (surfaces.size() > 1) {", "if (false) {")),
-    source.replace(waiter, waiter.replace(
+    source.replace(reader, reader.replace(
       'By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE)',
       'By.clazz("android.widget.FrameLayout").pkg(PRODUCT_PACKAGE)')),
     source.replace(

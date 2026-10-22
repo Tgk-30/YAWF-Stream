@@ -37,12 +37,12 @@ function validateOtaPolicyMutationGate(source) {
 }
 
 test("pins the exact verification artifact while retaining the published channel", () => {
-  assert.match(api30Runtime, /CANDIDATE_RUN_ID: "39834571270"/);
-  assert.match(api30Runtime, /CANDIDATE_SOURCE_SHA: 72bd21cf466d495349617bc3fab7a1ec59687c84/);
-  assert.match(api30Runtime, /CANDIDATE_APK_SHA256: 5029ad310fb15a93c2e2c29cb814e6a0c2dde2d2b0cfb239402553c77097c058/);
+  assert.match(api30Runtime, /CANDIDATE_RUN_ID: "39857024891"/);
+  assert.match(api30Runtime, /CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a/);
+  assert.match(api30Runtime, /CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3/);
   assert.match(api30Runtime, /name: android-phone-verification-candidate/);
-  assert.match(api30Runtime, /CANDIDATE_VERSION: 2\.3\.30/);
-  assert.match(api30Runtime, /CANDIDATE_VERSION_CODE: "2003030"/);
+  assert.match(api30Runtime, /CANDIDATE_VERSION: 2\.3\.31/);
+  assert.match(api30Runtime, /CANDIDATE_VERSION_CODE: "2003031"/);
   assert.match(api30Runtime, /PUBLISHED_ANDROID_VERSION: 2\.3\.27/);
 });
 

@@ -65,11 +65,11 @@ test("is manual branch-only read-only supplementary coverage", () => {
 });
 
 test("pins one exact signed candidate without changing the public channel", () => {
-  assert.match(workflow, /CANDIDATE_RUN_ID: "39834571270"/);
-  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 72bd21cf466d495349617bc3fab7a1ec59687c84/);
-  assert.match(workflow, /CANDIDATE_APK_SHA256: 5029ad310fb15a93c2e2c29cb814e6a0c2dde2d2b0cfb239402553c77097c058/);
-  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.30/);
-  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003030"/);
+  assert.match(workflow, /CANDIDATE_RUN_ID: "39857024891"/);
+  assert.match(workflow, /CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a/);
+  assert.match(workflow, /CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3/);
+  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.31/);
+  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003031"/);
   assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.27/);
   assert.match(workflow, /--certificate-pin candidate-source\/web\/src-tauri\/SIGNING_CERT_SHA256/);
   assert.match(workflow, /python3 candidate-source\/scripts\/verify_android_apk\.py/);

@@ -10,11 +10,11 @@ function validate(source) {
   assert.equal(source.split(marker).length, 2);
   const job = source.slice(source.indexOf(marker));
   for (const literal of [
-    'CANDIDATE_RUN_ID: "39834571270"',
-    "CANDIDATE_SOURCE_SHA: 72bd21cf466d495349617bc3fab7a1ec59687c84",
-    "CANDIDATE_APK_SHA256: 5029ad310fb15a93c2e2c29cb814e6a0c2dde2d2b0cfb239402553c77097c058",
-    "CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.30.apk",
-    "CANDIDATE_VERSION: 2.3.30", 'CANDIDATE_VERSION_CODE: "2003030"',
+    'CANDIDATE_RUN_ID: "39857024891"',
+    "CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a",
+    "CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3",
+    "CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.31.apk",
+    "CANDIDATE_VERSION: 2.3.31", 'CANDIDATE_VERSION_CODE: "2003031"',
     "SYSTEM_IMAGE_PACKAGE: system-images;android-30;google_apis;x86_64",
   ]) assert.ok(job.includes(literal), `missing exact candidate binding: ${literal}`);
   assert.match(job, /test "\$\(git -C candidate-source rev-parse HEAD\)" = "\$CANDIDATE_SOURCE_SHA"/);
@@ -72,7 +72,7 @@ test("the fixed multiword App info label survives host and adb remote shell pars
 });
 
 for (const [name, mutate] of [
-  ["APK identity", (s) => s.replaceAll("5029ad310fb15a93c2e2c29cb814e6a0c2dde2d2b0cfb239402553c77097c058", "0".repeat(64))],
+  ["APK identity", (s) => s.replaceAll("23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3", "0".repeat(64))],
   ["stock provider admission", (s) => s.replace("providers==[('com.google.android.webview','83.0.4103.106')]", "providers")],
   ["installed byte check", (s) => s.replaceAll('test "$installed_hash" = "$CANDIDATE_APK_SHA256"', 'test -n "$installed_hash"')],
   ["production signer verification", (s) => s.replaceAll("--certificate-pin candidate-source/web/src-tauri/SIGNING_CERT_SHA256", "--certificate-pin unknown")],

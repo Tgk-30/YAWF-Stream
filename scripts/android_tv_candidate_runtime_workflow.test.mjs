@@ -28,17 +28,17 @@ function assertCandidateContract(source) {
   assert.doesNotMatch(source, /contents:\s*write|packages:\s*write|secrets\.|GH_TOKEN|gh\s+(?:api|release)|git\s+push/);
 
   for (const literal of [
-    'TV_CANDIDATE_RUN_ID: "39836999127"',
+    'TV_CANDIDATE_RUN_ID: "39857029554"',
     "TV_CANDIDATE_ARTIFACT: android-tv-verification-candidate",
     "TV_BINDING_FILENAME: candidate-binding.json",
-    "TV_SOURCE_REVISION: 30a0ccbc0a71a9cf27019e0b35c543e0783179ae",
-    "TV_APK_FILENAME: YAWF.Stream_Android.TV_2.3.30.apk",
-    "TV_APK_SHA256: 69673ca2998dd2b05b64a0a39544d7bc664240178616d117f8312dba5a247d93",
+    "TV_SOURCE_REVISION: e7e2b7796684bf437bb10fdc9fc51263a8ba016a",
+    "TV_APK_FILENAME: YAWF.Stream_Android.TV_2.3.31.apk",
+    "TV_APK_SHA256: 140a1ab89af1a16f6da2a72f1d561693b5b715fe3cd6dfb13c4f16899f6ab332",
     'TV_APK_SIZE: "5057032"',
     "TV_SIGNER_SHA256: 6d8ec5466423e10e5c751132bb0f6a6ddf95a8d9f3378772d7809fce616eec1e",
     "TV_PACKAGE: com.yawf.stream.tv",
-    "TV_VERSION_NAME: 2.3.30",
-    'TV_VERSION_CODE: "20330"',
+    "TV_VERSION_NAME: 2.3.31",
+    'TV_VERSION_CODE: "20331"',
     'TV_MIN_SDK: "23"',
     'TV_TARGET_SDK: "36"',
     "SYSTEM_IMAGE_PACKAGE: system-images;android-36;android-tv;x86_64",
@@ -93,7 +93,7 @@ function assertHistoricalRuntimeBodyPreserved(source) {
   assert.equal(actual, expected);
 }
 
-test("private TV30 runtime workflow is owner-only read-only and bootstrap-scoped", () => {
+test("private TV31 runtime workflow is owner-only read-only and bootstrap-scoped", () => {
   assertCandidateContract(workflow);
 });
 
@@ -109,12 +109,12 @@ test("historical API36 fixture harness media and cleanup runtime body is unchang
 
 for (const [name, mutate] of [
   ["outer provisioning budget", (s) => s.replace("timeout-minutes: 45", "timeout-minutes: 35")],
-  ["candidate run", (s) => s.replace("39836999127", "39836999126")],
-  ["candidate source", (s) => s.replace("30a0ccbc0a71a9cf27019e0b35c543e0783179ae", "0".repeat(40))],
-  ["APK hash", (s) => s.replace("69673ca2998dd2b05b64a0a39544d7bc664240178616d117f8312dba5a247d93", "0".repeat(64))],
+  ["candidate run", (s) => s.replace("39857029554", "39857029553")],
+  ["candidate source", (s) => s.replace("e7e2b7796684bf437bb10fdc9fc51263a8ba016a", "0".repeat(40))],
+  ["APK hash", (s) => s.replace("140a1ab89af1a16f6da2a72f1d561693b5b715fe3cd6dfb13c4f16899f6ab332", "0".repeat(64))],
   ["APK size", (s) => s.replace('TV_APK_SIZE: "5057032"', 'TV_APK_SIZE: "1"')],
   ["signer", (s) => s.replace("6d8ec5466423e10e5c751132bb0f6a6ddf95a8d9f3378772d7809fce616eec1e", "0".repeat(64))],
-  ["version", (s) => s.replace("TV_VERSION_NAME: 2.3.30", "TV_VERSION_NAME: 2.3.29")],
+  ["version", (s) => s.replace("TV_VERSION_NAME: 2.3.31", "TV_VERSION_NAME: 2.3.29")],
   ["binding equality", (s) => s.replace("assert binding == expected, binding", "assert expected.items() <= binding.items(), binding")],
   ["artifact run binding", (s) => s.replace("run-id: ${{ env.TV_CANDIDATE_RUN_ID }}", "run-id: ${{ github.run_id }}")],
   ["published classification", (s) => s.replace("publishedTvProof=false", "publishedTvProof=true")],
