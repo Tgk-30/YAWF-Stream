@@ -53,7 +53,8 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final String PLAYER_DIALOG_LABEL =
             "Playing Synthetic Fixture Movie (2026)";
     private static final String PLAYBACK_SETTINGS_LABEL = "Playback settings";
-    private static final String EXTERNAL_PLAYER_LABEL = "Open in external player";
+    private static final String EXTERNAL_PLAYER_LABEL =
+            "Open in external player Choose VLC or another installed video app";
     private static final String CONNECT_SERVER_LABEL =
             "Connect to a server Already have a server or an invite link? Paste the address and sign in.";
     private static final String SOURCE_CONTROL_LABEL =

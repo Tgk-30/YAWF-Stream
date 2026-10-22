@@ -95,7 +95,7 @@ function playbackSettingsObservation(d) {
 }
 
 function playbackSettingsPanelObservation(d) {
-  assert.match(d, /EXTERNAL_PLAYER_LABEL = "Open in external player"/);
+  assert.match(d, /EXTERNAL_PLAYER_LABEL =\s*\n?\s*"Open in external player Choose VLC or another installed video app"/);
   const runFlow = methodBody(d, 'private void runFlow()');
   assert.match(runFlow, /transition\("production-player-visible"\);\s*capture\("production-player"\);\s*UiObject2 playbackSettings = waitForRefreshedPlaybackSettings\(\);\s*clickObservedControlImmediately\(playbackSettings, PLAYBACK_SETTINGS_LABEL\);/);
   const capturePlayer = runFlow.indexOf('capture("production-player")');
@@ -207,7 +207,7 @@ for (const [name, mutate, contract, original] of [
   ['settings scroll escapes dialog', s => s.replace('dialog.findObjects(\n                By.scrollable(true).pkg(PRODUCT_PACKAGE))', 'device.findObjects(\n                By.scrollable(true).pkg(PRODUCT_PACKAGE))'), driverContract, driver],
   ['generic external-control fallback', s => s.replace('scrollPlaybackSettingsUntilLabeledClickable(\n                EXTERNAL_PLAYER_LABEL, EXTERNAL_PLAYER_LABEL)', 'scrollUntilLabeledClickable(\n                EXTERNAL_PLAYER_LABEL, EXTERNAL_PLAYER_LABEL)'), driverContract, driver],
   ['settings visible-bounds admission removed', s => s.replace('found != null && hasVisibleBounds(found)', 'found != null'), driverContract, driver],
-  ['external action label widened', s => s.replace('EXTERNAL_PLAYER_LABEL = "Open in external player"', 'EXTERNAL_PLAYER_LABEL = "external player"'), driverContract, driver],
+  ['external action label shortened', s => s.replace('Open in external player Choose VLC or another installed video app', 'Open in external player'), driverContract, driver],
   ['dialog-scoped label made inexact', s => s.replace('Pattern labelPattern = exactLabel(label);', 'Pattern labelPattern = Pattern.compile(label);'), driverContract, driver],
   ['shortened connect label', s => s.replace('Connect to a server Already have a server or an invite link? Paste the address and sign in.', 'Connect to a server'), driverContract, driver],
   ['unused connect label', s => s.replace('clickLabeled(CONNECT_SERVER_LABEL,', 'clickLabeled("Connect to a server",'), driverContract, driver],
