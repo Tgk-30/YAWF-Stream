@@ -666,7 +666,8 @@ function assertJavaSemanticPolicy(source) {
 test("host admission and semantic receipt policy self-tests execute", () => {
   const result = spawnSync(python, [hostPath, "--self-test"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stderr, /Ran 8 tests/);
+  assert.match(result.stderr, /Ran 9 tests/);
+  assert.match(result.stderr, /test_pause_sample_evidence_names_are_exact_and_bounded.*ok/);
 });
 
 test("fixture path and native bridge contract self-tests execute", () => {

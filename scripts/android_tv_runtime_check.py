@@ -30,7 +30,14 @@ FIXTURE_AUDIT = "http://127.0.0.1:4190/__audit"
 HEX64 = re.compile(r"[0-9a-f]{64}")
 SHA40 = re.compile(r"[0-9a-f]{40}")
 CAPTURE = re.compile(r"(?:0[1-9]|[12][0-9]|3[0-2])-[a-z0-9-]+\.(?:png|xml)")
-ALLOWED_FIXED = {"actions.txt": 128 * 1024, "instrumentation-tv-receipt.json": 32 * 1024}
+ALLOWED_FIXED = {
+    "actions.txt": 128 * 1024,
+    "instrumentation-tv-receipt.json": 32 * 1024,
+    "pause-hash-before.png": 8 * 1024 * 1024,
+    "pause-hash-after.png": 8 * 1024 * 1024,
+    "pause-hash-before.json": 8 * 1024,
+    "pause-hash-after.json": 8 * 1024,
+}
 MAX_FILES = 68
 URL = re.compile(r"https?://[^\s\]\[\"'<>]+", re.IGNORECASE)
 BEARER = re.compile(r"Bearer\s+[A-Za-z0-9._~+/-]+", re.IGNORECASE)
@@ -375,6 +382,16 @@ def main_run(args: argparse.Namespace) -> None:
 
 
 class PolicyTests(unittest.TestCase):
+    def test_pause_sample_evidence_names_are_exact_and_bounded(self):
+        for phase in ("before", "after"):
+            self.assertEqual(evidence_limit(f"pause-hash-{phase}.png"), 8 * 1024 * 1024)
+            self.assertEqual(evidence_limit(f"pause-hash-{phase}.json"), 8 * 1024)
+        for name in ("../pause-hash-before.png", "pause-hash-other.png",
+                     "pause-hash-before.txt", "pause-hash-after.json.bak"):
+            with self.assertRaises(GateError):
+                evidence_limit(name)
+        self.assertEqual(MAX_FILES, 68)
+
     def args(self):
         return argparse.Namespace(apk_sha256="a" * 64, signer_sha256="b" * 64,
             source_revision="c" * 40, apk_size=123, version_code=20328,
