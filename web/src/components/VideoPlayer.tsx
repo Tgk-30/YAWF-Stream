@@ -3390,7 +3390,12 @@ function WebviewPlayer({
     const confirmExactHandoff = () => {
       if (!exactHandoffPendingRef.current) return true;
       const target = exactTarget();
-      if (!targetIsAvailable(target) || !targetWasReached(target)) return false;
+      if (
+        video.seeking ||
+        video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+        !targetIsAvailable(target) ||
+        !targetWasReached(target)
+      ) return false;
       finishExactHandoff();
       return true;
     };
@@ -3673,6 +3678,7 @@ function WebviewPlayer({
     onPausedChange(handoff?.paused ?? false);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("loadedmetadata", onLoadedMeta);
+    video.addEventListener("loadeddata", applyResume);
     video.addEventListener("durationchange", onDurationChange);
     video.addEventListener("seeked", onSeekedForResume);
     video.addEventListener("progress", onProgressForResume);
@@ -3690,6 +3696,7 @@ function WebviewPlayer({
     return () => {
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("loadedmetadata", onLoadedMeta);
+      video.removeEventListener("loadeddata", applyResume);
       video.removeEventListener("durationchange", onDurationChange);
       video.removeEventListener("seeked", onSeekedForResume);
       video.removeEventListener("progress", onProgressForResume);
@@ -3830,7 +3837,18 @@ function WebviewPlayer({
       // WebContent process. 60s behind + 30s (up to 120s) ahead keeps seeks snappy
       // without the balloon.
       const manifestTimeoutMs = webviewStartupTimeout(engine, url);
+      const configuredStartPosition = startPositionRef.current;
+      // hls.js uses -1 as live-edge startup for EVENT playlists. An exact
+      // handoff instead owns its local target, including a target of zero.
+      const exactHlsStartPosition = requiresExactHandoffRef.current
+        ? Number.isFinite(configuredStartPosition)
+          ? Math.max(0, configuredStartPosition as number)
+          : 0
+        : null;
       instance = new Hls({
+        ...(exactHlsStartPosition == null
+          ? {}
+          : { startPosition: exactHlsStartPosition }),
         backBufferLength: 60,
         maxBufferLength: 30,
         maxMaxBufferLength: 120,
