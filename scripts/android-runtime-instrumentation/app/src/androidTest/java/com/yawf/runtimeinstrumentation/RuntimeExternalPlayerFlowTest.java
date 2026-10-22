@@ -50,6 +50,10 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final String FIXTURE_ORIGIN_MESSAGE =
             "Allow http://127.0.0.1:43120 to open this stream in an external video player?";
     private static final String MOVIE_TITLE = "Synthetic Fixture Movie";
+    private static final String PLAYER_DIALOG_LABEL =
+            "Playing Synthetic Fixture Movie (2026)";
+    private static final String PLAYBACK_SETTINGS_LABEL = "Playback settings";
+    private static final String EXTERNAL_PLAYER_LABEL = "Open in external player";
     private static final String CONNECT_SERVER_LABEL =
             "Connect to a server Already have a server or an invite link? Paste the address and sign in.";
     private static final String SOURCE_CONTROL_LABEL =
@@ -182,13 +186,15 @@ public final class RuntimeExternalPlayerFlowTest {
         guardedClick(source, "synthetic source");
 
         transition("production-player-visible");
-        UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();
         capture("production-player");
-        guardedClick(playbackSettings, "Playback settings");
-        UiObject2 external = scrollUntilLabeledClickable(
-                "Open in external player", "Open in external player");
+        UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();
+        clickObservedControlImmediately(playbackSettings, PLAYBACK_SETTINGS_LABEL);
+        waitForUniquePlaybackSettingsDialog();
+        capture("playback-settings-panel");
+        UiObject2 external = scrollPlaybackSettingsUntilLabeledClickable(
+                EXTERNAL_PLAYER_LABEL, EXTERNAL_PLAYER_LABEL);
         capture("external-control-visible");
-        guardedClick(external, "Open in external player");
+        guardedClick(external, EXTERNAL_PLAYER_LABEL);
 
         transition("origin-confirmation-visible");
         waitFor(By.text("Open external player?"), SHORT_WAIT_MS, "native external-player title");
@@ -380,17 +386,96 @@ public final class RuntimeExternalPlayerFlowTest {
                 "Accessibility cache refresh requires Android API 34 or newer",
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
         long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
+        boolean revealTapPerformed = false;
         while (SystemClock.uptimeMillis() < deadline) {
             assertTrue(
                     "Accessibility cache refresh failed",
                     instrumentation.getUiAutomation().clearCache());
             assertNoOutOfScopeApproval();
-            UiObject2 found = findLabeledClickable("Playback settings");
-            if (found != null) return found;
+            UiObject2 playerDialog = findUniqueExactProductDialog(PLAYER_DIALOG_LABEL);
+            if (playerDialog == null || !hasVisibleBounds(playerDialog)) {
+                SystemClock.sleep(250);
+                continue;
+            }
+            UiObject2 found = findLabeledClickableWithin(
+                    playerDialog, PLAYBACK_SETTINGS_LABEL, PLAYBACK_SETTINGS_LABEL);
+            if (found != null && hasVisibleBounds(found)) {
+                assertVisibleBounds(found, PLAYBACK_SETTINGS_LABEL);
+                return found;
+            }
+            if (!revealTapPerformed) {
+                playerDialog.click();
+                revealTapPerformed = true;
+                log("Tapped the exact observed playing dialog surface once to reveal controls");
+            }
             SystemClock.sleep(250);
         }
         fail("Timed out waiting for Playback settings");
         return null;
+    }
+
+    private UiObject2 waitForUniquePlaybackSettingsDialog() {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertTrue(
+                    "Accessibility cache refresh failed",
+                    instrumentation.getUiAutomation().clearCache());
+            assertNoOutOfScopeApproval();
+            UiObject2 dialog = findUniqueExactProductDialog(PLAYBACK_SETTINGS_LABEL);
+            if (dialog != null) {
+                assertVisibleBounds(dialog, "Playback settings dialog");
+                return dialog;
+            }
+            SystemClock.sleep(250);
+        }
+        fail("Timed out waiting for the unique Playback settings dialog");
+        return null;
+    }
+
+    private UiObject2 scrollPlaybackSettingsUntilLabeledClickable(
+            String label, String description) {
+        for (int attempt = 0; attempt < 12; attempt++) {
+            assertTrue(
+                    "Accessibility cache refresh failed",
+                    instrumentation.getUiAutomation().clearCache());
+            assertNoOutOfScopeApproval();
+            UiObject2 dialog = requireUniqueExactProductDialog(
+                    PLAYBACK_SETTINGS_LABEL, "Playback settings dialog");
+            UiObject2 found = findLabeledClickableWithin(dialog, label, description);
+            if (found != null && hasVisibleBounds(found)) {
+                assertVisibleBounds(found, description);
+                return found;
+            }
+            UiObject2 scrollable = findUniqueScrollableWithin(dialog, description);
+            scrollable.scroll(Direction.DOWN, 0.70f);
+            log("Scrolled only the Playback settings dialog while seeking " + description);
+            SystemClock.sleep(500);
+        }
+        fail("Could not scroll the Playback settings dialog to " + description);
+        return null;
+    }
+
+    private UiObject2 findUniqueScrollableWithin(UiObject2 dialog, String description) {
+        List<UiObject2> candidates = new ArrayList<>();
+        if (dialog.isScrollable()) candidates.add(dialog);
+        for (UiObject2 descendant : dialog.findObjects(
+                By.scrollable(true).pkg(PRODUCT_PACKAGE))) {
+            boolean duplicate = false;
+            for (UiObject2 existing : candidates) {
+                if (sameSemanticNode(existing, descendant)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) candidates.add(descendant);
+        }
+        assertEquals(
+                "Expected one Playback settings scrollable while seeking " + description,
+                1,
+                candidates.size());
+        UiObject2 scrollable = candidates.get(0);
+        assertVisibleBounds(scrollable, "Playback settings scrollable");
+        return scrollable;
     }
 
     private UiObject2 waitForLabeledClickable(String label, long timeoutMs, String description) {
@@ -419,6 +504,38 @@ public final class RuntimeExternalPlayerFlowTest {
         return candidates.isEmpty() ? null : candidates.get(0);
     }
 
+    private UiObject2 findLabeledClickableWithin(
+            UiObject2 boundary, String label, String description) {
+        Pattern labelPattern = exactLabel(label);
+        List<UiObject2> candidates = new ArrayList<>();
+        collectClickableAncestorsWithin(
+                candidates, boundary.findObjects(By.text(labelPattern)), boundary);
+        collectClickableAncestorsWithin(
+                candidates, boundary.findObjects(By.desc(labelPattern)), boundary);
+        if (candidates.size() > 1) {
+            fail("Ambiguous enabled clickable controls inside the exact dialog for: " + description);
+        }
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private UiObject2 findUniqueExactProductDialog(String label) {
+        List<UiObject2> dialogs = device.findObjects(
+                By.clazz("android.app.Dialog")
+                        .pkg(PRODUCT_PACKAGE)
+                        .text(exactLabel(label)));
+        if (dialogs.size() > 1) {
+            fail("Ambiguous product dialogs for exact label: " + label);
+        }
+        return dialogs.isEmpty() ? null : dialogs.get(0);
+    }
+
+    private UiObject2 requireUniqueExactProductDialog(String label, String description) {
+        UiObject2 dialog = findUniqueExactProductDialog(label);
+        assertNotNull("Missing exact product-owned " + description, dialog);
+        assertVisibleBounds(dialog, description);
+        return dialog;
+    }
+
     private UiObject2 waitForOptionalLabeledClickable(
             Pattern labelPattern, long timeoutMs, String description) {
         long deadline = SystemClock.uptimeMillis() + timeoutMs;
@@ -434,6 +551,22 @@ public final class RuntimeExternalPlayerFlowTest {
     private void collectClickableAncestors(List<UiObject2> candidates, List<UiObject2> matches) {
         for (UiObject2 match : matches) {
             UiObject2 candidate = clickableAncestor(match);
+            if (candidate == null) continue;
+            boolean duplicate = false;
+            for (UiObject2 existing : candidates) {
+                if (sameSemanticNode(existing, candidate)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) candidates.add(candidate);
+        }
+    }
+
+    private void collectClickableAncestorsWithin(
+            List<UiObject2> candidates, List<UiObject2> matches, UiObject2 boundary) {
+        for (UiObject2 match : matches) {
+            UiObject2 candidate = clickableAncestorWithin(match, boundary);
             if (candidate == null) continue;
             boolean duplicate = false;
             for (UiObject2 existing : candidates) {
@@ -478,6 +611,25 @@ public final class RuntimeExternalPlayerFlowTest {
         return null;
     }
 
+    private UiObject2 clickableAncestorWithin(UiObject2 object, UiObject2 boundary) {
+        UiObject2 current = object;
+        for (int depth = 0; depth < 6 && current != null; depth++) {
+            if (sameSemanticNode(current, boundary)) return null;
+            if (current.isClickable() && current.isEnabled()) return current;
+            current = current.getParent();
+        }
+        return null;
+    }
+
+    private void assertVisibleBounds(UiObject2 object, String description) {
+        assertTrue(description + " had no visible bounds", hasVisibleBounds(object));
+    }
+
+    private boolean hasVisibleBounds(UiObject2 object) {
+        Rect bounds = object.getVisibleBounds();
+        return bounds.width() > 0 && bounds.height() > 0;
+    }
+
     private void clickLabeled(String label, String description, long timeoutMs) {
         UiObject2 object = waitForLabeledClickable(label, timeoutMs, description);
         guardedClick(object, description);
@@ -490,6 +642,12 @@ public final class RuntimeExternalPlayerFlowTest {
         object.click();
         log("Clicked semantic control: " + description);
         SystemClock.sleep(500);
+    }
+
+    private void clickObservedControlImmediately(UiObject2 object, String description) {
+        assertNotNull(description + " disappeared", object);
+        object.click();
+        log("Clicked freshly observed semantic control: " + description);
     }
 
     private UiObject2 waitForTextOrDescription(String label, long timeoutMs, String description) {

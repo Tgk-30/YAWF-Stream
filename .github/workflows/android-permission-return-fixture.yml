@@ -113,36 +113,35 @@ jobs:
             echo "$sdk_root/platform-tools"
           } >> "$GITHUB_PATH"
           extra_args=(:success-driver:assembleDebug :success-driver:assembleDebugAndroidTest)
-          if [ "${{ matrix.mode }}" = seeded-success ]; then
-            gradle --project-dir "$FIXTURE_PROJECT" --no-daemon --max-workers=2 \
-              :success-fixture:assembleTargetDebug
-            target="$FIXTURE_PROJECT/success-fixture/build/outputs/apk/target/debug/success-fixture-target-debug.apk"
-            test "$(apkanalyzer manifest application-id "$target")" = com.yawf.permissionreturnfixture
-            test "$(apkanalyzer manifest version-name "$target")" = 90.0.2
-            test "$(apkanalyzer manifest version-code "$target")" = 90000002
-            apkanalyzer manifest print "$target" > "$EVIDENCE/target-manifest.xml"
-            if grep -Fq 'android.permission.INTERNET' "$EVIDENCE/target-manifest.xml"; then
-              echo "::error::The fixture target must not have network permission" >&2
-              exit 1
-            fi
-            unzip -Z1 "$target" > "$EVIDENCE/target-archive-paths.txt"
-            if grep -Fxq 'assets/success-target.apk' "$EVIDENCE/target-archive-paths.txt"; then
-              echo "::error::The target recursively includes its baseline asset" >&2
-              exit 1
-            fi
-            target_sha="$(sha256sum "$target" | awk '{print $1}')"
-            target_size="$(stat -c %s "$target")"
-            node "$FIXTURE_PROJECT/stage_success_target.mjs" \
-              --target "$target" --sha256 "$target_sha" --size "$target_size" \
-              --receipt "$EVIDENCE/success-target-binding.json"
-            "$build_tools/apksigner" verify --print-certs "$target" > "$EVIDENCE/target-certificate.txt"
-            extra_args+=("-PsuccessTargetSha256=$target_sha" "-PsuccessTargetSize=$target_size")
-            {
-              echo "TARGET_APK=$target"
-              echo "TARGET_SHA256=$target_sha"
-              echo "TARGET_SIZE=$target_size"
-            } >> "$GITHUB_ENV"
-          elif [ "${{ matrix.mode }}" = return-resume-omitted ]; then
+          gradle --project-dir "$FIXTURE_PROJECT" --no-daemon --max-workers=2 \
+            :success-fixture:assembleTargetDebug
+          target="$FIXTURE_PROJECT/success-fixture/build/outputs/apk/target/debug/success-fixture-target-debug.apk"
+          test "$(apkanalyzer manifest application-id "$target")" = com.yawf.permissionreturnfixture
+          test "$(apkanalyzer manifest version-name "$target")" = 90.0.2
+          test "$(apkanalyzer manifest version-code "$target")" = 90000002
+          apkanalyzer manifest print "$target" > "$EVIDENCE/target-manifest.xml"
+          if grep -Fq 'android.permission.INTERNET' "$EVIDENCE/target-manifest.xml"; then
+            echo "::error::The fixture target must not have network permission" >&2
+            exit 1
+          fi
+          unzip -Z1 "$target" > "$EVIDENCE/target-archive-paths.txt"
+          if grep -Fxq 'assets/success-target.apk' "$EVIDENCE/target-archive-paths.txt"; then
+            echo "::error::The target recursively includes its baseline asset" >&2
+            exit 1
+          fi
+          target_sha="$(sha256sum "$target" | awk '{print $1}')"
+          target_size="$(stat -c %s "$target")"
+          node "$FIXTURE_PROJECT/stage_success_target.mjs" \
+            --target "$target" --sha256 "$target_sha" --size "$target_size" \
+            --receipt "$EVIDENCE/success-target-binding.json"
+          "$build_tools/apksigner" verify --print-certs "$target" > "$EVIDENCE/target-certificate.txt"
+          extra_args+=("-PsuccessTargetSha256=$target_sha" "-PsuccessTargetSize=$target_size")
+          {
+            echo "TARGET_APK=$target"
+            echo "TARGET_SHA256=$target_sha"
+            echo "TARGET_SIZE=$target_size"
+          } >> "$GITHUB_ENV"
+          if [ "${{ matrix.mode }}" = return-resume-omitted ]; then
             extra_args+=("-PfixtureTestBuildType=negativeControl")
           fi
           gradle \
@@ -166,6 +165,10 @@ jobs:
             exit 1
           fi
           "$build_tools/apksigner" verify --print-certs "$fixture_apk" > "$EVIDENCE/baseline-certificate.txt"
+          target_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/target-certificate.txt")"
+          baseline_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/baseline-certificate.txt")"
+          [[ "$target_cert" =~ ^[0-9a-f]{64}$ ]]
+          test "$baseline_cert" = "$target_cert"
           host="$FIXTURE_PROJECT/success-driver/build/outputs/apk/debug/success-driver-debug.apk"
           test "$(apkanalyzer manifest application-id "$host")" = com.yawf.permissionreturndriver
           apkanalyzer manifest print "$host" > "$EVIDENCE/driver-manifest.xml"
@@ -207,10 +210,6 @@ jobs:
           if [ "${{ matrix.mode }}" = seeded-success ]; then
             test "$(apkanalyzer manifest version-name "$fixture_apk")" = 90.0.1
             test "$(apkanalyzer manifest version-code "$fixture_apk")" = 90000001
-            target_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/target-certificate.txt")"
-            baseline_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/baseline-certificate.txt")"
-            [[ "$target_cert" =~ ^[0-9a-f]{64}$ ]]
-            test "$baseline_cert" = "$target_cert"
             {
               echo 'EVIDENCE_PACKAGE=com.yawf.permissionreturndriver'
               echo 'EVIDENCE_SUBDIR=permission-return-success-evidence'
@@ -445,12 +444,20 @@ jobs:
               assert receipt["permissionCleanupPerformedByCore"] is False
               assert receipt["installerObserved"] is False
               assert receipt["controlReachedTamper"] is True
+              assert receipt["identityBeforeTamperValidated"] is True
+              assert receipt["identityAfterTamperValidated"] is True
+              assert receipt["sameLengthTamper"] is True
+              assert receipt["originalSha256"] == os.environ["TARGET_SHA256"]
+              assert len(receipt["tamperedSha256"]) == 64
+              assert receipt["tamperedSha256"] != receipt["originalSha256"]
+              assert 1 <= receipt["signingPaddingBytes"] <= 65536
               assert receipt["publicOtaProof"] is False
               assert receipt["installProof"] is False
               assert receipt["dataPreservationProof"] is False
           if os.environ["MODE"] == "positive":
               assert receipt["classification"] == "fixture-lifecycle-and-tamper-rejection-core-only"
               assert receipt["negativeControl"] is False
+              assert receipt["retryMessage"] == "The verified update changed or became unavailable."
               assert receipt["verifierRecoveryObserved"] is True
               assert receipt["stagedFileCleared"] is True
           elif os.environ["MODE"] == "return-resume-omitted":

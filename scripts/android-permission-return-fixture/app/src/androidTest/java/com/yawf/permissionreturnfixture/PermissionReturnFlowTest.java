@@ -12,6 +12,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.SystemClock;
 
@@ -29,11 +31,17 @@ import org.junit.runner.RunWith;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Pattern;
 
 @RunWith(AndroidJUnit4.class)
@@ -42,7 +50,13 @@ public final class PermissionReturnFlowTest {
     private static final long VERIFY_WAIT_MS = 15_000L;
     private static final long SETTLE_SAMPLE_MS = 250L;
     private static final int MAX_CAPTURES = 8;
-    private static final int STAGED_BYTES = 4 * 1024 * 1024;
+    private static final int ZIP_EOCD_MIN_BYTES = 22;
+    private static final int ZIP_MAX_COMMENT_BYTES = 65_535;
+    private static final int ZIP_EOCD_SIGNATURE = 0x06054b50;
+    private static final int APK_SIGNING_BLOCK_PADDING_ID = 0x42726577;
+    private static final int MAX_SIGNING_PADDING_BYTES = 64 * 1024;
+    private static final byte[] APK_SIGNING_BLOCK_MAGIC =
+            "APK Sig Block 42".getBytes(StandardCharsets.US_ASCII);
 
     private Instrumentation instrumentation;
     private Context targetContext;
@@ -55,8 +69,15 @@ public final class PermissionReturnFlowTest {
     private boolean installerObserved;
     private boolean controlReachedTamper;
     private boolean verifierRecoveryObserved;
+    private boolean identityBeforeTamperValidated;
+    private boolean identityAfterTamperValidated;
     private String originalDigest;
     private String tamperedDigest;
+    private String retryMessage;
+    private long tamperedPaddingOffset = -1L;
+    private int signingPaddingBytes;
+    private PackageIdentity installedIdentity;
+    private PackageIdentity originalArchiveIdentity;
 
     @Test
     public void permissionReturnReverifiesTamperedStageAndNeverOpensInstaller() throws Exception {
@@ -68,6 +89,10 @@ public final class PermissionReturnFlowTest {
         assertTrue(
                 "Updater source pin was not finalized",
                 BuildConfig.UPDATER_SOURCE_SHA256.matches("[0-9a-f]{64}"));
+        assertTrue(
+                "Target APK digest pin was not finalized",
+                BuildConfig.TAMPER_TARGET_SHA256.matches("[0-9a-f]{64}"));
+        assertTrue("Target APK size pin was not finalized", BuildConfig.TAMPER_TARGET_SIZE > 0L);
 
         evidenceDir = new File(targetContext.getFilesDir(), "permission-return-evidence");
         deleteTree(evidenceDir);
@@ -149,18 +174,36 @@ public final class PermissionReturnFlowTest {
         deleteTree(updates);
         assertTrue("Could not create private update directory", updates.mkdirs());
         stagedFile = new File(updates, FixturePolicy.TEST_APK_NAME);
-        byte[] block = "fixture-stage-v1\n".getBytes(StandardCharsets.UTF_8);
-        try (FileOutputStream output = new FileOutputStream(stagedFile)) {
-            int remaining = STAGED_BYTES;
-            while (remaining > 0) {
-                int count = Math.min(remaining, block.length);
-                output.write(block, 0, count);
-                remaining -= count;
+        try (InputStream input = targetContext.getAssets().open(FixturePolicy.TARGET_ASSET_NAME);
+                FileOutputStream output = new FileOutputStream(stagedFile)) {
+            byte[] buffer = new byte[8192];
+            long total = 0L;
+            int count;
+            while ((count = input.read(buffer)) >= 0) {
+                total += count;
+                assertTrue("Target asset exceeded its size pin", total <= BuildConfig.TAMPER_TARGET_SIZE);
+                output.write(buffer, 0, count);
             }
             output.getFD().sync();
         }
-        assertEquals(STAGED_BYTES, stagedFile.length());
+        assertEquals(BuildConfig.TAMPER_TARGET_SIZE, stagedFile.length());
         originalDigest = sha256(stagedFile);
+        assertEquals(
+                "Target asset digest did not match its build pin",
+                BuildConfig.TAMPER_TARGET_SHA256,
+                originalDigest);
+
+        installedIdentity = installedIdentity();
+        originalArchiveIdentity = archiveIdentity(stagedFile);
+        assertTrue("Target APK was not newer than the installed fixture",
+                FixturePolicy.TEST_VERSION_CODE > installedIdentity.versionCode);
+        assertTargetArchiveIdentity(originalArchiveIdentity);
+        assertFalse("Installed current signer set was empty", installedIdentity.signers.isEmpty());
+        assertEquals(
+                "Target current signer set did not match the installed fixture",
+                installedIdentity.signers,
+                originalArchiveIdentity.signers);
+        identityBeforeTamperValidated = true;
 
         JSONObject candidate = new JSONObject();
         candidate.put("tag", FixturePolicy.TEST_TAG);
@@ -214,39 +257,67 @@ public final class PermissionReturnFlowTest {
 
     private void tamperStagedBytesWithoutChangingLength() throws Exception {
         long before = stagedFile.length();
+        tamperedPaddingOffset = requireZeroPaddingEntryOffset(stagedFile);
         try (RandomAccessFile file = new RandomAccessFile(stagedFile, "rw")) {
-            int first = file.read();
-            assertTrue("Staged file was empty", first >= 0);
-            file.seek(0L);
-            file.write(first ^ 0xff);
+            file.seek(tamperedPaddingOffset);
+            assertEquals("Signing-block padding byte was not zero", 0, file.read());
+            file.seek(tamperedPaddingOffset);
+            file.write(1);
             file.getFD().sync();
         }
         assertEquals("Tamper changed the staged length", before, stagedFile.length());
+        assertOnlyAssetPaddingByteChanged();
         tamperedDigest = sha256(stagedFile);
         assertNotEquals("Tamper did not change the staged digest", originalDigest, tamperedDigest);
+
+        PackageIdentity tamperedArchiveIdentity = archiveIdentity(stagedFile);
+        assertTargetArchiveIdentity(tamperedArchiveIdentity);
+        assertEquals(
+                "Tamper changed the parsed target package",
+                originalArchiveIdentity.packageName,
+                tamperedArchiveIdentity.packageName);
+        assertEquals(
+                "Tamper changed the parsed target version name",
+                originalArchiveIdentity.versionName,
+                tamperedArchiveIdentity.versionName);
+        assertEquals(
+                "Tamper changed the parsed target version code",
+                originalArchiveIdentity.versionCode,
+                tamperedArchiveIdentity.versionCode);
+        assertEquals(
+                "Tamper changed the target current signer set",
+                originalArchiveIdentity.signers,
+                tamperedArchiveIdentity.signers);
+        assertEquals(
+                "Tampered target current signer set did not match the installed fixture",
+                installedIdentity.signers,
+                tamperedArchiveIdentity.signers);
+        identityAfterTamperValidated = true;
     }
 
     private void waitForTamperFailureWithoutInstaller() {
         long deadline = SystemClock.uptimeMillis() + VERIFY_WAIT_MS;
         while (SystemClock.uptimeMillis() < deadline) {
             observeInstallerSurfaces();
-            UiObject2 reviewedMessage = findReviewedRetryMessage();
+            UiObject2 changedMessage = findChangedRetryMessage();
             UiObject2 retry = findUniqueNativeDialogButton("button1", "Retry");
             UiObject2 cancel = findUniqueNativeDialogButton("button2", "Cancel update");
             if (device.hasObject(By.text(FixturePolicy.RETRY_TITLE))
-                    && reviewedMessage != null
+                    && changedMessage != null
                     && retry != null
                     && cancel != null) {
-                assertTrue(
-                        "Retry message was outside the reviewed failure set",
-                        FixturePolicy.isReviewedRetryMessage(String.valueOf(reviewedMessage.getText())));
+                retryMessage = String.valueOf(changedMessage.getText());
+                assertEquals(
+                        "Retry message was not the exact changed-stage failure",
+                        FixturePolicy.CHANGED_MESSAGE,
+                        retryMessage);
                 int settled = 0;
                 while (settled < FixturePolicy.SETTLED_SAMPLES) {
                     observeInstallerSurfaces();
                     assertTrue(
                             "Tamper failure dialog did not remain settled",
                             device.hasObject(By.text(FixturePolicy.RETRY_TITLE))
-                                    && findReviewedRetryMessage() != null
+                                    && findChangedRetryMessage() != null
                                     && findUniqueNativeDialogButton("button1", "Retry") != null
                                     && findUniqueNativeDialogButton("button2", "Cancel update") != null);
                     settled++;
@@ -260,17 +331,13 @@ public final class PermissionReturnFlowTest {
         fail("Automatic permission return did not settle on the tamper rejection UI");
     }
 
-    private UiObject2 findReviewedRetryMessage() {
-        for (String message : new String[] {
-                FixturePolicy.CHANGED_MESSAGE,
-                FixturePolicy.INTERRUPTED_MESSAGE,
-        }) {
-            UiObject2 object = device.findObject(By.text(message).pkg(FixturePolicy.FIXTURE_PACKAGE));
-            if (object != null && FixturePolicy.isReviewedRetryMessage(String.valueOf(object.getText()))) {
-                return object;
-            }
-        }
-        return null;
+    private UiObject2 findChangedRetryMessage() {
+        UiObject2 object = device.findObject(
+                By.text(FixturePolicy.CHANGED_MESSAGE).pkg(FixturePolicy.FIXTURE_PACKAGE));
+        return object != null
+                        && FixturePolicy.isChangedRetryMessage(String.valueOf(object.getText()))
+                ? object
+                : null;
     }
 
     private void assertReturnResumeOmissionBlocksVerifierRecovery() throws Exception {
@@ -417,6 +484,13 @@ public final class PermissionReturnFlowTest {
         receipt.put("updaterSourceSha256", BuildConfig.UPDATER_SOURCE_SHA256);
         receipt.put("candidateParsedByUpdater", captureCount >= 1);
         receipt.put("sameLengthTamper", originalDigest != null && tamperedDigest != null);
+        receipt.put("originalSha256", originalDigest == null ? JSONObject.NULL : originalDigest);
+        receipt.put("tamperedSha256", tamperedDigest == null ? JSONObject.NULL : tamperedDigest);
+        receipt.put("retryMessage", retryMessage == null ? JSONObject.NULL : retryMessage);
+        receipt.put("identityBeforeTamperValidated", identityBeforeTamperValidated);
+        receipt.put("identityAfterTamperValidated", identityAfterTamperValidated);
+        receipt.put("signingPaddingBytes", signingPaddingBytes);
+        receipt.put("tamperedPaddingOffset", tamperedPaddingOffset);
         receipt.put("negativeControl", BuildConfig.OMIT_PERMISSION_RETURN_ON_RESUME);
         receipt.put("controlReachedTamper", controlReachedTamper);
         receipt.put("verifierRecoveryObserved", verifierRecoveryObserved);
@@ -435,6 +509,209 @@ public final class PermissionReturnFlowTest {
         }
     }
 
+    private PackageIdentity installedIdentity() throws Exception {
+        PackageInfo info = targetContext.getPackageManager().getPackageInfo(
+                FixturePolicy.FIXTURE_PACKAGE,
+                PackageManager.GET_SIGNING_CERTIFICATES);
+        return identityFromPackageInfo(info);
+    }
+
+    private PackageIdentity archiveIdentity(File apk) throws Exception {
+        PackageInfo info = targetContext.getPackageManager().getPackageArchiveInfo(
+                apk.getAbsolutePath(),
+                PackageManager.GET_SIGNING_CERTIFICATES);
+        assertNotNull("PackageManager could not parse the target APK", info);
+        return identityFromPackageInfo(info);
+    }
+
+    private static PackageIdentity identityFromPackageInfo(PackageInfo info) throws Exception {
+        assertNotNull("SigningInfo was unavailable", info.signingInfo);
+        android.content.pm.Signature[] currentSigners = info.signingInfo.getApkContentsSigners();
+        assertNotNull("Current APK signer set was unavailable", currentSigners);
+        Set<String> signers = new TreeSet<>();
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        for (android.content.pm.Signature signer : currentSigners) {
+            signers.add(toHex(digest.digest(signer.toByteArray())));
+        }
+        return new PackageIdentity(
+                info.packageName,
+                info.versionName == null ? "" : info.versionName,
+                info.getLongVersionCode(),
+                signers);
+    }
+
+    private static void assertTargetArchiveIdentity(PackageIdentity identity) {
+        assertEquals(
+                "Target APK package name was not the fixture package",
+                FixturePolicy.FIXTURE_PACKAGE,
+                identity.packageName);
+        assertEquals(
+                "Target APK version name was not the seeded candidate version",
+                FixturePolicy.TEST_VERSION,
+                identity.versionName);
+        assertEquals(
+                "Target APK version code was not the seeded candidate version",
+                FixturePolicy.TEST_VERSION_CODE,
+                identity.versionCode);
+        assertFalse("Target APK current signer set was empty", identity.signers.isEmpty());
+    }
+
+    private long requireZeroPaddingEntryOffset(File apk) throws Exception {
+        try (RandomAccessFile file = new RandomAccessFile(apk, "r")) {
+            long eocdOffset = requireEocdOffset(file);
+            byte[] eocd = readExactly(file, eocdOffset, ZIP_EOCD_MIN_BYTES);
+            ByteBuffer end = ByteBuffer.wrap(eocd).order(ByteOrder.LITTLE_ENDIAN);
+            assertEquals("EOCD signature changed", ZIP_EOCD_SIGNATURE, end.getInt(0));
+            assertEquals("Multi-disk APK is unsupported", 0, Short.toUnsignedInt(end.getShort(4)));
+            assertEquals("Multi-disk central directory is unsupported", 0, Short.toUnsignedInt(end.getShort(6)));
+            assertEquals(
+                    "Split central directory entry counts are unsupported",
+                    Short.toUnsignedInt(end.getShort(8)),
+                    Short.toUnsignedInt(end.getShort(10)));
+            long centralDirectorySize = Integer.toUnsignedLong(end.getInt(12));
+            long centralDirectoryOffset = Integer.toUnsignedLong(end.getInt(16));
+            assertNotEquals("ZIP64 central-directory size is unsupported", 0xffff_ffffL, centralDirectorySize);
+            assertNotEquals("ZIP64 central-directory offset is unsupported", 0xffff_ffffL, centralDirectoryOffset);
+            assertEquals(
+                    "Central directory did not end at the EOCD",
+                    eocdOffset,
+                    Math.addExact(centralDirectoryOffset, centralDirectorySize));
+            assertTrue("APK signing block footer was unavailable", centralDirectoryOffset >= 24L);
+
+            long footerOffset = centralDirectoryOffset - 24L;
+            byte[] footer = readExactly(file, footerOffset, 24);
+            ByteBuffer footerBuffer = ByteBuffer.wrap(footer).order(ByteOrder.LITTLE_ENDIAN);
+            long blockSize = footerBuffer.getLong();
+            byte[] magic = new byte[APK_SIGNING_BLOCK_MAGIC.length];
+            footerBuffer.get(magic);
+            assertTrue("APK signing block size was invalid", blockSize >= 24L);
+            assertTrue("APK signing block size exceeded the file", blockSize <= centralDirectoryOffset - 8L);
+            assertTrue(
+                    "APK signing block magic was missing",
+                    Arrays.equals(APK_SIGNING_BLOCK_MAGIC, magic));
+
+            long blockStart = centralDirectoryOffset - Math.addExact(blockSize, 8L);
+            assertTrue("APK signing block start was invalid", blockStart >= 0L);
+            assertEquals(
+                    "APK signing block header and footer sizes differed",
+                    blockSize,
+                    readLongLittleEndian(file, blockStart));
+
+            long cursor = blockStart + 8L;
+            long paddingOffset = -1L;
+            int paddingLength = -1;
+            while (cursor < footerOffset) {
+                long remaining = footerOffset - cursor;
+                assertTrue("APK signing block pair header was truncated", remaining >= 12L);
+                long pairSize = readLongLittleEndian(file, cursor);
+                assertTrue("APK signing block pair size was invalid", pairSize >= 4L);
+                assertTrue("APK signing block pair exceeded its block", pairSize <= remaining - 8L);
+                int pairId = readIntLittleEndian(file, cursor + 8L);
+                long valueOffset = cursor + 12L;
+                long valueSize = pairSize - 4L;
+                long pairEnd = Math.addExact(valueOffset, valueSize);
+                assertTrue("APK signing block pair boundary was invalid", pairEnd <= footerOffset);
+                if (pairId == APK_SIGNING_BLOCK_PADDING_ID) {
+                    assertEquals("APK signing block contained duplicate padding entries", -1L, paddingOffset);
+                    assertTrue(
+                            "APK signing block padding length was outside the fixture bound",
+                            valueSize >= 1L && valueSize <= MAX_SIGNING_PADDING_BYTES);
+                    byte[] padding = readExactly(file, valueOffset, Math.toIntExact(valueSize));
+                    for (byte item : padding) {
+                        assertEquals("APK signing block padding was not zero-filled", 0, item);
+                    }
+                    paddingLength = padding.length;
+                    paddingOffset = valueOffset + (padding.length / 2L);
+                }
+                cursor = pairEnd;
+            }
+            assertEquals("APK signing block pair table did not end at its footer", footerOffset, cursor);
+            assertTrue("APK signing block padding entry was absent", paddingOffset >= 0L);
+            signingPaddingBytes = paddingLength;
+            return paddingOffset;
+        }
+    }
+
+    private static long requireEocdOffset(RandomAccessFile file) throws Exception {
+        long fileLength = file.length();
+        assertTrue("APK was too short for a ZIP EOCD", fileLength >= ZIP_EOCD_MIN_BYTES);
+        int tailLength = (int) Math.min(
+                fileLength,
+                ZIP_EOCD_MIN_BYTES + (long) ZIP_MAX_COMMENT_BYTES);
+        long tailOffset = fileLength - tailLength;
+        byte[] tail = readExactly(file, tailOffset, tailLength);
+        long eocdOffset = -1L;
+        for (int index = tail.length - ZIP_EOCD_MIN_BYTES; index >= 0; index--) {
+            if (littleEndianInt(tail, index) != ZIP_EOCD_SIGNATURE) continue;
+            int commentLength = littleEndianUnsignedShort(tail, index + 20);
+            if (index + ZIP_EOCD_MIN_BYTES + commentLength != tail.length) continue;
+            assertEquals("APK contained ambiguous terminal ZIP EOCD records", -1L, eocdOffset);
+            eocdOffset = tailOffset + index;
+        }
+        assertTrue("APK ZIP EOCD was absent or malformed", eocdOffset >= 0L);
+        return eocdOffset;
+    }
+
+    private void assertOnlyAssetPaddingByteChanged() throws Exception {
+        int mismatches = 0;
+        long mismatchOffset = -1L;
+        long cursor = 0L;
+        try (InputStream original = targetContext.getAssets().open(FixturePolicy.TARGET_ASSET_NAME);
+                RandomAccessFile changed = new RandomAccessFile(stagedFile, "r")) {
+            byte[] originalBytes = new byte[8192];
+            byte[] changedBytes = new byte[8192];
+            int count;
+            while ((count = original.read(originalBytes)) >= 0) {
+                if (count == 0) continue;
+                changed.readFully(changedBytes, 0, count);
+                for (int index = 0; index < count; index++) {
+                    if (originalBytes[index] != changedBytes[index]) {
+                        mismatches++;
+                        mismatchOffset = cursor + index;
+                        assertEquals("Original padding byte was not zero", 0, originalBytes[index]);
+                        assertEquals("Changed padding byte was not one", 1, changedBytes[index]);
+                    }
+                }
+                cursor += count;
+            }
+            assertEquals("Changed APK length exceeded the target asset", -1, changed.read());
+        }
+        assertEquals("Tamper changed more or fewer than one APK byte", 1, mismatches);
+        assertEquals("Tamper changed a byte outside the parsed padding entry", tamperedPaddingOffset, mismatchOffset);
+    }
+
+    private static byte[] readExactly(RandomAccessFile file, long offset, int size) throws IOException {
+        byte[] bytes = new byte[size];
+        file.seek(offset);
+        file.readFully(bytes);
+        return bytes;
+    }
+
+    private static long readLongLittleEndian(RandomAccessFile file, long offset) throws IOException {
+        return ByteBuffer.wrap(readExactly(file, offset, Long.BYTES))
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .getLong();
+    }
+
+    private static int readIntLittleEndian(RandomAccessFile file, long offset) throws IOException {
+        return ByteBuffer.wrap(readExactly(file, offset, Integer.BYTES))
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .getInt();
+    }
+
+    private static int littleEndianInt(byte[] bytes, int offset) {
+        return ByteBuffer.wrap(bytes, offset, Integer.BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .getInt();
+    }
+
+    private static int littleEndianUnsignedShort(byte[] bytes, int offset) {
+        return Short.toUnsignedInt(
+                ByteBuffer.wrap(bytes, offset, Short.BYTES)
+                        .order(ByteOrder.LITTLE_ENDIAN)
+                        .getShort());
+    }
+
     private static String sha256(File file) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         try (java.io.FileInputStream input = new java.io.FileInputStream(file)) {
@@ -449,6 +726,28 @@ public final class PermissionReturnFlowTest {
             value.append(String.format(Locale.ROOT, "%02x", item & 0xff));
         }
         return value.toString();
+    }
+
+    private static String toHex(byte[] bytes) {
+        StringBuilder value = new StringBuilder(bytes.length * 2);
+        for (byte item : bytes) {
+            value.append(String.format(Locale.ROOT, "%02x", item & 0xff));
+        }
+        return value.toString();
+    }
+
+    private static final class PackageIdentity {
+        final String packageName;
+        final String versionName;
+        final long versionCode;
+        final Set<String> signers;
+
+        PackageIdentity(String packageName, String versionName, long versionCode, Set<String> signers) {
+            this.packageName = packageName;
+            this.versionName = versionName;
+            this.versionCode = versionCode;
+            this.signers = signers;
+        }
     }
 
     private static void deleteTree(File root) {

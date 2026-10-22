@@ -17,10 +17,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const OUTPUT = join(
-  ROOT,
+const OUTPUT_PATHS = [
   "success-fixture/build/generated/successBaselineAssets/success-target.apk",
-);
+  "app/build/generated/tamperBaselineAssets/success-target.apk",
+];
+const OUTPUTS = OUTPUT_PATHS.map((path) => join(ROOT, path));
 const MAX_BYTES = 160 * 1024 * 1024;
 
 function sha256(path) {
@@ -56,24 +57,28 @@ function requireApk(path, expectedSha256, expectedSize) {
 
 export function stageSuccessTarget({ target, expectedSha256, expectedSize, receipt }) {
   const admitted = requireApk(resolve(target), expectedSha256, expectedSize);
-  try {
-    const existing = lstatSync(OUTPUT);
-    if (!existing.isFile() || existing.isSymbolicLink() || sha256(OUTPUT) !== expectedSha256) {
-      throw new Error("Refusing to replace an unrecognized baseline target asset");
+  for (const output of OUTPUTS) {
+    try {
+      const existing = lstatSync(output);
+      if (!existing.isFile() || existing.isSymbolicLink() || sha256(output) !== expectedSha256) {
+        throw new Error("Refusing to replace an unrecognized baseline target asset");
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
     }
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
   }
-  mkdirSync(dirname(OUTPUT), { recursive: true });
-  copyFileSync(admitted.canonical, OUTPUT);
-  if (sha256(OUTPUT) !== expectedSha256 || statSync(OUTPUT).size !== expectedSize) {
-    throw new Error("Staged baseline target asset changed during copy");
+  for (const output of OUTPUTS) {
+    mkdirSync(dirname(output), { recursive: true });
+    copyFileSync(admitted.canonical, output);
+    if (sha256(output) !== expectedSha256 || statSync(output).size !== expectedSize) {
+      throw new Error("Staged baseline target asset changed during copy");
+    }
   }
   const result = {
     classification: "fixture-success-target-asset",
     targetSha256: expectedSha256,
     targetSize: expectedSize,
-    output: "success-fixture/build/generated/successBaselineAssets/success-target.apk",
+    outputs: OUTPUT_PATHS,
     publicDiscoveryProof: false,
     productionOtaProof: false,
   };

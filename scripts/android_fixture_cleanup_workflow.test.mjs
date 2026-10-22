@@ -26,6 +26,7 @@ with tempfile.TemporaryDirectory(prefix='yawf-cleanup-policy-') as directory:
     receipt = Path(directory) / 'receipt.json'
     os.environ['RECEIPT'] = str(receipt)
     os.environ['DRIVER_MANIFEST'] = str(receipt)
+    os.environ['TARGET_SHA256'] = 'a' * 64
     for case in p['cases']:
         receipt.write_text(case['xml'] if 'xml' in case else json.dumps(case['receipt']))
         os.environ['MODE'] = case.get('mode', 'positive')
@@ -61,6 +62,9 @@ const validCore = {
   installProof: false, dataPreservationProof: false,
   classification: 'fixture-lifecycle-and-tamper-rejection-core-only', negativeControl: false,
   verifierRecoveryObserved: true, stagedFileCleared: true,
+  identityBeforeTamperValidated: true, identityAfterTamperValidated: true,
+  sameLengthTamper: true, originalSha256: 'a'.repeat(64), tamperedSha256: 'b'.repeat(64),
+  signingPaddingBytes: 2650, retryMessage: 'The verified update changed or became unavailable.',
 };
 
 test('both instrumentation processes must finish and cleanup always runs after the core result', () => {
@@ -107,6 +111,12 @@ test('the exact core policy cannot claim same-UID cleanup or omit the external c
     { name: 'positive', receipt: validCore },
     { name: 'negative', mode: 'return-resume-omitted', receipt: negative },
     { name: 'coreFailure', receipt: { ...validCore, corePassed: false } },
+    { name: 'identityBeforeMissing', receipt: { ...validCore, identityBeforeTamperValidated: false } },
+    { name: 'identityAfterMissing', receipt: { ...validCore, identityAfterTamperValidated: false } },
+    { name: 'unchangedDigest', receipt: { ...validCore, tamperedSha256: 'a'.repeat(64) } },
+    { name: 'wrongOriginal', receipt: { ...validCore, originalSha256: 'c'.repeat(64) } },
+    { name: 'missingPadding', receipt: { ...validCore, signingPaddingBytes: 0 } },
+    { name: 'genericInterrupted', receipt: { ...validCore, retryMessage: 'Update preparation was interrupted. Retry when you are ready.' } },
     { name: 'cleanupNotRequired', receipt: { ...validCore, externalPermissionCleanupRequired: false } },
     { name: 'sameUidCleanupClaim', receipt: { ...validCore, permissionCleanupPerformedByCore: true } },
     { name: 'recoveryUnobserved', receipt: { ...validCore, verifierRecoveryObserved: false } },

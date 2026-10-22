@@ -347,10 +347,18 @@ jobs:
           set -euo pipefail
           source_node="$(readlink -f "$(command -v node)")"
           source_hash="$(sha256sum "$source_node" | awk '{print $1}')"
-          sudo install -d -o root -g root -m 0755 /opt/yawf-node24
-          sudo install -o root -g root -m 0755 "$source_node" /opt/yawf-node24/node
-          test "$source_hash" = "$(sha256sum /opt/yawf-node24/node | awk '{print $1}')"
-          /opt/yawf-node24/node --version | grep -Eq '^v24\.'
+          test ! -e /usr/lib/yawf-ci-node24
+          test ! -L /usr/lib/yawf-ci-node24
+          for ancestor in /usr/lib /usr /; do
+            test ! -L "$ancestor"
+            test "$(stat -c %u "$ancestor")" = 0
+            mode="$(stat -c %a "$ancestor")"
+            (( (8#$mode & 8#22) == 0 ))
+          done
+          sudo install -d -o root -g root -m 0755 /usr/lib/yawf-ci-node24
+          sudo install -o root -g root -m 0755 "$source_node" /usr/lib/yawf-ci-node24/node
+          test "$source_hash" = "$(sha256sum /usr/lib/yawf-ci-node24/node | awk '{print $1}')"
+          /usr/lib/yawf-ci-node24/node --version | grep -Eq '^v24\.'
 
       - name: Admit disposable CI Docker runtime
         shell: bash
@@ -386,7 +394,7 @@ jobs:
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             RUNNER_OS="$RUNNER_OS" \
             RUNNER_TEMP="$RUNNER_TEMP" \
-            YAWF_UPDATER_TEST_NODE=/opt/yawf-node24/node \
+            YAWF_UPDATER_TEST_NODE=/usr/lib/yawf-ci-node24/node \
             bash scripts/server_updater_install_runtime.sh 2>&1 | tee "$driver_log"
           runtime_raw="$(sed -n 's/^INSTALLER_RUNTIME_RAW=//p' "$driver_log" | tail -n 1)"
           runtime_receipt="$(sed -n 's/^INSTALLER_RUNTIME_RECEIPT=//p' "$driver_log" | tail -n 1)"
@@ -418,7 +426,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo bash deploy/updater/install.sh --node-runtime /opt/yawf-node24/node
+          sudo bash deploy/updater/install.sh --node-runtime /usr/lib/yawf-ci-node24/node
           sudo sh -c 'mkdir -p /run/yawf-server-updater; exec 9>/run/yawf-server-updater/operation.lock; flock 9; sleep 3' &
           holder=$!
           sleep 0.5
@@ -439,8 +447,8 @@ jobs:
           receipt="$RUNNER_TEMP/server-updater-compose.json"
           expected_version="$(node -p "require('./server/package.json').version")"
           failure_version="$(node -e "const [a,b,c]=require('./server/package.json').version.split('.').map(Number);process.stdout.write([a,b,c+1].join('.'))")"
-          sudo /opt/yawf-node24/node scripts/server_updater_compose_integration.mjs 2>&1 | tee "$raw"
-          /opt/yawf-node24/node --input-type=module - "$raw" "$receipt" "$expected_version" "$failure_version" <<'NODE'
+          sudo /usr/lib/yawf-ci-node24/node scripts/server_updater_compose_integration.mjs 2>&1 | tee "$raw"
+          /usr/lib/yawf-ci-node24/node --input-type=module - "$raw" "$receipt" "$expected_version" "$failure_version" <<'NODE'
           import assert from "node:assert/strict";
           import { readFileSync, writeFileSync } from "node:fs";
           const [raw, receipt, expectedVersion, failureVersion] = process.argv.slice(2);
@@ -485,11 +493,11 @@ jobs:
           raw="$RUNNER_TEMP/server-updater-compose-actual.log"
           receipt="$RUNNER_TEMP/server-updater-compose-actual.json"
           expected_version="$(node -p "require('./server/package.json').version")"
-          sudo /opt/yawf-node24/node scripts/server_updater_compose_integration.mjs \
+          sudo /usr/lib/yawf-ci-node24/node scripts/server_updater_compose_integration.mjs \
             --candidate-digest "$CANDIDATE_DIGEST" \
             --source-revision "$SOURCE_REVISION" \
             2>&1 | tee "$raw"
-          /opt/yawf-node24/node --input-type=module - "$raw" "$receipt" "$CANDIDATE_DIGEST" "$SOURCE_REVISION" "$expected_version" <<'NODE'
+          /usr/lib/yawf-ci-node24/node --input-type=module - "$raw" "$receipt" "$CANDIDATE_DIGEST" "$SOURCE_REVISION" "$expected_version" <<'NODE'
           import assert from "node:assert/strict";
           import { readFileSync, writeFileSync } from "node:fs";
           const [raw, receipt, expectedDigest, expectedSource, expectedVersion] = process.argv.slice(2);

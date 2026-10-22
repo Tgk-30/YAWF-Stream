@@ -28,7 +28,9 @@ const FLOW = join(
   ROOT,
   "app/src/androidTest/java/com/yawf/permissionreturnfixture/PermissionReturnFlowTest.java",
 );
-const WORKFLOW = resolve(ROOT, "../../.github/workflows/android-permission-return-fixture.yml");
+const WORKFLOW = process.env.PERMISSION_RETURN_WORKFLOW_PATH
+  ? resolve(process.env.PERMISSION_RETURN_WORKFLOW_PATH)
+  : resolve(ROOT, "../../.github/workflows/android-permission-return-fixture.yml");
 const ROOT_BUILD = join(ROOT, "build.gradle.kts");
 const APP_BUILD = join(ROOT, "app/build.gradle.kts");
 const SETTINGS = join(ROOT, "settings.gradle.kts");
@@ -89,7 +91,10 @@ async function syntheticStageModule() {
   const module = await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}`);
   return {
     root,
-    output: join(root, "success-fixture/build/generated/successBaselineAssets/success-target.apk"),
+    outputs: [
+      join(root, "success-fixture/build/generated/successBaselineAssets/success-target.apk"),
+      join(root, "app/build/generated/tamperBaselineAssets/success-target.apk"),
+    ],
     module,
   };
 }
@@ -122,7 +127,27 @@ function flowFailures(flow, policy) {
   const requiredFlow = [
     "putString(FixturePolicy.KEY_DOWNLOAD_CANDIDATE, candidate.toString())",
     "putInt(FixturePolicy.KEY_UPDATE_PHASE, FixturePolicy.PHASE_STAGED)",
+    "targetContext.getAssets().open(FixturePolicy.TARGET_ASSET_NAME)",
+    "BuildConfig.TAMPER_TARGET_SHA256",
+    "BuildConfig.TAMPER_TARGET_SIZE",
+    '"Target asset digest did not match its build pin"',
+    "PackageManager.GET_SIGNING_CERTIFICATES",
+    "getPackageArchiveInfo(\n                apk.getAbsolutePath(),",
+    "info.signingInfo.getApkContentsSigners()",
+    "assertTargetArchiveIdentity(originalArchiveIdentity)",
+    '"Target current signer set did not match the installed fixture"',
     "tamperStagedBytesWithoutChangingLength();\n            toggle.click();",
+    "tamperedPaddingOffset = requireZeroPaddingEntryOffset(stagedFile)",
+    "APK_SIGNING_BLOCK_PADDING_ID = 0x42726577",
+    "valueSize >= 1L && valueSize <= MAX_SIGNING_PADDING_BYTES",
+    '"APK signing block padding was not zero-filled"',
+    "file.write(1)",
+    "assertOnlyAssetPaddingByteChanged()",
+    '"Tamper changed the parsed target package"',
+    '"Tamper changed the parsed target version name"',
+    '"Tamper changed the parsed target version code"',
+    '"Tamper changed the target current signer set"',
+    '"Tampered target current signer set did not match the installed fixture"',
     "permissionEnabled = true;\n            controlReachedTamper = true;",
     "if (BuildConfig.OMIT_PERMISSION_RETURN_ON_RESUME)",
     "assertReturnResumeOmissionBlocksVerifierRecovery();",
@@ -144,6 +169,12 @@ function flowFailures(flow, policy) {
     'receipt.put("corePassed", failure == null)',
     'receipt.put("externalPermissionCleanupRequired", permissionEnabled)',
     'receipt.put("permissionCleanupPerformedByCore", false)',
+    'receipt.put("originalSha256", originalDigest == null ? JSONObject.NULL : originalDigest)',
+    'receipt.put("tamperedSha256", tamperedDigest == null ? JSONObject.NULL : tamperedDigest)',
+    'receipt.put("retryMessage", retryMessage == null ? JSONObject.NULL : retryMessage)',
+    'receipt.put("identityBeforeTamperValidated", identityBeforeTamperValidated)',
+    'receipt.put("identityAfterTamperValidated", identityAfterTamperValidated)',
+    'receipt.put("signingPaddingBytes", signingPaddingBytes)',
     "publicOtaProof\", false",
     "installProof\", false",
     "dataPreservationProof\", false",
@@ -156,12 +187,18 @@ function flowFailures(flow, policy) {
   for (const value of requiredFlow) if (!flow.includes(value)) failures.push(value);
   const requiredPolicy = [
     "The verified update changed or became unavailable.",
-    "Update preparation was interrupted. Retry when you are ready.",
-    "return CHANGED_MESSAGE.equals(message) || INTERRUPTED_MESSAGE.equals(message);",
+    'public static final String TEST_VERSION = "90.0.2"',
+    "public static final long TEST_VERSION_CODE = 90_000_002L",
+    'public static final String TEST_APK_NAME = "YAWF.Stream_Android_90.0.2.apk"',
+    'public static final String TARGET_ASSET_NAME = "success-target.apk"',
+    "return CHANGED_MESSAGE.equals(message);",
   ];
   for (const value of requiredPolicy) if (!policy.includes(value)) failures.push(value);
-  if (!/for \(String message : new String\[\] \{\s*FixturePolicy\.CHANGED_MESSAGE,\s*FixturePolicy\.INTERRUPTED_MESSAGE,/m.test(flow)) {
-    failures.push("bounded reviewed retry message set");
+  if (!flow.includes("By.text(FixturePolicy.CHANGED_MESSAGE).pkg(FixturePolicy.FIXTURE_PACKAGE)")) {
+    failures.push("exact changed-stage retry message selector");
+  }
+  if (/INTERRUPTED_MESSAGE|Update preparation was interrupted/.test(`${flow}\n${policy}`)) {
+    failures.push("generic interrupted retry acceptance");
   }
   if (/verifyStaged|java\.lang\.reflect|setAccessible\s*\(/.test(flow)) {
     failures.push("private verification bypass");
@@ -169,8 +206,17 @@ function flowFailures(flow, policy) {
   if (/getWindowRoots\s*\(/.test(flow)) {
     failures.push("nonpublic UiAutomator window-root API");
   }
-  if (/adb|pm install|fake feed|SIGNING_CERT/.test(flow)) {
+  if (/adb|pm install|fake feed|SIGNING_CERT(?!IFICATES)/.test(flow)) {
     failures.push("forbidden install or trust shortcut");
+  }
+  if (/fixture-stage-v1|STAGED_BYTES|file\.seek\(0L\)|file\.write\(first \^/.test(flow)) {
+    failures.push("synthetic or unparsed tamper target");
+  }
+  if (!/PackageIdentity tamperedArchiveIdentity = archiveIdentity\(stagedFile\);[\s\S]*identityAfterTamperValidated = true;/.test(flow)) {
+    failures.push("post-tamper public archive identity validation");
+  }
+  if ((flow.match(/assertOnlyAssetPaddingByteChanged\(\)/g) || []).length !== 2) {
+    failures.push("exactly one-byte asset comparison invocation");
   }
   if (flow.includes("Verifying update")) {
     failures.push("transient verification presentation asserted");
@@ -193,8 +239,15 @@ function fixtureBuildWiringFailures(appBuild, successBuild) {
   const failures = [];
   const requiredApp = [
     'val fixtureTestBuildType = providers.gradleProperty("fixtureTestBuildType")',
+    'val targetSha256 = providers.gradleProperty("successTargetSha256")',
+    'val targetSize = providers.gradleProperty("successTargetSize")',
     '.orElse("debug")',
     "testBuildType = fixtureTestBuildType.get()",
+    'buildConfigField("String", "TAMPER_TARGET_SHA256", "\\"${targetSha256.get()}\\"")',
+    'buildConfigField("long", "TAMPER_TARGET_SIZE", "${targetSize.get()}L")',
+    'sourceSets.getByName("debug").assets.directories.add',
+    'sourceSets.getByName("negativeControl").assets.directories.add',
+    '"build/generated/tamperBaselineAssets"',
   ];
   const requiredSuccess = [
     'sourceSets.getByName("main") {',
@@ -205,6 +258,10 @@ function fixtureBuildWiringFailures(appBuild, successBuild) {
   for (const value of requiredSuccess) if (!successBuild.includes(value)) failures.push(value);
   if (appBuild.includes('.orElse("negativeControl")')) {
     failures.push("negative instrumentation build type became the positive default");
+  }
+  if (appBuild.includes('sourceSets.getByName("main").assets')
+      || appBuild.includes('sourceSets.getByName("release").assets')) {
+    failures.push("tamper target asset escaped positive and negative fixture variants");
   }
   if (/\.srcDir\s*\(\s*"\.\.\/app\/src\/main\/java"/.test(successBuild)) {
     failures.push("deprecated Java-only shared source admission");
@@ -232,11 +289,44 @@ function workflowFailures(source) {
     "receipt[\"stagedFileCleared\"] is True",
     "receipt[\"verifierRecoveryObserved\"] is False",
     "receipt[\"stagedFileCleared\"] is False",
+    ":success-fixture:assembleTargetDebug",
+    "stage_success_target.mjs",
+    'extra_args+=("-PsuccessTargetSha256=$target_sha" "-PsuccessTargetSize=$target_size")',
+    'if [ "${{ matrix.mode }}" = return-resume-omitted ]; then',
+    'extra_args+=("-PfixtureTestBuildType=negativeControl")',
+    'test "$baseline_cert" = "$target_cert"',
     "actions/upload-artifact@v4",
   ];
   for (const value of required) if (!source.includes(value)) failures.push(value);
   if (/pull_request:|push:|schedule:/.test(source)) failures.push("workflow is not manual-only");
   if (/secrets\.|SIGNING|download-artifact/.test(source)) failures.push("workflow uses release or secret input");
+  const buildStart = source.indexOf("extra_args=(");
+  const targetBuild = source.indexOf(":success-fixture:assembleTargetDebug", buildStart);
+  const targetStage = source.indexOf("stage_success_target.mjs", targetBuild);
+  const propertyForwarding = source.indexOf("-PsuccessTargetSha256=$target_sha", targetStage);
+  const negativeOnly = source.indexOf('if [ "${{ matrix.mode }}" = return-resume-omitted ]; then', propertyForwarding);
+  const finalModeBuild = source.indexOf('"${{ matrix.app_task }}"', negativeOnly);
+  if (!(buildStart >= 0
+      && targetBuild > buildStart
+      && targetStage > targetBuild
+      && propertyForwarding > targetStage
+      && negativeOnly > propertyForwarding
+      && finalModeBuild > negativeOnly)) {
+    failures.push("target-first all-mode build ordering");
+  }
+  if (/if \[ "\$\{\{ matrix\.mode \}\}" = seeded-success \]; then[\s\S]*?:success-fixture:assembleTargetDebug/.test(source)) {
+    failures.push("target staging remains seeded-success-only");
+  }
+  const baselineCertificate = source.indexOf(
+    'apksigner" verify --print-certs "$fixture_apk" > "$EVIDENCE/baseline-certificate.txt"',
+  );
+  const certificateEquality = source.indexOf('test "$baseline_cert" = "$target_cert"', baselineCertificate);
+  const seededSuccessBranch = source.indexOf('if [ "${{ matrix.mode }}" = seeded-success ]; then', baselineCertificate);
+  if (!(baselineCertificate >= 0
+      && certificateEquality > baselineCertificate
+      && seededSuccessBranch > certificateEquality)) {
+    failures.push("all-mode target and baseline signer equality ordering");
+  }
   return failures;
 }
 
@@ -480,12 +570,56 @@ test("positive recovery and return-resume-omitted control prove distinct bounded
       "!(BuildConfig.OMIT_PERMISSION_RETURN_ON_RESUME && returningFromUnknownSourceSettings)",
       "true",
     )),
-    "generic retry disallowed": flowFailures(
+    "generic interrupted retry acceptance restored": flowFailures(
       flow,
       policy.replace(
-        "return CHANGED_MESSAGE.equals(message) || INTERRUPTED_MESSAGE.equals(message);",
         "return CHANGED_MESSAGE.equals(message);",
+        "return CHANGED_MESSAGE.equals(message) || INTERRUPTED_MESSAGE.equals(message);",
       ),
+    ),
+    "synthetic dummy APK restored": flowFailures(
+      flow.replace(
+        "targetContext.getAssets().open(FixturePolicy.TARGET_ASSET_NAME)",
+        'new java.io.ByteArrayInputStream("fixture-stage-v1".getBytes())',
+      ),
+      policy,
+    ),
+    "build digest pin unchecked": flowFailures(
+      flow.replace(
+        'assertEquals(\n                "Target asset digest did not match its build pin",\n                BuildConfig.TAMPER_TARGET_SHA256,\n                originalDigest);',
+        "BuildConfig.TAMPER_TARGET_SHA256.length();",
+      ),
+      policy,
+    ),
+    "signing padding ID changed": flowFailures(
+      flow.replace("APK_SIGNING_BLOCK_PADDING_ID = 0x42726577", "APK_SIGNING_BLOCK_PADDING_ID = 0x7109871a"),
+      policy,
+    ),
+    "padding zero-fill oracle removed": flowFailures(
+      flow.replace('assertEquals("APK signing block padding was not zero-filled", 0, item);', "assertNotNull(item);"),
+      policy,
+    ),
+    "one-byte comparison removed": flowFailures(
+      flow.replace("assertOnlyAssetPaddingByteChanged();", ""),
+      policy,
+    ),
+    "post-tamper archive parse removed": flowFailures(
+      flow.replace("PackageIdentity tamperedArchiveIdentity = archiveIdentity(stagedFile);", "PackageIdentity tamperedArchiveIdentity = originalArchiveIdentity;"),
+      policy,
+    ),
+    "post-tamper signer continuity removed": flowFailures(
+      flow.replace(
+        'assertEquals(\n                "Tampered target current signer set did not match the installed fixture",\n                installedIdentity.signers,\n                tamperedArchiveIdentity.signers);',
+        "",
+      ),
+      policy,
+    ),
+    "exact changed message broadened": flowFailures(
+      flow.replace(
+        "By.text(FixturePolicy.CHANGED_MESSAGE).pkg(FixturePolicy.FIXTURE_PACKAGE)",
+        "By.textContains(\"update\").pkg(FixturePolicy.FIXTURE_PACKAGE)",
+      ),
+      policy,
     ),
     "stage removal unchecked": flowFailures(
       flow.replace('assertFalse("Tampered staged file was retained", stagedFile.exists());', ""),
@@ -609,6 +743,22 @@ test("fixture build wiring selects one instrumentation build type and admits the
       app: appBuild,
       success: successBuild.replace('        java.directories.add("../app/src/main/java")\n', ""),
     },
+    "positive target asset removed": {
+      app: appBuild.replace(/\s*sourceSets\.getByName\("debug"\)\.assets\.directories\.add\([\s\S]*?\n    \)\n/, "\n"),
+      success: successBuild,
+    },
+    "negative target asset removed": {
+      app: appBuild.replace(/\s*sourceSets\.getByName\("negativeControl"\)\.assets\.directories\.add\([\s\S]*?\n    \)\n/, "\n"),
+      success: successBuild,
+    },
+    "target asset leaked into main": {
+      app: appBuild.replace('sourceSets.getByName("debug").assets', 'sourceSets.getByName("main").assets'),
+      success: successBuild,
+    },
+    "target SHA property removed": {
+      app: appBuild.replace('val targetSha256 = providers.gradleProperty("successTargetSha256")', 'val targetSha256 = providers.provider { "0".repeat(64) }'),
+      success: successBuild,
+    },
   };
   for (const [name, mutant] of Object.entries(mutants)) {
     assert.ok(mutant.app !== appBuild || mutant.success !== successBuild, `${name} did not mutate its source`);
@@ -626,6 +776,18 @@ test("workflow is manual, read-only, pinned, and runs both bounded lifecycle out
     )),
     "source hash changed": workflowFailures(workflow.replace(PINNED_UPDATER_SHA256, "0".repeat(64))),
     "negative mode removed": workflowFailures(workflow.replace("- mode: return-resume-omitted", "- mode: positive-copy")),
+    "target build made seeded-success-only": workflowFailures(workflow.replace(
+      '          gradle --project-dir "$FIXTURE_PROJECT" --no-daemon --max-workers=2 \\\n            :success-fixture:assembleTargetDebug',
+      '          if [ "${{ matrix.mode }}" = seeded-success ]; then\n            gradle --project-dir "$FIXTURE_PROJECT" --no-daemon --max-workers=2 \\\n              :success-fixture:assembleTargetDebug',
+    )),
+    "target properties not forwarded": workflowFailures(workflow.replace(
+      'extra_args+=("-PsuccessTargetSha256=$target_sha" "-PsuccessTargetSize=$target_size")',
+      ":",
+    )),
+    "signer equality returned to success-only branch": workflowFailures(workflow.replace(
+      '          test "$baseline_cert" = "$target_cert"',
+      '          if [ "${{ matrix.mode }}" = seeded-success ]; then\n            test "$baseline_cert" = "$target_cert"',
+    )),
     "PR trigger added": workflowFailures(workflow.replace("  workflow_dispatch:", "  workflow_dispatch:\n  pull_request:")),
     "release download added": workflowFailures(workflow.replace(
       "      - name: Set up JDK 17",
@@ -650,7 +812,11 @@ test("success target admission pins bytes and refuses changed, linked, or unrevi
       expectedSize: bytes.length,
     });
     assert.equal(receipt.targetSha256, digest);
-    assert.deepEqual(readFileSync(synthetic.output), bytes);
+    assert.deepEqual(receipt.outputs, [
+      "success-fixture/build/generated/successBaselineAssets/success-target.apk",
+      "app/build/generated/tamperBaselineAssets/success-target.apk",
+    ]);
+    for (const output of synthetic.outputs) assert.deepEqual(readFileSync(output), bytes);
     assert.throws(
       () => synthetic.module.stageSuccessTarget({
         target,
@@ -667,7 +833,7 @@ test("success target admission pins bytes and refuses changed, linked, or unrevi
       }),
       /size does not match/,
     );
-    writeFileSync(synthetic.output, "unreviewed");
+    writeFileSync(synthetic.outputs[1], "unreviewed");
     assert.throws(
       () => synthetic.module.stageSuccessTarget({
         target,

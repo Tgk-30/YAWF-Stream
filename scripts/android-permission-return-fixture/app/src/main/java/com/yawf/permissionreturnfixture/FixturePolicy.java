@@ -14,12 +14,11 @@ public final class FixturePolicy {
     public static final String RETRY_TITLE = "Update needs attention";
     public static final String CHANGED_MESSAGE =
             "The verified update changed or became unavailable.";
-    public static final String INTERRUPTED_MESSAGE =
-            "Update preparation was interrupted. Retry when you are ready.";
-    public static final String TEST_VERSION = "9.8.7";
-    public static final long TEST_VERSION_CODE = 9_008_007L;
-    public static final String TEST_APK_NAME = "YAWF.Stream_Android_9.8.7.apk";
-    public static final String TEST_TAG = "android-v9.8.7";
+    public static final String TEST_VERSION = "90.0.2";
+    public static final long TEST_VERSION_CODE = 90_000_002L;
+    public static final String TEST_APK_NAME = "YAWF.Stream_Android_90.0.2.apk";
+    public static final String TEST_TAG = "android-v90.0.2";
+    public static final String TARGET_ASSET_NAME = "success-target.apk";
     public static final int PHASE_PREPARING = 1;
     public static final int PHASE_STAGED = 3;
     public static final String PREFERENCES_NAME = "yawf_android_updater_v1";
@@ -45,8 +44,8 @@ public final class FixturePolicy {
         return INSTALLER_PACKAGES.contains(packageName);
     }
 
-    public static boolean isReviewedRetryMessage(String message) {
-        return CHANGED_MESSAGE.equals(message) || INTERRUPTED_MESSAGE.equals(message);
+    public static boolean isChangedRetryMessage(String message) {
+        return CHANGED_MESSAGE.equals(message);
     }
 
     public static Set<String> installerPackages() {
