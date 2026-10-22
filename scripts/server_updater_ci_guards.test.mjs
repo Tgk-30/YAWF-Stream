@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 
 const workflow = readFileSync(new URL("../.github/workflows/deb-release.yml", import.meta.url), "utf8");
 const integration = readFileSync(new URL("./server_updater_compose_integration.mjs", import.meta.url), "utf8");
@@ -618,4 +620,86 @@ expect_runtime_rejection_before_install relative relative-node
   assert.ok(declarations.includes(separate));
   const combined = declarations.replace(separate, 'local label="$1" candidate="$2" output="$runtime_root/runtime-reject-$label.log" status');
   assert.notEqual(probe(combined).status, 0, "same-local expansion must fail the scalar regression");
+});
+
+test("actual Compose transaction dispatch binds the parent Node and preserves every fault argument", () => {
+  const transaction = uniqueSlice(integration, "function productionTransaction(", "\nfunction image(", "production transaction dispatch");
+  function assertParentBinding(source) {
+    assert.match(source, /return run\("\/usr\/bin\/flock", \["-n", "\/run\/yawf-server-updater\/operation\.lock", process\.execPath,/);
+  }
+  assertParentBinding(transaction);
+  for (const replacement of ['"/usr/bin/node"', '"node"']) {
+    assert.throws(() => assertParentBinding(transaction.replace("process.execPath", replacement)));
+  }
+  const fixture = mkdtempSync(resolve(tmpdir(), "yawf-compose-parent-node-"));
+  function globalNodeIdentity() {
+    const path = "/usr/bin/node";
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (!stat) return { state: "absent" };
+    return { state: "present", uid: stat.uid, gid: stat.gid, mode: stat.mode, ino: stat.ino, dev: stat.dev,
+      target: stat.isSymbolicLink() ? readlinkSync(path) : null,
+      sha256: existsSync(path) && !stat.isDirectory() ? createHash("sha256").update(readFileSync(path)).digest("hex") : null };
+  }
+  const globalBefore = globalNodeIdentity();
+  try {
+    mkdirSync(join(fixture, "scripts"));
+    const emptyPath = join(fixture, "no-global-node");
+    mkdirSync(emptyPath);
+    const driver = join(fixture, "scripts/server_updater_transaction_driver.mjs");
+    writeFileSync(driver, 'process.stdout.write(JSON.stringify({ execPath: process.execPath, args: process.argv.slice(2) }));\n');
+    function loadDispatch(source) {
+      return vm.runInNewContext(`${source}\nproductionTransaction`, {
+        join, repo: fixture, process: Object.freeze({ execPath: process.execPath }),
+        run(command, argv) {
+          // Check the real flock boundary without taking a privileged host lock.
+          assert.equal(command, "/usr/bin/flock");
+          const args = Array.from(argv);
+          assert.deepEqual(args.slice(0, 2), ["-n", "/run/yawf-server-updater/operation.lock"]);
+          assert.equal(args[2], process.execPath, "the child must use the actual parent runtime, not PATH lookup");
+          assert.equal(args[3], driver);
+          return execFileSync(args[2], args.slice(3), { encoding: "utf8", env: { ...process.env, PATH: emptyPath } }).trim();
+        },
+      });
+    }
+    const dispatch = loadDispatch(transaction);
+    const digest = `sha256:${"a".repeat(64)}`;
+    const revision = "b".repeat(40);
+    for (const fault of ["none", "after-health", "stop", "snapshot", "interrupt", "recover"]) {
+      const receipt = JSON.parse(dispatch(digest, revision, fault));
+      assert.equal(receipt.execPath, process.execPath);
+      assert.deepEqual(receipt.args, [digest, revision, fault]);
+    }
+    assert.ok(transaction.includes("process.execPath"));
+    for (const replacement of ['"node"']) {
+      const mutated = transaction.replace("process.execPath", replacement);
+      assert.throws(() => loadDispatch(mutated)(digest, revision, "none"), /actual parent runtime/);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+    assert.deepEqual(globalNodeIdentity(), globalBefore, "isolated dispatch must not alter the global Node identity or absence");
+  }
+});
+
+test("actual Compose no-global dispatch rejects the system Node path", { skip: process.execPath === "/usr/bin/node" }, () => {
+  const transaction = uniqueSlice(integration, "function productionTransaction(", "\nfunction image(", "no-global transaction dispatch");
+  const digest = `sha256:${"a".repeat(64)}`;
+  const revision = "b".repeat(40);
+  const repo = "/isolated-compose-dispatch";
+  function loadDispatch(source) {
+    return vm.runInNewContext(`${source}\nproductionTransaction`, {
+      join, repo, process: Object.freeze({ execPath: process.execPath }),
+      run(command, argv) {
+        const args = Array.from(argv);
+        assert.equal(command, "/usr/bin/flock");
+        assert.notEqual(args[2], "/usr/bin/node", "the no-global fixture must never dispatch the system Node path");
+        assert.deepEqual(args, ["-n", "/run/yawf-server-updater/operation.lock", process.execPath,
+          join(repo, "scripts/server_updater_transaction_driver.mjs"), digest, revision, "none"]);
+        return "parent-runtime-dispatched";
+      },
+    });
+  }
+  assert.equal(loadDispatch(transaction)(digest, revision, "none"), "parent-runtime-dispatched");
+  assert.ok(transaction.includes("process.execPath"));
+  const hardcodedGlobal = transaction.replace("process.execPath", '"/usr/bin/node"');
+  assert.throws(() => loadDispatch(hardcodedGlobal)(digest, revision, "none"), /no-global fixture/);
 });
