@@ -12,4 +12,30 @@ if ! /usr/bin/flock -n 9; then
   echo "yawf-server-update: another updater operation is running" >&2
   exit 75
 fi
-exec /usr/bin/node /usr/lib/yawf-server-updater/yawf-server-update.mjs "$@"
+private_node=/usr/lib/yawf-server-updater/runtime/node
+validate_private_node() {
+  path=$1
+  [ ! -L "$path" ] && [ -f "$path" ] && [ -x "$path" ] || return 1
+  [ "$(stat -c '%u' "$path")" = 0 ] || return 1
+  mode=$(stat -c '%a' "$path")
+  [ $((0$mode & 022)) -eq 0 ] || return 1
+  current=$(dirname "$path")
+  while :; do
+    [ ! -L "$current" ] && [ -d "$current" ] || return 1
+    [ "$(stat -c '%u' "$current")" = 0 ] || return 1
+    mode=$(stat -c '%a' "$current")
+    [ $((0$mode & 022)) -eq 0 ] || return 1
+    [ "$current" = / ] && break
+    current=$(dirname "$current")
+  done
+}
+if [ -e "$private_node" ] || [ -L "$private_node" ]; then
+  if ! validate_private_node "$private_node"; then
+    echo "yawf-server-update: unsafe private Node runtime" >&2
+    exit 1
+  fi
+  node=$private_node
+else
+  node=/usr/bin/node
+fi
+exec "$node" /usr/lib/yawf-server-updater/yawf-server-update.mjs "$@"

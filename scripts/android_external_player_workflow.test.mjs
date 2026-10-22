@@ -32,6 +32,18 @@ function workflowContract(w, j) {
   ]);
   assert.doesNotMatch(j, /\b(?:pm\s+install|cmd\s+package\s+(?:install|grant)|pm\s+grant|appops\s+set)\b/);
   assert.match(j, /case "\$label" in Gallery\|Photos\)/);
+  assert.match(j, /timeout --kill-after=10s 90s adb -s "\$EMULATOR_SERIAL" exec-out cat "\$system_apk"/);
+  assert.doesNotMatch(j, /adb[^\n]*pull "\$system_apk"/);
+  assert.match(j, /test "\$remote_size" -gt 0 -a "\$remote_size" -le 268435456/);
+  assert.match(j, /test "\$remote_name" = "\$system_apk"/);
+  assert.match(j, /test "\$transfer_status" -eq 0/);
+  assert.match(j, /test "\$local_size" = "\$remote_size"/);
+  assert.match(j, /test "\$local_hash" = "\$remote_hash"/);
+  assert.match(j, /test "\$\(timeout 10s adb -s "\$EMULATOR_SERIAL" get-state\)" = device/);
+  assert.match(j, /timeout 10s adb -s "\$EMULATOR_SERIAL" emu avd name[^\n]*= "\$AVD_NAME"/);
+  const validated = j.indexOf("printf 'validated=true");
+  assert.ok(validated > j.indexOf('test "$local_hash" = "$remote_hash"'));
+  assert.ok(j.indexOf('aapt2 dump badging') > validated);
   assert.match(j, /\$1 == expected && \$2 ~/);
   assert.doesNotMatch(j, /secrets\.|contents: write|packages: write|adb root|pm grant|settings put|run-as com\.tgk30/);
   assert.ok(j.indexOf('sha256sum --check -') < j.indexOf('adb -s "$EMULATOR_SERIAL" install "$PRODUCT_APK"'));
@@ -77,6 +89,14 @@ for (const [name, mutate, contract, original] of [
   ['APK hash', s => s.replace('PRODUCT_SHA256: f3e983', 'PRODUCT_SHA256: a3e983'), s => workflowContract(workflow, s), job],
   ['engine minimum', s => s.replace('minimum_major=90', 'minimum_major=0'), s => workflowContract(workflow, s), job],
   ['installed bytes', s => s.replace('test "$installed_sha" = "$PRODUCT_SHA256"', ':'), s => workflowContract(workflow, s), job],
+  ['handler transfer timeout', s => s.replace('timeout --kill-after=10s 90s adb', 'adb'), s => workflowContract(workflow, s), job],
+  ['handler size bound', s => s.replace('test "$remote_size" -gt 0 -a "$remote_size" -le 268435456', ':'), s => workflowContract(workflow, s), job],
+  ['handler remote path binding', s => s.replace('test "$remote_name" = "$system_apk"', ':'), s => workflowContract(workflow, s), job],
+  ['handler transfer exit', s => s.replace('test "$transfer_status" -eq 0', ':'), s => workflowContract(workflow, s), job],
+  ['handler size equality', s => s.replace('test "$local_size" = "$remote_size"', ':'), s => workflowContract(workflow, s), job],
+  ['handler hash equality', s => s.replace('test "$local_hash" = "$remote_hash"', ':'), s => workflowContract(workflow, s), job],
+  ['handler live device', s => s.replace('get-state)" = device', 'get-state)" = offline'), s => workflowContract(workflow, s), job],
+  ['handler same AVD', s => s.replace(/(timeout 10s adb -s "\$EMULATOR_SERIAL" emu avd name[^\n]*= )"\$AVD_NAME"/, '$1"other-avd"'), s => workflowContract(workflow, s), job],
   ['fourth third-party install', s => s + '\n          adb -s "$EMULATOR_SERIAL" install "third-party.apk"\n', s => workflowContract(workflow, s), job],
   ['alternate package install', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell cmd package install third-party.apk\n', s => workflowContract(workflow, s), job],
   ['alternate package grant', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell cmd package grant some.pkg android.permission.INTERNET\n', s => workflowContract(workflow, s), job],

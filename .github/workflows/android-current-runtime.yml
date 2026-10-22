@@ -30,14 +30,14 @@ jobs:
     timeout-minutes: 25
     env:
       # Replace this fixed block together when a later signed candidate is reviewed.
-      CANDIDATE_RUN_ID: "39563675863"
-      CANDIDATE_SOURCE_SHA: 9fc94a237d99b849cfc18a01085bb487915dd978
-      CANDIDATE_APK_SHA256: f3e983929db9fb32ed42b9779d94f2f8492c1cf4fae3e0cd29eee91a9492e0eb
-      CANDIDATE_VERSION: 2.3.27
-      CANDIDATE_VERSION_CODE: "2003027"
-      PUBLISHED_ANDROID_VERSION: 2.3.26
+      CANDIDATE_RUN_ID: "39813178729"
+      CANDIDATE_SOURCE_SHA: da126ceaafa386be92f42cecc111ff5404f3fe74
+      CANDIDATE_APK_SHA256: 2c8cd38504d82cf67b46a535f241ba814e92125219cc76e3750adeadb538399b
+      CANDIDATE_VERSION: 2.3.29
+      CANDIDATE_VERSION_CODE: "2003029"
+      PUBLISHED_ANDROID_VERSION: 2.3.27
       CANDIDATE_ARTIFACT: android-phone-verification-candidate
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.27.apk
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.29.apk
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       AVD_NAME: yawf-phone-api36-current-runtime
       EMULATOR_SERIAL: emulator-5554
@@ -703,9 +703,38 @@ jobs:
             if ! awk -F/ -v expected="$package" '{ gsub(/^[ \t]+|[ \r\t]+$/, "", $1); gsub(/[ \r\t]+$/, "", $2); if ($1 == expected && $2 ~ /^[A-Za-z0-9_.$]+$/) found=1 } END { exit !found }' "$EVIDENCE/stock-video-handlers.txt"; then
               continue
             fi
-            system_apk="$(adb -s "$EMULATOR_SERIAL" shell pm path "$package" | tr -d '\r' | sed -n 's/^package://p' | head -1)"
+            system_apk="$(timeout 15s adb -s "$EMULATOR_SERIAL" shell pm path "$package" | tr -d '\r' | sed -n 's/^package://p')"
+            test "$(printf '%s\n' "$system_apk" | wc -l | tr -d ' ')" = 1
             case "$system_apk" in /system/app/*|/product/app/*|/system_ext/app/*) ;; *) continue ;; esac
-            adb -s "$EMULATOR_SERIAL" pull "$system_apk" "$RUNNER_TEMP/stock-video-handler.apk" >/dev/null
+            [[ "$system_apk" =~ ^/[A-Za-z0-9_./+-]+\.apk$ ]]
+            remote_size="$(timeout 15s adb -s "$EMULATOR_SERIAL" shell stat -c %s "$system_apk" | tr -d '\r')"
+            [[ "$remote_size" =~ ^[0-9]{1,9}$ ]]
+            test "$remote_size" -gt 0 -a "$remote_size" -le 268435456
+            remote_digest="$(timeout 30s adb -s "$EMULATOR_SERIAL" shell sha256sum "$system_apk" | tr -d '\r')"
+            test "$(printf '%s\n' "$remote_digest" | wc -l | tr -d ' ')" = 1
+            read -r remote_hash remote_name <<< "$remote_digest"
+            [[ "$remote_hash" =~ ^[a-f0-9]{64}$ ]]
+            test "$remote_name" = "$system_apk"
+            transfer_receipt="$EVIDENCE/stock-handler-transfer.txt"
+            printf 'validated=false\ntransport=adb-exec-out-cat\nremoteBytes=%s\nremoteSha256=%s\n' \
+              "$remote_size" "$remote_hash" > "$transfer_receipt"
+            set +e
+            timeout --kill-after=10s 90s adb -s "$EMULATOR_SERIAL" exec-out cat "$system_apk" \
+              > "$RUNNER_TEMP/stock-video-handler.apk.part"
+            transfer_status=$?
+            set -e
+            local_size="$(stat -c %s "$RUNNER_TEMP/stock-video-handler.apk.part")"
+            local_hash="$(sha256sum "$RUNNER_TEMP/stock-video-handler.apk.part" | awk '{print $1}')"
+            printf 'exitStatus=%s\nlocalBytes=%s\nlocalSha256=%s\n' \
+              "$transfer_status" "$local_size" "$local_hash" >> "$transfer_receipt"
+            test "$transfer_status" -eq 0
+            test "$local_size" = "$remote_size"
+            test "$local_hash" = "$remote_hash"
+            test "$(timeout 10s adb -s "$EMULATOR_SERIAL" get-state)" = device
+            test "$(timeout 10s adb -s "$EMULATOR_SERIAL" emu avd name | tr -d '\r' | sed -n '1p')" = "$AVD_NAME"
+            mv "$RUNNER_TEMP/stock-video-handler.apk.part" "$RUNNER_TEMP/stock-video-handler.apk"
+            printf 'validated=true\ntransport=adb-exec-out-cat\nremoteBytes=%s\nremoteSha256=%s\nexitStatus=%s\nlocalBytes=%s\nlocalSha256=%s\navdIdentityVerified=true\n' \
+              "$remote_size" "$remote_hash" "$transfer_status" "$local_size" "$local_hash" > "$transfer_receipt"
             aapt2 dump badging "$RUNNER_TEMP/stock-video-handler.apk" > "$RUNNER_TEMP/stock-video-handler-badging.txt"
             label="$(sed -n "s/^application-label:'\([^']*\)'$/\1/p" "$RUNNER_TEMP/stock-video-handler-badging.txt" | head -1)"
             case "$label" in Gallery|Photos) ;; *) continue ;; esac

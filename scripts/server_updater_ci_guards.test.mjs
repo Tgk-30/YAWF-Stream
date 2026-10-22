@@ -13,6 +13,7 @@ const volumeCopy = readFileSync(new URL("../deploy/updater/volume-copy.mjs", imp
 const installerRuntime = readFileSync(new URL("./server_updater_install_runtime.sh", import.meta.url), "utf8");
 const installerContainer = readFileSync(new URL("./server_updater_install.test.mjs", import.meta.url), "utf8");
 const installer = readFileSync(new URL("../deploy/updater/install.sh", import.meta.url), "utf8");
+const updaterWrapper = readFileSync(new URL("../deploy/updater/yawf-server-update", import.meta.url), "utf8");
 const updaterReadme = readFileSync(new URL("../deploy/updater/README.md", import.meta.url), "utf8");
 const composeReadme = readFileSync(new URL("../deploy/compose/README.md", import.meta.url), "utf8");
 const installerStep = workflow.match(/- name: Test updater policy and release guards[\s\S]*?(?=\n\s+- name: Install disabled updater)/)?.[0] ?? "";
@@ -83,6 +84,48 @@ function installerRuntimeSudoEnv(step) {
   assert.ok(command, "installer runtime sudo environment command missing");
   return command[0];
 }
+
+function assertPrivateRuntimeWorkflow(source) {
+  const job = source.slice(source.indexOf("  compose-updater-check:"));
+  assert.ok(job.startsWith("  compose-updater-check:"), "Compose updater job missing");
+  assert.doesNotMatch(job, /(?:ln|install|cp|mv)[^\n]*\/usr\/bin\/node/,
+    "Compose updater checks must not replace the global runtime");
+  assert.match(job, /sudo install -d -o root -g root -m 0755 \/opt\/yawf-node24/);
+  assert.match(job, /sudo install -o root -g root -m 0755 "\$source_node" \/opt\/yawf-node24\/node/);
+  assert.match(job, /test "\$source_hash" = "\$\(sha256sum \/opt\/yawf-node24\/node/);
+  assert.match(job, /\/opt\/yawf-node24\/node --version \| grep -Eq '\^v24\\\.'/);
+  const step = job.match(/- name: Test updater policy and release guards[\s\S]*?(?=\n\s+- name: Install disabled updater)/)?.[0] ?? "";
+  const env = installerRuntimeSudoEnv(step);
+  assert.equal((env.match(/^[ \t]*YAWF_UPDATER_TEST_NODE=\/opt\/yawf-node24\/node \\$/gm) ?? []).length, 1);
+  assert.match(step, /assert\.equal\(receipt\.cases, 23\)/);
+  for (const key of ["systemNodePreserved", "privateNode24Installed", "privateNodeReinstallReuseVerified"]) {
+    assert.match(step, new RegExp('"' + key + '"'));
+  }
+  assert.match(job, /sudo bash deploy\/updater\/install\.sh --node-runtime \/opt\/yawf-node24\/node/);
+  assert.doesNotMatch(job, /sudo \/usr\/bin\/node/);
+  assert.match(job, /sudo \/opt\/yawf-node24\/node scripts\/server_updater_compose_integration\.mjs/);
+}
+
+test("Compose CI uses a verified private runtime and proves global runtime preservation", () => {
+  assertPrivateRuntimeWorkflow(workflow);
+  const mutations = [
+    (s) => s.replace('sudo install -d -o root -g root -m 0755 /opt/yawf-node24', 'sudo install -d -m 0777 /opt/yawf-node24'),
+    (s) => s.replace('sudo install -o root -g root -m 0755 "$source_node" /opt/yawf-node24/node', 'sudo ln -sf "$source_node" /usr/bin/node'),
+    (s) => s.replace('test "$source_hash" = "$(sha256sum /opt/yawf-node24/node', 'test "$source_hash" = "$(echo /opt/yawf-node24/node'),
+    (s) => s.replace('YAWF_UPDATER_TEST_NODE=/opt/yawf-node24/node', 'YAWF_UPDATER_TEST_NODE=/usr/bin/node'),
+    (s) => s.replace('assert.equal(receipt.cases, 23)', 'assert.equal(receipt.cases, 13)'),
+    (s) => s.replace('"systemNodePreserved", ', ''),
+    (s) => s.replace('"privateNode24Installed", ', ''),
+    (s) => s.replace('"privateNodeReinstallReuseVerified", ', ''),
+    (s) => s.replace('sudo bash deploy/updater/install.sh --node-runtime /opt/yawf-node24/node', 'sudo bash deploy/updater/install.sh'),
+    (s) => s.replaceAll('sudo /opt/yawf-node24/node', 'sudo /usr/bin/node'),
+  ];
+  for (const mutate of mutations) {
+    const changed = mutate(workflow);
+    assert.notEqual(changed, workflow, "private runtime workflow mutant must change the source");
+    assert.throws(() => assertPrivateRuntimeWorkflow(changed));
+  }
+});
 
 function assertInstallerRuntimeTempForwarding(step) {
   const forwarded = installerRuntimeSudoEnv(step).match(/^[ \t]*RUNNER_TEMP="\$RUNNER_TEMP" \\$/gm) ?? [];
@@ -248,7 +291,7 @@ test("installer PTY runner bounds hung cases and proves replacement uses a secon
   assert.match(installerRuntime, /replacement_compose="\$fixture_root\/replacement\/docker-compose\.ghcr\.yml"/);
   assert.match(installerRuntime, /--replace-registration --compose-file "\$replacement_compose"/);
   assert.match(installerRuntime, /\[\[ "\$policy_before" != "\$\(sha256sum "\$policy_path"/);
-  assert.match(installerRuntime, /\/usr\/bin\/node - "\$replacement_compose"/);
+  assert.match(installerRuntime, /"\$node_path" - "\$replacement_compose"/);
   assert.match(installer, /"\$helper" register "\$compose_file"/);
   assert.match(installerStep, /timeout-minutes: 10/);
   assert.match(installerContainer, /YAWF_REQUIRE_DOCKER=1 requires a usable Docker daemon/);
@@ -264,13 +307,35 @@ test("installer PTY runner bounds hung cases and proves replacement uses a secon
   assert.match(installerContainer, /--replace-registration --compose-file "\$second"/);
 });
 
+test("private Node admission is fail-closed without weakening updater locking or global Node isolation", () => {
+  assert.match(installer, /--node-runtime requires an absolute executable path/);
+  assert.match(installer, /assert_secure_ancestor_chain\(\)/);
+  assert.match(installer, /Node runtime path must be canonical and contain no symlinks/);
+  assert.match(installer, /source_hash_before=.*sha256sum/);
+  assert.match(installer, /source_hash_after=.*sha256sum/);
+  assert.match(installer, /mv -fT -- "\$runtime_temp" "\$private_node"/);
+  assert.match(installer, /Installed private Node runtime hash mismatch/);
+  assert.doesNotMatch(installer, /(?:ln|mv|install)[^\n]*\/usr\/bin\/node/);
+  assert.match(updaterWrapper, /private_node=\/usr\/lib\/yawf-server-updater\/runtime\/node/);
+  assert.match(updaterWrapper, /unsafe private Node runtime/);
+  assert.match(updaterWrapper, /node=\/usr\/bin\/node/);
+  assert.match(updaterWrapper, /export YAWF_UPDATER_LOCK_FD=9[\s\S]*exec 9>"\$lock_dir\/operation\.lock"[\s\S]*\/usr\/bin\/flock -n 9/);
+  assert.match(installerRuntime, /system_node_hash_before=.*sha256sum \/usr\/bin\/node/);
+  assert.match(installerRuntime, /systemNodePreserved: true/);
+  assert.match(installerRuntime, /cases: 23/);
+  assert.match(installerContainer, /global_node_hash/);
+  assert.match(installerContainer, /installer runtime cases passed: 21/);
+  assert.match(installerContainer, /case_default_system_node24_does_not_create_private_runtime/);
+  assert.match(installerRuntime, /grep -q 'Private Node runtime reused' "\$runtime_root\/reinstall\.log"/);
+});
+
 test("updater transaction pipelines cannot hide a failed Node process behind tee", () => {
   for (const [name, step] of [["synthetic", syntheticStep], ["actual", actualStep]]) {
     assert.match(step, /set -euo pipefail/, `${name} updater step does not enable pipefail`);
     assert.match(step, /2>&1 \| tee "\$raw"/, `${name} updater step does not retain raw failure output`);
     assert.match(step, /test -s "\$receipt"/, `${name} updater step accepts an empty receipt`);
   }
-  assert.match(syntheticStep, /sudo \/usr\/bin\/node scripts\/server_updater_compose_integration\.mjs/,
+  assert.match(syntheticStep, /sudo \/opt\/yawf-node24\/node scripts\/server_updater_compose_integration\.mjs/,
     "synthetic integration does not run as root for root-owned fixture cleanup");
 });
 

@@ -9,6 +9,8 @@ public final class FlowPolicy {
     public static final String LEGACY_PUBLISHED_VERSION = "2.3.25";
     public static final String CURRENT_CANDIDATE_VERSION = "2.3.27";
     public static final String CURRENT_PUBLISHED_VERSION = "2.3.26";
+    public static final String NEXT_CANDIDATE_VERSION = "2.3.29";
+    public static final String NEXT_PUBLISHED_VERSION = "2.3.27";
     public static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
     public static final String WEB_BUTTON_CLASS = "android.widget.Button";
     public static final ExactTextWebNodeSpec WELCOME_TOUR_DIALOG =
@@ -188,6 +190,8 @@ public final class FlowPolicy {
         return (LEGACY_CANDIDATE_VERSION.equals(candidateVersion)
                         && LEGACY_PUBLISHED_VERSION.equals(publishedVersion))
                 || (CURRENT_CANDIDATE_VERSION.equals(candidateVersion)
-                        && CURRENT_PUBLISHED_VERSION.equals(publishedVersion));
+                        && CURRENT_PUBLISHED_VERSION.equals(publishedVersion))
+                || (NEXT_CANDIDATE_VERSION.equals(candidateVersion)
+                        && NEXT_PUBLISHED_VERSION.equals(publishedVersion));
     }
 }
