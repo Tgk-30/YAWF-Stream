@@ -22,7 +22,15 @@ function workflowContract(w, j) {
   assert.match(j, /--certificate-pin public-phone-source\/web\/src-tauri\/SIGNING_CERT_SHA256/);
   assert.match(j, /test "\$installed_sha" = "\$PRODUCT_SHA256"/);
   assert.match(j, /decodedPlaybackClaimed'\] is False/);
-  assert.match(j, /assert r\['outcome'\]=='passed' and r\['checks'\]\['openPlayerClicks'\]==1/);
+  assert.match(j, /assert r\['outcome'\]=='passed' and checks\['openPlayerClicks'\]==1/);
+  assert.match(j, /all\(type\(value\) is bool for value in destination\)/);
+  assert.match(j, /destination in \(\(True,False\),\(False,True\)\)/);
+  assert.match(j, /# BEGIN EXTERNAL_DESTINATION_RECEIPT_POLICY/);
+  assert.match(j, /host\['solePhotosDirectLaunchEligible'\] is True/);
+  assert.match(j, /checks\['expectedHandlerForegroundObserved'\] is True/);
+  assert.match(j, /checks\['manualMovingElapsedTimeCapturePair'\] is True/);
+  assert.match(j, /checks\['semanticSeekGesturePerformed'\] is True/);
+  assert.match(j, /checks\['singleBackReturnedToProduct'\] is True/);
   assert.match(j, /if: always\(\)/);
   const installs = [...j.matchAll(/adb[^\n]*\binstall(?:-multiple|-multi-package)?\b[^\n]*/g)].map(m => m[0]);
   assert.deepEqual(installs, [
@@ -32,6 +40,15 @@ function workflowContract(w, j) {
   ]);
   assert.doesNotMatch(j, /\b(?:pm\s+install|cmd\s+package\s+(?:install|grant)|pm\s+grant|appops\s+set)\b/);
   assert.match(j, /case "\$label" in Gallery\|Photos\)/);
+  assert.match(j, /# BEGIN EXTERNAL_STOCK_HANDLER_POLICY/);
+  assert.match(j, /len\(components\)==1/);
+  assert.match(j, /assert cursor==len\(lines\)/);
+  assert.match(j, /assert len\(components\)==reported/);
+  assert.match(j, /Duplicate Activity component/);
+  assert.match(j, /fixed_package='com\.google\.android\.apps\.photos'/);
+  assert.match(j, /fixed_activity='com\.google\.android\.apps\.photos\.pager\.HostPhotoPagerActivity'/);
+  assert.match(j, /-e externalHandlerActivity "\$handler_activity"/);
+  assert.match(j, /-e externalHandlerActivityCount "\$handler_activity_count"/);
   assert.match(j, /timeout --kill-after=10s 90s adb -s "\$EMULATOR_SERIAL" exec-out cat "\$system_apk"/);
   assert.doesNotMatch(j, /adb[^\n]*pull "\$system_apk"/);
   assert.match(j, /test "\$remote_size" -gt 0 -a "\$remote_size" -le 268435456/);
@@ -166,6 +183,46 @@ function driverContract(d) {
   assert.match(d, /handler-playback-t2/);
   assert.match(d, /handler-after-seek/);
   assert.match(d, /device\.pressBack\(\);\s*waitForForegroundPackage\(PRODUCT_PACKAGE/);
+  assert.match(d, /SYSTEM_UI_PACKAGE = "com\.android\.systemui"/);
+  assert.match(d, /FULLSCREEN_TIP_TITLE = "Viewing full screen"/);
+  assert.match(d, /FULLSCREEN_TIP_DESCRIPTION =\s*\n?\s*"To exit, swipe down from the top of your screen"/);
+  assert.match(d, /FULLSCREEN_TIP_BUTTON = "Got it"/);
+  assert.match(d, /DIRECT_HANDLER_PACKAGE = "com\.google\.android\.apps\.photos"/);
+  assert.match(d, /DIRECT_HANDLER_ACTIVITY =\s*\n?\s*"com\.google\.android\.apps\.photos\.pager\.HostPhotoPagerActivity"/);
+  assert.match(d, /checks\.put\("realAndroidChooserObserved", false\)/);
+  assert.match(d, /checks\.put\("soleHandlerDirectLaunchObserved", false\)/);
+  assert.match(d, /realAndroidChooserObserved \^ soleHandlerDirectLaunchObserved/);
+  assert.match(d, /hasCompleteHandlerMetadata\(\s*handlerLabel,\s*handlerPackage,\s*handlerActivity,\s*handlerActivityCountValue\)/);
+  const metadata = methodBody(d, 'private static boolean hasCompleteHandlerMetadata(');
+  assert.match(metadata, /boolean noneProvided = label\.isEmpty\(\)\s*&& packageName\.isEmpty\(\)\s*&& activity\.isEmpty\(\)\s*&& activityCount\.isEmpty\(\)/);
+  assert.match(metadata, /boolean allProvided = !label\.isEmpty\(\)\s*&& !packageName\.isEmpty\(\)\s*&& !activity\.isEmpty\(\)\s*&& !activityCount\.isEmpty\(\)/);
+  assert.match(metadata, /return noneProvided \|\| allProvided/);
+  const resolver = methodBody(d, 'private void resolveExternalDestination()');
+  assert.match(resolver, /long deadline = SystemClock\.uptimeMillis\(\) \+ SHORT_WAIT_MS/);
+  assert.match(resolver, /while \(SystemClock\.uptimeMillis\(\) < deadline\)/);
+  assert.match(resolver, /UiObject2 chooser = findTextOrDescription\("Open external player"\)/);
+  assert.match(resolver, /realAndroidChooserObserved = true/);
+  assert.match(resolver, /UiObject2 fullscreenTipButton = findExactFullscreenTipButton\(\)/);
+  assert.match(resolver, /UiObject2 handler = chooser == null \? null : findLabeledClickable\(handlerLabel\)/);
+  assert.doesNotMatch(resolver, /assertNotNull\("The chooser did not expose/);
+  assert.match(resolver, /chooseExternalDestinationAction\(/);
+  assert.match(resolver, /assertNoOutOfScopeApproval\(\);\s*capture\("nonbinding-fullscreen-tip"\);\s*fullscreenTipButton\.click\(\)/);
+  assert.equal((resolver.match(/fullscreenTipButton\.click\(\)/g) ?? []).length, 1);
+  assert.match(resolver, /soleHandlerDirectLaunchObserved = true/);
+  const action = methodBody(d, 'private static String chooseExternalDestinationAction(');
+  assert.match(action, /if \(exactFullscreenTipVisible\) \{\s*return fullscreenTipDismissed \? "wait" : "dismiss-fullscreen-tip";/);
+  assert.match(action, /if \(chooserVisible && chooserHandlerVisible\) return "select-chooser-handler"/);
+  assert.match(action, /!chooserVisible\s*&& !anyFullscreenTipResourceVisible\s*&& soleDirectAdmission\s*&& expectedHandlerForeground/);
+  const directAdmission = methodBody(d, 'private boolean isSolePhotosDirectLaunchAdmission()');
+  assert.match(directAdmission, /handlerActivityCount == 1/);
+  assert.match(directAdmission, /DIRECT_HANDLER_PACKAGE\.equals\(handlerPackage\)/);
+  assert.match(directAdmission, /DIRECT_HANDLER_ACTIVITY\.equals\(handlerActivity\)/);
+  const fullscreenTip = methodBody(d, 'private UiObject2 findExactFullscreenTipButton()');
+  assert.match(fullscreenTip, /By\.res\(SYSTEM_UI_PACKAGE, "immersive_cling_title"\)\s*\.pkg\(SYSTEM_UI_PACKAGE\)\s*\.text\(exactLabel\(FULLSCREEN_TIP_TITLE\)\)/);
+  assert.match(fullscreenTip, /By\.res\(SYSTEM_UI_PACKAGE, "immersive_cling_description"\)\s*\.pkg\(SYSTEM_UI_PACKAGE\)\s*\.text\(exactLabel\(FULLSCREEN_TIP_DESCRIPTION\)\)/);
+  assert.match(fullscreenTip, /By\.res\(SYSTEM_UI_PACKAGE, "ok"\)\s*\.pkg\(SYSTEM_UI_PACKAGE\)\s*\.text\(exactLabel\(FULLSCREEN_TIP_BUTTON\)\)\s*\.clazz\("android\.widget\.Button"\)\s*\.clickable\(true\)\s*\.enabled\(true\)/);
+  assert.match(fullscreenTip, /assertEquals\("Expected one exact fullscreen tip button", 1, buttons\.size\(\)\)/);
+  assert.match(fullscreenTip, /assertVisibleBounds\(button, "fullscreen tip button"\)/);
   assert.doesNotMatch(d, /evaluateJavascript|executeShellCommand|grantRuntimePermission|shared_prefs/);
 }
 
@@ -189,6 +246,16 @@ for (const [name, mutate, contract, original] of [
   ['alternate package install', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell cmd package install third-party.apk\n', s => workflowContract(workflow, s), job],
   ['alternate package grant', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell cmd package grant some.pkg android.permission.INTERNET\n', s => workflowContract(workflow, s), job],
   ['appops permission change', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell appops set some.pkg MANAGE_EXTERNAL_STORAGE allow\n', s => workflowContract(workflow, s), job],
+  ['wrong fullscreen overlay package', s => s.replace('SYSTEM_UI_PACKAGE = "com.android.systemui"', 'SYSTEM_UI_PACKAGE = "com.example.overlay"'), driverContract, driver],
+  ['wrong fullscreen overlay title', s => s.replace('FULLSCREEN_TIP_TITLE = "Viewing full screen"', 'FULLSCREEN_TIP_TITLE = "Full screen"'), driverContract, driver],
+  ['wrong sole direct package', s => s.replace('DIRECT_HANDLER_PACKAGE = "com.google.android.apps.photos"', 'DIRECT_HANDLER_PACKAGE = "com.example.video"'), driverContract, driver],
+  ['multiple handlers admitted as direct', s => s.replace('handlerActivityCount == 1', 'handlerActivityCount >= 1'), driverContract, driver],
+  ['direct launch bypasses host metadata', s => s.replace('                && soleDirectAdmission\n                && expectedHandlerForeground', '                && expectedHandlerForeground'), driverContract, driver],
+  ['false chooser and direct receipt coexist', s => s.replace('realAndroidChooserObserved ^ soleHandlerDirectLaunchObserved', 'realAndroidChooserObserved || soleHandlerDirectLaunchObserved'), driverContract, driver],
+  ['partial handler metadata admitted', s => s.replace('                && !activity.isEmpty()\n                && !activityCount.isEmpty()', '                && !activityCount.isEmpty()'), driverContract, driver],
+  ['disabled fullscreen tip button admitted', s => s.replace('                        .clickable(true)\n                        .enabled(true));', '                        .clickable(true));'), driverContract, driver],
+  ['already dismissed fullscreen tip clicked again', s => s.replace('return fullscreenTipDismissed ? "wait" : "dismiss-fullscreen-tip";', 'return "dismiss-fullscreen-tip";'), driverContract, driver],
+  ['unbounded destination resolver', s => s.replace('while (SystemClock.uptimeMillis() < deadline)', 'while (true)'), driverContract, driver],
   ['native button case', s => s.replace('Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE', 'Pattern.UNICODE_CASE'), driverContract, driver],
   ['refreshed settings callsite', s => s.replace('UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();', 'UiObject2 playbackSettings = waitForLabeledClickable("Playback settings", MEDIA_WAIT_MS, "Playback settings");'), driverContract, driver],
   ['settings refresh API guard', s => s.replace('Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE', 'true'), driverContract, driver],
@@ -235,6 +302,163 @@ function enginePolicy(code, providerDump) {
     env: {...process.env, EVIDENCE: evidence},
   });
 }
+
+function handlerPolicy(code, handlerDump) {
+  const evidence = mkdtempSync(join(tmpdir(), 'yawf-external-handler-'));
+  writeFileSync(join(evidence, 'stock-video-handlers.txt'), handlerDump);
+  const execution = spawnSync('python3', ['-c', code], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8',
+    env: {...process.env, EVIDENCE: evidence},
+  });
+  const receipt = execution.status === 0
+    ? JSON.parse(readFileSync(join(evidence, 'stock-handler-query-admission.json'), 'utf8'))
+    : null;
+  return {execution, receipt};
+}
+
+function destinationReceiptPolicy(code, checks) {
+  return spawnSync('python3', ['-c', `import json,os\nchecks=json.loads(os.environ['CHECKS'])\n${code}`], {
+    encoding: 'utf8', env: {...process.env, CHECKS: JSON.stringify(checks)},
+  });
+}
+
+test('executes strict boolean XOR destination receipt validation', () => {
+  const code = job.split('# BEGIN EXTERNAL_DESTINATION_RECEIPT_POLICY\n')[1].split('# END EXTERNAL_DESTINATION_RECEIPT_POLICY')[0]
+    .split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
+  assert.equal(destinationReceiptPolicy(code, {
+    realAndroidChooserObserved: true, soleHandlerDirectLaunchObserved: false,
+  }).status, 0);
+  assert.equal(destinationReceiptPolicy(code, {
+    realAndroidChooserObserved: false, soleHandlerDirectLaunchObserved: true,
+  }).status, 0);
+  assert.notEqual(destinationReceiptPolicy(code, {
+    realAndroidChooserObserved: 'false', soleHandlerDirectLaunchObserved: false,
+  }).status, 0);
+  assert.notEqual(destinationReceiptPolicy(code, {
+    realAndroidChooserObserved: false, soleHandlerDirectLaunchObserved: false,
+  }).status, 0);
+  assert.notEqual(destinationReceiptPolicy(code, {
+    realAndroidChooserObserved: true, soleHandlerDirectLaunchObserved: true,
+  }).status, 0);
+});
+
+function resolverPolicyProbe(source) {
+  const body = methodBody(source, 'private static String chooseExternalDestinationAction(');
+  const metadataBody = methodBody(source, 'private static boolean hasCompleteHandlerMetadata(');
+  const directory = mkdtempSync(join(tmpdir(), 'yawf-external-resolver-'));
+  const javaSource = `public final class ResolverPolicyProbe {
+    private static String chooseExternalDestinationAction(
+        boolean chooserVisible,
+        boolean chooserHandlerVisible,
+        boolean exactFullscreenTipVisible,
+        boolean anyFullscreenTipResourceVisible,
+        boolean fullscreenTipDismissed,
+        boolean soleDirectAdmission,
+        boolean expectedHandlerForeground) {${body}}
+    private static boolean hasCompleteHandlerMetadata(
+        String label, String packageName, String activity, String activityCount) {${metadataBody}}
+    private static void expect(String expected, String actual) {
+      if (!expected.equals(actual)) throw new AssertionError(expected + " != " + actual);
+    }
+    public static void main(String[] args) {
+      expect("dismiss-fullscreen-tip", chooseExternalDestinationAction(false, false, true, true, false, true, true));
+      expect("wait", chooseExternalDestinationAction(false, false, true, true, true, true, true));
+      expect("wait", chooseExternalDestinationAction(false, false, false, true, false, true, true));
+      expect("wait", chooseExternalDestinationAction(false, false, false, false, false, false, true));
+      expect("accept-sole-handler-direct-launch", chooseExternalDestinationAction(false, false, false, false, false, true, true));
+      expect("wait", chooseExternalDestinationAction(true, false, false, false, false, true, true));
+      expect("select-chooser-handler", chooseExternalDestinationAction(true, true, false, false, false, false, false));
+      if (!hasCompleteHandlerMetadata("", "", "", "")) throw new AssertionError("empty metadata rejected");
+      if (!hasCompleteHandlerMetadata("Photos", "com.google.android.apps.photos", "com.google.android.apps.photos.Player", "1")) throw new AssertionError("complete metadata rejected");
+      if (hasCompleteHandlerMetadata("", "com.google.android.apps.photos", "com.google.android.apps.photos.Player", "1")) throw new AssertionError("missing label admitted");
+      if (hasCompleteHandlerMetadata("Photos", "", "com.google.android.apps.photos.Player", "1")) throw new AssertionError("missing package admitted");
+      if (hasCompleteHandlerMetadata("Photos", "com.google.android.apps.photos", "", "1")) throw new AssertionError("missing activity admitted");
+      if (hasCompleteHandlerMetadata("Photos", "com.google.android.apps.photos", "com.google.android.apps.photos.Player", "")) throw new AssertionError("missing count admitted");
+    }
+  }`;
+  const file = join(directory, 'ResolverPolicyProbe.java');
+  writeFileSync(file, javaSource);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome ? join(javaHome, 'bin', 'javac') : 'javac';
+  const java = javaHome ? join(javaHome, 'bin', 'java') : 'java';
+  const compile = spawnSync(javac, ['-d', directory, file], {encoding: 'utf8'});
+  if (compile.status !== 0) return compile;
+  return spawnSync(java, ['-cp', directory, 'ResolverPolicyProbe'], {encoding: 'utf8'});
+}
+
+test('executes the actual destination state policy and kills unsafe state mutants', () => {
+  assert.equal(resolverPolicyProbe(driver).status, 0);
+  const repeatedTip = driver.replace(
+    'return fullscreenTipDismissed ? "wait" : "dismiss-fullscreen-tip";',
+    'return "dismiss-fullscreen-tip";');
+  assert.notEqual(repeatedTip, driver);
+  assert.notEqual(resolverPolicyProbe(repeatedTip).status, 0);
+  const noMetadata = driver.replace(
+    '                && soleDirectAdmission\n                && expectedHandlerForeground',
+    '                && expectedHandlerForeground');
+  assert.notEqual(noMetadata, driver);
+  assert.notEqual(resolverPolicyProbe(noMetadata).status, 0);
+  const chooserBypass = driver.replace('if (!chooserVisible', 'if (true');
+  assert.notEqual(chooserBypass, driver);
+  assert.notEqual(resolverPolicyProbe(chooserBypass).status, 0);
+  const partialMetadata = driver.replace(
+    '                && !activity.isEmpty()\n                && !activityCount.isEmpty()',
+    '                && !activityCount.isEmpty()');
+  assert.notEqual(partialMetadata, driver);
+  assert.notEqual(resolverPolicyProbe(partialMetadata).status, 0);
+});
+
+test('executes exact sole Photos direct-launch admission with negative controls', () => {
+  const code = job.split('# BEGIN EXTERNAL_STOCK_HANDLER_POLICY\n')[1].split('# END EXTERNAL_STOCK_HANDLER_POLICY')[0]
+    .split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
+  const photos = '  com.google.android.apps.photos/.pager.HostPhotoPagerActivity\n';
+  const admitted = handlerPolicy(code,
+    `1 activities found:\n  Activity #0:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n${photos}`);
+  assert.equal(admitted.execution.status, 0);
+  assert.equal(admitted.receipt.activityCount, 1);
+  assert.equal(admitted.receipt.solePhotosDirectLaunchEligible, true);
+
+  const wrongPackage = handlerPolicy(code,
+    '1 activities found:\n  Activity #0:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n  com.example.video/.PlayerActivity\n');
+  assert.equal(wrongPackage.execution.status, 0);
+  assert.equal(wrongPackage.receipt.activityCount, 1);
+  assert.equal(wrongPackage.receipt.solePhotosDirectLaunchEligible, false);
+
+  const multiple = handlerPolicy(code,
+    `2 activities found:\n  Activity #0:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n${photos}  Activity #1:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n  com.example.video/._PlayerActivity\n`);
+  assert.equal(multiple.execution.status, 0);
+  assert.equal(multiple.receipt.activityCount, 2);
+  assert.equal(multiple.receipt.solePhotosDirectLaunchEligible, false);
+
+  const wrongActivity = handlerPolicy(code,
+    '1 activities found:\n  Activity #0:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n  com.google.android.apps.photos/.WrongActivity\n');
+  assert.equal(wrongActivity.execution.status, 0);
+  assert.equal(wrongActivity.receipt.solePhotosDirectLaunchEligible, false);
+
+  const countMismatch = handlerPolicy(code,
+    `2 activities found:\n  Activity #0:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n${photos}`);
+  assert.notEqual(countMismatch.execution.status, 0);
+
+  const malformed = handlerPolicy(code,
+    '1 activities found:\n  Activity #0:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n  com.google.android.apps.photos/.Bad-Activity\n');
+  assert.notEqual(malformed.execution.status, 0);
+
+  const malformedSegments = handlerPolicy(code,
+    '1 activities found:\n  Activity #0:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n  com.google.android.apps.photos/.pager..HostPhotoPagerActivity\n');
+  assert.notEqual(malformedSegments.execution.status, 0);
+
+  const duplicate = handlerPolicy(code,
+    `2 activities found:\n  Activity #0:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n${photos}  Activity #1:\n    priority=0 preferredOrder=0 match=0x608000 specificIndex=-1 isDefault=true\n${photos}`);
+  assert.notEqual(duplicate.execution.status, 0);
+
+  const falseEmpty = handlerPolicy(code, `No activities found\n${photos}`);
+  assert.notEqual(falseEmpty.execution.status, 0);
+
+  const unknown = handlerPolicy(code,
+    `1 activities found:\n  Activity #0:\n    unexpected=true\n${photos}`);
+  assert.notEqual(unknown.execution.status, 0);
+});
+
 test('executes the actual minimum-engine admission before native UI', () => {
   const code = job.split('# BEGIN EXTERNAL_STOCK_WEBVIEW_POLICY\n')[1].split('# END EXTERNAL_STOCK_WEBVIEW_POLICY')[0]
     .split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');

@@ -697,8 +697,58 @@ jobs:
           adb -s "$EMULATOR_SERIAL" shell cmd package query-activities --brief \
             -a android.intent.action.VIEW -d http://127.0.0.1:43120/synthetic.mp4 -t 'video/*' \
             > "$EVIDENCE/stock-video-handlers.txt"
+          python3 - <<'PYHANDLERS'
+          # BEGIN EXTERNAL_STOCK_HANDLER_POLICY
+          import json,os,re
+          from pathlib import Path
+          evidence=Path(os.environ['EVIDENCE'])
+          text=(evidence/'stock-video-handlers.txt').read_text()
+          lines=[line.strip() for line in text.splitlines() if line.strip()]
+          components=[]
+          java_identifier=r'[A-Za-z_$][A-Za-z0-9_$]*'
+          package_pattern=java_identifier+r'(?:\.'+java_identifier+r')+'
+          relative_activity=r'\.'+java_identifier+r'(?:\.'+java_identifier+r')*'
+          activity_pattern=r'(?:'+relative_activity+r'|'+package_pattern+r')'
+          component_pattern=re.compile(r'^('+package_pattern+r')\/('+activity_pattern+r')$')
+          detail_pattern=re.compile(r'^priority=-?[0-9]+ preferredOrder=-?[0-9]+ match=0x[0-9a-fA-F]+ specificIndex=-?[0-9]+ isDefault=(?:true|false)$')
+          if lines==['No activities found']:
+              reported=0
+          else:
+              assert lines, 'Missing activity summary'
+              summary=re.fullmatch(r'([0-9]{1,3}) activities found:',lines[0])
+              assert summary, 'Malformed or duplicate activity summary'
+              reported=int(summary.group(1))
+              cursor=1
+              for expected_index in range(reported):
+                  assert cursor<len(lines), 'Truncated activity record'
+                  record=re.fullmatch(r'Activity #([0-9]{1,3}):',lines[cursor])
+                  assert record and int(record.group(1))==expected_index, 'Missing, duplicate, or reordered Activity record'
+                  cursor+=1
+                  assert cursor<len(lines) and detail_pattern.fullmatch(lines[cursor]), 'Missing or unrecognized Activity details'
+                  cursor+=1
+                  assert cursor<len(lines), 'Missing Activity component'
+                  component=component_pattern.fullmatch(lines[cursor])
+                  assert component, 'Malformed or unrecognized Activity component'
+                  package,activity=component.groups()
+                  canonical=package + activity if activity.startswith('.') else activity
+                  components.append({'package':package,'activity':canonical,'compact':lines[cursor]})
+                  cursor+=1
+              assert cursor==len(lines), 'Unexpected trailing, duplicate, or uncounted Activity data'
+          assert len(components)==reported, 'Reported activity count mismatch'
+          assert len({x['compact'] for x in components})==len(components), 'Duplicate Activity component'
+          assert len({(x['package'],x['activity']) for x in components})==len(components), 'Duplicate canonical Activity component'
+          fixed_package='com.google.android.apps.photos'
+          fixed_activity='com.google.android.apps.photos.pager.HostPhotoPagerActivity'
+          direct=(len(components)==1 and components[0]['package']==fixed_package and components[0]['activity']==fixed_activity)
+          receipt={'activityCount':len(components),'activities':components,'solePhotosDirectLaunchEligible':direct,'fixedPackage':fixed_package,'fixedActivity':fixed_activity}
+          (evidence/'stock-handler-query-admission.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          # END EXTERNAL_STOCK_HANDLER_POLICY
+          PYHANDLERS
+          handler_activity_count="$(python3 -c 'import json,os; from pathlib import Path; print(json.loads((Path(os.environ["EVIDENCE"])/"stock-handler-query-admission.json").read_text())["activityCount"])')"
+          [[ "$handler_activity_count" =~ ^[0-9]{1,2}$ ]]
           handler_label=""
           handler_package=""
+          handler_activity=""
           for package in com.android.gallery3d com.google.android.apps.photos; do
             if ! awk -F/ -v expected="$package" '{ gsub(/^[ \t]+|[ \r\t]+$/, "", $1); gsub(/[ \r\t]+$/, "", $2); if ($1 == expected && $2 ~ /^[A-Za-z0-9_.$]+$/) found=1 } END { exit !found }' "$EVIDENCE/stock-video-handlers.txt"; then
               continue
@@ -740,14 +790,20 @@ jobs:
             case "$label" in Gallery|Photos) ;; *) continue ;; esac
             handler_label="$label"
             handler_package="$package"
+            handler_activity="$(python3 -c 'import json,os,sys; from pathlib import Path; r=json.loads((Path(os.environ["EVIDENCE"])/"stock-handler-query-admission.json").read_text()); print(next(x["activity"] for x in r["activities"] if x["package"]==sys.argv[1]))' "$handler_package")"
             sha256sum "$RUNNER_TEMP/stock-video-handler.apk" > "$EVIDENCE/stock-handler-apk-sha256.txt"
-            printf 'package=%s\nlabel=%s\nnetworkVideoIntentObserved=true\nsystemPartitionObserved=true\n' \
-              "$handler_package" "$handler_label" > "$EVIDENCE/stock-handler-admission.txt"
+            printf 'package=%s\nlabel=%s\nactivity=%s\nactivityCount=%s\nnetworkVideoIntentObserved=true\nsystemPartitionObserved=true\n' \
+              "$handler_package" "$handler_label" "$handler_activity" "$handler_activity_count" > "$EVIDENCE/stock-handler-admission.txt"
             break
           done
           handler_args=()
           if [ -n "$handler_package" ]; then
-            handler_args=(-e externalHandlerLabel "$handler_label" -e externalHandlerPackage "$handler_package")
+            handler_args=(
+              -e externalHandlerLabel "$handler_label"
+              -e externalHandlerPackage "$handler_package"
+              -e externalHandlerActivity "$handler_activity"
+              -e externalHandlerActivityCount "$handler_activity_count"
+            )
           fi
           set +e
           timeout 480s adb -s "$EMULATOR_SERIAL" shell am instrument -w -r \
@@ -779,7 +835,24 @@ jobs:
               (out/n).write_bytes(data)
           assert not unexpected, 'Unexpected driver evidence filename; known captures retained, see bounded collector observation'
           r=json.loads((out/'instrumentation-external-player-receipt.json').read_text())
-          assert r['outcome']=='passed' and r['checks']['openPlayerClicks']==1
+          host=json.loads((Path(os.environ['EVIDENCE'])/'stock-handler-query-admission.json').read_text())
+          checks=r['checks']
+          assert r['outcome']=='passed' and checks['openPlayerClicks']==1
+          # BEGIN EXTERNAL_DESTINATION_RECEIPT_POLICY
+          destination=(checks['realAndroidChooserObserved'],checks['soleHandlerDirectLaunchObserved'])
+          assert all(type(value) is bool for value in destination)
+          assert destination in ((True,False),(False,True))
+          # END EXTERNAL_DESTINATION_RECEIPT_POLICY
+          if checks['soleHandlerDirectLaunchObserved']:
+              assert host['solePhotosDirectLaunchEligible'] is True
+              assert host['activityCount']==1
+              assert r['externalHandlerActivityCount']==host['activityCount']
+              assert r['expectedHandlerPackage']==host['fixedPackage']
+              assert r['expectedHandlerActivity']==host['fixedActivity']
+          assert checks['expectedHandlerForegroundObserved'] is True
+          assert checks['manualMovingElapsedTimeCapturePair'] is True
+          assert checks['semanticSeekGesturePerformed'] is True
+          assert checks['singleBackReturnedToProduct'] is True
           assert r['decodedPlaybackClaimed'] is False and r['decodeClaimRequiresManualScreenshotAndLiveReceiptReview'] is True
           assert os.environ['INSTRUMENTATION_STATUS']=='0'
           print('Native UI flow passed; decoded playback remains pending root screenshot/live-response review')

@@ -55,6 +55,14 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final String PLAYBACK_SETTINGS_LABEL = "Playback settings";
     private static final String EXTERNAL_PLAYER_LABEL =
             "Open in external player Choose VLC or another installed video app";
+    private static final String SYSTEM_UI_PACKAGE = "com.android.systemui";
+    private static final String FULLSCREEN_TIP_TITLE = "Viewing full screen";
+    private static final String FULLSCREEN_TIP_DESCRIPTION =
+            "To exit, swipe down from the top of your screen";
+    private static final String FULLSCREEN_TIP_BUTTON = "Got it";
+    private static final String DIRECT_HANDLER_PACKAGE = "com.google.android.apps.photos";
+    private static final String DIRECT_HANDLER_ACTIVITY =
+            "com.google.android.apps.photos.pager.HostPhotoPagerActivity";
     private static final String CONNECT_SERVER_LABEL =
             "Connect to a server Already have a server or an invite link? Paste the address and sign in.";
     private static final String SOURCE_CONTROL_LABEL =
@@ -94,6 +102,10 @@ public final class RuntimeExternalPlayerFlowTest {
     private String phase = "not-started";
     private String handlerLabel = "";
     private String handlerPackage = "";
+    private String handlerActivity = "";
+    private int handlerActivityCount;
+    private boolean realAndroidChooserObserved;
+    private boolean soleHandlerDirectLaunchObserved;
 
     @Test
     public void productionApkCompletesServerModeExternalPlayerFlow() throws Throwable {
@@ -107,11 +119,23 @@ public final class RuntimeExternalPlayerFlowTest {
 
         handlerLabel = arguments.getString("externalHandlerLabel", "").trim();
         handlerPackage = arguments.getString("externalHandlerPackage", "").trim();
+        handlerActivity = arguments.getString("externalHandlerActivity", "").trim();
+        String handlerActivityCountValue =
+                arguments.getString("externalHandlerActivityCount", "").trim();
         assertTrue("Handler label and package must be supplied together",
                 handlerLabel.isEmpty() == handlerPackage.isEmpty());
+        assertTrue("All external handler metadata fields must be supplied together",
+                hasCompleteHandlerMetadata(
+                        handlerLabel,
+                        handlerPackage,
+                        handlerActivity,
+                        handlerActivityCountValue));
         if (!handlerLabel.isEmpty()) {
             assertTrue("Unsafe external handler label", SAFE_LABEL.matcher(handlerLabel).matches());
             assertTrue("Unsafe external handler package", SAFE_PACKAGE.matcher(handlerPackage).matches());
+            assertTrue("Unsafe external handler activity count",
+                    handlerActivityCountValue.matches("[1-9][0-9]?") && handlerActivityCountValue.length() <= 2);
+            handlerActivityCount = Integer.parseInt(handlerActivityCountValue);
         }
 
         Context targetContext = instrumentation.getTargetContext();
@@ -124,6 +148,9 @@ public final class RuntimeExternalPlayerFlowTest {
         checks.put("permissionGrantUsed", false);
         checks.put("decodedPlaybackClaimed", false);
         checks.put("manualDecodedPlaybackReviewRequired", true);
+        checks.put("realAndroidChooserObserved", false);
+        checks.put("soleHandlerDirectLaunchObserved", false);
+        checks.put("nonbindingFullscreenTipDismissed", false);
 
         String outcome = "failed";
         String failure = null;
@@ -217,28 +244,11 @@ public final class RuntimeExternalPlayerFlowTest {
         log("Clicked the one origin-scoped native Open player confirmation");
         assertEquals("Native Open player was clicked more than once", 1, openPlayerClicks);
 
-        transition("chooser-visible");
-        waitForTextOrDescription(
-                "Open external player", SHORT_WAIT_MS, "Android external-player chooser");
-        checks.put("realAndroidChooserObserved", true);
-        capture("chooser");
-        if (handlerLabel.isEmpty()) {
-            checks.put("handlerAdmissionProvided", false);
-            fail("No exact externalHandlerLabel/externalHandlerPackage was admitted. "
-                    + "The chooser was retained for honest inspection; do not install a third-party handler.");
-        }
-        checks.put("handlerAdmissionProvided", true);
-        UiObject2 handler = waitForLabeledClickable(
-                handlerLabel, SHORT_WAIT_MS, "admitted external handler");
-        capture("chooser-handler-observed");
-        guardedClick(handler, "admitted external handler");
-
-        UiObject2 justOnce = waitForOptionalLabeledClickable(
-                exactCaseInsensitiveLabel("Just once"), 2_000, "single-use chooser choice");
-        if (justOnce != null && !handlerPackage.equals(currentPackage())) {
-            guardedClick(justOnce, "single-use chooser choice");
-            checks.put("singleUseChooserChoice", true);
-        }
+        transition("external-destination-resolving");
+        resolveExternalDestination();
+        assertTrue(
+                "Exactly one external destination path must be observed",
+                realAndroidChooserObserved ^ soleHandlerDirectLaunchObserved);
 
         transition("handler-visible");
         waitForForegroundPackage(handlerPackage, MEDIA_WAIT_MS);
@@ -276,6 +286,161 @@ public final class RuntimeExternalPlayerFlowTest {
         capture("returned-to-product");
         transition("complete-manual-review-required");
         log("Flow complete. Decode remains unclaimed pending manual elapsed-time screenshots and live 200/206 receipt review");
+    }
+
+    private void resolveExternalDestination() throws Exception {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        boolean fullscreenTipDismissed = false;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoOutOfScopeApproval();
+
+            UiObject2 chooser = findTextOrDescription("Open external player");
+            if (chooser != null) {
+                assertTrue("Chooser was observed after a direct-launch receipt",
+                        !soleHandlerDirectLaunchObserved);
+                if (!realAndroidChooserObserved) {
+                    realAndroidChooserObserved = true;
+                    checks.put("realAndroidChooserObserved", true);
+                    capture("chooser");
+                }
+                requireHandlerAdmission();
+            }
+            UiObject2 handler = chooser == null ? null : findLabeledClickable(handlerLabel);
+            UiObject2 fullscreenTipButton = findExactFullscreenTipButton();
+            boolean anyFullscreenTipResource = hasAnyFullscreenTipResource();
+            String action = chooseExternalDestinationAction(
+                    chooser != null,
+                    handler != null,
+                    fullscreenTipButton != null,
+                    anyFullscreenTipResource,
+                    fullscreenTipDismissed,
+                    !realAndroidChooserObserved && isSolePhotosDirectLaunchAdmission(),
+                    handlerPackage.equals(currentPackage()));
+
+            if ("select-chooser-handler".equals(action)) {
+                capture("chooser-handler-observed");
+                guardedClick(handler, "admitted external handler");
+
+                long remaining = deadline - SystemClock.uptimeMillis();
+                if (remaining > 0) {
+                    UiObject2 justOnce = waitForOptionalLabeledClickable(
+                            exactCaseInsensitiveLabel("Just once"),
+                            Math.min(2_000, remaining),
+                            "single-use chooser choice");
+                    if (justOnce != null && !handlerPackage.equals(currentPackage())) {
+                        guardedClick(justOnce, "single-use chooser choice");
+                        checks.put("singleUseChooserChoice", true);
+                    }
+                }
+                return;
+            }
+
+            if ("dismiss-fullscreen-tip".equals(action)) {
+                assertNoOutOfScopeApproval();
+                capture("nonbinding-fullscreen-tip");
+                fullscreenTipButton.click();
+                fullscreenTipDismissed = true;
+                checks.put("nonbindingFullscreenTipDismissed", true);
+                log("Dismissed the exact nonbinding SystemUI fullscreen tip once");
+                SystemClock.sleep(250);
+                continue;
+            }
+
+            if ("accept-sole-handler-direct-launch".equals(action)) {
+                assertTrue("Direct launch was observed after a chooser receipt",
+                        !realAndroidChooserObserved);
+                soleHandlerDirectLaunchObserved = true;
+                checks.put("soleHandlerDirectLaunchObserved", true);
+                checks.put("handlerAdmissionProvided", true);
+                capture("sole-handler-direct-launch");
+                log("Observed the independently admitted sole Photos handler in the foreground");
+                return;
+            }
+            SystemClock.sleep(250);
+        }
+        fail("Timed out waiting for an exact Android chooser or the independently admitted sole Photos handler");
+    }
+
+    private static String chooseExternalDestinationAction(
+            boolean chooserVisible,
+            boolean chooserHandlerVisible,
+            boolean exactFullscreenTipVisible,
+            boolean anyFullscreenTipResourceVisible,
+            boolean fullscreenTipDismissed,
+            boolean soleDirectAdmission,
+            boolean expectedHandlerForeground) {
+        if (exactFullscreenTipVisible) {
+            return fullscreenTipDismissed ? "wait" : "dismiss-fullscreen-tip";
+        }
+        if (chooserVisible && chooserHandlerVisible) return "select-chooser-handler";
+        if (!chooserVisible
+                && !anyFullscreenTipResourceVisible
+                && soleDirectAdmission
+                && expectedHandlerForeground) {
+            return "accept-sole-handler-direct-launch";
+        }
+        return "wait";
+    }
+
+    private static boolean hasCompleteHandlerMetadata(
+            String label, String packageName, String activity, String activityCount) {
+        boolean noneProvided = label.isEmpty()
+                && packageName.isEmpty()
+                && activity.isEmpty()
+                && activityCount.isEmpty();
+        boolean allProvided = !label.isEmpty()
+                && !packageName.isEmpty()
+                && !activity.isEmpty()
+                && !activityCount.isEmpty();
+        return noneProvided || allProvided;
+    }
+
+    private void requireHandlerAdmission() {
+        if (handlerLabel.isEmpty()) {
+            checks.put("handlerAdmissionProvided", false);
+            fail("No exact external handler metadata was admitted. "
+                    + "The chooser was retained for honest inspection; do not install a third-party handler.");
+        }
+        checks.put("handlerAdmissionProvided", true);
+    }
+
+    private boolean isSolePhotosDirectLaunchAdmission() {
+        return handlerActivityCount == 1
+                && DIRECT_HANDLER_PACKAGE.equals(handlerPackage)
+                && DIRECT_HANDLER_ACTIVITY.equals(handlerActivity);
+    }
+
+    private UiObject2 findExactFullscreenTipButton() {
+        List<UiObject2> titles = device.findObjects(
+                By.res(SYSTEM_UI_PACKAGE, "immersive_cling_title")
+                        .pkg(SYSTEM_UI_PACKAGE)
+                        .text(exactLabel(FULLSCREEN_TIP_TITLE)));
+        List<UiObject2> descriptions = device.findObjects(
+                By.res(SYSTEM_UI_PACKAGE, "immersive_cling_description")
+                        .pkg(SYSTEM_UI_PACKAGE)
+                        .text(exactLabel(FULLSCREEN_TIP_DESCRIPTION)));
+        List<UiObject2> buttons = device.findObjects(
+                By.res(SYSTEM_UI_PACKAGE, "ok")
+                        .pkg(SYSTEM_UI_PACKAGE)
+                        .text(exactLabel(FULLSCREEN_TIP_BUTTON))
+                        .clazz("android.widget.Button")
+                        .clickable(true)
+                        .enabled(true));
+        if (titles.isEmpty() || descriptions.isEmpty() || buttons.isEmpty()) return null;
+        assertEquals("Expected one exact fullscreen tip title", 1, titles.size());
+        assertEquals("Expected one exact fullscreen tip description", 1, descriptions.size());
+        assertEquals("Expected one exact fullscreen tip button", 1, buttons.size());
+        UiObject2 button = buttons.get(0);
+        assertVisibleBounds(titles.get(0), "fullscreen tip title");
+        assertVisibleBounds(descriptions.get(0), "fullscreen tip description");
+        assertVisibleBounds(button, "fullscreen tip button");
+        return button;
+    }
+
+    private boolean hasAnyFullscreenTipResource() {
+        return device.hasObject(By.res(SYSTEM_UI_PACKAGE, "immersive_cling_title"))
+                || device.hasObject(By.res(SYSTEM_UI_PACKAGE, "immersive_cling_description"))
+                || device.hasObject(By.res(SYSTEM_UI_PACKAGE, "ok"));
     }
 
     private void launchProduct() {
@@ -655,13 +820,18 @@ public final class RuntimeExternalPlayerFlowTest {
         long deadline = SystemClock.uptimeMillis() + timeoutMs;
         while (SystemClock.uptimeMillis() < deadline) {
             assertNoOutOfScopeApproval();
-            UiObject2 object = device.findObject(By.text(label));
-            if (object == null) object = device.findObject(By.desc(label));
+            UiObject2 object = findTextOrDescription(label);
             if (object != null) return object;
             SystemClock.sleep(250);
         }
         fail("Timed out waiting for " + description);
         return null;
+    }
+
+    private UiObject2 findTextOrDescription(String label) {
+        UiObject2 object = device.findObject(By.text(exactLabel(label)));
+        if (object == null) object = device.findObject(By.desc(exactLabel(label)));
+        return object;
     }
 
     private UiObject2 waitFor(BySelector selector, long timeoutMs, String description) {
@@ -769,6 +939,8 @@ public final class RuntimeExternalPlayerFlowTest {
         receipt.put("captures", captureIndex);
         receipt.put("expectedHandlerLabel", handlerLabel.isEmpty() ? JSONObject.NULL : handlerLabel);
         receipt.put("expectedHandlerPackage", handlerPackage.isEmpty() ? JSONObject.NULL : handlerPackage);
+        receipt.put("expectedHandlerActivity", handlerActivity.isEmpty() ? JSONObject.NULL : handlerActivity);
+        receipt.put("externalHandlerActivityCount", handlerActivityCount);
         receipt.put("phases", new JSONArray(phases));
         receipt.put("checks", new JSONObject(checks));
         receipt.put("decodedPlaybackClaimed", false);
