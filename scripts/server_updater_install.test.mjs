@@ -285,6 +285,11 @@ case_private_runtime_preserves_global_node_and_detaches_source() {
   test "$(sha256sum /opt/yawf-node24/replacement-node | awk '{print $1}')" = "$(sha256sum /usr/lib/yawf-server-updater/runtime/node | awk '{print $1}')"
   rm -f "$node24_candidate"
   rm -f /opt/yawf-node24/replacement-node
+  expect_no_registration
+  create_compose /srv/yawf/docker-compose.ghcr.yml
+  # The status probe needs a disabled registration, not installer opt-in.
+  /usr/local/sbin/yawf-server-update register "$path"
+  node -e 'const f=require("fs"); if (JSON.parse(f.readFileSync("/etc/yawf-server-updater/config.json")).enabled !== false) process.exit(1)'
   mkdir -p /var/lib/yawf-server-updater/public
   chmod 0755 /var/lib/yawf-server-updater /var/lib/yawf-server-updater/public
   printf '%s\\n' '{"ok":true,"runtime":"private"}' > /var/lib/yawf-server-updater/public/status.json

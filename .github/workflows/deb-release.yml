@@ -352,6 +352,26 @@ jobs:
           test "$source_hash" = "$(sha256sum /opt/yawf-node24/node | awk '{print $1}')"
           /opt/yawf-node24/node --version | grep -Eq '^v24\.'
 
+      - name: Admit disposable CI Docker runtime
+        shell: bash
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          docker_log="$RUNNER_TEMP/server-updater-docker-admission.log"
+          {
+            docker --version
+            sudo systemctl start docker.service
+            deadline=$((SECONDS + 60))
+            until timeout 10s docker info --format '{{.ServerVersion}}'; do
+              test "$SECONDS" -lt "$deadline"
+              sleep 2
+            done
+            docker compose version
+          } 2>&1 | tee "$docker_log"
+
       - name: Test updater policy and release guards
         shell: bash
         timeout-minutes: 10
@@ -520,6 +540,7 @@ jobs:
             ${{ runner.temp }}/server-updater-compose-actual.log
             ${{ runner.temp }}/server-updater-compose-actual.json
             ${{ runner.temp }}/server-updater-install-runtime-driver.log
+            ${{ runner.temp }}/server-updater-docker-admission.log
             ${{ runner.temp }}/yawf-updater-install-runtime.*/installer.raw.log
             ${{ runner.temp }}/yawf-updater-install-runtime.*/installer.receipt.json
           if-no-files-found: error

@@ -127,6 +127,40 @@ test("Compose CI uses a verified private runtime and proves global runtime prese
   }
 });
 
+function assertDockerAdmission(source) {
+  const job = source.slice(source.indexOf("  compose-updater-check:"));
+  const step = job.match(/- name: Admit disposable CI Docker runtime[\s\S]*?(?=\n\s+- name: Test updater policy)/)?.[0] ?? "";
+  assert.match(step, /timeout-minutes: 2/);
+  assert.match(step, /test "\$GITHUB_ACTIONS" = true/);
+  assert.match(step, /test "\$RUNNER_ENVIRONMENT" = github-hosted/);
+  assert.match(step, /test "\$RUNNER_OS" = Linux/);
+  assert.match(step, /set -euo pipefail/);
+  assert.match(step, /sudo systemctl start docker\.service/);
+  assert.match(step, /deadline=\$\(\(SECONDS \+ 60\)\)/);
+  assert.match(step, /until timeout 10s docker info --format '\{\{\.ServerVersion\}\}'/);
+  assert.match(step, /test "\$SECONDS" -lt "\$deadline"/);
+  assert.match(step, /docker compose version/);
+  assert.match(step, /\} 2>&1 \| tee "\$docker_log"/);
+  assert.match(job, /\$\{\{ runner\.temp \}\}\/server-updater-docker-admission\.log/);
+  assert.doesNotMatch(step, /chmod|chown|usermod|groupadd|docker.sock|sudo docker|\|\| true/);
+}
+
+test("CI Docker readiness is bounded, disposable-only, unprivileged, and retained on failure", () => {
+  assertDockerAdmission(workflow);
+  for (const [before, after] of [
+    ['test "$RUNNER_ENVIRONMENT" = github-hosted', ':'],
+    ['sudo systemctl start docker.service', ':'],
+    ["until timeout 10s docker info", "until docker info"],
+    ['test "$SECONDS" -lt "$deadline"', ':'],
+    ['} 2>&1 | tee "$docker_log"', '} 2>&1 | cat'],
+    ['${{ runner.temp }}/server-updater-docker-admission.log', '${{ runner.temp }}/other.log'],
+  ]) {
+    const changed = workflow.replace(before, after);
+    assert.notEqual(changed, workflow);
+    assert.throws(() => assertDockerAdmission(changed));
+  }
+});
+
 function assertInstallerRuntimeTempForwarding(step) {
   const forwarded = installerRuntimeSudoEnv(step).match(/^[ \t]*RUNNER_TEMP="\$RUNNER_TEMP" \\$/gm) ?? [];
   assert.equal(forwarded.length, 1, "installer runtime sudo environment must forward RUNNER_TEMP exactly once");

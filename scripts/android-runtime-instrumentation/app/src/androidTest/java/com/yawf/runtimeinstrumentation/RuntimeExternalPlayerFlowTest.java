@@ -10,6 +10,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Rect;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 
@@ -181,8 +182,7 @@ public final class RuntimeExternalPlayerFlowTest {
         guardedClick(source, "synthetic source");
 
         transition("production-player-visible");
-        UiObject2 playbackSettings = waitForLabeledClickable(
-                "Playback settings", MEDIA_WAIT_MS, "Playback settings");
+        UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();
         capture("production-player");
         guardedClick(playbackSettings, "Playback settings");
         UiObject2 external = scrollUntilLabeledClickable(
@@ -372,6 +372,24 @@ public final class RuntimeExternalPlayerFlowTest {
             SystemClock.sleep(500);
         }
         fail("Could not scroll to " + description);
+        return null;
+    }
+
+    private UiObject2 waitForRefreshedPlaybackSettings() {
+        assertTrue(
+                "Accessibility cache refresh requires Android API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertTrue(
+                    "Accessibility cache refresh failed",
+                    instrumentation.getUiAutomation().clearCache());
+            assertNoOutOfScopeApproval();
+            UiObject2 found = findLabeledClickable("Playback settings");
+            if (found != null) return found;
+            SystemClock.sleep(250);
+        }
+        fail("Timed out waiting for Playback settings");
         return null;
     }
 

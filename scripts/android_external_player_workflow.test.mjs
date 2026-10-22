@@ -60,7 +60,36 @@ function fixtureContract(f) {
   assert.match(f, /drawtext=fontfile=/);
   assert.doesNotMatch(f, /\/Volumes\/Work\/|\/private\/tmp\/ds-/);
 }
+function playbackSettingsObservation(d) {
+  assert.equal((d.match(/UiObject2 playbackSettings = waitForRefreshedPlaybackSettings\(\);/g) ?? []).length, 1);
+  assert.match(d, /MEDIA_WAIT_MS = 60_000/);
+  const signature = '    private UiObject2 waitForRefreshedPlaybackSettings() {\n';
+  assert.equal(d.split(signature).length, 2);
+  const start = d.indexOf(signature) + signature.length;
+  const end = d.indexOf('\n    }\n', start);
+  assert.ok(end > start);
+  const lines = d.slice(start, end).split('\n').map(line => line.trim()).filter(Boolean);
+  assert.deepEqual(lines, [
+    'assertTrue(',
+    '"Accessibility cache refresh requires Android API 34 or newer",',
+    'Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);',
+    'long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;',
+    'while (SystemClock.uptimeMillis() < deadline) {',
+    'assertTrue(',
+    '"Accessibility cache refresh failed",',
+    'instrumentation.getUiAutomation().clearCache());',
+    'assertNoOutOfScopeApproval();',
+    'UiObject2 found = findLabeledClickable("Playback settings");',
+    'if (found != null) return found;',
+    'SystemClock.sleep(250);',
+    '}',
+    'fail("Timed out waiting for Playback settings");',
+    'return null;',
+  ]);
+}
+
 function driverContract(d) {
+  playbackSettingsObservation(d);
   assert.equal((d.match(/openPlayer\.click\(\)/g) ?? []).length, 1);
   assert.match(d, /waitFor\(By\.text\(FIXTURE_ORIGIN_MESSAGE\)/);
   assert.match(d, /checks\.put\("decodedPlaybackClaimed", false\)/);
@@ -102,6 +131,13 @@ for (const [name, mutate, contract, original] of [
   ['alternate package grant', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell cmd package grant some.pkg android.permission.INTERNET\n', s => workflowContract(workflow, s), job],
   ['appops permission change', s => s + '\n          adb -s "$EMULATOR_SERIAL" shell appops set some.pkg MANAGE_EXTERNAL_STORAGE allow\n', s => workflowContract(workflow, s), job],
   ['native button case', s => s.replace('Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE', 'Pattern.UNICODE_CASE'), driverContract, driver],
+  ['refreshed settings callsite', s => s.replace('UiObject2 playbackSettings = waitForRefreshedPlaybackSettings();', 'UiObject2 playbackSettings = waitForLabeledClickable("Playback settings", MEDIA_WAIT_MS, "Playback settings");'), driverContract, driver],
+  ['settings refresh API guard', s => s.replace('Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE', 'true'), driverContract, driver],
+  ['settings cache refresh result', s => s.replace('instrumentation.getUiAutomation().clearCache());', 'true);'), driverContract, driver],
+  ['settings cache refresh ordering', s => s.replace('            assertTrue(\n                    "Accessibility cache refresh failed",\n                    instrumentation.getUiAutomation().clearCache());\n            assertNoOutOfScopeApproval();', '            assertNoOutOfScopeApproval();\n            assertTrue(\n                    "Accessibility cache refresh failed",\n                    instrumentation.getUiAutomation().clearCache());'), driverContract, driver],
+  ['settings refresh exact label', s => s.replace('UiObject2 found = findLabeledClickable("Playback settings");', 'UiObject2 found = findLabeledClickable("Settings");'), driverContract, driver],
+  ['settings observation input replay', s => s.replace('UiObject2 found = findLabeledClickable("Playback settings");', 'device.click(500, 500);\n            UiObject2 found = findLabeledClickable("Playback settings");'), driverContract, driver],
+  ['settings deadline relaxation', s => s.replace('MEDIA_WAIT_MS = 60_000', 'MEDIA_WAIT_MS = 600_000'), driverContract, driver],
   ['shortened connect label', s => s.replace('Connect to a server Already have a server or an invite link? Paste the address and sign in.', 'Connect to a server'), driverContract, driver],
   ['unused connect label', s => s.replace('clickLabeled(CONNECT_SERVER_LABEL,', 'clickLabeled("Connect to a server",'), driverContract, driver],
   ['shortened source label', s => s.replace('1080p Synthetic Fixture Movie 2026 1080p WEB-DL x264 Synthetic Fixture Movie 2026 1080p WEB-DL x264 1080p · H.264 · WEB-DL · - · 0 seeders · Synthetic Fixture Cache unknown', '1080p Synthetic Fixture Movie 2026'), driverContract, driver],

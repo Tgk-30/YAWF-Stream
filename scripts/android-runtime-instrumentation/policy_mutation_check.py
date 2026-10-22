@@ -111,8 +111,16 @@ MUTANTS = {
         "return UP_TO_DATE_TITLE.equals(title);",
     ),
     "versionPins": (
-        "return (LEGACY_CANDIDATE_VERSION.equals(candidateVersion)\n                        && LEGACY_PUBLISHED_VERSION.equals(publishedVersion))\n                || (CURRENT_CANDIDATE_VERSION.equals(candidateVersion)\n                        && CURRENT_PUBLISHED_VERSION.equals(publishedVersion));",
-        "return (LEGACY_CANDIDATE_VERSION.equals(candidateVersion)\n                        && LEGACY_PUBLISHED_VERSION.equals(publishedVersion));",
+        "(CURRENT_CANDIDATE_VERSION.equals(candidateVersion)\n                        && CURRENT_PUBLISHED_VERSION.equals(publishedVersion))",
+        "false",
+    ),
+    "versionPinsLegacy": (
+        "(LEGACY_CANDIDATE_VERSION.equals(candidateVersion)\n                        && LEGACY_PUBLISHED_VERSION.equals(publishedVersion))",
+        "false",
+    ),
+    "versionPinsNext": (
+        "(NEXT_CANDIDATE_VERSION.equals(candidateVersion)\n                        && NEXT_PUBLISHED_VERSION.equals(publishedVersion))",
+        "false",
     ),
 }
 
@@ -162,6 +170,8 @@ def main() -> int:
                 "tourDismissalSettled"
                 if mutation_name.startswith("tourDialog")
                 or mutation_name.startswith("tourObservation")
+                else "versionPins"
+                if mutation_name.startswith("versionPins")
                 else mutation_name
             )
             if original.count(before) != 1:
