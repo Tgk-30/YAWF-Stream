@@ -51,8 +51,8 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final String MOVIE_TITLE = "Synthetic Fixture Movie";
     private static final String CONNECT_SERVER_LABEL =
             "Connect to a server Already have a server or an invite link? Paste the address and sign in.";
-    private static final String SOURCE_TITLE =
-            "Synthetic Fixture Movie 2026 1080p WEB-DL x264";
+    private static final String SOURCE_CONTROL_LABEL =
+            "1080p Synthetic Fixture Movie 2026 1080p WEB-DL x264 Synthetic Fixture Movie 2026 1080p WEB-DL x264 1080p · H.264 · WEB-DL · - · 0 seeders · Synthetic Fixture Cache unknown";
     private static final String USERNAME = "fixture-owner";
     private static final String PASSWORD = "fixture-owner-password";
     private static final String WEB_BUTTON_CLASS = "android.widget.Button";
@@ -176,7 +176,7 @@ public final class RuntimeExternalPlayerFlowTest {
 
         transition("movie-detail-visible");
         waitFor(By.text(MOVIE_TITLE), UI_WAIT_MS, "synthetic movie detail");
-        UiObject2 source = scrollUntilLabeledClickable(SOURCE_TITLE, "synthetic source");
+        UiObject2 source = scrollUntilLabeledClickable(SOURCE_CONTROL_LABEL, "synthetic source");
         capture("source-visible");
         guardedClick(source, "synthetic source");
 

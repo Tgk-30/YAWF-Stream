@@ -57,6 +57,8 @@ function driverContract(d) {
   assert.match(d, /Pattern\.quote\(label\)/);
   assert.match(d, /Connect to a server Already have a server or an invite link\? Paste the address and sign in\./);
   assert.match(d, /clickLabeled\(CONNECT_SERVER_LABEL, "combined Connect to a server card", UI_WAIT_MS\)/);
+  assert.match(d, /1080p Synthetic Fixture Movie 2026 1080p WEB-DL x264 Synthetic Fixture Movie 2026 1080p WEB-DL x264 1080p · H\.264 · WEB-DL · - · 0 seeders · Synthetic Fixture Cache unknown/);
+  assert.match(d, /scrollUntilLabeledClickable\(SOURCE_CONTROL_LABEL, "synthetic source"\)/);
   assert.match(d, /device\.findObjects\(By\.text\(labelPattern\)\)/);
   assert.match(d, /device\.findObjects\(By\.desc\(labelPattern\)\)/);
   assert.match(d, /Ambiguous/);
@@ -82,6 +84,8 @@ for (const [name, mutate, contract, original] of [
   ['native button case', s => s.replace('Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE', 'Pattern.UNICODE_CASE'), driverContract, driver],
   ['shortened connect label', s => s.replace('Connect to a server Already have a server or an invite link? Paste the address and sign in.', 'Connect to a server'), driverContract, driver],
   ['unused connect label', s => s.replace('clickLabeled(CONNECT_SERVER_LABEL,', 'clickLabeled("Connect to a server",'), driverContract, driver],
+  ['shortened source label', s => s.replace('1080p Synthetic Fixture Movie 2026 1080p WEB-DL x264 Synthetic Fixture Movie 2026 1080p WEB-DL x264 1080p · H.264 · WEB-DL · - · 0 seeders · Synthetic Fixture Cache unknown', '1080p Synthetic Fixture Movie 2026'), driverContract, driver],
+  ['unused source label', s => s.replace('scrollUntilLabeledClickable(SOURCE_CONTROL_LABEL,', 'scrollUntilLabeledClickable("1080p Synthetic Fixture Movie 2026",'), driverContract, driver],
   ['first-match heading shadow', s => s.replace('device.findObjects(By.text(labelPattern))', 'java.util.Collections.singletonList(device.findObject(By.text(labelPattern)))'), driverContract, driver],
   ['native fake decode claim', s => s.replace('receipt.put("decodedPlaybackClaimed", false)', 'receipt.put("decodedPlaybackClaimed", true)'), driverContract, driver],
   ['lost origin confirmation', s => s.replace('waitFor(By.text(FIXTURE_ORIGIN_MESSAGE)', 'waitFor(By.text("Open external player?")'), driverContract, driver],
