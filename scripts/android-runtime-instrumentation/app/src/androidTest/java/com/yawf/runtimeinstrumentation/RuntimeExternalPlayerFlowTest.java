@@ -83,6 +83,7 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final int MAX_CAPTURES = 30;
     private static final int MAX_ACTION_LINES = 220;
     private static final int MAX_PHASES = 48;
+    private static final int MAX_SETTINGS_TRANSACTION_TIMING_EVENTS = 64;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
     private static final long MAX_HIERARCHY_BYTES = 1024L * 1024L;
     private static final Pattern SAFE_SUBDIR = Pattern.compile("[A-Za-z0-9._-]{1,64}");
@@ -102,9 +103,16 @@ public final class RuntimeExternalPlayerFlowTest {
     private File evidenceDir;
     private final List<String> actions = new ArrayList<>();
     private final List<String> phases = new ArrayList<>();
+    private final List<String> settingsTransactionTimings = new ArrayList<>();
     private final Map<String, Object> checks = new LinkedHashMap<>();
     private int captureIndex;
     private int openPlayerClicks;
+    private int settingsTransactionTimingEventsOmitted;
+    private long settingsClickDispatchedAtMs = -1L;
+    private long settingsClickFinishedAtMs = -1L;
+    private long settingsClickIdleBeforeMs = -1L;
+    private long settingsClickIdleAfterMs = -1L;
+    private boolean settingsClickReturned;
     private long startedAtMs;
     private String phase = "not-started";
     private String handlerLabel = "";
@@ -670,12 +678,45 @@ public final class RuntimeExternalPlayerFlowTest {
 
                     @Override
                     public void assertNoOutOfScopeApproval() {
-                        RuntimeExternalPlayerFlowTest.this.assertNoOutOfScopeApproval();
+                        RuntimeExternalPlayerFlowTest.this
+                                .assertNoOutOfScopeApprovalForSettingsTransaction();
                     }
 
                     @Override
                     public RuntimeExternalSettingsTransaction.Observation observePlaybackSettings() {
                         return observePlaybackSettingsTransaction();
+                    }
+
+                    @Override
+                    public void recordTiming(
+                            String stage,
+                            long startedAtMs,
+                            long finishedAtMs,
+                            long idleBeforeMs,
+                            long idleAfterMs,
+                            boolean returned) {
+                        RuntimeExternalPlayerFlowTest.this.recordSettingsTransactionTiming(
+                                stage,
+                                startedAtMs,
+                                finishedAtMs,
+                                idleBeforeMs,
+                                idleAfterMs,
+                                returned);
+                    }
+
+                    @Override
+                    public void recordSettingsClickTiming(
+                            long dispatchedAtMs,
+                            long finishedAtMs,
+                            long idleBeforeMs,
+                            long idleAfterMs,
+                            boolean returned) {
+                        RuntimeExternalPlayerFlowTest.this.recordSettingsClickTiming(
+                                dispatchedAtMs,
+                                finishedAtMs,
+                                idleBeforeMs,
+                                idleAfterMs,
+                                returned);
                     }
 
                     @Override
@@ -1010,6 +1051,57 @@ public final class RuntimeExternalPlayerFlowTest {
         }
     }
 
+    private void assertNoOutOfScopeApprovalForSettingsTransaction() {
+        RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                instrumentation.getUiAutomation(), BINDING_TERMS);
+        String foreground = currentPackage();
+        if (foreground.equals("com.android.permissioncontroller")
+                || foreground.equals("com.google.android.permissioncontroller")
+                || foreground.equals("com.android.settings")
+                || foreground.equals("com.google.android.packageinstaller")
+                || foreground.equals("com.android.packageinstaller")) {
+            fail("Refusing to approve an out-of-scope permission, security, settings, or install surface");
+        }
+    }
+
+    private void recordSettingsTransactionTiming(
+            String stage,
+            long startedAtMs,
+            long finishedAtMs,
+            long idleBeforeMs,
+            long idleAfterMs,
+            boolean returned) {
+        if (settingsTransactionTimings.size() >= MAX_SETTINGS_TRANSACTION_TIMING_EVENTS) {
+            settingsTransactionTimingEventsOmitted++;
+            return;
+        }
+        settingsTransactionTimings.add(String.format(
+                Locale.ROOT,
+                "%s startUptimeMs=%d finishUptimeMs=%d idleBeforeMs=%d idleAfterMs=%d returned=%s",
+                safe(stage),
+                startedAtMs,
+                finishedAtMs,
+                idleBeforeMs,
+                idleAfterMs,
+                returned));
+    }
+
+    private void recordSettingsClickTiming(
+            long dispatchedAtMs,
+            long finishedAtMs,
+            long idleBeforeMs,
+            long idleAfterMs,
+            boolean returned) {
+        if (settingsClickDispatchedAtMs >= 0L) {
+            fail("Playback settings click timing was recorded more than once");
+        }
+        settingsClickDispatchedAtMs = dispatchedAtMs;
+        settingsClickFinishedAtMs = finishedAtMs;
+        settingsClickIdleBeforeMs = idleBeforeMs;
+        settingsClickIdleAfterMs = idleAfterMs;
+        settingsClickReturned = returned;
+    }
+
     private void transition(String next) {
         phase = next;
         if (phases.size() >= MAX_PHASES) fail("Phase receipt exceeded bound");
@@ -1077,6 +1169,21 @@ public final class RuntimeExternalPlayerFlowTest {
                 handlerPlaybackActivity.isEmpty() ? JSONObject.NULL : handlerPlaybackActivity);
         receipt.put("externalHandlerActivityCount", handlerActivityCount);
         receipt.put("phases", new JSONArray(phases));
+        receipt.put("settingsTransactionTimings", new JSONArray(settingsTransactionTimings));
+        receipt.put(
+                "settingsTransactionTimingEventsOmitted",
+                settingsTransactionTimingEventsOmitted);
+        if (settingsClickDispatchedAtMs >= 0L) {
+            JSONObject settingsClickTiming = new JSONObject();
+            settingsClickTiming.put("dispatchUptimeMs", settingsClickDispatchedAtMs);
+            settingsClickTiming.put("finishUptimeMs", settingsClickFinishedAtMs);
+            settingsClickTiming.put("idleBeforeMs", settingsClickIdleBeforeMs);
+            settingsClickTiming.put("idleAfterMs", settingsClickIdleAfterMs);
+            settingsClickTiming.put("returned", settingsClickReturned);
+            receipt.put("settingsClickTiming", settingsClickTiming);
+        } else {
+            receipt.put("settingsClickTiming", JSONObject.NULL);
+        }
         receipt.put("checks", new JSONObject(checks));
         receipt.put("decodedPlaybackClaimed", false);
         receipt.put("decodeClaimRequiresManualScreenshotAndLiveReceiptReview", true);

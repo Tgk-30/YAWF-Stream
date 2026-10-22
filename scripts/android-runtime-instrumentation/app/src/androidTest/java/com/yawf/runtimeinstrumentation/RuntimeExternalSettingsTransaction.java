@@ -21,6 +21,21 @@ final class RuntimeExternalSettingsTransaction {
 
         Observation observePlaybackSettings();
 
+        void recordTiming(
+                String stage,
+                long startedAtMs,
+                long finishedAtMs,
+                long idleBeforeMs,
+                long idleAfterMs,
+                boolean returned);
+
+        void recordSettingsClickTiming(
+                long dispatchedAtMs,
+                long finishedAtMs,
+                long idleBeforeMs,
+                long idleAfterMs,
+                boolean returned);
+
         void log(String message);
     }
 
@@ -77,23 +92,97 @@ final class RuntimeExternalSettingsTransaction {
             long deadline = SystemClock.uptimeMillis() + timeoutMs;
             boolean revealTapPerformed = false;
             while (SystemClock.uptimeMillis() < deadline) {
-                if (!environment.clearAccessibilityCache()) {
+                long cacheStartedAtMs = SystemClock.uptimeMillis();
+                long cacheIdleBeforeMs = configurator.getWaitForIdleTimeout();
+                boolean cacheReturned = false;
+                boolean cacheCleared;
+                try {
+                    cacheCleared = environment.clearAccessibilityCache();
+                    cacheReturned = true;
+                } finally {
+                    environment.recordTiming(
+                            "cache",
+                            cacheStartedAtMs,
+                            SystemClock.uptimeMillis(),
+                            cacheIdleBeforeMs,
+                            configurator.getWaitForIdleTimeout(),
+                            cacheReturned);
+                }
+                if (!cacheCleared) {
                     throw new AssertionError("Accessibility cache refresh failed");
                 }
-                environment.assertNoOutOfScopeApproval();
-                Observation observation = environment.observePlaybackSettings();
+
+                long guardStartedAtMs = SystemClock.uptimeMillis();
+                long guardIdleBeforeMs = configurator.getWaitForIdleTimeout();
+                boolean guardReturned = false;
+                try {
+                    environment.assertNoOutOfScopeApproval();
+                    guardReturned = true;
+                } finally {
+                    environment.recordTiming(
+                            "fresh-legal-guard",
+                            guardStartedAtMs,
+                            SystemClock.uptimeMillis(),
+                            guardIdleBeforeMs,
+                            configurator.getWaitForIdleTimeout(),
+                            guardReturned);
+                }
+
+                long acquisitionStartedAtMs = SystemClock.uptimeMillis();
+                long acquisitionIdleBeforeMs = configurator.getWaitForIdleTimeout();
+                boolean acquisitionReturned = false;
+                Observation observation;
+                try {
+                    observation = environment.observePlaybackSettings();
+                    acquisitionReturned = true;
+                } finally {
+                    environment.recordTiming(
+                            "settings-acquisition",
+                            acquisitionStartedAtMs,
+                            SystemClock.uptimeMillis(),
+                            acquisitionIdleBeforeMs,
+                            configurator.getWaitForIdleTimeout(),
+                            acquisitionReturned);
+                }
                 if (observation == null) {
                     throw new AssertionError("The settings observation was missing");
                 }
 
                 if (observation.settingsTarget != null) {
-                    observation.settingsTarget.click();
+                    long clickDispatchedAtMs = SystemClock.uptimeMillis();
+                    long clickIdleBeforeMs = configurator.getWaitForIdleTimeout();
+                    boolean clickReturned = false;
+                    try {
+                        observation.settingsTarget.click();
+                        clickReturned = true;
+                    } finally {
+                        environment.recordSettingsClickTiming(
+                                clickDispatchedAtMs,
+                                SystemClock.uptimeMillis(),
+                                clickIdleBeforeMs,
+                                configurator.getWaitForIdleTimeout(),
+                                clickReturned);
+                    }
                     environment.log("Clicked freshly observed semantic control: Playback settings");
                     return;
                 }
                 if (observation.revealTarget != null && !revealTapPerformed) {
                     revealTapPerformed = true;
-                    observation.revealTarget.click();
+                    long revealStartedAtMs = SystemClock.uptimeMillis();
+                    long revealIdleBeforeMs = configurator.getWaitForIdleTimeout();
+                    boolean revealReturned = false;
+                    try {
+                        observation.revealTarget.click();
+                        revealReturned = true;
+                    } finally {
+                        environment.recordTiming(
+                                "reveal-click",
+                                revealStartedAtMs,
+                                SystemClock.uptimeMillis(),
+                                revealIdleBeforeMs,
+                                configurator.getWaitForIdleTimeout(),
+                                revealReturned);
+                    }
                     environment.log(
                             "Tapped the exact observed playing dialog surface once to reveal controls");
                 }

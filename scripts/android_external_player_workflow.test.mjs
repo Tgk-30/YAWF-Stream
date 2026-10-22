@@ -10,6 +10,7 @@ const workflow = readFileSync(new URL('../.github/workflows/android-current-runt
 const fixture = readFileSync(new URL('./android_external_player_server_fixture.mts', import.meta.url), 'utf8');
 const driver = readFileSync(new URL('./android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalPlayerFlowTest.java', import.meta.url), 'utf8');
 const settingsTransaction = readFileSync(new URL('./android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalSettingsTransaction.java', import.meta.url), 'utf8');
+const externalLegalSnapshot = readFileSync(new URL('./android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalLegalSnapshot.java', import.meta.url), 'utf8');
 const job = workflow.slice(workflow.indexOf('  external-player-fixture:\n'));
 
 function methodBody(source, signature) {
@@ -158,7 +159,7 @@ function fixtureContract(f) {
   assert.doesNotMatch(f, /\/Volumes\/Work\/|\/private\/tmp\/ds-/);
 }
 
-function playbackSettingsObservation(d, transactionSource) {
+function playbackSettingsObservation(d, transactionSource, legalSource) {
   assert.equal((d.match(/openPlaybackSettingsTransaction\(\);/g) ?? []).length, 1);
   assert.match(d, /MEDIA_WAIT_MS = 60_000/);
   assert.match(d, /PLAYER_DIALOG_LABEL =\s*\n?\s*"Playing Synthetic Fixture Movie \(2026\)"/);
@@ -166,10 +167,16 @@ function playbackSettingsObservation(d, transactionSource) {
   const call = methodBody(d, 'private void openPlaybackSettingsTransaction()');
   assert.match(call, /RuntimeExternalSettingsTransaction\.open\(/);
   assert.match(call, /return instrumentation\.getUiAutomation\(\)\.clearCache\(\)/);
-  assert.match(call, /RuntimeExternalPlayerFlowTest\.this\.assertNoOutOfScopeApproval\(\)/);
+  assert.match(call, /RuntimeExternalPlayerFlowTest\.this\s*\.assertNoOutOfScopeApprovalForSettingsTransaction\(\)/);
   assert.match(call, /return observePlaybackSettingsTransaction\(\)/);
+  assert.match(call, /recordSettingsTransactionTiming\(/);
+  assert.match(call, /recordSettingsClickTiming\(/);
   assert.match(call, /RuntimeExternalPlayerFlowTest\.this\.log\(message\)/);
   assert.match(call, /MEDIA_WAIT_MS/);
+  assert.match(d, /MAX_SETTINGS_TRANSACTION_TIMING_EVENTS = 64/);
+  assert.match(d, /receipt\.put\("settingsTransactionTimings", new JSONArray\(settingsTransactionTimings\)\)/);
+  assert.match(d, /"settingsTransactionTimingEventsOmitted"/);
+  assert.match(d, /receipt\.put\("settingsClickTiming", settingsClickTiming\)/);
 
   const observation = methodBody(
     d,
@@ -191,8 +198,7 @@ function playbackSettingsObservation(d, transactionSource) {
   );
   assert.match(helperBody, /configurator\.setWaitForIdleTimeout\(TRANSACTION_IDLE_TIMEOUT_MS\)/);
   assert.match(helperBody, /Build\.VERSION\.SDK_INT < Build\.VERSION_CODES\.UPSIDE_DOWN_CAKE/);
-  assert.match(helperBody, /if \(!environment\.clearAccessibilityCache\(\)\)/);
-  assert.match(helperBody, /environment\.assertNoOutOfScopeApproval\(\);\s*Observation observation = environment\.observePlaybackSettings\(\)/);
+  assert.match(helperBody, /if \(!cacheCleared\)/);
   const apiGuard = helperBody.indexOf('Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE');
   const cacheRefresh = helperBody.indexOf('environment.clearAccessibilityCache()');
   const policyGuard = helperBody.indexOf('environment.assertNoOutOfScopeApproval()');
@@ -201,7 +207,30 @@ function playbackSettingsObservation(d, transactionSource) {
   assert.match(helperBody, /observation\.revealTarget != null && !revealTapPerformed/);
   assert.equal((helperBody.match(/observation\.revealTarget\.click\(\)/g) ?? []).length, 1);
   assert.equal((helperBody.match(/observation\.settingsTarget\.click\(\)/g) ?? []).length, 1);
+  for (const stage of ['cache', 'fresh-legal-guard', 'settings-acquisition', 'reveal-click']) {
+    assert.match(helperBody, new RegExp(`"${stage}"`));
+  }
+  assert.match(helperBody, /environment\.recordSettingsClickTiming\(/);
   assert.match(helperBody, /finally \{\s*configurator\.setWaitForIdleTimeout\(previousIdleTimeoutMs\)/);
+
+  const transactionGuard = methodBody(
+    d,
+    'private void assertNoOutOfScopeApprovalForSettingsTransaction()',
+  );
+  assert.match(transactionGuard, /RuntimeExternalLegalSnapshot\.assertNoBindingTermsVisible\(\s*instrumentation\.getUiAutomation\(\), BINDING_TERMS\)/);
+  for (const packageName of [
+    'com.android.permissioncontroller',
+    'com.google.android.permissioncontroller',
+    'com.android.settings',
+    'com.google.android.packageinstaller',
+    'com.android.packageinstaller',
+  ]) assert.match(transactionGuard, new RegExp(`foreground\\.equals\\("${packageName.replaceAll('.', '\\.')}"\\)`));
+  assert.match(legalSource, /automation\.getRootInActiveWindow\(\)/);
+  assert.match(legalSource, /automation\.getWindowsOnAllDisplays\(\)/);
+  assert.match(legalSource, /node\.isVisibleToUser\(\)/);
+  assert.match(legalSource, /node\.getText\(\)/);
+  assert.match(legalSource, /node\.getContentDescription\(\)/);
+  assert.doesNotMatch(legalSource, /androidx\.test\.uiautomator\.(?:By|UiDevice)|findObjects?\(/);
 }
 
 function playbackSettingsPanelObservation(d) {
@@ -251,8 +280,12 @@ function playbackSettingsPanelObservation(d) {
   assert.doesNotMatch(scrollable, /device\.findObject|device\.findObjects/);
 }
 
-function driverContract(d, transactionSource = settingsTransaction) {
-  playbackSettingsObservation(d, transactionSource);
+function driverContract(
+  d,
+  transactionSource = settingsTransaction,
+  legalSource = externalLegalSnapshot,
+) {
+  playbackSettingsObservation(d, transactionSource, legalSource);
   playbackSettingsPanelObservation(d);
   assert.match(d, /VLC_PACKAGE = "org\.videolan\.vlc"/);
   assert.match(d, /VLC_INTENT_ACTIVITY = "org\.videolan\.vlc\.StartActivity"/);
@@ -388,11 +421,11 @@ for (const [name, original, mutate, contract] of [
     'Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE',
     'false'), h => driverContract(driver, h)],
   ['ignored accessibility cache result', settingsTransaction, s => s.replace(
-    'if (!environment.clearAccessibilityCache())',
+    'if (!cacheCleared)',
     'if (false)'), h => driverContract(driver, h)],
   ['settings cache refresh ordering', settingsTransaction, s => s.replace(
-    '                if (!environment.clearAccessibilityCache()) {\n                    throw new AssertionError("Accessibility cache refresh failed");\n                }\n                environment.assertNoOutOfScopeApproval();',
-    '                environment.assertNoOutOfScopeApproval();\n                if (!environment.clearAccessibilityCache()) {\n                    throw new AssertionError("Accessibility cache refresh failed");\n                }'), h => driverContract(driver, h)],
+    '                long cacheStartedAtMs = SystemClock.uptimeMillis();',
+    '                environment.assertNoOutOfScopeApproval();\n                long cacheStartedAtMs = SystemClock.uptimeMillis();'), h => driverContract(driver, h)],
   ['settings refresh exact label', driver, s => s.replace('PLAYBACK_SETTINGS_LABEL = "Playback settings"', 'PLAYBACK_SETTINGS_LABEL = "Settings"'), driverContract],
   ['settings observation input replay', driver, s => s.replace('UiObject2 settings = findLabeledClickableWithin(', 'device.click(500, 500);\n        UiObject2 settings = findLabeledClickableWithin('), driverContract],
   ['settings deadline relaxation', driver, s => s.replace('MEDIA_WAIT_MS = 60_000', 'MEDIA_WAIT_MS = 600_000'), driverContract],

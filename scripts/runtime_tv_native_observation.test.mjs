@@ -13,6 +13,7 @@ const javaDirectory = join(
 );
 const helperPath = join(javaDirectory, "RuntimeTvNativeObservation.java");
 const keyHelperPath = join(javaDirectory, "RuntimeTvNativeKey.java");
+const surfaceHelperPath = join(javaDirectory, "RuntimeTvNativeSurface.java");
 const flowPath = join(javaDirectory, "RuntimeTvFlowTest.java");
 const javac = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin/javac") : "javac";
 const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin/java") : "java";
@@ -20,7 +21,7 @@ const read = path => readFileSync(path, "utf8");
 
 function method(source, name) {
   const signature = new RegExp(
-    `^\\s*(?:private\\s+(?:static\\s+)?|static\\s+)(?:<[^>]+>\\s+)?[A-Za-z][A-Za-z0-9_<>?\\[\\]]*\\s+${name}\\s*\\(`,
+    `^\\s*(?:private\\s+(?:static\\s+)?|static\\s+)(?:<[^>]+>\\s+)?[A-Za-z][A-Za-z0-9_.<>?\\[\\]]*\\s+${name}\\s*\\(`,
     "m",
   );
   const match = signature.exec(source);
@@ -709,9 +710,10 @@ ${positionMethod}
   }, "com.yawf.runtimeinstrumentation.RuntimeTvPositionCallsiteProbe");
 }
 
-function assertNativeReadSourceContract(source) {
+function assertNativeReadSourceContract(source, surfaceSource = read(surfaceHelperPath)) {
   const surfaceWaiter = method(source, "waitForNativePlayerSurface");
   const surfaceReader = method(source, "readNativePlayerSurfaceSnapshot");
+  const surfaceCandidateReader = method(source, "readNativePlayerSurfaceCandidate");
   const reveal = method(source, "revealControls");
   const audio = method(source, "selectAudioTrack");
   const nativeFocus = method(source, "focusNativeTarget");
@@ -724,13 +726,48 @@ function assertNativeReadSourceContract(source) {
 
   assert.match(surfaceWaiter,
     /observeFreshNative\(\s*\(\) -> readNativePlayerSurfaceSnapshot\(label\)\)/s);
-  assert.match(surfaceReader, /device\.findObjects\(nativePlayerSurfaceSelector\(\)\)/);
-  assert.match(surfaceReader, /surface\.getVisibleBounds\(\)/);
-  assert.match(surfaceReader, /surface\.findObjects\(/);
-  assert.match(surfaceReader, /contentFrame\.getVisibleBounds\(\)/);
-  assert.match(surfaceReader, /videoSurfaces\.get\(0\)\.getVisibleBounds\(\)/);
+  assert.match(surfaceReader, /device\.findObjects\(nativePlayerSurfaceRootSelector\(\)\)/);
+  assert.match(surfaceReader,
+    /RuntimeTvNativeSurface\.Candidate candidate = readNativePlayerSurfaceCandidate\(root\);/);
+  assert.match(surfaceReader, /RuntimeTvNativeSurface\.admits\(candidate\)/);
+  assert.match(surfaceReader, /if \(admitted > 1\)/);
+  assert.match(surfaceReader, /device\.findObject\(By\.focused\(true\)\)/);
+  assert.match(surfaceReader, /currentFocus\.getVisibleBounds\(\)/);
+  assert.match(surfaceReader, /root\.isFocused\(\)/);
+  assert.match(surfaceReader, /root\.getVisibleBounds\(\)/);
+  assert.match(surfaceCandidateReader,
+    /root\.findObjects\(nativePlayerControllerSelector\(\)\)/);
+  assert.match(surfaceCandidateReader,
+    /controller\.findObjects\(nativePlayerStateSelector\(\)\)/);
+  assert.match(surfaceCandidateReader,
+    /root\.findObjects\(nativeContentFrameSelector\(\)\)/);
+  assert.match(surfaceCandidateReader,
+    /contentFrame\.findObjects\(\s*nativeVideoSurfaceSelector\(\)\)/s);
+  for (const getter of [
+    "root.getApplicationPackage()",
+    "root.getClassName()",
+    "root.getContentDescription()",
+    "root.isClickable()",
+    "root.isEnabled()",
+    "root.isFocusable()",
+    "root.getVisibleBounds()",
+    "controller.getVisibleBounds()",
+    "state.isClickable()",
+    "state.isEnabled()",
+    "state.isFocusable()",
+    "state.getVisibleBounds()",
+    "contentFrame.getVisibleBounds()",
+    "videoSurfaces.get(0).getVisibleBounds()",
+  ]) assert.ok(surfaceCandidateReader.includes(getter), `uncovered surface getter: ${getter}`);
 
   assert.equal((reveal.match(/sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_DOWN\)/g) ?? []).length, 1);
+  assert.match(reveal,
+    /observeFreshNative\(\s*\(\) -> readNativePlayerSurfaceSnapshot\("native PlayerView before control reveal"\)\)/s);
+  assert.ok(reveal.indexOf("surface.complete")
+    < reveal.indexOf("sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_DOWN)"));
+  assert.match(reveal, /assertNotNull\([\s\S]*surface\.focus\);/);
+  assert.doesNotMatch(reveal,
+    /device\.find|UiObject2|\.getVisibleBounds\(|\.isFocused\(|\.isFocusable\(|\.getParent\(/);
   assert.match(reveal,
     /waitForNativePresence\(playPauseSelector\(\), 5_000\)/);
   assert.doesNotMatch(reveal, /\bfor\s*\(|\bwhile\s*\(|device\.press|KEYCODE_DPAD_CENTER/);
@@ -770,7 +807,7 @@ function assertNativeReadSourceContract(source) {
   assert.match(clockReader, /UiObject2::getContentDescription/);
   assert.match(clockReader, /RuntimeTvClock\.readUniqueVisibleTimeBar\(/);
 
-  for (const reader of [surfaceReader, focusReader, clockReader]) {
+  for (const reader of [surfaceReader, surfaceCandidateReader, focusReader, clockReader]) {
     assert.doesNotMatch(reader,
       /press(?:DPad|KeyCode|Back)|sendNativeDpadKey|\.click\s*\(|setText\(|capture\(|centerFrameHash\(|log\(|SystemClock\.sleep/);
   }
@@ -798,11 +835,18 @@ function assertNativeReadSourceContract(source) {
     assert.doesNotMatch(body, /UiObject2/);
     assert.doesNotMatch(body, /\bfinal\s+Rect\b/);
     for (const field of body.matchAll(
-      /^\s{8}(?:final\s+)?(?:boolean|int|long|String|BoundsSnapshot)\s+[A-Za-z][A-Za-z0-9_]*;$/gm,
+      /^\s{8}(?:final\s+)?(?:boolean|int|long|String|BoundsSnapshot|NativeFocusSnapshot)\s+[A-Za-z][A-Za-z0-9_]*;$/gm,
     )) {
       assert.match(field[0], /\bfinal\b/, `mutable snapshot field: ${field[0]}`);
     }
   }
+  assert.doesNotMatch(surfaceSource, /UiObject2|android\.graphics\.Rect/);
+  assert.match(surfaceSource, /static final class Candidate/);
+  for (const field of surfaceSource.matchAll(
+    /^\s{8}final (?:boolean|int|String) [A-Za-z][A-Za-z0-9_]*;$/gm,
+  )) assert.match(field[0], /\bfinal\b/);
+  assert.doesNotMatch(surfaceSource,
+    /press(?:DPad|KeyCode|Back)|sendNativeDpadKey|\.click\s*\(|setText\(|capture\(|SystemClock\.sleep/);
 
   assert.equal((flow.match(/revealControls\(\);/g) ?? []).length, 6);
   assert.equal((audio.match(/revealControls\(\);/g) ?? []).length, 1);
@@ -1062,8 +1106,8 @@ test("TV native readers are fresh, bounded, immutable, and input-free", () => {
 test("source guard kills key input inside a native supplier", () => {
   const source = read(flowPath);
   const mutant = source.replace(
-    "        List<UiObject2> timeBars = device.findObjects(positionTimeBarSelector());",
-    "        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER);\n        List<UiObject2> timeBars = device.findObjects(positionTimeBarSelector());",
+    "        List<UiObject2> controllers = root.findObjects(nativePlayerControllerSelector());",
+    "        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER);\n        List<UiObject2> controllers = root.findObjects(nativePlayerControllerSelector());",
   );
   assert.notEqual(mutant, source);
   assert.throws(() => assertNativeReadSourceContract(mutant));
@@ -1072,8 +1116,18 @@ test("source guard kills key input inside a native supplier", () => {
 test("source guard kills semantic click input inside a native supplier", () => {
   const source = read(flowPath);
   const mutant = source.replace(
-    "        List<UiObject2> timeBars = device.findObjects(positionTimeBarSelector());",
-    "        List<UiObject2> timeBars = device.findObjects(positionTimeBarSelector());\n        timeBars.get(0).click();",
+    "        List<UiObject2> controllers = root.findObjects(nativePlayerControllerSelector());",
+    "        List<UiObject2> controllers = root.findObjects(nativePlayerControllerSelector());\n        controllers.get(0).click();",
+  );
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertNativeReadSourceContract(mutant));
+});
+
+test("source guard kills a live native getter after reveal observation restore", () => {
+  const source = read(flowPath);
+  const mutant = source.replace(
+    "        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_DOWN);",
+    "        device.findObject(nativePlayerSurfaceRootSelector()).getVisibleBounds();\n        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_DOWN);",
   );
   assert.notEqual(mutant, source);
   assert.throws(() => assertNativeReadSourceContract(mutant));

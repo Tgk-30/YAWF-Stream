@@ -15,11 +15,16 @@ const helperPath = new URL(
   './android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalSettingsTransaction.java',
   import.meta.url,
 );
+const legalPath = new URL(
+  './android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalLegalSnapshot.java',
+  import.meta.url,
+);
 const driverPath = new URL(
   './android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalPlayerFlowTest.java',
   import.meta.url,
 );
 const helper = readFileSync(helperPath, 'utf8');
+const legal = readFileSync(legalPath, 'utf8');
 const driver = readFileSync(driverPath, 'utf8');
 
 function methodBody(source, signature) {
@@ -41,7 +46,21 @@ function replaceUnique(source, before, after) {
   return source.replace(before, after);
 }
 
-function validateIntegration(source, helperSource) {
+function replaceUniqueInMethod(source, signature, before, after) {
+  const body = methodBody(source, signature);
+  const mutatedBody = replaceUnique(body, before, after);
+  return replaceUnique(source, body, mutatedBody);
+}
+
+function bindingPatternLiteral(source) {
+  const match = source.match(
+    /private static final Pattern BINDING_TERMS = Pattern\.compile\(\s*("(?:\\.|[^"\\])*")\s*\);/,
+  );
+  assert.ok(match, 'Missing BINDING_TERMS Pattern literal');
+  return match[1];
+}
+
+function validateIntegration(source, helperSource, legalSource) {
   const failures = [];
   const runFlow = methodBody(source, 'private void runFlow()');
   const transaction = methodBody(source, 'private void openPlaybackSettingsTransaction()');
@@ -49,6 +68,11 @@ function validateIntegration(source, helperSource) {
     source,
     'private RuntimeExternalSettingsTransaction.Observation observePlaybackSettingsTransaction()',
   );
+  const transactionGuard = methodBody(
+    source,
+    'private void assertNoOutOfScopeApprovalForSettingsTransaction()',
+  );
+  const ordinaryGuard = methodBody(source, 'private void assertNoOutOfScopeApproval()');
   const dialogFinder = methodBody(source, 'private UiObject2 findUniqueExactProductDialog(String label)');
   const scopedLabel = methodBody(source, 'private UiObject2 findLabeledClickableWithin(');
 
@@ -69,15 +93,43 @@ function validateIntegration(source, helperSource) {
   const requiredTransactionFragments = [
     'RuntimeExternalSettingsTransaction.open(',
     'return instrumentation.getUiAutomation().clearCache();',
-    'RuntimeExternalPlayerFlowTest.this.assertNoOutOfScopeApproval();',
+    '.assertNoOutOfScopeApprovalForSettingsTransaction();',
     'return observePlaybackSettingsTransaction();',
+    'recordSettingsTransactionTiming(',
+    'recordSettingsClickTiming(',
     'RuntimeExternalPlayerFlowTest.this.log(message);',
     'MEDIA_WAIT_MS',
   ];
   for (const fragment of requiredTransactionFragments) {
-    if (!transaction.includes(fragment)) {
-      failures.push(`transaction callsite lost: ${fragment}`);
+    if (!transaction.includes(fragment)) failures.push(`transaction callsite lost: ${fragment}`);
+  }
+
+  if (!transactionGuard.includes(
+    'RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(\n                instrumentation.getUiAutomation(), BINDING_TERMS)',
+  )) failures.push('transaction legal guard does not use the fresh accessibility snapshot');
+  const forbiddenPackages = [
+    'com.android.permissioncontroller',
+    'com.google.android.permissioncontroller',
+    'com.android.settings',
+    'com.google.android.packageinstaller',
+    'com.android.packageinstaller',
+  ];
+  for (const packageName of forbiddenPackages) {
+    if (!transactionGuard.includes(`foreground.equals("${packageName}")`)) {
+      failures.push(`transaction guard lost forbidden package: ${packageName}`);
     }
+  }
+  if (!transactionGuard.includes('String foreground = currentPackage();')) {
+    failures.push('transaction guard lost the current foreground package check');
+  }
+  if (!ordinaryGuard.includes('device.findObject(By.text(BINDING_TERMS))')
+      || !ordinaryGuard.includes('device.findObject(By.desc(BINDING_TERMS))')) {
+    failures.push('ordinary flow legal guard changed');
+  }
+  if (!source.includes('receipt.put("settingsTransactionTimings"')
+      || !source.includes('"settingsTransactionTimingEventsOmitted"')
+      || !source.includes('receipt.put("settingsClickTiming", settingsClickTiming)')) {
+    failures.push('bounded settings timing receipt changed');
   }
 
   const requiredObservationFragments = [
@@ -92,9 +144,7 @@ function validateIntegration(source, helperSource) {
     'Observation.reveal(playerDialog::click)',
   ];
   for (const fragment of requiredObservationFragments) {
-    if (!observation.includes(fragment)) {
-      failures.push(`transaction observation lost: ${fragment}`);
-    }
+    if (!observation.includes(fragment)) failures.push(`transaction observation lost: ${fragment}`);
   }
   if (/\.click\s*\(|device\.click/.test(observation)) {
     failures.push('observation performs input instead of returning one fresh target');
@@ -114,8 +164,8 @@ function validateIntegration(source, helperSource) {
       || !/openPlayerClicks\+\+;[\s\S]*?assertEquals\("Native Open player was clicked more than once", 1, openPlayerClicks\)/.test(runFlow)) {
     failures.push('the separate origin-scoped Open player authority changed');
   }
-  if (/Open player|openPlayerClicks|resolveExternalDestination|EXTERNAL_PLAYER_LABEL/.test(helperSource)) {
-    failures.push('settings helper gained external-handoff authority');
+  if (/Open player|openPlayerClicks|resolveExternalDestination|EXTERNAL_PLAYER_LABEL/.test(helperSource + legalSource)) {
+    failures.push('settings helpers gained external-handoff authority');
   }
   return failures;
 }
@@ -142,6 +192,12 @@ function validateHelperShape(source) {
       || !/observation\.revealTarget != null && !revealTapPerformed/.test(body)) {
     failures.push('helper does not cap settings and conditional reveal input to one each');
   }
+  for (const stage of ['cache', 'fresh-legal-guard', 'settings-acquisition', 'reveal-click']) {
+    if (!body.includes(`"${stage}"`)) failures.push(`missing bounded timing stage: ${stage}`);
+  }
+  if (!body.includes('environment.recordSettingsClickTiming(')) {
+    failures.push('actual settings click timing is missing');
+  }
   if (!/finally\s*\{[\s\S]*configurator\.setWaitForIdleTimeout\(previousIdleTimeoutMs\)/.test(body)
       || restore < 0) {
     failures.push('helper does not restore the exact prior idle timeout in finally');
@@ -150,6 +206,38 @@ function validateHelperShape(source) {
       || !/SystemClock\.sleep\(POLL_INTERVAL_MS\)/.test(body)
       || !/POLL_INTERVAL_MS = 250L/.test(source)) {
     failures.push('helper changed the bounded 250 ms observation loop');
+  }
+  return failures;
+}
+
+function validateLegalShape(source) {
+  const failures = [];
+  const body = methodBody(
+    source,
+    'static void assertNoBindingTermsVisible(UiAutomation automation, Pattern bindingTerms)',
+  );
+  const roots = methodBody(source, 'private static Set<AccessibilityNodeInfo> freshRoots(');
+  if (!body.includes('node.isVisibleToUser()')
+      || !body.includes('node.getText()')
+      || !body.includes('node.getContentDescription()')) {
+    failures.push('one-pass guard lost visibility, text, or description checks');
+  }
+  if (!body.includes('node.getChild(childIndex)')
+      || !body.includes('visited.add(child)')
+      || !body.includes('enforceSizeBound(visited.size())')
+      || !body.includes('enforceTimeBound(startedAtMs)')) {
+    failures.push('one-pass guard lost graph or bound checks');
+  }
+  if (!roots.includes('automation.getRootInActiveWindow()')
+      || !roots.includes('automation.getWindowsOnAllDisplays()')
+      || !roots.includes('window.getRoot()')) {
+    failures.push('fresh guard does not cover the UiAutomator root/window scope');
+  }
+  if (/androidx\.test\.uiautomator\.(?:By|UiDevice)|findObject|findObjects|runWatchers/.test(source)) {
+    failures.push('fresh guard reintroduced ByMatcher or watcher traversal');
+  }
+  if (!source.includes('MAX_NODES = 4_096') || !source.includes('MAX_TRAVERSAL_MS = 1_000L')) {
+    failures.push('fresh guard bounds changed');
   }
   return failures;
 }
@@ -186,15 +274,131 @@ public final class Configurator {
 }
 `;
 
-const harnessSource = `package com.yawf.runtimeinstrumentation;
+const sparseArrayStub = `package android.util;
+import java.util.ArrayList;
+import java.util.List;
+public final class SparseArray<T> {
+    private final List<Integer> keys = new ArrayList<>();
+    private final List<T> values = new ArrayList<>();
+    public void put(int key, T value) {
+        int existing = keys.indexOf(key);
+        if (existing >= 0) values.set(existing, value);
+        else { keys.add(key); values.add(value); }
+    }
+    public int size() { return values.size(); }
+    public int keyAt(int index) { return keys.get(index); }
+    public T valueAt(int index) { return values.get(index); }
+}
+`;
+
+const accessibilityNodeStub = `package android.view.accessibility;
+import android.os.SystemClock;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+public class AccessibilityNodeInfo {
+    public final String id;
+    public boolean visible = true;
+    public CharSequence text;
+    public CharSequence description;
+    public long accessCostMs;
+    public String failureOperation;
+    public final List<AccessibilityNodeInfo> children = new ArrayList<>();
+    private final Map<Integer, Integer> childReads = new HashMap<>();
+    public AccessibilityNodeInfo(String id) { this.id = id; }
+    private void before(String operation) {
+        SystemClock.advance(accessCostMs);
+        if (operation.equals(failureOperation)) {
+            throw new IllegalStateException("RAW_UI_SENTINEL");
+        }
+    }
+    public boolean isVisibleToUser() { before("visible"); return visible; }
+    public CharSequence getText() { before("text"); return text; }
+    public CharSequence getContentDescription() { before("description"); return description; }
+    public int getChildCount() { before("childCount"); return children.size(); }
+    public AccessibilityNodeInfo getChild(int index) {
+        before("child");
+        childReads.put(index, childReads.getOrDefault(index, 0) + 1);
+        return children.get(index);
+    }
+    public int childReads(int index) { return childReads.getOrDefault(index, 0); }
+    @Override public boolean equals(Object other) {
+        return other instanceof AccessibilityNodeInfo
+                && Objects.equals(id, ((AccessibilityNodeInfo) other).id);
+    }
+    @Override public int hashCode() { return Objects.hashCode(id); }
+}
+`;
+
+const accessibilityWindowStub = `package android.view.accessibility;
+import android.os.SystemClock;
+public class AccessibilityWindowInfo {
+    public AccessibilityNodeInfo root;
+    public long accessCostMs;
+    public boolean fail;
+    public AccessibilityWindowInfo(AccessibilityNodeInfo root) { this.root = root; }
+    public AccessibilityNodeInfo getRoot() {
+        SystemClock.advance(accessCostMs);
+        if (fail) throw new IllegalStateException("RAW_UI_SENTINEL");
+        return root;
+    }
+}
+`;
+
+const uiAutomationStub = `package android.app;
+import android.os.SystemClock;
+import android.util.SparseArray;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
+import androidx.test.uiautomator.Configurator;
+import java.util.List;
+public class UiAutomation {
+    public AccessibilityNodeInfo activeRoot;
+    public SparseArray<List<AccessibilityWindowInfo>> windows = new SparseArray<>();
+    public long accessCostMs;
+    public String failureOperation;
+    public int activeRootCalls;
+    public int windowsCalls;
+    public int clearCalls;
+    public boolean clearResult = true;
+    public boolean clearCache() {
+        if (Configurator.getInstance().getWaitForIdleTimeout() != 0L) {
+            throw new AssertionError("cache refresh did not run at zero idle");
+        }
+        clearCalls++;
+        return clearResult;
+    }
+    public AccessibilityNodeInfo getRootInActiveWindow() {
+        SystemClock.advance(accessCostMs);
+        activeRootCalls++;
+        if ("activeRoot".equals(failureOperation)) {
+            throw new IllegalStateException("RAW_UI_SENTINEL");
+        }
+        return activeRoot;
+    }
+    public SparseArray<List<AccessibilityWindowInfo>> getWindowsOnAllDisplays() {
+        SystemClock.advance(accessCostMs);
+        windowsCalls++;
+        if ("windows".equals(failureOperation)) {
+            throw new IllegalStateException("RAW_UI_SENTINEL");
+        }
+        return windows;
+    }
+}
+`;
+
+const transactionHarnessSource = `package com.yawf.runtimeinstrumentation;
 
 import android.os.Build;
 import android.os.SystemClock;
 import androidx.test.uiautomator.Configurator;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class RuntimeExternalSettingsTransactionHarness {
     private static int checks;
-
     private interface Action { void run(); }
 
     private static void check(boolean value, String message) {
@@ -231,7 +435,12 @@ public final class RuntimeExternalSettingsTransactionHarness {
         int revealAttempts;
         int settingsAttempts;
         int logs;
+        int settingsClickTimings;
+        boolean settingsClickReturned;
         boolean cacheResult = true;
+        long guardCostMs;
+        final List<String> timingStages = new ArrayList<>();
+        final List<Boolean> timingReturned = new ArrayList<>();
 
         @Override
         public boolean clearAccessibilityCache() {
@@ -244,6 +453,37 @@ public final class RuntimeExternalSettingsTransactionHarness {
         public void assertNoOutOfScopeApproval() {
             requireZeroIdle("policy guard");
             guardCalls++;
+            SystemClock.advance(guardCostMs);
+        }
+
+        @Override
+        public void recordTiming(
+                String stage,
+                long startedAtMs,
+                long finishedAtMs,
+                long idleBeforeMs,
+                long idleAfterMs,
+                boolean returned) {
+            requireZeroIdle("transaction timing");
+            check(finishedAtMs >= startedAtMs, "timing was not monotonic");
+            check(idleBeforeMs == 0L && idleAfterMs == 0L, "timing did not record zero idle");
+            timingStages.add(stage);
+            timingReturned.add(returned);
+        }
+
+        @Override
+        public void recordSettingsClickTiming(
+                long dispatchedAtMs,
+                long finishedAtMs,
+                long idleBeforeMs,
+                long idleAfterMs,
+                boolean returned) {
+            requireZeroIdle("settings click timing");
+            check(finishedAtMs >= dispatchedAtMs, "settings click timing was not monotonic");
+            check(idleBeforeMs == 0L && idleAfterMs == 0L,
+                    "settings click timing did not record zero idle");
+            settingsClickTimings++;
+            settingsClickReturned = returned;
         }
 
         @Override
@@ -275,8 +515,6 @@ public final class RuntimeExternalSettingsTransactionHarness {
             public RuntimeExternalSettingsTransaction.Observation observePlaybackSettings() {
                 requireZeroIdle("fresh observation");
                 observeCalls++;
-                long implicitIdle = Configurator.getInstance().getWaitForIdleTimeout();
-                if (implicitIdle > 0L) SystemClock.advance(implicitIdle);
                 return RuntimeExternalSettingsTransaction.Observation.settings(() -> {
                     settingsAttempts++;
                     if (SystemClock.uptimeMillis() >= 3_200L) {
@@ -285,12 +523,18 @@ public final class RuntimeExternalSettingsTransactionHarness {
                 });
             }
         };
+        environment.guardCostMs = 300L;
         RuntimeExternalSettingsTransaction.open(environment, 60_000L);
         check(environment.clearCalls == 1, "success cache refresh count changed");
         check(environment.guardCalls == 1, "success guard count changed");
         check(environment.observeCalls == 1, "success observation count changed");
         check(environment.settingsAttempts == 1, "success settings click count changed");
         check(environment.revealAttempts == 0, "success unexpectedly revealed controls");
+        check(environment.timingStages.equals(List.of(
+                        "cache", "fresh-legal-guard", "settings-acquisition")),
+                "success timing stages changed");
+        check(environment.settingsClickTimings == 1 && environment.settingsClickReturned,
+                "success actual click timing changed");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
                 "success did not restore the exact nondefault timeout");
     }
@@ -315,6 +559,11 @@ public final class RuntimeExternalSettingsTransactionHarness {
         check(environment.clearCalls == 4 && environment.guardCalls == 4
                         && environment.observeCalls == 4,
                 "each retry did not repeat cache, guard, and fresh acquisition");
+        check(environment.timingStages.size() == 13
+                        && environment.timingStages.contains("reveal-click"),
+                "reveal timing stages changed");
+        check(environment.settingsClickTimings == 1 && environment.settingsClickReturned,
+                "reveal flow lost final click timing");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
                 "reveal success did not restore the exact timeout");
     }
@@ -335,6 +584,8 @@ public final class RuntimeExternalSettingsTransactionHarness {
         check(environment.clearCalls == 0 && environment.guardCalls == 0
                         && environment.observeCalls == 0 && environment.settingsAttempts == 0,
                 "API guard allowed cache/query/click activity");
+        check(environment.timingStages.isEmpty() && environment.settingsClickTimings == 0,
+                "API guard recorded action timing");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
                 "API guard failure did not restore the exact timeout");
     }
@@ -356,6 +607,8 @@ public final class RuntimeExternalSettingsTransactionHarness {
         check(environment.clearCalls == 1 && environment.guardCalls == 0
                         && environment.observeCalls == 0 && environment.settingsAttempts == 0,
                 "cache failure allowed guard/query/click activity");
+        check(environment.timingStages.equals(List.of("cache")),
+                "cache failure timing changed");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
                 "cache failure did not restore the exact timeout");
     }
@@ -381,6 +634,9 @@ public final class RuntimeExternalSettingsTransactionHarness {
         check(environment.clearCalls == 1 && environment.guardCalls == 1
                         && environment.observeCalls == 0 && environment.settingsAttempts == 0,
                 "failed guard allowed query/click activity");
+        check(environment.timingStages.equals(List.of("cache", "fresh-legal-guard"))
+                        && !environment.timingReturned.get(1),
+                "failed guard timing changed");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
                 "AssertionError did not restore the exact timeout");
     }
@@ -406,6 +662,10 @@ public final class RuntimeExternalSettingsTransactionHarness {
                             && environment.observeCalls == 1
                             && environment.revealAttempts == 0 && environment.settingsAttempts == 0,
                     label + " failure allowed a click");
+            check(environment.timingStages.equals(List.of(
+                            "cache", "fresh-legal-guard", "settings-acquisition"))
+                            && !environment.timingReturned.get(2),
+                    label + " acquisition timing changed");
             check(Configurator.getInstance().getWaitForIdleTimeout() == original,
                     label + " failure did not restore the exact timeout");
         }
@@ -431,6 +691,8 @@ public final class RuntimeExternalSettingsTransactionHarness {
                 "stale click");
         check(environment.observeCalls == 1 && environment.settingsAttempts == 1,
                 "stale target was queried or clicked again");
+        check(environment.settingsClickTimings == 1 && !environment.settingsClickReturned,
+                "failed actual click did not retain final timing");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
                 "RuntimeException did not restore the exact timeout");
     }
@@ -452,6 +714,8 @@ public final class RuntimeExternalSettingsTransactionHarness {
         check(environment.observeCalls == 2 && environment.settingsAttempts == 0
                         && environment.revealAttempts == 0,
                 "bounded timeout changed polling or clicked");
+        check(environment.timingStages.size() == 6 && environment.settingsClickTimings == 0,
+                "bounded timeout timing count changed");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
                 "timeout AssertionError did not restore the exact timeout");
     }
@@ -477,8 +741,22 @@ function writeSource(root, relative, source) {
   return path;
 }
 
-function executeHelper(source) {
-  const root = mkdtempSync(join(tmpdir(), 'yawf-external-settings-'));
+function javaCommands(root, sources, mainClass) {
+  const classes = join(root, 'classes');
+  mkdirSync(classes);
+  const javaHome = process.env.JAVA_HOME
+    || '/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home';
+  const javac = join(javaHome, 'bin', 'javac');
+  const java = join(javaHome, 'bin', 'java');
+  const compiled = spawnSync(javac, ['-encoding', 'UTF-8', '-d', classes, ...sources], {
+    encoding: 'utf8',
+  });
+  if (compiled.status !== 0) return compiled;
+  return spawnSync(java, ['-cp', classes, mainClass], { encoding: 'utf8' });
+}
+
+function executeTransaction(source) {
+  const root = mkdtempSync(join(tmpdir(), 'yawf-external-settings-transaction-'));
   try {
     const sources = [
       writeSource(root, 'android/os/Build.java', buildStub),
@@ -492,24 +770,306 @@ function executeHelper(source) {
       writeSource(
         root,
         'com/yawf/runtimeinstrumentation/RuntimeExternalSettingsTransactionHarness.java',
-        harnessSource,
+        transactionHarnessSource,
       ),
     ];
-    const classes = join(root, 'classes');
-    mkdirSync(classes);
-    const javac = process.env.JAVA_HOME
-      ? join(process.env.JAVA_HOME, 'bin', 'javac')
-      : 'javac';
-    const java = process.env.JAVA_HOME
-      ? join(process.env.JAVA_HOME, 'bin', 'java')
-      : 'java';
-    const compiled = spawnSync(javac, ['-encoding', 'UTF-8', '-d', classes, ...sources], {
-      encoding: 'utf8',
-    });
-    if (compiled.status !== 0) return compiled;
-    return spawnSync(java, ['-cp', classes, 'com.yawf.runtimeinstrumentation.RuntimeExternalSettingsTransactionHarness'], {
-      encoding: 'utf8',
-    });
+    return javaCommands(
+      root,
+      sources,
+      'com.yawf.runtimeinstrumentation.RuntimeExternalSettingsTransactionHarness',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function androidAccessibilityStubs(root) {
+  return [
+    writeSource(root, 'android/os/SystemClock.java', clockStub),
+    writeSource(root, 'android/util/SparseArray.java', sparseArrayStub),
+    writeSource(root, 'android/view/accessibility/AccessibilityNodeInfo.java', accessibilityNodeStub),
+    writeSource(root, 'android/view/accessibility/AccessibilityWindowInfo.java', accessibilityWindowStub),
+    writeSource(root, 'android/app/UiAutomation.java', uiAutomationStub),
+    writeSource(root, 'androidx/test/uiautomator/Configurator.java', configuratorStub),
+  ];
+}
+
+function legalHarnessSource(patternLiteral) {
+  return `package com.yawf.runtimeinstrumentation;
+
+import android.app.UiAutomation;
+import android.os.SystemClock;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+
+public final class RuntimeExternalLegalSnapshotHarness {
+    private static final Pattern BINDING_TERMS = Pattern.compile(${patternLiteral});
+    private static int checks;
+    private interface Action { void run(); }
+
+    private static void check(boolean value, String message) {
+        checks++;
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static Throwable expectFailure(Class<?> type, Action action, String label) {
+        try {
+            action.run();
+        } catch (Throwable failure) {
+            check(type.isInstance(failure), label + " threw " + failure.getClass().getName());
+            return failure;
+        }
+        throw new AssertionError(label + " did not fail");
+    }
+
+    private static AccessibilityNodeInfo node(String id) {
+        return new AccessibilityNodeInfo(id);
+    }
+
+    private static UiAutomation automation(
+            AccessibilityNodeInfo activeRoot, AccessibilityNodeInfo... windowRoots) {
+        UiAutomation automation = new UiAutomation();
+        automation.activeRoot = activeRoot;
+        List<AccessibilityWindowInfo> windows = new ArrayList<>();
+        for (AccessibilityNodeInfo root : windowRoots) {
+            windows.add(new AccessibilityWindowInfo(root));
+        }
+        automation.windows.put(0, windows);
+        return automation;
+    }
+
+    private static void reset() { SystemClock.reset(0L); }
+
+    private static void originalPatternCoversTextDescriptionAndVisibility() {
+        String[] phrases = {
+                "terms of service",
+                "license agreement",
+                "user agreement",
+                "binding terms"
+        };
+        for (String phrase : phrases) {
+            reset();
+            AccessibilityNodeInfo text = node("text-" + phrase);
+            text.text = "Prefix " + phrase.toUpperCase() + " suffix";
+            expectFailure(AssertionError.class,
+                    () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                            automation(text, text), BINDING_TERMS),
+                    "visible text " + phrase);
+
+            reset();
+            AccessibilityNodeInfo description = node("description-" + phrase);
+            description.description = "Prefix\\n" + phrase + " suffix";
+            expectFailure(AssertionError.class,
+                    () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                            automation(description, description), BINDING_TERMS),
+                    "visible description " + phrase);
+
+            reset();
+            AccessibilityNodeInfo root = node("hidden-root-" + phrase);
+            AccessibilityNodeInfo hidden = node("hidden-" + phrase);
+            hidden.visible = false;
+            hidden.text = phrase;
+            hidden.description = phrase;
+            AccessibilityNodeInfo unreachable = node("unreachable-" + phrase);
+            unreachable.text = phrase;
+            hidden.children.add(unreachable);
+            root.children.add(hidden);
+            RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                    automation(root, root), BINDING_TERMS);
+            check(hidden.childReads(0) == 0,
+                    "hidden subtree was traversed for " + phrase);
+        }
+
+        String[] adversarialNonmatches = {
+                "terms of services",
+                "license agreements",
+                "user agreementish",
+                "nonbinding terms"
+        };
+        for (int index = 0; index < adversarialNonmatches.length; index++) {
+            reset();
+            AccessibilityNodeInfo root = node("nonmatch-" + index);
+            root.text = adversarialNonmatches[index];
+            root.description = adversarialNonmatches[index];
+            RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                    automation(root, root), BINDING_TERMS);
+        }
+    }
+
+    private static void multipleRootsAndDisplaysAreCovered() {
+        reset();
+        AccessibilityNodeInfo active = node("active-safe");
+        AccessibilityNodeInfo otherWindow = node("other-window");
+        otherWindow.description = "binding terms";
+        UiAutomation automation = automation(active, active, otherWindow);
+        List<AccessibilityWindowInfo> displayOne = new ArrayList<>();
+        displayOne.add(new AccessibilityWindowInfo(node("display-one-safe")));
+        automation.windows.put(1, displayOne);
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation, BINDING_TERMS),
+                "second visible window root");
+        check(automation.activeRootCalls == 1 && automation.windowsCalls == 1,
+                "fresh root acquisition count changed");
+    }
+
+    private static void missingRootsAndUnexpectedErrorsFailClosed() {
+        reset();
+        AccessibilityNodeInfo valid = node("valid-window-root");
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation(null, valid), BINDING_TERMS),
+                "missing active root");
+
+        reset();
+        UiAutomation noDisplays = new UiAutomation();
+        noDisplays.activeRoot = node("active-only");
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        noDisplays, BINDING_TERMS),
+                "missing display windows");
+
+        reset();
+        UiAutomation emptyDisplay = new UiAutomation();
+        emptyDisplay.activeRoot = node("active-empty-display");
+        emptyDisplay.windows.put(0, new ArrayList<>());
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        emptyDisplay, BINDING_TERMS),
+                "empty display windows");
+
+        reset();
+        UiAutomation nullWindow = new UiAutomation();
+        nullWindow.activeRoot = node("active-null-window");
+        List<AccessibilityWindowInfo> nullWindows = new ArrayList<>();
+        nullWindows.add(null);
+        nullWindow.windows.put(0, nullWindows);
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        nullWindow, BINDING_TERMS),
+                "missing window");
+
+        reset();
+        UiAutomation nullWindowRoot = automation(node("active-null-root"), (AccessibilityNodeInfo) null);
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        nullWindowRoot, BINDING_TERMS),
+                "missing window root");
+
+        reset();
+        AccessibilityNodeInfo missingChild = node("missing-child-root");
+        missingChild.children.add(null);
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation(missingChild, missingChild), BINDING_TERMS),
+                "missing child");
+
+        reset();
+        AccessibilityNodeInfo throwing = node("throwing");
+        throwing.failureOperation = "text";
+        Throwable failure = expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation(throwing, throwing), BINDING_TERMS),
+                "unexpected node error");
+        check(!failure.getMessage().contains("RAW_UI_SENTINEL"),
+                "raw UI diagnostic escaped the guard");
+
+        reset();
+        UiAutomation throwingAutomation = automation(node("safe"), node("safe"));
+        throwingAutomation.failureOperation = "windows";
+        Throwable automationFailure = expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        throwingAutomation, BINDING_TERMS),
+                "unexpected root error");
+        check(!automationFailure.getMessage().contains("RAW_UI_SENTINEL"),
+                "raw automation diagnostic escaped the guard");
+    }
+
+    private static void graphSizeAndTimeBoundsFailClosed() {
+        reset();
+        AccessibilityNodeInfo cycle = node("cycle");
+        cycle.children.add(cycle);
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation(cycle, cycle), BINDING_TERMS),
+                "cycle");
+
+        reset();
+        AccessibilityNodeInfo oversized = node("oversized");
+        for (int index = 0; index < 4_096; index++) {
+            oversized.children.add(node("oversized-child-" + index));
+        }
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation(oversized, oversized), BINDING_TERMS),
+                "node bound");
+
+        reset();
+        AccessibilityNodeInfo slow = node("slow");
+        slow.accessCostMs = 260L;
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation(slow, slow), BINDING_TERMS),
+                "time bound");
+    }
+
+    private static void everyAccessibleChildIsReadOnceWithoutLegacyMatcher() {
+        reset();
+        LegacyMatcher.calls = 0;
+        AccessibilityNodeInfo root = node("once-root");
+        AccessibilityNodeInfo first = node("once-first");
+        AccessibilityNodeInfo second = node("once-second");
+        AccessibilityNodeInfo grandchild = node("once-grandchild");
+        root.children.add(first);
+        root.children.add(second);
+        first.children.add(grandchild);
+        RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                automation(root, root), BINDING_TERMS);
+        check(root.childReads(0) == 1 && root.childReads(1) == 1
+                        && first.childReads(0) == 1,
+                "an accessible child was read more than once");
+        check(LegacyMatcher.calls == 0,
+                "one-pass guard invoked a ByMatcher watcher scan");
+    }
+
+    public static void main(String[] args) {
+        originalPatternCoversTextDescriptionAndVisibility();
+        multipleRootsAndDisplaysAreCovered();
+        missingRootsAndUnexpectedErrorsFailClosed();
+        graphSizeAndTimeBoundsFailClosed();
+        everyAccessibleChildIsReadOnceWithoutLegacyMatcher();
+        System.out.println("LEGAL_OK checks=" + checks);
+    }
+
+    private static final class LegacyMatcher { static int calls; }
+}
+`;
+}
+
+function executeLegal(source, driverSource = driver) {
+  const root = mkdtempSync(join(tmpdir(), 'yawf-external-settings-legal-'));
+  try {
+    const sources = [
+      ...androidAccessibilityStubs(root),
+      writeSource(
+        root,
+        'com/yawf/runtimeinstrumentation/RuntimeExternalLegalSnapshot.java',
+        source,
+      ),
+      writeSource(
+        root,
+        'com/yawf/runtimeinstrumentation/RuntimeExternalLegalSnapshotHarness.java',
+        legalHarnessSource(bindingPatternLiteral(driverSource)),
+      ),
+    ];
+    return javaCommands(
+      root,
+      sources,
+      'com.yawf.runtimeinstrumentation.RuntimeExternalLegalSnapshotHarness',
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -525,13 +1085,20 @@ function settingsCallsiteBlock(source) {
   return runFlow.slice(start + after.length, end).trim();
 }
 
-function adapterProbeSource(source) {
+function driverAdapterSource(source) {
   const callsite = settingsCallsiteBlock(source);
   const openTransaction = methodBody(source, 'private void openPlaybackSettingsTransaction()');
   const observeTransaction = methodBody(
     source,
     'private RuntimeExternalSettingsTransaction.Observation observePlaybackSettingsTransaction()',
   );
+  const transactionGuard = methodBody(
+    source,
+    'private void assertNoOutOfScopeApprovalForSettingsTransaction()',
+  );
+  const currentPackage = methodBody(source, 'private String currentPackage()');
+  const recordTiming = methodBody(source, 'private void recordSettingsTransactionTiming(');
+  const recordClickTiming = methodBody(source, 'private void recordSettingsClickTiming(');
   const findDialog = methodBody(source, 'private UiObject2 findUniqueExactProductDialog(String label)');
   const findScopedLabel = methodBody(source, 'private UiObject2 findLabeledClickableWithin(');
   const collectScoped = methodBody(source, 'private void collectClickableAncestorsWithin(');
@@ -544,11 +1111,15 @@ function adapterProbeSource(source) {
 
   return `package com.yawf.runtimeinstrumentation;
 
+import android.app.UiAutomation;
 import android.os.Build;
 import android.os.SystemClock;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import androidx.test.uiautomator.Configurator;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -557,47 +1128,56 @@ final class RuntimeExternalPlayerFlowTest {
     private static final String PLAYER_DIALOG_LABEL = "Playing Synthetic Fixture Movie (2026)";
     private static final String PLAYBACK_SETTINGS_LABEL = "Playback settings";
     private static final long MEDIA_WAIT_MS = 60_000L;
+    private static final int MAX_SETTINGS_TRANSACTION_TIMING_EVENTS = 64;
+    private static final Pattern BINDING_TERMS = Pattern.compile(${bindingPatternLiteral(source)});
 
     private final FakeInstrumentation instrumentation = new FakeInstrumentation();
     private final UiDevice device = new UiDevice();
-    private int guardCalls;
+    private final List<String> settingsTransactionTimings = new ArrayList<>();
+    private int settingsTransactionTimingEventsOmitted;
+    private long settingsClickDispatchedAtMs = -1L;
+    private long settingsClickFinishedAtMs = -1L;
+    private long settingsClickIdleBeforeMs = -1L;
+    private long settingsClickIdleAfterMs = -1L;
+    private boolean settingsClickReturned;
     private int logCalls;
     private int revealAttempts;
     private int settingsAttempts;
     private int nextNode;
+    private long revealedAtMs = -1L;
+    private boolean enforceChromeExpiry = true;
 
-    private void executeSettingsCallsite() {
-        ${callsite}
-    }
-
+    private void executeSettingsCallsite() { ${callsite} }
     private void openPlaybackSettingsTransaction() {${openTransaction}}
-
     private RuntimeExternalSettingsTransaction.Observation observePlaybackSettingsTransaction() {${observeTransaction}}
-
+    private void assertNoOutOfScopeApprovalForSettingsTransaction() {${transactionGuard}}
+    private String currentPackage() {${currentPackage}}
+    private void recordSettingsTransactionTiming(
+            String stage,
+            long startedAtMs,
+            long finishedAtMs,
+            long idleBeforeMs,
+            long idleAfterMs,
+            boolean returned) {${recordTiming}}
+    private void recordSettingsClickTiming(
+            long dispatchedAtMs,
+            long finishedAtMs,
+            long idleBeforeMs,
+            long idleAfterMs,
+            boolean returned) {${recordClickTiming}}
     private UiObject2 findUniqueExactProductDialog(String label) {${findDialog}}
-
     private UiObject2 findLabeledClickableWithin(
             UiObject2 boundary, String label, String description) {${findScopedLabel}}
-
     private void collectClickableAncestorsWithin(
             List<UiObject2> candidates, List<UiObject2> matches, UiObject2 boundary) {${collectScoped}}
-
     private UiObject2 clickableAncestorWithin(UiObject2 object, UiObject2 boundary) {${clickableScoped}}
-
     private boolean sameSemanticNode(UiObject2 left, UiObject2 right) {${sameNode}}
-
     private static boolean sameNullable(Object left, Object right) {${sameNullable}}
-
     private static Pattern exactLabel(String label) {${exactLabel}}
-
     private void assertVisibleBounds(UiObject2 object, String description) {${assertVisible}}
-
     private boolean hasVisibleBounds(UiObject2 object) {${hasVisible}}
 
-    private void assertNoOutOfScopeApproval() {
-        requireZeroIdle("actual driver policy guard");
-        guardCalls++;
-    }
+    private static String safe(String value) { return value == null ? "" : value; }
 
     private void log(String message) {
         requireZeroIdle("actual driver log");
@@ -606,11 +1186,13 @@ final class RuntimeExternalPlayerFlowTest {
 
     private UiObject2 waitForRefreshedPlaybackSettings() {
         UiObject2 dialog = device.roots.get(0);
-        if (dialog.children.isEmpty()) addSettings(dialog, true, 0);
-        UiObject2 settings = dialog.children.get(0);
-        long implicitIdle = Configurator.getInstance().getWaitForIdleTimeout();
-        if (implicitIdle > 0L) SystemClock.advance(implicitIdle);
-        return settings;
+        if (dialog.children.isEmpty()) {
+            dialog.click();
+            addSettings(dialog, true, 0);
+        }
+        SystemClock.advance(3_250L);
+        device.legacyMatcherRuns += 2;
+        return dialog.children.get(0);
     }
 
     private void clickObservedControlImmediately(UiObject2 object, String description) {
@@ -630,6 +1212,7 @@ final class RuntimeExternalPlayerFlowTest {
                 new Rect(0, 0, 500, 500));
         dialog.onClick = () -> {
             revealAttempts++;
+            revealedAtMs = SystemClock.uptimeMillis();
             if (attachOnReveal && dialog.children.isEmpty()) addSettings(dialog, true, 0);
         };
         return dialog;
@@ -648,7 +1231,8 @@ final class RuntimeExternalPlayerFlowTest {
                 new Rect(10, 20 + offset, 300, 90 + offset));
         button.onClick = () -> {
             settingsAttempts++;
-            if (SystemClock.uptimeMillis() >= 3_200L) {
+            if (enforceChromeExpiry && revealedAtMs >= 0L
+                    && SystemClock.uptimeMillis() - revealedAtMs >= 3_200L) {
                 throw new RuntimeException("Playback settings chrome expired");
             }
         };
@@ -667,27 +1251,46 @@ final class RuntimeExternalPlayerFlowTest {
         return button;
     }
 
+    private void installSafeLegalTree(long accessCostMs) {
+        AccessibilityNodeInfo root = new AccessibilityNodeInfo("legal-root-" + nextNode++);
+        root.accessCostMs = accessCostMs;
+        installLegalRoot(root);
+        instrumentation.automation.accessCostMs = accessCostMs;
+    }
+
+    private void installLegalRoot(AccessibilityNodeInfo root) {
+        instrumentation.automation.activeRoot = root;
+        List<AccessibilityWindowInfo> windows = new ArrayList<>();
+        AccessibilityWindowInfo window = new AccessibilityWindowInfo(root);
+        window.accessCostMs = root == null ? 0L : root.accessCostMs;
+        windows.add(window);
+        instrumentation.automation.windows.put(0, windows);
+    }
+
+    private void installBindingPhrase(String phrase, boolean description) {
+        AccessibilityNodeInfo root = new AccessibilityNodeInfo("binding-root-" + nextNode++);
+        if (description) root.description = phrase;
+        else root.text = phrase;
+        instrumentation.automation.activeRoot = root;
+        List<AccessibilityWindowInfo> windows = new ArrayList<>();
+        windows.add(new AccessibilityWindowInfo(root));
+        instrumentation.automation.windows.put(0, windows);
+    }
+
     private static void assertTrue(String message, boolean value) {
         if (!value) throw new AssertionError(message);
     }
-
-    private static void fail(String message) {
-        throw new AssertionError(message);
-    }
-
+    private static void fail(String message) { throw new AssertionError(message); }
     private static void check(boolean value, String message) {
         if (!value) throw new AssertionError(message);
     }
-
     private static void requireZeroIdle(String phase) {
         check(Configurator.getInstance().getWaitForIdleTimeout() == 0L,
                 phase + " did not run with zero idle timeout");
     }
-
     private static Throwable expectFailure(Class<?> type, Runnable action, String label) {
-        try {
-            action.run();
-        } catch (Throwable failure) {
+        try { action.run(); }
+        catch (Throwable failure) {
             check(type.isInstance(failure), label + " threw " + failure.getClass().getName());
             return failure;
         }
@@ -698,130 +1301,248 @@ final class RuntimeExternalPlayerFlowTest {
         Build.VERSION.SDK_INT = 36;
         Configurator.reset(idleTimeout);
         SystemClock.reset(0L);
-        return new RuntimeExternalPlayerFlowTest();
+        RuntimeExternalPlayerFlowTest flow = new RuntimeExternalPlayerFlowTest();
+        flow.installSafeLegalTree(35L);
+        flow.device.currentPackage = PRODUCT_PACKAGE;
+        return flow;
     }
 
-    private static void normalAdapterUsesActualHelper() {
+    private static void actualOnePassGuardBeatsThePredecessorModel() {
         long original = 8_411L;
         RuntimeExternalPlayerFlowTest flow = reset(original);
-        flow.device.roots.add(flow.makeDialog(PRODUCT_PACKAGE, true, true));
+        UiObject2 dialog = flow.makeDialog(PRODUCT_PACKAGE, true, true);
+        flow.device.roots.add(dialog);
+        flow.device.queryCostMs = 120L;
         flow.executeSettingsCallsite();
         check(flow.instrumentation.automation.clearCalls == 2,
                 "actual adapter did not delegate both cache refreshes");
-        check(flow.guardCalls == 2, "actual adapter did not delegate both guards");
-        check(flow.revealAttempts == 1, "actual adapter reveal count changed");
-        check(flow.settingsAttempts == 1, "actual adapter settings count changed");
-        check(flow.logCalls == 2, "actual adapter log count changed");
+        check(flow.instrumentation.automation.activeRootCalls == 2
+                        && flow.instrumentation.automation.windowsCalls == 2,
+                "actual adapter did not acquire a fresh root snapshot twice");
+        check(flow.device.currentPackageCalls == 2,
+                "actual adapter did not preserve both foreground checks");
+        check(flow.device.legacyMatcherRuns == 0,
+                "fresh legal guard reran ByMatcher watchers");
+        check(flow.revealAttempts == 1 && flow.settingsAttempts == 1,
+                "actual adapter input counts changed");
+        check(flow.settingsClickDispatchedAtMs - flow.revealedAtMs < 3_200L,
+                "one-pass legal guard missed the unchanged chrome timer");
+        check(flow.settingsClickReturned,
+                "actual adapter did not retain the settings click return timing");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
                 "actual adapter did not restore the exact timeout");
+
+        RuntimeExternalPlayerFlowTest predecessor = reset(original);
+        UiObject2 predecessorDialog = predecessor.makeDialog(PRODUCT_PACKAGE, true, false);
+        predecessor.device.roots.add(predecessorDialog);
+        expectFailure(RuntimeException.class, () -> {
+            UiObject2 settings = predecessor.waitForRefreshedPlaybackSettings();
+            predecessor.clickObservedControlImmediately(settings, PLAYBACK_SETTINGS_LABEL);
+        }, "predecessor matcher model");
+        check(predecessor.device.legacyMatcherRuns == 2,
+                "predecessor model did not include both unsuccessful matcher scans");
     }
 
-    private static void duplicateDialogsFailClosed() {
-        long original = 8_422L;
-        RuntimeExternalPlayerFlowTest flow = reset(original);
-        flow.device.roots.add(flow.makeDialog(PRODUCT_PACKAGE, true, false));
-        flow.device.roots.add(flow.makeDialog(PRODUCT_PACKAGE, true, false));
-        expectFailure(AssertionError.class, flow::executeSettingsCallsite, "duplicate dialogs");
-        check(flow.revealAttempts == 0 && flow.settingsAttempts == 0,
-                "duplicate dialogs allowed a click");
-        check(Configurator.getInstance().getWaitForIdleTimeout() == original,
-                "duplicate dialog failure did not restore idle timeout");
+    private static void legalAndForegroundFailuresPrecedeSelectionAndInput() {
+        String[] forbidden = {
+                "com.android.permissioncontroller",
+                "com.google.android.permissioncontroller",
+                "com.android.settings",
+                "com.google.android.packageinstaller",
+                "com.android.packageinstaller"
+        };
+        for (String packageName : forbidden) {
+            RuntimeExternalPlayerFlowTest flow = reset(7_000L);
+            UiObject2 dialog = flow.makeDialog(PRODUCT_PACKAGE, true, false);
+            flow.addSettings(dialog, true, 0);
+            flow.device.roots.add(dialog);
+            flow.device.currentPackage = packageName;
+            expectFailure(AssertionError.class, flow::executeSettingsCallsite,
+                    "forbidden package " + packageName);
+            check(flow.device.selectionQueries == 0
+                            && flow.revealAttempts == 0 && flow.settingsAttempts == 0,
+                    "forbidden package allowed query or click: " + packageName);
+        }
+
+        String[] phrases = {
+                "terms of service", "license agreement", "user agreement", "binding terms"
+        };
+        for (String phrase : phrases) {
+            for (boolean description : new boolean[] {false, true}) {
+                RuntimeExternalPlayerFlowTest flow = reset(7_100L);
+                UiObject2 dialog = flow.makeDialog(PRODUCT_PACKAGE, true, false);
+                flow.addSettings(dialog, true, 0);
+                flow.device.roots.add(dialog);
+                flow.installBindingPhrase(phrase, description);
+                expectFailure(AssertionError.class, flow::executeSettingsCallsite,
+                        "binding phrase " + phrase);
+                check(flow.device.selectionQueries == 0
+                                && flow.revealAttempts == 0 && flow.settingsAttempts == 0,
+                        "binding phrase allowed query or click: " + phrase);
+            }
+        }
     }
 
-    private static void dialogPackageScopeFailsClosed() {
-        long original = 8_433L;
-        RuntimeExternalPlayerFlowTest flow = reset(original);
-        flow.device.roots.add(flow.makeDialog("com.example.other", true, true));
-        expectFailure(AssertionError.class, flow::executeSettingsCallsite, "dialog package scope");
-        check(flow.revealAttempts == 0 && flow.settingsAttempts == 0,
-                "wrong-package dialog allowed a click");
-        check(Configurator.getInstance().getWaitForIdleTimeout() == original,
-                "scope failure did not restore idle timeout");
+    private static void snapshotSafetyFailuresPrecedeSelectionAndInput() {
+        RuntimeExternalPlayerFlowTest missingRoot = armedFlow(7_200L);
+        missingRoot.instrumentation.automation.activeRoot = null;
+        assertGuardFailureBeforeSelection(missingRoot, "missing active root");
+
+        RuntimeExternalPlayerFlowTest error = armedFlow(7_201L);
+        error.instrumentation.automation.activeRoot.failureOperation = "text";
+        assertGuardFailureBeforeSelection(error, "unexpected snapshot error");
+
+        RuntimeExternalPlayerFlowTest cycle = armedFlow(7_202L);
+        AccessibilityNodeInfo cycleRoot = new AccessibilityNodeInfo("adapter-cycle");
+        cycleRoot.children.add(cycleRoot);
+        cycle.installLegalRoot(cycleRoot);
+        assertGuardFailureBeforeSelection(cycle, "snapshot cycle");
+
+        RuntimeExternalPlayerFlowTest oversized = armedFlow(7_203L);
+        AccessibilityNodeInfo oversizedRoot = new AccessibilityNodeInfo("adapter-oversized");
+        for (int index = 0; index < 4_096; index++) {
+            oversizedRoot.children.add(new AccessibilityNodeInfo("adapter-child-" + index));
+        }
+        oversized.installLegalRoot(oversizedRoot);
+        assertGuardFailureBeforeSelection(oversized, "snapshot size bound");
+
+        RuntimeExternalPlayerFlowTest slow = armedFlow(7_204L);
+        AccessibilityNodeInfo slowRoot = new AccessibilityNodeInfo("adapter-slow");
+        slowRoot.accessCostMs = 260L;
+        slow.installLegalRoot(slowRoot);
+        assertGuardFailureBeforeSelection(slow, "snapshot time bound");
     }
 
-    private static void invisibleDialogFailsClosed() {
-        long original = 8_444L;
-        RuntimeExternalPlayerFlowTest flow = reset(original);
-        flow.device.roots.add(flow.makeDialog(PRODUCT_PACKAGE, false, true));
-        expectFailure(AssertionError.class, flow::executeSettingsCallsite, "invisible dialog");
-        check(flow.revealAttempts == 0 && flow.settingsAttempts == 0,
-                "invisible dialog allowed a click");
-        check(Configurator.getInstance().getWaitForIdleTimeout() == original,
-                "invisible dialog failure did not restore idle timeout");
-    }
-
-    private static void duplicateSettingsFailClosed() {
-        long original = 8_455L;
-        RuntimeExternalPlayerFlowTest flow = reset(original);
+    private static RuntimeExternalPlayerFlowTest armedFlow(long idleTimeout) {
+        RuntimeExternalPlayerFlowTest flow = reset(idleTimeout);
         UiObject2 dialog = flow.makeDialog(PRODUCT_PACKAGE, true, false);
         flow.addSettings(dialog, true, 0);
-        flow.addSettings(dialog, true, 120);
         flow.device.roots.add(dialog);
-        expectFailure(AssertionError.class, flow::executeSettingsCallsite, "duplicate settings");
-        check(flow.revealAttempts == 0 && flow.settingsAttempts == 0,
-                "duplicate settings allowed a click");
-        check(Configurator.getInstance().getWaitForIdleTimeout() == original,
-                "duplicate settings failure did not restore idle timeout");
+        return flow;
     }
 
-    private static void settingsScopeFailsClosed() {
-        long original = 8_466L;
-        RuntimeExternalPlayerFlowTest flow = reset(original);
-        UiObject2 dialog = flow.makeDialog(PRODUCT_PACKAGE, true, false);
+    private static void assertGuardFailureBeforeSelection(
+            RuntimeExternalPlayerFlowTest flow, String label) {
+        expectFailure(AssertionError.class, flow::executeSettingsCallsite, label);
+        check(flow.device.selectionQueries == 0
+                        && flow.revealAttempts == 0 && flow.settingsAttempts == 0,
+                label + " allowed a selection query or click");
+    }
+
+    private static void duplicateScopeAndBoundsRemainFailClosed() {
+        RuntimeExternalPlayerFlowTest duplicateDialogs = reset(8_422L);
+        duplicateDialogs.device.roots.add(
+                duplicateDialogs.makeDialog(PRODUCT_PACKAGE, true, false));
+        duplicateDialogs.device.roots.add(
+                duplicateDialogs.makeDialog(PRODUCT_PACKAGE, true, false));
+        expectFailure(AssertionError.class, duplicateDialogs::executeSettingsCallsite,
+                "duplicate dialogs");
+        check(duplicateDialogs.revealAttempts == 0 && duplicateDialogs.settingsAttempts == 0,
+                "duplicate dialogs allowed a click");
+
+        RuntimeExternalPlayerFlowTest wrongPackage = reset(8_433L);
+        wrongPackage.device.roots.add(
+                wrongPackage.makeDialog("com.example.other", true, true));
+        expectFailure(AssertionError.class, wrongPackage::executeSettingsCallsite,
+                "dialog package scope");
+        check(wrongPackage.revealAttempts == 0 && wrongPackage.settingsAttempts == 0,
+                "wrong-package dialog allowed a click");
+
+        RuntimeExternalPlayerFlowTest invisibleDialog = reset(8_444L);
+        invisibleDialog.device.roots.add(
+                invisibleDialog.makeDialog(PRODUCT_PACKAGE, false, true));
+        expectFailure(AssertionError.class, invisibleDialog::executeSettingsCallsite,
+                "invisible dialog");
+        check(invisibleDialog.revealAttempts == 0 && invisibleDialog.settingsAttempts == 0,
+                "invisible dialog allowed a click");
+
+        RuntimeExternalPlayerFlowTest duplicateSettings = reset(8_455L);
+        UiObject2 duplicateDialog = duplicateSettings.makeDialog(PRODUCT_PACKAGE, true, false);
+        duplicateSettings.addSettings(duplicateDialog, true, 0);
+        duplicateSettings.addSettings(duplicateDialog, true, 120);
+        duplicateSettings.device.roots.add(duplicateDialog);
+        expectFailure(AssertionError.class, duplicateSettings::executeSettingsCallsite,
+                "duplicate settings");
+        check(duplicateSettings.settingsAttempts == 0,
+                "duplicate settings allowed a click");
+
+        RuntimeExternalPlayerFlowTest settingsScope = reset(8_466L);
+        UiObject2 scopedDialog = settingsScope.makeDialog(PRODUCT_PACKAGE, true, false);
         UiObject2 outside = new UiObject2(
                 "outside-root", "android.view.View", PRODUCT_PACKAGE, null, null,
                 false, true, true, new Rect(0, 0, 400, 400));
-        flow.addSettings(outside, true, 0);
-        flow.device.roots.add(dialog);
-        flow.device.roots.add(outside);
-        expectFailure(AssertionError.class, flow::executeSettingsCallsite, "settings scope");
-        check(flow.settingsAttempts == 0, "out-of-dialog settings control was clicked");
-        check(Configurator.getInstance().getWaitForIdleTimeout() == original,
-                "settings scope failure did not restore idle timeout");
+        settingsScope.addSettings(outside, true, 0);
+        settingsScope.device.roots.add(scopedDialog);
+        settingsScope.device.roots.add(outside);
+        expectFailure(AssertionError.class, settingsScope::executeSettingsCallsite,
+                "settings scope");
+        check(settingsScope.settingsAttempts == 0,
+                "out-of-dialog settings control was clicked");
+
+        RuntimeExternalPlayerFlowTest bounds = reset(8_477L);
+        UiObject2 boundsDialog = bounds.makeDialog(PRODUCT_PACKAGE, true, false);
+        bounds.addSettings(boundsDialog, false, 0);
+        bounds.device.roots.add(boundsDialog);
+        expectFailure(AssertionError.class, bounds::executeSettingsCallsite,
+                "settings bounds");
+        check(bounds.settingsAttempts == 0,
+                "invisible settings control was clicked");
     }
 
-    private static void settingsBoundsFailClosed() {
-        long original = 8_477L;
-        RuntimeExternalPlayerFlowTest flow = reset(original);
+    private static void boundedDiagnosticsRetainTheFinalClickTiming() {
+        RuntimeExternalPlayerFlowTest flow = reset(9_000L);
+        flow.installSafeLegalTree(0L);
+        flow.enforceChromeExpiry = false;
         UiObject2 dialog = flow.makeDialog(PRODUCT_PACKAGE, true, false);
-        flow.addSettings(dialog, false, 0);
         flow.device.roots.add(dialog);
-        expectFailure(AssertionError.class, flow::executeSettingsCallsite, "settings bounds");
-        check(flow.settingsAttempts == 0, "invisible settings control was clicked");
-        check(Configurator.getInstance().getWaitForIdleTimeout() == original,
-                "settings bounds failure did not restore idle timeout");
+        flow.device.beforeGlobalQuery = () -> {
+            if (flow.device.selectionQueries == 22 && dialog.children.isEmpty()) {
+                flow.addSettings(dialog, true, 0);
+            }
+        };
+        flow.executeSettingsCallsite();
+        check(flow.settingsTransactionTimings.size() == 64,
+                "diagnostic event cap changed");
+        check(flow.settingsTransactionTimingEventsOmitted > 0,
+                "diagnostic overflow was not counted");
+        check(flow.settingsClickDispatchedAtMs >= 0L
+                        && flow.settingsClickFinishedAtMs >= flow.settingsClickDispatchedAtMs
+                        && flow.settingsClickReturned,
+                "final actual click timing was lost after the poll cap");
     }
 
     static void runProbe() {
-        normalAdapterUsesActualHelper();
-        duplicateDialogsFailClosed();
-        dialogPackageScopeFailsClosed();
-        invisibleDialogFailsClosed();
-        duplicateSettingsFailClosed();
-        settingsScopeFailsClosed();
-        settingsBoundsFailClosed();
+        actualOnePassGuardBeatsThePredecessorModel();
+        legalAndForegroundFailuresPrecedeSelectionAndInput();
+        snapshotSafetyFailuresPrecedeSelectionAndInput();
+        duplicateScopeAndBoundsRemainFailClosed();
+        boundedDiagnosticsRetainTheFinalClickTiming();
     }
 
     private static final class FakeInstrumentation {
-        final FakeUiAutomation automation = new FakeUiAutomation();
-        FakeUiAutomation getUiAutomation() { return automation; }
-    }
-
-    private static final class FakeUiAutomation {
-        int clearCalls;
-        boolean clearCache() {
-            requireZeroIdle("actual adapter cache refresh");
-            clearCalls++;
-            return true;
-        }
+        final UiAutomation automation = new UiAutomation();
+        UiAutomation getUiAutomation() { return automation; }
     }
 
     private static final class UiDevice {
         final List<UiObject2> roots = new ArrayList<>();
+        String currentPackage = PRODUCT_PACKAGE;
+        long queryCostMs;
+        int selectionQueries;
+        int currentPackageCalls;
+        int legacyMatcherRuns;
+        Runnable beforeGlobalQuery = () -> {};
         List<UiObject2> findObjects(BySelector selector) {
+            selectionQueries++;
+            beforeGlobalQuery.run();
+            SystemClock.advance(queryCostMs);
             List<UiObject2> found = new ArrayList<>();
             for (UiObject2 root : roots) root.collect(selector, found, true);
             return found;
+        }
+        String getCurrentPackageName() {
+            currentPackageCalls++;
+            return currentPackage;
         }
     }
 
@@ -838,7 +1559,6 @@ final class RuntimeExternalPlayerFlowTest {
         final List<UiObject2> children = new ArrayList<>();
         UiObject2 parent;
         Runnable onClick = () -> {};
-
         UiObject2(
                 String resourceName,
                 String className,
@@ -859,23 +1579,16 @@ final class RuntimeExternalPlayerFlowTest {
             this.visible = visible;
             this.bounds = bounds;
         }
-
-        void add(UiObject2 child) {
-            child.parent = this;
-            children.add(child);
-        }
-
+        void add(UiObject2 child) { child.parent = this; children.add(child); }
         List<UiObject2> findObjects(BySelector selector) {
             List<UiObject2> found = new ArrayList<>();
             for (UiObject2 child : children) child.collect(selector, found, true);
             return found;
         }
-
         void collect(BySelector selector, List<UiObject2> found, boolean includeSelf) {
             if (includeSelf && selector.matches(this)) found.add(this);
             for (UiObject2 child : children) child.collect(selector, found, true);
         }
-
         void click() { onClick.run(); }
         boolean isClickable() { return clickable; }
         boolean isEnabled() { return enabled; }
@@ -918,10 +1631,7 @@ final class RuntimeExternalPlayerFlowTest {
         final int right;
         final int bottom;
         Rect(int left, int top, int right, int bottom) {
-            this.left = left;
-            this.top = top;
-            this.right = right;
-            this.bottom = bottom;
+            this.left = left; this.top = top; this.right = right; this.bottom = bottom;
         }
         int width() { return right - left; }
         int height() { return bottom - top; }
@@ -946,13 +1656,12 @@ public final class RuntimeExternalSettingsDriverAdapterHarness {
 }
 `;
 
-function executeDriverAdapter(source, helperSource = helper) {
+function executeDriverAdapter(source, helperSource = helper, legalSource = legal) {
   const root = mkdtempSync(join(tmpdir(), 'yawf-external-settings-adapter-'));
   try {
     const sources = [
       writeSource(root, 'android/os/Build.java', buildStub),
-      writeSource(root, 'android/os/SystemClock.java', clockStub),
-      writeSource(root, 'androidx/test/uiautomator/Configurator.java', configuratorStub),
+      ...androidAccessibilityStubs(root),
       writeSource(
         root,
         'com/yawf/runtimeinstrumentation/RuntimeExternalSettingsTransaction.java',
@@ -960,8 +1669,13 @@ function executeDriverAdapter(source, helperSource = helper) {
       ),
       writeSource(
         root,
+        'com/yawf/runtimeinstrumentation/RuntimeExternalLegalSnapshot.java',
+        legalSource,
+      ),
+      writeSource(
+        root,
         'com/yawf/runtimeinstrumentation/RuntimeExternalPlayerFlowTest.java',
-        adapterProbeSource(source),
+        driverAdapterSource(source),
       ),
       writeSource(
         root,
@@ -969,43 +1683,38 @@ function executeDriverAdapter(source, helperSource = helper) {
         adapterHarnessSource,
       ),
     ];
-    const classes = join(root, 'classes');
-    mkdirSync(classes);
-    const javac = process.env.JAVA_HOME
-      ? join(process.env.JAVA_HOME, 'bin', 'javac')
-      : 'javac';
-    const java = process.env.JAVA_HOME
-      ? join(process.env.JAVA_HOME, 'bin', 'java')
-      : 'java';
-    const compiled = spawnSync(javac, ['-encoding', 'UTF-8', '-d', classes, ...sources], {
-      encoding: 'utf8',
-    });
-    if (compiled.status !== 0) return compiled;
-    return spawnSync(
-      java,
-      ['-cp', classes, 'com.yawf.runtimeinstrumentation.RuntimeExternalSettingsDriverAdapterHarness'],
-      { encoding: 'utf8' },
+    return javaCommands(
+      root,
+      sources,
+      'com.yawf.runtimeinstrumentation.RuntimeExternalSettingsDriverAdapterHarness',
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-test('actual helper survives expiring chrome and restores nondefault idle state on every exit', () => {
+test('actual transaction helper keeps zero-idle ordering, bounded input, timings, and exact restoration', () => {
   assert.deepEqual(validateHelperShape(helper), []);
-  const result = executeHelper(helper);
+  const result = executeTransaction(helper);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /^OK checks=\d+\s*$/);
 });
 
-test('actual driver callsite retains fresh guards, exact scope, bounds, and separate handoff authority', () => {
-  assert.deepEqual(validateIntegration(driver, helper), []);
+test('actual fresh legal helper executes one bounded traversal over the original pattern and root scope', () => {
+  assert.deepEqual(validateLegalShape(legal), []);
+  const result = executeLegal(legal);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /^LEGAL_OK checks=\d+\s*$/);
+});
+
+test('actual driver adapter uses the real helpers and keeps selection, package, timing, and input gates', () => {
+  assert.deepEqual(validateIntegration(driver, helper, legal), []);
   const result = executeDriverAdapter(driver);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /^ADAPTER_OK\s*$/);
 });
 
-test('executable actual callsite rejects the predecessor split acquire and click path', () => {
+test('executable actual callsite rejects the predecessor split matcher and click path', () => {
   const bypassed = replaceUnique(
     driver,
     '        openPlaybackSettingsTransaction();',
@@ -1018,37 +1727,73 @@ test('executable actual callsite rejects the predecessor split acquire and click
 
 for (const [name, mutate] of [
   [
-    'product dialog package scope removal',
+    'visible text omission',
     source => replaceUnique(
       source,
-      'By.clazz("android.app.Dialog")\n                        .pkg(PRODUCT_PACKAGE)\n                        .text(exactLabel(label))',
-      'By.clazz("android.app.Dialog")\n                        .text(exactLabel(label))',
+      'if (matches(bindingTerms, text)) {',
+      'if (false && matches(bindingTerms, text)) {',
     ),
   ],
   [
-    'duplicate dialog admission',
-    source => replaceUnique(source, 'if (dialogs.size() > 1)', 'if (dialogs.size() > 2)'),
-  ],
-  [
-    'settings visible-bounds admission removal',
+    'visible content-description omission',
     source => replaceUnique(
       source,
-      'if (settings != null && hasVisibleBounds(settings)) {\n            assertVisibleBounds(settings, PLAYBACK_SETTINGS_LABEL);',
-      'if (settings != null) {',
+      'if (matches(bindingTerms, description)) {',
+      'if (false && matches(bindingTerms, description)) {',
     ),
   ],
   [
-    'dialog-scoped label bypass',
+    'visibility omission',
+    source => replaceUnique(source, 'if (!visible) {', 'if (false) {'),
+  ],
+  [
+    'all-window scope omission',
     source => replaceUnique(
       source,
-      'candidates, boundary.findObjects(By.text(labelPattern)), boundary',
-      'candidates, device.findObjects(By.text(labelPattern)), boundary',
+      'displayIndex < windowsByDisplay.size()',
+      'displayIndex < 0',
+    ),
+  ],
+  [
+    'missing-active-root safety removal',
+    source => replaceUnique(
+      source,
+      'if (activeRoot == null) {\n            throw new AssertionError("The fresh legal snapshot active root was missing");\n        }',
+      'if (activeRoot == null) {\n            return roots;\n        }',
+    ),
+  ],
+  [
+    'cycle safety removal',
+    source => replaceUnique(
+      source,
+      'throw new AssertionError("The fresh legal snapshot graph was cyclic");',
+      'continue;',
+    ),
+  ],
+  [
+    'node bound safety removal',
+    source => replaceUnique(source, 'if (size > MAX_NODES) {', 'if (false) {'),
+  ],
+  [
+    'time bound safety removal',
+    source => replaceUnique(
+      source,
+      'if (elapsedMs < 0 || elapsedMs > MAX_TRAVERSAL_MS) {',
+      'if (false) {',
+    ),
+  ],
+  [
+    'unexpected-error fail-closed conversion removal',
+    source => replaceUnique(
+      source,
+      '} catch (RuntimeException failure) {\n            throw new AssertionError(\n                    "The fresh legal snapshot could not be verified: "\n                            + failure.getClass().getSimpleName());\n        }',
+      '} catch (RuntimeException failure) {\n            throw failure;\n        }',
     ),
   ],
 ]) {
-  test(`executable actual adapter rejects ${name}`, () => {
-    const mutated = mutate(driver);
-    const result = executeDriverAdapter(mutated);
+  test(`executable legal helper rejects ${name}`, () => {
+    const mutated = mutate(legal);
+    const result = executeLegal(mutated);
     assert.notEqual(result.status, 0, `${name} unexpectedly passed\n${result.stdout}`);
   });
 }
@@ -1064,11 +1809,7 @@ for (const [name, mutate] of [
   ],
   [
     'ignored cache failure',
-    source => replaceUnique(
-      source,
-      '                if (!environment.clearAccessibilityCache()) {\n                    throw new AssertionError("Accessibility cache refresh failed");\n                }',
-      '                environment.clearAccessibilityCache();\n                if (false) {\n                    throw new AssertionError("Accessibility cache refresh failed");\n                }',
-    ),
+    source => replaceUnique(source, 'if (!cacheCleared) {', 'if (false) {'),
   ],
   [
     'omitted finally restoration',
@@ -1106,15 +1847,109 @@ for (const [name, mutate] of [
     'duplicated the settings click',
     source => replaceUnique(
       source,
-      '                    observation.settingsTarget.click();\n',
-      '                    observation.settingsTarget.click();\n                    observation.settingsTarget.click();\n',
+      '                        observation.settingsTarget.click();\n',
+      '                        observation.settingsTarget.click();\n'
+        + '                        observation.settingsTarget.click();\n',
+    ),
+  ],
+  [
+    'fresh guard timing omission',
+    source => replaceUnique(
+      source,
+      '                    environment.recordTiming(\n                            "fresh-legal-guard",',
+      '                    if (false) environment.recordTiming(\n                            "fresh-legal-guard",',
+    ),
+  ],
+  [
+    'final actual click timing omission',
+    source => replaceUnique(
+      source,
+      '                        environment.recordSettingsClickTiming(',
+      '                        if (false) environment.recordSettingsClickTiming(',
     ),
   ],
 ]) {
-  test(`executable helper rejects ${name}`, () => {
+  test(`executable transaction helper rejects ${name}`, () => {
     const mutated = mutate(helper);
-    assert.notEqual(mutated, helper);
-    const result = executeHelper(mutated);
+    const result = executeTransaction(mutated);
+    assert.notEqual(result.status, 0, `${name} unexpectedly passed\n${result.stdout}`);
+  });
+}
+
+for (const [name, mutate] of [
+  [
+    'actual helper callsite bypass',
+    source => replaceUnique(
+      source,
+      '        openPlaybackSettingsTransaction();',
+      '        waitForLabeledClickable(PLAYBACK_SETTINGS_LABEL, MEDIA_WAIT_MS, PLAYBACK_SETTINGS_LABEL).click();',
+    ),
+  ],
+  [
+    'fresh transaction legal guard bypass',
+    source => replaceUnique(
+      source,
+      '                        RuntimeExternalPlayerFlowTest.this\n                                .assertNoOutOfScopeApprovalForSettingsTransaction();',
+      '                        return;',
+    ),
+  ],
+  [
+    'forbidden foreground package removal',
+    source => replaceUniqueInMethod(
+      source,
+      'private void assertNoOutOfScopeApprovalForSettingsTransaction()',
+      '                || foreground.equals("com.android.settings")',
+      '',
+    ),
+  ],
+  [
+    'product dialog package scope removal',
+    source => replaceUnique(
+      source,
+      'By.clazz("android.app.Dialog")\n                        .pkg(PRODUCT_PACKAGE)\n                        .text(exactLabel(label))',
+      'By.clazz("android.app.Dialog")\n                        .text(exactLabel(label))',
+    ),
+  ],
+  [
+    'duplicate dialog admission',
+    source => replaceUnique(source, 'if (dialogs.size() > 1)', 'if (dialogs.size() > 2)'),
+  ],
+  [
+    'settings visible-bounds admission removal',
+    source => replaceUnique(
+      source,
+      'if (settings != null && hasVisibleBounds(settings)) {\n            assertVisibleBounds(settings, PLAYBACK_SETTINGS_LABEL);',
+      'if (settings != null) {',
+    ),
+  ],
+  [
+    'dialog-scoped label bypass',
+    source => replaceUnique(
+      source,
+      'candidates, boundary.findObjects(By.text(labelPattern)), boundary',
+      'candidates, device.findObjects(By.text(labelPattern)), boundary',
+    ),
+  ],
+  [
+    'bounded diagnostic cap removal',
+    source => replaceUnique(
+      source,
+      'if (settingsTransactionTimings.size() >= MAX_SETTINGS_TRANSACTION_TIMING_EVENTS) {',
+      'if (false) {',
+    ),
+  ],
+  [
+    'dedicated final click timing storage omission',
+    source => replaceUnique(
+      source,
+      '        settingsClickDispatchedAtMs = dispatchedAtMs;',
+      '        return;',
+    ),
+  ],
+]) {
+  test(`executable actual adapter rejects ${name}`, () => {
+    const mutated = mutate(driver);
+    const result = executeDriverAdapter(mutated);
     assert.notEqual(result.status, 0, `${name} unexpectedly passed\n${result.stdout}`);
   });
 }
@@ -1126,6 +1961,14 @@ for (const [name, mutate] of [
       source,
       '        openPlaybackSettingsTransaction();',
       '        waitForLabeledClickable(PLAYBACK_SETTINGS_LABEL, MEDIA_WAIT_MS, PLAYBACK_SETTINGS_LABEL).click();',
+    ),
+  ],
+  [
+    'ordinary guard substituted into settings transaction',
+    source => replaceUnique(
+      source,
+      '.assertNoOutOfScopeApprovalForSettingsTransaction();',
+      '.assertNoOutOfScopeApproval();',
     ),
   ],
   [
@@ -1156,10 +1999,17 @@ for (const [name, mutate] of [
       'candidates, device.findObjects(By.text(labelPattern)), boundary',
     ),
   ],
+  [
+    'final click timing receipt omission',
+    source => replaceUnique(
+      source,
+      '            receipt.put("settingsClickTiming", settingsClickTiming);',
+      '            receipt.put("settingsClickTiming", JSONObject.NULL);',
+    ),
+  ],
 ]) {
   test(`integration guard scan rejects ${name}`, () => {
     const mutated = mutate(driver);
-    assert.notEqual(mutated, driver);
-    assert.notDeepEqual(validateIntegration(mutated, helper), []);
+    assert.notDeepEqual(validateIntegration(mutated, helper, legal), []);
   });
 }

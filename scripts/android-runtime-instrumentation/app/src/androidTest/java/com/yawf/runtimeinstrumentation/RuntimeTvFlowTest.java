@@ -54,9 +54,6 @@ public final class RuntimeTvFlowTest {
     private static final long UI_WAIT = 60_000;
     private static final long MEDIA_WAIT = 45_000;
     private static final int MAX_CAPTURES = 32;
-    private static final Pattern PLAYER_CONTROLS_SURFACE =
-            Pattern.compile("^(?:Show|Hide) player controls$");
-
     private Instrumentation instrumentation;
     private UiDevice device;
     private File evidenceDir;
@@ -259,13 +256,35 @@ public final class RuntimeTvFlowTest {
                 .enabled(true);
     }
 
-    private BySelector nativePlayerSurfaceSelector() {
+    private BySelector nativePlayerSurfaceRootSelector() {
         return By.clazz("android.widget.FrameLayout")
                 .pkg(PRODUCT_PACKAGE)
-                .desc(PLAYER_CONTROLS_SURFACE)
                 .clickable(true)
                 .enabled(true)
                 .focusable(true);
+    }
+
+    private BySelector nativePlayerControllerSelector() {
+        return By.res(PRODUCT_PACKAGE, "exo_controller")
+                .pkg(PRODUCT_PACKAGE)
+                .clazz("android.widget.FrameLayout");
+    }
+
+    private BySelector nativePlayerStateSelector() {
+        return By.res(PRODUCT_PACKAGE, "exo_play_pause")
+                .pkg(PRODUCT_PACKAGE)
+                .clazz("android.widget.ImageButton")
+                .desc(Pattern.compile("^(?:Play|Pause)$"));
+    }
+
+    private BySelector nativeContentFrameSelector() {
+        return By.res(PRODUCT_PACKAGE, "exo_content_frame")
+                .pkg(PRODUCT_PACKAGE)
+                .clazz("android.widget.FrameLayout");
+    }
+
+    private BySelector nativeVideoSurfaceSelector() {
+        return By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE);
     }
 
     private void waitForNativePlayerSurface(String label) {
@@ -285,49 +304,97 @@ public final class RuntimeTvFlowTest {
     }
 
     private NativeSurfaceSnapshot readNativePlayerSurfaceSnapshot(String label) {
-        List<UiObject2> surfaces = device.findObjects(nativePlayerSurfaceSelector());
-        if (surfaces.size() > 1) {
-            fail("Multiple exact product-scoped Media3 control surfaces appeared for " + label);
+        List<UiObject2> roots = device.findObjects(nativePlayerSurfaceRootSelector());
+        int admitted = 0;
+        NativeFocusSnapshot admittedFocus = null;
+        for (UiObject2 root : roots) {
+            RuntimeTvNativeSurface.Candidate candidate = readNativePlayerSurfaceCandidate(root);
+            if (RuntimeTvNativeSurface.admits(candidate)) {
+                admitted++;
+                UiObject2 currentFocus = device.findObject(By.focused(true));
+                BoundsSnapshot currentFocusBounds = currentFocus == null
+                        ? null
+                        : BoundsSnapshot.from(currentFocus.getVisibleBounds());
+                admittedFocus = NativeFocusSnapshot.present(
+                        root.isFocused(),
+                        BoundsSnapshot.from(root.getVisibleBounds()),
+                        currentFocus != null,
+                        currentFocusBounds);
+            }
         }
-        if (surfaces.isEmpty()) {
-            return NativeSurfaceSnapshot.incomplete("no exact product-scoped Media3 control surface");
+        if (admitted > 1) {
+            fail("Multiple exact product-scoped Media3 player surfaces appeared for " + label);
         }
-        UiObject2 surface = surfaces.get(0);
-        if (surface.getVisibleBounds().isEmpty()) {
-            return NativeSurfaceSnapshot.incomplete(
-                    "exact Media3 control surface had empty visible bounds");
+        if (admitted == 1) return NativeSurfaceSnapshot.complete(admittedFocus);
+        return NativeSurfaceSnapshot.incomplete(
+                "no exact product-scoped Media3 player surface matched a supported control state");
+    }
+
+    private RuntimeTvNativeSurface.Candidate readNativePlayerSurfaceCandidate(UiObject2 root) {
+        List<UiObject2> controllers = root.findObjects(nativePlayerControllerSelector());
+        boolean controllerVisible = false;
+        int playPauseCount = 0;
+        boolean playPauseClickable = false;
+        boolean playPauseEnabled = false;
+        boolean playPauseFocusable = false;
+        boolean playPauseVisible = false;
+        if (controllers.size() == 1) {
+            UiObject2 controller = controllers.get(0);
+            controllerVisible = !controller.getVisibleBounds().isEmpty();
+            List<UiObject2> playPause = controller.findObjects(nativePlayerStateSelector());
+            playPauseCount = playPause.size();
+            if (playPauseCount == 1) {
+                UiObject2 state = playPause.get(0);
+                playPauseClickable = state.isClickable();
+                playPauseEnabled = state.isEnabled();
+                playPauseFocusable = state.isFocusable();
+                playPauseVisible = !state.getVisibleBounds().isEmpty();
+            }
         }
-        List<UiObject2> contentFrames = surface.findObjects(
-                By.res(PRODUCT_PACKAGE, "exo_content_frame")
-                        .clazz("android.widget.FrameLayout")
-                        .pkg(PRODUCT_PACKAGE));
-        if (contentFrames.size() > 1) {
-            fail("Multiple exact product-scoped Media3 content frames appeared for " + label);
+
+        List<UiObject2> contentFrames = root.findObjects(nativeContentFrameSelector());
+        boolean contentFrameVisible = false;
+        int videoSurfaceCount = 0;
+        boolean videoSurfaceVisible = false;
+        if (contentFrames.size() == 1) {
+            UiObject2 contentFrame = contentFrames.get(0);
+            contentFrameVisible = !contentFrame.getVisibleBounds().isEmpty();
+            List<UiObject2> videoSurfaces = contentFrame.findObjects(
+                    nativeVideoSurfaceSelector());
+            videoSurfaceCount = videoSurfaces.size();
+            if (videoSurfaceCount == 1) {
+                videoSurfaceVisible = !videoSurfaces.get(0).getVisibleBounds().isEmpty();
+            }
         }
-        if (contentFrames.isEmpty()) {
-            return NativeSurfaceSnapshot.incomplete(
-                    "exact Media3 control surface had no product-scoped content frame");
-        }
-        UiObject2 contentFrame = contentFrames.get(0);
-        List<UiObject2> videoSurfaces = contentFrame.findObjects(
-                By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE));
-        if (videoSurfaces.size() > 1) {
-            fail("Multiple exact product-scoped video surfaces appeared for " + label);
-        }
-        if (videoSurfaces.isEmpty()) {
-            return NativeSurfaceSnapshot.incomplete(
-                    "exact Media3 content frame had no product-scoped SurfaceView");
-        }
-        if (contentFrame.getVisibleBounds().isEmpty()
-                || videoSurfaces.get(0).getVisibleBounds().isEmpty()) {
-            return NativeSurfaceSnapshot.incomplete(
-                    "exact Media3 content or video surface had empty visible bounds");
-        }
-        return NativeSurfaceSnapshot.complete();
+
+        return new RuntimeTvNativeSurface.Candidate(
+                root.getApplicationPackage(),
+                root.getClassName(),
+                root.getContentDescription(),
+                root.isClickable(),
+                root.isEnabled(),
+                root.isFocusable(),
+                !root.getVisibleBounds().isEmpty(),
+                controllers.size(),
+                controllerVisible,
+                playPauseCount,
+                playPauseClickable,
+                playPauseEnabled,
+                playPauseFocusable,
+                playPauseVisible,
+                contentFrames.size(),
+                contentFrameVisible,
+                videoSurfaceCount,
+                videoSurfaceVisible);
     }
 
     private void revealControls() {
-        observeFreshNative(() -> readNativeFocusSnapshot(nativePlayerSurfaceSelector()));
+        NativeSurfaceSnapshot surface = observeFreshNative(
+                () -> readNativePlayerSurfaceSnapshot("native PlayerView before control reveal"));
+        assertTrue("Native player surface disappeared before control reveal: "
+                + surface.incomplete, surface.complete);
+        assertNotNull("Native player focus snapshot was missing before control reveal",
+                surface.focus);
         sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_DOWN);
         assertTrue("Media3 controls did not become visible",
                 waitForNativePresence(playPauseSelector(), 5_000));
@@ -582,18 +649,23 @@ public final class RuntimeTvFlowTest {
     private static final class NativeSurfaceSnapshot {
         final boolean complete;
         final String incomplete;
+        final NativeFocusSnapshot focus;
 
-        private NativeSurfaceSnapshot(boolean complete, String incomplete) {
+        private NativeSurfaceSnapshot(
+                boolean complete,
+                String incomplete,
+                NativeFocusSnapshot focus) {
             this.complete = complete;
             this.incomplete = incomplete;
+            this.focus = focus;
         }
 
-        static NativeSurfaceSnapshot complete() {
-            return new NativeSurfaceSnapshot(true, "");
+        static NativeSurfaceSnapshot complete(NativeFocusSnapshot focus) {
+            return new NativeSurfaceSnapshot(true, "", focus);
         }
 
         static NativeSurfaceSnapshot incomplete(String reason) {
-            return new NativeSurfaceSnapshot(false, reason);
+            return new NativeSurfaceSnapshot(false, reason, null);
         }
     }
 
