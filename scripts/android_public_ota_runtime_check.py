@@ -64,6 +64,30 @@ AUTOMATIC_BASELINE_SOURCE = "9fc94a237d99b849cfc18a01085bb487915dd978"
 AUTOMATIC_BASELINE_TAG = "android-v2.3.27"
 AUTOMATIC_BASELINE_APK_NAME = "YAWF.Stream_Android_2.3.27.apk"
 MINIMUM_AUTOMATIC_TARGET_CODE = 2_003_031
+EMERGENCY_36_VERSION = "2.3.36"
+EMERGENCY_36_CODE = 2_003_036
+EMERGENCY_36_SOURCE = "b9f51773232fa546ed3a95ec3e9169780f7df244"
+EMERGENCY_36_PRODUCER_RUN = 39_917_780_677
+EMERGENCY_36_SOURCE_CI_RUN = 39_917_164_434
+EMERGENCY_36_APK_SHA256 = "b6109604b1bc0bb7db87ed79402da7356011caab48833ac2d07eb4cede4dfe11"
+EMERGENCY_36_APK_SIZE = 88_578_945
+EMERGENCY_36_MANIFEST_SHA256 = "82cf99df55ebc766da645f16ac76d7dd7f5f7d06671cdc78d65318595e326b95"
+EMERGENCY_36_VERIFICATION_SHA256 = "fa7eb7dc02f30594ceceb03a8c86aa2ccde35ed6228c2b243b83ecae44667d1c"
+EMERGENCY_36_VERIFIED_AT = "2026-10-23T07:55:43.417811+00:00"
+EMERGENCY_36_SCOPE = (
+    "Emergency canonical episode-guide and continuation-identity fix. "
+    "Separate from pending player stabilization37."
+)
+STANDARD_VERIFICATION_KEYS = frozenset({
+    "version", "sourceRevision", "buildRun", "apk", "certificateSha256",
+    "checks", "pending", "limits",
+})
+EMERGENCY_VERIFICATION_KEYS = frozenset({
+    "schemaVersion", "version", "versionCode", "packageName", "sourceRevision",
+    "exactSourceCiRun", "producerRun", "apk", "signerSha256",
+    "offlineSignatureManifestAbiPayloadAndAlignment", "nativeRuntime",
+    "episodeVerification", "verifiedAt", "scope",
+})
 URL_RE = re.compile(r"https?://[^\s\]\[\"'<>]+", re.IGNORECASE)
 MAX_HOST_EVIDENCE_BYTES = 2 * 1024 * 1024
 BOUNDED_DIAGNOSTIC_STDOUT_NAMES = frozenset(
@@ -196,6 +220,35 @@ def load_automatic_binding(path: Path) -> RuntimeBinding:
     )
     if target_sha256 == AUTOMATIC_BASELINE_SHA256:
         raise RuntimeGateError("Automatic admission target APK equals the baseline")
+    target_size = _decimal_string(value.get("targetSize"), "targetSize")
+    target_source = _exact_string(
+        value.get("targetSourceRevision"), r"[0-9a-f]{40}", "targetSourceRevision"
+    )
+    target_build_run = _decimal_string(value.get("targetBuildRun"), "targetBuildRun")
+    target_manifest_sha256 = _exact_string(
+        value.get("targetManifestSha256"), r"[0-9a-f]{64}", "targetManifestSha256"
+    )
+    target_verification_sha256 = _exact_string(
+        value.get("targetVerificationSha256"), r"[0-9a-f]{64}",
+        "targetVerificationSha256",
+    )
+    if target_version == EMERGENCY_36_VERSION:
+        exact_emergency = {
+            "targetCode": (target_code, EMERGENCY_36_CODE),
+            "targetSha256": (target_sha256, EMERGENCY_36_APK_SHA256),
+            "targetSize": (target_size, EMERGENCY_36_APK_SIZE),
+            "targetSourceRevision": (target_source, EMERGENCY_36_SOURCE),
+            "targetBuildRun": (target_build_run, EMERGENCY_36_PRODUCER_RUN),
+            "targetManifestSha256": (
+                target_manifest_sha256, EMERGENCY_36_MANIFEST_SHA256
+            ),
+            "targetVerificationSha256": (
+                target_verification_sha256, EMERGENCY_36_VERIFICATION_SHA256
+            ),
+        }
+        for label, (actual, expected) in exact_emergency.items():
+            if actual != expected:
+                raise RuntimeGateError(f"Automatic emergency 2.3.36 {label} mismatch")
     return RuntimeBinding(
         automatic=True,
         ota_mode=AUTOMATIC_OTA_MODE,
@@ -210,22 +263,15 @@ def load_automatic_binding(path: Path) -> RuntimeBinding:
         target_version=target_version,
         target_code=target_code,
         target_sha256=target_sha256,
-        target_size=_decimal_string(value.get("targetSize"), "targetSize"),
-        target_source=_exact_string(
-            value.get("targetSourceRevision"), r"[0-9a-f]{40}", "targetSourceRevision"
-        ),
-        target_build_run=_decimal_string(value.get("targetBuildRun"), "targetBuildRun"),
+        target_size=target_size,
+        target_source=target_source,
+        target_build_run=target_build_run,
         target_tag=f"android-v{target_version}",
         target_apk_name=target_apk_name,
         target_verification_name=f"Android_{target_version}_verification.json",
         signer_pin=SIGNER_PIN,
-        target_manifest_sha256=_exact_string(
-            value.get("targetManifestSha256"), r"[0-9a-f]{64}", "targetManifestSha256"
-        ),
-        target_verification_sha256=_exact_string(
-            value.get("targetVerificationSha256"), r"[0-9a-f]{64}",
-            "targetVerificationSha256",
-        ),
+        target_manifest_sha256=target_manifest_sha256,
+        target_verification_sha256=target_verification_sha256,
     )
 
 
@@ -393,10 +439,83 @@ def validate_target_verification(
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RuntimeGateError("Target verification receipt is invalid JSON") from error
-    if not isinstance(value, dict) or set(value) != {
-        "version", "sourceRevision", "buildRun", "apk", "certificateSha256",
-        "checks", "pending", "limits",
-    }:
+    if not isinstance(value, dict):
+        raise RuntimeGateError("Target verification receipt keys are not exact")
+    if set(value) == EMERGENCY_VERIFICATION_KEYS:
+        if not binding.automatic or binding.target_version != EMERGENCY_36_VERSION:
+            raise RuntimeGateError("Emergency verification schema is not admitted for this target")
+        expected_root = {
+            "schemaVersion": 1,
+            "version": EMERGENCY_36_VERSION,
+            "versionCode": EMERGENCY_36_CODE,
+            "packageName": PRODUCT_PACKAGE,
+            "sourceRevision": EMERGENCY_36_SOURCE,
+            "exactSourceCiRun": EMERGENCY_36_SOURCE_CI_RUN,
+            "producerRun": EMERGENCY_36_PRODUCER_RUN,
+            "signerSha256": binding.signer_pin,
+            "offlineSignatureManifestAbiPayloadAndAlignment": "passed verify_android_apk.py",
+            "verifiedAt": EMERGENCY_36_VERIFIED_AT,
+            "scope": EMERGENCY_36_SCOPE,
+        }
+        for key, expected in expected_root.items():
+            if type(value.get(key)) is not type(expected) or value.get(key) != expected:
+                raise RuntimeGateError(f"Emergency target verification {key} mismatch")
+        expected_apk = {
+            "name": binding.target_apk_name,
+            "sha256": EMERGENCY_36_APK_SHA256,
+            "size": EMERGENCY_36_APK_SIZE,
+        }
+        if value.get("apk") != expected_apk:
+            raise RuntimeGateError("Emergency target verification APK identity mismatch")
+        expected_native_runtime = {
+            "abi": "arm64-v8a",
+            "api": 36,
+            "automaticOtaTransactionProven": False,
+            "completeSetupAndNativeManualUpdater": "pass",
+            "exactInstalledApkHash": "pass",
+            "freshOwnedEmulator": True,
+            "passed": True,
+            "physicalDeviceProof": False,
+            "webviewMajor": 133,
+        }
+        if value.get("nativeRuntime") != expected_native_runtime:
+            raise RuntimeGateError("Emergency target native runtime state mismatch")
+        expected_episode_verification = {
+            "allPlatformVerificationComplete": False,
+            "canonicalGuideAndSourceRegressionTests": "passed exact source CI",
+            "productionServer36Tybw17E1FileDecode": (
+                "The Blood Warfare,524decodedframes,0dropped"
+            ),
+            "standaloneConfiguredGuideRuntime": (
+                "not run without metadata credential in account-free emulator"
+            ),
+        }
+        if value.get("episodeVerification") != expected_episode_verification:
+            raise RuntimeGateError("Emergency target episode verification state mismatch")
+        exact_binding = {
+            "versionCode": (binding.target_code, EMERGENCY_36_CODE),
+            "sourceRevision": (binding.target_source, EMERGENCY_36_SOURCE),
+            "producerRun": (binding.target_build_run, EMERGENCY_36_PRODUCER_RUN),
+            "apkSha256": (binding.target_sha256, EMERGENCY_36_APK_SHA256),
+            "apkSize": (binding.target_size, EMERGENCY_36_APK_SIZE),
+            "manifestSha256": (
+                binding.target_manifest_sha256, EMERGENCY_36_MANIFEST_SHA256
+            ),
+            "verificationSha256": (
+                binding.target_verification_sha256, EMERGENCY_36_VERIFICATION_SHA256
+            ),
+        }
+        for label, (actual, expected) in exact_binding.items():
+            if actual != expected:
+                raise RuntimeGateError(f"Emergency target binding {label} mismatch")
+        validate_file(
+            path,
+            EMERGENCY_36_VERIFICATION_SHA256,
+            path.stat().st_size,
+            "emergency target verification receipt",
+        )
+        return value
+    if set(value) != STANDARD_VERIFICATION_KEYS:
         raise RuntimeGateError("Target verification receipt keys are not exact")
     if not binding.automatic:
         if value.get("version") != TARGET_VERSION or value.get("sourceRevision") != TARGET_SOURCE:

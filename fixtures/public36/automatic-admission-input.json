@@ -1,0 +1,86 @@
+{
+  "manifest": {
+    "apk": {
+      "name": "YAWF.Stream_Android_2.3.36.apk",
+      "sha256": "b6109604b1bc0bb7db87ed79402da7356011caab48833ac2d07eb4cede4dfe11",
+      "size": 88578945
+    },
+    "packageName": "com.tgk30.debridstreamer",
+    "schemaVersion": 1,
+    "sourceRevision": "b9f51773232fa546ed3a95ec3e9169780f7df244",
+    "version": "2.3.36",
+    "versionCode": 2003036
+  },
+  "release": {
+    "assets": [
+      {
+        "digest": "sha256:82cf99df55ebc766da645f16ac76d7dd7f5f7d06671cdc78d65318595e326b95",
+        "name": "android-update.json",
+        "size": 348,
+        "state": "uploaded",
+        "url": "https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.36/android-update.json"
+      },
+      {
+        "digest": "sha256:fa7eb7dc02f30594ceceb03a8c86aa2ccde35ed6228c2b243b83ecae44667d1c",
+        "name": "Android_2.3.36_verification.json",
+        "size": 1411,
+        "state": "uploaded",
+        "url": "https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.36/Android_2.3.36_verification.json"
+      },
+      {
+        "digest": "sha256:d46f8f1886ac72742f371994735e7717d1f4e0f8815d36e4f9be61443000c29e",
+        "name": "SHA256SUMS",
+        "size": 282,
+        "state": "uploaded",
+        "url": "https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.36/SHA256SUMS"
+      },
+      {
+        "digest": "sha256:b6109604b1bc0bb7db87ed79402da7356011caab48833ac2d07eb4cede4dfe11",
+        "name": "YAWF.Stream_Android_2.3.36.apk",
+        "size": 88578945,
+        "state": "uploaded",
+        "url": "https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.36/YAWF.Stream_Android_2.3.36.apk"
+      }
+    ],
+    "isDraft": false,
+    "isPrerelease": false,
+    "publishedAt": "2026-10-23T08:00:39Z",
+    "tagName": "android-v2.3.36",
+    "targetCommitish": "b9f51773232fa546ed3a95ec3e9169780f7df244"
+  },
+  "verification": {
+    "apk": {
+      "name": "YAWF.Stream_Android_2.3.36.apk",
+      "sha256": "b6109604b1bc0bb7db87ed79402da7356011caab48833ac2d07eb4cede4dfe11",
+      "size": 88578945
+    },
+    "episodeVerification": {
+      "allPlatformVerificationComplete": false,
+      "canonicalGuideAndSourceRegressionTests": "passed exact source CI",
+      "productionServer36Tybw17E1FileDecode": "The Blood Warfare,524decodedframes,0dropped",
+      "standaloneConfiguredGuideRuntime": "not run without metadata credential in account-free emulator"
+    },
+    "exactSourceCiRun": 39917164434,
+    "nativeRuntime": {
+      "abi": "arm64-v8a",
+      "api": 36,
+      "automaticOtaTransactionProven": false,
+      "completeSetupAndNativeManualUpdater": "pass",
+      "exactInstalledApkHash": "pass",
+      "freshOwnedEmulator": true,
+      "passed": true,
+      "physicalDeviceProof": false,
+      "webviewMajor": 133
+    },
+    "offlineSignatureManifestAbiPayloadAndAlignment": "passed verify_android_apk.py",
+    "packageName": "com.tgk30.debridstreamer",
+    "producerRun": 39917780677,
+    "schemaVersion": 1,
+    "scope": "Emergency canonical episode-guide and continuation-identity fix. Separate from pending player stabilization37.",
+    "signerSha256": "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a",
+    "sourceRevision": "b9f51773232fa546ed3a95ec3e9169780f7df244",
+    "verifiedAt": "2026-10-23T07:55:43.417811+00:00",
+    "version": "2.3.36",
+    "versionCode": 2003036
+  }
+}
