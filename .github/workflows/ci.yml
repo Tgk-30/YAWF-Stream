@@ -368,6 +368,11 @@ jobs:
           workspaces: "web/src-tauri -> target"
           key: android
 
+      - name: Set up Node 24 for Android checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Install web dependencies
         working-directory: web
         run: npm ci
@@ -418,6 +423,9 @@ jobs:
       # this Linux runner would need the GTK development headers the Tauri Linux
       # backend links against, which are not installed here and are not what this
       # job is for.
+
+      - name: Native Android updater consent and ownership contracts
+        run: node --test scripts/android_updater.test.mjs scripts/android-consent-focus-fixture/source_contract.test.mjs
 
   android-tv:
     name: Android TV unit tests, lint, and APK

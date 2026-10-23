@@ -188,6 +188,7 @@ class YawfAndroidUpdater private constructor(
         persistedDownloadId() == NO_DOWNLOAD_ID &&
         persistedUpdatePhase() == PHASE_NONE &&
         !preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false) &&
+        !manualCheckPending &&
         automaticChecksEnabled() &&
         automaticCheckIsDue()
       ) {
@@ -223,8 +224,9 @@ class YawfAndroidUpdater private constructor(
   fun checkManually() {
     runOnMain {
       if (destroyed) return@runOnMain
+      manualCheckPending = true
       if (!activityReady()) {
-        manualCheckPending = true
+        scheduleReadiness(resetAttempts = true)
         return@runOnMain
       }
       requestManualCheckAfterConsent()
@@ -261,7 +263,13 @@ class YawfAndroidUpdater private constructor(
 
   private fun handleForegroundReadiness() {
     if (!activityReady()) return
-    if (operation != null) return
+    if (operation != null) {
+      if (manualCheckPending && operation == Operation.CHECK_AUTOMATIC) {
+        cancelOperation()
+      } else {
+        return
+      }
+    }
     if (preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)) {
       if (
         dialogState == DialogState.AWAITING_PERMISSION &&
@@ -287,7 +295,6 @@ class YawfAndroidUpdater private constructor(
       return
     }
     if (manualCheckPending) {
-      manualCheckPending = false
       requestManualCheckAfterConsent()
     } else if (!showPersistedCheckResultIfReady()) {
       showPersistedOfferIfReady()
@@ -354,12 +361,19 @@ class YawfAndroidUpdater private constructor(
   }
 
   private fun requestManualCheckAfterConsent() {
+    if (!manualCheckPending) return
+    if (!activityReady()) {
+      scheduleReadiness(resetAttempts = true)
+      return
+    }
+    if (dialog != null) return
     if (!hasNetworkConsent()) {
-      showManualConsentDialog()
+      if (showManualConsentDialog()) manualCheckPending = false
       return
     }
     val phase = persistedUpdatePhase()
     if (phase != PHASE_NONE || persistedDownloadId() != NO_DOWNLOAD_ID) {
+      manualCheckPending = false
       preferences.edit().putLong(KEY_PHASE_NOT_BEFORE_GENERATION, foregroundGeneration).apply()
       resumePersistedUpdate(phase)
       return
@@ -383,6 +397,7 @@ class YawfAndroidUpdater private constructor(
       operationFuture?.cancel(true)
       operationFuture = null
       operation = null
+      manualCheckPending = false
       clearPendingInstallerLaunch()
       dismissDialog()
       worker.shutdownNow()
@@ -391,15 +406,20 @@ class YawfAndroidUpdater private constructor(
 
   private fun startCheck(manual: Boolean) {
     if (destroyed || operation != null || !hasNetworkConsent()) return
-    preferences.edit().remove(KEY_PENDING_CHECK_RESULT).apply()
     if (manual) {
-      showProgressDialog(
+      val progressPresented = showProgressDialog(
         state = DialogState.CHECKING,
         title = "Checking for updates",
         message = "Checking the official YAWF Stream Android release channel.",
         cancelLabel = "Cancel",
       ) { cancelOperationAndDismiss() }
+      if (!progressPresented) {
+        holdPendingManualUntilNextReadinessEdge()
+        return
+      }
+      manualCheckPending = false
     }
+    preferences.edit().remove(KEY_PENDING_CHECK_RESULT).apply()
 
     val startedResume = resumeNumber
     val op = if (manual) Operation.CHECK_MANUAL else Operation.CHECK_AUTOMATIC
@@ -447,21 +467,24 @@ class YawfAndroidUpdater private constructor(
           .putInt(KEY_NETWORK_CONSENT, CONSENT_GRANTED)
           .putBoolean(KEY_AUTOMATIC_CHECKS, true)
           .apply()
-        startCheck(manual = true)
+        manualCheckPending = true
+        dismissDialog()
+        scheduleReadiness(resetAttempts = true)
       },
       onNegative = {
         preferences.edit()
           .putInt(KEY_NETWORK_CONSENT, CONSENT_DECLINED)
           .putBoolean(KEY_AUTOMATIC_CHECKS, false)
           .apply()
+        manualCheckPending = false
         dismissDialog()
       },
       includeAutomaticCheckbox = false,
     )
   }
 
-  private fun showManualConsentDialog() {
-    if (!activityReady()) return
+  private fun showManualConsentDialog(): Boolean {
+    if (!activityReady()) return false
     dismissDialog()
     var enableAutomatic = false
     val builder =
@@ -479,13 +502,16 @@ class YawfAndroidUpdater private constructor(
             .putInt(KEY_NETWORK_CONSENT, CONSENT_GRANTED)
             .putBoolean(KEY_AUTOMATIC_CHECKS, enableAutomatic)
           editor.apply()
-          startCheck(manual = true)
+          manualCheckPending = true
+          dismissDialog()
+          scheduleReadiness(resetAttempts = true)
         }
         .setNegativeButton("Cancel") { _, _ ->
           preferences.edit()
             .putInt(KEY_NETWORK_CONSENT, CONSENT_DECLINED)
             .putBoolean(KEY_AUTOMATIC_CHECKS, false)
             .apply()
+          manualCheckPending = false
           dismissDialog()
         }
         .setCancelable(false)
@@ -497,12 +523,18 @@ class YawfAndroidUpdater private constructor(
         if (dialog === created) {
           dialog = null
           dialogState = null
+          schedulePendingManualCheckIfNeeded()
         }
       }
       created.show()
+      val presented = dialog === created && dialogState == DialogState.CONSENT && created.isShowing
+      if (!presented) holdPendingManualUntilNextReadinessEdge()
+      return presented
     } catch (_: Exception) {
       dialog = null
       dialogState = null
+      holdPendingManualUntilNextReadinessEdge()
+      return false
     }
   }
 
@@ -1322,7 +1354,7 @@ class YawfAndroidUpdater private constructor(
     message: String,
     cancelLabel: String,
     onCancel: () -> Unit,
-  ) {
+  ): Boolean =
     showUpdaterDialog(
       state = state,
       title = title,
@@ -1333,7 +1365,6 @@ class YawfAndroidUpdater private constructor(
       onNegative = onCancel,
       includeAutomaticCheckbox = false,
     )
-  }
 
   private fun showUpdaterDialog(
     state: DialogState,
@@ -1344,8 +1375,8 @@ class YawfAndroidUpdater private constructor(
     onPositive: (() -> Unit)?,
     onNegative: (() -> Unit)?,
     includeAutomaticCheckbox: Boolean,
-  ) {
-    if (!activityReady()) return
+  ): Boolean {
+    if (!activityReady()) return false
     dismissDialog()
     val builder =
       AlertDialog.Builder(activity)
@@ -1374,12 +1405,18 @@ class YawfAndroidUpdater private constructor(
         if (dialog === created) {
           dialog = null
           dialogState = null
+          schedulePendingManualCheckIfNeeded()
         }
       }
       created.show()
+      val presented = dialog === created && dialogState == state && created.isShowing
+      if (!presented) holdPendingManualUntilNextReadinessEdge()
+      return presented
     } catch (_: Exception) {
       dialog = null
       dialogState = null
+      holdPendingManualUntilNextReadinessEdge()
+      return false
     }
   }
 
@@ -2232,6 +2269,7 @@ class YawfAndroidUpdater private constructor(
             operationFuture = null
             this.operation = null
             success(result)
+            schedulePendingManualCheckIfNeeded()
           }
         } catch (_: InterruptedException) {
           Thread.currentThread().interrupt()
@@ -2261,6 +2299,7 @@ class YawfAndroidUpdater private constructor(
                 preferences.edit().putInt(KEY_PENDING_CHECK_RESULT, CHECK_RESULT_FAILED).apply()
               }
             }
+            schedulePendingManualCheckIfNeeded()
           }
         }
       }
@@ -2275,6 +2314,7 @@ class YawfAndroidUpdater private constructor(
   }
 
   private fun cancelOperationAndDismiss() {
+    manualCheckPending = false
     cancelOperation()
     dismissDialog()
   }
@@ -2288,6 +2328,17 @@ class YawfAndroidUpdater private constructor(
     } catch (_: Exception) {
       // The Activity window may already be gone.
     }
+    schedulePendingManualCheckIfNeeded()
+  }
+
+  private fun schedulePendingManualCheckIfNeeded() {
+    if (manualCheckPending && foreground && !destroyed) {
+      scheduleReadiness(resetAttempts = true)
+    }
+  }
+
+  private fun holdPendingManualUntilNextReadinessEdge() {
+    if (manualCheckPending) main.removeCallbacks(resumeReadiness)
   }
 
   private fun activityReady(): Boolean =

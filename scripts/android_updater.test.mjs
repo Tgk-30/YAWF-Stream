@@ -86,7 +86,7 @@ function permissionReturnFailures(subject) {
   }
 
   const ready = foreground.indexOf("if (!activityReady()) return");
-  const operation = foreground.indexOf("if (operation != null) return");
+  const operation = foreground.indexOf("if (operation != null) {");
   const awaiting = foreground.indexOf(
     "if (preferences.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)) {",
   );
@@ -106,6 +106,100 @@ function permissionReturnFailures(subject) {
   }
   if (!/putBoolean\(KEY_AWAITING_INSTALL_PERMISSION, false\)[\s\S]*deferPhaseUntilNextForeground\(\)[\s\S]*dismissDialog\(\)/.test(guidance)) {
     failures.push("Later no longer clears awaiting permission and defers the staged update");
+  }
+  return failures;
+}
+
+function manualConsentFocusFailures(subject) {
+  const failures = [];
+  const fields = sourceSection(subject, "private var destroyed", "private val resumeReadiness");
+  const onResume = sourceSection(subject, "fun onResume()", "/** Forward Activity.onPause()");
+  const onPause = sourceSection(subject, "fun onPause()", "/** Forward Activity.onWindowFocusChanged()");
+  const check = sourceSection(subject, "fun checkManually()", "private fun scheduleReadiness");
+  const foreground = sourceSection(subject, "private fun handleForegroundReadiness()", "private fun resumePersistedUpdate");
+  const request = sourceSection(subject, "private fun requestManualCheckAfterConsent()", "/** Forward Activity.onDestroy()");
+  const destroy = sourceSection(subject, "fun onDestroy()", "private fun startCheck");
+  const start = sourceSection(subject, "private fun startCheck", "private fun showInitialConsentDialog");
+  const initialConsent = sourceSection(subject, "private fun showInitialConsentDialog", "private fun showManualConsentDialog");
+  const manualConsent = sourceSection(subject, "private fun showManualConsentDialog", "private fun discoverCandidate");
+  const progress = sourceSection(subject, "private fun showProgressDialog", "private fun showUpdaterDialog");
+  const dialog = sourceSection(subject, "private fun showUpdaterDialog", "private fun automaticChecksView");
+  const submit = sourceSection(subject, "private fun <T> submit", "private fun cancelOperation");
+  const cancel = sourceSection(subject, "private fun cancelOperation()", "private fun cancelOperationAndDismiss");
+  const cancelAndDismiss = sourceSection(subject, "private fun cancelOperationAndDismiss()", "private fun dismissDialog");
+  const pendingFailure = subject.includes("private fun holdPendingManualUntilNextReadinessEdge()")
+    ? sourceSection(subject, "private fun holdPendingManualUntilNextReadinessEdge()", "private fun activityReady")
+    : "";
+
+  if (!fields.includes("private var manualCheckPending = false")) {
+    failures.push("manual check pending owner state is missing");
+  }
+  if (!/!preferences\.getBoolean\(KEY_AWAITING_INSTALL_PERMISSION, false\) &&\s*!manualCheckPending &&\s*automaticChecksEnabled\(\)/.test(onResume)) {
+    failures.push("automatic discovery can overtake an explicit pending manual check");
+  }
+  if (!/manualCheckPending = true[\s\S]*?if \(!activityReady\(\)\) \{[\s\S]*?scheduleReadiness\(resetAttempts = true\)[\s\S]*?return@runOnMain[\s\S]*?requestManualCheckAfterConsent\(\)/.test(check)) {
+    failures.push("manual requests are not owned and readiness-queued before any work");
+  }
+  if (!/if \(operation != null\) \{[\s\S]*?manualCheckPending && operation == Operation\.CHECK_AUTOMATIC[\s\S]*?cancelOperation\(\)[\s\S]*?else \{\s*return\s*\}/.test(foreground)) {
+    failures.push("pending manual work does not cancel only automatic discovery or wait for other work");
+  }
+  const dialogGuard = foreground.indexOf("if (dialog != null) return");
+  const pendingDrain = foreground.indexOf("if (manualCheckPending) {");
+  if (!(dialogGuard >= 0 && pendingDrain > dialogGuard && foreground.indexOf("requestManualCheckAfterConsent()", pendingDrain) > pendingDrain)) {
+    failures.push("pending manual work can replace an owned dialog or is not drained through readiness");
+  }
+  const requestRequirements = [
+    "if (!manualCheckPending) return",
+    "if (!activityReady()) {",
+    "scheduleReadiness(resetAttempts = true)",
+    "if (showManualConsentDialog()) manualCheckPending = false",
+    "manualCheckPending = false",
+    "if (operation == Operation.CHECK_AUTOMATIC) cancelOperation()",
+    "if (operation != null)",
+    "startCheck(manual = true)",
+  ];
+  for (const requirement of requestRequirements) {
+    if (!request.includes(requirement)) failures.push(`manual pending drain lacks: ${requirement}`);
+  }
+  const requestReadyReturn = request.indexOf("return\n    }", request.indexOf("if (!activityReady()) {"));
+  const requestDialogGuard = request.indexOf("if (dialog != null) return");
+  const requestConsent = request.indexOf("if (!hasNetworkConsent()) {");
+  if (!(requestReadyReturn >= 0 && requestDialogGuard > requestReadyReturn && requestConsent > requestDialogGuard)) {
+    failures.push("ready manual fast path can replace an owned dialog before its focus handoff");
+  }
+  if (!/val progressPresented = showProgressDialog\([\s\S]*?DialogState\.CHECKING[\s\S]*?cancelLabel = "Cancel"[\s\S]*?if \(!progressPresented\) \{[\s\S]*?holdPendingManualUntilNextReadinessEdge\(\)[\s\S]*?return[\s\S]*?manualCheckPending = false[\s\S]*?submit\(/.test(start)) {
+    failures.push("manual worker can start before a visible CHECKING dialog with Cancel");
+  }
+  for (const [label, consent] of [["initial", initialConsent], ["manual", manualConsent]]) {
+    if (/startCheck\s*\(/.test(consent)) failures.push(`${label} consent callback starts work before dismissal`);
+    if (!/putInt\(KEY_NETWORK_CONSENT, CONSENT_GRANTED\)[\s\S]*?manualCheckPending = true[\s\S]*?dismissDialog\(\)[\s\S]*?scheduleReadiness\(resetAttempts = true\)/.test(consent)) {
+      failures.push(`${label} consent does not persist, queue, dismiss, and schedule in order`);
+    }
+    if (!/putInt\(KEY_NETWORK_CONSENT, CONSENT_DECLINED\)[\s\S]*?manualCheckPending = false[\s\S]*?dismissDialog\(\)/.test(consent)) {
+      failures.push(`${label} consent cancellation does not invalidate pending work`);
+    }
+  }
+  if (!/private fun showProgressDialog\([\s\S]*?\): Boolean =\s*showUpdaterDialog\(/.test(progress)) {
+    failures.push("progress presentation does not report success");
+  }
+  if (!/\): Boolean \{[\s\S]*?if \(!activityReady\(\)\) return false[\s\S]*?created\.show\(\)[\s\S]*?val presented = dialog === created && dialogState == state && created\.isShowing[\s\S]*?if \(!presented\) holdPendingManualUntilNextReadinessEdge\(\)[\s\S]*?catch \(_:\s*Exception\)[\s\S]*?holdPendingManualUntilNextReadinessEdge\(\)[\s\S]*?return false/.test(dialog)) {
+    failures.push("dialog presentation success is not focus-, attachment-, and isShowing-gated");
+  }
+  if (!/if \(manualCheckPending\) main\.removeCallbacks\(resumeReadiness\)/.test(pendingFailure)) {
+    failures.push("failed manual presentation does not remove its already queued readiness callback");
+  }
+  if (!onPause.includes("main.removeCallbacks(resumeReadiness)")) {
+    failures.push("background transition retains readiness callbacks");
+  }
+  if (!destroy.includes("manualCheckPending = false") || !destroy.includes("main.removeCallbacksAndMessages(null)")) {
+    failures.push("destroy does not invalidate pending manual readiness");
+  }
+  if (!/if \(destroyed \|\| serial != operationSerial\) return@post/.test(submit)
+      || !/operationSerial \+= 1[\s\S]*?operationFuture\?\.cancel\(true\)/.test(cancel)) {
+    failures.push("Cancel no longer invalidates delayed worker completion");
+  }
+  if (!/manualCheckPending = false[\s\S]*?cancelOperation\(\)[\s\S]*?dismissDialog\(\)/.test(cancelAndDismiss)) {
+    failures.push("explicit Cancel does not invalidate a manual intent queued behind the owned dialog");
   }
   return failures;
 }
@@ -278,6 +372,77 @@ test("network access is consent-gated and automatic results are foreground-defer
   assert.match(source, /showPersistedCheckResultIfReady\(\)/);
   assert.match(source, /KEY_OFFER_NOT_BEFORE_GENERATION/);
   assert.match(source, /scheduleReadiness\(resetAttempts = true\)/);
+});
+
+test("manual consent dismisses before focus readiness and CHECKING presentation gates worker start", () => {
+  assert.deepEqual(manualConsentFocusFailures(source), []);
+  const mutants = {
+    "automatic discovery overtakes pending manual intent": source.replace(
+      "        !manualCheckPending &&\n        automaticChecksEnabled()",
+      "        automaticChecksEnabled()",
+      1,
+    ),
+    "initial consent starts worker in framework callback": source.replace(
+      `        manualCheckPending = true
+        dismissDialog()
+        scheduleReadiness(resetAttempts = true)`,
+      "        startCheck(manual = true)",
+      1,
+    ),
+    "progress failure still starts worker": source.replace(
+      `      if (!progressPresented) {
+        holdPendingManualUntilNextReadinessEdge()
+        return
+      }`,
+      "      if (!progressPresented) return",
+      1,
+    ),
+    "progress presentation failure spins an immediate readiness retry": source.replace(
+      "        holdPendingManualUntilNextReadinessEdge()\n        return",
+      "        scheduleReadiness(resetAttempts = true)\n        return",
+      1,
+    ),
+    "dialog show result ignored": source.replace(
+      "      val presented = dialog === created && dialogState == state && created.isShowing",
+      "      val presented = true",
+      1,
+    ),
+    "ready manual fast path replaces an owned dialog": source.replace(
+      "    if (dialog != null) return\n    if (!hasNetworkConsent()) {",
+      "    if (!hasNetworkConsent()) {",
+      1,
+    ),
+    "background readiness callback retained": source.replace(
+      "      main.removeCallbacks(resumeReadiness)\n      main.removeCallbacks(pollDownload)",
+      "      main.removeCallbacks(pollDownload)",
+      1,
+    ),
+    "destroy retains pending manual intent": source.replace(
+      "      operation = null\n      manualCheckPending = false",
+      "      operation = null",
+      1,
+    ),
+    "Cancel permits delayed completion": source.replace(
+      "    operationSerial += 1\n    operationFuture?.cancel(true)",
+      "    operationFuture?.cancel(true)",
+      1,
+    ),
+    "explicit Cancel restarts a manual request queued behind CHECKING": source.replace(
+      `  private fun cancelOperationAndDismiss() {
+    manualCheckPending = false`,
+      `  private fun cancelOperationAndDismiss() {`,
+      1,
+    ),
+    "failed presentation retains the readiness callback queued by dialog dismissal": source.replace(
+      "    if (manualCheckPending) main.removeCallbacks(resumeReadiness)",
+      "    if (manualCheckPending) scheduleReadiness(resetAttempts = true)",
+      1,
+    ),
+  };
+  for (const [name, mutant] of Object.entries(mutants)) {
+    assert.notEqual(mutant, source, `${name} mutation site must exist`);
+    assert.notDeepEqual(manualConsentFocusFailures(mutant), [], name);
+  }
 });
 
 test("permission return tears down only the owned retained dialog before the focus gate", () => {
