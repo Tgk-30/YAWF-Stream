@@ -244,7 +244,7 @@ jobs:
           set -euo pipefail
           python3 scripts/android_tv_runtime_check.py --self-test
           python3 scripts/android_tv_runtime_fixture.py self-test
-          node --test scripts/android_tv_runtime_check.test.mjs
+          node --test scripts/android_tv_runtime_check.test.mjs scripts/runtime_tv_upper_video_roi.test.mjs
           python3 scripts/android_tv_runtime_fixture.py generate \
             --output "$RUNNER_TEMP/tv-fixture" \
             > "$EVIDENCE/fixture-generation-stdout.json"

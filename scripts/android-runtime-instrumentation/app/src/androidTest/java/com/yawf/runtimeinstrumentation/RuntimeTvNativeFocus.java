@@ -11,12 +11,26 @@ final class RuntimeTvNativeFocus {
 
     private RuntimeTvNativeFocus() { }
 
+    static PopupObservationTransaction beginSettingsPopupTransaction(
+            boolean targetPresent,
+            boolean activationFocused,
+            ScopeKind activationScope) {
+        if (!targetPresent
+                || !activationFocused
+                || activationScope != ScopeKind.PLAYER_VIEW) {
+            throw new AssertionError(
+                    "Settings popup transaction requires a focused admitted PlayerView target");
+        }
+        return new PopupObservationTransaction();
+    }
+
     static Ownership selectOwnership(
             String foregroundPackage,
             List<TargetNode> targets,
             List<ScopeNode> admittedPlayerRoots,
             List<ScopeNode> settingsLists,
-            List<ScopeNode> targetAncestors) {
+            List<ScopeNode> targetAncestors,
+            PopupObservationTransaction popupTransaction) {
         if (!PRODUCT_PACKAGE.equals(foregroundPackage)) {
             throw new AssertionError("TV product was not the foreground package");
         }
@@ -25,13 +39,14 @@ final class RuntimeTvNativeFocus {
         requireList(settingsLists, "Media3 settings-list snapshots were missing");
         requireList(targetAncestors, "Target ownership ancestor snapshots were missing");
 
-        if (admittedPlayerRoots.size() != 1) {
+        if (admittedPlayerRoots.size() > 1) {
             throw new AssertionError(
-                    "Expected exactly one admitted native PlayerView root, found "
+                    "Multiple admitted native PlayerView roots appeared: "
                             + admittedPlayerRoots.size());
         }
-        ScopeNode playerRoot = admittedPlayerRoots.get(0);
-        validateScope(playerRoot, ScopeKind.PLAYER_VIEW);
+        for (ScopeNode playerRoot : admittedPlayerRoots) {
+            validateScope(playerRoot, ScopeKind.PLAYER_VIEW);
+        }
 
         if (settingsLists.size() > 1) {
             throw new AssertionError(
@@ -42,7 +57,22 @@ final class RuntimeTvNativeFocus {
             validateScope(settingsList, ScopeKind.SETTINGS_LIST);
         }
 
-        if (targets.isEmpty()) return Ownership.missingTarget();
+        boolean popupOwned = popupTransaction != null && popupTransaction.isActive();
+        if (targets.isEmpty()) {
+            if (popupOwned) {
+                if (settingsLists.size() != 1) {
+                    throw new AssertionError(
+                            "Owned settings popup was not the unique current observation root");
+                }
+            } else {
+                requireUniquePlayerRoot(admittedPlayerRoots);
+                if (!settingsLists.isEmpty()) {
+                    throw new AssertionError(
+                            "Settings popup appeared without an owned activation transition");
+                }
+            }
+            return Ownership.missingTarget();
+        }
         if (targets.size() != 1) {
             throw new AssertionError(
                     "Expected exactly one visible exact product target, found " + targets.size());
@@ -66,6 +96,11 @@ final class RuntimeTvNativeFocus {
         ScopeNode owner = targetAncestors.get(0);
         validateScope(owner, owner.kind);
         if (owner.kind == ScopeKind.PLAYER_VIEW) {
+            if (popupOwned) {
+                throw new AssertionError(
+                        "Owned popup transaction cannot observe a main-control target");
+            }
+            ScopeNode playerRoot = requireUniquePlayerRoot(admittedPlayerRoots);
             if (!settingsLists.isEmpty()) {
                 throw new AssertionError(
                         "A main-control target was selected while a settings popup was visible");
@@ -75,6 +110,10 @@ final class RuntimeTvNativeFocus {
                         "Main-control target did not belong to the admitted PlayerView");
             }
         } else if (owner.kind == ScopeKind.SETTINGS_LIST) {
+            if (!popupOwned) {
+                throw new AssertionError(
+                        "Settings popup appeared without an owned activation transition");
+            }
             if (settingsLists.size() != 1 || !sameScope(owner, settingsLists.get(0))) {
                 throw new AssertionError(
                         "Popup target did not belong to the unique visible Media3 settings list");
@@ -193,6 +232,15 @@ final class RuntimeTvNativeFocus {
         return left.resourceName.equals(right.resourceName);
     }
 
+    private static ScopeNode requireUniquePlayerRoot(List<ScopeNode> admittedPlayerRoots) {
+        if (admittedPlayerRoots.size() != 1) {
+            throw new AssertionError(
+                    "Expected exactly one admitted native PlayerView root, found "
+                            + admittedPlayerRoots.size());
+        }
+        return admittedPlayerRoots.get(0);
+    }
+
     private static void requireList(List<?> snapshots, String message) {
         if (snapshots == null) throw new AssertionError(message);
     }
@@ -207,6 +255,21 @@ final class RuntimeTvNativeFocus {
         UP,
         LEFT,
         RIGHT
+    }
+
+    static final class PopupObservationTransaction implements AutoCloseable {
+        private boolean active = true;
+
+        private PopupObservationTransaction() { }
+
+        boolean isActive() {
+            return active;
+        }
+
+        @Override
+        public void close() {
+            active = false;
+        }
     }
 
     static final class Bounds {

@@ -338,6 +338,7 @@ public final class RuntimeTvFlowTest {
                         ? BoundsSnapshot.from(currentFocus.bounds)
                         : null;
                 admittedFocus = NativeFocusSnapshot.present(
+                        RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW,
                         root.isFocused(),
                         BoundsSnapshot.from(root.getVisibleBounds()),
                         currentFocus.present,
@@ -476,16 +477,36 @@ public final class RuntimeTvFlowTest {
 
     private void selectAudioTrack(String language) {
         revealControls();
-        focusNativeAndActivate(By.res(PRODUCT_PACKAGE, "exo_settings"), "Media3 settings", 18);
-        waitForNative(By.text("Audio"), 10_000, "Audio settings row");
-        focusNativeAndActivate(By.text("Audio"), "Audio settings", 12);
-        BySelector english = audioLabel("English");
-        BySelector french = audioLabel("French");
-        waitForNative(english, 10_000, "English audio track");
-        waitForNative(french, 10_000, "French audio track");
-        focusNativeAndActivate(audioLabel(language), language + " audio", 12);
-        SystemClock.sleep(1_000);
-        log("Selected exact native audio label " + language);
+        RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction =
+                activateNativeSettingsPopup();
+        try {
+            waitForNative(By.text("Audio"), 10_000, "Audio settings row");
+            focusNativePopupAndActivate(
+                    By.text("Audio"), "Audio settings", 12, popupTransaction);
+            BySelector english = audioLabel("English");
+            BySelector french = audioLabel("French");
+            waitForNative(english, 10_000, "English audio track");
+            waitForNative(french, 10_000, "French audio track");
+            focusNativePopupAndActivate(
+                    audioLabel(language), language + " audio", 12, popupTransaction);
+            popupTransaction.close();
+            SystemClock.sleep(1_000);
+            log("Selected exact native audio label " + language);
+        } finally {
+            popupTransaction.close();
+        }
+    }
+
+    private RuntimeTvNativeFocus.PopupObservationTransaction activateNativeSettingsPopup() {
+        NativeFocusSnapshot focused = focusNativeTarget(
+                By.res(PRODUCT_PACKAGE, "exo_settings"), "Media3 settings", 18);
+        assertTrue("Could not focus target with bounded D-pad navigation: Media3 settings",
+                focused.activationFocused);
+        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER);
+        log("Activated Media3 settings with DPAD_CENTER");
+        SystemClock.sleep(350);
+        return RuntimeTvNativeFocus.beginSettingsPopupTransaction(
+                focused.targetPresent, focused.activationFocused, focused.scopeKind);
     }
 
     private BySelector audioLabel(String language) {
@@ -512,14 +533,38 @@ public final class RuntimeTvFlowTest {
         SystemClock.sleep(350);
     }
 
+    private void focusNativePopupAndActivate(
+            BySelector selector,
+            String label,
+            int steps,
+            RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction) {
+        NativeFocusSnapshot focused = focusNativeTargetInOwnershipScope(
+                selector, label, steps, popupTransaction);
+        assertTrue("Could not focus target with bounded D-pad navigation: " + label,
+                focused.activationFocused);
+        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER);
+        log("Activated " + label + " with DPAD_CENTER");
+        SystemClock.sleep(350);
+    }
+
     private NativeFocusSnapshot focusNativeTarget(
             BySelector selector,
             String label,
             int maxSteps) {
-        NativeFocusSnapshot snapshot = waitForNativeFocusSnapshot(selector, UI_WAIT, label);
+        return focusNativeTargetInOwnershipScope(selector, label, maxSteps, null);
+    }
+
+    private NativeFocusSnapshot focusNativeTargetInOwnershipScope(
+            BySelector selector,
+            String label,
+            int maxSteps,
+            RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction) {
+        NativeFocusSnapshot snapshot = waitForNativeFocusSnapshot(
+                selector, UI_WAIT, label, popupTransaction);
         if (snapshot.activationFocused) return snapshot;
         for (int index = 0; index < maxSteps; index++) {
-            snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));
+            snapshot = observeFreshNative(
+                    () -> readNativeFocusSnapshot(selector, popupTransaction));
             if (snapshot.activationFocused) {
                 log("Focused " + label + " using D-pad navigation");
                 return snapshot;
@@ -550,7 +595,8 @@ public final class RuntimeTvFlowTest {
             }
             SystemClock.sleep(180);
         }
-        snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));
+        snapshot = observeFreshNative(
+                () -> readNativeFocusSnapshot(selector, popupTransaction));
         assertTrue("Target disappeared while focusing: " + label, snapshot.targetPresent);
         assertTrue("Could not focus target with bounded D-pad navigation: " + label,
                 snapshot.activationFocused);
@@ -558,7 +604,8 @@ public final class RuntimeTvFlowTest {
     }
 
     private void pressNativeFocusedRight(BySelector selector, String label) {
-        NativeFocusSnapshot snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));
+        NativeFocusSnapshot snapshot = observeFreshNative(
+                () -> readNativeFocusSnapshot(selector, null));
         assertTrue("Target disappeared before native key input: " + label,
                 snapshot.targetPresent);
         assertTrue("Native target was not focused before key input: " + label,
@@ -573,11 +620,12 @@ public final class RuntimeTvFlowTest {
     private NativeFocusSnapshot waitForNativeFocusSnapshot(
             BySelector selector,
             long timeout,
-            String label) {
+            String label,
+            RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction) {
         long deadline = SystemClock.uptimeMillis() + timeout;
         while (SystemClock.uptimeMillis() < deadline) {
             NativeFocusSnapshot snapshot = observeFreshNative(
-                    () -> readNativeFocusSnapshot(selector));
+                    () -> readNativeFocusSnapshot(selector, popupTransaction));
             if (snapshot.targetPresent) return snapshot;
             SystemClock.sleep(100);
         }
@@ -585,7 +633,9 @@ public final class RuntimeTvFlowTest {
         return null;
     }
 
-    private NativeFocusSnapshot readNativeFocusSnapshot(BySelector selector) {
+    private NativeFocusSnapshot readNativeFocusSnapshot(
+            BySelector selector,
+            RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction) {
         String foregroundPackage = device.getCurrentPackageName();
 
         List<UiObject2> targets = device.findObjects(selector);
@@ -676,7 +726,8 @@ public final class RuntimeTvFlowTest {
                 targetSnapshots,
                 admittedRootSnapshots,
                 settingsListSnapshots,
-                ownershipSnapshots);
+                ownershipSnapshots,
+                popupTransaction);
         if (!ownership.targetPresent) {
             return NativeFocusSnapshot.missingTarget(false, null);
         }
@@ -697,10 +748,14 @@ public final class RuntimeTvFlowTest {
                 : null;
         if (!currentFocus.present) {
             return NativeFocusSnapshot.present(
-                    activationFocused, activationBounds, false, null);
+                    ownership.scopeKind, activationFocused, activationBounds, false, null);
         }
         return NativeFocusSnapshot.present(
-                activationFocused, activationBounds, true, currentFocusBounds);
+                ownership.scopeKind,
+                activationFocused,
+                activationBounds,
+                true,
+                currentFocusBounds);
     }
 
     private RuntimeTvNativeFocus.Selection readTargetOwnedNativeFocus(
@@ -907,6 +962,7 @@ public final class RuntimeTvFlowTest {
     }
 
     private static final class NativeFocusSnapshot {
+        final RuntimeTvNativeFocus.ScopeKind scopeKind;
         final boolean targetPresent;
         final boolean activationFocused;
         final BoundsSnapshot activationBounds;
@@ -914,11 +970,13 @@ public final class RuntimeTvFlowTest {
         final BoundsSnapshot currentFocusBounds;
 
         private NativeFocusSnapshot(
+                RuntimeTvNativeFocus.ScopeKind scopeKind,
                 boolean targetPresent,
                 boolean activationFocused,
                 BoundsSnapshot activationBounds,
                 boolean currentFocusPresent,
                 BoundsSnapshot currentFocusBounds) {
+            this.scopeKind = scopeKind;
             this.targetPresent = targetPresent;
             this.activationFocused = activationFocused;
             this.activationBounds = activationBounds;
@@ -930,15 +988,17 @@ public final class RuntimeTvFlowTest {
                 boolean currentFocusPresent,
                 BoundsSnapshot currentFocusBounds) {
             return new NativeFocusSnapshot(
-                    false, false, null, currentFocusPresent, currentFocusBounds);
+                    null, false, false, null, currentFocusPresent, currentFocusBounds);
         }
 
         static NativeFocusSnapshot present(
+                RuntimeTvNativeFocus.ScopeKind scopeKind,
                 boolean activationFocused,
                 BoundsSnapshot activationBounds,
                 boolean currentFocusPresent,
                 BoundsSnapshot currentFocusBounds) {
             return new NativeFocusSnapshot(
+                    scopeKind,
                     true,
                     activationFocused,
                     activationBounds,
