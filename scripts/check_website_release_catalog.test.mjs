@@ -31,8 +31,8 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.25', tag: 'v2.3.25' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.22', tag: 'v2.3.25' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.34', tag: 'v2.3.34' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.22', tag: 'v2.3.34' };",
   },
   {
     name: "server checksum channel",
