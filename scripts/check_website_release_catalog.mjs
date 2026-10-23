@@ -30,7 +30,7 @@ export function validateWebsiteReleaseCatalog(source) {
     ["DESKTOP_RELEASE", "2.3.37", "v2.3.37-web"],
     ["ANDROID_TV_RELEASE", "2.3.37", "v2.3.37-web"],
     ["ANDROID_PHONE_RELEASE", "2.3.37", "android-v2.3.37"],
-    ["SERVER_RELEASE", "2.3.37", "v2.3.37"],
+    ["SERVER_RELEASE", "2.3.39", "v2.3.39"],
   ]) {
     includes(
       source,
