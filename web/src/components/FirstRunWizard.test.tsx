@@ -30,8 +30,8 @@ vi.mock("../store/AppStore", () => ({
   useAppStore: () => ({ settings, services: { tmdb: tmdbService }, updateSettings, navigate }),
 }));
 
-const markOnboardingComplete = vi.fn().mockResolvedValue(undefined);
-const markQuickSetupAcknowledged = vi.fn().mockResolvedValue(undefined);
+const markOnboardingComplete = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+const markQuickSetupAcknowledged = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
 vi.mock("../lib/firstRun", () => ({
   markOnboardingComplete: () => markOnboardingComplete(),
   markQuickSetupAcknowledged: () => markQuickSetupAcknowledged(),
@@ -68,7 +68,13 @@ function configureRuntime({
   if (native) runtime.__TAURI_INTERNALS__ = {};
   if (mobileMarker) runtime.__YAWF_TAURI_MOBILE__ = true;
 }
-beforeEach(() => configureRuntime());
+beforeEach(() => {
+  configureRuntime();
+  markOnboardingComplete.mockResolvedValue(undefined);
+  markQuickSetupAcknowledged.mockResolvedValue(undefined);
+  ensureDefaultProfile.mockResolvedValue({ id: "default" });
+  updateSettings.mockResolvedValue(undefined);
+});
 afterEach(() => {
   vi.unstubAllGlobals();
   const runtime = window as unknown as Record<string, unknown>;
@@ -85,8 +91,9 @@ vi.mock("../lib/onboardingValidation", () => ({
 vi.mock("../lib/passwordHash", () => ({
   hashPassword: () => Promise.resolve("pbkdf2:v1:test"),
 }));
+const ensureDefaultProfile = vi.fn().mockResolvedValue({ id: "default" });
 vi.mock("../storage/ProfileRegistry", () => ({
-  ensureDefaultProfile: () => Promise.resolve({ id: "default" }),
+  ensureDefaultProfile: (input: unknown) => ensureDefaultProfile(input),
   updateProfileRecord: () => Promise.resolve(),
   setMultiUserEnabled: () => Promise.resolve(),
 }));
@@ -221,6 +228,37 @@ describe("FirstRunWizard", () => {
     expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
   });
 
+  it("retries only unfinished Quick setup persistence after the completion marker fails", async () => {
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    markOnboardingComplete
+      .mockRejectedValueOnce(new Error("quota exceeded"))
+      .mockResolvedValue(undefined);
+    render(<FirstRunWizard forced onDone={onDone} />);
+    await user.click(screen.getByText("Quick setup"));
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Continue with Quick setup" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /couldn't record that setup is complete/i,
+    );
+    expect(onDone).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(ensureDefaultProfile).toHaveBeenCalledTimes(1);
+    expect(markQuickSetupAcknowledged).toHaveBeenCalledTimes(1);
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Retry saving setup" }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(ensureDefaultProfile).toHaveBeenCalledTimes(1);
+    expect(markQuickSetupAcknowledged).toHaveBeenCalledTimes(1);
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
+    expect(testTmdbKeyMock).not.toHaveBeenCalled();
+    expect(testOmdbKeyMock).not.toHaveBeenCalled();
+    expect(testDebridTokenMock).not.toHaveBeenCalled();
+  });
+
   it("Quick setup reports an existing catalog credential truthfully", async () => {
     tmdbService = {};
     const user = userEvent.setup();
@@ -345,6 +383,43 @@ describe("FirstRunWizard", () => {
       }),
     );
     expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries only the completion marker without repeating saved choices or validation", async () => {
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    testDebridTokenMock.mockResolvedValue(true);
+    markOnboardingComplete
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockResolvedValue(undefined);
+    render(<FirstRunWizard onDone={onDone} />);
+    await reachStreamingStep(user);
+    await user.type(screen.getByLabelText("API token"), "rd-token-1");
+    await user.click(screen.getByRole("button", { name: "Test token & finish" }));
+    await skipAi(user);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /couldn't record that setup is complete/i,
+    );
+    expect(onDone).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tmdbKey: "tmdb-key-1",
+        debridTokens: [{ service: "real_debrid", apiToken: "rd-token-1" }],
+      }),
+    );
+    expect(ensureDefaultProfile).toHaveBeenCalledTimes(1);
+    expect(testTmdbKeyMock).toHaveBeenCalledTimes(1);
+    expect(testDebridTokenMock).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Retry saving setup" }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(ensureDefaultProfile).toHaveBeenCalledTimes(1);
+    expect(testTmdbKeyMock).toHaveBeenCalledTimes(1);
+    expect(testDebridTokenMock).toHaveBeenCalledTimes(1);
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
   });
 
   it("streaming step replaces an existing token for the same service", async () => {
@@ -557,6 +632,79 @@ describe("FirstRunWizard", () => {
     expect(saveServerURL).toHaveBeenCalledWith("https://stream.example.com", {
       follow: true,
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("does not save or navigate to a server until failed completion persistence is retried", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+    markOnboardingComplete
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockResolvedValue(undefined);
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "stream.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /couldn't record that setup is complete/i,
+    );
+    expect(saveServerURL).not.toHaveBeenCalled();
+    expect(assign).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Retry saving setup" }));
+    await waitFor(() =>
+      expect(saveServerURL).toHaveBeenCalledWith("https://stream.example.com", {
+        follow: true,
+      }),
+    );
+    expect(assign).toHaveBeenCalledWith("https://stream.example.com");
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(ensureDefaultProfile).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the Connect address and navigation error after completion retry succeeds", async () => {
+    const user = userEvent.setup();
+    const assign = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error("navigation blocked");
+      })
+      .mockImplementation(() => undefined);
+    vi.stubGlobal("location", { assign });
+    markOnboardingComplete
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockResolvedValue(undefined);
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "stream.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Retry saving setup" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Couldn't open that server. Check the address and try again.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Server address")).toHaveValue(
+      "stream.example.com",
+    );
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await waitFor(() =>
+      expect(assign).toHaveBeenLastCalledWith("https://stream.example.com"),
+    );
+    expect(assign).toHaveBeenCalledTimes(2);
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
   });
 

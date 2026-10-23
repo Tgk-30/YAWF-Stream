@@ -8,7 +8,7 @@
 // lib, serverMode, and serverSetup persistence are all mocked.
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // --- mocks for every external dependency the component imports ---------------
@@ -58,6 +58,7 @@ describe("ServerSetupWizard", () => {
     vi.clearAllMocks();
     saveServerSharedCredential.mockResolvedValue(undefined);
     createServerInvite.mockResolvedValue({ token: "tok_abc123" });
+    markServerSetupComplete.mockResolvedValue(undefined);
     configuredServerURL.mockReturnValue("https://my.server");
     toDataURL.mockResolvedValue("data:image/png;base64,QRZZ");
   });
@@ -81,6 +82,44 @@ describe("ServerSetupWizard", () => {
     await user.click(screen.getByRole("button", { name: "Skip setup" }));
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
     expect(markServerSetupComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("Skip setup exposes a retryable completion error and ignores double activation", async () => {
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    let rejectCompletion!: (reason: Error) => void;
+    markServerSetupComplete
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectCompletion = reject;
+          }),
+      )
+      .mockResolvedValueOnce(undefined);
+
+    render(<ServerSetupWizard onDone={onDone} />);
+    const skip = screen.getByRole("button", { name: "Skip setup" });
+    await user.click(skip);
+
+    const saving = screen.getByRole("button", { name: "Saving..." });
+    expect(saving).toBeDisabled();
+    await user.click(saving);
+    expect(markServerSetupComplete).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      rejectCompletion(new Error("storage unavailable"));
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "We couldn't record that server setup is complete.",
+    );
+    expect(onDone).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Retry saving setup" }),
+    );
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(markServerSetupComplete).toHaveBeenCalledTimes(2);
   });
 
   it("Get started advances to the keys step", async () => {
@@ -307,5 +346,35 @@ describe("ServerSetupWizard", () => {
     await user.click(screen.getByRole("button", { name: "Open YAWF Stream" }));
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
     expect(markServerSetupComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("done step retries only the completion marker after persistence fails", async () => {
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    markServerSetupComplete
+      .mockRejectedValueOnce(new Error("storage unavailable"))
+      .mockResolvedValueOnce(undefined);
+    render(<ServerSetupWizard onDone={onDone} />);
+    await gotoInvite(user);
+    await user.click(
+      screen.getByRole("button", { name: /Skip - I'll invite people later/ }),
+    );
+
+    const credentialWrites = saveServerSharedCredential.mock.calls.length;
+    const inviteWrites = createServerInvite.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Open YAWF Stream" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "We couldn't record that server setup is complete.",
+    );
+    expect(onDone).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Retry saving setup" }),
+    );
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(markServerSetupComplete).toHaveBeenCalledTimes(2);
+    expect(saveServerSharedCredential).toHaveBeenCalledTimes(credentialWrites);
+    expect(createServerInvite).toHaveBeenCalledTimes(inviteWrites);
   });
 });

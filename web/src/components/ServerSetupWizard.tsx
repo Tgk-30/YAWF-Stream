@@ -82,9 +82,27 @@ interface ServerSetupWizardProps {
 
 export function ServerSetupWizard({ onDone }: ServerSetupWizardProps) {
   const [step, setStep] = useState<ServerSetupStep>("welcome");
+  const [completionBusy, setCompletionBusy] = useState(false);
+  const [completionError, setCompletionError] = useState<string | null>(null);
+  const completionPending = useRef(false);
 
   async function finish() {
-    await markServerSetupComplete();
+    if (completionPending.current) return;
+    completionPending.current = true;
+    setCompletionBusy(true);
+    setCompletionError(null);
+    try {
+      await markServerSetupComplete();
+    } catch {
+      completionPending.current = false;
+      setCompletionBusy(false);
+      setCompletionError(
+        "We couldn't record that server setup is complete. Retry so setup does not appear again on the next launch.",
+      );
+      return;
+    }
+    completionPending.current = false;
+    setCompletionBusy(false);
     onDone();
   }
 
@@ -100,25 +118,74 @@ export function ServerSetupWizard({ onDone }: ServerSetupWizardProps) {
   return (
     <div className="first-run">
       <div className="first-run-card server-setup-card">
-        {!isFinalStep(step) && (
+        {!isFinalStep(step) && completionError == null && (
           <button
             type="button"
             className="first-run-skip"
             onClick={() => void finish()}
+            disabled={completionBusy}
           >
-            Skip setup
+            {completionBusy ? "Saving..." : "Skip setup"}
           </button>
         )}
 
         <SetupProgress current={step} />
 
-        {step === "welcome" && <WelcomeStep onContinue={goNext} />}
-        {step === "keys" && <KeysStep onBack={goBack} onContinue={goNext} />}
-        {step === "access" && <AccessStep onBack={goBack} onContinue={goNext} />}
-        {step === "invite" && <InviteStep onBack={goBack} onContinue={goNext} />}
-        {step === "done" && <DoneStep onFinish={() => void finish()} />}
+        {completionError != null ? (
+          <CompletionRetryStep
+            error={completionError}
+            busy={completionBusy}
+            onRetry={() => void finish()}
+          />
+        ) : (
+          <>
+            {step === "welcome" && <WelcomeStep onContinue={goNext} />}
+            {step === "keys" && <KeysStep onBack={goBack} onContinue={goNext} />}
+            {step === "access" && (
+              <AccessStep onBack={goBack} onContinue={goNext} />
+            )}
+            {step === "invite" && (
+              <InviteStep onBack={goBack} onContinue={goNext} />
+            )}
+            {step === "done" && (
+              <DoneStep
+                onFinish={() => void finish()}
+                completionBusy={completionBusy}
+              />
+            )}
+          </>
+        )}
       </div>
     </div>
+  );
+}
+
+function CompletionRetryStep({
+  error,
+  busy,
+  onRetry,
+}: {
+  error: string;
+  busy: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <>
+      <h1 className="first-run-title">Finish saving setup</h1>
+      <p className="first-run-error" role="alert">
+        {error}
+      </p>
+      <div className="first-run-actions">
+        <button
+          type="button"
+          className="first-run-primary"
+          onClick={onRetry}
+          disabled={busy}
+        >
+          {busy ? "Retrying..." : "Retry saving setup"}
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -551,7 +618,13 @@ function InviteStep({
   );
 }
 
-function DoneStep({ onFinish }: { onFinish: () => void }) {
+function DoneStep({
+  onFinish,
+  completionBusy,
+}: {
+  onFinish: () => void;
+  completionBusy: boolean;
+}) {
   // A tiny recap so the owner knows where to pick each thing back up.
   const links = useMemo(
     () => [
@@ -574,8 +647,13 @@ function DoneStep({ onFinish }: { onFinish: () => void }) {
         ))}
       </ul>
       <div className="first-run-actions">
-        <button type="button" className="first-run-primary" onClick={onFinish}>
-          Open YAWF Stream
+        <button
+          type="button"
+          className="first-run-primary"
+          onClick={onFinish}
+          disabled={completionBusy}
+        >
+          {completionBusy ? "Saving..." : "Open YAWF Stream"}
         </button>
       </div>
     </>

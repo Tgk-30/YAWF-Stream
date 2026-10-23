@@ -58,6 +58,18 @@ describe("WelcomeGuide", () => {
     expect(screen.getByText("K")).toBeInTheDocument();
   });
 
+  it("describes vibe discovery without claiming AI is configured", async () => {
+    const user = userEvent.setup();
+    render(<WelcomeGuide onClose={() => {}} />);
+    for (let i = 0; i < 3; i++) {
+      await user.click(screen.getByRole("button", { name: "Next" }));
+    }
+    expect(screen.getByText(/describe a vibe/i)).toHaveTextContent(
+      "Browse Discover or search any title without AI. If you configure AI later",
+    );
+    expect(screen.queryByText(/let the AI build a lineup/i)).not.toBeInTheDocument();
+  });
+
   it("shows 'Get started' on the last step and calls onClose when clicked", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -92,12 +104,49 @@ describe("WelcomeGuide", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("lets focused setup CTA Enter open Settings instead of treating it as global Next", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onOpenSettings = vi.fn();
+    render(<WelcomeGuide onClose={onClose} onOpenSettings={onOpenSettings} />);
+    for (let i = 0; i < TOTAL - 1; i++) {
+      await user.click(screen.getByRole("button", { name: "Next" }));
+    }
+    const cta = screen.getByRole("button", { name: /Set up streaming in Settings/i });
+    cta.focus();
+    await user.keyboard("{Enter}");
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("Skip dismisses the tour via onClose", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<WelcomeGuide onClose={onClose} />);
     await user.click(screen.getByRole("button", { name: "Skip the tour" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets focused Skip Enter dismiss instead of advancing the tour", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<WelcomeGuide onClose={onClose} />);
+    const skip = screen.getByRole("button", { name: "Skip the tour" });
+    skip.focus();
+    await user.keyboard("{Enter}");
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(`1 / ${TOTAL}`)).toBeInTheDocument();
+  });
+
+  it("lets focused Back Enter move backward instead of advancing globally", async () => {
+    const user = userEvent.setup();
+    render(<WelcomeGuide onClose={() => {}} />);
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    const back = screen.getByRole("button", { name: "Back" });
+    back.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByText(`2 / ${TOTAL}`)).toBeInTheDocument();
   });
 
   it("Escape dismisses the tour", async () => {

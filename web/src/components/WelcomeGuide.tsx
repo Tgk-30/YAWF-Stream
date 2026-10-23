@@ -38,7 +38,7 @@ const STEPS: Step[] = [
   {
     icon: "wand-search",
     title: "Find something to watch",
-    body: "Browse the Discover spotlight, search any title, or describe a vibe - “cozy fall mysteries” - and let the AI build a lineup for the moment.",
+    body: "Browse Discover or search any title without AI. If you configure AI later, you can also describe a vibe like “cozy fall mysteries” for a tailored lineup.",
   },
   {
     icon: "sliders",
@@ -90,6 +90,15 @@ export function WelcomeGuide({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
       else if (e.key === "ArrowRight" || e.key === "Enter") {
+        if (
+          e.key === "Enter" &&
+          e.target instanceof Element &&
+          e.target.closest(
+            "button, a[href], input, select, textarea, [contenteditable='true'], [role='button'], [role='link']",
+          ) != null
+        ) {
+          return;
+        }
         e.preventDefault();
         next();
       } else if (e.key === "ArrowLeft") {

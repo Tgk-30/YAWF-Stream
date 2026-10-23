@@ -6,7 +6,7 @@
 // explicit, honest escape rather than a silent skip. Mounted by FirstRunHost
 // (see App.tsx) when isFirstRun() is true.
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { useAppStore } from "../store/AppStore";
 import {
   markOnboardingComplete,
@@ -124,6 +124,14 @@ interface AiChoice {
   ollamaEndpoint?: string;
 }
 
+type CompletionOperation = () => Promise<void>;
+
+interface CompletionRetry {
+  operations: CompletionOperation[];
+  nextIndex: number;
+  onSuccess: () => void;
+}
+
 export function FirstRunWizard({
   onDone,
   forced = false,
@@ -162,15 +170,40 @@ export function FirstRunWizard({
   const [exitPersona, setExitPersona] = useState<"device" | "advanced" | "host">(
     "device",
   );
+  const [completionRetry, setCompletionRetry] = useState<CompletionRetry | null>(null);
+  const [completionBusy, setCompletionBusy] = useState(false);
+
+  async function persistCompletion(
+    operations: CompletionOperation[],
+    onSuccess: () => void,
+    startIndex = 0,
+  ): Promise<boolean> {
+    setCompletionBusy(true);
+    for (let index = startIndex; index < operations.length; index += 1) {
+      try {
+        await operations[index]();
+      } catch {
+        setCompletionRetry({ operations, nextIndex: index, onSuccess });
+        setCompletionBusy(false);
+        return false;
+      }
+    }
+    setCompletionRetry(null);
+    setCompletionBusy(false);
+    onSuccess();
+    return true;
+  }
+
   async function finish(simple: boolean, andThen?: () => void) {
     await updateSettings({ ...settings, simpleMode: simple });
     await ensureDefaultProfile({
       name: settings.userName || "You",
       avatar: settings.userAvatar || "😀",
     });
-    await markOnboardingComplete();
-    andThen?.();
-    onDone();
+    await persistCompletion([markOnboardingComplete], () => {
+      andThen?.();
+      onDone();
+    });
   }
 
   async function finishQuick() {
@@ -183,9 +216,10 @@ export function FirstRunWizard({
       name: settings.userName || "You",
       avatar: settings.userAvatar || "😀",
     });
-    await markQuickSetupAcknowledged();
-    await markOnboardingComplete();
-    onDone();
+    await persistCompletion(
+      [markQuickSetupAcknowledged, markOnboardingComplete],
+      onDone,
+    );
   }
 
   /** The device path's SINGLE settings write: catalog keys, the debrid entry,
@@ -226,10 +260,11 @@ export function FirstRunWizard({
       name: settings.userName || "You",
       avatar: settings.userAvatar || "😀",
     });
-    await markOnboardingComplete();
-    // Advanced and host asked for Settings, land them there once keys are in.
-    if (exitPersona !== "device") navigate("settings");
-    onDone();
+    await persistCompletion([markOnboardingComplete], () => {
+      // Advanced and host asked for Settings, land them there once keys are in.
+      if (exitPersona !== "device") navigate("settings");
+      onDone();
+    });
   }
 
   async function choose(id: Persona["id"]) {
@@ -257,12 +292,49 @@ export function FirstRunWizard({
       name: settings.userName || "You",
       avatar: settings.userAvatar || "😀",
     });
-    await markOnboardingComplete();
-    onDone();
+    await persistCompletion([markOnboardingComplete], onDone);
   }
 
   if (step === "connect") {
-    return <ConnectStep onBack={() => setStep("choose")} />;
+    const retryingCompletion = completionRetry != null;
+    return (
+      <>
+        <ConnectStep
+          hidden={retryingCompletion}
+          onBack={() => setStep("choose")}
+          completeOnboarding={(onSuccess) =>
+            persistCompletion([markOnboardingComplete], onSuccess)
+          }
+        />
+        {completionRetry != null && (
+          <CompletionRetryStep
+            busy={completionBusy}
+            onRetry={() =>
+              void persistCompletion(
+                completionRetry.operations,
+                completionRetry.onSuccess,
+                completionRetry.nextIndex,
+              )
+            }
+          />
+        )}
+      </>
+    );
+  }
+
+  if (completionRetry != null) {
+    return (
+      <CompletionRetryStep
+        busy={completionBusy}
+        onRetry={() =>
+          void persistCompletion(
+            completionRetry.operations,
+            completionRetry.onSuccess,
+            completionRetry.nextIndex,
+          )
+        }
+      />
+    );
   }
   if (step === "quick") {
     return (
@@ -982,10 +1054,49 @@ function AiStep({
   );
 }
 
-function ConnectStep({ onBack }: { onBack: () => void }) {
+function CompletionRetryStep({
+  busy,
+  onRetry,
+}: {
+  busy: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="first-run">
+      <div className="first-run-card">
+        <h1 className="first-run-title">Finish saving setup</h1>
+        <p className="first-run-error" role="alert">
+          We couldn&apos;t record that setup is complete. Your saved choices are still
+          here. Retry so setup does not appear again on the next launch.
+        </p>
+        <div className="first-run-actions">
+          <button
+            type="button"
+            className="first-run-primary"
+            disabled={busy}
+            onClick={onRetry}
+          >
+            {busy ? "Retrying…" : "Retry saving setup"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConnectStep({
+  hidden,
+  onBack,
+  completeOnboarding,
+}: {
+  hidden: boolean;
+  onBack: () => void;
+  completeOnboarding: (onSuccess: () => void) => Promise<boolean>;
+}) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const completionSaved = useRef(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1002,27 +1113,41 @@ function ConnectStep({ onBack }: { onBack: () => void }) {
     }
     setBusy(true);
     setError(null);
-    try {
-      // Mark complete before leaving so returning to Local Mode later does not
-      // re-trigger the wizard. Persist the destination ORIGIN as the followed
-      // server too, so the next cold boot goes straight back to it instead of
-      // asking for the address again. (Origin only: an invite URL's token is
-      // single-use, so following the full URL would loop on a dead link.)
-      await markOnboardingComplete();
+    const openServer = () => {
+      completionSaved.current = true;
       try {
-        saveServerURL(new URL(destination).origin, { follow: true });
+        // Persist the destination ORIGIN as the followed server so the next cold
+        // boot goes straight back to it. Origin only: an invite URL's token is
+        // single-use, so following the full URL would loop on a dead link.
+        try {
+          saveServerURL(new URL(destination).origin, { follow: true });
+        } catch {
+          saveServerURL(destination, { follow: true });
+        }
+        globalThis.location.assign(destination);
       } catch {
-        saveServerURL(destination, { follow: true });
+        setError("Couldn't open that server. Check the address and try again.");
+        setBusy(false);
       }
-      globalThis.location.assign(destination);
-    } catch {
-      setError("Couldn't open that server. Check the address and try again.");
-      setBusy(false);
+    };
+    if (completionSaved.current) {
+      openServer();
+      return;
     }
+    // Mark complete before leaving so returning to Local Mode later does not
+    // re-trigger the wizard. A failed marker opens the completion-only retry;
+    // it does not save or navigate to the server until the marker succeeds.
+    const persisted = await completeOnboarding(openServer);
+    if (!persisted) setBusy(false);
   }
 
   return (
-    <div className="first-run">
+    <div
+      className="first-run"
+      hidden={hidden}
+      aria-hidden={hidden || undefined}
+      style={hidden ? { display: "none" } : undefined}
+    >
       <div className="first-run-card">
         <h1 className="first-run-title">Connect to a server</h1>
         <p className="first-run-sub">
