@@ -16,7 +16,7 @@ for (const { name, from, to } of [
   },
   {
     name: "Android phone tag",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.36', tag: 'android-v2.3.36' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.37', tag: 'android-v2.3.37' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.13' };",
   },
   {
