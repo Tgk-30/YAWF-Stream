@@ -64,7 +64,11 @@ export function hasEpisodeContinuationIdentityConflict(
 ): boolean {
   if (imdbId == null || tmdbId == null) return false;
   const relation = continuationForParent(imdbId);
-  return relation != null && relation.parentTmdbId !== tmdbId;
+  if (relation != null) return relation.parentTmdbId !== tmdbId;
+  return EPISODE_CONTINUATIONS.some(
+    (candidate) =>
+      candidate.childImdbId === imdbId && candidate.parentTmdbId === tmdbId,
+  );
 }
 
 /** Resolve display coordinates to the exact metadata and source identity. The

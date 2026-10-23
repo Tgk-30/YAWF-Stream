@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EPISODE_GUIDE_VERSION,
+  hasEpisodeContinuationIdentityConflict,
   requiresCanonicalEpisodeGuide,
   resolveEpisodeSource,
 } from "./episodeSource";
@@ -47,6 +48,13 @@ describe("episode source relations", () => {
   it("requires the canonical guide for the verified parent TMDB identity alone", () => {
     expect(requiresCanonicalEpisodeGuide(null, 30984)).toBe(true);
     expect(requiresCanonicalEpisodeGuide(null, 1396)).toBe(false);
+  });
+
+  it("fails closed on the verified child IMDb and parent TMDB conflict only", () => {
+    expect(hasEpisodeContinuationIdentityConflict("tt14986406", 30984)).toBe(true);
+    expect(hasEpisodeContinuationIdentityConflict("tt14986406", 215105)).toBe(false);
+    expect(hasEpisodeContinuationIdentityConflict("tt0434665", 215105)).toBe(true);
+    expect(hasEpisodeContinuationIdentityConflict("tt0903747", 30984)).toBe(false);
   });
 
   it("does not map original seasons, a separate sequel entry, or other shows", () => {
