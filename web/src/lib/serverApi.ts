@@ -1063,9 +1063,10 @@ export async function fetchServerEpisodes(input: {
   imdbId?: string | null;
   season: number;
 }): Promise<{ episodes: Episode[]; numbering: "cinemeta" | "tmdb" }> {
-  const params = new URLSearchParams({ season: String(input.season) });
+  const params = new URLSearchParams();
   if (input.tmdbId != null) params.set("tmdbId", String(input.tmdbId));
   if (input.imdbId != null) params.set("imdbId", input.imdbId);
+  params.set("season", String(input.season));
   return serverRequest("GET", `/api/media/episodes?${params.toString()}`);
 }
 
