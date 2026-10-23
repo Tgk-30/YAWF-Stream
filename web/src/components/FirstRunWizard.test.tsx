@@ -7,7 +7,7 @@
 // validation/direct-navigation flow, and the supported desktop host handoff.
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // --- mocks for every external dependency the component imports ---------------
@@ -37,10 +37,21 @@ vi.mock("../lib/firstRun", () => ({
   markQuickSetupAcknowledged: () => markQuickSetupAcknowledged(),
 }));
 
-const saveServerURL = vi.fn();
+let followedServerURL: string | null = null;
+const saveServerURL = vi.fn(
+  (url: string | null, options?: { follow?: boolean }) => {
+    if (url == null || options?.follow === false) {
+      followedServerURL = null;
+    } else if (options?.follow === true) {
+      followedServerURL = url;
+    }
+  },
+);
+const followServerURL = vi.fn(() => followedServerURL);
 vi.mock("../lib/serverMode", () => ({
   saveServerURL: (url: string | null, options?: { follow?: boolean }) =>
     saveServerURL(url, options),
+  followServerURL: () => followServerURL(),
 }));
 
 // Exercise the actual shared native-desktop capability, not a mocked UA gate.
@@ -124,6 +135,7 @@ async function reachStreamingStep(user: ReturnType<typeof userEvent.setup>) {
 describe("FirstRunWizard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    followedServerURL = null;
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];
@@ -609,6 +621,140 @@ describe("FirstRunWizard", () => {
     });
     expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
     vi.unstubAllGlobals();
+  });
+
+  it("recovers a started Connect navigation after Safari restores the page from bfcache", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "not-a-valid-server");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith("https://not-a-valid-server"),
+    );
+    expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
+
+    const restored = new Event("pageshow");
+    Object.defineProperty(restored, "persisted", { value: true });
+    fireEvent(window, restored);
+
+    expect(screen.getByLabelText("Server address")).toHaveValue(
+      "not-a-valid-server",
+    );
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    expect(saveServerURL).toHaveBeenLastCalledWith(
+      "https://not-a-valid-server",
+      { follow: false },
+    );
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(2));
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("recovers Connect without changing a newer followed server bookmark", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "old.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+
+    followedServerURL = "https://new.example.com";
+    saveServerURL.mockClear();
+    const restored = new Event("pageshow");
+    Object.defineProperty(restored, "persisted", { value: true });
+    fireEvent(window, restored);
+
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    expect(screen.getByLabelText("Server address")).toHaveValue("old.example.com");
+    expect(followedServerURL).toBe("https://new.example.com");
+    expect(saveServerURL).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("ignores an ordinary pageshow until a started Connect navigation is restored", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "stream.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+
+    fireEvent(window, new Event("pageshow"));
+    expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
+    expect(followedServerURL).toBe("https://stream.example.com");
+
+    const restored = new Event("pageshow");
+    Object.defineProperty(restored, "persisted", { value: true });
+    fireEvent(window, restored);
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    vi.unstubAllGlobals();
+  });
+
+  it("does not recover Connect while completion is pending before navigation", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+    let resolveCompletion!: () => void;
+    markOnboardingComplete.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCompletion = resolve;
+        }),
+    );
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "stream.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+
+    const prematureRestore = new Event("pageshow");
+    Object.defineProperty(prematureRestore, "persisted", { value: true });
+    fireEvent(window, prematureRestore);
+    expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
+    expect(saveServerURL).not.toHaveBeenCalled();
+    expect(assign).not.toHaveBeenCalled();
+
+    await act(async () => resolveCompletion());
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
+
+    const restored = new Event("pageshow");
+    Object.defineProperty(restored, "persisted", { value: true });
+    fireEvent(window, restored);
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    vi.unstubAllGlobals();
+  });
+
+  it("removes the Connect bfcache recovery listener on unmount", async () => {
+    const user = userEvent.setup();
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    const removeEventListener = vi.spyOn(window, "removeEventListener");
+    const { unmount } = render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    const pageshowRegistration = addEventListener.mock.calls.find(
+      ([type]) => type === "pageshow",
+    );
+
+    expect(pageshowRegistration).toBeDefined();
+    unmount();
+    expect(removeEventListener).toHaveBeenCalledWith(
+      "pageshow",
+      pageshowRegistration?.[1],
+    );
   });
 
   it("connect step preserves the full invite path, query, and fragment", async () => {

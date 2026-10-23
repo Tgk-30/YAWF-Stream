@@ -6,13 +6,13 @@
 // explicit, honest escape rather than a silent skip. Mounted by FirstRunHost
 // (see App.tsx) when isFirstRun() is true.
 
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useAppStore } from "../store/AppStore";
 import {
   markOnboardingComplete,
   markQuickSetupAcknowledged,
 } from "../lib/firstRun";
-import { saveServerURL } from "../lib/serverMode";
+import { followServerURL, saveServerURL } from "../lib/serverMode";
 import { isDesktopTauri } from "../lib/tauri";
 import { DebridServiceType } from "../services/debrid/models";
 import { AIProviderKind } from "../services/ai/models";
@@ -1097,6 +1097,31 @@ function ConnectStep({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const completionSaved = useRef(false);
+  const attemptedNavigationOrigin = useRef<string | null>(null);
+
+  useEffect(() => {
+    const recoverPersistedNavigation = (event: PageTransitionEvent) => {
+      const attemptedOrigin = attemptedNavigationOrigin.current;
+      if (!event.persisted || attemptedOrigin == null) return;
+
+      attemptedNavigationOrigin.current = null;
+      setBusy(false);
+
+      const followed = followServerURL();
+      if (followed == null) return;
+      try {
+        if (new URL(followed).origin === attemptedOrigin) {
+          saveServerURL(followed, { follow: false });
+        }
+      } catch {
+        // A malformed or replaced bookmark is not owned by this navigation.
+      }
+    };
+
+    globalThis.addEventListener("pageshow", recoverPersistedNavigation);
+    return () =>
+      globalThis.removeEventListener("pageshow", recoverPersistedNavigation);
+  }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1119,13 +1144,12 @@ function ConnectStep({
         // Persist the destination ORIGIN as the followed server so the next cold
         // boot goes straight back to it. Origin only: an invite URL's token is
         // single-use, so following the full URL would loop on a dead link.
-        try {
-          saveServerURL(new URL(destination).origin, { follow: true });
-        } catch {
-          saveServerURL(destination, { follow: true });
-        }
+        const destinationOrigin = new URL(destination).origin;
+        saveServerURL(destinationOrigin, { follow: true });
+        attemptedNavigationOrigin.current = destinationOrigin;
         globalThis.location.assign(destination);
       } catch {
+        attemptedNavigationOrigin.current = null;
         setError("Couldn't open that server. Check the address and try again.");
         setBusy(false);
       }
