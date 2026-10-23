@@ -13,6 +13,7 @@ import type { TMDBService } from "../services/metadata/TMDBService";
 import type { WatchHistoryRecord } from "../storage/models";
 import { fetchServerEpisodes, fetchServerSeasons } from "../lib/serverApi";
 import { isServerMode } from "../lib/serverMode";
+import { CinemetaEpisodeService } from "../services/metadata/CinemetaEpisodeService";
 
 // MARK: - Pure helpers
 
@@ -77,6 +78,35 @@ export function defaultSelectionFor(
   return parseEpisodeId(newest?.episodeId) ?? { season: 1, episode: 1 };
 }
 
+/** Translate a legacy TMDB-style flattened S1 position through an already
+ * validated Cinemeta regular-season inventory. Existing canonical selections,
+ * specials, valid long first seasons, and positions beyond the inventory are
+ * returned unchanged. */
+export function normalizeFlattenedSeasonOneSelection(
+  selection: { season: number; episode: number },
+  seasons: Season[],
+): { season: number; episode: number } {
+  if (selection.season !== 1 || selection.episode < 1) return selection;
+  const regular = seasons
+    .filter((season) => season.seasonNumber > 0 && season.episodeCount > 0)
+    .sort((left, right) => left.seasonNumber - right.seasonNumber);
+  if (regular.length < 2 || regular[0].seasonNumber !== 1) return selection;
+  if (selection.episode <= regular[0].episodeCount) return selection;
+
+  let ordinal = selection.episode;
+  for (let index = 0; index < regular.length; index += 1) {
+    const season = regular[index];
+    if (season.seasonNumber !== index + 1 || !Number.isSafeInteger(season.episodeCount)) {
+      return selection;
+    }
+    if (ordinal <= season.episodeCount) {
+      return { season: season.seasonNumber, episode: ordinal };
+    }
+    ordinal -= season.episodeCount;
+  }
+  return selection;
+}
+
 // MARK: - Hooks
 
 interface SeasonsState {
@@ -85,16 +115,40 @@ interface SeasonsState {
   /** "live" when a metadata source produced the list, "none" for the
    * no-key/error fallback (the picker degrades to a stepper). */
   source: "live" | "none";
+  /** Only Cinemeta inventories are exact Stremio/IMDb numbering and safe for
+   * translating a legacy flattened first-season position. */
+  numbering: "cinemeta" | "tmdb" | null;
 }
 
 interface EpisodesState {
   episodes: Episode[];
   loading: boolean;
   source: "live" | "none";
+  numbering: "cinemeta" | "tmdb" | null;
 }
 
-const NO_SEASONS: SeasonsState = { seasons: [], loading: false, source: "none" };
-const NO_EPISODES: EpisodesState = { episodes: [], loading: false, source: "none" };
+interface KeyedState<T> {
+  key: string;
+  value: T;
+}
+
+const NO_SEASONS: SeasonsState = {
+  seasons: [], loading: false, source: "none", numbering: null,
+};
+const NO_EPISODES: EpisodesState = {
+  episodes: [], loading: false, source: "none", numbering: null,
+};
+const cinemetaEpisodes = new CinemetaEpisodeService();
+
+async function localImdbId(
+  tmdbId: number | null,
+  imdbId: string | null,
+  tmdb: TMDBService | null,
+): Promise<string | null> {
+  if (imdbId != null) return imdbId;
+  if (tmdbId == null || tmdb == null) return null;
+  return (await tmdb.getExternalIds(tmdbId, "series")).imdbId ?? null;
+}
 
 /** Load the seasons list for a series. `enabled` gates the fetch (pass
  * `type === "series"`); errors and missing tmdbId/service degrade to
@@ -103,47 +157,77 @@ export function useSeasons(
   tmdbId: number | null,
   enabled: boolean,
   tmdb: TMDBService | null,
+  imdbId: string | null = null,
 ): SeasonsState {
-  const [state, setState] = useState<SeasonsState>({ ...NO_SEASONS, loading: enabled });
+  const requestKey = `${enabled ? 1 : 0}:${tmdbId ?? ""}:${imdbId ?? ""}`;
+  const shouldLoad = enabled && (tmdbId != null || imdbId != null);
+  const [state, setState] = useState<KeyedState<SeasonsState>>({
+    key: requestKey,
+    value: { ...NO_SEASONS, loading: shouldLoad },
+  });
 
   useEffect(() => {
-    if (!enabled || tmdbId == null) {
-      setState(NO_SEASONS);
+    if (!enabled || (tmdbId == null && imdbId == null)) {
+      setState({ key: requestKey, value: NO_SEASONS });
       return;
     }
     let cancelled = false;
-    setState({ seasons: [], loading: true, source: "none" });
+    setState({
+      key: requestKey,
+      value: { seasons: [], loading: true, source: "none", numbering: null },
+    });
 
     async function run() {
       try {
-        const raw = isServerMode()
-          ? (await fetchServerSeasons({ tmdbId: tmdbId! })).seasons
-          : tmdb != null
-            ? await tmdb.getSeasons(tmdbId!)
-            : null;
+        let raw: Season[] | null = null;
+        let numbering: "cinemeta" | "tmdb" | null = null;
+        if (isServerMode()) {
+          const response = await fetchServerSeasons({ tmdbId, imdbId });
+          raw = response.seasons;
+          numbering = response.numbering;
+        } else {
+          const exactImdbId = await localImdbId(tmdbId, imdbId, tmdb).catch(() => null);
+          if (exactImdbId != null) {
+            const guide = await cinemetaEpisodes.getGuide(exactImdbId).catch(() => null);
+            if (guide != null) {
+              raw = guide.seasons;
+              numbering = "cinemeta";
+            }
+          }
+          if (raw == null && tmdbId != null && tmdb != null) {
+            raw = await tmdb.getSeasons(tmdbId);
+            numbering = "tmdb";
+          }
+        }
         if (cancelled) return;
         if (raw == null) {
-          setState(NO_SEASONS);
+          setState({ key: requestKey, value: NO_SEASONS });
           return;
         }
         // Season 0 is "Specials" - outside the picker's scope this round.
         const seasons = raw.filter((s) => s.seasonNumber > 0);
         setState({
-          seasons,
-          loading: false,
-          source: seasons.length > 0 ? "live" : "none",
+          key: requestKey,
+          value: {
+            seasons,
+            loading: false,
+            source: seasons.length > 0 ? "live" : "none",
+            numbering: seasons.length > 0 ? numbering : null,
+          },
         });
       } catch {
-        if (!cancelled) setState(NO_SEASONS);
+        if (!cancelled) setState({ key: requestKey, value: NO_SEASONS });
       }
     }
     void run();
     return () => {
       cancelled = true;
     };
-  }, [tmdbId, enabled, tmdb]);
+  }, [tmdbId, enabled, tmdb, imdbId, requestKey]);
 
-  return state;
+  return state.key === requestKey
+    ? state.value
+    : { ...NO_SEASONS, loading: shouldLoad };
 }
 
 /** Load one season's episode list. Same degrade-to-"none" contract as
@@ -152,46 +236,78 @@ export function useEpisodes(
   tmdbId: number | null,
   seasonNumber: number | null,
   tmdb: TMDBService | null,
+  imdbId: string | null = null,
 ): EpisodesState {
-  const [state, setState] = useState<EpisodesState>({
-    ...NO_EPISODES,
-    loading: tmdbId != null && seasonNumber != null,
+  const requestKey = `${tmdbId ?? ""}:${imdbId ?? ""}:${seasonNumber ?? ""}`;
+  const shouldLoad = (tmdbId != null || imdbId != null) && seasonNumber != null;
+  const [state, setState] = useState<KeyedState<EpisodesState>>({
+    key: requestKey,
+    value: { ...NO_EPISODES, loading: shouldLoad },
   });
 
   useEffect(() => {
-    if (tmdbId == null || seasonNumber == null) {
-      setState(NO_EPISODES);
+    if ((tmdbId == null && imdbId == null) || seasonNumber == null) {
+      setState({ key: requestKey, value: NO_EPISODES });
       return;
     }
     let cancelled = false;
-    setState({ episodes: [], loading: true, source: "none" });
+    setState({
+      key: requestKey,
+      value: { episodes: [], loading: true, source: "none", numbering: null },
+    });
 
     async function run() {
       try {
-        const raw = isServerMode()
-          ? (await fetchServerEpisodes({ tmdbId: tmdbId!, season: seasonNumber! })).episodes
-          : tmdb != null
-            ? await tmdb.getEpisodes(tmdbId!, seasonNumber!)
-            : null;
+        let raw: Episode[] | null = null;
+        let numbering: "cinemeta" | "tmdb" | null = null;
+        if (isServerMode()) {
+          const response = await fetchServerEpisodes({
+            tmdbId,
+            imdbId,
+            season: seasonNumber!,
+          });
+          raw = response.episodes;
+          numbering = response.numbering;
+        } else {
+          const exactImdbId = await localImdbId(tmdbId, imdbId, tmdb).catch(() => null);
+          if (exactImdbId != null) {
+            const guide = await cinemetaEpisodes.getGuide(exactImdbId).catch(() => null);
+            const episodes = guide?.episodesBySeason.get(seasonNumber!);
+            if (episodes != null) {
+              raw = episodes;
+              numbering = "cinemeta";
+            }
+          }
+          if (raw == null && tmdbId != null && tmdb != null) {
+            raw = await tmdb.getEpisodes(tmdbId, seasonNumber!);
+            numbering = "tmdb";
+          }
+        }
         if (cancelled) return;
         if (raw == null) {
-          setState(NO_EPISODES);
+          setState({ key: requestKey, value: NO_EPISODES });
           return;
         }
         setState({
-          episodes: raw,
-          loading: false,
-          source: raw.length > 0 ? "live" : "none",
+          key: requestKey,
+          value: {
+            episodes: raw,
+            loading: false,
+            source: raw.length > 0 ? "live" : "none",
+            numbering: raw.length > 0 ? numbering : null,
+          },
         });
       } catch {
-        if (!cancelled) setState(NO_EPISODES);
+        if (!cancelled) setState({ key: requestKey, value: NO_EPISODES });
       }
     }
     void run();
     return () => {
       cancelled = true;
     };
-  }, [tmdbId, seasonNumber, tmdb]);
+  }, [tmdbId, seasonNumber, tmdb, imdbId, requestKey]);
 
-  return state;
+  return state.key === requestKey
+    ? state.value
+    : { ...NO_EPISODES, loading: shouldLoad };
 }

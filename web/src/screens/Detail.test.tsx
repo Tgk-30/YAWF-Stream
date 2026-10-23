@@ -33,7 +33,21 @@ let pickerSelection = { season: 1, episode: 3 };
 let mockActiveProfile: { id: string } | null = null;
 let mockServerSession: { profileId: string } | null = null;
 let capturedStreamPlay: (() => void) | null = null;
+const localStorageValues = new Map<string, string>();
+const testLocalStorage = {
+  getItem: (key: string) => localStorageValues.get(key) ?? null,
+  setItem: (key: string, value: string) => localStorageValues.set(key, value),
+  removeItem: (key: string) => localStorageValues.delete(key),
+  clear: () => localStorageValues.clear(),
+  key: (index: number) => [...localStorageValues.keys()][index] ?? null,
+  get length() { return localStorageValues.size; },
+};
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: testLocalStorage,
+});
 const useStreamsMock = vi.hoisted(() => vi.fn());
+const cinemetaFetch = vi.hoisted(() => vi.fn());
 const tauriState = vi.hoisted(() => ({ on: false, desktop: false }));
 const downloadsFfmpegAvailable = vi.hoisted(() => vi.fn(async () => true));
 const downloadsRuntime = vi.hoisted(() => ({
@@ -257,8 +271,12 @@ vi.mock("../components/OmdbRatings", () => ({
 }));
 
 vi.mock("../components/StreamPicker", () => ({
-  StreamPicker: ({ onOpenSettings, onPlay, resolveStream }: any) => (
-    <div data-testid="streampicker">
+  StreamPicker: ({ onOpenSettings, onPlay, resolveStream, episodeContext }: any) => (
+    <div
+      data-testid="streampicker"
+      data-season={episodeContext?.season ?? ""}
+      data-episode={episodeContext?.episode ?? ""}
+    >
       <button onClick={onOpenSettings}>open-settings</button>
       <button
         data-testid="play-stream"
@@ -326,8 +344,13 @@ vi.mock("../components/StreamPicker", () => ({
 }));
 
 vi.mock("../components/EpisodePicker", () => ({
-  EpisodePicker: ({ onSelect, onToggleWatched }: any) => (
+  EpisodePicker: ({ onSelect, onToggleWatched, selected }: any) => (
     <>
+      <span
+        data-testid="episode-picker-selection"
+        data-season={selected.season}
+        data-episode={selected.episode}
+      />
       <button
         data-testid="pick-episode"
         onClick={() => onSelect(pickerSelection)}
@@ -567,6 +590,9 @@ beforeEach(() => {
     translator: null,
   };
   mockSettings = { transcode: false, ratingScale: "thumbs" };
+  vi.stubGlobal("fetch", cinemetaFetch);
+  cinemetaFetch.mockRejectedValue(new Error("offline test"));
+  testLocalStorage.clear();
   vi.clearAllMocks();
   useStreamsMock.mockClear();
   movieHistory = null;
@@ -598,6 +624,66 @@ describe("Detail null guard", () => {
 });
 
 describe("Detail base render", () => {
+  it("normalizes a flattened Bleach S1E27 before stream and file selection", async () => {
+    mockDetailItem = preview("bleach", {
+      type: "series",
+      title: "Bleach",
+      tmdbId: 30984,
+    });
+    mockDetail = detailState({
+      item: mediaItem({
+        id: "tt0434665",
+        type: "series",
+        title: "Bleach",
+        tmdbId: 30984,
+      }),
+      imdbId: "tt0434665",
+    });
+    const videos = [20, 21].flatMap((count, seasonIndex) =>
+      Array.from({ length: count }, (_, episodeIndex) => {
+        const season = seasonIndex + 1;
+        const number = episodeIndex + 1;
+        return {
+          id: `tt0434665:${season}:${number}`,
+          season,
+          number,
+          episode: number,
+          name: season === 2 && number === 7 ? "Release the Death Blow!" : `S${season}E${number}`,
+        };
+      }),
+    );
+    cinemetaFetch.mockResolvedValue(new Response(JSON.stringify({
+      meta: { id: "tt0434665", type: "series", videos },
+    })));
+    pickerSelection = { season: 2, episode: 7 };
+    testLocalStorage.setItem("ds_episode_overrides", JSON.stringify({
+      bleach: { season: 1, episode: 27 },
+    }));
+
+    render(<Detail />);
+
+    await waitFor(() => {
+      expect(useStreamsMock).toHaveBeenLastCalledWith(
+        "tt0434665",
+        "series",
+        2,
+        7,
+        "Bleach",
+        2020,
+        mockServices.indexers,
+        mockServices.debrid,
+        false,
+      );
+      expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-season", "2");
+      expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-episode", "7");
+    });
+
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    const picker = await screen.findByTestId("streampicker");
+    expect(picker).toHaveAttribute("data-season", "2");
+    expect(picker).toHaveAttribute("data-episode", "7");
+  });
+
   it("renders hero, omdb, stream picker, cast rail and related", () => {
     mockDetail = detailState({
       cast: [{ id: 1, name: "Actor", character: "Role", profilePath: null } as any],

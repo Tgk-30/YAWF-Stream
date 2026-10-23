@@ -626,16 +626,22 @@ const mediaDetailQuerySchema = z.object({
   type: mediaTypeSchema,
 });
 
-const mediaSeasonsQuerySchema = z.object({
-  tmdbId: z.coerce.number().int().min(1),
-});
+const episodeGuideIdentitySchema = z
+  .object({
+    tmdbId: z.coerce.number().int().min(1).optional(),
+    imdbId: z.string().trim().regex(/^tt\d{7,10}$/).optional(),
+  })
+  .refine((value) => value.tmdbId != null || value.imdbId != null, {
+    message: "tmdbId or imdbId is required",
+  });
 
-const mediaEpisodesQuerySchema = z.object({
-  tmdbId: z.coerce.number().int().min(1),
+const mediaSeasonsQuerySchema = episodeGuideIdentitySchema;
+
+const mediaEpisodesQuerySchema = episodeGuideIdentitySchema.and(z.object({
   // Realistic ceiling - the longest-running shows are well under 100 seasons;
   // anything bigger is abuse probing and is rejected before TMDB is contacted.
   season: z.coerce.number().int().min(0).max(200),
-});
+}));
 
 const mediaPreviewSchema = z.object({
   id: z.string().trim().min(1).max(128),
@@ -5290,6 +5296,7 @@ function registerRoutes(
     try {
       return await getServerSeasons(db, config, auth.profileId, {
         tmdbId: query.tmdbId,
+        imdbId: query.imdbId,
       });
     } catch {
       throw httpError(503, "Episode guide is unavailable right now.");
@@ -5306,6 +5313,7 @@ function registerRoutes(
     try {
       return await getServerEpisodes(db, config, auth.profileId, {
         tmdbId: query.tmdbId,
+        imdbId: query.imdbId,
         season: query.season,
       });
     } catch {

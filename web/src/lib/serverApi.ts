@@ -1048,21 +1048,24 @@ export async function fetchServerDetail(input: {
 /** Fetch a series' seasons via the server metadata proxy (the TMDB key lives
  *  on the server). Callers treat any failure as "no episode guide". */
 export async function fetchServerSeasons(input: {
-  tmdbId: number;
-}): Promise<{ seasons: Season[] }> {
-  const params = new URLSearchParams({ tmdbId: String(input.tmdbId) });
+  tmdbId: number | null;
+  imdbId?: string | null;
+}): Promise<{ seasons: Season[]; numbering: "cinemeta" | "tmdb" }> {
+  const params = new URLSearchParams();
+  if (input.tmdbId != null) params.set("tmdbId", String(input.tmdbId));
+  if (input.imdbId != null) params.set("imdbId", input.imdbId);
   return serverRequest("GET", `/api/media/seasons?${params.toString()}`);
 }
 
 /** Fetch one season's episode list via the server metadata proxy. */
 export async function fetchServerEpisodes(input: {
-  tmdbId: number;
+  tmdbId: number | null;
+  imdbId?: string | null;
   season: number;
-}): Promise<{ episodes: Episode[] }> {
-  const params = new URLSearchParams({
-    tmdbId: String(input.tmdbId),
-    season: String(input.season),
-  });
+}): Promise<{ episodes: Episode[]; numbering: "cinemeta" | "tmdb" }> {
+  const params = new URLSearchParams({ season: String(input.season) });
+  if (input.tmdbId != null) params.set("tmdbId", String(input.tmdbId));
+  if (input.imdbId != null) params.set("imdbId", input.imdbId);
   return serverRequest("GET", `/api/media/episodes?${params.toString()}`);
 }
 

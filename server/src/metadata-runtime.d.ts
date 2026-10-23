@@ -145,7 +145,8 @@ export function getServerSeasons(
   config: ServerConfig,
   profileId: string,
   input: {
-    tmdbId: number;
+    tmdbId?: number;
+    imdbId?: string;
   },
 ): Promise<unknown>;
 
@@ -156,7 +157,8 @@ export function getServerEpisodes(
   config: ServerConfig,
   profileId: string,
   input: {
-    tmdbId: number;
+    tmdbId?: number;
+    imdbId?: string;
     season: number;
   },
 ): Promise<unknown>;

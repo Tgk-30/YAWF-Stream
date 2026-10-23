@@ -2149,6 +2149,75 @@ describe("DebridStreamer server", () => {
     }
   });
 
+  it("server episode guides derive IMDb identity for legacy TMDB-only callers", async () => {
+    const owner = await setupOwner(app);
+    await request(owner, {
+      method: "PUT",
+      url: "/api/admin/credentials",
+      csrf: true,
+      payload: { provider: "tmdb", value: "tmdb-key", label: "TMDB" },
+    });
+    const videos = [20, 21].flatMap((count, seasonIndex) =>
+      Array.from({ length: count }, (_, episodeIndex) => {
+        const season = seasonIndex + 1;
+        const number = episodeIndex + 1;
+        return {
+          id: `tt0434665:${season}:${number}`,
+          season,
+          number,
+          episode: number,
+          name: season === 2 && number === 7 ? "Release the Death Blow!" : `S${season}E${number}`,
+        };
+      }),
+    );
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url, init) => {
+      const value = String(url);
+      if (value.includes("api.themoviedb.org/3/tv/30984/external_ids")) {
+        return new Response(JSON.stringify({ imdb_id: "tt0434665", tvdb_id: 74796 }));
+      }
+      if (value === "https://v3-cinemeta.strem.io/meta/series/tt0434665.json") {
+        return new Response(JSON.stringify({
+          meta: { id: "tt0434665", type: "series", videos },
+        }));
+      }
+      return originalFetch(url, init);
+    }) as typeof fetch;
+
+    try {
+      const seasonsResponse = await request(owner, {
+        method: "GET",
+        url: "/api/media/seasons?tmdbId=30984",
+      });
+      expect(seasonsResponse.statusCode).toBe(200);
+      expect(json<{
+        numbering: string;
+        seasons: Array<{ seasonNumber: number; episodeCount: number }>;
+      }>(seasonsResponse)).toMatchObject({
+        numbering: "cinemeta",
+        seasons: [
+          { seasonNumber: 1, episodeCount: 20 },
+          { seasonNumber: 2, episodeCount: 21 },
+        ],
+      });
+
+      const episodeResponse = await request(owner, {
+        method: "GET",
+        url: "/api/media/episodes?imdbId=tt0434665&season=2",
+      });
+      expect(episodeResponse.statusCode).toBe(200);
+      const episodeBody = json<{
+        numbering: string;
+        episodes: Array<{ id: string; title: string }>;
+      }>(episodeResponse);
+      expect(episodeBody.numbering).toBe("cinemeta");
+      expect(episodeBody.episodes.find((episode) => episode.id === "tt0434665:2:7"))
+        .toMatchObject({ title: "Release the Death Blow!" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("server calendar: returns cached TMDB movie release dates", async () => {
     const owner = await setupOwner(app);
     await request(owner, {

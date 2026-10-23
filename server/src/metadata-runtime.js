@@ -1,4 +1,5 @@
 import { TMDBService } from "../../web/src/services/metadata/TMDBService.ts";
+import { CinemetaEpisodeService } from "../../web/src/services/metadata/CinemetaEpisodeService.ts";
 import { createHash } from "node:crypto";
 import { decryptSecret } from "./crypto.js";
 
@@ -11,6 +12,9 @@ const TMDB_CACHE_TTL_MS = {
   long: 24 * 60 * 60 * 1000,
 };
 const tmdbInflightByDb = new WeakMap();
+const cinemetaEpisodeService = new CinemetaEpisodeService((url, init) =>
+  fetch(url, init),
+);
 
 function isoFromEpochMs(epochMs) {
   return new Date(epochMs).toISOString();
@@ -481,17 +485,43 @@ export async function getServerDetail(db, config, profileId, input) {
   };
 }
 
-/** A series' seasons for the episode picker (thin proxy over the server-side
- *  TMDB key, mirroring getServerDetail). */
+async function exactSeriesImdbId(service, input) {
+  if (typeof input.imdbId === "string" && /^tt\d{7,10}$/.test(input.imdbId)) {
+    return input.imdbId;
+  }
+  if (typeof input.tmdbId !== "number") return null;
+  return (await service.getExternalIds(input.tmdbId, "series")).imdbId;
+}
+
+/** A series' seasons for the episode picker. Cinemeta is authoritative for
+ * Stremio/IMDb season numbering; TMDB remains the clean fallback. */
 export async function getServerSeasons(db, config, profileId, input) {
   const service = tmdbService(db, config, profileId);
-  const seasons = await service.getSeasons(input.tmdbId);
-  return { seasons };
+  const imdbId = await exactSeriesImdbId(service, input).catch(() => null);
+  if (imdbId != null) {
+    const guide = await cinemetaEpisodeService.getGuide(imdbId).catch(() => null);
+    if (guide != null) return { seasons: guide.seasons, numbering: "cinemeta" };
+  }
+  if (typeof input.tmdbId !== "number") {
+    throw new Error("Episode guide identity could not be resolved.");
+  }
+  return { seasons: await service.getSeasons(input.tmdbId), numbering: "tmdb" };
 }
 
 /** One season's episode list for the episode picker. */
 export async function getServerEpisodes(db, config, profileId, input) {
   const service = tmdbService(db, config, profileId);
-  const episodes = await service.getEpisodes(input.tmdbId, input.season);
-  return { episodes };
+  const imdbId = await exactSeriesImdbId(service, input).catch(() => null);
+  if (imdbId != null) {
+    const guide = await cinemetaEpisodeService.getGuide(imdbId).catch(() => null);
+    const episodes = guide?.episodesBySeason.get(input.season);
+    if (episodes != null) return { episodes, numbering: "cinemeta" };
+  }
+  if (typeof input.tmdbId !== "number") {
+    throw new Error("Episode guide identity could not be resolved.");
+  }
+  return {
+    episodes: await service.getEpisodes(input.tmdbId, input.season),
+    numbering: "tmdb",
+  };
 }

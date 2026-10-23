@@ -21,6 +21,7 @@ import {
   episodeIdFor,
   episodeLabel,
   nextEpisodeFor,
+  normalizeFlattenedSeasonOneSelection,
   parseEpisodeId,
   useEpisodes,
   useSeasons,
@@ -392,7 +393,7 @@ export function Detail() {
       return bounded;
     });
   };
-  const selected = useMemo(
+  const rawSelected = useMemo(
     () =>
       detailItem?.type === "series"
         ? episodeOverrides[detailItem.id] ??
@@ -400,6 +401,22 @@ export function Detail() {
         : null,
     [detailItem, episodeOverrides, continueWatching],
   );
+  const episodeGuideTmdbId = detail.data.item?.tmdbId ?? detailItem?.tmdbId ?? null;
+  const seasonsState = useSeasons(
+    episodeGuideTmdbId,
+    detailItem?.type === "series",
+    services.tmdb,
+    detail.data.imdbId,
+  );
+  const selected = useMemo(
+    () =>
+      rawSelected != null && seasonsState.numbering === "cinemeta"
+        ? normalizeFlattenedSeasonOneSelection(rawSelected, seasonsState.seasons)
+        : rawSelected,
+    [rawSelected, seasonsState.numbering, seasonsState.seasons],
+  );
+  const episodeGuidePending =
+    detailItem?.type === "series" && rawSelected != null && seasonsState.loading;
 
   // Completion is deliberately sourced from complete history rows. The
   // Continue Watching slice below remains only for resume bars and positions.
@@ -416,7 +433,7 @@ export function Detail() {
   const watchedMutationIds = useRef<Set<string>>(new Set());
 
   const streams = useStreams(
-    detail.data.imdbId,
+    episodeGuidePending ? null : detail.data.imdbId,
     detailItem?.type ?? "movie",
     selected?.season ?? null,
     selected?.episode ?? null,
@@ -424,7 +441,7 @@ export function Detail() {
     detailItem?.year ?? detail.data.item?.year ?? null,
     services.indexers,
     services.debrid,
-    detail.loading,
+    detail.loading || episodeGuidePending,
   );
   const confirmedMissingImdbId =
     streams.missingImdbId && !detail.loading && detail.data.imdbId == null;
@@ -571,15 +588,11 @@ export function Detail() {
   // picker selection) using TMDB season metadata for season boundaries; a
   // guide-less series falls back to a blind within-season increment inside
   // nextEpisodeFor (harmless: moving to it still requires a cached row).
-  const seasonsState = useSeasons(
-    detail.data.item?.tmdbId ?? detailItem?.tmdbId ?? null,
-    detailItem?.type === "series",
-    services.tmdb,
-  );
   const selectedSeasonEpisodes = useEpisodes(
-    detail.data.item?.tmdbId ?? detailItem?.tmdbId ?? null,
+    episodeGuideTmdbId,
     selected?.season ?? null,
     services.tmdb,
+    detail.data.imdbId,
   );
   const upNextTarget = useMemo(
     () =>
@@ -2077,6 +2090,7 @@ export function Detail() {
       {detailItem.type === "series" && selected != null && (
         <EpisodePicker
           tmdbId={item?.tmdbId ?? detailItem.tmdbId ?? null}
+          imdbId={detail.data.imdbId}
           tmdb={services.tmdb}
           selected={selected}
           onSelect={(next) => {

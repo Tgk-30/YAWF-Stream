@@ -42,6 +42,8 @@ function seasonOptionLabel(s: {
 interface EpisodePickerProps {
   /** Numeric TMDB id for the series (null → degraded stepper mode). */
   tmdbId: number | null;
+  /** Exact IMDb identity used by Stremio and Cinemeta episode numbering. */
+  imdbId?: string | null;
   tmdb: TMDBService | null;
   selected: { season: number; episode: number };
   onSelect: (next: { season: number; episode: number }) => void;
@@ -79,6 +81,7 @@ function metaLabel(ep: Episode): string {
 
 export function EpisodePicker({
   tmdbId,
+  imdbId = null,
   tmdb,
   selected,
   onSelect,
@@ -89,7 +92,7 @@ export function EpisodePicker({
   onToggleSeriesWatched,
   seriesWatched = false,
 }: EpisodePickerProps) {
-  const seasons = useSeasons(tmdbId, true, tmdb);
+  const seasons = useSeasons(tmdbId, true, tmdb, imdbId);
   const rich = seasons.source === "live";
 
   // The season being BROWSED (chip row) - follows the selected episode's
@@ -98,12 +101,13 @@ export function EpisodePicker({
   const [browseSeason, setBrowseSeason] = useState(selected.season);
   useEffect(() => {
     setBrowseSeason(selected.season);
-  }, [selected.season, tmdbId]);
+  }, [selected.season, tmdbId, imdbId]);
 
   const episodes = useEpisodes(
     rich ? tmdbId : null,
     rich ? browseSeason : null,
     tmdb,
+    imdbId,
   );
   const season = seasons.seasons.find((item) => item.seasonNumber === browseSeason);
   const seasonWatched = seasonIsWatched(

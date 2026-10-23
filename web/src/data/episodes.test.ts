@@ -25,6 +25,7 @@ import {
   episodeIdFor,
   episodeLabel,
   nextEpisodeFor,
+  normalizeFlattenedSeasonOneSelection,
   parseEpisodeId,
   useEpisodes,
   useSeasons,
@@ -102,6 +103,47 @@ describe("defaultSelectionFor", () => {
   });
 });
 
+describe("normalizeFlattenedSeasonOneSelection", () => {
+  const seasons = (counts: number[]) => counts.map((episodeCount, index) => ({
+    id: index + 1,
+    seasonNumber: index + 1,
+    name: `Season ${index + 1}`,
+    episodeCount,
+  }));
+
+  it("maps Bleach's flattened E20/E21/E27 at the canonical boundary", () => {
+    const bleach = seasons([20, 21, 22]);
+    expect(normalizeFlattenedSeasonOneSelection({ season: 1, episode: 20 }, bleach))
+      .toEqual({ season: 1, episode: 20 });
+    expect(normalizeFlattenedSeasonOneSelection({ season: 1, episode: 21 }, bleach))
+      .toEqual({ season: 2, episode: 1 });
+    expect(normalizeFlattenedSeasonOneSelection({ season: 1, episode: 27 }, bleach))
+      .toEqual({ season: 2, episode: 7 });
+  });
+
+  it("maps another affected anime but preserves an ordinary long first season", () => {
+    expect(normalizeFlattenedSeasonOneSelection(
+      { season: 1, episode: 40 }, seasons([35, 48, 48]),
+    )).toEqual({ season: 2, episode: 5 });
+    expect(normalizeFlattenedSeasonOneSelection(
+      { season: 1, episode: 27 }, seasons([30, 10]),
+    )).toEqual({ season: 1, episode: 27 });
+  });
+
+  it("does not change specials, already canonical selections, or out-of-range positions", () => {
+    const bleach = [
+      { id: 0, seasonNumber: 0, name: "Specials", episodeCount: 7 },
+      ...seasons([20, 21]),
+    ];
+    expect(normalizeFlattenedSeasonOneSelection({ season: 0, episode: 6 }, bleach))
+      .toEqual({ season: 0, episode: 6 });
+    expect(normalizeFlattenedSeasonOneSelection({ season: 2, episode: 7 }, bleach))
+      .toEqual({ season: 2, episode: 7 });
+    expect(normalizeFlattenedSeasonOneSelection({ season: 1, episode: 99 }, bleach))
+      .toEqual({ season: 1, episode: 99 });
+  });
+});
+
 describe("useSeasons / useEpisodes", () => {
   it("degrades to source 'none' without a tmdbId or service", async () => {
     const { result } = renderHook(() => useSeasons(null, true, null));
@@ -142,11 +184,71 @@ describe("useSeasons / useEpisodes", () => {
     try {
       mockFetchServerSeasons.mockResolvedValue({
         seasons: [{ id: 2, seasonNumber: 1, name: "Season 1", episodeCount: 8 }],
+        numbering: "cinemeta",
       });
       const { result } = renderHook(() => useSeasons(42, true, null));
       await waitFor(() => expect(result.current.loading).toBe(false));
-      expect(mockFetchServerSeasons).toHaveBeenCalledWith({ tmdbId: 42 });
+      expect(mockFetchServerSeasons).toHaveBeenCalledWith({ tmdbId: 42, imdbId: null });
       expect(result.current.source).toBe("live");
+    } finally {
+      mockServerMode = false;
+    }
+  });
+
+  it("fences completed guide data during exact identity and season transitions", async () => {
+    mockServerMode = true;
+    try {
+      mockFetchServerSeasons.mockResolvedValueOnce({
+        seasons: [{ id: 1, seasonNumber: 1, name: "Season 1", episodeCount: 20 }],
+        numbering: "cinemeta",
+      });
+      const seasonRenders: Array<ReturnType<typeof useSeasons>> = [];
+      const seasons = renderHook(
+        ({ tmdbId, imdbId }: { tmdbId: number; imdbId: string }) => {
+          const state = useSeasons(tmdbId, true, null, imdbId);
+          seasonRenders.push(state);
+          return state;
+        },
+        { initialProps: { tmdbId: 1, imdbId: "tt0000001" } },
+      );
+      await waitFor(() => expect(seasons.result.current.source).toBe("live"));
+
+      mockFetchServerSeasons.mockImplementationOnce(() => new Promise(() => {}));
+      seasonRenders.length = 0;
+      seasons.rerender({ tmdbId: 2, imdbId: "tt0000002" });
+      expect(seasonRenders[0]).toMatchObject({
+        seasons: [], loading: true, source: "none", numbering: null,
+      });
+      seasons.unmount();
+
+      mockFetchServerEpisodes.mockResolvedValueOnce({
+        episodes: [{
+          id: "tt0000001:1:1",
+          mediaId: "tt0000001",
+          seasonNumber: 1,
+          episodeNumber: 1,
+          title: "Old episode",
+        }],
+        numbering: "cinemeta",
+      });
+      const episodeRenders: Array<ReturnType<typeof useEpisodes>> = [];
+      const episodes = renderHook(
+        ({ imdbId, season }: { imdbId: string; season: number }) => {
+          const state = useEpisodes(null, season, null, imdbId);
+          episodeRenders.push(state);
+          return state;
+        },
+        { initialProps: { imdbId: "tt0000001", season: 1 } },
+      );
+      await waitFor(() => expect(episodes.result.current.source).toBe("live"));
+
+      mockFetchServerEpisodes.mockImplementationOnce(() => new Promise(() => {}));
+      episodeRenders.length = 0;
+      episodes.rerender({ imdbId: "tt0000002", season: 2 });
+      expect(episodeRenders[0]).toMatchObject({
+        episodes: [], loading: true, source: "none", numbering: null,
+      });
+      episodes.unmount();
     } finally {
       mockServerMode = false;
     }

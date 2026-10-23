@@ -1,7 +1,7 @@
 {
   "name": "debridstreamer-web",
   "private": true,
-  "version": "2.3.32",
+  "version": "2.3.34",
   "license": "MIT",
   "type": "module",
   "scripts": {
