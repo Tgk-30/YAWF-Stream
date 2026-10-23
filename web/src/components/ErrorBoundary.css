@@ -50,6 +50,13 @@
   word-break: break-word;
 }
 
+.error-boundary-status {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--danger, #ff8a8a);
+}
+
 .error-boundary-actions {
   display: flex;
   gap: calc(10px * var(--density-scale));

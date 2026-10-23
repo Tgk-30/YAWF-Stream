@@ -11,7 +11,7 @@ test("website release catalog accepts the published platform channels", () => {
 for (const { name, from, to } of [
   {
     name: "desktop version",
-    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.37', tag: 'v2.3.37-web' };",
+    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.38', tag: 'v2.3.38-web' };",
     to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.25', tag: 'v2.3.28-web' };",
   },
   {
@@ -31,8 +31,8 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.37', tag: 'v2.3.37' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.22', tag: 'v2.3.37' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.40', tag: 'v2.3.40' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.22', tag: 'v2.3.40' };",
   },
   {
     name: "server checksum channel",
