@@ -221,6 +221,7 @@
 
 .detail-hero-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-md);
   margin-top: var(--sp-xs);
 }

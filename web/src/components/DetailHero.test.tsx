@@ -7,6 +7,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
+import { readFileSync } from "node:fs";
 import { DetailHero } from "./DetailHero";
 import type { MediaItem } from "../models/media";
 
@@ -30,6 +31,15 @@ function makeItem(overrides: Partial<MediaItem> = {}): MediaItem {
 }
 
 const noop = () => {};
+
+describe("DetailHero responsive actions", () => {
+  it("allows the full action row to wrap before the phone layout breakpoint", () => {
+    const css = readFileSync("src/components/DetailHero.css", "utf8");
+    const baseActions = css.match(/\.detail-hero-actions\s*\{([^}]*)\}/);
+    expect(baseActions).not.toBeNull();
+    expect(baseActions?.[1]).toMatch(/flex-wrap:\s*wrap/);
+  });
+});
 
 describe("DetailHero backdrop", () => {
   it("renders the w1280 backdrop image when a backdrop is present", () => {
