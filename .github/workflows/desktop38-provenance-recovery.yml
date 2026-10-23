@@ -27,7 +27,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
-      contents: read
+      # GitHub hides draft releases from read-only Actions tokens. This mirrors
+      # clean-install.yml's draft-download permission; no release write is run.
+      contents: write
       id-token: write
       attestations: write
     steps:
