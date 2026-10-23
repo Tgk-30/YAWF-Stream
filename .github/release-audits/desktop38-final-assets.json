@@ -1,0 +1,114 @@
+{
+  "schema": 1,
+  "tag": "v2.3.38-web",
+  "sourceRevision": "47c9b185a21e35722b0902a49155daf2aaa26348",
+  "originalProducerRun": 39975983866,
+  "purpose": "Attest the final frozen draft asset set after checksum finalization and recovery of the already Apple-accepted Intel DMG ticket. This does not rebuild binaries or turn the original failed aggregate producer green.",
+  "assets": [
+    {
+      "name": "SHA256SUMS",
+      "size": 2007,
+      "digest": "sha256:71a76c14f284982ebafe52ea630241cd5ade503bd3413a829d7ae97b9b63c877"
+    },
+    {
+      "name": "YAWF.Stream_2.3.38_aarch64.dmg",
+      "size": 94171439,
+      "digest": "sha256:e2cdd0ecc3a8b7cbc30195c5026b0378c3f03361100578b56b4d9542c19750f6"
+    },
+    {
+      "name": "YAWF.Stream_2.3.38_amd64.AppImage",
+      "size": 262207992,
+      "digest": "sha256:c84c644361aa4f60a235cd053c7bbf091623e5c63d615d9131a8347a2d00b0d8"
+    },
+    {
+      "name": "YAWF.Stream_2.3.38_amd64.AppImage.sig",
+      "size": 444,
+      "digest": "sha256:6bf122e0f23780816d1023d098274b32fce39642fd854983c34124bd161d48f6"
+    },
+    {
+      "name": "YAWF.Stream_2.3.38_amd64.deb",
+      "size": 137365770,
+      "digest": "sha256:b0b1fb709f5678e991f544025688d93bb5b4afc53557ff405b9f984754aa0ad2"
+    },
+    {
+      "name": "YAWF.Stream_2.3.38_amd64.deb.sig",
+      "size": 440,
+      "digest": "sha256:c6f770f6beb1bff839a62e4b60a0e6a45beb0a26e3c569b1934b946aa82c0451"
+    },
+    {
+      "name": "YAWF.Stream_2.3.38_x64.dmg",
+      "size": 99681797,
+      "digest": "sha256:4909a8240791acd84fc8e40d4a39632ec56ba9e0c853fd697e33170e7ca6c696"
+    },
+    {
+      "name": "YAWF.Stream_Android.TV_2.3.38.apk",
+      "size": 5057028,
+      "digest": "sha256:b8eb63aeadbba1bdf9a347262d6c3abccfa19b60b4ce1cf54c4ea10572856eac"
+    },
+    {
+      "name": "YAWF.Stream_Android_2.3.38.apk",
+      "size": 88587137,
+      "digest": "sha256:a44226430dfa734426172889cba9d6cbbeffbb5f4968ad30c29993c34771fbe1"
+    },
+    {
+      "name": "YAWF.Stream_aarch64.app.tar.gz",
+      "size": 95434569,
+      "digest": "sha256:2e83b32b5adeefe20b6fa54e31d0a7745db36ce7a461a18e6ee973889506d870"
+    },
+    {
+      "name": "YAWF.Stream_aarch64.app.tar.gz.sig",
+      "size": 432,
+      "digest": "sha256:02c03c00ec31d8473484053667de6aaa941ba1a56b0c7c433f3b6254a7804e7a"
+    },
+    {
+      "name": "YAWF.Stream_x64.app.tar.gz",
+      "size": 100370001,
+      "digest": "sha256:c32bf069fe6ad23ae2b8e9f3415cb00c01093874fde8dd506f3002c93a81d451"
+    },
+    {
+      "name": "YAWF.Stream_x64.app.tar.gz.sig",
+      "size": 432,
+      "digest": "sha256:c13e61226a146050830c0955d6b5eec916aa9b05e06139a658a16f287d08738d"
+    },
+    {
+      "name": "debridstreamer-server_2.3.38_all.deb",
+      "size": 4192214,
+      "digest": "sha256:96a45f91a1b607d8bf3d127722c7815b5a654c684df84a4286038d16f21b1f6e"
+    },
+    {
+      "name": "debridstreamer-server_all.deb",
+      "size": 4192214,
+      "digest": "sha256:96a45f91a1b607d8bf3d127722c7815b5a654c684df84a4286038d16f21b1f6e"
+    },
+    {
+      "name": "latest-macos11.json",
+      "size": 4526,
+      "digest": "sha256:6422dfdc5908c71aaf743e5f08cbabab06d20c3791e2df2fd271ac82e4d66903"
+    },
+    {
+      "name": "latest.json",
+      "size": 3332,
+      "digest": "sha256:8503f8ce6e2923e7b56b5347fa1555bce1d37325dcfb15300d38dda8e3f01275"
+    },
+    {
+      "name": "macos-media-provenance-arm64.json",
+      "size": 1591,
+      "digest": "sha256:26aa3dce052ad244b0c32f743621fe0173b168e6fe386bbf5ea54e8316f9844b"
+    },
+    {
+      "name": "macos-media-provenance-x86_64.json",
+      "size": 1592,
+      "digest": "sha256:757250e1f950f090500145bd2aafe51d3cd55d79e4a449352a1337a238a14cd4"
+    },
+    {
+      "name": "yawf-macos-media-runtime-source-6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c.tar.gz",
+      "size": 456776628,
+      "digest": "sha256:6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c"
+    },
+    {
+      "name": "yawf-server-updater_2.3.38.tar.gz",
+      "size": 16257,
+      "digest": "sha256:b1eefacfd56ef7287bfd228e1aa4f6ba9f8aacd5e505711424a6500f0eee5069"
+    }
+  ]
+}

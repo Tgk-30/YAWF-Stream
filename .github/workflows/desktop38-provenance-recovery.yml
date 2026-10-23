@@ -1,0 +1,112 @@
+name: Desktop38 final artifact provenance recovery
+
+on:
+  push:
+    branches: [codex/desktop38-provenance-recovery]
+    paths:
+      - .github/workflows/desktop38-provenance-recovery.yml
+      - .github/release-audits/desktop38-final-assets.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop38-final-artifact-provenance
+  cancel-in-progress: false
+
+jobs:
+  registration:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo 'Registered only. No release assets or attestations are changed on push.'
+
+  attest-frozen-draft:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'Tgk-30/YAWF-Stream' && github.actor == 'Tgk-30' && github.ref == 'refs/heads/codex/desktop38-provenance-recovery'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # This is final-set provenance, like web-release.yml's finalizer, not a
+      # rebuild. The original producer's failed aggregate status is preserved.
+      # No tag, binary, installer, feed, checksum or publication is changed here.
+      - name: Admit the exact frozen draft and inventory
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' \
+            6b7107abfcba0be21a929003ad663308773e371531888e13a9bc26d533337e8e \
+            .github/release-audits/desktop38-final-assets.json | sha256sum --check
+          test "$(gh api repos/Tgk-30/YAWF-Stream/commits/v2.3.38-web --jq .sha)" = 47c9b185a21e35722b0902a49155daf2aaa26348
+          gh release view v2.3.38-web --repo Tgk-30/YAWF-Stream \
+            --json isDraft,tagName,assets > "$RUNNER_TEMP/draft.json"
+          python3 - <<'PY'
+          import json, os
+          pin = json.load(open('.github/release-audits/desktop38-final-assets.json'))
+          draft = json.load(open(os.environ['RUNNER_TEMP'] + '/draft.json'))
+          assert pin['tag'] == draft['tagName'] == 'v2.3.38-web'
+          assert pin['sourceRevision'] == '47c9b185a21e35722b0902a49155daf2aaa26348'
+          assert draft['isDraft'] is True
+          expected = pin['assets']
+          actual = sorted([{k: a[k] for k in ('name', 'size', 'digest')} for a in draft['assets']], key=lambda a: a['name'])
+          assert len(expected) == len(actual) == 21
+          assert actual == expected, 'Draft assets changed; re-review instead of attesting.'
+          PY
+
+      - name: Download and verify every actual final asset byte
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/final-assets"
+          gh release download v2.3.38-web --repo Tgk-30/YAWF-Stream --dir "$RUNNER_TEMP/final-assets"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          pin = json.load(open('.github/release-audits/desktop38-final-assets.json'))
+          root = Path(os.environ['RUNNER_TEMP']) / 'final-assets'
+          assert {p.name for p in root.iterdir()} == {a['name'] for a in pin['assets']}
+          for asset in pin['assets']:
+              assert Path(asset['name']).name == asset['name']
+              path = root / asset['name']
+              assert path.is_file() and not path.is_symlink()
+              assert path.stat().st_size == asset['size']
+              with path.open('rb') as stream:
+                  actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+              assert 'sha256:' + actual == asset['digest'], asset['name']
+          sums = (root / 'SHA256SUMS').read_text().splitlines()
+          assert len(sums) == 20
+          names = set()
+          for line in sums:
+              digest, name = line.split('  ', 1)
+              assert name not in names and name != 'SHA256SUMS'
+              assert Path(name).name == name
+              names.add(name)
+              assert next(a['digest'] for a in pin['assets'] if a['name'] == name) == 'sha256:' + digest
+          assert names == {a['name'] for a in pin['assets']} - {'SHA256SUMS'}
+          print('All21 final draft asset bytes and all20 checksum entries admitted.')
+          PY
+
+      - name: Attest the admitted final asset set
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ runner.temp }}/final-assets/*
+
+      - name: Confirm the release remains a draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view v2.3.38-web --repo Tgk-30/YAWF-Stream --json isDraft --jq .isDraft)" = true
