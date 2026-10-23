@@ -307,9 +307,15 @@ vi.mock("./player/useScrubThumbnails", () => ({
 }));
 
 // Child components we don't drive directly - render identifiable stubs.
-vi.mock("./player/ScrubBar", () => ({
-  ScrubBar: scrubBarMock,
-}));
+const scrubBarMode = vi.hoisted(() => ({ actual: false }));
+vi.mock("./player/ScrubBar", async (original) => {
+  const actual = await original<typeof import("./player/ScrubBar")>();
+  return {
+    ScrubBar: (props: Parameters<typeof actual.ScrubBar>[0]) => scrubBarMode.actual
+      ? <actual.ScrubBar {...props} />
+      : scrubBarMock(props),
+  };
+});
 const captionMenuMode = vi.hoisted(() => ({ actual: false }));
 vi.mock("./player/CaptionsMenu", async (original) => {
   const actual = await original<typeof import("./player/CaptionsMenu")>();
@@ -445,6 +451,7 @@ beforeEach(() => {
   );
   isAndroidExternalPlayerEligibleOverride.mockReturnValue(undefined);
   captionMenuMode.actual = false;
+  scrubBarMode.actual = false;
   subsState.tracks = [];
   subsState.activeTrackId = null;
   scrubBarMock.mockClear();
@@ -4030,6 +4037,184 @@ describe("WebviewPlayer", () => {
       await waitFor(() => expect(request).toHaveBeenNthCalledWith(3, "480p", 800));
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  async function prepareRealTouchScrub() {
+    scrubBarMode.actual = true;
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const prepared = (position: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    });
+    let releasePreparation!: (value: ReturnType<typeof prepared>) => void;
+    let requestCount = 0;
+    const request = vi.fn((_quality: string, position: number) => ++requestCount === 1
+      ? Promise.resolve(prepared(position))
+      : new Promise<ReturnType<typeof prepared>>((resolve) => { releasePreparation = resolve; }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n")));
+    const view = render(<VideoPlayer
+      url="https://server.example/api/stream/session-1"
+      title="Touch seek"
+      serverOptimized={{ qualities: ["480p"], request }}
+      onClose={() => {}}
+    />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(original, "duration", { configurable: true, value: 1_000 });
+    Object.defineProperty(original, "paused", { configurable: true, value: true });
+    original.currentTime = 395;
+    fireEvent.loadedMetadata(original);
+    fireEvent.timeUpdate(original);
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "480p" }));
+    await waitFor(() => expect(document.querySelector("video.player-video")).not.toBe(original));
+    const current = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(current, "duration", { configurable: true, value: 12 });
+    Object.defineProperty(current, "paused", { configurable: true, value: true });
+    fireEvent.loadedMetadata(current);
+    markCurrentMediaDataReady(current);
+    fireEvent.canPlay(current);
+    fireEvent.seeked(current);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    slider.setPointerCapture = vi.fn();
+    slider.hasPointerCapture = vi.fn(() => true);
+    slider.releasePointerCapture = vi.fn();
+    return { slider, current, request, view, prepared, release: (position: number) => releasePreparation(prepared(position)) };
+  }
+
+  it.each(["hls.js", "native Safari"])(
+    "commits the real touch scrub release target with deferred %s preparation",
+    async (renderer) => {
+      if (renderer === "native Safari") {
+        deviceKindMock.mockReturnValue("ios");
+        vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+      }
+      const { slider, current, request, release } = await prepareRealTouchScrub();
+      fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 50 });
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 75 });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(slider).toHaveAttribute("aria-valuenow", "750");
+      current.currentTime = 5;
+      fireEvent.timeUpdate(current);
+      expect(slider).toHaveAttribute("aria-valuenow", "750");
+      fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(2, "480p", 800));
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(document.querySelector("video.player-video")).toBe(current);
+      await act(async () => release(800));
+      await waitFor(() => expect(document.querySelector("video.player-video")).not.toBe(current));
+      const replacement = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(replacement, "duration", { configurable: true, value: 12 });
+      fireEvent.loadedMetadata(replacement);
+      markCurrentMediaDataReady(replacement);
+      fireEvent.canPlay(replacement);
+      fireEvent.seeked(replacement);
+      fireEvent.timeUpdate(replacement);
+      expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuenow", "800");
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(["pointerCancel", "lostPointerCapture"] as const)(
+    "cancels real touch preparation on %s without a late release commit",
+    async (eventName) => {
+      const { slider, current, request } = await prepareRealTouchScrub();
+      fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+      fireEvent[eventName](slider, { pointerId: 7 });
+      fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+      await act(async () => { await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(document.querySelector("video.player-video")).toBe(current);
+    },
+  );
+
+  it.each(["source replacement", "unmount"])(
+    "disposes a real touch gesture on %s before any remote preparation",
+    async (action) => {
+      const { slider, request, view } = await prepareRealTouchScrub();
+      fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+      if (action === "unmount") view.unmount();
+      else view.rerender(<VideoPlayer url="https://x/replacement.mp4" title="New owner" onClose={() => {}} />);
+      fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+      await act(async () => { await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(slider.releasePointerCapture).toHaveBeenCalledWith(7);
+    },
+  );
+
+  it("disposes a real touch gesture on a committed same-URL engine replacement", async () => {
+    scrubBarMode.actual = true;
+    const props = { url: "https://x/movie.m3u8", title: "Engine owner", onClose: () => {} };
+    const { rerender } = render(<VideoPlayer {...props} engine="webview-direct" />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 1_000 });
+    fireEvent.loadedMetadata(video);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    slider.setPointerCapture = vi.fn();
+    slider.hasPointerCapture = vi.fn(() => true);
+    slider.releasePointerCapture = vi.fn();
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    rerender(<VideoPlayer {...props} engine="webview-hls-transcode" />);
+    expect(screen.getByRole("slider", { name: "Seek" })).not.toBe(slider);
+    expect(slider.releasePointerCapture).toHaveBeenCalledWith(7);
+    const positionBeforeLateRelease = video.currentTime;
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+    expect(video.currentTime).toBe(positionBeforeLateRelease);
+    await waitFor(() => expect(hlsInstances).toHaveLength(2));
+  });
+
+  it("keeps real local touch previews and keyboard seeks immediate", () => {
+    scrubBarMode.actual = true;
+    render(<VideoPlayer url="https://x/movie.mp4" title="Local touch" onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 1_000 });
+    fireEvent.loadedMetadata(video);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    expect(video.currentTime).toBe(200);
+    fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+    expect(video.currentTime).toBe(800);
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 85 });
+    expect(video.currentTime).toBe(850);
+    fireEvent.timeUpdate(video);
+    const seekWrites: number[] = [];
+    let currentTime = video.currentTime;
+    Object.defineProperty(video, "currentTime", {
+      configurable: true,
+      get: () => currentTime,
+      set: (value: number) => { currentTime = value; seekWrites.push(value); },
+    });
+    fireEvent.keyDown(slider, { key: "ArrowLeft" });
+    expect(seekWrites).toEqual([845]);
+    expect(video.currentTime).toBe(845);
+  });
+
+  it("keeps global seeking outside the real scrub slider and yields to editable controls", () => {
+    scrubBarMode.actual = true;
+    render(<>
+      <VideoPlayer url="https://x/movie.mp4" title="Keyboard" onClose={() => {}} />
+      <input aria-label="Editable input" />
+      <textarea aria-label="Editable text area" />
+      <select aria-label="Editable select"><option>One</option></select>
+    </>);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 1_000 });
+    video.currentTime = 500;
+    fireEvent.loadedMetadata(video);
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(video.currentTime).toBe(505);
+    for (const label of ["Editable input", "Editable text area", "Editable select"]) {
+      fireEvent.keyDown(screen.getByLabelText(label), { key: "ArrowLeft" });
+      expect(video.currentTime).toBe(505);
     }
   });
 

@@ -1,5 +1,5 @@
 // Persona-based first-run wizard (Local Mode only). Routes a brand-new user down
-// one of five paths, or lets them skip past an honest warning. The "device"
+// an available setup path, or lets them skip past an honest warning. The "device"
 // path is a FORCED key-collection flow: the app can't search properly without
 // a TMDB key and can't play anything without a debrid token, so both are
 // collected (with live validation) before the wizard completes - each with an
@@ -13,7 +13,7 @@ import {
   markQuickSetupAcknowledged,
 } from "../lib/firstRun";
 import { saveServerURL } from "../lib/serverMode";
-import { isTauri } from "../lib/tauri";
+import { isDesktopTauri } from "../lib/tauri";
 import { DebridServiceType } from "../services/debrid/models";
 import { AIProviderKind } from "../services/ai/models";
 import type { AppSettings, DebridTokenEntry } from "../data/settings";
@@ -136,6 +136,8 @@ export function FirstRunWizard({
 }) {
   const { settings, services, updateSettings, navigate } = useAppStore();
   const directTorrentAvailable = useDirectTorrentAvailable();
+  // Match Settings and the native server bridge, not a desktop-shaped browser UA.
+  const desktopHostAvailable = isDesktopTauri();
   const [step, setStep] = useState<
     | "choose"
     | "connect"
@@ -272,7 +274,7 @@ export function FirstRunWizard({
       />
     );
   }
-  if (step === "host") {
+  if (step === "host" && desktopHostAvailable) {
     return (
       <HostStep
         onBack={() => setStep("choose")}
@@ -351,7 +353,7 @@ export function FirstRunWizard({
             : "Pick one to get started - you can change anything later in Settings."}
         </p>
         <div className="first-run-choices">
-          {PERSONAS.map((p) => (
+          {PERSONAS.filter((p) => p.id !== "host" || desktopHostAvailable).map((p) => (
             <button
               key={p.id}
               type="button"
@@ -1059,7 +1061,7 @@ function ConnectStep({ onBack }: { onBack: () => void }) {
 }
 
 function HostStep({ onBack, onContinue }: { onBack: () => void; onContinue: () => void }) {
-  const desktop = isTauri();
+  const desktop = isDesktopTauri();
   return (
     <div className="first-run">
       <div className="first-run-card">

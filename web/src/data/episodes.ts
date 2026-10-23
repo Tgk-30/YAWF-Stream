@@ -7,7 +7,7 @@
 // shared by Detail, StreamPicker labels, and continue-watching rows.
 // Imports the ported TMDBService READ-ONLY.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Episode, Season } from "../models/media";
 import type { TMDBService } from "../services/metadata/TMDBService";
 import type { WatchHistoryRecord } from "../storage/models";
@@ -124,7 +124,11 @@ interface SeasonsState {
    * translating a legacy flattened first-season position. */
   numbering: "cinemeta" | "tmdb" | null;
   guideVersion: string | null;
+  /** Retry this exact guide owner after a transient outage. */
+  retry: () => void;
 }
+
+type SeasonsValue = Omit<SeasonsState, "retry">;
 
 interface EpisodesState {
   episodes: Episode[];
@@ -139,7 +143,7 @@ interface KeyedState<T> {
   value: T;
 }
 
-const NO_SEASONS: SeasonsState = {
+const NO_SEASONS: SeasonsValue = {
   seasons: [], loading: false, source: "none", numbering: null, guideVersion: null,
 };
 const NO_EPISODES: EpisodesState = {
@@ -211,10 +215,21 @@ export function useSeasons(
 ): SeasonsState {
   const requestKey = `${enabled ? 1 : 0}:${tmdbId ?? ""}:${imdbId ?? ""}`;
   const shouldLoad = enabled && (tmdbId != null || imdbId != null);
-  const [state, setState] = useState<KeyedState<SeasonsState>>({
+  const [state, setState] = useState<KeyedState<SeasonsValue>>({
     key: requestKey,
     value: { ...NO_SEASONS, loading: shouldLoad },
   });
+  const [retryGeneration, setRetryGeneration] = useState(0);
+  const retry = useCallback(() => {
+    if (!shouldLoad) return;
+    setState({
+      key: requestKey,
+      value: {
+        seasons: [], loading: true, source: "none", numbering: null, guideVersion: null,
+      },
+    });
+    setRetryGeneration((generation) => generation + 1);
+  }, [requestKey, shouldLoad]);
 
   useEffect(() => {
     if (!enabled || (tmdbId == null && imdbId == null)) {
@@ -286,11 +301,12 @@ export function useSeasons(
     return () => {
       cancelled = true;
     };
-  }, [tmdbId, enabled, tmdb, imdbId, requestKey]);
+  }, [tmdbId, enabled, tmdb, imdbId, requestKey, retryGeneration]);
 
-  return state.key === requestKey
+  const value = state.key === requestKey
     ? state.value
     : { ...NO_SEASONS, loading: shouldLoad };
+  return { ...value, retry };
 }
 
 /** Load one season's episode list. Same degrade-to-"none" contract as

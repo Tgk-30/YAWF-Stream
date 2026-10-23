@@ -1635,6 +1635,29 @@
   flex-direction: column;
 }
 
+@media (max-width: 1099px) {
+  .settings-tabs {
+    display: none;
+  }
+
+  .settings-tab-select {
+    display: flex;
+    flex-direction: column;
+    gap: calc(6px * var(--density-scale));
+  }
+
+  .settings-tab-select select {
+    min-height: 44px;
+    padding: var(--sp-sm) var(--sp-md);
+    border: 0.75px solid var(--glass-border);
+    border-radius: var(--r-sm);
+    background: var(--glass-tint-control);
+    color: var(--text-primary);
+    font: inherit;
+    outline: none;
+  }
+}
+
 @media (max-width: 819px) {
   .settings-header {
     align-items: stretch;
@@ -1685,27 +1708,6 @@
   .settings-footer.is-clean .btn {
     min-height: 38px;
     padding-inline: calc(15px * var(--density-scale));
-  }
-
-  .settings-tabs {
-    display: none;
-  }
-
-  .settings-tab-select {
-    display: flex;
-    flex-direction: column;
-    gap: calc(6px * var(--density-scale));
-  }
-
-  .settings-tab-select select {
-    min-height: 44px;
-    padding: var(--sp-sm) var(--sp-md);
-    border: 0.75px solid var(--glass-border);
-    border-radius: var(--r-sm);
-    background: var(--glass-tint-control);
-    color: var(--text-primary);
-    font: inherit;
-    outline: none;
   }
 
   .settings-subsection-picker {

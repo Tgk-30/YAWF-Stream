@@ -207,6 +207,48 @@ describe("ScrubBar pointer flow", () => {
     },
   );
 
+  it("previews a deferred pointer gesture without preparing until its own release", () => {
+    const onSeek = vi.fn();
+    const onSeekPreview = vi.fn();
+    const props = { currentTime: 50, duration: 600, preview: null, onHover: vi.fn(), onLeave: vi.fn(), onSeek, onSeekPreview };
+    const { rerender } = render(<ScrubBar {...props} />);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    fireEvent.pointerDown(slider, { clientX: 20, pointerId: 7 });
+    fireEvent.pointerMove(slider, { clientX: 75, pointerId: 7 });
+    expect(onSeekPreview.mock.calls.map(([time]) => time)).toEqual([120, 450]);
+    expect(onSeek).not.toHaveBeenCalled();
+    rerender(<ScrubBar {...props} currentTime={60} />);
+    expect(slider).toHaveAttribute("aria-valuenow", "450");
+    expect(slider.querySelector(".scrubbar-fill")).toHaveStyle({ transform: "scaleX(0.75)" });
+    fireEvent.pointerDown(slider, { clientX: 90, pointerId: 8 });
+    expect(onSeekPreview).toHaveBeenCalledTimes(2);
+    fireEvent.pointerUp(slider, { clientX: 90, pointerId: 8 });
+    expect(onSeek).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider, { clientX: 80, pointerId: 7 });
+    expect(onSeek.mock.calls).toEqual([[480]]);
+    expect(slider).toHaveAttribute("aria-valuenow", "60");
+    fireEvent.keyDown(slider, { key: "ArrowRight" });
+    expect(onSeek).toHaveBeenLastCalledWith(65);
+    expect(onSeekPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels a disabled deferred gesture even when reenabled before pointer release", () => {
+    const onSeek = vi.fn();
+    const onScrubbingChange = vi.fn();
+    const props = { currentTime: 50, duration: 600, preview: null, onHover: vi.fn(), onLeave: vi.fn(), onSeek, onSeekPreview: vi.fn(), onScrubbingChange };
+    const { rerender } = render(<ScrubBar {...props} />);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    fireEvent.pointerDown(slider, { clientX: 20, pointerId: 7 });
+    rerender(<ScrubBar {...props} disabled />);
+    expect(onScrubbingChange.mock.calls).toEqual([[true], [false]]);
+    rerender(<ScrubBar {...props} />);
+    fireEvent.pointerUp(slider, { clientX: 80, pointerId: 7 });
+    expect(onSeek).not.toHaveBeenCalled();
+    expect(slider).toHaveAttribute("aria-valuenow", "50");
+  });
+
   it("does not seek from a zero-width layout box", () => {
     const { slider, onSeek } = setup(50, 600);
     slider.getBoundingClientRect = vi.fn(() => ({

@@ -443,6 +443,8 @@ function shouldIgnoreShortcut(
     role === "menuitem" ||
     role === "checkbox" ||
     role === "switch" ||
+    // The custom scrub slider owns its arrows and Home/End, like native ranges.
+    role === "slider" ||
     role === "tab"
   );
 }
@@ -4853,7 +4855,7 @@ function WebviewPlayer({
     };
   }, [engine, url, isHls, leasePreparationReady]);
 
-  const seekAbsolute = (t: number) => {
+  const seekAbsolute = (t: number, allowPreparation = true) => {
     const video = videoRef.current;
     if (video == null || !Number.isFinite(t)) return;
     const knownDuration = knownAbsoluteDurationRef.current;
@@ -4907,7 +4909,9 @@ function WebviewPlayer({
       );
       return;
     }
-    if (serverOptimized == null || activeServerOptimizedQuality == null) return;
+    // Pointer movement previews the local window without starting a server job.
+    // Only the final release may replace it with a new optimized generation.
+    if (!allowPreparation || serverOptimized == null || activeServerOptimizedQuality == null) return;
     const selected = serverAudioTracks.find(
       (track) => track.index === resolvedServerAudioTrack,
     );
@@ -4929,11 +4933,11 @@ function WebviewPlayer({
     );
   };
 
-  const seek = (t: number) => {
+  const seek = (t: number, allowPreparation = true) => {
     const video = videoRef.current;
     if (video == null || !Number.isFinite(t)) return;
     if (knownAbsoluteDurationRef.current != null) {
-      seekAbsolute(t);
+      seekAbsolute(t, allowPreparation);
       return;
     }
     const localDuration = Number.isFinite(video.duration) && video.duration > 0
@@ -5505,7 +5509,7 @@ function WebviewPlayer({
         onBlurCapture={onChromeBlur}
       >
         <WebviewScrubber
-          key={url}
+          key={`${url}:${engine}`}
           ref={scrubberRef}
           active={chromeVisible}
           duration={displayedDuration ?? 0}
@@ -5513,6 +5517,7 @@ function WebviewPlayer({
           onHover={thumbs.onHover}
           onLeave={thumbs.onLeave}
           onSeek={seek}
+          onSeekPreview={(time) => seek(time, false)}
           onScrubbingChange={setScrubbing}
           disabled={!chromeVisible}
         />

@@ -2,15 +2,22 @@
    shifts page layout. */
 .setup-nudge {
   position: fixed;
-  left: 50%;
+  left: calc(var(--nav-safe-left) + var(--sp-lg));
+  right: var(--sp-lg);
   bottom: var(--sp-lg);
-  transform: translateX(-50%);
+  margin-inline: auto;
+  transform: none;
   z-index: 40;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-md);
-  width: min(680px, calc(100% - var(--sp-xl)));
+  width: min(
+    680px,
+    calc(
+      100% - var(--nav-safe-left) - var(--sp-lg) - var(--sp-lg)
+    )
+  );
   padding: var(--sp-md) var(--sp-lg);
   border-radius: var(--r-lg, calc(18px * var(--radius-scale)));
 }
@@ -82,6 +89,7 @@
     width: auto;
     gap: var(--sp-sm);
     padding: var(--sp-md);
+    margin-inline: 0;
     transform: none;
   }
 

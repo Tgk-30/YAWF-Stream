@@ -325,6 +325,9 @@ export function Detail() {
     detailItem,
     closeDetail,
     openDetail,
+    detailSourcesOpen,
+    openDetailSources,
+    closeDetailSources,
     navigate,
     services,
     settings,
@@ -471,6 +474,9 @@ export function Detail() {
     detail.data.imdbId,
     episodeGuideTmdbId,
   );
+  const episodeGuideBlocked =
+    continuationRecoveryBlocked ||
+    (canonicalEpisodeGuideRequired && seasonsState.source !== "live");
   const selectedSeasonInGuide =
     !continuationRecoveryBlocked &&
     !hasEpisodeContinuationIdentityConflict(detail.data.imdbId, episodeGuideTmdbId) &&
@@ -594,7 +600,7 @@ export function Detail() {
   // episode) instead of inline at the bottom of Detail; movies keep the inline
   // list since they have no episode step.
   const isSeries = detailItem?.type === "series";
-  const [streamsPageOpen, setStreamsPageOpen] = useState(false);
+  const streamsPageOpen = detailSourcesOpen;
   const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
   const [downloadMode, setDownloadMode] = useState<"full" | "optimized">("full");
   const [downloadQuality, setDownloadQuality] = useState<VideoQualityValue | null>(null);
@@ -706,7 +712,7 @@ export function Detail() {
   // fallback so both honor the same series-vs-movie split.
   const revealStreams = () => {
     if (isSeries) {
-      setStreamsPageOpen(true);
+      openDetailSources();
     } else {
       streamsAnchorRef.current?.scrollIntoView({ behavior: "smooth" });
     }
@@ -721,7 +727,7 @@ export function Detail() {
     streamsPageOpen,
   );
   const streamsPageRef = useModalA11y<HTMLDivElement>(
-    () => setStreamsPageOpen(false),
+    closeDetailSources,
     streamsPageOpen && player == null,
   );
   // The streams portal is outside .detail in the DOM, so explicitly inert the
@@ -1020,10 +1026,6 @@ export function Detail() {
     playbackHandoff: ActivePlayer["playbackHandoff"] = null,
     recoverySource: StreamRow | null = null,
   ): void {
-    // The series stream picker is a body-level portal above Detail. Close it
-    // before mounting the player portal so playback and error states cannot
-    // start invisibly behind that page until the user presses Back.
-    setStreamsPageOpen(false);
     const metadataTitle = item?.title?.trim() || detailItem?.title?.trim() || "";
     const metadataYear = item?.year ?? detailItem?.year ?? null;
     const episodeMetadata =
@@ -1985,7 +1987,7 @@ export function Detail() {
             // Series open the dedicated streams page; movies scroll the inline
             // picker into view.
             if (isSeries) {
-              setStreamsPageOpen(true);
+              openDetailSources();
               return;
             }
             setScrollToStreams(true);
@@ -2221,22 +2223,28 @@ export function Detail() {
       {/* Season/episode picker (series only). Selecting an episode re-drives
           the stream search below; falls back to a plain stepper without TMDB. */}
       {detailItem.type === "series" && selected != null && (
-        continuationRecoveryBlocked ? (
-          <p
+        episodeGuideBlocked ? (
+          <div
             className="episode-picker-note t-secondary"
             role="status"
             aria-busy={seasonsState.loading}
           >
-            {seasonsState.loading
-              ? "Loading the canonical episode guide..."
-              : "The canonical episode guide is unavailable. Retry before choosing an episode."}
-          </p>
-        ) : !seasonsState.loading &&
-          canonicalEpisodeGuideRequired &&
-          seasonsState.source !== "live" ? (
-          <p className="episode-picker-note t-secondary" role="status">
-            The canonical episode guide is unavailable. Retry before choosing an episode.
-          </p>
+            <span>
+              {seasonsState.loading
+                ? "Loading the canonical episode guide..."
+                : "The canonical episode guide is unavailable. Retry before choosing an episode."}
+            </span>
+            {!seasonsState.loading && (
+              <button
+                type="button"
+                className="btn-secondary"
+                aria-label="Retry episode guide"
+                onClick={seasonsState.retry}
+              >
+                Retry
+              </button>
+            )}
+          </div>
         ) : (
         <EpisodePicker
           tmdbId={item?.tmdbId ?? detailItem.tmdbId ?? null}
@@ -2246,7 +2254,7 @@ export function Detail() {
           onSelect={(next) => {
             // Picking an episode opens the dedicated streams page for it.
             selectEpisode(detailItem.id, next);
-            setStreamsPageOpen(true);
+            openDetailSources();
           }}
           progressByEpisodeId={progressByEpisodeId}
           watchedEpisodeIds={new Set(watchedDetail.episodeIds)}
@@ -2311,7 +2319,7 @@ export function Detail() {
                 ref={streamsBackRef}
                 type="button"
                 className="episode-streams-back"
-                onClick={() => setStreamsPageOpen(false)}
+                onClick={closeDetailSources}
               >
                 ‹ Episodes
               </button>

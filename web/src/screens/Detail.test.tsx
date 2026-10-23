@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { readFileSync } from "node:fs";
 import type { MediaPreview, MediaItem } from "../models/media";
 import type { DetailState } from "../data/detail";
@@ -69,6 +70,8 @@ const recordResume = vi.fn();
 const refreshContinueWatching = vi.fn(async () => {});
 const openDetailPlayer = vi.fn();
 const closeDetailPlayer = vi.fn();
+const openDetailSources = vi.fn();
+const closeDetailSources = vi.fn();
 const openTrailer = vi.fn();
 const closeTrailer = vi.fn();
 
@@ -83,7 +86,9 @@ let mockServices: any = {
 let mockSettings: any = { transcode: false };
 
 vi.mock("../store/AppStore", () => ({
-  useAppStore: () => ({
+  useAppStore: () => {
+    const [detailSourcesOpen, setDetailSourcesOpen] = useState(false);
+    return {
     detailItem: mockDetailItem,
     closeDetail,
     openDetail,
@@ -95,14 +100,27 @@ vi.mock("../store/AppStore", () => ({
     recordResume,
     continueWatching: mockContinueWatching,
     refreshContinueWatching,
+    detailSourcesOpen,
+    openDetailSources: () => {
+      openDetailSources();
+      setDetailSourcesOpen(true);
+    },
+    closeDetailSources: () => {
+      closeDetailSources();
+      setDetailSourcesOpen(false);
+    },
     detailPlayerOpen: true,
-    openDetailPlayer,
+    openDetailPlayer: () => {
+      openDetailPlayer();
+      setDetailSourcesOpen(false);
+    },
     closeDetailPlayer,
     trailerOpen: false,
     openTrailer,
     closeTrailer,
     activeProfile: mockActiveProfile,
-  }),
+    };
+  },
   useCachedResolutions: () =>
     mockCached ? { [mockDetailItem?.id ?? "x"]: mockCached } : {},
 }));
@@ -1034,6 +1052,66 @@ describe("Detail base render", () => {
     expect(testLocalStorage.getItem("ds_episode_overrides")).toBeNull();
   });
 
+  it("retries a failed child guide without exposing stale episode sources", async () => {
+    const child = showTybwChildWithHistory("s17e7");
+    episodePickerMode.real = true;
+    let resolveRetry!: (value: ReturnType<typeof serverSeasonGuide>) => void;
+    fetchServerSeasons
+      .mockRejectedValueOnce(new Error("temporary guide outage"))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRetry = resolve;
+      }))
+      .mockResolvedValue(serverSeasonGuide([13, 13, 14, 10]));
+    fetchServerEpisodes.mockImplementation(async ({ season }: { season: number }) => ({
+      episodes: [{
+        id: `tt14986406:${season}:1`,
+        mediaId: "tt14986406",
+        seasonNumber: season,
+        episodeNumber: 1,
+        title: `S${season}E1`,
+      }],
+      numbering: "cinemeta",
+      guideVersion: "2",
+    }));
+
+    render(<Detail />);
+    const retry = await screen.findByRole("button", { name: "Retry episode guide" });
+    expect(useStreamsMock.mock.calls.every((call) => call[0] == null)).toBe(true);
+    expect(fetchServerEpisodes).not.toHaveBeenCalled();
+
+    await userEvent.click(retry);
+    expect(screen.getByText("Loading the canonical episode guide...")).toBeInTheDocument();
+    expect(useStreamsMock.mock.calls.every((call) => call[0] == null)).toBe(true);
+    await act(async () => {
+      resolveRetry(serverSeasonGuide([13, 13, 14, 10]));
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Season 1" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      expect(useStreamsMock).toHaveBeenLastCalledWith(
+        "tt14986406",
+        "series",
+        1,
+        7,
+        child.title,
+        2022,
+        mockServices.indexers,
+        mockServices.debrid,
+        false,
+      );
+    });
+    expect(fetchServerSeasons.mock.calls.every(
+      ([input]) => input.tmdbId === 215105 && input.imdbId === "tt14986406",
+    )).toBe(true);
+    expect(fetchServerEpisodes).not.toHaveBeenCalledWith(
+      expect.objectContaining({ season: 17 }),
+    );
+    expect(storeRecordHistory).not.toHaveBeenCalled();
+    expect(testLocalStorage.getItem("ds_episode_overrides")).toBeNull();
+  });
+
   it("fails closed instead of guessing E1 when child recovery is unverified", async () => {
     const child = showTybwChildWithHistory("s17e7");
     episodePickerMode.real = true;
@@ -1491,6 +1569,22 @@ describe("Detail base render", () => {
     await userEvent.click(screen.getByRole("button", { name: /Episodes/ }));
     expect(screen.queryByTestId("streampicker")).not.toBeInTheDocument();
     expect(episodeTrigger).toHaveFocus();
+  });
+
+  it("routes the source page open, close, and Escape controls through app history", async () => {
+    mockDetailItem = preview("s1", { type: "series", title: "The Series", tmdbId: 200 });
+    mockDetail = detailState({ item: mediaItem({ type: "series", id: "s1", tmdbId: 200 }) });
+    render(<Detail />);
+
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    expect(openDetailSources).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole("button", { name: /Episodes/ }));
+    expect(closeDetailSources).toHaveBeenCalledTimes(1);
+
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await userEvent.keyboard("{Escape}");
+    expect(closeDetailSources).toHaveBeenCalledTimes(2);
+    expect(closeDetail).not.toHaveBeenCalled();
   });
 
   it("inerts and restores both Detail content regions around the streams portal", async () => {

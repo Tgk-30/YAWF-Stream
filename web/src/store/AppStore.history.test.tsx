@@ -76,10 +76,16 @@ vi.mock("../storage/ProfileRegistry", () => ({
 const item: MediaPreview = {
   id: "history-test-title",
   title: "History test title",
-  type: "movie",
+  type: "series",
   year: 2024,
   posterPath: null,
   backdropPath: null,
+};
+
+const replacementItem: MediaPreview = {
+  ...item,
+  id: "history-replacement-title",
+  title: "History replacement title",
 };
 
 function HistoryHarness() {
@@ -92,6 +98,12 @@ function HistoryHarness() {
         {store.browseFiltersOpen ? "open" : "closed"}
       </output>
       <output data-testid="detail">{store.detailItem?.id ?? "none"}</output>
+      <output data-testid="detail-sources">
+        {store.detailSourcesOpen ? "open" : "closed"}
+      </output>
+      <output data-testid="detail-player">
+        {store.detailPlayerOpen ? "open" : "closed"}
+      </output>
       <button
         type="button"
         onClick={() =>
@@ -102,6 +114,18 @@ function HistoryHarness() {
       </button>
       <button type="button" onClick={() => store.openDetail(item)}>
         detail
+      </button>
+      <button type="button" onClick={() => store.openDetail(replacementItem)}>
+        replacement detail
+      </button>
+      <button type="button" onClick={store.openDetailSources}>
+        sources
+      </button>
+      <button type="button" onClick={store.closeDetailSources}>
+        episodes
+      </button>
+      <button type="button" onClick={store.openDetailPlayer}>
+        player
       </button>
       <button type="button" onClick={store.openBrowseFilters}>
         filters
@@ -264,5 +288,58 @@ describe("AppStore browser history", () => {
 
     expect(screen.getByTestId("browse")).toHaveTextContent("category");
     expect(screen.getByTestId("detail")).toHaveTextContent(item.id);
+  });
+
+  it("treats a series source page as a replayable Detail history layer", async () => {
+    const pushState = vi.spyOn(window.history, "pushState");
+    render(
+      <AppStoreProvider>
+        <HistoryHarness />
+      </AppStoreProvider>,
+    );
+    fireEvent.click(screen.getByText("detail"));
+    fireEvent.click(screen.getByText("sources"));
+
+    expect(screen.getByTestId("detail")).toHaveTextContent(item.id);
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("open");
+    expect(readNavigationHistoryEntry(window.history.state)?.layer)
+      .toBe("detail-sources");
+    const pushesBeforeReplay = pushState.mock.calls.length;
+
+    await act(async () => {
+      const popped = new Promise<void>((resolve) => {
+        window.addEventListener("popstate", () => resolve(), { once: true });
+      });
+      fireEvent.click(screen.getByText("episodes"));
+      await popped;
+    });
+    expect(screen.getByTestId("detail")).toHaveTextContent(item.id);
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("closed");
+
+    await browserForward();
+    expect(screen.getByTestId("detail")).toHaveTextContent(item.id);
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("open");
+    expect(pushState).toHaveBeenCalledTimes(pushesBeforeReplay);
+
+    fireEvent.click(screen.getByText("player"));
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("closed");
+    expect(screen.getByTestId("detail-player")).toHaveTextContent("open");
+    expect(readNavigationHistoryEntry(window.history.state)?.layer)
+      .toBe("detail-player-sources");
+
+    await browserBack();
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("open");
+    expect(screen.getByTestId("detail-player")).toHaveTextContent("closed");
+
+    await browserForward();
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("closed");
+    expect(screen.getByTestId("detail-player")).toHaveTextContent("closed");
+
+    await browserBack();
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("open");
+    await browserBack();
+    fireEvent.click(screen.getByText("replacement detail"));
+    expect(screen.getByTestId("detail")).toHaveTextContent(replacementItem.id);
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("closed");
   });
 });

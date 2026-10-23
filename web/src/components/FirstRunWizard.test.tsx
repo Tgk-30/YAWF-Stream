@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 //
 // Component coverage for the Local-Mode persona first-run wizard. Verifies the
-// choose step renders all five personas, each persona routes correctly (device =
+// chooser gates local hosting by native desktop capability, each path routes correctly (device =
 // forced catalog→streaming key steps, advanced = finish + navigate to settings,
 // connect/host = sub steps), skip requires a confirm step, the connect-step
-// validation/direct-navigation flow, and the host-step desktop-vs-web copy.
+// validation/direct-navigation flow, and the supported desktop host handoff.
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -43,10 +43,39 @@ vi.mock("../lib/serverMode", () => ({
     saveServerURL(url, options),
 }));
 
-const isTauriMock = vi.fn(() => false);
-vi.mock("../lib/tauri", () => ({
-  isTauri: () => isTauriMock(),
-}));
+// Exercise the actual shared native-desktop capability, not a mocked UA gate.
+const MAC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/26.0 Safari/605.1.15";
+function configureRuntime({
+  native = false,
+  userAgent = MAC_UA,
+  platform = "MacIntel",
+  maxTouchPoints = 0,
+  standalone = false,
+  mobileMarker = false,
+}: {
+  native?: boolean;
+  userAgent?: string;
+  platform?: string;
+  maxTouchPoints?: number;
+  standalone?: boolean;
+  mobileMarker?: boolean;
+} = {}) {
+  vi.stubGlobal("navigator", { userAgent, platform, maxTouchPoints, standalone });
+  const runtime = window as unknown as Record<string, unknown>;
+  delete runtime.__TAURI_INTERNALS__;
+  delete runtime.__TAURI__;
+  delete runtime.__YAWF_TAURI_MOBILE__;
+  if (native) runtime.__TAURI_INTERNALS__ = {};
+  if (mobileMarker) runtime.__YAWF_TAURI_MOBILE__ = true;
+}
+beforeEach(() => configureRuntime());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  const runtime = window as unknown as Record<string, unknown>;
+  delete runtime.__TAURI_INTERNALS__;
+  delete runtime.__TAURI__;
+  delete runtime.__YAWF_TAURI_MOBILE__;
+});
 
 vi.mock("../lib/onboardingValidation", () => ({
   testTmdbKey: vi.fn(),
@@ -88,14 +117,14 @@ async function reachStreamingStep(user: ReturnType<typeof userEvent.setup>) {
 describe("FirstRunWizard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    isTauriMock.mockReturnValue(false);
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];
     tmdbService = null;
   });
 
-  it("renders the choose step with all five personas and a skip button", () => {
+  it("renders all five personas and a skip button on a supported desktop", () => {
+    configureRuntime({ native: true });
     render(<FirstRunWizard onDone={() => {}} />);
     expect(
       screen.getByText("How do you want to use YAWF Stream?"),
@@ -108,6 +137,63 @@ describe("FirstRunWizard", () => {
     expect(screen.getByRole("button", { name: "Skip for now" })).toBeInTheDocument();
     expect(screen.getByText("Just watch on this device").closest("button")).toHaveClass("is-recommended");
     expect(screen.getByText("Quick setup").closest("button")).not.toHaveClass("is-recommended");
+  });
+
+  it.each([
+    { name: "iPad Safari desktop-shaped UA", maxTouchPoints: 5 },
+    { name: "iPad installed PWA", maxTouchPoints: 5, standalone: true },
+    { name: "iPad native desktop-shaped UA", maxTouchPoints: 5, native: true },
+    { name: "Android browser", userAgent: "Mozilla/5.0 (Linux; Android 16)", platform: "Linux armv8l", maxTouchPoints: 5 },
+    { name: "Android native", userAgent: "Mozilla/5.0 (Linux; Android 16)", platform: "Linux armv8l", maxTouchPoints: 5, native: true, mobileMarker: true },
+    { name: "legacy Android native", userAgent: "Mozilla/5.0 (Linux; Android 16)", platform: "Linux armv8l", maxTouchPoints: 5, native: true },
+    { name: "native mobile marker with desktop-shaped UA", native: true, mobileMarker: true },
+    { name: "desktop browser" },
+  ])("offers Connect without on-device hosting on $name", async (runtime) => {
+    configureRuntime(runtime);
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    render(<FirstRunWizard forced onDone={onDone} />);
+    expect(screen.queryByRole("button", { name: /Host for my family/ })).toBeNull();
+    expect(screen.queryByText(/Run the server on this computer/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Connect to a server/ })).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: /Connect to a server/ }));
+    expect(screen.getByRole("heading", { name: "Connect to a server" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Server address")).toBeEnabled();
+    expect(onDone).not.toHaveBeenCalled();
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "macOS native", platform: "MacIntel" },
+    { name: "Windows native", platform: "Win32", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+    { name: "Linux native", platform: "Linux x86_64", userAgent: "Mozilla/5.0 (X11; Linux x86_64)" },
+  ])("preserves the desktop hosting handoff on $name", async (runtime) => {
+    configureRuntime({ ...runtime, native: true });
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    render(<FirstRunWizard onDone={onDone} />);
+    expect(screen.getByRole("button", { name: /Connect to a server/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Host for my family/ })).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: /Host for my family/ }));
+    expect(screen.getByText(/This computer can serve YAWF Stream/)).toBeInTheDocument();
+    expect(onDone).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Open Settings" }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith("settings");
+  });
+
+  it("leaves a stale hosting step when the desktop capability is no longer available", async () => {
+    configureRuntime({ native: true });
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    const { rerender } = render(<FirstRunWizard onDone={onDone} />);
+    await user.click(screen.getByRole("button", { name: /Host for my family/ }));
+    configureRuntime({ maxTouchPoints: 5 });
+    rerender(<FirstRunWizard onDone={onDone} />);
+    expect(screen.queryByRole("heading", { name: "Host for your household" })).toBeNull();
+    expect(screen.getByRole("button", { name: /Connect to a server/ })).toBeInTheDocument();
+    expect(onDone).not.toHaveBeenCalled();
+    expect(updateSettings).not.toHaveBeenCalled();
   });
 
   it("Quick setup requires acknowledgement, performs no validation, and persists the deliberate route", async () => {
@@ -531,22 +617,19 @@ describe("FirstRunWizard", () => {
     vi.unstubAllGlobals();
   });
 
-  it("'host' persona shows the web copy when not running under Tauri", async () => {
+  it("does not offer local hosting in a plain browser and keeps server connection available", async () => {
     const user = userEvent.setup();
-    isTauriMock.mockReturnValue(false);
     render(<FirstRunWizard onDone={() => {}} />);
-    await user.click(screen.getByRole("button", { name: /Host for my family/i }));
-    expect(
-      screen.getByRole("heading", { name: "Host for your household" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/released macOS and Linux desktop apps/),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Host for my family/i })).toBeNull();
+    expect(screen.queryByText(/Run the server on this computer/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Connect to a server/ })).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: /Connect to a server/ }));
+    expect(screen.getByLabelText("Server address")).toBeInTheDocument();
   });
 
   it("'host' persona shows the desktop copy under Tauri", async () => {
     const user = userEvent.setup();
-    isTauriMock.mockReturnValue(true);
+    configureRuntime({ native: true });
     render(<FirstRunWizard onDone={() => {}} />);
     await user.click(screen.getByRole("button", { name: /Host for my family/i }));
     expect(
@@ -555,6 +638,7 @@ describe("FirstRunWizard", () => {
   });
 
   it("'host' persona enters host mode without finishing onboarding", async () => {
+    configureRuntime({ native: true });
     const user = userEvent.setup();
     const onDone = vi.fn();
     render(<FirstRunWizard onDone={onDone} />);
@@ -566,6 +650,7 @@ describe("FirstRunWizard", () => {
   });
 
   it("host step Continue finishes simple + navigates to settings", async () => {
+    configureRuntime({ native: true });
     const user = userEvent.setup();
     const onDone = vi.fn();
     render(<FirstRunWizard onDone={onDone} />);
@@ -579,6 +664,7 @@ describe("FirstRunWizard", () => {
   });
 
   it("host step Back returns to the choose screen", async () => {
+    configureRuntime({ native: true });
     const user = userEvent.setup();
     render(<FirstRunWizard onDone={() => {}} />);
     await user.click(screen.getByRole("button", { name: /Host for my family/i }));
@@ -592,7 +678,6 @@ describe("FirstRunWizard", () => {
 describe("FirstRunWizard - forced key gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    isTauriMock.mockReturnValue(false);
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];
@@ -714,7 +799,6 @@ describe("FirstRunWizard - forced key gate", () => {
 describe("FirstRunWizard - forced advanced/host route through keys", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    isTauriMock.mockReturnValue(false);
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];
@@ -750,6 +834,7 @@ describe("FirstRunWizard - forced advanced/host route through keys", () => {
   });
 
   it("forced Host explains hosting, then collects keys before Settings", async () => {
+    configureRuntime({ native: true });
     const user = userEvent.setup();
     const onDone = vi.fn();
     render(<FirstRunWizard forced onDone={onDone} />);
@@ -772,7 +857,6 @@ describe("FirstRunWizard - forced advanced/host route through keys", () => {
 describe("FirstRunWizard - optional AI step", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    isTauriMock.mockReturnValue(false);
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];

@@ -5,7 +5,7 @@
 // useEpisodes degrade-to-"none" contract.
 
 import { describe, expect, it, vi } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 
 vi.mock("../lib/serverMode", () => ({
   isServerMode: () => mockServerMode,
@@ -193,6 +193,48 @@ describe("useSeasons / useEpisodes", () => {
       expect(result.current.source).toBe("live");
     } finally {
       mockServerMode = false;
+    }
+  });
+
+  it("retries the same exact season guide owner after an outage", async () => {
+    mockServerMode = true;
+    mockFetchServerSeasons.mockReset();
+    try {
+      mockFetchServerSeasons
+        .mockRejectedValueOnce(new Error("temporary outage"))
+        .mockResolvedValueOnce({
+          seasons: [{ id: 1, seasonNumber: 1, name: "Season 1", episodeCount: 13 }],
+          numbering: "cinemeta",
+          guideVersion: "2",
+        });
+      const seasons = renderHook(() =>
+        useSeasons(215105, true, null, "tt14986406"),
+      );
+      await waitFor(() => expect(seasons.result.current.loading).toBe(false));
+      expect(seasons.result.current).toMatchObject({ seasons: [], source: "none" });
+
+      act(() => seasons.result.current.retry());
+      expect(seasons.result.current).toMatchObject({
+        seasons: [], loading: true, source: "none",
+      });
+      await waitFor(() => expect(seasons.result.current.source).toBe("live"));
+      expect(seasons.result.current.seasons[0]).toMatchObject({
+        seasonNumber: 1,
+        episodeCount: 13,
+      });
+      expect(mockFetchServerSeasons).toHaveBeenCalledTimes(2);
+      expect(mockFetchServerSeasons).toHaveBeenNthCalledWith(1, {
+        tmdbId: 215105,
+        imdbId: "tt14986406",
+      });
+      expect(mockFetchServerSeasons).toHaveBeenNthCalledWith(2, {
+        tmdbId: 215105,
+        imdbId: "tt14986406",
+      });
+      seasons.unmount();
+    } finally {
+      mockServerMode = false;
+      mockFetchServerSeasons.mockReset();
     }
   });
 

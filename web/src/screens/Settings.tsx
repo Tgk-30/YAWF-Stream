@@ -136,6 +136,12 @@ import {
 } from "../lib/tauri";
 import { getDownloadsBridge } from "../lib/downloadsBridge";
 import { getAppVersion } from "../lib/appVersion";
+import { usePlayerMounted } from "../lib/attention";
+import {
+  assertBrowserAppRefreshAllowed,
+  prepareBrowserAppRefresh,
+  reloadBrowserAppPage,
+} from "../lib/browserAppRefresh";
 import {
   buildDiagnosticsReport,
   downloadDiagnosticsReport,
@@ -433,6 +439,7 @@ export function Settings() {
   } = useAppStore();
   const serverSession = useServerSession();
   const setServerSession = useSetServerSession();
+  const playerMounted = usePlayerMounted();
   // Land where the user's next step is: an unconfigured profile (no debrid
   // token yet) opens on Install & setup - the critical path - instead of the
   // Appearance dial-park. Configured profiles keep the familiar default.
@@ -663,6 +670,13 @@ export function Settings() {
             patch={patch}
             debrid={services?.debrid ?? null}
             appVersion={appVersion ?? __APP_VERSION__}
+            hasUnsavedChanges={hasUnsavedChanges}
+            playerMounted={playerMounted}
+            refreshOwnerKey={
+              serverSession?.profileId != null
+                ? `server:${serverSession.profileId}`
+                : `local:${activeProfile?.id ?? "none"}`
+            }
           />
         )}
         {tab === "server" && (
@@ -1137,13 +1151,115 @@ function UpdatesTab({
   patch,
   debrid,
   appVersion,
-}: TabProps & { debrid: DebridManager | null; appVersion: string }) {
+  hasUnsavedChanges,
+  playerMounted,
+  refreshOwnerKey,
+}: TabProps & {
+  debrid: DebridManager | null;
+  appVersion: string;
+  hasUnsavedChanges: boolean;
+  playerMounted: boolean;
+  refreshOwnerKey: string;
+}) {
   const [smokeResults, setSmokeResults] = useState<ProviderSmokeResult[] | null>(null);
   const [smokeRunning, setSmokeRunning] = useState(false);
   const [diagnosticsStatus, setDiagnosticsStatus] = useState<string | null>(null);
   const desktop = isDesktopTauri();
   const androidUpdater = hasLocalAndroidUpdater();
+  const browserRefresh = !isTauri() && !androidUpdater;
   const [androidUpdateStatus, setAndroidUpdateStatus] = useState<string | null>(null);
+  const [browserRefreshRunning, setBrowserRefreshRunning] = useState(false);
+  const [browserRefreshStatus, setBrowserRefreshStatus] = useState<string | null>(null);
+  const browserRefreshRequest = useRef(0);
+  const browserRefreshRunningRef = useRef(false);
+  const browserRefreshMountedRef = useRef(false);
+  const browserRefreshOwnerRef = useRef(refreshOwnerKey);
+  const browserRefreshGuardsRef = useRef({
+    hasUnsavedChanges,
+    playerMounted,
+    refreshOwnerKey,
+  });
+
+  useLayoutEffect(() => {
+    browserRefreshGuardsRef.current = {
+      hasUnsavedChanges,
+      playerMounted,
+      refreshOwnerKey,
+    };
+  }, [hasUnsavedChanges, playerMounted, refreshOwnerKey]);
+
+  useLayoutEffect(() => {
+    if (browserRefreshOwnerRef.current === refreshOwnerKey) return;
+    browserRefreshOwnerRef.current = refreshOwnerKey;
+    browserRefreshRequest.current += 1;
+    browserRefreshRunningRef.current = false;
+    setBrowserRefreshRunning(false);
+    setBrowserRefreshStatus(null);
+  }, [refreshOwnerKey]);
+
+  useEffect(() => {
+    browserRefreshMountedRef.current = true;
+    return () => {
+      browserRefreshMountedRef.current = false;
+      browserRefreshRequest.current += 1;
+      browserRefreshRunningRef.current = false;
+    };
+  }, []);
+
+  function browserRefreshIsCurrent(request: number, owner: string): boolean {
+    return (
+      browserRefreshMountedRef.current &&
+      browserRefreshRequest.current === request &&
+      browserRefreshGuardsRef.current.refreshOwnerKey === owner
+    );
+  }
+
+  async function refreshBrowserApp(): Promise<void> {
+    if (!browserRefresh || browserRefreshRunningRef.current) return;
+    const startingGuards = browserRefreshGuardsRef.current;
+    if (startingGuards.hasUnsavedChanges || startingGuards.playerMounted) return;
+
+    browserRefreshRunningRef.current = true;
+    setBrowserRefreshRunning(true);
+    setBrowserRefreshStatus("Checking the current app files before reloading...");
+    const request = browserRefreshRequest.current + 1;
+    browserRefreshRequest.current = request;
+    const owner = startingGuards.refreshOwnerKey;
+
+    try {
+      await prepareBrowserAppRefresh();
+      if (!browserRefreshIsCurrent(request, owner)) return;
+      const latestGuards = browserRefreshGuardsRef.current;
+      if (latestGuards.hasUnsavedChanges) {
+        setBrowserRefreshStatus(
+          "Reload cancelled because settings changed. Save them, then try again.",
+        );
+        return;
+      }
+      if (latestGuards.playerMounted) {
+        setBrowserRefreshStatus(
+          "Reload cancelled because a player opened. Close it, then try again.",
+        );
+        return;
+      }
+      assertBrowserAppRefreshAllowed();
+      if (!browserRefreshIsCurrent(request, owner)) return;
+      setBrowserRefreshStatus("Reloading this page...");
+      reloadBrowserAppPage();
+    } catch (error) {
+      if (!browserRefreshIsCurrent(request, owner)) return;
+      setBrowserRefreshStatus(
+        error instanceof Error && error.name === "BrowserAppRefreshTimeoutError"
+          ? error.message
+          : "Could not reload the app. Check your connection or privacy mode, then try again.",
+      );
+    } finally {
+      if (browserRefreshIsCurrent(request, owner)) {
+        browserRefreshRunningRef.current = false;
+        setBrowserRefreshRunning(false);
+      }
+    }
+  }
 
   async function runProviderChecks() {
     if (debrid == null || smokeRunning) return;
@@ -1217,10 +1333,43 @@ function UpdatesTab({
             Check for Android updates
           </button>
         </section>
+      ) : browserRefresh ? (
+        <section
+          className="settings-section settings-install-card glass-rest"
+          aria-labelledby="browser-app-refresh-title"
+        >
+          <div>
+            <h2 id="browser-app-refresh-title">Refresh browser app</h2>
+            <p className="settings-hint">
+              Browser and installed PWA screens are delivered by your configured
+              web server. Reloading asks an existing service worker to check first,
+              then reloads this same page. It does not install or confirm a newer build.
+            </p>
+            <p className="settings-hint">
+              {hasUnsavedChanges
+                ? "Save your settings changes before reloading."
+                : playerMounted
+                  ? "Close the active player before reloading."
+                  : "Your profiles, login, storage, and offline files are left intact."}
+            </p>
+            {browserRefreshStatus && (
+              <p className="settings-status" role="status">
+                {browserRefreshStatus}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => void refreshBrowserApp()}
+            disabled={hasUnsavedChanges || playerMounted || browserRefreshRunning}
+          >
+            {browserRefreshRunning ? "Preparing reload..." : "Reload app"}
+          </button>
+        </section>
       ) : (
         <SettingsInfo label="About desktop updates">
-          Desktop builds use signed release metadata from GitHub Releases. Browser
-          and PWA installs update through the web server instead.
+          Desktop builds use signed release metadata from GitHub Releases.
         </SettingsInfo>
       )}
 
@@ -1240,7 +1389,7 @@ function UpdatesTab({
         </p>
       </section>
 
-      {!androidUpdater && <><label className="settings-toggle-row">
+      {desktop && <><label className="settings-toggle-row">
         <input
           type="checkbox"
           checked={draft.autoUpdateChecks}
@@ -2376,7 +2525,7 @@ function InstallTab({ onOpenUpdates }: { onOpenUpdates: () => void }) {
                   {nativeAndroidApp
                     ? "YAWF Stream is installed. Open Help & updates to check for signed Android updates."
                     : installed
-                    ? "This server is already running as an installed app."
+                    ? "This web app is already installed on this device."
                     : primary.body}
                 </p>
               </div>

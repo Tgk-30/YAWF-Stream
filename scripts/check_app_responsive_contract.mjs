@@ -186,6 +186,19 @@ const shortLandscapeHeroControlsCss = atRuleBlock(
 );
 const phoneSettingsCss = atRuleBlock(settingsCss, "@media (max-width: 699px) {");
 const compactSettingsCss = atRuleBlock(settingsCss, "@media (max-width: 560px) {");
+const tabletCategorySettingsCss = atRuleBlock(
+  settingsCss,
+  "@media (max-width: 1099px) {",
+);
+const tabletCategoryTabsRule = ruleBlock(tabletCategorySettingsCss, ".settings-tabs");
+const tabletCategorySelectRule = ruleBlock(tabletCategorySettingsCss, ".settings-tab-select");
+const tabletCategorySelectInputRule = ruleBlock(
+  tabletCategorySettingsCss,
+  ".settings-tab-select select",
+);
+const desktopSettingsCss = atRuleBlock(settingsCss, "@media (min-width: 1100px) {");
+const desktopSettingsTabsRule = ruleBlock(desktopSettingsCss, ".settings-tabs");
+const desktopSettingsSelectRule = ruleBlock(desktopSettingsCss, ".settings-tab-select");
 const shortLandscapeSettingsCss = atRuleBlock(
   settingsCss,
   "@media (min-width: 700px) and (max-width: 950px) and (max-height: 500px) {",
@@ -268,10 +281,21 @@ check(
 );
 
 check(
+  "tablet and desktop setup reminder stays inside the available app content",
+  /left:\s*calc\(var\(--nav-safe-left\)\s*\+\s*var\(--sp-lg\)\)/.test(setupNudgeBaseRule) &&
+    /right:\s*var\(--sp-lg\)/.test(setupNudgeBaseRule) &&
+    /margin-inline:\s*auto/.test(setupNudgeBaseRule) &&
+    /width:\s*min\(\s*680px,\s*calc\(\s*100%\s*-\s*var\(--nav-safe-left\)\s*-\s*var\(--sp-lg\)\s*-\s*var\(--sp-lg\)\s*\)\s*\)/.test(setupNudgeBaseRule) &&
+    /transform:\s*none/.test(setupNudgeBaseRule) &&
+    !/left:\s*50%/.test(setupNudgeBaseRule),
+  "SetupNudge.css must center the fixed reminder between the current nav-safe left edge and the right content edge without a viewport-centered transform.",
+);
+
+check(
   "mobile setup and install cards stay above navigation without clipping",
-  /@media\s*\(max-width:\s*640px\)[\s\S]*bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(setupNudgeCss) &&
+  /@media\s*\(max-width:\s*640px\)[\s\S]*right:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-right\)\)[\s\S]{0,120}left:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-left\)\)[\s\S]{0,160}bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)[\s\S]{0,260}width:\s*auto[\s\S]{0,180}margin-inline:\s*0[\s\S]{0,100}transform:\s*none[\s\S]{0,800}grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[\s\S]{0,500}min-height:\s*44px/.test(setupNudgeCss) &&
     /@media\s*\(max-width:\s*699px\)[\s\S]*bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)/.test(installPromptCss),
-  "SetupNudge.css and InstallPrompt.css must clear the floating nav and keep phone actions within their cards.",
+  "SetupNudge.css and InstallPrompt.css must clear the floating nav, reset desktop centering inside native phone insets, and keep 44px phone actions within their cards.",
 );
 
 check(
@@ -484,6 +508,18 @@ check(
     /@media\s*\(max-width:\s*560px\)[\s\S]*\.settings-mobile-picker\s*\{[\s\S]*display:\s*flex/.test(settingsCss) &&
     /\.settings-subsection-picker\.is-option-only \.settings-option-strip\s*\{[\s\S]*display:\s*none/.test(settingsCss),
   "Settings mobile layouts must show the selector and hide dense option-card strips.",
+);
+
+check(
+  "tablet Settings replaces clipped category chips with the native selector",
+  /display:\s*none/.test(tabletCategoryTabsRule) &&
+    /display:\s*flex/.test(tabletCategorySelectRule) &&
+    /flex-direction:\s*column/.test(tabletCategorySelectRule) &&
+    /min-height:\s*44px/.test(tabletCategorySelectInputRule) &&
+    !/\.(?:settings-screen|settings-header|settings-panel|settings-footer|settings-mobile-picker)\s*\{/.test(tabletCategorySettingsCss) &&
+    /flex-direction:\s*column/.test(desktopSettingsTabsRule) &&
+    /display:\s*none/.test(desktopSettingsSelectRule),
+  "Settings.css must use the existing category select through 1099px without widening phone-only layout rules or changing the 1100px desktop sidebar.",
 );
 
 check(

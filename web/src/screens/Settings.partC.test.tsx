@@ -566,6 +566,12 @@ describe("Settings · Install (setup paths)", () => {
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Install app" })).not.toBeInTheDocument(),
     );
+    expect(
+      await screen.findByText("This web app is already installed on this device."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("This server is already running as an installed app."),
+    ).not.toBeInTheDocument();
   });
 });
 
