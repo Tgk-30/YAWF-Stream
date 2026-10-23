@@ -112,13 +112,15 @@ public final class RuntimeTvFlowTest {
         capture("native-player");
         checks.put("nativePlayerOpened", true);
         revealControls();
+        RuntimeTvUpperVideoRoi.Admission playingFrameRoi =
+                observeFreshNative(this::readUpperVideoRoiAdmission);
         long first = waitForPositionAtLeast(2, MEDIA_WAIT);
-        String firstFrame = centerFrameHash();
+        String firstFrame = upperVideoFrameHash(playingFrameRoi);
         SystemClock.sleep(2_500);
         long second = readPositionSeconds();
-        String secondFrame = centerFrameHash();
+        String secondFrame = upperVideoFrameHash(playingFrameRoi);
         assertTrue("Playback position did not advance", second >= first + 1);
-        assertTrue("Decoded center frame did not change while playback advanced",
+        assertTrue("Decoded upper-video ROI did not change while playback advanced",
                 !firstFrame.equals(secondFrame));
         checks.put("playingPositionAdvanced", true);
         checks.put("decodedFrameChanged", true);
@@ -128,11 +130,15 @@ public final class RuntimeTvFlowTest {
         waitForNative(playPauseSelector("Pause"), 5_000, "semantic Pause state before pausing");
         focusNativeAndActivate(playPauseSelector("Pause"), "Pause", 14);
         waitForNative(playPauseSelector("Play"), 5_000, "semantic Play state after pausing");
+        RuntimeTvUpperVideoRoi.Admission pausedFrameRoi =
+                observeFreshNative(this::readUpperVideoRoiAdmission);
         long pausedStart = readPositionSeconds();
-        String pausedFrame = centerFrameHash("pause-hash-before", pausedStart);
+        String pausedFrame = upperVideoFrameHash(
+                pausedFrameRoi, "pause-hash-before", pausedStart);
         SystemClock.sleep(3_000);
         long pausedEnd = readPositionSeconds();
-        String pausedFrameAfter = centerFrameHash("pause-hash-after", pausedEnd);
+        String pausedFrameAfter = upperVideoFrameHash(
+                pausedFrameRoi, "pause-hash-after", pausedEnd);
         assertTrue("Position advanced materially while paused", Math.abs(pausedEnd - pausedStart) <= 1);
         assertEquals("Decoded content changed while paused", pausedFrame, pausedFrameAfter);
         checks.put("pauseStable", true);
@@ -289,6 +295,12 @@ public final class RuntimeTvFlowTest {
         return By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE);
     }
 
+    private BySelector nativeCenterControlsSelector() {
+        return By.res(PRODUCT_PACKAGE, "exo_center_controls")
+                .pkg(PRODUCT_PACKAGE)
+                .clazz("android.widget.LinearLayout");
+    }
+
     private BySelector nativeSettingsListSelector() {
         return By.res(PRODUCT_PACKAGE, "exo_settings_listview")
                 .pkg(PRODUCT_PACKAGE)
@@ -396,6 +408,58 @@ public final class RuntimeTvFlowTest {
                 contentFrameVisible,
                 videoSurfaceCount,
                 videoSurfaceVisible);
+    }
+
+    private RuntimeTvUpperVideoRoi.Admission readUpperVideoRoiAdmission() {
+        String foregroundPackage = device.getCurrentPackageName();
+        List<RuntimeTvUpperVideoRoi.Candidate> candidateSnapshots = new ArrayList<>();
+        List<UiObject2> roots = device.findObjects(nativePlayerSurfaceRootSelector());
+        for (UiObject2 root : roots) {
+            RuntimeTvNativeSurface.Candidate nativeSurface =
+                    readNativePlayerSurfaceCandidate(root);
+
+            List<RuntimeTvUpperVideoRoi.Node> contentFrameSnapshots = new ArrayList<>();
+            List<RuntimeTvUpperVideoRoi.Node> videoSurfaceSnapshots = new ArrayList<>();
+            List<UiObject2> contentFrames = root.findObjects(nativeContentFrameSelector());
+            for (UiObject2 contentFrame : contentFrames) {
+                contentFrameSnapshots.add(snapshotUpperVideoRoiNode(contentFrame));
+                List<UiObject2> videoSurfaces = contentFrame.findObjects(
+                        nativeVideoSurfaceSelector());
+                for (UiObject2 videoSurface : videoSurfaces) {
+                    videoSurfaceSnapshots.add(snapshotUpperVideoRoiNode(videoSurface));
+                }
+            }
+
+            List<RuntimeTvUpperVideoRoi.Node> centerControlSnapshots = new ArrayList<>();
+            List<UiObject2> controllers = root.findObjects(nativePlayerControllerSelector());
+            if (controllers.size() == 1) {
+                UiObject2 controller = controllers.get(0);
+                List<UiObject2> centerControls = controller.findObjects(
+                        nativeCenterControlsSelector());
+                for (UiObject2 centerControl : centerControls) {
+                    centerControlSnapshots.add(snapshotUpperVideoRoiNode(centerControl));
+                }
+            }
+
+            candidateSnapshots.add(new RuntimeTvUpperVideoRoi.Candidate(
+                    RuntimeTvNativeSurface.admits(nativeSurface),
+                    snapshotUpperVideoRoiNode(root),
+                    contentFrameSnapshots,
+                    videoSurfaceSnapshots,
+                    centerControlSnapshots));
+        }
+        return RuntimeTvUpperVideoRoi.admit(foregroundPackage, candidateSnapshots);
+    }
+
+    private RuntimeTvUpperVideoRoi.Node snapshotUpperVideoRoiNode(UiObject2 node) {
+        Rect bounds = node.getVisibleBounds();
+        return new RuntimeTvUpperVideoRoi.Node(
+                node.getApplicationPackage(),
+                node.getResourceName(),
+                node.getClassName(),
+                !bounds.isEmpty(),
+                new RuntimeTvUpperVideoRoi.Bounds(
+                        bounds.left, bounds.top, bounds.right, bounds.bottom));
     }
 
     private void revealControls() {
@@ -883,19 +947,25 @@ public final class RuntimeTvFlowTest {
         }
     }
 
-    private String centerFrameHash() throws Exception {
-        return centerFrameHash(null, -1);
+    private String upperVideoFrameHash(RuntimeTvUpperVideoRoi.Admission admission)
+            throws Exception {
+        return upperVideoFrameHash(admission, null, -1);
     }
 
-    private String centerFrameHash(String evidenceLabel, long observedPositionSeconds) throws Exception {
+    private String upperVideoFrameHash(
+            RuntimeTvUpperVideoRoi.Admission admission,
+            String evidenceLabel,
+            long observedPositionSeconds) throws Exception {
         long screenshotStartedAt = SystemClock.uptimeMillis();
         Bitmap image = instrumentation.getUiAutomation().takeScreenshot();
         long screenshotCompletedAt = SystemClock.uptimeMillis();
         assertNotNull("UiAutomation screenshot unavailable", image);
-        int left = image.getWidth() / 4;
-        int top = image.getHeight() / 4;
-        int width = image.getWidth() / 2;
-        int height = image.getHeight() / 2;
+        RuntimeTvUpperVideoRoi.Bounds roi = RuntimeTvUpperVideoRoi.validateScreenshot(
+                admission, image.getWidth(), image.getHeight());
+        int left = roi.left;
+        int top = roi.top;
+        int width = roi.width();
+        int height = roi.height();
         int[] pixels = new int[width * height];
         image.getPixels(pixels, 0, width, left, top, width, height);
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -912,15 +982,27 @@ public final class RuntimeTvFlowTest {
             sample.put("screenshotStartedAtUptimeMillis", screenshotStartedAt);
             sample.put("screenshotCompletedAtUptimeMillis", screenshotCompletedAt);
             sample.put("precedingNativePositionSeconds", observedPositionSeconds);
-            sample.put("centerArgbSha256", hash);
+            sample.put("upperVideoArgbSha256", hash);
             sample.put("cropLeft", left);
             sample.put("cropTop", top);
             sample.put("cropWidth", width);
             sample.put("cropHeight", height);
-            sample.put("stateObservationScope", "Exact native Play required before first sample; sampler performs no additional UI reads");
+            sample.put("contentFrameBounds", boundsJson(admission.contentFrameBounds));
+            sample.put("videoSurfaceBounds", boundsJson(admission.videoSurfaceBounds));
+            sample.put("centerControlsBounds", boundsJson(admission.centerControlsBounds));
+            sample.put("stateObservationScope", "Exact native Play and upper-video ROI admission required before first sample; sampler performs no UI reads");
             writeText(evidenceLabel + ".json", sample.toString(2) + "\n");
         }
         return hash;
+    }
+
+    private JSONObject boundsJson(RuntimeTvUpperVideoRoi.Bounds bounds) throws Exception {
+        JSONObject value = new JSONObject();
+        value.put("left", bounds.left);
+        value.put("top", bounds.top);
+        value.put("right", bounds.right);
+        value.put("bottom", bounds.bottom);
+        return value;
     }
 
     private void capture(String label) throws Exception {

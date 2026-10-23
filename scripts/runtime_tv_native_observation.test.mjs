@@ -1055,6 +1055,8 @@ function assertNativeReadSourceContract(
   const nativeWait = method(source, "waitForNativePresence");
   const clock = method(source, "readPositionSeconds");
   const clockReader = method(source, "readPositionSecondsSnapshot");
+  const upperVideoRoiReader = method(source, "readUpperVideoRoiAdmission");
+  const upperVideoRoiNodeReader = method(source, "snapshotUpperVideoRoiNode");
   const flow = method(source, "runFlow");
 
   assert.match(surfaceWaiter,
@@ -1189,6 +1191,9 @@ function assertNativeReadSourceContract(
   assert.match(clockReader, /timeBar -> !timeBar\.getVisibleBounds\(\)\.isEmpty\(\)/);
   assert.match(clockReader, /UiObject2::getContentDescription/);
   assert.match(clockReader, /RuntimeTvClock\.readUniqueVisibleTimeBar\(/);
+  assert.equal((flow.match(/observeFreshNative\(this::readUpperVideoRoiAdmission\)/g) ?? []).length, 2);
+  assert.match(upperVideoRoiReader,
+    /return RuntimeTvUpperVideoRoi\.admit\(foregroundPackage, candidateSnapshots\);/);
 
   for (const reader of [
     surfaceReader,
@@ -1197,6 +1202,8 @@ function assertNativeReadSourceContract(
     scopedFocusReader,
     targetOwnedFocusReader,
     clockReader,
+    upperVideoRoiReader,
+    upperVideoRoiNodeReader,
   ]) {
     assert.doesNotMatch(reader,
       /press(?:DPad|KeyCode|Back)|sendNativeDpadKey|\.click\s*\(|setText\(|capture\(|centerFrameHash\(|log\(|SystemClock\.sleep/);
@@ -1278,7 +1285,7 @@ function assertNativeReadSourceContract(
     'waitFor(closedStatus(), UI_WAIT, "second close event");',
     'waitFor(closedStatus(), UI_WAIT, "recovery close event");',
     'assertTrue("Playback position did not advance", second >= first + 1);',
-    'assertTrue("Decoded center frame did not change while playback advanced",',
+    'assertTrue("Decoded upper-video ROI did not change while playback advanced",',
     'assertTrue("Position advanced materially while paused", Math.abs(pausedEnd - pausedStart) <= 1);',
     'assertEquals("Decoded content changed while paused", pausedFrame, pausedFrameAfter);',
     'assertTrue("D-pad seek did not move by a meaningful delta", afterSeek >= beforeSeek + 10);',

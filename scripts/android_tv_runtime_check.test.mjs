@@ -651,7 +651,7 @@ function assertFirstDpadConnectPolicy(source) {
 function assertJavaSemanticPolicy(source) {
   for (const marker of [
     'assertTrue("Playback position did not advance"',
-    'assertTrue("Decoded center frame did not change while playback advanced"',
+    'assertTrue("Decoded upper-video ROI did not change while playback advanced"',
     'assertTrue("Position advanced materially while paused"',
     'assertTrue("D-pad seek did not move by a meaningful delta"',
     'assertTrue("Back did not restore focus to the WebView or one of its descendants"',
