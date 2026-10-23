@@ -296,7 +296,7 @@ const TAB_DESCRIPTIONS: Record<Tab, string> = {
   language: "Interface language, metadata language, and regional release context.",
   playback: "Player behavior, captions, quality, and handoff preferences.",
   privacy: "Network access, local storage, and data controls for this device.",
-  install: "Install YAWF Stream and finish setup on this device.",
+  install: "Manage installation and finish setup on this device.",
   profiles: "Names, avatars, colors, and sign-in protection for this device.",
   updates: "Troubleshooting, diagnostics, version checks, and release status.",
   server: "Hosting, remote access, and shared server settings.",

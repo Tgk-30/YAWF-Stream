@@ -99,7 +99,6 @@ export function Discover({ onSelect }: DiscoverProps) {
                 ) === i
             )
             .slice(0, 5)}
-          onPlay={onSelect}
           onDetails={onSelect}
           suspended={detailItem != null || browseContext != null || attentionParked}
         />

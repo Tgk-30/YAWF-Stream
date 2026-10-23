@@ -167,8 +167,9 @@ export function ScrubBar({
   );
 
   const displayedTime = pointerPreview ?? currentTime;
+  const knownDuration = Number.isFinite(duration) && duration > 0;
   const progress =
-    Number.isFinite(duration) && duration > 0
+    knownDuration
       ? Math.max(0, Math.min(1, displayedTime / duration))
       : 0;
 
@@ -224,7 +225,11 @@ export function ScrubBar({
         aria-valuemin={0}
         aria-valuemax={Number.isFinite(duration) ? Math.floor(duration) : 0}
         aria-valuenow={Math.floor(displayedTime)}
-        aria-valuetext={formatTime(displayedTime)}
+        aria-valuetext={
+          knownDuration
+            ? `${formatTime(displayedTime)} of ${formatTime(duration)}`
+            : formatTime(displayedTime)
+        }
         tabIndex={disabled ? -1 : 0}
       >
         <div className="scrubbar-track">

@@ -281,27 +281,35 @@ describe("HeroSpotlight dot navigation & hover pause", () => {
 });
 
 describe("HeroSpotlight Play / More handlers", () => {
-  it("calls onPlay with the active item", () => {
+  it("keeps Play primary when both actions are available", () => {
     const onPlay = vi.fn();
-    render(<HeroSpotlight items={items} onPlay={onPlay} />);
-    fireEvent.click(screen.getByRole("button", { name: /Play/ }));
+    const onDetails = vi.fn();
+    render(<HeroSpotlight items={items} onPlay={onPlay} onDetails={onDetails} />);
+    const play = screen.getByRole("button", { name: /Play/ });
+    const details = screen.getByRole("button", { name: /More info/ });
+    expect(play).toHaveClass("btn-prominent");
+    expect(details).not.toHaveClass("btn-prominent");
+    fireEvent.click(play);
     expect(onPlay).toHaveBeenCalledTimes(1);
     expect(onPlay).toHaveBeenCalledWith(items[0]);
   });
 
-  it("calls onDetails with the active item", () => {
+  it("makes More info primary when no real Play action is available", () => {
     const onDetails = vi.fn();
     render(<HeroSpotlight items={items} onDetails={onDetails} />);
-    fireEvent.click(screen.getByRole("button", { name: /More info/ }));
+    expect(screen.queryByRole("button", { name: /Play/ })).toBeNull();
+    const details = screen.getByRole("button", { name: /More info/ });
+    expect(details).toHaveClass("btn-prominent");
+    fireEvent.click(details);
     expect(onDetails).toHaveBeenCalledTimes(1);
     expect(onDetails).toHaveBeenCalledWith(items[0]);
   });
 
-  it("does not throw when handlers are omitted", () => {
-    render(<HeroSpotlight items={items} />);
-    fireEvent.click(screen.getByRole("button", { name: /Play/ }));
-    fireEvent.click(screen.getByRole("button", { name: /More info/ }));
-    // No assertion needed beyond not throwing.
+  it("omits the action row when handlers are omitted", () => {
+    const { container } = render(<HeroSpotlight items={items} />);
+    expect(screen.queryByRole("button", { name: /Play/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /More info/ })).toBeNull();
+    expect(container.querySelector(".hero-actions")).toBeNull();
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Alpha");
   });
 

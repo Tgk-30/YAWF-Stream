@@ -66,8 +66,8 @@ vi.mock("../components/HeroSpotlight", () => ({
   HeroSpotlight: ({ items, onPlay, onDetails }: any) => (
     <div data-testid="hero">
       <span data-testid="hero-count">{items.length}</span>
-      <button onClick={() => onPlay?.(items[0])}>hero-play</button>
-      <button onClick={() => onDetails?.(items[0])}>hero-details</button>
+      {onPlay && <button onClick={() => onPlay(items[0])}>hero-play</button>}
+      {onDetails && <button onClick={() => onDetails(items[0])}>hero-details</button>}
     </div>
   ),
 }));
@@ -332,13 +332,14 @@ describe("Discover loaded", () => {
     );
   });
 
-  it("wires hero onPlay/onDetails to onSelect", async () => {
+  it("offers only the real hero details action and forwards it to onSelect", async () => {
     const onSelect = vi.fn();
     mockDiscover = { data: fullData(), loading: false };
     render(<Discover onSelect={onSelect} />);
-    await userEvent.click(screen.getByText("hero-play"));
+    expect(screen.queryByText("hero-play")).toBeNull();
     await userEvent.click(screen.getByText("hero-details"));
-    expect(onSelect).toHaveBeenCalledTimes(2);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: "hero1" }));
   });
 });
 

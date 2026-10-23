@@ -4,6 +4,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
 import { ScrubBar, formatTime } from "./ScrubBar";
 
 function setup(currentTime = 100, duration = 600) {
@@ -58,9 +59,42 @@ describe("ScrubBar keyboard seeking", () => {
     expect(onSeek).toHaveBeenLastCalledWith(0);
   });
 
-  it("exposes a human-readable time via aria-valuetext", () => {
+  it("exposes the elapsed and total time via aria-valuetext when duration is known", () => {
     const { slider } = setup(125, 600);
-    expect(slider).toHaveAttribute("aria-valuetext", "2:05");
+    expect(slider).toHaveAttribute("aria-valuetext", "2:05 of 10:00");
+  });
+
+  it.each([0, Number.NaN, Number.POSITIVE_INFINITY])(
+    "keeps the current-only aria value for an unknown or live duration (%s)",
+    (duration) => {
+      const { slider } = setup(125, duration);
+      expect(slider).toHaveAttribute("aria-valuetext", "2:05");
+    },
+  );
+
+  it("keeps the compact time readout visible across tablet widths", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    const tabletRule = css.match(
+      /@media \(min-width: 561px\) and \(max-width: 900px\) \{([\s\S]*?)\n\}/,
+    );
+    expect(tabletRule).not.toBeNull();
+    expect(tabletRule?.[1]).toContain(".player-volume-control");
+    expect(tabletRule?.[1]).not.toContain(".player-time");
+
+    const narrowTabletQuery =
+      "@media (min-width: 561px) and (max-width: 767px) and (min-height: 501px)";
+    const coarseTabletQuery =
+      "@media (pointer: coarse) and (min-width: 561px) and (min-height: 501px)";
+    const narrowTabletRule = css.match(
+      /@media \(min-width: 561px\) and \(max-width: 767px\) and \(min-height: 501px\) \{([\s\S]*?)\n\}/,
+    );
+    expect(narrowTabletRule).not.toBeNull();
+    expect(narrowTabletRule?.[1]).toContain('"transport transport"');
+    expect(narrowTabletRule?.[1]).toContain('"audio actions"');
+    expect(narrowTabletRule?.[1]).toMatch(/\+\s*92px/);
+    expect(css.indexOf(narrowTabletQuery)).toBeGreaterThan(
+      css.indexOf(coarseTabletQuery),
+    );
   });
 
   it("uses a compositor-friendly scale transform for progress", () => {

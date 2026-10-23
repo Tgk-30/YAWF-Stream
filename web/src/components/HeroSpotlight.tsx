@@ -344,16 +344,26 @@ export function HeroSpotlight({
         <h1 className="hero-title">{active.title}</h1>
         {overview && <p className="hero-overview">{overview}</p>}
 
-        <div className="hero-actions">
-          <button type="button" className="btn btn-prominent hero-play" onClick={() => onPlay?.(active)}>
-            <Icon name="play" size={16} />
-            Play
-          </button>
-          <button type="button" className="btn hero-info" onClick={() => onDetails?.(active)}>
-            <Icon name="info" size={16} />
-            More info
-          </button>
-        </div>
+        {(onPlay != null || onDetails != null) && (
+          <div className="hero-actions">
+            {onPlay != null && (
+              <button type="button" className="btn btn-prominent hero-play" onClick={() => onPlay(active)}>
+                <Icon name="play" size={16} />
+                Play
+              </button>
+            )}
+            {onDetails != null && (
+              <button
+                type="button"
+                className={onPlay == null ? "btn btn-prominent hero-play" : "btn hero-info"}
+                onClick={() => onDetails(active)}
+              >
+                <Icon name="info" size={16} />
+                More info
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {list.length > 1 && (

@@ -235,8 +235,7 @@
   outline-offset: 3px;
 }
 @media (min-width: 561px) and (max-width: 900px) {
-  .player-volume-control,
-  .player-time {
+  .player-volume-control {
     display: none;
   }
 }
@@ -1014,6 +1013,37 @@
       + 44px
       + max(calc(12px * var(--density-scale)), var(--safe-area-bottom))
     );
+  }
+}
+
+@media (min-width: 561px) and (max-width: 767px) and (min-height: 501px) {
+  .webview-player {
+    --player-compact-osd-reserve: calc(
+      calc(46px * var(--density-scale))
+      + 44px
+      + var(--sp-xs)
+      + 92px
+      + max(calc(12px * var(--density-scale)), var(--safe-area-bottom))
+    );
+  }
+  .player-osd-row {
+    grid-template-columns: minmax(44px, 1fr) auto;
+    grid-template-areas:
+      "transport transport"
+      "audio actions";
+    gap: calc(4px * var(--density-scale));
+  }
+  .player-osd-audio {
+    grid-area: audio;
+  }
+  .player-osd-transport {
+    grid-area: transport;
+  }
+  .player-osd-actions {
+    grid-area: actions;
+  }
+  .player-osd .player-mobile-optional {
+    display: none;
   }
 }
 

@@ -256,6 +256,9 @@ describe("Settings shell", () => {
     expect(
       document.querySelector('button[data-tab="install"]')?.className ?? "",
     ).toContain("is-active");
+    expect(
+      screen.getByText("Manage installation and finish setup on this device."),
+    ).toBeInTheDocument();
   });
 
   it("opens a one-time section requested by another screen", () => {
