@@ -20,7 +20,7 @@
     "utp-native": "file:vendor/utp-native-disabled",
     "webtorrent": "^3.0.21",
     "webrtc-polyfill": "file:vendor/webrtc-polyfill-disabled",
-    "zod": "^4.2.1"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
