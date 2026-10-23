@@ -1,5 +1,11 @@
 import { TMDBService } from "../../web/src/services/metadata/TMDBService.ts";
 import { CinemetaEpisodeService } from "../../web/src/services/metadata/CinemetaEpisodeService.ts";
+import {
+  EPISODE_GUIDE_VERSION,
+  hasEpisodeContinuationIdentityConflict,
+  requiresCanonicalEpisodeGuide,
+  resolveEpisodeSource,
+} from "../../web/src/data/episodeSource.ts";
 import { createHash } from "node:crypto";
 import { decryptSecret } from "./crypto.js";
 
@@ -15,6 +21,8 @@ const tmdbInflightByDb = new WeakMap();
 const cinemetaEpisodeService = new CinemetaEpisodeService((url, init) =>
   fetch(url, init),
 );
+
+export { EPISODE_GUIDE_VERSION, resolveEpisodeSource };
 
 function isoFromEpochMs(epochMs) {
   return new Date(epochMs).toISOString();
@@ -487,6 +495,9 @@ export async function getServerDetail(db, config, profileId, input) {
 
 async function exactSeriesImdbId(service, input) {
   if (typeof input.imdbId === "string" && /^tt\d{7,10}$/.test(input.imdbId)) {
+    if (hasEpisodeContinuationIdentityConflict(input.imdbId, input.tmdbId ?? null)) {
+      throw new Error("Episode guide identities conflict.");
+    }
     return input.imdbId;
   }
   if (typeof input.tmdbId !== "number") return null;
@@ -497,31 +508,59 @@ async function exactSeriesImdbId(service, input) {
  * Stremio/IMDb season numbering; TMDB remains the clean fallback. */
 export async function getServerSeasons(db, config, profileId, input) {
   const service = tmdbService(db, config, profileId);
+  if (hasEpisodeContinuationIdentityConflict(input.imdbId ?? null, input.tmdbId ?? null)) {
+    throw new Error("Episode guide identities conflict.");
+  }
   const imdbId = await exactSeriesImdbId(service, input).catch(() => null);
   if (imdbId != null) {
     const guide = await cinemetaEpisodeService.getGuide(imdbId).catch(() => null);
-    if (guide != null) return { seasons: guide.seasons, numbering: "cinemeta" };
+    if (guide != null) {
+      return {
+        seasons: guide.seasons,
+        numbering: "cinemeta",
+        guideVersion: EPISODE_GUIDE_VERSION,
+      };
+    }
   }
-  if (typeof input.tmdbId !== "number") {
-    throw new Error("Episode guide identity could not be resolved.");
+  if (
+    typeof input.tmdbId !== "number" ||
+    requiresCanonicalEpisodeGuide(imdbId, input.tmdbId)
+  ) {
+    throw new Error("The canonical episode guide is unavailable. Retry before choosing an episode.");
   }
-  return { seasons: await service.getSeasons(input.tmdbId), numbering: "tmdb" };
+  return {
+    seasons: await service.getSeasons(input.tmdbId),
+    numbering: "tmdb",
+    guideVersion: null,
+  };
 }
 
 /** One season's episode list for the episode picker. */
 export async function getServerEpisodes(db, config, profileId, input) {
   const service = tmdbService(db, config, profileId);
+  if (hasEpisodeContinuationIdentityConflict(input.imdbId ?? null, input.tmdbId ?? null)) {
+    throw new Error("Episode guide identities conflict.");
+  }
   const imdbId = await exactSeriesImdbId(service, input).catch(() => null);
   if (imdbId != null) {
     const guide = await cinemetaEpisodeService.getGuide(imdbId).catch(() => null);
-    const episodes = guide?.episodesBySeason.get(input.season);
-    if (episodes != null) return { episodes, numbering: "cinemeta" };
+    if (guide != null) {
+      return {
+        episodes: guide.episodesBySeason.get(input.season) ?? [],
+        numbering: "cinemeta",
+        guideVersion: EPISODE_GUIDE_VERSION,
+      };
+    }
   }
-  if (typeof input.tmdbId !== "number") {
-    throw new Error("Episode guide identity could not be resolved.");
+  if (
+    typeof input.tmdbId !== "number" ||
+    requiresCanonicalEpisodeGuide(imdbId, input.tmdbId)
+  ) {
+    throw new Error("The canonical episode guide is unavailable. Retry before choosing an episode.");
   }
   return {
     episodes: await service.getEpisodes(input.tmdbId, input.season),
     numbering: "tmdb",
+    guideVersion: null,
   };
 }

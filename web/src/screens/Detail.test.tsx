@@ -15,6 +15,7 @@ import { readFileSync } from "node:fs";
 import type { MediaPreview, MediaItem } from "../models/media";
 import type { DetailState } from "../data/detail";
 import type { StreamsState } from "../data/streams";
+import { defaultSettings } from "../data/settings";
 import { TorrentResult } from "../services/indexers/models";
 
 // --- mutable mock state -----------------------------------------------------
@@ -33,6 +34,9 @@ let pickerSelection = { season: 1, episode: 3 };
 let mockActiveProfile: { id: string } | null = null;
 let mockServerSession: { profileId: string } | null = null;
 let capturedStreamPlay: (() => void) | null = null;
+let capturedRefreshCurrentSource: ((position: number, handoff: any) => Promise<void>) | null = null;
+let capturedTryNextSource: (() => Promise<void>) | null = null;
+const streamPickerMode = vi.hoisted(() => ({ real: false }));
 const localStorageValues = new Map<string, string>();
 const testLocalStorage = {
   getItem: (key: string) => localStorageValues.get(key) ?? null,
@@ -47,6 +51,7 @@ Object.defineProperty(globalThis, "localStorage", {
   value: testLocalStorage,
 });
 const useStreamsMock = vi.hoisted(() => vi.fn());
+const loadCanonicalEpisodesMock = vi.hoisted(() => vi.fn());
 const cinemetaFetch = vi.hoisted(() => vi.fn());
 const tauriState = vi.hoisted(() => ({ on: false, desktop: false }));
 const downloadsFfmpegAvailable = vi.hoisted(() => vi.fn(async () => true));
@@ -101,11 +106,21 @@ vi.mock("../store/AppStore", () => ({
     mockCached ? { [mockDetailItem?.id ?? "x"]: mockCached } : {},
 }));
 
+vi.mock("../data/episodes", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../data/episodes")>();
+  return {
+    ...actual,
+    loadCanonicalSeasonEpisodes: (input: unknown) =>
+      loadCanonicalEpisodesMock(input, actual.loadCanonicalSeasonEpisodes),
+  };
+});
+
 vi.mock("../data/detail", () => ({
   useDetail: () => mockDetail,
 }));
 
-vi.mock("../data/streams", () => ({
+vi.mock("../data/streams", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../data/streams")>()),
   useStreams: (...args: unknown[]) => {
     useStreamsMock(...args);
     return mockStreams;
@@ -152,6 +167,7 @@ vi.mock("../services/downloads", () => ({
 const createRequest = vi.fn<(...a: any[]) => any>();
 const resolveServerStream = vi.fn<(...a: any[]) => any>();
 const fetchServerEpisodes = vi.fn<(...a: any[]) => any>();
+const fetchServerSeasons = vi.fn<(...a: any[]) => any>();
 const serverOptimizedSource = vi.fn((stream: any, options: any) => ({
   url: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8${
     options.startSeconds > 0 ? `?start=${options.startSeconds}` : ""
@@ -183,6 +199,7 @@ vi.mock("../lib/serverApi", () => ({
   serverStreamSourceInfo: (stream: any) => serverStreamSourceInfo(stream),
   createRequest: (...a: unknown[]) => createRequest(...a),
   fetchServerEpisodes: (...a: unknown[]) => fetchServerEpisodes(...a),
+  fetchServerSeasons: (...a: unknown[]) => fetchServerSeasons(...a),
   resolveServerStream: (...a: unknown[]) => resolveServerStream(...a),
 }));
 
@@ -270,8 +287,14 @@ vi.mock("../components/OmdbRatings", () => ({
   ),
 }));
 
-vi.mock("../components/StreamPicker", () => ({
-  StreamPicker: ({ onOpenSettings, onPlay, resolveStream, episodeContext }: any) => (
+vi.mock("../components/StreamPicker", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/StreamPicker")>();
+  const ActualStreamPicker = actual.StreamPicker;
+  return {
+  StreamPicker: (props: any) => {
+    if (streamPickerMode.real) return <ActualStreamPicker {...props} />;
+    const { onOpenSettings, onPlay, resolveStream, episodeContext } = props;
+    return (
     <div
       data-testid="streampicker"
       data-season={episodeContext?.season ?? ""}
@@ -340,11 +363,13 @@ vi.mock("../components/StreamPicker", () => ({
         resolve-exact-stream
       </button>
     </div>
-  ),
-}));
+    );
+  },
+  };
+});
 
 vi.mock("../components/EpisodePicker", () => ({
-  EpisodePicker: ({ onSelect, onToggleWatched, selected }: any) => (
+  EpisodePicker: ({ onSelect, onToggleWatched, onToggleSeriesWatched, selected }: any) => (
     <>
       <span
         data-testid="episode-picker-selection"
@@ -368,6 +393,12 @@ vi.mock("../components/EpisodePicker", () => ({
         onClick={() => onToggleWatched?.({ season: 1, episode: 2 }, false)}
       >
         mark-episode-unwatched
+      </button>
+      <button
+        data-testid="mark-series-watched"
+        onClick={() => onToggleSeriesWatched?.(true)}
+      >
+        mark-series-watched
       </button>
     </>
   ),
@@ -414,12 +445,17 @@ vi.mock("../components/VideoPlayer", () => ({
     onProgress,
     onEnded,
     refreshCurrentSource,
+    onTryNextSource,
     startPositionSeconds,
     timelineOffsetSeconds,
     externalPlaybackUrl,
     initialHandoffState,
     serverOptimized,
-  }: any) => (
+    scrobbleContext,
+  }: any) => {
+    capturedRefreshCurrentSource = refreshCurrentSource ?? null;
+    capturedTryNextSource = onTryNextSource ?? null;
+    return (
     <div
       data-testid="player"
       data-url={url}
@@ -450,6 +486,9 @@ vi.mock("../components/VideoPlayer", () => ({
       data-external-playback-url={externalPlaybackUrl ?? ""}
       data-handoff-rate={String(initialHandoffState?.playbackRate ?? "")}
       data-has-source-info={String(serverOptimized?.loadSourceInfo != null)}
+      data-scrobble-tmdb={scrobbleContext?.tmdbId ?? ""}
+      data-scrobble-season={scrobbleContext?.season ?? ""}
+      data-scrobble-episode={scrobbleContext?.episode ?? ""}
     >
       {serverOptimized?.loadSourceInfo != null && (
         <button type="button" onClick={() => void serverOptimized.loadSourceInfo()}>
@@ -485,7 +524,8 @@ vi.mock("../components/VideoPlayer", () => ({
         refresh-current-source
       </button>
     </div>
-  ),
+    );
+  },
 }));
 
 import { Detail } from "./Detail";
@@ -581,6 +621,9 @@ beforeEach(() => {
   mockActiveProfile = null;
   mockServerSession = null;
   capturedStreamPlay = null;
+  capturedRefreshCurrentSource = null;
+  capturedTryNextSource = null;
+  streamPickerMode.real = false;
   mockServices = {
     tmdb: null,
     indexers: null,
@@ -592,6 +635,8 @@ beforeEach(() => {
   mockSettings = { transcode: false, ratingScale: "thumbs" };
   vi.stubGlobal("fetch", cinemetaFetch);
   cinemetaFetch.mockRejectedValue(new Error("offline test"));
+  loadCanonicalEpisodesMock.mockReset();
+  loadCanonicalEpisodesMock.mockImplementation((input, fallback) => fallback(input));
   testLocalStorage.clear();
   vi.clearAllMocks();
   useStreamsMock.mockClear();
@@ -639,7 +684,7 @@ describe("Detail base render", () => {
       }),
       imdbId: "tt0434665",
     });
-    const videos = [20, 21].flatMap((count, seasonIndex) =>
+    const videos = [20, 21, ...Array.from({ length: 14 }, () => 1)].flatMap((count, seasonIndex) =>
       Array.from({ length: count }, (_, episodeIndex) => {
         const season = seasonIndex + 1;
         const number = episodeIndex + 1;
@@ -652,10 +697,29 @@ describe("Detail base render", () => {
         };
       }),
     );
-    cinemetaFetch.mockResolvedValue(new Response(JSON.stringify({
-      meta: { id: "tt0434665", type: "series", videos },
-    })));
+    const childVideos = [13, 13, 14, 10].flatMap((count, seasonIndex) =>
+      Array.from({ length: count }, (_, episodeIndex) => ({
+        id: `tt14986406:${seasonIndex + 1}:${episodeIndex + 1}`,
+        season: seasonIndex + 1,
+        number: episodeIndex + 1,
+        episode: episodeIndex + 1,
+        name: `S${seasonIndex + 1}E${episodeIndex + 1}`,
+      })),
+    );
+    cinemetaFetch.mockImplementation(async (input: RequestInfo | URL) =>
+      new Response(JSON.stringify({
+        meta: String(input).includes("tt14986406")
+          ? { id: "tt14986406", type: "series", videos: childVideos }
+          : { id: "tt0434665", type: "series", videos },
+      })),
+    );
     pickerSelection = { season: 2, episode: 7 };
+    const resolveStream = vi.fn(async () => ({
+      streamURL: "https://cdn.example/original.mkv",
+      fileName: "Bleach.S02E07.mkv",
+      codec: "H.264",
+    }));
+    mockServices.debrid = { hasServices: true, resolveStream };
     testLocalStorage.setItem("ds_episode_overrides", JSON.stringify({
       bleach: { season: 1, episode: 27 },
     }));
@@ -682,6 +746,411 @@ describe("Detail base render", () => {
     const picker = await screen.findByTestId("streampicker");
     expect(picker).toHaveAttribute("data-season", "2");
     expect(picker).toHaveAttribute("data-episode", "7");
+    await userEvent.click(screen.getByTestId("resolve-exact-stream"));
+    await waitFor(() => expect(resolveStream).toHaveBeenCalledWith(
+      "HASH",
+      "torbox",
+      expect.objectContaining({ season: 2, episode: 7 }),
+    ));
+  });
+
+  it("maps Bleach display S17 to TYBW search, file selection, and scrobble identity", async () => {
+    mockDetailItem = preview("bleach", {
+      type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+    });
+    mockDetail = detailState({
+      item: mediaItem({
+        id: "tt0434665", type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+      }),
+      imdbId: "tt0434665",
+    });
+    const guide = (imdbId: string, counts: number[]) => JSON.stringify({
+      meta: {
+        id: imdbId,
+        type: "series",
+        videos: counts.flatMap((count, seasonIndex) =>
+          Array.from({ length: count }, (_, episodeIndex) => ({
+            id: `${imdbId}:${seasonIndex + 1}:${episodeIndex + 1}`,
+            season: seasonIndex + 1,
+            number: episodeIndex + 1,
+            episode: episodeIndex + 1,
+            name: `S${seasonIndex + 1}E${episodeIndex + 1}`,
+          })),
+        ),
+      },
+    });
+    cinemetaFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return new Response(url.includes("tt14986406")
+        ? guide("tt14986406", [13, 13, 14, 10])
+        : guide("tt0434665", Array.from({ length: 16 }, () => 1)));
+    });
+    const resolveStream = vi.fn(async () => ({
+      streamURL: "https://cdn.example/tybw.mkv",
+      fileName: "Bleach.S01E07.mkv",
+      codec: "H.264",
+    }));
+    mockServices.debrid = { hasServices: true, resolveStream };
+    pickerSelection = { season: 17, episode: 7 };
+    testLocalStorage.setItem("ds_episode_overrides", JSON.stringify({
+      bleach: pickerSelection,
+    }));
+
+    render(<Detail />);
+
+    await waitFor(() => expect(useStreamsMock).toHaveBeenLastCalledWith(
+      "tt14986406",
+      "series",
+      1,
+      7,
+      "Bleach: Thousand-Year Blood War",
+      2022,
+      mockServices.indexers,
+      mockServices.debrid,
+      false,
+    ));
+    await userEvent.click(screen.getByText("play"));
+    await userEvent.click(screen.getByTestId("resolve-exact-stream"));
+    await waitFor(() => expect(resolveStream).toHaveBeenCalledWith(
+      "HASH",
+      "torbox",
+      expect.objectContaining({
+        season: 1,
+        episode: 7,
+        fileIndex: 0,
+        fileName: "Requested.Small.mp4",
+      }),
+    ));
+
+    await userEvent.click(screen.getByTestId("play-stream"));
+    const player = await screen.findByTestId("player");
+    expect(player).toHaveAttribute("data-scrobble-tmdb", "215105");
+    expect(player).toHaveAttribute("data-scrobble-season", "1");
+    expect(player).toHaveAttribute("data-scrobble-episode", "7");
+    expect(player).toHaveAttribute("data-pause-episode", "S17 E7 - S1E7");
+  });
+
+  it("passes TYBW source coordinates through the real season-pack file guard", async () => {
+    mockDetailItem = preview("bleach", {
+      type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+    });
+    mockDetail = detailState({
+      item: mediaItem({
+        id: "tt0434665", type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+      }),
+      imdbId: "tt0434665",
+    });
+    const guide = (imdbId: string, counts: number[]) => JSON.stringify({
+      meta: {
+        id: imdbId,
+        type: "series",
+        videos: counts.flatMap((count, seasonIndex) =>
+          Array.from({ length: count }, (_, episodeIndex) => ({
+            id: `${imdbId}:${seasonIndex + 1}:${episodeIndex + 1}`,
+            season: seasonIndex + 1,
+            number: episodeIndex + 1,
+            episode: episodeIndex + 1,
+            name: `S${seasonIndex + 1}E${episodeIndex + 1}`,
+          })),
+        ),
+      },
+    });
+    cinemetaFetch.mockImplementation(async (input: RequestInfo | URL) =>
+      new Response(String(input).includes("tt14986406")
+        ? guide("tt14986406", [13, 13, 14, 10])
+        : guide("tt0434665", Array.from({ length: 16 }, () => 1))),
+    );
+    const pack = TorrentResult.fromSearch({
+      infoHash: "TYBW-PACK",
+      title: "Bleach Thousand-Year Blood War Complete",
+      sizeBytes: 1_000,
+      seeders: 5,
+      leechers: 0,
+      indexerName: "test",
+    });
+    mockStreams = {
+      ...streamsState(),
+      rows: [{ result: pack, cachedOn: "real_debrid" }],
+      hasDebrid: true,
+    };
+    const resolveStream = vi.fn(async () => ({
+      streamURL: "https://cdn.example/tybw.mkv",
+      fileName: "Bleach.S01E07.mkv",
+      codec: "H.264",
+    }));
+    mockServices.debrid = { hasServices: true, resolveStream };
+    mockSettings = { ...defaultSettings(), streamCachedOnly: false };
+    streamPickerMode.real = true;
+    pickerSelection = { season: 17, episode: 7 };
+    testLocalStorage.setItem("ds_episode_overrides", JSON.stringify({
+      bleach: pickerSelection,
+    }));
+
+    render(<Detail />);
+    await waitFor(() => expect(useStreamsMock).toHaveBeenLastCalledWith(
+      "tt14986406",
+      "series",
+      1,
+      7,
+      "Bleach: Thousand-Year Blood War",
+      2022,
+      mockServices.indexers,
+      mockServices.debrid,
+      false,
+    ));
+    await userEvent.click(screen.getByText("play"));
+    await userEvent.click(screen.getByText(pack.title).closest("button")!);
+
+    expect(await screen.findByTestId("player")).toHaveAttribute(
+      "data-scrobble-season",
+      "1",
+    );
+    expect(resolveStream).toHaveBeenCalledWith(
+      "tybw-pack",
+      "real_debrid",
+      expect.objectContaining({ season: 1, episode: 7 }),
+    );
+    expect(screen.queryByText(/Couldn't find S17E07/)).toBeNull();
+  });
+
+  it("rejects refresh and try-next after the picker leaves the playing episode", async () => {
+    mockDetailItem = preview("bleach", {
+      type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+    });
+    mockDetail = detailState({
+      item: mediaItem({
+        id: "tt0434665", type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+      }),
+      imdbId: "tt0434665",
+    });
+    const guide = (imdbId: string, counts: number[]) => JSON.stringify({
+      meta: {
+        id: imdbId,
+        type: "series",
+        videos: counts.flatMap((count, seasonIndex) =>
+          Array.from({ length: count }, (_, episodeIndex) => ({
+            id: `${imdbId}:${seasonIndex + 1}:${episodeIndex + 1}`,
+            season: seasonIndex + 1,
+            number: episodeIndex + 1,
+            episode: episodeIndex + 1,
+            name: `S${seasonIndex + 1}E${episodeIndex + 1}`,
+          })),
+        ),
+      },
+    });
+    cinemetaFetch.mockImplementation(async (input: RequestInfo | URL) =>
+      new Response(String(input).includes("tt14986406")
+        ? guide("tt14986406", [13, 13, 14, 10])
+        : guide("tt0434665", Array.from({ length: 16 }, () => 1))),
+    );
+    const resolveStream = vi.fn(async () => ({
+      streamURL: "https://cdn.example/active.mkv",
+      fileName: "Bleach.S01E07.mkv",
+      codec: "H.264",
+    }));
+    mockServices.debrid = { hasServices: true, resolveStream };
+    mockStreams.rows = [downloadRow("other-source", 1_000)];
+    pickerSelection = { season: 17, episode: 7 };
+    testLocalStorage.setItem("ds_episode_overrides", JSON.stringify({
+      bleach: pickerSelection,
+    }));
+
+    render(<Detail />);
+    await waitFor(() => expect(useStreamsMock).toHaveBeenLastCalledWith(
+      "tt14986406", "series", 1, 7,
+      "Bleach: Thousand-Year Blood War", 2022,
+      mockServices.indexers, mockServices.debrid, false,
+    ));
+    await userEvent.click(screen.getByText("play"));
+    await userEvent.click(screen.getByTestId("resolve-and-play-stream"));
+    expect(await screen.findByTestId("player")).toBeInTheDocument();
+    resolveStream.mockClear();
+
+    pickerSelection = { season: 2, episode: 1 };
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await waitFor(() => expect(screen.getByTestId("episode-picker-selection"))
+      .toHaveAttribute("data-season", "2"));
+
+    await expect(capturedRefreshCurrentSource?.(88, {
+      paused: false, volume: 1, muted: false, playbackRate: 1,
+    })).rejects.toThrow(
+      "Return to the episode that is currently playing before refreshing its source.",
+    );
+    await expect(capturedTryNextSource?.()).rejects.toThrow(
+      "Return to the episode that is currently playing before trying another source.",
+    );
+    expect(resolveStream).not.toHaveBeenCalled();
+  });
+
+  it("marks all 416 canonical original and TYBW display episodes", async () => {
+    mockDetailItem = preview("bleach", {
+      type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+    });
+    mockDetail = detailState({
+      item: mediaItem({
+        id: "tt0434665", type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+      }),
+      imdbId: "tt0434665",
+    });
+    const originalCounts = [20, 21, 22, 28, 18, 22, 20, 16, 22, 16, 7, 17, 36, 51, 26, 24];
+    const sequelCounts = [13, 13, 14, 10];
+    const guide = (imdbId: string, counts: number[]) => JSON.stringify({
+      meta: {
+        id: imdbId,
+        type: "series",
+        videos: counts.flatMap((count, seasonIndex) =>
+          Array.from({ length: count }, (_, episodeIndex) => ({
+            id: `${imdbId}:${seasonIndex + 1}:${episodeIndex + 1}`,
+            season: seasonIndex + 1,
+            number: episodeIndex + 1,
+            episode: episodeIndex + 1,
+            name: `${imdbId} S${seasonIndex + 1}E${episodeIndex + 1}`,
+          })),
+        ),
+      },
+    });
+    cinemetaFetch.mockImplementation(async (input: RequestInfo | URL) =>
+      new Response(String(input).includes("tt14986406")
+        ? guide("tt14986406", sequelCounts)
+        : guide("tt0434665", originalCounts)),
+    );
+    const mergedTmdbEpisodes = vi.fn(async () =>
+      Array.from({ length: 50 }, (_, index) => ({
+        id: `wrong-${index + 1}`, mediaId: "tmdb-30984", seasonNumber: 2,
+        episodeNumber: index + 1, title: "Merged Blood War",
+      })),
+    );
+    mockServices.tmdb = { getEpisodes: mergedTmdbEpisodes };
+    const displayCounts = [...originalCounts, ...sequelCounts];
+    loadCanonicalEpisodesMock.mockImplementation(async (input: { season: number }) =>
+      Array.from({ length: displayCounts[input.season - 1] ?? 0 }, (_, index) => ({
+        id: `display-${input.season}-${index + 1}`,
+        mediaId: input.season >= 17 ? "tt14986406" : "tt0434665",
+        seasonNumber: input.season,
+        episodeNumber: index + 1,
+        title: `Display S${input.season}E${index + 1}`,
+      })),
+    );
+
+    render(<Detail />);
+    await waitFor(() => expect(screen.getByTestId("episode-picker-selection"))
+      .toBeInTheDocument());
+    await userEvent.click(screen.getByTestId("mark-series-watched"));
+
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledTimes(416));
+    expect(loadCanonicalEpisodesMock).toHaveBeenCalledTimes(20);
+    expect(mergedTmdbEpisodes).not.toHaveBeenCalled();
+    expect(storeRecordHistory).toHaveBeenCalledWith(expect.objectContaining({
+      episodeId: "s17e1",
+      completed: true,
+    }));
+  });
+
+  it("does not persist partial watched state when a middle season guide fails", async () => {
+    mockDetailItem = preview("bleach", {
+      type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+    });
+    mockDetail = detailState({
+      item: mediaItem({
+        id: "tt0434665", type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+      }),
+      imdbId: "tt0434665",
+    });
+    serverModeOn = true;
+    mockServices.tmdb = {};
+    fetchServerSeasons.mockResolvedValue({
+      seasons: Array.from({ length: 20 }, (_, index) => ({
+        id: index + 1,
+        seasonNumber: index + 1,
+        name: `Season ${index + 1}`,
+        episodeCount: 1,
+      })),
+      numbering: "cinemeta",
+      guideVersion: "2",
+    });
+    fetchServerEpisodes.mockImplementation(async ({ season }: { season: number }) => {
+      if (season === 10) throw new Error("middle season unavailable");
+      return {
+        episodes: [{
+          id: `display-${season}-1`,
+          mediaId: season >= 17 ? "tt14986406" : "tt0434665",
+          seasonNumber: season,
+          episodeNumber: 1,
+          title: `Display S${season}E1`,
+        }],
+        numbering: "cinemeta",
+        guideVersion: "2",
+      };
+    });
+
+    render(<Detail />);
+    await waitFor(() => expect(screen.getByTestId("episode-picker-selection"))
+      .toBeInTheDocument());
+    await userEvent.click(screen.getByTestId("mark-series-watched"));
+
+    await waitFor(() => expect(loadCanonicalEpisodesMock).toHaveBeenCalledTimes(20));
+    await act(async () => { await Promise.resolve(); });
+    expect(storeRecordHistory).not.toHaveBeenCalled();
+  });
+
+  it("does not enqueue a partial whole-show download when a middle season guide fails", async () => {
+    mockDetailItem = preview("generic-show", {
+      type: "series", title: "Generic show", year: 2020, tmdbId: 42,
+    });
+    mockDetail = detailState({
+      item: mediaItem({
+        id: "tt7654321", type: "series", title: "Generic show", year: 2020, tmdbId: 42,
+      }),
+      imdbId: "tt7654321",
+    });
+    tauriState.on = true;
+    tauriState.desktop = true;
+    mockStreams.rows = [downloadRow("Generic source", 1_000)];
+    const getEpisodes = vi.fn(async (_tmdbId: number, season: number) => {
+      if (season === 10) throw new Error("middle season unavailable");
+      return [{
+        id: `generic-${season}-1`,
+        mediaId: "tt7654321",
+        seasonNumber: season,
+        episodeNumber: 1,
+        title: `Generic S${season}E1`,
+      }];
+    });
+    mockServices = {
+      ...mockServices,
+      tmdb: {
+        getSeasons: vi.fn(async () => Array.from({ length: 20 }, (_, index) => ({
+          id: index + 1,
+          seasonNumber: index + 1,
+          name: `Season ${index + 1}`,
+          episodeCount: 1,
+        }))),
+        getEpisodes,
+      },
+      indexers: {
+        searchAll: vi.fn(async () => [TorrentResult.fromSearch({
+          infoHash: "BATCH-SOURCE",
+          title: "Generic episode",
+          sizeBytes: 1_000,
+          seeders: 1,
+          leechers: 0,
+          indexerName: "test",
+        })]),
+      },
+      debrid: { hasServices: true },
+    };
+    cinemetaFetch.mockRejectedValue(new Error("generic Cinemeta unavailable"));
+
+    render(<Detail />);
+    await waitFor(() => expect(screen.getByTestId("episode-picker-selection"))
+      .toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "download" }));
+    await userEvent.click(screen.getByRole("button", { name: "Whole show" }));
+
+    await waitFor(() => expect(loadCanonicalEpisodesMock).toHaveBeenCalledTimes(20));
+    expect(await screen.findByText("The episode guide could not be loaded."))
+      .toBeInTheDocument();
+    expect(downloadsRuntime.enqueueSeason).not.toHaveBeenCalled();
   });
 
   it("renders hero, omdb, stream picker, cast rail and related", () => {
@@ -1175,6 +1644,22 @@ describe("Detail play", () => {
       expect(storeRecordHistory).toHaveBeenCalledWith(
         expect.objectContaining({ episodeId: "s2e1", queuedNext: true }),
       ),
+    );
+  });
+
+  it("does not queue a speculative next episode when its canonical guide request fails", async () => {
+    const getSeasons = vi.fn(async () => [{ seasonNumber: 1, episodeCount: 2 }]);
+    const getEpisodes = vi.fn(async () => [
+      { seasonNumber: 1, episodeNumber: 1, airDate: "2020-01-01" },
+      { seasonNumber: 1, episodeNumber: 2, airDate: "2020-01-08" },
+    ]);
+    await playSeriesEpisode({ season: 1, episode: 1 }, getSeasons, getEpisodes);
+    loadCanonicalEpisodesMock.mockRejectedValue(new Error("episode guide unavailable"));
+
+    await userEvent.click(screen.getByRole("button", { name: "report-ended" }));
+    await waitFor(() => expect(loadCanonicalEpisodesMock).toHaveBeenCalled());
+    expect(storeRecordHistory).not.toHaveBeenCalledWith(
+      expect.objectContaining({ queuedNext: true }),
     );
   });
 

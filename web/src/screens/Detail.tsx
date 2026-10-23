@@ -20,12 +20,19 @@ import {
   defaultSelectionFor,
   episodeIdFor,
   episodeLabel,
+  loadCanonicalSeasonEpisodes,
   nextEpisodeFor,
   normalizeFlattenedSeasonOneSelection,
   parseEpisodeId,
   useEpisodes,
   useSeasons,
 } from "../data/episodes";
+import {
+  hasEpisodeContinuationIdentityConflict,
+  requiresCanonicalEpisodeGuide,
+  resolveEpisodeSource,
+  type EpisodeSourceCoordinates,
+} from "../data/episodeSource";
 import { filterStreamRows } from "../data/streams";
 import { EpisodePicker } from "../components/EpisodePicker";
 import { DetailHero, type TasteSignal } from "../components/DetailHero";
@@ -58,7 +65,6 @@ import type { StreamRow } from "../data/streams";
 import { rankSources } from "../data/sourceIntelligence";
 import {
   createRequest,
-  fetchServerEpisodes,
   resolveServerStream,
   serverOptimizedSource,
   serverStreamAudioTracks,
@@ -206,6 +212,11 @@ interface ActivePlayer {
   episode: number | null;
   /** Immutable TMDB identity for the item actually handed to the player. */
   scrobbleContext: TraktScrobbleContext | null;
+  /** Detail and source coordinates snapshotted with the playing file. */
+  detailId: string | null;
+  sourceImdbId: string | null;
+  sourceSeason: number | null;
+  sourceEpisode: number | null;
   /** Torrent identity used by one-click source recovery. */
   sourceHash: string | null;
   /** Source provenance retained even when the live source list is empty. */
@@ -417,6 +428,30 @@ export function Detail() {
   );
   const episodeGuidePending =
     detailItem?.type === "series" && rawSelected != null && seasonsState.loading;
+  const canonicalEpisodeGuideRequired = requiresCanonicalEpisodeGuide(
+    detail.data.imdbId,
+    episodeGuideTmdbId,
+  );
+  const selectedSeasonInGuide =
+    !hasEpisodeContinuationIdentityConflict(detail.data.imdbId, episodeGuideTmdbId) &&
+    (selected == null ||
+      (seasonsState.source === "live"
+        ? seasonsState.seasons.some((season) => season.seasonNumber === selected.season)
+        : !canonicalEpisodeGuideRequired));
+  const sourceForEpisode = (
+    episode: { season: number; episode: number } | null,
+  ): EpisodeSourceCoordinates | null => {
+    if (episode == null || detail.data.imdbId == null) return null;
+    return resolveEpisodeSource({
+      imdbId: detail.data.imdbId,
+      tmdbId: episodeGuideTmdbId,
+      season: episode.season,
+      episode: episode.episode,
+      title: detailItem?.title ?? detail.data.item?.title ?? null,
+      year: detailItem?.year ?? detail.data.item?.year ?? null,
+    });
+  };
+  const selectedSource = sourceForEpisode(selected);
 
   // Completion is deliberately sourced from complete history rows. The
   // Continue Watching slice below remains only for resume bars and positions.
@@ -433,12 +468,14 @@ export function Detail() {
   const watchedMutationIds = useRef<Set<string>>(new Set());
 
   const streams = useStreams(
-    episodeGuidePending ? null : detail.data.imdbId,
+    episodeGuidePending || !selectedSeasonInGuide
+      ? null
+      : selectedSource?.imdbId ?? detail.data.imdbId,
     detailItem?.type ?? "movie",
-    selected?.season ?? null,
-    selected?.episode ?? null,
-    detailItem?.title ?? detail.data.item?.title ?? null,
-    detailItem?.year ?? detail.data.item?.year ?? null,
+    selectedSource?.season ?? selected?.season ?? null,
+    selectedSource?.episode ?? selected?.episode ?? null,
+    selectedSource?.title ?? detailItem?.title ?? detail.data.item?.title ?? null,
+    selectedSource?.year ?? detailItem?.year ?? detail.data.item?.year ?? null,
     services.indexers,
     services.debrid,
     detail.loading || episodeGuidePending,
@@ -874,23 +911,22 @@ export function Detail() {
     const tmdbId = item?.tmdbId ?? currentDetailItem.tmdbId ?? null;
     if (tmdbId == null || seasonsState.seasons.length === 0) return;
     void Promise.all(
-      seasonsState.seasons.map((season) =>
-        isServerMode()
-          ? fetchServerEpisodes({ tmdbId, season: season.seasonNumber }).then(
-              (response) => response.episodes,
-            )
-          : services.tmdb?.getEpisodes(tmdbId, season.seasonNumber) ??
-            Promise.resolve([]),
-      ),
+      seasonsState.seasons.map(async (season) => {
+        const displaySeason = season.seasonNumber;
+        const episodes = await loadCanonicalSeasonEpisodes({
+          tmdbId,
+          imdbId: detail.data.imdbId,
+          season: displaySeason,
+          tmdb: services.tmdb,
+        });
+        return episodes.map((episode) => ({
+          season: displaySeason,
+          episode: episode.episodeNumber,
+        }));
+      }),
     )
       .then((groups) =>
-        persistWatchedEpisodes(
-          groups.flat().map((episode) => ({
-            season: episode.seasonNumber,
-            episode: episode.episodeNumber,
-          })),
-          true,
-        ),
+        persistWatchedEpisodes(groups.flat(), true),
       )
       .catch(() => {
         // A failed guide fetch leaves current watched state intact.
@@ -981,6 +1017,7 @@ export function Detail() {
           : metadataTitle
         : sourceFileName || "Untitled stream";
     const tmdbId = item?.tmdbId ?? detailItem?.tmdbId ?? null;
+    const playingSource = sourceForEpisode(selected);
     const scrobbleContext: TraktScrobbleContext | null =
       tmdbId == null
         ? null
@@ -988,10 +1025,10 @@ export function Detail() {
           ? selected == null
             ? null
             : {
-                tmdbId,
+                tmdbId: playingSource?.tmdbId ?? tmdbId,
                 type: "series",
-                season: selected.season,
-                episode: selected.episode,
+                season: playingSource?.season ?? selected.season,
+                episode: playingSource?.episode ?? selected.episode,
               }
           : { tmdbId, type: "movie" };
     const nextPlayer: ActivePlayer = {
@@ -1021,6 +1058,10 @@ export function Detail() {
       season: selected?.season ?? null,
       episode: selected?.episode ?? null,
       scrobbleContext,
+      detailId: detailItem?.id ?? null,
+      sourceImdbId: playingSource?.imdbId ?? null,
+      sourceSeason: playingSource?.season ?? null,
+      sourceEpisode: playingSource?.episode ?? null,
       sourceHash,
       recoverySource,
       timelineOffsetSeconds,
@@ -1376,11 +1417,16 @@ export function Detail() {
     // or carry no tag (fallback to the default pick) - always safe to pass.
     // The auto-advance effect passes its target explicitly (hintOverride) so
     // the hint can never depend on which render's `selected` was captured.
-    const episodeHint =
+    const displayEpisodeHint =
       hintOverride ??
       (detailItem?.type === "series" && selected != null
         ? { season: selected.season, episode: selected.episode }
         : null);
+    const sourceEpisodeHint = sourceForEpisode(displayEpisodeHint);
+    const episodeHint =
+      sourceEpisodeHint == null
+        ? displayEpisodeHint
+        : { season: sourceEpisodeHint.season, episode: sourceEpisodeHint.episode };
     const fileHint: DebridFileHint | null =
       row.result.fileIndex != null
         ? {
@@ -1393,7 +1439,12 @@ export function Detail() {
       // Keep Device Original by default unless the existing opt-in is enabled.
       // The title context is required for maturity gating on capped profiles.
       const media =
-        detailItem != null ? { id: detailItem.id, type: detailItem.type } : undefined;
+        detailItem != null
+          ? {
+              id: sourceEpisodeHint?.imdbId ?? detailItem.id,
+              type: detailItem.type,
+            }
+          : undefined;
       try {
         const startSeconds = Math.max(
           0,
@@ -1475,11 +1526,15 @@ export function Detail() {
     if (detailItem?.type !== "series" || player == null || upNextTarget == null ||
         seasonsState.source !== "live") return;
     const tmdbId = detail.data.item?.tmdbId ?? detailItem.tmdbId ?? null;
-    if (tmdbId == null) return;
+    const source = sourceForEpisode(upNextTarget);
+    if (tmdbId == null || source == null) return;
     try {
-      const episodes = isServerMode()
-        ? (await fetchServerEpisodes({ tmdbId, season: upNextTarget.season })).episodes
-        : await services.tmdb?.getEpisodes(tmdbId, upNextTarget.season) ?? [];
+      const episodes = await loadCanonicalSeasonEpisodes({
+        tmdbId,
+        imdbId: detail.data.imdbId,
+        season: upNextTarget.season,
+        tmdb: services.tmdb,
+      });
       const target = episodes.find((episode) =>
         episode.seasonNumber === upNextTarget.season &&
         episode.episodeNumber === upNextTarget.episode,
@@ -1520,10 +1575,29 @@ export function Detail() {
     await playResolvedStream(stream, stream.fileName || source.title, source);
   }
 
+  function activePlayerOwnsLiveSelection(active: ActivePlayer): boolean {
+    if (
+      active.detailId !== (detailItem?.id ?? null) ||
+      active.season !== (selected?.season ?? null) ||
+      active.episode !== (selected?.episode ?? null)
+    ) return false;
+    const liveSource = sourceForEpisode(selected);
+    return (
+      active.sourceImdbId === (liveSource?.imdbId ?? null) &&
+      active.sourceSeason === (liveSource?.season ?? null) &&
+      active.sourceEpisode === (liveSource?.episode ?? null)
+    );
+  }
+
   async function handleRefreshCurrentSource(
     absolutePositionSeconds: number,
     playbackHandoff: NonNullable<ActivePlayer["playbackHandoff"]>,
   ): Promise<void> {
+    if (player != null && !activePlayerOwnsLiveSelection(player)) {
+      throw new Error(
+        "Return to the episode that is currently playing before refreshing its source.",
+      );
+    }
     if (player?.sourceHash == null) {
       throw new Error("The current source cannot be resolved again.");
     }
@@ -1581,6 +1655,11 @@ export function Detail() {
 
   async function handleTryNextSource(): Promise<void> {
     if (player == null) throw new Error("No active source is available to replace.");
+    if (!activePlayerOwnsLiveSelection(player)) {
+      throw new Error(
+        "Return to the episode that is currently playing before trying another source.",
+      );
+    }
     const runtimeMinutes =
       player.nowPlaying?.runtimeMinutes ?? item?.runtime ?? null;
     const profile = isDesktopTauri()
@@ -1648,6 +1727,7 @@ export function Detail() {
     const show = item?.title ?? currentDetailItem.title;
     const year = item?.year != null ? ` (${item.year})` : "";
     const episodeTitle = episodeContext?.title?.trim();
+    const sourceEpisode = sourceForEpisode(episodeContext);
     const title =
       episodeContext == null
         ? `${show}${year}`
@@ -1659,14 +1739,17 @@ export function Detail() {
           ? null
           : episodeIdFor(episodeContext.season, episodeContext.episode),
       title,
-      season: episodeContext?.season ?? null,
-      episode: episodeContext?.episode ?? null,
+      season: sourceEpisode?.season ?? episodeContext?.season ?? null,
+      episode: sourceEpisode?.episode ?? episodeContext?.episode ?? null,
       infoHash: source.infoHash,
       sizeBytes: source.sizeBytes,
       fileHint:
         episodeContext == null
           ? null
-          : episodeIdFor(episodeContext.season, episodeContext.episode),
+          : episodeIdFor(
+              sourceEpisode?.season ?? episodeContext.season,
+              sourceEpisode?.episode ?? episodeContext.episode,
+            ),
       fileIndex: source.fileIndex ?? null,
       fileNameHint: source.fileNameHint ?? null,
       mode: downloadMode,
@@ -1707,11 +1790,13 @@ export function Detail() {
     setDownloadNotice(`Finding sources for ${label}…`);
     const matches = await Promise.all(
       episodes.map(async (episode) => {
+        const sourceEpisode = sourceForEpisode(episode);
+        if (sourceEpisode == null) return null;
         const results = await services.indexers!.searchAll(
-          detail.data.imdbId!,
+          sourceEpisode.imdbId,
           "series",
-          episode.season,
-          episode.episode,
+          sourceEpisode.season,
+          sourceEpisode.episode,
         );
         const source =
           results.find(
@@ -1751,13 +1836,21 @@ export function Detail() {
   }
 
   function enqueueWholeShow(): void {
-    if (services.tmdb == null || item?.tmdbId == null || seasonsState.seasons.length === 0) {
+    const tmdbId = item?.tmdbId ?? null;
+    if (services.tmdb == null || tmdbId == null || seasonsState.seasons.length === 0) {
       setDownloadNotice("Load the episode guide before downloading the whole show.");
       return;
     }
     setDownloadNotice("Loading the episode guide…");
     void Promise.all(
-      seasonsState.seasons.map((season) => services.tmdb!.getEpisodes(item.tmdbId!, season.seasonNumber)),
+      seasonsState.seasons.map((season) =>
+        loadCanonicalSeasonEpisodes({
+          tmdbId,
+          imdbId: detail.data.imdbId,
+          season: season.seasonNumber,
+          tmdb: services.tmdb,
+        }),
+      ),
     ).then((groups) =>
       enqueueEpisodeBatch(
         groups.flat().map((episode) => ({
@@ -2088,6 +2181,11 @@ export function Detail() {
       {/* Season/episode picker (series only). Selecting an episode re-drives
           the stream search below; falls back to a plain stepper without TMDB. */}
       {detailItem.type === "series" && selected != null && (
+        canonicalEpisodeGuideRequired && !seasonsState.loading && seasonsState.source !== "live" ? (
+          <p className="episode-picker-note t-secondary" role="status">
+            The canonical episode guide is unavailable. Retry before choosing an episode.
+          </p>
+        ) : (
         <EpisodePicker
           tmdbId={item?.tmdbId ?? detailItem.tmdbId ?? null}
           imdbId={detail.data.imdbId}
@@ -2107,6 +2205,7 @@ export function Detail() {
           onToggleSeriesWatched={toggleSeriesWatched}
           seriesWatched={seriesWatched}
         />
+        )
       )}
 
       {/* Movies: the stream list sits inline. Series show it on a dedicated
@@ -2175,7 +2274,11 @@ export function Detail() {
                 resolveStream={resolvePickerStream}
                 onPlay={handlePlay}
                 episodeLabel={episodeLabel(selected.season, selected.episode)}
-                episodeContext={selected}
+                episodeContext={
+                  selectedSource == null
+                    ? selected
+                    : { season: selectedSource.season, episode: selectedSource.episode }
+                }
                 runtimeMinutes={
                   selectedSeasonEpisodes.episodes.find(
                     (episode) =>

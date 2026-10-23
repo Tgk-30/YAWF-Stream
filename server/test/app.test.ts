@@ -690,6 +690,63 @@ describe("DebridStreamer server", () => {
     ]);
   });
 
+  it("requires the current episode guide marker only for ambiguous Bleach searches", async () => {
+    const owner = await setupOwner(app);
+    await request(owner, {
+      method: "PUT",
+      url: "/api/settings/profile",
+      csrf: true,
+      payload: {
+        key: "server_indexer_configs",
+        value: JSON.stringify([{
+          id: "stremio",
+          type: "stremio_addon",
+          baseURL: "https://stremio.test",
+          isActive: true,
+        }]),
+      },
+    });
+    const originalFetch = globalThis.fetch;
+    const stremioURLs: string[] = [];
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.startsWith("https://stremio.test/stream/")) {
+        stremioURLs.push(url);
+        return new Response(JSON.stringify({ streams: [] }), { status: 200 });
+      }
+      return originalFetch(input);
+    }) as typeof fetch;
+    try {
+      const stale = await request(owner, {
+        method: "GET",
+        url: "/api/streams/tt0434665?type=series&season=2&episode=7",
+      });
+      expect(stale.statusCode).toBe(409);
+      expect(json<{ error: string }>(stale).error).toContain("Reload");
+      expect(stremioURLs).toEqual([]);
+
+      const current = await request(owner, {
+        method: "GET",
+        url: "/api/streams/tt0434665?type=series&episodeGuide=2&season=17&episode=1&title=Bleach",
+      });
+      expect(current.statusCode).toBe(200);
+      expect(stremioURLs).toContain(
+        "https://stremio.test/stream/series/tt14986406%3A1%3A1.json",
+      );
+
+      const ordinary = await request(owner, {
+        method: "GET",
+        url: "/api/streams/tt0903747?type=series&season=2&episode=7",
+      });
+      expect(ordinary.statusCode).toBe(200);
+      expect(stremioURLs).toContain(
+        "https://stremio.test/stream/series/tt0903747%3A2%3A7.json",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("creates the first owner, starts a session, and rejects unsafe writes without CSRF", async () => {
     const health = await app.inject({ method: "GET", url: "/api/health" });
     expect(health.statusCode).toBe(200);
@@ -2149,6 +2206,40 @@ describe("DebridStreamer server", () => {
     }
   });
 
+  it("fails closed instead of using merged TMDB numbering when Bleach's canonical guide is unavailable", async () => {
+    const owner = await setupOwner(app);
+    await request(owner, {
+      method: "PUT",
+      url: "/api/admin/credentials",
+      csrf: true,
+      payload: { provider: "tmdb", value: "tmdb-key", label: "TMDB" },
+    });
+    const originalFetch = globalThis.fetch;
+    let tmdbGuideCalls = 0;
+    globalThis.fetch = (async (url, init) => {
+      const value = String(url);
+      if (value === "https://v3-cinemeta.strem.io/meta/series/tt0434665.json") {
+        throw new Error("Cinemeta unavailable");
+      }
+      if (value.includes("api.themoviedb.org/3/tv/30984")) {
+        tmdbGuideCalls += 1;
+        return new Response(JSON.stringify({ seasons: [{ season_number: 2 }] }));
+      }
+      return originalFetch(url, init);
+    }) as typeof fetch;
+
+    try {
+      const response = await request(owner, {
+        method: "GET",
+        url: "/api/media/seasons?tmdbId=30984&imdbId=tt0434665",
+      });
+      expect(response.statusCode).toBe(503);
+      expect(tmdbGuideCalls).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("server episode guides derive IMDb identity for legacy TMDB-only callers", async () => {
     const owner = await setupOwner(app);
     await request(owner, {
@@ -2157,7 +2248,7 @@ describe("DebridStreamer server", () => {
       csrf: true,
       payload: { provider: "tmdb", value: "tmdb-key", label: "TMDB" },
     });
-    const videos = [20, 21].flatMap((count, seasonIndex) =>
+    const videos = [20, 21, ...Array.from({ length: 14 }, () => 1)].flatMap((count, seasonIndex) =>
       Array.from({ length: count }, (_, episodeIndex) => {
         const season = seasonIndex + 1;
         const number = episodeIndex + 1;
@@ -2181,6 +2272,24 @@ describe("DebridStreamer server", () => {
           meta: { id: "tt0434665", type: "series", videos },
         }));
       }
+      if (value === "https://v3-cinemeta.strem.io/meta/series/tt14986406.json") {
+        const childVideos = [13, 13, 14, 10].flatMap((count, seasonIndex) =>
+          Array.from({ length: count }, (_, episodeIndex) => {
+            const season = seasonIndex + 1;
+            const number = episodeIndex + 1;
+            return {
+              id: `tt14986406:${season}:${number}`,
+              season,
+              number,
+              episode: number,
+              name: `TYBW S${season}E${number}`,
+            };
+          }),
+        );
+        return new Response(JSON.stringify({
+          meta: { id: "tt14986406", type: "series", videos: childVideos },
+        }));
+      }
       return originalFetch(url, init);
     }) as typeof fetch;
 
@@ -2190,16 +2299,16 @@ describe("DebridStreamer server", () => {
         url: "/api/media/seasons?tmdbId=30984",
       });
       expect(seasonsResponse.statusCode).toBe(200);
-      expect(json<{
+      const seasonsBody = json<{
         numbering: string;
         seasons: Array<{ seasonNumber: number; episodeCount: number }>;
-      }>(seasonsResponse)).toMatchObject({
-        numbering: "cinemeta",
-        seasons: [
-          { seasonNumber: 1, episodeCount: 20 },
-          { seasonNumber: 2, episodeCount: 21 },
-        ],
-      });
+      }>(seasonsResponse);
+      expect(seasonsBody.numbering).toBe("cinemeta");
+      expect(seasonsBody.seasons.map((season) => season.seasonNumber)).toEqual(
+        Array.from({ length: 20 }, (_, index) => index + 1),
+      );
+      expect(seasonsBody.seasons.slice(-4).map((season) => season.episodeCount))
+        .toEqual([13, 13, 14, 10]);
 
       const episodeResponse = await request(owner, {
         method: "GET",
@@ -2213,6 +2322,22 @@ describe("DebridStreamer server", () => {
       expect(episodeBody.numbering).toBe("cinemeta");
       expect(episodeBody.episodes.find((episode) => episode.id === "tt0434665:2:7"))
         .toMatchObject({ title: "Release the Death Blow!" });
+
+      const continuationResponse = await request(owner, {
+        method: "GET",
+        url: "/api/media/episodes?imdbId=tt0434665&season=17",
+      });
+      expect(continuationResponse.statusCode).toBe(200);
+      const continuationBody = json<{
+        guideVersion: string;
+        episodes: Array<{ id: string; mediaId: string; seasonNumber: number }>;
+      }>(continuationResponse);
+      expect(continuationBody.guideVersion).toBe("2");
+      expect(continuationBody.episodes[0]).toMatchObject({
+          id: "tt14986406:1:1",
+          mediaId: "tt14986406",
+          seasonNumber: 17,
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -40,6 +40,16 @@ function serviceWith(body: string) {
   return { service: new CinemetaEpisodeService(fetchImpl), fetchImpl };
 }
 
+function serviceWithBodies(bodies: Record<string, string | Error>) {
+  const fetchImpl = vi.fn(async (url: string) => {
+    const imdbId = url.match(/(tt\d+)\.json$/)?.[1] ?? "";
+    const value = bodies[imdbId];
+    if (value instanceof Error) throw value;
+    return { status: value == null ? 404 : 200, text: async () => value ?? "" };
+  });
+  return { service: new CinemetaEpisodeService(fetchImpl), fetchImpl };
+}
+
 describe("CinemetaEpisodeService", () => {
   it("uses AbortController when AbortSignal.timeout is unavailable", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
@@ -84,6 +94,47 @@ describe("CinemetaEpisodeService", () => {
 
     await service.getGuide("tt0434665");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("appends the verified TYBW identity as display seasons 17 through 20", async () => {
+    const { service } = serviceWithBodies({
+      tt0434665: guideBody("tt0434665", Array.from({ length: 16 }, () => 1), [1]),
+      tt14986406: guideBody("tt14986406", [13, 13, 14, 10]),
+    });
+    const guide = await service.getGuide("tt0434665");
+
+    expect(guide.seasons.slice(-4).map((season) => [
+      season.seasonNumber,
+      season.episodeCount,
+      season.name,
+    ])).toEqual([
+      [17, 13, "Bleach: Thousand-Year Blood War · Season 17"],
+      [18, 13, "Bleach: Thousand-Year Blood War · Season 18"],
+      [19, 14, "Bleach: Thousand-Year Blood War · Season 19"],
+      [20, 10, "Bleach: Thousand-Year Blood War · Season 20"],
+    ]);
+    expect(guide.episodesBySeason.get(17)?.[0]).toMatchObject({
+      id: "tt14986406:1:1",
+      mediaId: "tt14986406",
+      seasonNumber: 17,
+      episodeNumber: 1,
+    });
+    expect(guide.sourceBySeason.get(17)).toMatchObject({
+      imdbId: "tt14986406",
+      tmdbId: 215105,
+      season: 1,
+      title: "Bleach: Thousand-Year Blood War",
+    });
+  });
+
+  it("keeps the validated original 16 seasons when the child guide fails", async () => {
+    const { service } = serviceWithBodies({
+      tt0434665: guideBody("tt0434665", Array.from({ length: 16 }, () => 1)),
+      tt14986406: new Error("offline"),
+    });
+    const guide = await service.getGuide("tt0434665");
+    expect(guide.seasons.filter((season) => season.seasonNumber > 0)).toHaveLength(16);
+    expect(guide.episodesBySeason.has(17)).toBe(false);
   });
 
   it.each([

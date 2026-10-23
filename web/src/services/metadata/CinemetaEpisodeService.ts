@@ -1,5 +1,10 @@
 import type { Episode, Season } from "../../models/media";
 import { assertNetworkAllowed } from "../../lib/networkPolicy";
+import {
+  EPISODE_GUIDE_VERSION,
+  continuationForParent,
+  type EpisodeSourceCoordinates,
+} from "../../data/episodeSource";
 
 interface FetchResponse {
   status: number;
@@ -34,6 +39,8 @@ export interface CinemetaEpisodeGuide {
   imdbId: string;
   seasons: Season[];
   episodesBySeason: ReadonlyMap<number, Episode[]>;
+  sourceBySeason: ReadonlyMap<number, EpisodeSourceCoordinates>;
+  version: typeof EPISODE_GUIDE_VERSION;
 }
 
 interface CacheEntry {
@@ -126,6 +133,61 @@ export class CinemetaEpisodeService {
   }
 
   private async load(imdbId: string): Promise<CinemetaEpisodeGuide> {
+    const primary = await this.loadSingle(imdbId);
+    const continuation = continuationForParent(imdbId);
+    if (continuation == null) return primary;
+    const primaryRegularSeasons = primary.seasons.filter(
+      (season) => season.seasonNumber > 0,
+    );
+    if (
+      primaryRegularSeasons.length !== continuation.parentSeasonCount ||
+      primaryRegularSeasons[primaryRegularSeasons.length - 1]?.seasonNumber !==
+        continuation.parentSeasonCount
+    ) {
+      return primary;
+    }
+
+    const child = await this.loadSingle(continuation.childImdbId).catch(() => null);
+    if (child == null) return primary;
+
+    const seasons = [...primary.seasons];
+    const episodesBySeason = new Map(primary.episodesBySeason);
+    const sourceBySeason = new Map(primary.sourceBySeason);
+    for (const childSeason of child.seasons) {
+      if (childSeason.seasonNumber === 0) continue;
+      const displaySeason =
+        continuation.displaySeasonStart +
+        (childSeason.seasonNumber - continuation.childSeasonStart);
+      const childEpisodes = child.episodesBySeason.get(childSeason.seasonNumber) ?? [];
+      seasons.push({
+        ...childSeason,
+        id: displaySeason,
+        seasonNumber: displaySeason,
+        name: `${continuation.childTitle} · Season ${displaySeason}`,
+      });
+      episodesBySeason.set(
+        displaySeason,
+        childEpisodes.map((episode) => ({
+          ...episode,
+          seasonNumber: displaySeason,
+        })),
+      );
+      sourceBySeason.set(displaySeason, {
+        displaySeason,
+        displayEpisode: 1,
+        imdbId: continuation.childImdbId,
+        tmdbId: continuation.childTmdbId,
+        season: childSeason.seasonNumber,
+        episode: 1,
+        title: continuation.childTitle,
+        year: continuation.childYear,
+      });
+    }
+    seasons.sort((left, right) => left.seasonNumber - right.seasonNumber);
+    return { ...primary, seasons, episodesBySeason, sourceBySeason };
+  }
+
+  private async loadSingle(imdbId: string): Promise<CinemetaEpisodeGuide> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     let text: string;
@@ -223,7 +285,26 @@ export class CinemetaEpisodeService {
         episodeCount: episodes.length,
         airDate: episodes.map((episode) => episode.airDate).find((date) => date != null) ?? null,
       }));
-    return { imdbId, seasons, episodesBySeason };
+    const sourceBySeason = new Map<number, EpisodeSourceCoordinates>();
+    for (const season of seasons) {
+      sourceBySeason.set(season.seasonNumber, {
+        displaySeason: season.seasonNumber,
+        displayEpisode: 1,
+        imdbId,
+        tmdbId: null,
+        season: season.seasonNumber,
+        episode: 1,
+        title: null,
+        year: null,
+      });
+    }
+    return {
+      imdbId,
+      seasons,
+      episodesBySeason,
+      sourceBySeason,
+      version: EPISODE_GUIDE_VERSION,
+    };
   }
 
   private store(imdbId: string, value: CinemetaEpisodeGuide): void {

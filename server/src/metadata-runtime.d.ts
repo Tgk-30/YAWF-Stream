@@ -78,6 +78,25 @@ export function getServerGenres(
 ): Promise<unknown>;
 
 export const MAX_CALENDAR_SERIES: 30;
+export const EPISODE_GUIDE_VERSION: "2";
+
+export function resolveEpisodeSource(input: {
+  imdbId: string;
+  tmdbId: number | null;
+  season: number;
+  episode: number;
+  title?: string | null;
+  year?: number | null;
+}): {
+  displaySeason: number;
+  displayEpisode: number;
+  imdbId: string;
+  tmdbId: number | null;
+  season: number;
+  episode: number;
+  title: string | null;
+  year: number | null;
+};
 
 export interface UpcomingEpisodeSeries {
   id: string;

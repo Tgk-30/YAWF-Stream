@@ -7,7 +7,7 @@
 // cache") so the UI can render the green "Instant · RD" vs grey "Will cache"
 // badge and a cached-first sort. Imports the ported services READ-ONLY.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MediaType } from "../models/media";
 import type {
   DebridManager,
@@ -70,6 +70,34 @@ export interface StreamsState {
   sourceErrors: IndexerSearchError[];
 }
 
+
+interface StreamQueryOwner {
+  imdbId: string | null;
+  type: MediaType;
+  season: number | null;
+  episode: number | null;
+  title: string | null;
+  year: number | null;
+  indexers: IndexerManager;
+  debrid: DebridManager | null;
+  imdbIdPending: boolean;
+  serverURL: string | null;
+}
+
+function sameStreamQueryOwner(left: StreamQueryOwner, right: StreamQueryOwner): boolean {
+  return (
+    left.imdbId === right.imdbId &&
+    left.type === right.type &&
+    left.season === right.season &&
+    left.episode === right.episode &&
+    left.title === right.title &&
+    left.year === right.year &&
+    left.indexers === right.indexers &&
+    left.debrid === right.debrid &&
+    left.imdbIdPending === right.imdbIdPending &&
+    left.serverURL === right.serverURL
+  );
+}
 const EMPTY: StreamsState = {
   rows: [],
   loading: false,
@@ -420,20 +448,42 @@ export function useStreams(
   const hasIndexers = serverMode ? true : indexers.activeIndexers.length > 0;
   const hasDebrid = serverMode ? true : debrid != null && debrid.hasServices;
   const waitingForImdbId = imdbId == null && imdbIdPending && hasIndexers;
-
-  const [state, setState] = useState<StreamsState>({
+  const queryOwner = useMemo<StreamQueryOwner>(() => ({
+    imdbId,
+    type,
+    season,
+    episode,
+    title,
+    year,
+    indexers,
+    debrid,
+    imdbIdPending,
+    serverURL,
+  }), [imdbId, type, season, episode, title, year, indexers, debrid, imdbIdPending, serverURL]);
+  const initialState = (): StreamsState => ({
     ...EMPTY,
     hasIndexers,
     hasDebrid,
     loading: (imdbId != null && hasIndexers) || waitingForImdbId,
   });
+  const [state, setState] = useState<StreamsState>(initialState);
+  const ownerRef = useRef(queryOwner);
+  const ownerChanged = !sameStreamQueryOwner(ownerRef.current, queryOwner);
+  if (ownerChanged) ownerRef.current = queryOwner;
+  const commitState = useCallback(
+    (next: StreamsState | ((current: StreamsState) => StreamsState)) => {
+      if (!sameStreamQueryOwner(ownerRef.current, queryOwner)) return;
+      setState(next);
+    },
+    [queryOwner],
+  );
 
   const run = useCallback(
     async (signal: AbortSignal) => {
       if (imdbId == null || !hasIndexers) {
         // HONEST idle: a null imdb id means NO search ever ran - say so instead
         // of letting the UI render the generic "No streams found".
-        setState({
+        commitState({
           ...EMPTY,
           hasIndexers,
           hasDebrid,
@@ -442,7 +492,7 @@ export function useStreams(
         });
         return;
       }
-      setState((s) => ({
+      commitState((s) => ({
         ...s,
         rows: [],
         loading: true,
@@ -463,7 +513,7 @@ export function useStreams(
             signal,
             onPhase: (phase, partial) => {
               if (phase !== "sources" || signal.aborted) return;
-              setState({
+              commitState({
                 rows: filterAndRankForEpisode(
                   dedupeStreamRows(partial.rows),
                   season,
@@ -480,7 +530,7 @@ export function useStreams(
             },
           });
           if (!signal.aborted) {
-            setState({
+            commitState({
               rows: filterAndRankForEpisode(
                 dedupeStreamRows(remote.rows),
                 season,
@@ -509,7 +559,7 @@ export function useStreams(
           signal,
           ({ rows, sourceErrors }) => {
             if (signal.aborted) return;
-            setState({
+            commitState({
               rows,
               loading: true,
               phase: "checking_availability",
@@ -534,7 +584,7 @@ export function useStreams(
           throw new Error(`Couldn't reach any source - ${detail}`);
         }
         if (!signal.aborted) {
-          setState({
+          commitState({
             rows,
             loading: false,
             phase: "ready",
@@ -548,7 +598,7 @@ export function useStreams(
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (!signal.aborted) {
-          setState({
+          commitState({
             rows: [],
             loading: false,
             phase: "ready",
@@ -561,7 +611,7 @@ export function useStreams(
         }
       }
     },
-    [imdbId, type, season, episode, title, year, indexers, debrid, imdbIdPending, hasIndexers, hasDebrid, serverMode, waitingForImdbId],
+    [imdbId, type, season, episode, title, year, indexers, debrid, imdbIdPending, hasIndexers, hasDebrid, serverMode, waitingForImdbId, commitState],
   );
 
   useEffect(() => {
@@ -572,5 +622,5 @@ export function useStreams(
     };
   }, [run]);
 
-  return state;
+  return ownerChanged ? initialState() : state;
 }

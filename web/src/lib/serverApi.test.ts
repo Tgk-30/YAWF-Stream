@@ -274,7 +274,7 @@ describe("fetchServerStreams", () => {
     });
     const { url } = lastCall();
     expect(url).toBe(
-      "https://server.example/api/streams/tt%20123?type=series&season=2&episode=5",
+      "https://server.example/api/streams/tt%20123?type=series&episodeGuide=2&season=2&episode=5",
     );
     expect(res).toEqual({
       rows: [{ id: "r1" }],

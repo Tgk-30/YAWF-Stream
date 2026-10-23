@@ -24,6 +24,7 @@ import {
   defaultSelectionFor,
   episodeIdFor,
   episodeLabel,
+  loadCanonicalSeasonEpisodes,
   nextEpisodeFor,
   normalizeFlattenedSeasonOneSelection,
   parseEpisodeId,
@@ -276,6 +277,186 @@ describe("useSeasons / useEpisodes", () => {
     await waitFor(() => expect(result.current.episodes[0]?.title).toBe("S2 opener"));
     expect(getEpisodes).toHaveBeenCalledTimes(2);
   });
+
+  it("fails closed when the known Bleach canonical guide is unavailable", async () => {
+    const originalFetch = globalThis.fetch;
+    const getSeasons = vi.fn(async () => [{
+      id: 2, seasonNumber: 2, name: "Thousand-Year Blood War", episodeCount: 13,
+    }]);
+    const getEpisodes = vi.fn(async () => [{
+      id: "tmdb-wrong", mediaId: "tmdb-30984", seasonNumber: 2,
+      episodeNumber: 7, title: "Wrong merged identity",
+    }]);
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error("Cinemeta unavailable");
+    }) as typeof fetch;
+    const tmdb = fakeTmdb({ getSeasons, getEpisodes });
+    try {
+      const seasons = renderHook(() =>
+        useSeasons(30984, true, tmdb, "tt0434665"),
+      );
+      const episodes = renderHook(() =>
+        useEpisodes(30984, 17, tmdb, "tt0434665"),
+      );
+      await waitFor(() => {
+        expect(seasons.result.current.loading).toBe(false);
+        expect(episodes.result.current.loading).toBe(false);
+      });
+      expect(seasons.result.current).toMatchObject({ seasons: [], source: "none" });
+      expect(episodes.result.current).toMatchObject({ episodes: [], source: "none" });
+      expect(getSeasons).not.toHaveBeenCalled();
+      expect(getEpisodes).not.toHaveBeenCalled();
+      seasons.unmount();
+      episodes.unmount();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects a known-parent canonical guide outage instead of returning a valid empty season", async () => {
+    const originalFetch = globalThis.fetch;
+    const getEpisodes = vi.fn(async () => [{
+      id: "tmdb-wrong", mediaId: "tmdb-30984", seasonNumber: 2,
+      episodeNumber: 1, title: "Wrong merged identity",
+    }]);
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error("Cinemeta unavailable");
+    }) as typeof fetch;
+    try {
+      await expect(loadCanonicalSeasonEpisodes({
+        tmdbId: 30984,
+        imdbId: "tt0434665",
+        season: 2,
+        tmdb: fakeTmdb({ getEpisodes }),
+      })).rejects.toThrow("Cinemeta unavailable");
+      expect(getEpisodes).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("returns an authoritative empty list when a valid exact guide lacks the season", async () => {
+    const originalFetch = globalThis.fetch;
+    const imdbId = "tt7654321";
+    const getEpisodes = vi.fn(async () => [{
+      id: "tmdb-wrong", mediaId: "tmdb-42", seasonNumber: 2,
+      episodeNumber: 1, title: "Wrong identity",
+    }]);
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      meta: {
+        id: imdbId,
+        type: "series",
+        videos: [{ id: `${imdbId}:1:1`, season: 1, number: 1, episode: 1 }],
+      },
+    }))) as typeof fetch;
+    try {
+      await expect(loadCanonicalSeasonEpisodes({
+        tmdbId: 42,
+        imdbId,
+        season: 2,
+        tmdb: fakeTmdb({ getEpisodes }),
+      })).resolves.toEqual([]);
+      expect(getEpisodes).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("loads Bleach display seasons from the canonical composite instead of merged TMDB", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalCounts = [20, 21, 22, 28, 18, 22, 20, 16, 22, 16, 7, 17, 36, 51, 26, 24];
+    const sequelCounts = [13, 13, 14, 10];
+    const guide = (imdbId: string, counts: number[]) => JSON.stringify({
+      meta: {
+        id: imdbId,
+        type: "series",
+        videos: counts.flatMap((count, seasonIndex) =>
+          Array.from({ length: count }, (_, episodeIndex) => ({
+            id: `${imdbId}:${seasonIndex + 1}:${episodeIndex + 1}`,
+            season: seasonIndex + 1,
+            number: episodeIndex + 1,
+            episode: episodeIndex + 1,
+            name: `${imdbId} S${seasonIndex + 1}E${episodeIndex + 1}`,
+          })),
+        ),
+      },
+    });
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) =>
+      new Response(String(input).includes("tt14986406")
+        ? guide("tt14986406", sequelCounts)
+        : guide("tt0434665", originalCounts)),
+    ) as typeof fetch;
+    const mergedTmdbEpisodes = vi.fn(async () =>
+      Array.from({ length: 50 }, (_, index) => ({
+        id: `tmdb-wrong-${index + 1}`,
+        mediaId: "tmdb-30984",
+        seasonNumber: 2,
+        episodeNumber: index + 1,
+        title: `Merged Blood War ${index + 1}`,
+      })),
+    );
+    const tmdb = fakeTmdb({ getEpisodes: mergedTmdbEpisodes });
+    try {
+      const originalSeasonTwo = await loadCanonicalSeasonEpisodes({
+        tmdbId: 30984,
+        imdbId: "tt0434665",
+        season: 2,
+        tmdb,
+      });
+      expect(originalSeasonTwo).toHaveLength(21);
+      expect(originalSeasonTwo[0]).toMatchObject({
+        mediaId: "tt0434665", seasonNumber: 2, episodeNumber: 1,
+      });
+
+      const allEpisodes = (await Promise.all(
+        Array.from({ length: 20 }, (_, index) => loadCanonicalSeasonEpisodes({
+          tmdbId: 30984,
+          imdbId: "tt0434665",
+          season: index + 1,
+          tmdb,
+        })),
+      )).flat();
+      expect(allEpisodes).toHaveLength(416);
+      expect(allEpisodes.filter((episode) => episode.seasonNumber === 17)).toHaveLength(13);
+      expect(allEpisodes.find((episode) => episode.seasonNumber === 17)).toMatchObject({
+        mediaId: "tt14986406", episodeNumber: 1,
+      });
+      expect(mergedTmdbEpisodes).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not fall back to conflicting TMDB numbering when an exact guide lacks the season", async () => {
+    const imdbId = "tt7654321";
+    const originalFetch = globalThis.fetch;
+    const getEpisodes = vi.fn(async () => [{
+      id: "tmdb-conflict",
+      mediaId: "tmdb-42",
+      seasonNumber: 2,
+      episodeNumber: 1,
+      title: "Wrong identity",
+    }]);
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      meta: {
+        id: imdbId,
+        type: "series",
+        videos: [{ id: `${imdbId}:1:1`, season: 1, number: 1, episode: 1 }],
+      },
+    }))) as typeof fetch;
+    const tmdb = fakeTmdb({ getEpisodes });
+    try {
+      const { result } = renderHook(() =>
+        useEpisodes(42, 2, tmdb, imdbId),
+      );
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.episodes).toEqual([]);
+      expect(result.current.guideVersion).toBe("2");
+      expect(getEpisodes).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("nextEpisodeFor", () => {
@@ -297,6 +478,19 @@ describe("nextEpisodeFor", () => {
   it("crosses to the next non-empty season at the boundary (skipping empties)", () => {
     expect(nextEpisodeFor({ season: 2, episode: 2 }, seasons)).toEqual({
       season: 4,
+      episode: 1,
+    });
+  });
+
+  it("crosses Bleach's original-series boundary from display S16 to S17", () => {
+    const bleachSeasons = Array.from({ length: 20 }, (_, index) => ({
+      id: index + 1,
+      seasonNumber: index + 1,
+      name: `Season ${index + 1}`,
+      episodeCount: index === 15 ? 24 : 13,
+    }));
+    expect(nextEpisodeFor({ season: 16, episode: 24 }, bleachSeasons)).toEqual({
+      season: 17,
       episode: 1,
     });
   });

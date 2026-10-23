@@ -14,6 +14,11 @@ import type { WatchHistoryRecord } from "../storage/models";
 import { fetchServerEpisodes, fetchServerSeasons } from "../lib/serverApi";
 import { isServerMode } from "../lib/serverMode";
 import { CinemetaEpisodeService } from "../services/metadata/CinemetaEpisodeService";
+import {
+  EPISODE_GUIDE_VERSION,
+  hasEpisodeContinuationIdentityConflict,
+  requiresCanonicalEpisodeGuide,
+} from "./episodeSource";
 
 // MARK: - Pure helpers
 
@@ -118,6 +123,7 @@ interface SeasonsState {
   /** Only Cinemeta inventories are exact Stremio/IMDb numbering and safe for
    * translating a legacy flattened first-season position. */
   numbering: "cinemeta" | "tmdb" | null;
+  guideVersion: string | null;
 }
 
 interface EpisodesState {
@@ -125,6 +131,7 @@ interface EpisodesState {
   loading: boolean;
   source: "live" | "none";
   numbering: "cinemeta" | "tmdb" | null;
+  guideVersion: string | null;
 }
 
 interface KeyedState<T> {
@@ -133,10 +140,10 @@ interface KeyedState<T> {
 }
 
 const NO_SEASONS: SeasonsState = {
-  seasons: [], loading: false, source: "none", numbering: null,
+  seasons: [], loading: false, source: "none", numbering: null, guideVersion: null,
 };
 const NO_EPISODES: EpisodesState = {
-  episodes: [], loading: false, source: "none", numbering: null,
+  episodes: [], loading: false, source: "none", numbering: null, guideVersion: null,
 };
 const cinemetaEpisodes = new CinemetaEpisodeService();
 
@@ -148,6 +155,49 @@ async function localImdbId(
   if (imdbId != null) return imdbId;
   if (tmdbId == null || tmdb == null) return null;
   return (await tmdb.getExternalIds(tmdbId, "series")).imdbId ?? null;
+}
+
+/** Load one display season using canonical IMDb/Cinemeta numbering when
+ * available. An exact guide is authoritative: a missing season or known-guide
+ * outage never falls through to conflicting TMDB numbering. */
+export async function loadCanonicalSeasonEpisodes(input: {
+  tmdbId: number | null;
+  imdbId: string | null;
+  season: number;
+  tmdb: TMDBService | null;
+}): Promise<Episode[]> {
+  if (hasEpisodeContinuationIdentityConflict(input.imdbId, input.tmdbId)) {
+    throw new Error("Episode guide identities conflict.");
+  }
+  if (isServerMode()) {
+    return (await fetchServerEpisodes({
+      tmdbId: input.tmdbId,
+      imdbId: input.imdbId,
+      season: input.season,
+    })).episodes;
+  }
+
+  let exactImdbId = input.imdbId;
+  if (exactImdbId == null && input.tmdbId != null && input.tmdb != null) {
+    try {
+      exactImdbId = await localImdbId(input.tmdbId, null, input.tmdb);
+    } catch (error) {
+      if (requiresCanonicalEpisodeGuide(null, input.tmdbId)) throw error;
+    }
+  }
+  if (exactImdbId != null) {
+    try {
+      const guide = await cinemetaEpisodes.getGuide(exactImdbId);
+      return guide.episodesBySeason.get(input.season) ?? [];
+    } catch (error) {
+      if (requiresCanonicalEpisodeGuide(exactImdbId, input.tmdbId)) throw error;
+    }
+  }
+  if (requiresCanonicalEpisodeGuide(exactImdbId, input.tmdbId)) {
+    throw new Error("The canonical episode guide is unavailable.");
+  }
+  if (input.tmdbId == null || input.tmdb == null) return [];
+  return input.tmdb.getEpisodes(input.tmdbId, input.season);
 }
 
 /** Load the seasons list for a series. `enabled` gates the fetch (pass
@@ -174,17 +224,23 @@ export function useSeasons(
     let cancelled = false;
     setState({
       key: requestKey,
-      value: { seasons: [], loading: true, source: "none", numbering: null },
+      value: { seasons: [], loading: true, source: "none", numbering: null, guideVersion: null },
     });
 
     async function run() {
       try {
+        if (hasEpisodeContinuationIdentityConflict(imdbId, tmdbId)) {
+          if (!cancelled) setState({ key: requestKey, value: NO_SEASONS });
+          return;
+        }
         let raw: Season[] | null = null;
         let numbering: "cinemeta" | "tmdb" | null = null;
+        let guideVersion: string | null = null;
         if (isServerMode()) {
           const response = await fetchServerSeasons({ tmdbId, imdbId });
           raw = response.seasons;
           numbering = response.numbering;
+          guideVersion = response.guideVersion ?? null;
         } else {
           const exactImdbId = await localImdbId(tmdbId, imdbId, tmdb).catch(() => null);
           if (exactImdbId != null) {
@@ -192,9 +248,15 @@ export function useSeasons(
             if (guide != null) {
               raw = guide.seasons;
               numbering = "cinemeta";
+              guideVersion = guide.version;
             }
           }
-          if (raw == null && tmdbId != null && tmdb != null) {
+          if (
+            raw == null &&
+            !requiresCanonicalEpisodeGuide(exactImdbId, tmdbId) &&
+            tmdbId != null &&
+            tmdb != null
+          ) {
             raw = await tmdb.getSeasons(tmdbId);
             numbering = "tmdb";
           }
@@ -213,6 +275,7 @@ export function useSeasons(
             loading: false,
             source: seasons.length > 0 ? "live" : "none",
             numbering: seasons.length > 0 ? numbering : null,
+            guideVersion: seasons.length > 0 ? guideVersion : null,
           },
         });
       } catch {
@@ -253,13 +316,18 @@ export function useEpisodes(
     let cancelled = false;
     setState({
       key: requestKey,
-      value: { episodes: [], loading: true, source: "none", numbering: null },
+      value: { episodes: [], loading: true, source: "none", numbering: null, guideVersion: null },
     });
 
     async function run() {
       try {
+        if (hasEpisodeContinuationIdentityConflict(imdbId, tmdbId)) {
+          if (!cancelled) setState({ key: requestKey, value: NO_EPISODES });
+          return;
+        }
         let raw: Episode[] | null = null;
         let numbering: "cinemeta" | "tmdb" | null = null;
+        let guideVersion: string | null = null;
         if (isServerMode()) {
           const response = await fetchServerEpisodes({
             tmdbId,
@@ -268,17 +336,23 @@ export function useEpisodes(
           });
           raw = response.episodes;
           numbering = response.numbering;
+          guideVersion = response.guideVersion ?? null;
         } else {
           const exactImdbId = await localImdbId(tmdbId, imdbId, tmdb).catch(() => null);
           if (exactImdbId != null) {
             const guide = await cinemetaEpisodes.getGuide(exactImdbId).catch(() => null);
-            const episodes = guide?.episodesBySeason.get(seasonNumber!);
-            if (episodes != null) {
-              raw = episodes;
+            if (guide != null) {
+              raw = guide.episodesBySeason.get(seasonNumber!) ?? [];
               numbering = "cinemeta";
+              guideVersion = guide.version;
             }
           }
-          if (raw == null && tmdbId != null && tmdb != null) {
+          if (
+            raw == null &&
+            !requiresCanonicalEpisodeGuide(exactImdbId, tmdbId) &&
+            tmdbId != null &&
+            tmdb != null
+          ) {
             raw = await tmdb.getEpisodes(tmdbId, seasonNumber!);
             numbering = "tmdb";
           }
@@ -295,6 +369,8 @@ export function useEpisodes(
             loading: false,
             source: raw.length > 0 ? "live" : "none",
             numbering: raw.length > 0 ? numbering : null,
+            guideVersion:
+              numbering === "cinemeta" ? guideVersion ?? EPISODE_GUIDE_VERSION : null,
           },
         });
       } catch {

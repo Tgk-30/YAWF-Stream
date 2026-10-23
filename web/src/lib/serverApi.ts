@@ -18,6 +18,7 @@ import type { StreamRow } from "../data/streams";
 import type { UpcomingEpisode } from "./metadata";
 import type { MovieRelease } from "../services/metadata/TMDBService";
 import type { PortableProfileBundle } from "../data/portableBackup";
+import { EPISODE_GUIDE_VERSION } from "../data/episodeSource";
 import { configuredServerURL } from "./serverMode";
 import { notifyUnauthorized, readCsrfToken } from "./serverSession";
 
@@ -291,6 +292,7 @@ export async function fetchServerStreams(input: {
     sourceErrors: response.sourceErrors ?? response.indexerErrors ?? [],
   });
   const params = new URLSearchParams({ type: input.type });
+  if (input.type === "series") params.set("episodeGuide", EPISODE_GUIDE_VERSION);
   if (input.season != null) params.set("season", String(input.season));
   if (input.episode != null) params.set("episode", String(input.episode));
   if (input.title != null && input.title.trim().length > 0) {
@@ -1050,7 +1052,11 @@ export async function fetchServerDetail(input: {
 export async function fetchServerSeasons(input: {
   tmdbId: number | null;
   imdbId?: string | null;
-}): Promise<{ seasons: Season[]; numbering: "cinemeta" | "tmdb" }> {
+}): Promise<{
+  seasons: Season[];
+  numbering: "cinemeta" | "tmdb";
+  guideVersion?: string;
+}> {
   const params = new URLSearchParams();
   if (input.tmdbId != null) params.set("tmdbId", String(input.tmdbId));
   if (input.imdbId != null) params.set("imdbId", input.imdbId);
@@ -1062,7 +1068,11 @@ export async function fetchServerEpisodes(input: {
   tmdbId: number | null;
   imdbId?: string | null;
   season: number;
-}): Promise<{ episodes: Episode[]; numbering: "cinemeta" | "tmdb" }> {
+}): Promise<{
+  episodes: Episode[];
+  numbering: "cinemeta" | "tmdb";
+  guideVersion?: string;
+}> {
   const params = new URLSearchParams();
   if (input.tmdbId != null) params.set("tmdbId", String(input.tmdbId));
   if (input.imdbId != null) params.set("imdbId", input.imdbId);

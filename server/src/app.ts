@@ -31,7 +31,9 @@ import {
   getServerMovieReleaseCalendar,
   getServerSeasons,
   getServerUpcomingEpisodes,
+  EPISODE_GUIDE_VERSION,
   MAX_CALENDAR_SERIES,
+  resolveEpisodeSource,
   searchServerMedia,
   titleCertification,
 } from "./metadata-runtime.js";
@@ -589,6 +591,7 @@ const streamSearchQuerySchema = z.object({
   // document, while current clients can render indexer results before the
   // provider cache checks complete.
   progressive: z.literal("1").optional().catch(undefined),
+  episodeGuide: z.string().trim().max(16).optional().catch(undefined),
 });
 
 const mediaSearchQuerySchema = z.object({
@@ -5419,9 +5422,31 @@ function registerRoutes(
       .max(64)
       .parse((request.params as { imdbId: string }).imdbId);
     const query = parseBody(streamSearchQuerySchema, request.query);
+    if (
+      imdbId === "tt0434665" &&
+      query.type === "series" &&
+      query.episodeGuide !== EPISODE_GUIDE_VERSION
+    ) {
+      throw httpError(
+        409,
+        "This Bleach episode guide is outdated. Reload the app before searching for streams.",
+      );
+    }
+    const episodeSource =
+      query.type === "series" && query.season != null
+        ? resolveEpisodeSource({
+            imdbId,
+            tmdbId: null,
+            season: query.season,
+            episode: query.episode ?? 1,
+            title: query.title ?? null,
+            year: query.year ?? null,
+          })
+        : null;
+    const sourceImdbId = episodeSource?.imdbId ?? imdbId;
     // Over-cap source enumeration is blocked for kids - both an info leak and the
     // supply of infoHashes the resolve path would otherwise have to defend alone.
-    await requireTitleWithinCap(auth, imdbId, query.type);
+    await requireTitleWithinCap(auth, sourceImdbId, query.type);
     // The name-matching title pass is deliberately SUPPRESSED for kid/capped
     // profiles: it can surface loosely-name-matched (e.g. APIBay) sources that
     // the fail-closed play-block (titleHasInfoHash, imdb-EXACT) would then refuse
@@ -5430,14 +5455,15 @@ function registerRoutes(
     // stay imdb-exact end-to-end; only normal profiles get the extra pass.
     const capped = auth.isKid || auth.maturityMax != null;
     const searchInput = {
-      imdbId,
+      imdbId: sourceImdbId,
       type: query.type,
-      season: query.season ?? null,
-      episode: query.episode ?? null,
-      title: capped ? null : query.title ?? null,
+      season: episodeSource?.season ?? query.season ?? null,
+      episode:
+        query.episode == null ? null : episodeSource?.episode ?? query.episode,
+      title: capped ? null : episodeSource?.title ?? query.title ?? null,
       // The year passes through even for capped profiles: it only REORDERS the
       // imdb-exact results (wrong-year noise sinks), it never widens the set.
-      year: query.year ?? null,
+      year: episodeSource?.year ?? query.year ?? null,
     };
     if (query.progressive !== "1") {
       return searchServerStreams(db, config, auth.profileId, searchInput);
@@ -6428,6 +6454,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   if (transcodeReady) transcodeRegistry.start();
 
   const app = Fastify({
+    forceCloseConnections: true,
     logger: config.logger,
     trustProxy: config.trustProxy,
   });
