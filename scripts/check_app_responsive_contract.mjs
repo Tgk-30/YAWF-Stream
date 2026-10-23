@@ -93,6 +93,10 @@ const setupInvite = read("web/src/lib/serverSetupInvite.ts");
 const serverSetupWizard = read("web/src/components/ServerSetupWizard.tsx");
 const ciWorkflow = read(".github/workflows/ci.yml");
 const viteConfig = read("web/vite.config.ts");
+const appShellRule = ruleBlock(appCss, ".app");
+const appContentRule = ruleBlock(appCss, ".app-content");
+const skipLinkRule = ruleBlock(appCss, ".skip-to-content");
+const skipLinkFocusRule = ruleBlock(appCss, ".skip-to-content:focus");
 const intermediatePlayerStart = playerCss.indexOf(
   "@media (min-width: 561px) and (max-width: 950px) {",
 );
@@ -212,6 +216,13 @@ check(
     /scroll-padding-bottom:\s*var\(--mobile-nav-reserve\)/.test(appCss) &&
     !/height:\s*calc\(100d?vh\s*-\s*var\(--mobile-nav-reserve\)\)/.test(appCss),
   "web/src/App.css must keep a full viewport scrollport and reserve the floating bottom nav only with padding.",
+);
+
+check(
+  "general app shell tracks the dynamic viewport outside mobile media",
+  /min-height:\s*100vh;\s*min-height:\s*100dvh;/.test(appShellRule) &&
+    /height:\s*100vh;\s*height:\s*100dvh;/.test(appContentRule),
+  "The base app and app-content rules must declare 100vh fallbacks immediately before 100dvh so tablet Safari uses its visible viewport.",
 );
 
 check(
@@ -396,6 +407,14 @@ check(
   "profile control clears native top and right insets",
   /\.profile-menu\s*\{[\s\S]{0,160}top:\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)[\s\S]{0,100}right:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)/.test(profileMenuCss),
   "ProfileMenu.css must preserve its normal spacing while keeping the avatar and popover clear of native top and right insets.",
+);
+
+check(
+  "skip link is fully hidden independent of native top inset until focused",
+  /top:\s*0;/.test(skipLinkRule) &&
+    /transform:\s*translateY\(calc\(-100% - 2px\)\)/.test(skipLinkRule) &&
+    /transform:\s*translateY\(max\(10px,\s*var\(--safe-area-top\)\)\)/.test(skipLinkFocusRule),
+  "App.css must park the whole skip link above the viewport and move its focused state below the native top inset.",
 );
 
 check(

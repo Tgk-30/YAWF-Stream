@@ -24,6 +24,7 @@
   position: relative;
   display: flex;
   min-height: 100vh;
+  min-height: 100dvh;
   z-index: 1;
 }
 
@@ -32,6 +33,7 @@
   flex: 1 1 auto;
   min-width: 0;
   height: 100vh;
+  height: 100dvh;
   overflow-y: auto;
   /* Reserve the floating rail's footprint; full-bleed media (the hero) escapes
      this with a 100vw breakout so it can reflect through the glass rail. */
@@ -41,9 +43,9 @@
 .skip-to-content {
   position: fixed;
   z-index: 10000;
-  top: max(10px, var(--safe-area-top));
+  top: 0;
   left: max(10px, var(--safe-area-left));
-  transform: translateY(-160%);
+  transform: translateY(calc(-100% - 2px));
   padding: calc(10px * var(--density-scale)) calc(14px * var(--density-scale));
   border-radius: var(--r-sm);
   color: var(--text-primary);
@@ -51,7 +53,7 @@
   border: 1px solid var(--accent);
 }
 .skip-to-content:focus {
-  transform: translateY(0);
+  transform: translateY(max(10px, var(--safe-area-top)));
 }
 .route-frame:focus,
 .app-content:focus {
