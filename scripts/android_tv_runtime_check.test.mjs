@@ -673,7 +673,7 @@ test("host admission and semantic receipt policy self-tests execute", () => {
 test("fixture path and native bridge contract self-tests execute", () => {
   const result = runPythonSelfTest(fixturePath);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stderr, /Ran 2 tests/);
+  assert.match(result.stderr, /Ran 4 tests/);
 });
 
 test("host tests kill removal of decoded-frame semantic admission", () => {
