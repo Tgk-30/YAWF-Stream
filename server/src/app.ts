@@ -59,6 +59,11 @@ import { assertSafeUpstream, fetchUpstreamSafely } from "./ssrf.js";
 import { ExternalStreamAssets, type ExternalStreamAsset } from "./externalStreamAssets.js";
 import { MAX_HLS_MANIFEST_BYTES, rewriteHlsManifest } from "./hlsManifest.js";
 import {
+  isTranscodeAssetName,
+  rewriteGeneratedWebVttForTimeline,
+  rewriteTranscodeManifest,
+} from "./transcodeHls.js";
+import {
   demandAwareNodeReadable,
   streamWithIdleTimeout,
   waitForUpstreamResponse,
@@ -74,6 +79,7 @@ import {
   type TranscodeClientProfile,
   type TranscodeHdrPolicy,
   type TranscodeQuality,
+  type TranscodeSourceInfo,
   isTranscodeQuality,
 } from "./transcodeSession.js";
 import { SERVER_VERSION } from "./version.js";
@@ -95,34 +101,6 @@ import {
   type ServerConfig,
   type UserRole,
 } from "./types.js";
-
-function rewriteTranscodeManifest(
-  manifest: string,
-  generation?: string,
-): string {
-  const suffix = generation == null
-    ? ""
-    : `?generation=${encodeURIComponent(generation)}`;
-  const rewritten = manifest.replace(
-    /^(?!#)((?:1080p|720p|480p|360p)\.m3u8|(?:1080p|720p|480p|360p)_seg_\d{5}\.ts|seg_\d{5}\.ts|subtitles\.vtt)$/gm,
-    // Keep assets relative to the manifest. A reverse proxy can mount the
-    // server below a path prefix, while a root-relative URI would drop it.
-    (_line, asset: string) => `${asset}${suffix}`,
-  );
-  if (
-    rewritten.includes("#EXTINF:") &&
-    !rewritten.includes("#EXT-X-START:")
-  ) {
-    // FFmpeg must publish an EVENT playlist while it is still encoding so the
-    // first segment can play immediately. Pin its initial position to the
-    // beginning rather than letting live-HLS clients jump to the newest segment.
-    return rewritten.replace(
-      /^#EXTM3U$/m,
-      "#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES",
-    );
-  }
-  return rewritten;
-}
 
 const SESSION_COOKIE = "ds_session";
 const CSRF_COOKIE = "ds_csrf";
@@ -6201,10 +6179,24 @@ function registerRoutes(
     rateLimit(request, `stream-audio:${row.id}`, 30, 60 * 1000);
     const query = parseBody(streamAudioTracksQuerySchema, request.query);
     const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
-    await assertSafeUpstream(upstreamUrl, config.allowRawStreamUrls);
-    const sourceInfo = await transcode.registry.sourceInfoFor(row.id, upstreamUrl, {
-      retryFailed: query.retry === "1",
-    });
+    const controller = new AbortController();
+    const cancelProbeWaiter = () => controller.abort();
+    request.raw.once("aborted", cancelProbeWaiter);
+    reply.raw.once("close", cancelProbeWaiter);
+    if (request.raw.aborted || request.raw.destroyed || reply.raw.destroyed) {
+      cancelProbeWaiter();
+    }
+    let sourceInfo: TranscodeSourceInfo;
+    try {
+      await assertSafeUpstream(upstreamUrl, config.allowRawStreamUrls);
+      sourceInfo = await transcode.registry.sourceInfoFor(row.id, upstreamUrl, {
+        retryFailed: query.retry === "1",
+        signal: controller.signal,
+      });
+    } finally {
+      request.raw.off("aborted", cancelProbeWaiter);
+      reply.raw.off("close", cancelProbeWaiter);
+    }
     const tracks = sourceInfo.audioTracks;
     if (tracks == null) {
       throw httpError(409, "Audio track inventory is unavailable for this stream.");
@@ -6270,7 +6262,7 @@ function registerRoutes(
         "HDR tone mapping requires an ffmpeg build with the zscale filter.",
       );
     }
-    const preserveSubtitles = query.subtitles === "preserve";
+    const preserveSubtitlesRequested = query.subtitles === "preserve";
     let audioTrack = 0;
     let audioTracks: Awaited<ReturnType<TranscodeRegistry["audioTracksFor"]>> | null = null;
     if (transcode.audioTrackSelectionAvailable) {
@@ -6292,6 +6284,10 @@ function registerRoutes(
         throw httpError(400, "Unsupported audio track.");
       }
     }
+    const preserveSubtitles =
+      preserveSubtitlesRequested &&
+      transcode.subtitleSidecarAvailable &&
+      (await transcode.registry.subtitleAvailableFor(row.id, upstreamUrl)) === true;
     const dir = await transcode.registry.ensureJob(row.id, upstreamUrl, {
       profile,
       quality,
@@ -6300,25 +6296,7 @@ function registerRoutes(
       preserveSubtitles,
       audioTrack,
     });
-    let manifest = await readFile(join(dir, MANIFEST_NAME), "utf8");
-    if (
-      preserveSubtitles &&
-      manifest.includes("#EXT-X-STREAM-INF")
-    ) {
-      const generation = transcode.registry.generationFor(row.id, dir);
-      const subtitleUri = `subtitles.vtt${
-        generation == null ? "" : `?generation=${encodeURIComponent(generation)}`
-      }`;
-      manifest = manifest.replace(
-        /^#EXTM3U$/m,
-        `#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Embedded",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,URI="${subtitleUri}"`,
-      );
-      manifest = manifest.replace(
-        /^#EXT-X-STREAM-INF:(.+)$/gm,
-        (_line, attributes: string) =>
-          `#EXT-X-STREAM-INF:${attributes},SUBTITLES="subs"`,
-      );
-    }
+    const manifest = await readFile(join(dir, MANIFEST_NAME), "utf8");
     const rewritten = rewriteTranscodeManifest(
       manifest,
       transcode.registry.generationFor(row.id, dir) ?? undefined,
@@ -6333,21 +6311,27 @@ function registerRoutes(
     return reply.send(rewritten);
   });
 
-  // HLS child manifests, segments, and the optional subtitle sidecar. The
+  // HLS child manifests, segments, and optional subtitle rendition. The
   // strict filename grammar rejects traversal and arbitrary files.
   app.get("/api/stream/:id/:asset", async (request, reply) => {
     if (!transcode.ready) throw httpError(404, "Transcoding is not available.");
     const asset = (request.params as { asset: string }).asset;
-    if (
-      !/^(?:(?:1080p|720p|480p|360p)\.m3u8|(?:1080p|720p|480p|360p)_seg_\d{5}\.ts|seg_\d{5}\.ts|subtitles\.vtt)$/.test(
-        asset,
-      )
-    ) {
+    if (!isTranscodeAssetName(asset)) {
       throw httpError(404, "Not found.");
     }
     const row = loadTranscodeSession(request);
     if (row == null) throw httpError(404, "Stream session not found.");
     const generation = (request.query as { generation?: string }).generation;
+    if (request.method === "HEAD" && /^(?:1080p|720p|480p|360p)\.m3u8$/.test(asset) && generation != null) {
+      reply.header("cache-control", "private, no-store");
+      rateLimit(request, `stream-retention:${row.id}`, 12, 60_000);
+      if (
+        typeof generation !== "string" ||
+        !/^transcode-[A-Za-z0-9_-]{1,100}$/.test(generation) ||
+        !transcode.registry.touchCurrentGeneration(row.id, asset, generation)
+      ) throw httpError(404, "Transcode asset not found.");
+      return reply.status(200).send();
+    }
     const dir = transcode.registry.dirForAsset(row.id, asset, generation);
     if (dir == null) throw httpError(404, "Transcode asset not found.");
     const path = join(dir, asset);
@@ -6360,7 +6344,16 @@ function registerRoutes(
     }
     if (asset.endsWith(".vtt")) {
       reply.header("content-type", "text/vtt; charset=utf-8");
-      return reply.send(await readFile(path, "utf8"));
+      const subtitleReady = transcode.registry.subtitleReadyForAsset(
+        row.id,
+        generation,
+      );
+      if (!subtitleReady) {
+        throw httpError(404, "Transcode asset not found.");
+      }
+      return reply.send(rewriteGeneratedWebVttForTimeline(
+        await readFile(path, "utf8"),
+      ));
     }
     reply.header("content-type", "video/mp2t");
     // HLS segments are served from the session-owned transcode dir, but still
@@ -6454,9 +6447,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   if (transcodeReady) transcodeRegistry.start();
 
   const app = Fastify({
-    forceCloseConnections: true,
     logger: config.logger,
     trustProxy: config.trustProxy,
+    forceCloseConnections: true,
   });
 
   await app.register(cookie);

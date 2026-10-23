@@ -145,7 +145,7 @@
 /* Subtitle appearance - driven by the --sub-* CSS vars set in useTheme from the
  * persisted subtitle settings (font scale, text color, caption bg opacity). */
 .player-video::cue {
-  font-size: calc(1em * var(--sub-font-scale, 1));
+  font-size: calc(var(--player-caption-font-size, 1em) * var(--sub-font-scale, 1));
   color: var(--sub-color, #ffffff);
   background-color: rgba(0, 0, 0, var(--sub-bg, 0.55));
   line-height: 1.3;

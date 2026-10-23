@@ -37,6 +37,7 @@ let capturedStreamPlay: (() => void) | null = null;
 let capturedRefreshCurrentSource: ((position: number, handoff: any) => Promise<void>) | null = null;
 let capturedTryNextSource: (() => Promise<void>) | null = null;
 const streamPickerMode = vi.hoisted(() => ({ real: false }));
+const episodePickerMode = vi.hoisted(() => ({ real: false }));
 const localStorageValues = new Map<string, string>();
 const testLocalStorage = {
   getItem: (key: string) => localStorageValues.get(key) ?? null,
@@ -168,14 +169,20 @@ const createRequest = vi.fn<(...a: any[]) => any>();
 const resolveServerStream = vi.fn<(...a: any[]) => any>();
 const fetchServerEpisodes = vi.fn<(...a: any[]) => any>();
 const fetchServerSeasons = vi.fn<(...a: any[]) => any>();
-const serverOptimizedSource = vi.fn((stream: any, options: any) => ({
-  url: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8${
-    options.startSeconds > 0 ? `?start=${options.startSeconds}` : ""
-  }`,
-  timelineOffsetSeconds: options.startSeconds ?? 0,
-  startPositionSeconds: 0,
-  quality: options.quality,
-}));
+const serverOptimizedSource = vi.fn((stream: any, options: any) => {
+  const requestedStart = Number.isFinite(options.startSeconds) && options.startSeconds > 0
+    ? Math.min(86_400, options.startSeconds)
+    : 0;
+  const timelineOffset = Math.floor(requestedStart);
+  return {
+    url: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8${
+      timelineOffset > 0 ? `?start=${timelineOffset}` : ""
+    }`,
+    timelineOffsetSeconds: timelineOffset,
+    startPositionSeconds: requestedStart - timelineOffset,
+    quality: options.quality,
+  };
+});
 const serverExternalPlaybackURL = vi.fn(
   (stream: any) => `${stream.streamURL}/external-test` as string | null,
 );
@@ -368,8 +375,14 @@ vi.mock("../components/StreamPicker", async (importOriginal) => {
   };
 });
 
-vi.mock("../components/EpisodePicker", () => ({
-  EpisodePicker: ({ onSelect, onToggleWatched, onToggleSeriesWatched, selected }: any) => (
+vi.mock("../components/EpisodePicker", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/EpisodePicker")>();
+  const ActualEpisodePicker = actual.EpisodePicker;
+  return {
+  EpisodePicker: (props: any) => {
+    if (episodePickerMode.real) return <ActualEpisodePicker {...props} />;
+    const { onSelect, onToggleWatched, onToggleSeriesWatched, selected } = props;
+    return (
     <>
       <span
         data-testid="episode-picker-selection"
@@ -401,8 +414,10 @@ vi.mock("../components/EpisodePicker", () => ({
         mark-series-watched
       </button>
     </>
-  ),
-}));
+    );
+  },
+  };
+});
 
 vi.mock("../components/CastRail", () => ({
   CastRail: ({ cast }: any) => (
@@ -583,6 +598,56 @@ function streamsState(): StreamsState {
   };
 }
 
+function serverSeasonGuide(
+  counts: number[],
+  guideVersion = "2",
+  numbering: "cinemeta" | "tmdb" = "cinemeta",
+) {
+  return {
+    seasons: counts.map((episodeCount, index) => ({
+      id: index + 1,
+      seasonNumber: index + 1,
+      name: `Season ${index + 1}`,
+      episodeCount,
+    })),
+    numbering,
+    guideVersion,
+  };
+}
+
+function continueWatchingEpisode(item: MediaPreview, episodeId: string) {
+  return {
+    id: `${item.id}:${episodeId}`,
+    mediaId: item.id,
+    episodeId,
+    progressSeconds: 120,
+    durationSeconds: 1_200,
+    completed: false,
+    lastWatched: "2026-10-23T12:00:00.000Z",
+    streamQuality: null,
+    preview: item,
+  };
+}
+
+function showTybwChildWithHistory(
+  episodeId: string,
+  title = "Bleach: Thousand-Year Blood War",
+): MediaPreview {
+  const child = preview("tybw", { type: "series", title, year: 2022, tmdbId: 215105 });
+  mockDetailItem = child;
+  mockDetail = detailState({
+    item: mediaItem({
+      id: "tt14986406", type: "series", title, year: 2022, tmdbId: 215105,
+    }),
+    imdbId: "tt14986406",
+  });
+  mockContinueWatching = [continueWatchingEpisode(child, episodeId)];
+  serverModeOn = true;
+  fetchServerSeasons.mockReset();
+  fetchServerEpisodes.mockReset();
+  return child;
+}
+
 function downloadRow(
   title: string,
   sizeBytes: number,
@@ -624,6 +689,7 @@ beforeEach(() => {
   capturedRefreshCurrentSource = null;
   capturedTryNextSource = null;
   streamPickerMode.real = false;
+  episodePickerMode.real = false;
   mockServices = {
     tmdb: null,
     indexers: null,
@@ -828,6 +894,207 @@ describe("Detail base render", () => {
     expect(player).toHaveAttribute("data-scrobble-season", "1");
     expect(player).toHaveAttribute("data-scrobble-episode", "7");
     expect(player).toHaveAttribute("data-pause-episode", "S17 E7 - S1E7");
+  });
+
+  it("recovers child-owned continuation history without a stale episode or stream request", async () => {
+    const child = showTybwChildWithHistory("s17e7", "Sennen Kessen-hen");
+    let resolveSeasons!: (value: ReturnType<typeof serverSeasonGuide>) => void;
+    fetchServerSeasons.mockImplementation(() => new Promise((resolve) => {
+      resolveSeasons = resolve;
+    }));
+    fetchServerEpisodes.mockImplementation(async ({ season }: { season: number }) => ({
+      episodes: [{
+        id: `tt14986406:${season}:1`,
+        mediaId: "tt14986406",
+        seasonNumber: season,
+        episodeNumber: 1,
+        title: `S${season}E1`,
+      }],
+      numbering: "cinemeta",
+      guideVersion: "2",
+    }));
+
+    const view = render(<Detail />);
+    await waitFor(() => expect(fetchServerSeasons).toHaveBeenCalledTimes(1));
+    expect(useStreamsMock.mock.calls.every((call) => call[0] == null)).toBe(true);
+    expect(fetchServerEpisodes).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSeasons(serverSeasonGuide([13, 13, 14, 10]));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-season", "1");
+      expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-episode", "7");
+      expect(useStreamsMock).toHaveBeenLastCalledWith(
+        "tt14986406",
+        "series",
+        1,
+        7,
+        "Sennen Kessen-hen",
+        2022,
+        mockServices.indexers,
+        mockServices.debrid,
+        false,
+      );
+    });
+    expect(fetchServerEpisodes).not.toHaveBeenCalledWith(
+      expect.objectContaining({ season: 17 }),
+    );
+
+    const transitionCall = useStreamsMock.mock.calls.length;
+    mockContinueWatching = [continueWatchingEpisode(child, "s19e4")];
+    view.rerender(<Detail />);
+    await waitFor(() => {
+      expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-season", "3");
+      expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-episode", "4");
+    });
+    expect(useStreamsMock.mock.calls.slice(transitionCall).every(
+      (call) => call[0] == null || (call[0] === "tt14986406" && call[2] === 3 && call[3] === 4),
+    )).toBe(true);
+    expect(fetchServerEpisodes).not.toHaveBeenCalledWith(
+      expect.objectContaining({ season: 19 }),
+    );
+    expect(storeRecordHistory).not.toHaveBeenCalled();
+    expect(testLocalStorage.getItem("ds_episode_overrides")).toBeNull();
+  });
+
+  it("does not mount the real picker while stale child coordinates await validation", async () => {
+    const child = showTybwChildWithHistory("s17e7");
+    episodePickerMode.real = true;
+    let resolveDetailSeasons!: (value: ReturnType<typeof serverSeasonGuide>) => void;
+    let detailGuideReleased = false;
+    let seasonsRequestCount = 0;
+    fetchServerSeasons.mockImplementation(() => {
+      seasonsRequestCount += 1;
+      if (seasonsRequestCount === 1) {
+        return new Promise((resolve) => {
+          resolveDetailSeasons = resolve;
+        });
+      }
+      if (!detailGuideReleased) {
+        resolveDetailSeasons(serverSeasonGuide([13, 13, 14, 10]));
+        return new Promise((resolve) => {
+          resolveDetailSeasons = resolve;
+        });
+      }
+      return Promise.resolve(serverSeasonGuide([13, 13, 14, 10]));
+    });
+    fetchServerEpisodes.mockImplementation(async ({ season }: { season: number }) => ({
+      episodes: [{
+        id: `tt14986406:${season}:1`,
+        mediaId: "tt14986406",
+        seasonNumber: season,
+        episodeNumber: 1,
+        title: `S${season}E1`,
+      }],
+      numbering: "cinemeta",
+      guideVersion: "2",
+    }));
+
+    render(<Detail />);
+    await waitFor(() => expect(fetchServerSeasons).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(fetchServerEpisodes).not.toHaveBeenCalledWith(
+      expect.objectContaining({ season: 17 }),
+    );
+    expect(fetchServerSeasons).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Loading the canonical episode guide...")).toBeInTheDocument();
+    expect(useStreamsMock.mock.calls.every((call) => call[0] == null)).toBe(true);
+
+    await act(async () => {
+      detailGuideReleased = true;
+      resolveDetailSeasons(serverSeasonGuide([13, 13, 14, 10]));
+    });
+    await waitFor(() => expect(fetchServerSeasons).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Season 1" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      expect(useStreamsMock).toHaveBeenLastCalledWith(
+        "tt14986406",
+        "series",
+        1,
+        7,
+        child.title,
+        2022,
+        mockServices.indexers,
+        mockServices.debrid,
+        false,
+      );
+    });
+    expect(fetchServerEpisodes).not.toHaveBeenCalledWith(
+      expect.objectContaining({ season: 17 }),
+    );
+    expect(storeRecordHistory).not.toHaveBeenCalled();
+    expect(testLocalStorage.getItem("ds_episode_overrides")).toBeNull();
+  });
+
+  it("fails closed instead of guessing E1 when child recovery is unverified", async () => {
+    const child = showTybwChildWithHistory("s17e7");
+    episodePickerMode.real = true;
+    fetchServerSeasons.mockResolvedValue(serverSeasonGuide([13, 13, 14, 10], "1"));
+    fetchServerEpisodes.mockResolvedValue({
+      episodes: [], numbering: "cinemeta", guideVersion: "1",
+    });
+
+    const first = render(<Detail />);
+    expect(await screen.findByText(
+      "The canonical episode guide is unavailable. Retry before choosing an episode.",
+    )).toBeInTheDocument();
+    expect(screen.queryByTestId("episode-picker-selection")).toBeNull();
+    expect(useStreamsMock.mock.calls.every((call) => call[0] == null)).toBe(true);
+    expect(fetchServerEpisodes).not.toHaveBeenCalled();
+    first.unmount();
+
+    vi.clearAllMocks();
+    useStreamsMock.mockClear();
+    mockContinueWatching = [continueWatchingEpisode(child, "s17e14")];
+    fetchServerSeasons.mockReset();
+    fetchServerEpisodes.mockReset();
+    fetchServerSeasons.mockResolvedValue(serverSeasonGuide([13, 13, 14, 10]));
+    fetchServerEpisodes.mockResolvedValue({
+      episodes: [], numbering: "cinemeta", guideVersion: "2",
+    });
+
+    render(<Detail />);
+    expect(await screen.findByText(
+      "The canonical episode guide is unavailable. Retry before choosing an episode.",
+    )).toBeInTheDocument();
+    expect(useStreamsMock.mock.calls.every((call) => call[0] == null)).toBe(true);
+    expect(useStreamsMock).not.toHaveBeenCalledWith(
+      "tt14986406", "series", 1, 1,
+      expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything(),
+    );
+    expect(fetchServerEpisodes).not.toHaveBeenCalled();
+    expect(storeRecordHistory).not.toHaveBeenCalled();
+    expect(testLocalStorage.getItem("ds_episode_overrides")).toBeNull();
+  });
+
+  it("preserves a selected child season that is present in the canonical guide", async () => {
+    const child = showTybwChildWithHistory("s17e7");
+    fetchServerSeasons.mockResolvedValue(
+      serverSeasonGuide([...Array.from({ length: 16 }, () => 1), 8]),
+    );
+    fetchServerEpisodes.mockResolvedValue({
+      episodes: [], numbering: "cinemeta", guideVersion: "2",
+    });
+
+    render(<Detail />);
+    await waitFor(() => {
+      expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-season", "17");
+      expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-episode", "7");
+      expect(useStreamsMock).toHaveBeenLastCalledWith(
+        "tt14986406", "series", 17, 7,
+        child.title, 2022,
+        mockServices.indexers, mockServices.debrid, false,
+      );
+    });
+    expect(fetchServerEpisodes).toHaveBeenCalledWith(expect.objectContaining({ season: 17 }));
   });
 
   it("passes TYBW source coordinates through the real season-pack file guard", async () => {
@@ -2242,6 +2509,46 @@ describe("Detail play", () => {
     );
     expect(player).toHaveAttribute("data-timeline-offset", "912");
     expect(player).toHaveAttribute("data-start-position", "0");
+  });
+
+  it("preserves the fractional remainder of an initial server HLS resume", async () => {
+    const actualServerApi = await vi.importActual<typeof import("../lib/serverApi")>(
+      "../lib/serverApi",
+    );
+    serverOptimizedSource.mockImplementationOnce(actualServerApi.serverOptimizedSource);
+    serverModeOn = true;
+    transcodeAvailable = true;
+    mockContinueWatching = [{
+      mediaId: "m1",
+      episodeId: null,
+      progressSeconds: 731.8,
+      durationSeconds: 4_000,
+      completed: false,
+    }];
+    mockCached = {
+      stream: {
+        fileName: "movie.mkv",
+        streamURL: "https://server.example/api/stream/fractional-resume-session",
+        codec: "H.265",
+      },
+    };
+
+    render(<Detail />);
+    await userEvent.click(screen.getByText("play"));
+
+    const player = await screen.findByTestId("player");
+    expect(serverOptimizedSource).toHaveBeenCalledWith(
+      expect.objectContaining({
+        streamURL: "https://server.example/api/stream/fractional-resume-session",
+      }),
+      { quality: "480p", startSeconds: 731.8 },
+    );
+    expect(player).toHaveAttribute(
+      "data-url",
+      "https://server.example/api/stream/fractional-resume-session/index.m3u8?quality=480p&start=731",
+    );
+    expect(player).toHaveAttribute("data-timeline-offset", "731");
+    expect(Number(player.getAttribute("data-start-position"))).toBeCloseTo(0.8, 10);
   });
 
   it("does not expose a protected server player URL when its external capability is unavailable", async () => {

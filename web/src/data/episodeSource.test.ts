@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   EPISODE_GUIDE_VERSION,
   hasEpisodeContinuationIdentityConflict,
+  recoverContinuationChildSelection,
   requiresCanonicalEpisodeGuide,
   resolveEpisodeSource,
 } from "./episodeSource";
@@ -55,6 +56,42 @@ describe("episode source relations", () => {
     expect(hasEpisodeContinuationIdentityConflict("tt14986406", 215105)).toBe(false);
     expect(hasEpisodeContinuationIdentityConflict("tt0434665", 215105)).toBe(true);
     expect(hasEpisodeContinuationIdentityConflict("tt0903747", 30984)).toBe(false);
+  });
+
+  it("recovers stale continuation coordinates under the verified child identity", () => {
+    expect(recoverContinuationChildSelection({
+      imdbId: "tt14986406",
+      tmdbId: 215105,
+      season: 17,
+      episode: 7,
+    })).toEqual({ season: 1, episode: 7 });
+    expect(recoverContinuationChildSelection({
+      imdbId: "tt14986406",
+      tmdbId: null,
+      season: 19,
+      episode: 4,
+    })).toEqual({ season: 3, episode: 4 });
+    expect(recoverContinuationChildSelection({
+      imdbId: null,
+      tmdbId: 215105,
+      season: 20,
+      episode: 3,
+    })).toEqual({ season: 4, episode: 3 });
+  });
+
+  it("rejects incomplete or conflicting continuation-child recovery identities", () => {
+    const cases = [
+      { imdbId: null, tmdbId: null, season: 17, episode: 7 },
+      { imdbId: "tt14986406", tmdbId: 30984, season: 17, episode: 7 },
+      { imdbId: "tt0434665", tmdbId: 215105, season: 17, episode: 7 },
+      { imdbId: "tt0434665", tmdbId: 30984, season: 17, episode: 7 },
+      { imdbId: "tt0903747", tmdbId: 1396, season: 17, episode: 7 },
+      { imdbId: "tt14986406", tmdbId: 215105, season: 16, episode: 7 },
+      { imdbId: "tt14986406", tmdbId: 215105, season: 17, episode: 0 },
+    ];
+    for (const input of cases) {
+      expect(recoverContinuationChildSelection(input)).toBeNull();
+    }
   });
 
   it("does not map original seasons, a separate sequel entry, or other shows", () => {

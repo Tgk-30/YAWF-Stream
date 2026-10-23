@@ -63,7 +63,7 @@ import { useScrubThumbnails } from "./player/useScrubThumbnails";
 import { useWakeLock } from "./player/useWakeLock";
 import { useTVRemotePlayback } from "./player/useTVRemotePlayback";
 import { ScrubBar } from "./player/ScrubBar";
-import { CaptionsMenu } from "./player/CaptionsMenu";
+import { CaptionsMenu, type EmbeddedCaptions } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { CastControls } from "./CastControls";
 import { predictEpisodeEnd } from "../lib/endPredictor";
@@ -82,6 +82,7 @@ import { registerPlayerMount } from "../lib/attention";
 import { recordDiagnostic } from "../lib/diagnostics";
 import { mediaErrorMessage, nextHlsRecovery } from "../lib/playerReliability";
 import { findPreferredLanguageMatch } from "../lib/languagePreference";
+import { captionLayout, type CaptionRect } from "../lib/captionLayout";
 import { configuredServerURL } from "../lib/serverMode";
 import {
   PlaybackStallWatchdog,
@@ -101,10 +102,13 @@ import {
   stopAndroidTVPlayback,
   type AndroidTVPlaybackProgress,
 } from "../lib/androidTV";
+import { renewServerHlsLease, serverHlsLeaseTarget } from "../lib/serverApi";
+import { notifyUnauthorized } from "../lib/serverSession";
 import type {
   ServerAudioInventoryLoadOptions,
   ServerAudioTrack,
   ServerOptimizedSource,
+  ServerStreamSourceInfo,
   ServerTranscodeQuality,
 } from "../lib/serverApi";
 import "./VideoPlayer.css";
@@ -785,6 +789,7 @@ export function VideoPlayer({
     originOwner: string;
     audioPreference?: AudioPreference;
     partialTimeline: boolean;
+    leaseTarget: string | null;
   };
   type ScopedPosition = {
     originOwner: string;
@@ -813,6 +818,7 @@ export function VideoPlayer({
   const [serverOptimizationPending, setServerOptimizationPending] = useState(false);
   const latestAbsolutePositionRef = useRef(0);
   const autoOptimizationAttemptedRef = useRef<string | null>(null);
+  const [verifiedPlaybackProgressOwner, setVerifiedPlaybackProgressOwner] = useState<string | null>(null);
   const playbackOwner = `${requestedEngine}\u0000${sourceRevision}\u0000${url}`;
   // The original URL, engine, and caller-issued revision define media identity.
   // Internal optimized/fallback URLs never change this owner, while a fresh
@@ -831,14 +837,22 @@ export function VideoPlayer({
     optimizedSource?.originOwner === playbackOwner
       ? optimizedSource
       : null;
-  const initialServerOptimizedTimeline =
-    activeOptimized == null &&
+  const originalSourceIsServerOptimized =
     serverOptimized != null &&
     requestedEngine === "webview-hls-transcode" &&
     isTrustedServerHlsManifestURL(url);
+  const initialServerOptimizedTimeline =
+    activeOptimized == null &&
+    originalSourceIsServerOptimized;
   const initialServerOptimizedQuality = initialServerOptimizedTimeline
     ? serverOptimizedQualityFromURL(url, serverOptimized?.qualities ?? [])
     : null;
+  const reportVerifiedPlaybackProgress = useCallback(() => {
+    if (!originalSourceIsServerOptimized) return;
+    setVerifiedPlaybackProgressOwner((current) =>
+      current === playbackOwner ? current : playbackOwner,
+    );
+  }, [originalSourceIsServerOptimized, playbackOwner]);
   const explicitInitialServerAudioTrack = initialServerOptimizedTimeline
     ? serverOptimizedAudioFromURL(url)
     : null;
@@ -964,10 +978,11 @@ export function VideoPlayer({
     );
   }, [externalTarget, playbackOwner]);
   const [playbackAttempt, setPlaybackAttempt] = useState(0);
+  const [serverLeaseExpired, setServerLeaseExpired] = useState(false);
+  const activeWebSourceRef = useRef(effectiveUrl);
   const [activeSubtitleUrl, setActiveSubtitleUrl] = useState<string | null>(null);
   const [androidTVError, setAndroidTVError] = useState<string | null>(null);
   const playbackOwnerRef = useRef(playbackOwner);
-  playbackOwnerRef.current = playbackOwner;
   const playerMountedRef = useRef(false);
   const recoveryRequestSequenceRef = useRef(0);
   const recoveryPendingRef = useRef<{ owner: string; request: number } | null>(null);
@@ -978,6 +993,12 @@ export function VideoPlayer({
     controller: AbortController;
   } | null>(null);
   const sourceInfoLoadOwnerRef = useRef<string | null>(null);
+  // Async ownership follows the committed player, not a replacement render
+  // that React can suspend or abandon while the old owner remains mounted.
+  useLayoutEffect(() => {
+    activeWebSourceRef.current = effectiveUrl;
+    playbackOwnerRef.current = playbackOwner;
+  }, [effectiveUrl, playbackOwner]);
   useLayoutEffect(() => {
     playerMountedRef.current = true;
     return () => {
@@ -1001,6 +1022,8 @@ export function VideoPlayer({
     setWebRecoveryPending(false);
     setExternalActionStatus(null);
     setExternalError(null);
+    setServerLeaseExpired(false);
+    setManualRecoveryPending(false);
   }, [playbackOwner]);
   const androidTVNative = hasAndroidTVBridge();
   const androidOnCloseRef = useRef(onClose);
@@ -1140,23 +1163,46 @@ export function VideoPlayer({
   const retryFreshStream = useCallback(async (): Promise<void> => {
     const context = lastStallContextRef.current;
     if (refreshCurrentSource == null || context == null || manualRecoveryPending) return;
+    const owner = playbackOwnerRef.current;
+    const source = activeWebSourceRef.current;
+    const ownsLeaseRecovery = () => !serverLeaseExpired || (playerMountedRef.current &&
+      playbackOwnerRef.current === owner && activeWebSourceRef.current === source);
     setManualRecoveryPending(true);
     recordDiagnostic("player", "stall.manual_retry_started");
     try {
       await withFreshStreamResolutionTimeout(
         refreshCurrentSource(context.position, context.handoff),
       );
-      setExternalError(null);
+      if (!ownsLeaseRecovery()) return;
+      // A successful resolver must publish a new source owner. Until then an
+      // expired generation cannot be remounted under its old URL.
+      if (!serverLeaseExpired) setExternalError(null);
       recordDiagnostic("player", "stall.manual_retry_ready");
     } catch {
+      if (!ownsLeaseRecovery()) return;
       setExternalError(
         "A fresh stream could not be prepared. Retry, or choose another source.",
       );
       recordDiagnostic("player", "stall.manual_retry_failed", "error");
     } finally {
-      setManualRecoveryPending(false);
+      if (ownsLeaseRecovery()) setManualRecoveryPending(false);
     }
-  }, [manualRecoveryPending, refreshCurrentSource]);
+  }, [manualRecoveryPending, refreshCurrentSource, serverLeaseExpired]);
+
+  const expireServerGeneration = useCallback((
+    source: string,
+    position: number,
+    handoff: PlaybackHandoffState,
+  ) => {
+    if (!playerMountedRef.current || playbackOwnerRef.current !== playbackOwner ||
+      activeWebSourceRef.current !== source || optimizationPendingRef.current != null) return;
+    lastStallContextRef.current = { position, handoff };
+    setServerLeaseExpired(true);
+    setExternalError(refreshCurrentSource == null
+      ? "This stream has expired. Choose another source or close the player."
+      : "This stream has expired. Retry to request a fresh stream, or choose another source.");
+    recordDiagnostic("player", "server_generation.expired", "warning");
+  }, [playbackOwner, refreshCurrentSource]);
 
   // State is scoped below for render-time safety. Reset it too, so a completed
   // previous source cannot leave stale errors or an automatic-mode latch on the
@@ -1175,6 +1221,43 @@ export function VideoPlayer({
     setKnownAbsoluteDuration(null);
   }, [durationOwner]);
 
+  const rememberServerSourceInfo = useCallback((
+    owner: string,
+    sourceInfo: {
+      durationSeconds: number | null;
+      tracks?: ServerAudioTrack[];
+    },
+  ) => {
+    if (!playerMountedRef.current || playbackOwnerRef.current !== owner) return;
+    const durationSeconds = sourceInfo.durationSeconds;
+    if (
+      typeof durationSeconds === "number" &&
+      Number.isFinite(durationSeconds) &&
+      durationSeconds > 0 &&
+      durationSeconds <= MAX_SOURCE_DURATION_SECONDS
+    ) {
+      setKnownAbsoluteDuration((current) =>
+        current?.originOwner === owner
+          ? current
+          : { originOwner: owner, duration: durationSeconds },
+      );
+    }
+    if (Array.isArray(sourceInfo.tracks)) {
+      const tracks = normalizedServerAudioTracks(sourceInfo.tracks);
+      const defaults = tracks.filter((track) => track.default);
+      setKnownSourceAudio({
+        originOwner: owner,
+        tracks,
+        defaultTrack: defaults.length === 1 ? defaults[0]!.index : null,
+      });
+    }
+  }, []);
+  const rememberCurrentServerSourceInfo = useCallback(
+    (sourceInfo: ServerStreamSourceInfo) =>
+      rememberServerSourceInfo(playbackOwner, sourceInfo),
+    [playbackOwner, rememberServerSourceInfo],
+  );
+
   useEffect(() => {
     const loadSourceInfo = serverOptimized?.loadSourceInfo;
     if (
@@ -1191,34 +1274,12 @@ export function VideoPlayer({
       SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS,
       "Source information timed out.",
     ).then((sourceInfo) => {
-      if (!playerMountedRef.current || playbackOwnerRef.current !== owner) return;
-      const durationSeconds = sourceInfo.durationSeconds;
-      if (
-        typeof durationSeconds === "number" &&
-        Number.isFinite(durationSeconds) &&
-        durationSeconds > 0 &&
-        durationSeconds <= MAX_SOURCE_DURATION_SECONDS
-      ) {
-        setKnownAbsoluteDuration((current) =>
-          current?.originOwner === owner
-            ? current
-            : { originOwner: owner, duration: durationSeconds },
-        );
-      }
-      const tracks = normalizedServerAudioTracks(sourceInfo.tracks);
-      if (tracks.length > 0) {
-        const defaults = tracks.filter((track) => track.default);
-        setKnownSourceAudio({
-          originOwner: owner,
-          tracks,
-          defaultTrack: defaults.length === 1 ? defaults[0].index : null,
-        });
-      }
+      rememberServerSourceInfo(owner, sourceInfo);
     }).catch(() => {
       // Source metadata is an optional enhancement. Playback remains usable
       // with an unknown total when probing is unavailable or times out.
     });
-  }, [mode, playbackOwner, serverOptimized?.loadSourceInfo]);
+  }, [mode, playbackOwner, rememberServerSourceInfo, serverOptimized?.loadSourceInfo]);
 
   const clearChromeTimer = useCallback(() => {
     window.clearTimeout(chromeHideTimer.current);
@@ -1300,6 +1361,7 @@ export function VideoPlayer({
     setSourceSize(null);
     setWebTechnicalStats([]);
     setDetailsSection(null);
+    setManualRecoveryPending(false);
   }, [effectiveUrl]);
 
   useEffect(() => {
@@ -1525,6 +1587,7 @@ export function VideoPlayer({
           ...next,
           audioTrack: preparedAudioTrack,
           audioPreference,
+          leaseTarget: serverHlsLeaseTarget(next.url, manifest),
           partialTimeline: /(?:^|\n)#EXT-X-PLAYLIST-TYPE:EVENT(?:\r?$|\s)/m.test(manifest),
           startPositionSeconds: activationStart,
           originOwner: owner,
@@ -1563,11 +1626,66 @@ export function VideoPlayer({
     recordDiagnostic("player", "server_optimized.disabled");
   }, [playbackOwner]);
 
+  // The deferred default is a startup policy, not a command. Only a current
+  // owner's explicit quality or mode control consumes it. Automatic seek,
+  // audio, and error-recovery switches continue through the raw callbacks.
+  const claimExplicitServerOptimizationChoice = useCallback(() => {
+    if (
+      !playerMountedRef.current ||
+      playbackOwnerRef.current !== playbackOwner
+    ) {
+      return false;
+    }
+    autoOptimizationAttemptedRef.current = playbackOwner;
+    return true;
+  }, [playbackOwner]);
+
+  const selectServerOptimized = useCallback((
+    quality: ServerTranscodeQuality,
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+    audioTrack?: number,
+    audioPreference?: AudioPreference,
+    positionIntent: ServerOptimizedPositionIntent = "follow-current",
+  ): Promise<void> => {
+    if (!claimExplicitServerOptimizationChoice()) return Promise.resolve();
+    return switchToServerOptimized(
+      quality,
+      absolutePositionSeconds,
+      handoffState,
+      audioTrack,
+      audioPreference,
+      positionIntent,
+    );
+  }, [claimExplicitServerOptimizationChoice, switchToServerOptimized]);
+
+  const selectDeviceOriginal = useCallback((
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState,
+  ) => {
+    if (!claimExplicitServerOptimizationChoice()) return;
+    switchToDeviceOriginal(absolutePositionSeconds, handoffState);
+  }, [claimExplicitServerOptimizationChoice, switchToDeviceOriginal]);
+
+  const updatePendingHandoffPaused = useCallback((paused: boolean) => {
+    if (
+      playbackOwnerRef.current !== playbackOwner ||
+      sourceSwitchPosition?.originOwner !== playbackOwner
+    ) return;
+    setSourceSwitchState((current) => {
+      if (current == null || current.paused === paused) return current;
+      return { ...current, paused };
+    });
+  }, [playbackOwner, sourceSwitchPosition?.originOwner]);
+
   useEffect(() => {
     const identity = playbackOwner;
     const quality = serverOptimized?.defaultQuality ?? null;
     if (
       quality == null ||
+      (originalSourceIsServerOptimized &&
+        (verifiedPlaybackProgressOwner !== playbackOwner ||
+          initialServerOptimizedQuality === quality)) ||
       activeOptimized != null ||
       serverOptimizationPending ||
       autoOptimizationAttemptedRef.current === identity
@@ -1578,10 +1696,13 @@ export function VideoPlayer({
     void switchToServerOptimized(quality, latestAbsolutePositionRef.current);
   }, [
     activeOptimized,
+    originalSourceIsServerOptimized,
+    initialServerOptimizedQuality,
     playbackOwner,
     serverOptimizationPending,
     serverOptimized?.defaultQuality,
     switchToServerOptimized,
+    verifiedPlaybackProgressOwner,
   ]);
 
   const handleWebviewPlaybackError = useCallback(
@@ -1599,15 +1720,20 @@ export function VideoPlayer({
               // Preserve pre-handoff play/pause intent only while that internal
               // pause is still active. After synchronization, the element's
               // latest pause state is user-owned like volume, mute, and speed.
-              paused: exactHandoffPending
+              // Cast suspension is another internal pause, so keep the owned
+              // intent until local playback is allowed to apply it.
+              paused: exactHandoffPending || castSuspended
                 ? activeSourceSwitchState?.paused ?? latestElementState.paused
                 : latestElementState.paused,
             };
         switchToDeviceOriginal(latestAbsolutePositionRef.current, restoredState);
+        const restoredCopy = originalSourceIsServerOptimized
+          ? "The previous stream was restored."
+          : "Device Original was restored.";
         setServerOptimizationError(
           exactHandoffPending
-            ? "Server Optimized could not synchronize. Device Original was restored."
-            : "Server Optimized failed after synchronization. Device Original was restored.",
+            ? `Server Optimized could not synchronize. ${restoredCopy}`
+            : `Server Optimized failed after synchronization. ${restoredCopy}`,
         );
         recordDiagnostic(
           "player",
@@ -1652,8 +1778,10 @@ export function VideoPlayer({
       activeFallback,
       activeOptimized,
       activeSourceSwitchState,
+      castSuspended,
       currentWebviewHandoffState,
       effectiveEngine,
+      originalSourceIsServerOptimized,
       playbackOwner,
       resolveWebviewFallbackForRequest,
       requestWebviewFallback,
@@ -2103,8 +2231,8 @@ export function VideoPlayer({
         activeServerOptimizedQuality={activeOptimized?.quality ?? null}
         serverOptimizationPending={serverOptimizationPending}
         serverOptimizationError={serverOptimizationError}
-        onSwitchServerOptimized={switchToServerOptimized}
-        onSwitchDeviceOriginal={switchToDeviceOriginal}
+        onSwitchServerOptimized={selectServerOptimized}
+        onSwitchDeviceOriginal={selectDeviceOriginal}
         onAbsolutePositionChange={reportAbsolutePosition}
         onOpenExternalPlayer={externalPlaybackAvailable ? openExternalPlayback : undefined}
         externalActionStatus={externalPlaybackAvailable ? externalActionStatus : null}
@@ -2229,6 +2357,8 @@ export function VideoPlayer({
             onChromeBlur={blurChrome}
             onActivity={nudgeChrome}
             onPausedChange={setWebviewPaused}
+            onPendingHandoffPausedChange={updatePendingHandoffPaused}
+            onVerifiedPlaybackProgress={reportVerifiedPlaybackProgress}
             onCaptionsOpenChange={setCaptionsOpen}
             onMenuOpenChange={setWebMenuOpen}
             onCastLocalPlaybackChange={setCastSuspended}
@@ -2249,11 +2379,14 @@ export function VideoPlayer({
               !initialServerOptimizedTimeline
               ? rememberAbsoluteDuration
               : undefined}
+            onServerSourceInfoKnown={rememberCurrentServerSourceInfo}
             sourceSwitchState={activeSourceSwitchState}
             exactHandoff={activeOptimized != null}
             optimizedTimelineIsPartial={activeOptimized?.partialTimeline ?? initialServerOptimizedTimeline}
             externalHandoffVideoRef={externalHandoffVideoRef}
             serverOptimized={serverOptimized}
+            preparedLeaseTarget={activeOptimized?.leaseTarget}
+            onServerLeaseExpired={expireServerGeneration}
             serverAudioOwner={playbackOwner}
             initialServerAudioTracks={activeKnownSourceAudio?.tracks}
             activeServerOptimizedQuality={activeOptimized?.quality ?? initialServerOptimizedQuality}
@@ -2265,7 +2398,8 @@ export function VideoPlayer({
             serverOptimizationPending={serverOptimizationPending}
             serverOptimizationError={serverOptimizationError}
             onSwitchServerOptimized={switchToServerOptimized}
-            onSwitchDeviceOriginal={switchToDeviceOriginal}
+            onSelectServerOptimized={selectServerOptimized}
+            onSelectDeviceOriginal={selectDeviceOriginal}
             onAbsolutePositionChange={reportAbsolutePosition}
             onPlaybackError={(message, exactHandoffPending) =>
               void handleWebviewPlaybackError(message, exactHandoffPending)
@@ -2310,7 +2444,9 @@ export function VideoPlayer({
             onTryNextSource={onTryNextSource}
             onRetry={
               mode === "webview" && externalError != null
-                ? lastStallContextRef.current != null && refreshCurrentSource != null
+                ? serverLeaseExpired && refreshCurrentSource == null
+                  ? undefined
+                  : lastStallContextRef.current != null && refreshCurrentSource != null
                   ? retryFreshStream
                   : () => {
                       recordDiagnostic("player", "webview.retry_requested");
@@ -2319,6 +2455,7 @@ export function VideoPlayer({
                     }
                 : undefined
             }
+            freshResolutionRequired={serverLeaseExpired}
             retryPending={manualRecoveryPending}
           />
         )}
@@ -2351,6 +2488,8 @@ function WebviewPlayer({
   onChromeBlur,
   onActivity,
   onPausedChange,
+  onPendingHandoffPausedChange,
+  onVerifiedPlaybackProgress,
   onCaptionsOpenChange,
   onMenuOpenChange,
   onCastLocalPlaybackChange,
@@ -2367,6 +2506,7 @@ function WebviewPlayer({
   timelineOffsetSeconds,
   knownAbsoluteDurationSeconds,
   onSourceDurationKnown,
+  onServerSourceInfoKnown,
   sourceSwitchState,
   exactHandoff,
   optimizedTimelineIsPartial,
@@ -2393,6 +2533,8 @@ function WebviewPlayer({
   autoCountdown = true,
   serverOptimized,
   serverAudioOwner,
+  preparedLeaseTarget,
+  onServerLeaseExpired,
   initialServerAudioTracks,
   activeServerOptimizedQuality,
   activeServerAudioTrack,
@@ -2401,7 +2543,8 @@ function WebviewPlayer({
   serverOptimizationPending,
   serverOptimizationError,
   onSwitchServerOptimized,
-  onSwitchDeviceOriginal,
+  onSelectServerOptimized,
+  onSelectDeviceOriginal,
   onAbsolutePositionChange,
 }: {
   url: string;
@@ -2417,6 +2560,8 @@ function WebviewPlayer({
   onChromeBlur: (event: React.FocusEvent<HTMLElement>) => void;
   onActivity: () => void;
   onPausedChange: (paused: boolean) => void;
+  onPendingHandoffPausedChange: (paused: boolean) => void;
+  onVerifiedPlaybackProgress: () => void;
   onCaptionsOpenChange: (open: boolean) => void;
   onMenuOpenChange: (open: boolean) => void;
   onCastLocalPlaybackChange: (suspended: boolean) => void;
@@ -2443,6 +2588,7 @@ function WebviewPlayer({
   timelineOffsetSeconds: number;
   knownAbsoluteDurationSeconds: number | null;
   onSourceDurationKnown?: (durationSeconds: number) => void;
+  onServerSourceInfoKnown: (sourceInfo: ServerStreamSourceInfo) => void;
   sourceSwitchState: PlaybackHandoffState | null;
   exactHandoff: boolean;
   optimizedTimelineIsPartial: boolean;
@@ -2472,6 +2618,8 @@ function WebviewPlayer({
   autoCountdown?: boolean;
   serverOptimized?: VideoPlayerProps["serverOptimized"];
   serverAudioOwner: string;
+  preparedLeaseTarget?: string | null;
+  onServerLeaseExpired: (source: string, position: number, handoff: PlaybackHandoffState) => void;
   initialServerAudioTracks?: readonly ServerAudioTrack[];
   activeServerOptimizedQuality: ServerTranscodeQuality | null;
   activeServerAudioTrack: number | null;
@@ -2487,13 +2635,23 @@ function WebviewPlayer({
     audioPreference?: AudioPreference,
     positionIntent?: ServerOptimizedPositionIntent,
   ) => Promise<void>;
-  onSwitchDeviceOriginal: (
+  onSelectServerOptimized: (
+    quality: ServerTranscodeQuality,
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+    audioTrack?: number,
+    audioPreference?: AudioPreference,
+    positionIntent?: ServerOptimizedPositionIntent,
+  ) => Promise<void>;
+  onSelectDeviceOriginal: (
     absolutePositionSeconds: number,
     handoffState?: PlaybackHandoffState,
   ) => void;
   onAbsolutePositionChange: (absolutePositionSeconds: number) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const captionViewportRef = useRef<HTMLDivElement | null>(null);
+  const captionControlsRef = useRef<HTMLDivElement | null>(null);
   const setVideoElement = useCallback((element: HTMLVideoElement | null) => {
     videoRef.current = element;
     externalHandoffVideoRef.current = element;
@@ -2570,6 +2728,12 @@ function WebviewPlayer({
   const requiresExactHandoffRef = useRef(requiresExactHandoff);
   requiresExactHandoffRef.current = requiresExactHandoff;
   const exactHandoffPendingRef = useRef(requiresExactHandoff);
+  const sourceSwitchStateRef = useRef(sourceSwitchState);
+  sourceSwitchStateRef.current = sourceSwitchState;
+  const pendingHandoffPlaybackIntentRef = useRef<"play" | "pause" | null>(null);
+  const verifiedPlaybackProgressReportedRef = useRef(false);
+  const verifiedPlaybackPlayingRef = useRef(false);
+  const lastObservedMediaTimeRef = useRef(0);
   const [playbackStatus, setPlaybackStatus] = useState<"starting" | "buffering" | "seeking" | null>(
     requiresExactHandoff ? "seeking" : "starting",
   );
@@ -2640,6 +2804,7 @@ function WebviewPlayer({
   >("idle");
   const serverAudioLoadSequenceRef = useRef(0);
   const serverAudioLoadPendingRef = useRef(false);
+  const serverAudioLoadControllerRef = useRef<AbortController | null>(null);
   const serverAudioLoaderRef = useRef(serverOptimized?.loadAudioTracks);
   serverAudioLoaderRef.current = serverOptimized?.loadAudioTracks;
   const serverAudioLoaderAvailable = serverOptimized?.loadAudioTracks != null;
@@ -2653,16 +2818,86 @@ function WebviewPlayer({
   const mediaArtist = nowPlaying?.episodeLabel ?? subtitle ?? "";
   const mediaArtworkUrl = nowPlaying?.posterUrl ?? "";
 
+  const requestPlaybackState = useCallback((shouldPlay: boolean) => {
+    const video = videoRef.current;
+    if (video == null) return;
+    if (
+      exactHandoffPendingRef.current ||
+      (suspendedRef.current && pendingHandoffPlaybackIntentRef.current != null)
+    ) {
+      pendingHandoffPlaybackIntentRef.current = shouldPlay ? "play" : "pause";
+      onPendingHandoffPausedChange(!shouldPlay);
+      setPaused(!shouldPlay);
+      setPlaying(shouldPlay);
+      onPausedChange(!shouldPlay);
+      if (!shouldPlay && !video.paused) video.pause();
+      return;
+    }
+    if (shouldPlay) {
+      try {
+        void video.play().catch(() => {});
+      } catch {
+        // Older WebKit versions can throw synchronously instead of rejecting.
+      }
+    } else {
+      video.pause();
+    }
+  }, [onPausedChange, onPendingHandoffPausedChange]);
+
+  const applyDeferredHandoffPlayback = useCallback((
+    video: HTMLVideoElement,
+    shouldPlay: boolean,
+  ) => {
+    autoplayAttemptedRef.current = true;
+    setPaused(!shouldPlay);
+    setPlaying(shouldPlay);
+    onPausedChange(!shouldPlay);
+    if (shouldPlay && video.paused) {
+      try {
+        void video.play().catch(() => {});
+      } catch {
+        // Older WebKit versions can throw synchronously instead of rejecting.
+      }
+    } else if (!shouldPlay && !video.paused) {
+      video.pause();
+    }
+  }, [onPausedChange]);
+
+  const togglePlaybackState = useCallback(() => {
+    const video = videoRef.current;
+    if (video == null) return;
+    const pendingIntent = pendingHandoffPlaybackIntentRef.current;
+    const hasDeferredHandoffIntent = exactHandoffPendingRef.current ||
+      (suspendedRef.current && pendingIntent != null);
+    const wantsPlayback = hasDeferredHandoffIntent
+      ? pendingIntent === "play" ||
+        (pendingIntent == null && sourceSwitchStateRef.current?.paused !== true)
+      : !video.paused;
+    requestPlaybackState(!wantsPlayback);
+  }, [requestPlaybackState]);
+
   const startServerAudioInventoryLoad = useCallback((retryFailed: boolean) => {
     const load = serverAudioLoaderRef.current;
     if (load == null || serverAudioLoadPendingRef.current) return;
     const request = ++serverAudioLoadSequenceRef.current;
     serverAudioLoadPendingRef.current = true;
     setServerAudioInventoryStatus("loading");
+    const controller = retryFailed ? new AbortController() : null;
+    serverAudioLoadControllerRef.current?.abort();
+    serverAudioLoadControllerRef.current = controller;
     let loading: Promise<ServerAudioTrack[]>;
     try {
-      loading = retryFailed ? load({ retryFailed: true }) : load();
+      loading = retryFailed
+        ? load({
+            retryFailed: true,
+            signal: controller!.signal,
+            onSourceInfo: onServerSourceInfoKnown,
+          })
+        : load();
     } catch {
+      if (serverAudioLoadControllerRef.current === controller) {
+        serverAudioLoadControllerRef.current = null;
+      }
       serverAudioLoadPendingRef.current = false;
       if (serverAudioLoadSequenceRef.current === request) {
         setServerAudioInventoryStatus("unavailable");
@@ -2671,6 +2906,9 @@ function WebviewPlayer({
     }
     void loading.then(
       (tracks) => {
+        if (serverAudioLoadControllerRef.current === controller) {
+          serverAudioLoadControllerRef.current = null;
+        }
         if (serverAudioLoadSequenceRef.current !== request) return;
         serverAudioLoadPendingRef.current = false;
         const choices = normalizedServerAudioTracks(tracks)
@@ -2685,15 +2923,20 @@ function WebviewPlayer({
         setServerAudioInventoryStatus("ready");
       },
       () => {
+        if (serverAudioLoadControllerRef.current === controller) {
+          serverAudioLoadControllerRef.current = null;
+        }
         if (serverAudioLoadSequenceRef.current === request) {
           serverAudioLoadPendingRef.current = false;
           setServerAudioInventoryStatus("unavailable");
         }
       },
     );
-  }, []);
+  }, [onServerSourceInfoKnown]);
 
   useEffect(() => {
+    serverAudioLoadControllerRef.current?.abort();
+    serverAudioLoadControllerRef.current = null;
     serverAudioLoadSequenceRef.current += 1;
     serverAudioLoadPendingRef.current = false;
     const choices = normalizedServerAudioTracks(initialServerAudioTracks).map((track) => ({
@@ -2704,7 +2947,9 @@ function WebviewPlayer({
       isDefault: track.default,
     }));
     setServerAudioTracks(choices);
-    setServerAudioInventoryStatus(choices.length > 0 ? "ready" : "idle");
+    setServerAudioInventoryStatus(
+      initialServerAudioTracks != null ? "ready" : "idle",
+    );
     // A successful optimized switch carries the audio preference that produced
     // this exact URL. Treat it like an explicit URL audio selection on remount,
     // otherwise stale saved preferences can immediately switch the new stream
@@ -2717,6 +2962,11 @@ function WebviewPlayer({
     initialServerAudioTracks,
     serverAudioOwner,
   ]);
+
+  useEffect(() => () => {
+    serverAudioLoadControllerRef.current?.abort();
+    serverAudioLoadControllerRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (!optionsOpen || !serverAudioLoaderAvailable || serverAudioInventoryStatus !== "idle") return;
@@ -2830,29 +3080,384 @@ function WebviewPlayer({
   }, [onMenuOpenChange, optionsOpen]);
 
   const subs = useSubtitleTracks(subtitleClient, translator);
+  const subsRef = useRef(subs);
+  subsRef.current = subs;
+  const [embeddedCaptionState, setEmbeddedCaptionState] = useState<
+    Omit<EmbeddedCaptions, "setActiveTrack">
+  >({ tracks: [], activeTrackId: null });
+  const captionControllerRef = useRef<{
+    refresh: () => void;
+    selectEmbedded: (id: string | null) => void;
+    selectDownloaded: (id: string | null) => void;
+    updateDownloaded: (id: string | null) => void;
+  } | null>(null);
+  const selectDownloadedCaption = useCallback((id: string | null) => {
+    captionControllerRef.current?.selectDownloaded(id);
+  }, []);
+  const selectEmbeddedCaption = useCallback((id: string | null) => {
+    captionControllerRef.current?.selectEmbedded(id);
+  }, []);
+
+  // Observe the media owner's actual subtitle inventory, including late HLS
+  // renditions and Safari TextTrackList changes. Downloaded tracks are owned by
+  // their <track> identity, never by a potentially colliding display label.
   useEffect(() => {
     const video = videoRef.current;
     if (video == null) return;
-    const apply = () => {
-      for (const track of Array.from(video.textTracks)) {
-        if (track.mode !== "showing" || track.cues == null) continue;
-        for (const cue of Array.from(track.cues)) {
-          const positioned = cue as TextTrackCue & {
-            line?: number | "auto";
-            snapToLines?: boolean;
-          };
-          positioned.snapToLines = false;
-          positioned.line = subtitlePosition;
-        }
+    const list = video.textTracks;
+    let active = true;
+    let updating = false;
+    let nextId = 0;
+    const identities = new WeakMap<object, string>();
+    const identity = (track: object, prefix: string) => {
+      let id = identities.get(track);
+      if (id == null) {
+        id = `${prefix}:${nextId++}`;
+        identities.set(track, id);
+      }
+      return id;
+    };
+    type Choice = {
+      id: string;
+      label: string;
+      language: string;
+      hlsIndex?: number;
+      textTrack?: TextTrack;
+      name: string;
+    };
+    let downloadedId = subsRef.current.activeTrackId;
+    let mode: "auto" | "off" | "embedded" | "downloaded" = "auto";
+    let preferencePending = true;
+    const ownedTrack = (track: TextTrack) =>
+      Array.from(video.querySelectorAll("track")).find(
+        (element) => element.track === track,
+      )?.dataset.subtitleTrackId ?? null;
+    const textTracks = () => Array.from(list).filter(
+      (track) => track.kind === "subtitles" || track.kind === "captions",
+    );
+    const label = (name: string, language: string) => {
+      const friendly = name.trim();
+      return /^subtitle[_ -]?\d+$/i.test(friendly)
+        ? "Embedded subtitles"
+        : friendly || language.trim() || "Embedded subtitles";
+    };
+    const inventory = (): Choice[] => {
+      const hlsChoices = (hlsRef.current?.subtitleTracks ?? []).map((track, index) => ({
+        id: identity(track, "hls"),
+        label: label(track.name ?? "", track.lang ?? ""),
+        name: track.name ?? "",
+        language: track.lang ?? "",
+        hlsIndex: index,
+      }));
+      const nativeChoices = textTracks().filter((track) =>
+        ownedTrack(track) == null && !hlsChoices.some((choice) =>
+          choice.name === track.label && choice.language === track.language,
+        ),
+      ).map((track) => ({
+        id: identity(track, "native"),
+        label: label(track.label, track.language),
+        name: track.label,
+        language: track.language,
+        textTrack: track,
+      }));
+      return [...hlsChoices, ...nativeChoices];
+    };
+    const setMode = (track: TextTrack, next: TextTrackMode) => {
+      if (track.mode !== next) track.mode = next;
+    };
+    const disableHls = () => {
+      const hls = hlsRef.current;
+      if (hls == null) return;
+      if (hls.subtitleDisplay) hls.subtitleDisplay = false;
+      if (hls.subtitleTrack !== -1) hls.subtitleTrack = -1;
+    };
+    const show = (choice: Choice) => {
+      const hls = hlsRef.current;
+      if (choice.hlsIndex != null && hls != null) {
+        hls.subtitleDisplay = true;
+        hls.subtitleTrack = choice.hlsIndex;
+      } else {
+        disableHls();
+      }
+      for (const track of textTracks()) {
+        const selected = ownedTrack(track) == null && (
+          track === choice.textTrack || (choice.hlsIndex != null &&
+            track.label === choice.name && track.language === choice.language)
+        );
+        setMode(track, selected ? "showing" : "disabled");
       }
     };
-    const tracks = Array.from(video.textTracks);
-    for (const track of tracks) track.addEventListener("cuechange", apply);
+    const refresh = () => {
+      if (!active || videoRef.current !== video || updating) return;
+      updating = true;
+      try {
+        const choices = inventory();
+        if (preferencePending && downloadedId == null) {
+          const preferences = playerPreferencesRef.current;
+          const remembered = preferences?.rememberPerTitleTrackChoices === false
+            ? null : savedPrefs?.preferredSubId;
+          const matchLanguage = (language: unknown) =>
+            findPreferredLanguageMatch(language, choices, (choice) => choice.language) ??
+            findPreferredLanguageMatch(language, choices, (choice) => choice.name);
+          const rememberedMatch = remembered === "no" ? null : matchLanguage(remembered);
+          const preferredMatch = preferences?.defaultSubtitleBehavior === "preferred"
+            ? matchLanguage(preferences.defaultSubtitleLanguage) : null;
+          const preferred = rememberedMatch ?? preferredMatch;
+          if (remembered === "no") {
+            mode = "off";
+            preferencePending = false;
+          } else if (preferred != null) {
+            mode = "embedded";
+            preferencePending = false;
+            show(preferred);
+          } else if (preferences?.defaultSubtitleBehavior === "off" ||
+            preferences?.defaultSubtitleBehavior === "preferred") {
+            // Do not substitute a manifest's unknown/default language when the
+            // requested language has not appeared. Keep listening for it.
+            mode = "off";
+          }
+        }
+        if (mode === "off" || mode === "downloaded") {
+          disableHls();
+          for (const track of textTracks()) {
+            const owner = ownedTrack(track);
+            setMode(track, owner != null && owner === downloadedId ? "showing" : "disabled");
+          }
+        }
+        const showing = textTracks().find((track) =>
+          ownedTrack(track) == null && track.mode === "showing",
+        );
+        const hls = hlsRef.current;
+        const selected = showing != null
+          ? choices.find((choice) => choice.textTrack === showing || (
+            choice.hlsIndex != null && choice.name === showing.label &&
+            choice.language === showing.language
+          ))
+          : choices.find((choice) => choice.hlsIndex != null &&
+            choice.hlsIndex === hls?.subtitleTrack && hls.subtitleDisplay &&
+            !textTracks().some((track) => ownedTrack(track) == null &&
+              track.label === choice.name && track.language === choice.language),
+          );
+        const next = {
+          tracks: choices.map(({ id, label }) => ({ id, label })),
+          activeTrackId: selected?.id ?? null,
+        };
+        setEmbeddedCaptionState((previous) =>
+          JSON.stringify(previous) === JSON.stringify(next) ? previous : next,
+        );
+      } finally {
+        updating = false;
+      }
+    };
+    const controller = {
+      refresh,
+      selectEmbedded: (id: string | null) => {
+        if (!active || videoRef.current !== video) return;
+        const choice = id == null ? null : inventory().find((track) => track.id === id);
+        if (id != null && choice == null) return;
+        preferencePending = false;
+        downloadedId = null;
+        mode = choice == null ? "off" : "embedded";
+        updating = true;
+        try {
+          subsRef.current.setActiveTrack(null);
+          if (choice != null) show(choice);
+        } finally {
+          updating = false;
+        }
+        refresh();
+      },
+      selectDownloaded: (id: string | null) => {
+        if (!active || videoRef.current !== video) return;
+        preferencePending = false;
+        downloadedId = id;
+        mode = id == null ? "off" : "downloaded";
+        subsRef.current.setActiveTrack(id);
+        refresh();
+      },
+      updateDownloaded: (id: string | null) => {
+        if (!active) return;
+        if (id != null) {
+          preferencePending = false;
+          mode = "downloaded";
+        } else if (downloadedId != null) {
+          mode = "off";
+        }
+        downloadedId = id;
+        refresh();
+      },
+    };
+    captionControllerRef.current = controller;
+    for (const event of ["addtrack", "removetrack", "change"]) {
+      list.addEventListener?.(event, refresh);
+    }
+    video.addEventListener("loadedmetadata", refresh);
+    refresh();
+    return () => {
+      active = false;
+      for (const event of ["addtrack", "removetrack", "change"]) {
+        list.removeEventListener?.(event, refresh);
+      }
+      video.removeEventListener("loadedmetadata", refresh);
+      if (captionControllerRef.current === controller) captionControllerRef.current = null;
+    };
+  }, [engine, url]);
+  useEffect(() => {
+    captionControllerRef.current?.updateDownloaded(subs.activeTrackId);
+  }, [subs.activeTrackId, subs.tracks]);
+
+  const captionLayoutOptionsRef = useRef({ chromeVisible, videoFit, videoZoom, subtitlePosition });
+  captionLayoutOptionsRef.current = { chromeVisible, videoFit, videoZoom, subtitlePosition };
+  const refreshCaptionLayoutRef = useRef<(() => void) | null>(null);
+  useLayoutEffect(() => {
+    const video = videoRef.current;
+    const viewport = captionViewportRef.current;
+    const controls = captionControlsRef.current;
+    if (video == null || viewport == null) return;
+    let active = true;
+    let nativeFullscreen = false;
+    type PositionedCue = TextTrackCue & Pick<VTTCue,
+      "line" | "snapToLines" | "lineAlign" | "position" | "positionAlign" | "size" | "vertical" | "region" | "text">;
+    type Geometry = Pick<PositionedCue, "line" | "snapToLines" | "lineAlign" | "position" | "positionAlign" | "size">;
+    const originals = new Map<PositionedCue, { track: TextTrack; geometry: Geometry }>();
+    const trackListeners = new Map<TextTrack, () => void>();
+    const oldFont = video.style.getPropertyValue("--player-caption-font-size");
+    const restore = (cue: PositionedCue, geometry: Geometry) => {
+      try { Object.assign(cue, geometry); } catch { /* A browser may have disposed an expired native cue. */ }
+    };
+    const apply = () => {
+      if (!active || videoRef.current !== video || !video.isConnected) return;
+      const tracks = new Set(Array.from(video.textTracks));
+      for (const [track, listener] of trackListeners) {
+        if (tracks.has(track)) continue;
+        track.removeEventListener("cuechange", listener);
+        trackListeners.delete(track);
+      }
+      for (const track of tracks) {
+        if (!trackListeners.has(track)) {
+          track.addEventListener("cuechange", apply);
+          trackListeners.set(track, apply);
+        }
+      }
+      const currentCues = new Set<PositionedCue>();
+      for (const track of tracks) {
+        if (track.mode !== "showing" || !["subtitles", "captions"].includes(track.kind)) continue;
+        for (const cue of Array.from(track.cues ?? [])) {
+          if (!("line" in cue) || !("snapToLines" in cue)) continue;
+          const positioned = cue as PositionedCue;
+          currentCues.add(positioned);
+          if (!originals.has(positioned)) {
+            originals.set(positioned, { track, geometry: {
+              line: positioned.line, snapToLines: positioned.snapToLines,
+              lineAlign: positioned.lineAlign, position: positioned.position,
+              positionAlign: positioned.positionAlign, size: positioned.size,
+            } });
+          }
+        }
+      }
+      for (const [cue, original] of originals) {
+        if (currentCues.has(cue)) continue;
+        restore(cue, original.geometry);
+        originals.delete(cue);
+      }
+      const nativeMode = (video as WebKitVideoElement).webkitPresentationMode;
+      if (nativeFullscreen || document.pictureInPictureElement === video ||
+          (nativeMode != null && nativeMode !== "inline")) {
+        // Browser-owned presentation has no measurable inline cue viewport.
+        for (const [cue, original] of originals) restore(cue, original.geometry);
+        if (oldFont) video.style.setProperty("--player-caption-font-size", oldFont);
+        else video.style.removeProperty("--player-caption-font-size");
+        return;
+      }
+      const options = captionLayoutOptionsRef.current;
+      const rootStyle = getComputedStyle(document.documentElement);
+      const fontScale = Number.parseFloat(rootStyle.getPropertyValue("--sub-font-scale"));
+      const fullscreen = document.fullscreenElement ?? (document as WebKitDocument).webkitFullscreenElement;
+      const box = (fullscreen?.contains(video) ? fullscreen : viewport).getBoundingClientRect();
+      const controlsVisible = options.chromeVisible &&
+        (fullscreen == null || (controls != null && fullscreen.contains(controls)));
+      const visual = window.visualViewport;
+      let visible: CaptionRect = box;
+      if (visual != null && visual.width > 0 && visual.height > 0) {
+        const left = Math.max(box.left, visual.offsetLeft);
+        const top = Math.max(box.top, visual.offsetTop);
+        visible = { left, top,
+          width: Math.min(box.right, visual.offsetLeft + visual.width) - left,
+          height: Math.min(box.bottom, visual.offsetTop + visual.height) - top,
+        };
+      }
+      const bounds = {
+        video: video.getBoundingClientRect(), viewport: visible,
+        controls: controlsVisible ? controls?.getBoundingClientRect() : null,
+        mediaWidth: video.videoWidth, mediaHeight: video.videoHeight,
+        fit: options.videoFit, position: options.subtitlePosition,
+        fontScale, zoom: options.videoZoom,
+      };
+      for (const [cue, original] of originals) {
+        // Safari (and hls.js on Safari) can expose automatic defaults as -1/50.
+        // A literal authored -1/50 is indistinguishable from those defaults.
+        // Other authored line/vertical/region/position layouts remain authored.
+        const geometry = original.geometry;
+        const automaticLine = geometry.line === "auto" ||
+          (geometry.line === -1 && geometry.snapToLines && geometry.lineAlign === "start");
+        if (!automaticLine || cue.vertical || cue.region != null ||
+            (geometry.position !== "auto" && geometry.position !== 50) || geometry.size !== 100) continue;
+        const layout = captionLayout({ ...bounds, text: cue.text });
+        if (layout == null) { restore(cue, geometry); continue; }
+        video.style.setProperty("--player-caption-font-size", `${layout.fontSize}px`);
+        cue.snapToLines = false;
+        cue.line = layout.line;
+        cue.lineAlign = layout.lineAlign;
+        cue.position = layout.position;
+        cue.positionAlign = "center";
+        cue.size = layout.size;
+      }
+    };
+    const beginNativeFullscreen = () => { nativeFullscreen = true; apply(); };
+    const endNativeFullscreen = () => { nativeFullscreen = false; apply(); };
+    refreshCaptionLayoutRef.current = apply;
+    const list = video.textTracks;
+    for (const event of ["addtrack", "removetrack", "change"]) list.addEventListener?.(event, apply);
+    for (const event of ["loadedmetadata", "resize", "enterpictureinpicture", "leavepictureinpicture", "webkitpresentationmodechanged"]) video.addEventListener(event, apply);
+    video.addEventListener("webkitbeginfullscreen", beginNativeFullscreen);
+    video.addEventListener("webkitendfullscreen", endNativeFullscreen);
+    for (const event of ["resize", "orientationchange"]) window.addEventListener(event, apply);
+    document.addEventListener("fullscreenchange", apply);
+    document.addEventListener("webkitfullscreenchange", apply);
+    const visual = window.visualViewport;
+    visual?.addEventListener("resize", apply);
+    visual?.addEventListener("scroll", apply);
+    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(apply);
+    resize?.observe(viewport);
+    resize?.observe(video);
+    if (controls != null) resize?.observe(controls);
+    const appearance = new MutationObserver(apply);
+    appearance.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "class"] });
     apply();
     return () => {
-      for (const track of tracks) track.removeEventListener("cuechange", apply);
+      active = false;
+      if (refreshCaptionLayoutRef.current === apply) refreshCaptionLayoutRef.current = null;
+      for (const event of ["addtrack", "removetrack", "change"]) list.removeEventListener?.(event, apply);
+      for (const event of ["loadedmetadata", "resize", "enterpictureinpicture", "leavepictureinpicture", "webkitpresentationmodechanged"]) video.removeEventListener(event, apply);
+      video.removeEventListener("webkitbeginfullscreen", beginNativeFullscreen);
+      video.removeEventListener("webkitendfullscreen", endNativeFullscreen);
+      for (const event of ["resize", "orientationchange"]) window.removeEventListener(event, apply);
+      document.removeEventListener("fullscreenchange", apply);
+      document.removeEventListener("webkitfullscreenchange", apply);
+      visual?.removeEventListener("resize", apply);
+      visual?.removeEventListener("scroll", apply);
+      resize?.disconnect();
+      appearance.disconnect();
+      for (const [track, listener] of trackListeners) track.removeEventListener("cuechange", listener);
+      for (const [cue, original] of originals) restore(cue, original.geometry);
+      if (oldFont) video.style.setProperty("--player-caption-font-size", oldFont);
+      else video.style.removeProperty("--player-caption-font-size");
     };
-  }, [subtitlePosition, subs.activeTrackId]);
+  }, [engine, url]);
+  useLayoutEffect(() => {
+    refreshCaptionLayoutRef.current?.();
+  }, [chromeVisible, videoFit, videoZoom, videoPanX, videoPanY, subtitlePosition,
+    subs.activeTrackId, subs.tracks, embeddedCaptionState]);
   useEffect(() => {
     const activeTrack = subs.tracks.find(
       (track) => track.id === subs.activeTrackId,
@@ -2873,11 +3478,18 @@ function WebviewPlayer({
       video.pause();
       return;
     }
+    const deferredIntent = pendingHandoffPlaybackIntentRef.current;
+    if (!exactHandoffPendingRef.current && deferredIntent != null) {
+      pendingHandoffPlaybackIntentRef.current = null;
+      pausedForCastRef.current = false;
+      applyDeferredHandoffPlayback(video, deferredIntent === "play");
+      return;
+    }
     if (pausedForCastRef.current) {
       pausedForCastRef.current = false;
       void video.play().catch(() => {});
     }
-  }, [suspended]);
+  }, [applyDeferredHandoffPlayback, suspended]);
   // Thumbnails only work on a progressive source the browser can re-open and
   // seek (MP4/WebM). For HLS the manifest URL can't drive a second <video>
   // reliably, so gate them to non-HLS in-webview sources.
@@ -3073,16 +3685,16 @@ function WebviewPlayer({
     setPlaybackState();
     setPositionState(true);
     setActionHandler("play", () => {
-      void video.play().catch(() => {});
+      requestPlaybackState(true);
     });
-    setActionHandler("pause", () => video.pause());
+    setActionHandler("pause", () => requestPlaybackState(false));
     setActionHandler("seekbackward", () => seek(currentAbsolutePosition() - 10));
     setActionHandler("seekforward", () => seek(currentAbsolutePosition() + 10));
     setActionHandler("seekto", (details) => {
       if (details.seekTime != null) seek(details.seekTime);
     });
     setActionHandler("stop", () => {
-      video.pause();
+      requestPlaybackState(false);
       seek(0);
     });
 
@@ -3112,7 +3724,14 @@ function WebviewPlayer({
         // The session can already be invalidated during a browser teardown.
       }
     };
-  }, [mediaArtist, mediaArtworkUrl, optimizedTimelineIsPartial, title, url]);
+  }, [
+    mediaArtist,
+    mediaArtworkUrl,
+    optimizedTimelineIsPartial,
+    requestPlaybackState,
+    title,
+    url,
+  ]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -3256,8 +3875,6 @@ function WebviewPlayer({
   const startPositionRef = useRef(startPositionSeconds);
   startPositionRef.current = startPositionSeconds;
   const nativeExactHlsFragmentRef = useRef(false);
-  const sourceSwitchStateRef = useRef(sourceSwitchState);
-  sourceSwitchStateRef.current = sourceSwitchState;
   const timelineOffsetRef = useRef(
     Number.isFinite(timelineOffsetSeconds)
       ? Math.max(0, timelineOffsetSeconds)
@@ -3392,6 +4009,12 @@ function WebviewPlayer({
     if (video == null) return;
     didSeekRef.current = false;
     exactHandoffPendingRef.current = requiresExactHandoffRef.current;
+    pendingHandoffPlaybackIntentRef.current = null;
+    verifiedPlaybackProgressReportedRef.current = false;
+    verifiedPlaybackPlayingRef.current = false;
+    lastObservedMediaTimeRef.current = Number.isFinite(video.currentTime)
+      ? video.currentTime
+      : 0;
     onSourceSizeRef.current(null);
 
     const report = () => {
@@ -3434,14 +4057,18 @@ function WebviewPlayer({
       startupReadyRef.current = true;
       setPlaybackStatus(null);
       const handoff = sourceSwitchStateRef.current;
-      if (!suspendedRef.current && handoff?.paused !== true && video.paused) {
-        autoplayAttemptedRef.current = true;
-        try {
-          void video.play().catch(() => {});
-        } catch {
-          // Older WebKit versions can throw synchronously instead of rejecting.
-        }
+      const pendingIntent = pendingHandoffPlaybackIntentRef.current;
+      const shouldPlay = pendingIntent === "play" ||
+        (pendingIntent == null && handoff?.paused !== true);
+      if (suspendedRef.current) {
+        setPaused(!shouldPlay);
+        setPlaying(shouldPlay);
+        onPausedChange(!shouldPlay);
+        pendingHandoffPlaybackIntentRef.current = shouldPlay ? "play" : "pause";
+        return;
       }
+      pendingHandoffPlaybackIntentRef.current = null;
+      applyDeferredHandoffPlayback(video, shouldPlay);
     };
     const confirmExactHandoff = () => {
       if (!exactHandoffPendingRef.current) return true;
@@ -3467,6 +4094,17 @@ function WebviewPlayer({
         startupReadyRef.current = true;
       }
       onAbsolutePositionChange(video.currentTime + timelineOffsetRef.current);
+      const previousMediaTime = lastObservedMediaTimeRef.current;
+      lastObservedMediaTimeRef.current = video.currentTime;
+      if (
+        !verifiedPlaybackProgressReportedRef.current &&
+        verifiedPlaybackPlayingRef.current &&
+        !video.paused &&
+        video.currentTime > previousMediaTime + 0.01
+      ) {
+        verifiedPlaybackProgressReportedRef.current = true;
+        onVerifiedPlaybackProgress();
+      }
       scrubberRef.current?.setCurrentTime(
         knownAbsoluteDurationRef.current == null
           ? video.currentTime
@@ -3631,17 +4269,35 @@ function WebviewPlayer({
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
     const onPause = () => {
+      verifiedPlaybackPlayingRef.current = false;
+      if (exactHandoffPendingRef.current) {
+        const pendingIntent = pendingHandoffPlaybackIntentRef.current;
+        const shouldPlay = pendingIntent === "play" ||
+          (pendingIntent == null && sourceSwitchStateRef.current?.paused !== true);
+        setPaused(!shouldPlay);
+        setPlaying(shouldPlay);
+        onPausedChange(!shouldPlay);
+        return;
+      }
       setPaused(true);
       setPlaying(false);
       onPausedChange(true);
-      if (!exactHandoffPendingRef.current && !video.ended && scrobbleContext != null) {
+      if (!video.ended && scrobbleContext != null) {
         scrobblePlaybackPause(scrobbleContext, progressPct());
       }
     };
     const onPlay = () => {
       if (suspendedRef.current || exactHandoffPendingRef.current) {
         video.pause();
-        if (exactHandoffPendingRef.current) setPlaybackStatus("seeking");
+        if (exactHandoffPendingRef.current) {
+          const pendingIntent = pendingHandoffPlaybackIntentRef.current;
+          const shouldPlay = pendingIntent === "play" ||
+            (pendingIntent == null && sourceSwitchStateRef.current?.paused !== true);
+          setPaused(!shouldPlay);
+          setPlaying(shouldPlay);
+          onPausedChange(!shouldPlay);
+          setPlaybackStatus("seeking");
+        }
         return;
       }
       setPaused(false);
@@ -3669,6 +4325,10 @@ function WebviewPlayer({
         setPlaybackStatus("seeking");
         return;
       }
+      verifiedPlaybackPlayingRef.current = true;
+      lastObservedMediaTimeRef.current = Number.isFinite(video.currentTime)
+        ? video.currentTime
+        : 0;
       startupReadyRef.current = true;
       setPlaybackStatus(null);
     };
@@ -3755,6 +4415,7 @@ function WebviewPlayer({
     video.addEventListener("volumechange", onVolumeChange);
     video.addEventListener("ratechange", onRateChange);
     return () => {
+      pendingHandoffPlaybackIntentRef.current = null;
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("loadedmetadata", onLoadedMeta);
       video.removeEventListener("loadeddata", applyResume);
@@ -3779,7 +4440,14 @@ function WebviewPlayer({
       ) report();
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
-  }, [onAbsolutePositionChange, onPausedChange, scrobbleContext, url]);
+  }, [
+    applyDeferredHandoffPlayback,
+    onAbsolutePositionChange,
+    onPausedChange,
+    onVerifiedPlaybackProgress,
+    scrobbleContext,
+    url,
+  ]);
 
   useEffect(() => {
     startupReadyRef.current = false;
@@ -3803,10 +4471,123 @@ function WebviewPlayer({
     };
   }, [engine, suspended, url]);
 
+  const needsServerPreparation = isHls && serverOptimized != null && isTrustedServerHlsManifestURL(url);
+  const [initialLeasePreparation, setInitialLeasePreparation] = useState<{ source: string; target: string | null } | null>(null);
+  const leasePreparationReady = !needsServerPreparation || preparedLeaseTarget !== undefined || initialLeasePreparation?.source === url;
+  const leaseTarget = preparedLeaseTarget !== undefined
+    ? preparedLeaseTarget
+    : initialLeasePreparation?.source === url ? initialLeasePreparation.target : null;
+  const leaseExpiredCallbackRef = useRef(onServerLeaseExpired);
+  useLayoutEffect(() => {
+    leaseExpiredCallbackRef.current = onServerLeaseExpired;
+  }, [onServerLeaseExpired]);
+  const stopLeaseRef = useRef<() => void>(() => {});
+  const leaseLastAttemptRef = useRef<{ target: string; at: number } | null>(null);
+
+  useEffect(() => {
+    if (!needsServerPreparation || preparedLeaseTarget !== undefined) return;
+    const video = videoRef.current;
+    const controller = new AbortController();
+    let active = true;
+    const owns = () => active && !controller.signal.aborted && videoRef.current === video;
+    const deadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
+    void (async () => {
+      let delay = SERVER_OPTIMIZED_RETRY_BASE_MS;
+      while (owns()) {
+        const response = await promiseWithinTimeout(fetch(url, {
+          credentials: "include", cache: "no-store", redirect: "error",
+          headers: { accept: "application/vnd.apple.mpegurl" }, signal: controller.signal,
+        }), Math.max(1, deadline - Date.now()), "Server optimized playback timed out.", () => controller.abort());
+        if (!owns()) return;
+        if ((response.status === 503 || response.status === 504) && Date.now() < deadline) {
+          await abortableDelay(Math.min(delay, Math.max(1, deadline - Date.now())), controller.signal);
+          delay = Math.min(delay * 2, SERVER_OPTIMIZED_RETRY_MAX_MS);
+          if (Date.now() >= deadline) throw new Error("Server optimized playback timed out.");
+          continue;
+        }
+        if (!response.ok) throw new Error(`The server could not prepare playback (${response.status}).`);
+        const manifest = await promiseWithinTimeout(response.text(), Math.max(1, deadline - Date.now()),
+          "Server optimized playback timed out.", () => controller.abort());
+        if (!owns()) return;
+        if (!manifest.startsWith("#EXTM3U")) throw new Error("The server did not return a playable HLS manifest.");
+        setInitialLeasePreparation({ source: url, target: serverHlsLeaseTarget(url, manifest) });
+        return;
+      }
+    })().catch((error: unknown) => {
+      if (active && videoRef.current === video) {
+        onPlaybackErrorRef.current(error instanceof Error ? error.message : "Server playback preparation failed.", exactHandoffPendingRef.current);
+      }
+    });
+    return () => { active = false; controller.abort(); };
+  }, [needsServerPreparation, preparedLeaseTarget, url]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video == null || !leasePreparationReady || leaseTarget == null || suspended || ended || serverOptimizationPending) return;
+    let active = true;
+    let dormant = false;
+    let terminal = false;
+    let timer: number | undefined;
+    let controller: AbortController | null = null;
+    let lastAttempt = leaseLastAttemptRef.current?.target === leaseTarget
+      ? leaseLastAttemptRef.current.at : -Infinity;
+    const owns = () => active && videoRef.current === video;
+    const stop = () => {
+      terminal = true;
+      window.clearTimeout(timer);
+      controller?.abort();
+    };
+    stopLeaseRef.current = stop;
+    const expired = () => {
+      stop();
+      leaseExpiredCallbackRef.current(url, Math.max(0, video.currentTime + timelineOffsetRef.current), {
+        paused: video.paused, volume: video.volume, muted: video.muted, playbackRate: video.playbackRate,
+      });
+    };
+    const renew = async () => {
+      if (!owns() || dormant || terminal || controller != null) return;
+      window.clearTimeout(timer);
+      const remaining = 30_000 - (Date.now() - lastAttempt);
+      if (remaining > 0) { timer = window.setTimeout(() => void renew(), remaining); return; }
+      lastAttempt = Date.now();
+      leaseLastAttemptRef.current = { target: leaseTarget, at: lastAttempt };
+      const request = new AbortController();
+      controller = request;
+      try {
+        const status = await promiseWithinTimeout(renewServerHlsLease(leaseTarget, request.signal),
+          5_000, "Stream retention timed out.", () => request.abort());
+        if (!owns() || dormant || terminal || request.signal.aborted) return;
+        if (status === 401) { stop(); notifyUnauthorized(); }
+        else if (status === 404 || status === 403) expired();
+        else if (status === 405) stop(); // Older reverse proxies can omit HEAD support.
+      } catch {
+        // A transient failure never polls the master, reloads media or bypasses the cadence.
+      } finally {
+        if (controller === request) controller = null;
+        if (owns() && !dormant && !terminal) timer = window.setTimeout(() => void renew(), Math.max(0, 30_000 - (Date.now() - lastAttempt)));
+      }
+    };
+    const onPageHide = () => { dormant = true; window.clearTimeout(timer); controller?.abort(); };
+    const onPageShow = () => { dormant = false; void renew(); };
+    const onVisibility = () => { if (document.visibilityState === "visible") void renew(); };
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("visibilitychange", onVisibility);
+    void renew();
+    return () => {
+      active = false;
+      stop();
+      if (stopLeaseRef.current === stop) stopLeaseRef.current = () => {};
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [ended, leasePreparationReady, leaseTarget, serverOptimizationPending, suspended, url]);
+
   // Wire hls.js for HLS streams when the browser can't play them natively.
   useEffect(() => {
     const video = videoRef.current;
-    if (video == null) return;
+    if (video == null || !leasePreparationReady) return;
     nativeExactHlsFragmentRef.current = false;
 
     if (!isHls) {
@@ -3839,6 +4620,7 @@ function WebviewPlayer({
     // that return above and never touch it. Fetch it on demand instead.
     let cancelled = false;
     let instance: HlsInstance | null = null;
+    let removeCaptionListeners = () => {};
     setNativeHlsPlayback(false);
     appliedHlsAudioPreferenceRef.current = false;
     setHlsAudioInventoryKnown(false);
@@ -3938,6 +4720,17 @@ function WebviewPlayer({
         },
       });
       hlsRef.current = instance;
+      const refreshCaptions = () => {
+        if (!cancelled && hlsRef.current === instance) captionControllerRef.current?.refresh();
+      };
+      instance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, refreshCaptions);
+      instance.on(Hls.Events.SUBTITLE_TRACK_SWITCH, refreshCaptions);
+      const captionInstance = instance;
+      removeCaptionListeners = () => {
+        captionInstance.off(Hls.Events.SUBTITLE_TRACKS_UPDATED, refreshCaptions);
+        captionInstance.off(Hls.Events.SUBTITLE_TRACK_SWITCH, refreshCaptions);
+      };
+      refreshCaptions();
       instance.on(Hls.Events.ERROR, (_event, data) => {
         if (cancelled || !data.fatal || instance == null) return;
         const action = nextHlsRecovery(data.type, recovery);
@@ -3969,6 +4762,7 @@ function WebviewPlayer({
           instance.recoverMediaError();
           return;
         }
+        stopLeaseRef.current();
         recordDiagnostic("player", "hls.fatal", "error", data.type);
         onPlaybackErrorRef.current(
           data.type === Hls.ErrorTypes.NETWORK_ERROR
@@ -3978,6 +4772,7 @@ function WebviewPlayer({
         );
       });
       instance.on(Hls.Events.MANIFEST_PARSED, () => {
+        refreshCaptions();
         setHlsLevels(
           instance?.levels.map((level, index) => ({
             index,
@@ -4049,31 +4844,14 @@ function WebviewPlayer({
     return () => {
       cancelled = true;
       window.clearTimeout(retryTimer);
+      removeCaptionListeners();
       instance?.destroy();
       if (hlsRef.current === instance) hlsRef.current = null;
       setHlsLevels([]);
       setHlsAudioTracks([]);
       setHlsAudioInventoryKnown(false);
     };
-  }, [engine, url, isHls]);
-
-  // Reflect the active subtitle track onto the <video>'s text tracks: show only
-  // the active one, hide the rest. Match by label (our <track> elements carry
-  // label={t.label}) rather than by index, because hls.js can inject its own
-  // in-band subtitle tracks that desync a positional pairing. Tracks that don't
-  // correspond to one of ours (e.g. hls.js-injected) are left untouched.
-  useEffect(() => {
-    const video = videoRef.current;
-    if (video == null) return;
-    const list = video.textTracks;
-    for (let i = 0; i < list.length; i += 1) {
-      const tt = list[i];
-      if (tt.kind !== "subtitles") continue;
-      const match = subs.tracks.find((t) => t.label === tt.label);
-      if (match == null) continue; // not one of ours (hls.js-injected) - leave it
-      tt.mode = match.id === subs.activeTrackId ? "showing" : "hidden";
-    }
-  }, [subs.tracks, subs.activeTrackId]);
+  }, [engine, url, isHls, leasePreparationReady]);
 
   const seekAbsolute = (t: number) => {
     const video = videoRef.current;
@@ -4298,8 +5076,7 @@ function WebviewPlayer({
         case "k":
         case "K":
           e.preventDefault();
-          if (video.paused) void video.play();
-          else video.pause();
+          togglePlaybackState();
           break;
         case "ArrowLeft":
           e.preventDefault();
@@ -4335,9 +5112,15 @@ function WebviewPlayer({
         case "c":
         case "C": {
           e.preventDefault();
-          const ids = [null, ...subs.tracks.map((track) => track.id)];
-          const current = ids.indexOf(subs.activeTrackId);
-          subs.setActiveTrack(ids[(current + 1) % ids.length] ?? null);
+          const ids = [null, ...embeddedCaptionState.tracks.map((track) => track.id),
+            ...subs.tracks.map((track) => track.id)];
+          const current = ids.indexOf(embeddedCaptionState.activeTrackId ?? subs.activeTrackId);
+          const next = ids[(current + 1) % ids.length] ?? null;
+          if (next != null && embeddedCaptionState.tracks.some((track) => track.id === next)) {
+            selectEmbeddedCaption(next);
+          } else {
+            selectDownloadedCaption(next);
+          }
           break;
         }
         case "<":
@@ -4389,21 +5172,19 @@ function WebviewPlayer({
     onPlayNext,
     optimizedTimelineIsPartial,
     subs.activeTrackId,
-    subs.setActiveTrack,
+    selectDownloadedCaption,
+    selectEmbeddedCaption,
+    embeddedCaptionState,
     subs.tracks,
+    togglePlaybackState,
   ]);
 
   const resumePlayback = useCallback(() => {
     setPaused(false);
-    void videoRef.current?.play();
-  }, []);
+    requestPlaybackState(true);
+  }, [requestPlaybackState]);
 
-  const togglePlayback = useCallback(() => {
-    const video = videoRef.current;
-    if (video == null) return;
-    if (video.paused) void video.play();
-    else video.pause();
-  }, []);
+  const togglePlayback = togglePlaybackState;
 
   const handleVideoPointerDown = useCallback((event: React.PointerEvent<HTMLVideoElement>) => {
     touchLikePointerRef.current =
@@ -4443,7 +5224,7 @@ function WebviewPlayer({
     const selected = serverAudioTracks.find(
       (track) => track.index === resolvedServerAudioTrack,
     );
-    void onSwitchServerOptimized(
+    void onSelectServerOptimized(
       quality,
       absolutePlaybackPosition(),
       playbackHandoffState,
@@ -4457,14 +5238,14 @@ function WebviewPlayer({
     absolutePlaybackPosition,
     activeServerAudioPreference,
     resolvedServerAudioTrack,
-    onSwitchServerOptimized,
+    onSelectServerOptimized,
     playbackHandoffState,
     serverAudioTracks,
   ]);
 
   const selectDeviceOriginal = useCallback(() => {
-    onSwitchDeviceOriginal(absolutePlaybackPosition(), playbackHandoffState());
-  }, [absolutePlaybackPosition, onSwitchDeviceOriginal, playbackHandoffState]);
+    onSelectDeviceOriginal(absolutePlaybackPosition(), playbackHandoffState());
+  }, [absolutePlaybackPosition, onSelectDeviceOriginal, playbackHandoffState]);
 
   const toggleMuted = useCallback(() => {
     const video = videoRef.current;
@@ -4627,11 +5408,14 @@ function WebviewPlayer({
   return (
     <div
       className={`webview-player${suspended ? " is-casting" : ""}`}
+      ref={captionViewportRef}
       onPointerMove={onActivity}
     >
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         Playback speed {playbackRate} times. Subtitles{" "}
-        {activeSubtitle == null ? "off" : activeSubtitle.label}.
+        {activeSubtitle?.label ?? embeddedCaptionState.tracks.find(
+          (track) => track.id === embeddedCaptionState.activeTrackId,
+        )?.label ?? "off"}.
         {activeSubtitle != null
           ? ` Subtitle delay ${(activeSubtitle.delayMs / 1000).toFixed(1)} seconds.`
           : ""}
@@ -4663,6 +5447,7 @@ function WebviewPlayer({
             // MediaError on the playable video. Treat only a real MediaError as
             // a playback failure; later readiness/progress remains authoritative.
             if (mediaError == null) return;
+            stopLeaseRef.current();
             onPlaybackErrorRef.current(
               mediaErrorMessage(mediaError),
               exactHandoffPendingRef.current,
@@ -4673,6 +5458,7 @@ function WebviewPlayer({
             <track
               key={t.id}
               kind="subtitles"
+              data-subtitle-track-id={t.id}
               src={t.vttUrl}
               srcLang={t.language}
               label={t.label}
@@ -4700,7 +5486,8 @@ function WebviewPlayer({
         </div>
       )}
 
-      {paused && !ended && !captionsOpen && !optionsOpen && !detailsOpen && !scrubbing && (
+      {paused && !ended && subs.activeTrackId == null && embeddedCaptionState.activeTrackId == null &&
+        !captionsOpen && !optionsOpen && !detailsOpen && !scrubbing && (
         <PlayerPauseOverlay
           title={title}
           nowPlaying={nowPlaying}
@@ -4710,6 +5497,7 @@ function WebviewPlayer({
 
       <div
         className={`player-osd${chromeVisible ? " is-visible" : ""}`}
+        ref={captionControlsRef}
         aria-hidden={!chromeVisible || undefined}
         onPointerEnter={onChromeEnter}
         onPointerLeave={onChromeLeave}
@@ -4822,7 +5610,7 @@ function WebviewPlayer({
             </label>
             <button
               type="button"
-              className={`chip player-osd-icon-button${captionsOpen || subs.activeTrackId != null ? " is-active" : ""}`}
+              className={`chip player-osd-icon-button${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
               onClick={() => {
                 setOptionsOpen(false);
                 setCaptionsOpen((open) => !open);
@@ -4834,7 +5622,7 @@ function WebviewPlayer({
               tabIndex={chromeVisible ? undefined : -1}
             >
               <Icon name="captions" size={17} />
-              {subs.activeTrackId != null && <span className="captions-active-dot" />}
+              {(subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null) && <span className="captions-active-dot" />}
             </button>
             {underTauri ? (
               <CastControls
@@ -5203,7 +5991,8 @@ function WebviewPlayer({
 
       {captionsOpen && (
         <CaptionsMenu
-          subs={subs}
+          subs={{ ...subs, setActiveTrack: selectDownloadedCaption }}
+          embedded={{ ...embeddedCaptionState, setActiveTrack: selectEmbeddedCaption }}
           seedTitle={title}
           seedImdbId={imdbId}
           seedSeason={season}
@@ -5323,6 +6112,7 @@ function ExternalPanel({
   onTryNextSource,
   onRetry,
   retryPending = false,
+  freshResolutionRequired = false,
 }: {
   underTauri: boolean;
   externalPlaybackAvailable: boolean;
@@ -5338,11 +6128,12 @@ function ExternalPanel({
   onTryNextSource?: () => Promise<void>;
   onRetry?: () => void | Promise<void>;
   retryPending?: boolean;
+  freshResolutionRequired?: boolean;
 }) {
   const [tryNextState, setTryNextState] = useState<
     { kind: "idle" } | { kind: "loading" } | { kind: "error"; message: string }
   >({ kind: "idle" });
-  if (onRetry != null) {
+  if (onRetry != null || freshResolutionRequired) {
     return (
       <div className="player-external">
         <Icon name="info" size={36} className="t-warning" />
@@ -5374,14 +6165,16 @@ function ExternalPanel({
                 : "Try next source"}
             </button>
           )}
-          <button
-            type="button"
-            className="btn btn-prominent"
-            disabled={retryPending}
-            onClick={() => void onRetry()}
-          >
-            {retryPending ? "Preparing fresh stream" : "Retry playback"}
-          </button>
+          {onRetry != null && (
+            <button
+              type="button"
+              className="btn btn-prominent"
+              disabled={retryPending}
+              onClick={() => void onRetry()}
+            >
+              {retryPending ? "Preparing fresh stream" : "Retry playback"}
+            </button>
+          )}
           {browserExternalLinks.map((link) => (
             <a
               className="btn"

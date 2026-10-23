@@ -45,6 +45,36 @@ export function continuationForParent(
   return EPISODE_CONTINUATIONS.find((relation) => relation.parentImdbId === imdbId) ?? null;
 }
 
+/** Interpret legacy parent-display coordinates stored under a verified child.
+ * At least one exact child id is required, and every supplied id must agree. */
+export function recoverContinuationChildSelection(input: {
+  imdbId: string | null;
+  tmdbId: number | null;
+  season: number;
+  episode: number;
+}): { season: number; episode: number } | null {
+  if (
+    !Number.isSafeInteger(input.season) ||
+    !Number.isSafeInteger(input.episode) ||
+    input.episode < 1
+  ) {
+    return null;
+  }
+  const continuation = EPISODE_CONTINUATIONS.find(
+    (relation) =>
+      (input.imdbId === relation.childImdbId || input.tmdbId === relation.childTmdbId) &&
+      (input.imdbId == null || input.imdbId === relation.childImdbId) &&
+      (input.tmdbId == null || input.tmdbId === relation.childTmdbId),
+  );
+  if (continuation == null || input.season < continuation.displaySeasonStart) return null;
+  return {
+    season:
+      continuation.childSeasonStart +
+      (input.season - continuation.displaySeasonStart),
+    episode: input.episode,
+  };
+}
+
 export function requiresCanonicalEpisodeGuide(
   imdbId: string | null,
   tmdbId: number | null,

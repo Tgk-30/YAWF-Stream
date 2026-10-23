@@ -10,17 +10,23 @@
 // ffmpeg present) - so it has zero cost in the default (off) configuration.
 
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { AppDatabase } from "./db.js";
 import type { ServerConfig } from "./types.js";
+import { TRANSCODE_SUBTITLE_PLAYLIST_PATTERN } from "./transcodeHls.js";
 import type {
   Transcoder,
   TranscoderAudioTrack,
   TranscoderStreamProbe,
   TranscodeVideoEncoder,
 } from "./transcode.js";
+import {
+  STREAM_PROBE_FAST_TIMEOUT_MS,
+  STREAM_PROBE_RETRY_TIMEOUT_MS,
+} from "./transcode.js";
+import { readInitialMpegTsVideoPresentationTimestamp } from "./transcodeTsClock.js";
 
 export const MANIFEST_NAME = "stream.m3u8";
 const FIRST_ADAPTIVE_SEGMENT = "1080p_seg_00000.ts";
@@ -31,6 +37,8 @@ const RETIRED_ASSET_GRACE_MS = 30_000;
 const PROBE_CACHE_IDLE_MS = 5 * 60_000;
 const FAILED_PROBE_RETRY_COOLDOWN_MS = 5_000;
 const MAX_PROBE_CACHE_ENTRIES = 64;
+const PROBE_FAST_CALLER_TIMEOUT_MS = 6_000;
+const PROBE_RETRY_CALLER_TIMEOUT_MS = 17_000;
 
 /** Legacy client profile names retained for older app versions. */
 export type TranscodeClientProfile = "adaptive" | "high" | "data-saver";
@@ -68,7 +76,7 @@ export interface HlsTranscodeOptions {
   /** Zero-based source audio-stream index. Never a global ffmpeg stream specifier. */
   audioTrack?: number;
   hdrPolicy?: TranscodeHdrPolicy;
-  /** Preserve the first embedded subtitle track as a WebVTT sidecar. */
+  /** Preserve the first embedded subtitle track as a WebVTT HLS rendition. */
   preserveSubtitles?: boolean;
   videoEncoder?: TranscodeVideoEncoder;
   /** Internal result of the source probe. Defaults true for injected test
@@ -85,6 +93,7 @@ export interface TranscodeSourceInfo {
 
 export interface TranscodeSourceInfoOptions {
   retryFailed?: boolean;
+  signal?: AbortSignal;
 }
 
 function encoderArgs(
@@ -149,6 +158,8 @@ export function hlsArgs(
       ? options.audioTrack
       : 0;
   const audioMap = `0:a:${audioTrack}`;
+  const includeSubtitle =
+    options.preserveSubtitles === true && options.includeSubtitle === true;
   const args = [
     "-nostdin",
     "-y",
@@ -156,7 +167,12 @@ export function hlsArgs(
     "-loglevel",
     "error",
   ];
-  if (startSeconds > 0) args.push("-ss", String(startSeconds));
+  // Keep VIDEO and WebVTT in the same input clock domain, including at zero
+  // start. Otherwise input normalization can shift only the generated cues.
+  if (includeSubtitle) args.push("-copyts");
+  if (startSeconds > 0) {
+    args.push("-ss", String(startSeconds));
+  }
   args.push(
     "-i",
     upstreamUrl,
@@ -187,6 +203,7 @@ export function hlsArgs(
             audioMap,
           ]
         : []),
+      ...(includeSubtitle ? ["-map", "0:s:0"] : []),
       ...encoderArgs(encoder, ["8000k", "4500k", "1800k", "700k"]),
       ...(includeAudio
         ? [
@@ -204,6 +221,7 @@ export function hlsArgs(
             "2",
           ]
         : []),
+      ...(includeSubtitle ? ["-c:s", "webvtt"] : []),
       "-g",
       "144",
       "-keyint_min",
@@ -212,10 +230,15 @@ export function hlsArgs(
       "0",
       "-force_key_frames",
       "expr:gte(t,n_forced*6)",
-      "-sn",
+      ...(includeSubtitle ? [] : ["-sn"]),
       "-dn",
       "-max_muxing_queue_size",
       "1024",
+      // Preserve the shared output clock in both HLS and its inner TS muxer.
+      ...(includeSubtitle ? [
+        "-avoid_negative_ts", "disabled",
+        "-hls_segment_options", "mpegts_copyts=1:avoid_negative_ts=disabled",
+      ] : []),
       "-f",
       "hls",
       "-hls_time",
@@ -228,8 +251,15 @@ export function hlsArgs(
       MANIFEST_NAME,
       "-var_stream_map",
       includeAudio
-        ? "v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p v:3,a:3,name:360p"
-        : "v:0,name:1080p v:1,name:720p v:2,name:480p v:3,name:360p",
+        ? includeSubtitle
+          ? "v:0,a:0,s:0,sgroup:subs,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p v:3,a:3,name:360p"
+          : "v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p v:3,a:3,name:360p"
+        : includeSubtitle
+          ? "v:0,s:0,sgroup:subs,name:1080p v:1,name:720p v:2,name:480p v:3,name:360p"
+          : "v:0,name:1080p v:1,name:720p v:2,name:480p v:3,name:360p",
+      ...(includeSubtitle
+        ? ["-hls_subtitle_path", join(dir, TRANSCODE_SUBTITLE_PLAYLIST_PATTERN)]
+        : []),
       "-hls_segment_filename",
       join(dir, "%v_seg_%05d.ts"),
       join(dir, "%v.m3u8"),
@@ -247,6 +277,7 @@ export function hlsArgs(
       "-map",
       "0:v:0",
       ...(includeAudio ? ["-map", audioMap] : []),
+      ...(includeSubtitle ? ["-map", "0:s:0"] : []),
       "-vf",
       videoFilter,
       ...encoderArgs(encoder, [fixed.videoBitrate]),
@@ -260,6 +291,7 @@ export function hlsArgs(
             "2",
           ]
         : []),
+      ...(includeSubtitle ? ["-c:s", "webvtt"] : []),
       "-g",
       "144",
       "-keyint_min",
@@ -268,10 +300,14 @@ export function hlsArgs(
       "0",
       "-force_key_frames",
       "expr:gte(t,n_forced*6)",
-      "-sn",
+      ...(includeSubtitle ? [] : ["-sn"]),
       "-dn",
       "-max_muxing_queue_size",
       "1024",
+      ...(includeSubtitle ? [
+        "-avoid_negative_ts", "disabled",
+        "-hls_segment_options", "mpegts_copyts=1:avoid_negative_ts=disabled",
+      ] : []),
       "-f",
       "hls",
       "-hls_time",
@@ -284,22 +320,18 @@ export function hlsArgs(
       MANIFEST_NAME,
       "-var_stream_map",
       includeAudio
-        ? `v:0,a:0,name:${quality}`
-        : `v:0,name:${quality}`,
+        ? includeSubtitle
+          ? `v:0,a:0,s:0,sgroup:subs,name:${quality}`
+          : `v:0,a:0,name:${quality}`
+        : includeSubtitle
+          ? `v:0,s:0,sgroup:subs,name:${quality}`
+          : `v:0,name:${quality}`,
+      ...(includeSubtitle
+        ? ["-hls_subtitle_path", join(dir, TRANSCODE_SUBTITLE_PLAYLIST_PATTERN)]
+        : []),
       "-hls_segment_filename",
       join(dir, "%v_seg_%05d.ts"),
       join(dir, "%v.m3u8"),
-    );
-  }
-  if (options.preserveSubtitles && options.includeSubtitle) {
-    args.push(
-      "-map",
-      "0:s:0",
-      "-c:s",
-      "webvtt",
-      "-f",
-      "webvtt",
-      join(dir, "subtitles.vtt"),
     );
   }
   return args;
@@ -314,6 +346,8 @@ interface Job {
   cancelled: boolean;
   disposed: boolean;
   assetGeneration: string;
+  startSeconds: number;
+  subtitleVideoMpegTsTimestamp: number | null;
 }
 
 interface PendingJob {
@@ -326,9 +360,13 @@ interface PendingJob {
 interface StreamProbeCacheEntry {
   upstreamUrl: string;
   promise: Promise<TranscoderStreamProbe | null>;
+  settle: (value: TranscoderStreamProbe | null) => void;
+  controller: AbortController;
   lastAccess: number;
   state: "pending" | "succeeded" | "failed";
   settledAt: number | null;
+  waiters: number;
+  invalidated: boolean;
 }
 
 export class TranscodeRegistry {
@@ -405,9 +443,68 @@ export class TranscodeRegistry {
       clearInterval(this.reaper);
       this.reaper = null;
     }
+    for (const [id, probe] of this.streamProbes) {
+      this.invalidateProbe(id, probe);
+    }
     const ids = new Set([...this.jobs.keys(), ...this.pending.keys()]);
     await Promise.all([...ids].map((id) => this.kill(id)));
-    this.streamProbes.clear();
+  }
+
+  private invalidateProbe(
+    sessionId: string,
+    entry: StreamProbeCacheEntry,
+  ): void {
+    if (this.streamProbes.get(sessionId) === entry) {
+      this.streamProbes.delete(sessionId);
+    }
+    if (entry.invalidated) return;
+    entry.invalidated = true;
+    entry.settle(null);
+    entry.controller.abort();
+  }
+
+  private waitForProbe(
+    sessionId: string,
+    entry: StreamProbeCacheEntry,
+    options: TranscodeSourceInfoOptions,
+  ): Promise<TranscoderStreamProbe | null> {
+    if (entry.state !== "pending") return entry.promise;
+    const timeoutMs = options.retryFailed === true
+      ? PROBE_RETRY_CALLER_TIMEOUT_MS
+      : PROBE_FAST_CALLER_TIMEOUT_MS;
+    entry.waiters += 1;
+    return new Promise((resolve) => {
+      let finished = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (
+        value: TranscoderStreamProbe | null,
+        detached: boolean,
+      ) => {
+        if (finished) return;
+        finished = true;
+        if (timer != null) clearTimeout(timer);
+        options.signal?.removeEventListener("abort", detach);
+        entry.waiters = Math.max(0, entry.waiters - 1);
+        if (
+          detached &&
+          entry.waiters === 0 &&
+          entry.state === "pending" &&
+          this.streamProbes.get(sessionId) === entry
+        ) {
+          this.invalidateProbe(sessionId, entry);
+        }
+        resolve(value);
+      };
+      const detach = () => finish(null, true);
+      timer = setTimeout(detach, timeoutMs);
+      timer.unref?.();
+      options.signal?.addEventListener("abort", detach, { once: true });
+      if (options.signal?.aborted === true) {
+        detach();
+        return;
+      }
+      void entry.promise.then((value) => finish(value, false));
+    });
   }
 
   private probeStreams(
@@ -415,6 +512,7 @@ export class TranscodeRegistry {
     upstreamUrl: string,
     options: TranscodeSourceInfoOptions = {},
   ): Promise<TranscoderStreamProbe | null> {
+    if (options.signal?.aborted === true) return Promise.resolve(null);
     const now = Date.now();
     const cached = this.streamProbes.get(sessionId);
     let retryingFailed = false;
@@ -425,7 +523,9 @@ export class TranscodeRegistry {
         cached.state === "failed" &&
         cached.settledAt != null &&
         now - cached.settledAt >= FAILED_PROBE_RETRY_COOLDOWN_MS;
-      if (!retryingFailed) return cached.promise;
+      if (!retryingFailed) return this.waitForProbe(sessionId, cached, options);
+    } else if (cached != null) {
+      this.invalidateProbe(sessionId, cached);
     }
     // ffprobe is an external process too. Count it against the same global
     // admission budget as active and warming ffmpeg jobs so opening audio menus
@@ -437,50 +537,97 @@ export class TranscodeRegistry {
       // Keep an eligible failed entry in place unless its replacement reserves
       // the normal process budget. This avoids an eviction gap that could turn
       // a later ordinary read into an automatic retry.
-      return retryingFailed ? cached!.promise : Promise.resolve(null);
+      return retryingFailed
+        ? this.waitForProbe(sessionId, cached!, options)
+        : Promise.resolve(null);
     }
     this.activeProbes += 1;
     let resolveProbe: (value: TranscoderStreamProbe | null) => void = () => {};
+    let callersSettled = false;
     const promise = new Promise<TranscoderStreamProbe | null>((resolve) => {
       resolveProbe = resolve;
     });
+    const settle = (value: TranscoderStreamProbe | null) => {
+      if (callersSettled) return;
+      callersSettled = true;
+      resolveProbe(value);
+    };
     const entry: StreamProbeCacheEntry = {
       upstreamUrl,
       promise,
+      settle,
+      controller: new AbortController(),
       lastAccess: now,
       state: "pending",
       settledAt: null,
+      waiters: 0,
+      invalidated: false,
     };
     // Publish the pending entry before the adapter is called. Test adapters can
     // settle synchronously, and concurrent callers must still share this exact
     // promise without resurrecting an entry removed by kill().
     this.streamProbes.set(sessionId, entry);
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const finish = (value: TranscoderStreamProbe | null) => {
-      if (settled) return;
-      settled = true;
-      if (timer != null) clearTimeout(timer);
+    let adapterSettled = false;
+    let childReported = false;
+    let childClosed = false;
+    let admissionReleased = false;
+    const releaseAdmission = () => {
+      if (
+        admissionReleased ||
+        !adapterSettled ||
+        (childReported && !childClosed)
+      ) {
+        return;
+      }
+      admissionReleased = true;
       this.activeProbes = Math.max(0, this.activeProbes - 1);
+    };
+    const onSpawn = (child: ChildProcess) => {
+      if (childReported) {
+        entry.controller.abort();
+        return;
+      }
+      childReported = true;
+      child.once("close", () => {
+        childClosed = true;
+        releaseAdmission();
+      });
+    };
+    const finish = (value: TranscoderStreamProbe | null) => {
+      if (adapterSettled) return;
+      adapterSettled = true;
+      releaseAdmission();
+      if (
+        entry.invalidated ||
+        this.streamProbes.get(sessionId) !== entry
+      ) {
+        settle(null);
+        return;
+      }
       entry.state = value == null ? "failed" : "succeeded";
       entry.settledAt = Date.now();
-      resolveProbe(value);
+      settle(value);
     };
-    timer = setTimeout(() => finish(null), 6_000);
-    timer.unref?.();
     if (this.transcoder.probeStreams == null) {
       finish(null);
-      return promise;
+      return this.waitForProbe(sessionId, entry, options);
     }
     try {
-      void this.transcoder.probeStreams(upstreamUrl).then(
+      void this.transcoder.probeStreams(upstreamUrl, {
+        timeoutMs: options.retryFailed === true
+          ? STREAM_PROBE_RETRY_TIMEOUT_MS
+          : STREAM_PROBE_FAST_TIMEOUT_MS,
+        signal: entry.controller.signal,
+        onSpawn,
+      }).then(
         (value) => finish(value),
         () => finish(null),
       );
     } catch {
+      entry.controller.abort();
       finish(null);
     }
-    return promise;
+    return this.waitForProbe(sessionId, entry, options);
   }
 
   async audioTracksFor(
@@ -488,6 +635,14 @@ export class TranscodeRegistry {
     upstreamUrl: string,
   ): Promise<TranscoderAudioTrack[] | null> {
     return (await this.sourceInfoFor(sessionId, upstreamUrl)).audioTracks;
+  }
+
+  async subtitleAvailableFor(
+    sessionId: string,
+    upstreamUrl: string,
+  ): Promise<boolean | null> {
+    const probe = await this.probeStreams(sessionId, upstreamUrl);
+    return probe == null ? null : probe.subtitle === true;
   }
 
   async sourceInfoFor(
@@ -545,13 +700,14 @@ export class TranscodeRegistry {
         (row.expires_at != null && row.expires_at <= nowIso) ||
         now - probe.lastAccess > PROBE_CACHE_IDLE_MS
       ) {
-        this.streamProbes.delete(id);
+        this.invalidateProbe(id, probe);
       }
     }
   }
 
   async kill(sessionId: string): Promise<void> {
-    this.streamProbes.delete(sessionId);
+    const probe = this.streamProbes.get(sessionId);
+    if (probe != null) this.invalidateProbe(sessionId, probe);
     this.generations.set(sessionId, (this.generations.get(sessionId) ?? 0) + 1);
     const job = this.jobs.get(sessionId);
     if (job != null) {
@@ -638,6 +794,23 @@ export class TranscodeRegistry {
     return job.dir;
   }
 
+  /** Renew only the current, still-live output. A lease never creates work or
+   * extends the fixed grace period of a replaced generation. Authorization is
+   * checked by the asset route before calling this method. */
+  touchCurrentGeneration(sessionId: string, asset: string, generation: string): boolean {
+    const job = this.jobs.get(sessionId);
+    const now = Date.now();
+    if (
+      job == null || job.assetGeneration !== generation ||
+      job.failed || job.cancelled || job.disposed ||
+      now - job.lastAccess > IDLE_MS ||
+      !/^(?:1080p|720p|480p|360p)\.m3u8$/.test(asset) ||
+      !existsSync(join(job.dir, asset))
+    ) return false;
+    job.lastAccess = now;
+    return true;
+  }
+
   generationFor(sessionId: string, dir: string): string | null {
     const candidates = [
       this.jobs.get(sessionId),
@@ -657,6 +830,31 @@ export class TranscodeRegistry {
     if (match == null || !existsSync(join(match.dir, asset))) return null;
     match.lastAccess = Date.now();
     return match.dir;
+  }
+
+  startSecondsForAsset(sessionId: string, generation?: string): number | null {
+    const candidates = [
+      this.jobs.get(sessionId),
+      ...(this.retired.get(sessionId) ?? []),
+    ].filter((job): job is Job => job != null);
+    const match = generation == null
+      ? candidates[0]
+      : candidates.find((job) => job.assetGeneration === generation);
+    return match?.startSeconds ?? null;
+  }
+
+  subtitleReadyForAsset(
+    sessionId: string,
+    generation?: string,
+  ): boolean {
+    const candidates = [
+      this.jobs.get(sessionId),
+      ...(this.retired.get(sessionId) ?? []),
+    ].filter((job): job is Job => job != null);
+    const match = generation == null
+      ? candidates[0]
+      : candidates.find((job) => job.assetGeneration === generation);
+    return match?.subtitleVideoMpegTsTimestamp != null;
   }
 
   /** Ensure an HLS job exists for this session and return its output dir once the
@@ -750,12 +948,6 @@ export class TranscodeRegistry {
       includeSubtitle:
         options.preserveSubtitles === true && streamProbe?.subtitle === true,
     };
-    if (options.preserveSubtitles) {
-      // Keep the advertised subtitle rendition valid when the source has no
-      // embedded subtitle stream or stream probing is unavailable. When a
-      // track exists, the one main FFmpeg process replaces this placeholder.
-      await writeFile(join(dir, "subtitles.vtt"), "WEBVTT\n\n", "utf8");
-    }
     try {
       child = this.transcoder.spawnHls(
         hlsArgs(upstreamUrl, dir, processOptions),
@@ -777,6 +969,8 @@ export class TranscodeRegistry {
       cancelled: false,
       disposed: false,
       assetGeneration: basename(dir),
+      startSeconds: options.startSeconds ?? 0,
+      subtitleVideoMpegTsTimestamp: null,
     };
     for (const process of children) this.trackChild(process);
     registerStaged(job);
@@ -797,13 +991,34 @@ export class TranscodeRegistry {
       dir,
       quality === "auto" ? FIRST_ADAPTIVE_SEGMENT : `${quality}_seg_00000.ts`,
     );
+    const firstSubtitlePrefix = quality === "auto" ? "1080p" : quality;
+    const subtitlePlaylist = join(dir, `${firstSubtitlePrefix}_subtitles.m3u8`);
+    const firstSubtitleSegment = join(
+      dir,
+      `${firstSubtitlePrefix}0.vtt`,
+    );
     const deadline = Date.now() + this.config.transcodeStartTimeoutMs;
     while (Date.now() < deadline) {
       if (job.cancelled) {
         await this.disposeJob(sessionId, job, false);
         throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
       }
-      if (existsSync(manifest) && existsSync(firstSeg)) {
+      if (
+        processOptions.includeSubtitle === true &&
+        job.subtitleVideoMpegTsTimestamp == null &&
+        existsSync(firstSeg)
+      ) {
+        job.subtitleVideoMpegTsTimestamp =
+          await readInitialMpegTsVideoPresentationTimestamp(firstSeg);
+      }
+      const subtitleReady =
+        processOptions.includeSubtitle !== true ||
+        (
+          existsSync(subtitlePlaylist) &&
+          existsSync(firstSubtitleSegment) &&
+          job.subtitleVideoMpegTsTimestamp != null
+        );
+      if (existsSync(manifest) && existsSync(firstSeg) && subtitleReady) {
         // Atomically make the fully playable replacement visible before the
         // old process and files are touched. A failed warm-up never changes the
         // active map entry or session directory.

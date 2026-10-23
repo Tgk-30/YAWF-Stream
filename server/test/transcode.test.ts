@@ -68,4 +68,98 @@ describe("real transcoder source probe", () => {
       completeProbe({ streams: [], format: { duration: "86400" } }),
     ).resolves.toMatchObject({ durationSeconds: 86_400 });
   });
+
+  it("lets only the explicit slow lane retain a valid probe completing at 10.1 seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const stdout = new EventEmitter();
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.stdout = stdout;
+      child.kill = vi.fn(() => true);
+      spawnMock.mockReturnValueOnce(child as unknown as ChildProcess);
+
+      const result = realTranscoder.probeStreams!(
+        "https://provider.example/slow-media",
+        { timeoutMs: 15_000 },
+      );
+      stdout.emit("data", Buffer.from(JSON.stringify({
+        streams: [{
+          codec_type: "audio",
+          tags: { language: "fra", title: "French" },
+          disposition: { default: 1 },
+        }],
+        format: { duration: "596.457379" },
+      })));
+      await vi.advanceTimersByTimeAsync(10_100);
+      child.emit("close", 0);
+
+      await expect(result).resolves.toMatchObject({
+        audioTracks: [{ index: 0, language: "fra", label: "French", default: true }],
+        durationSeconds: 596.457379,
+      });
+      expect(child.kill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the ordinary five-second deadline and settles only after actual child close", async () => {
+    vi.useFakeTimers();
+    try {
+      const stdout = new EventEmitter();
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.stdout = stdout;
+      child.kill = vi.fn(() => true);
+      spawnMock.mockReturnValueOnce(child as unknown as ChildProcess);
+
+      let settled = false;
+      const result = realTranscoder.probeStreams!(
+        "https://provider.example/slow-media",
+      ).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(settled).toBe(false);
+
+      child.emit("close", null);
+      await expect(result).resolves.toBeNull();
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("kills an externally cancelled probe and still waits for actual child close", async () => {
+    const stdout = new EventEmitter();
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdout = stdout;
+    child.kill = vi.fn(() => true);
+    spawnMock.mockReturnValueOnce(child as unknown as ChildProcess);
+    const controller = new AbortController();
+    let settled = false;
+    const result = realTranscoder.probeStreams!(
+      "https://provider.example/cancelled-media",
+      { signal: controller.signal },
+    ).finally(() => {
+      settled = true;
+    });
+
+    controller.abort();
+    await Promise.resolve();
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(settled).toBe(false);
+    child.emit("close", null);
+    await expect(result).resolves.toBeNull();
+    expect(settled).toBe(true);
+  });
 });

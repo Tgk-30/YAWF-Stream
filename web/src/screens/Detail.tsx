@@ -28,7 +28,9 @@ import {
   useSeasons,
 } from "../data/episodes";
 import {
+  EPISODE_GUIDE_VERSION,
   hasEpisodeContinuationIdentityConflict,
+  recoverContinuationChildSelection,
   requiresCanonicalEpisodeGuide,
   resolveEpisodeSource,
   type EpisodeSourceCoordinates,
@@ -419,13 +421,50 @@ export function Detail() {
     services.tmdb,
     detail.data.imdbId,
   );
-  const selected = useMemo(
-    () =>
+  const selectionResolution = useMemo(() => {
+    const current =
       rawSelected != null && seasonsState.numbering === "cinemeta"
         ? normalizeFlattenedSeasonOneSelection(rawSelected, seasonsState.seasons)
-        : rawSelected,
-    [rawSelected, seasonsState.numbering, seasonsState.seasons],
-  );
+        : rawSelected;
+    if (current == null) return { selected: null, recoveryBlocked: false };
+    const recovered = recoverContinuationChildSelection({
+      imdbId: detail.data.imdbId,
+      tmdbId: episodeGuideTmdbId,
+      season: current.season,
+      episode: current.episode,
+    });
+    if (recovered == null) return { selected: current, recoveryBlocked: false };
+
+    const hasCanonicalGuide =
+      seasonsState.source === "live" &&
+      seasonsState.numbering === "cinemeta" &&
+      seasonsState.guideVersion === EPISODE_GUIDE_VERSION;
+    if (!hasCanonicalGuide) return { selected: current, recoveryBlocked: true };
+    if (seasonsState.seasons.some((season) => season.seasonNumber === current.season)) {
+      return { selected: current, recoveryBlocked: false };
+    }
+    const recoveredSeason = seasonsState.seasons.find(
+      (season) => season.seasonNumber === recovered.season,
+    );
+    if (
+      recoveredSeason == null ||
+      !Number.isSafeInteger(recoveredSeason.episodeCount) ||
+      recovered.episode > recoveredSeason.episodeCount
+    ) {
+      return { selected: current, recoveryBlocked: true };
+    }
+    return { selected: recovered, recoveryBlocked: false };
+  }, [
+    detail.data.imdbId,
+    episodeGuideTmdbId,
+    rawSelected,
+    seasonsState.guideVersion,
+    seasonsState.numbering,
+    seasonsState.seasons,
+    seasonsState.source,
+  ]);
+  const selected = selectionResolution.selected;
+  const continuationRecoveryBlocked = selectionResolution.recoveryBlocked;
   const episodeGuidePending =
     detailItem?.type === "series" && rawSelected != null && seasonsState.loading;
   const canonicalEpisodeGuideRequired = requiresCanonicalEpisodeGuide(
@@ -433,6 +472,7 @@ export function Detail() {
     episodeGuideTmdbId,
   );
   const selectedSeasonInGuide =
+    !continuationRecoveryBlocked &&
     !hasEpisodeContinuationIdentityConflict(detail.data.imdbId, episodeGuideTmdbId) &&
     (selected == null ||
       (seasonsState.source === "live"
@@ -627,7 +667,7 @@ export function Detail() {
   // nextEpisodeFor (harmless: moving to it still requires a cached row).
   const selectedSeasonEpisodes = useEpisodes(
     episodeGuideTmdbId,
-    selected?.season ?? null,
+    continuationRecoveryBlocked ? null : selected?.season ?? null,
     services.tmdb,
     detail.data.imdbId,
   );
@@ -2181,7 +2221,19 @@ export function Detail() {
       {/* Season/episode picker (series only). Selecting an episode re-drives
           the stream search below; falls back to a plain stepper without TMDB. */}
       {detailItem.type === "series" && selected != null && (
-        canonicalEpisodeGuideRequired && !seasonsState.loading && seasonsState.source !== "live" ? (
+        continuationRecoveryBlocked ? (
+          <p
+            className="episode-picker-note t-secondary"
+            role="status"
+            aria-busy={seasonsState.loading}
+          >
+            {seasonsState.loading
+              ? "Loading the canonical episode guide..."
+              : "The canonical episode guide is unavailable. Retry before choosing an episode."}
+          </p>
+        ) : !seasonsState.loading &&
+          canonicalEpisodeGuideRequired &&
+          seasonsState.source !== "live" ? (
           <p className="episode-picker-note t-secondary" role="status">
             The canonical episode guide is unavailable. Retry before choosing an episode.
           </p>
