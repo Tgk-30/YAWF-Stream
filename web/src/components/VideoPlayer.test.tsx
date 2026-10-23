@@ -2656,6 +2656,49 @@ describe("WebviewPlayer", () => {
     expect(screen.queryByText("Loading audio tracks…")).toBeNull();
   });
 
+  it("places the functional Audio track section before Video fit and Zoom", async () => {
+    const loadAudioTracks = vi.fn()
+      .mockRejectedValueOnce(new Error("probe unavailable"))
+      .mockResolvedValueOnce([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await screen.findByText("Audio track inventory is temporarily unavailable.");
+    const dialog = screen.getByRole("dialog", { name: "Playback settings" });
+    const audio = within(dialog).getByText("Audio track").closest<HTMLElement>(".player-options-section");
+    const fit = within(dialog).getByText("Video fit").closest<HTMLElement>(".player-options-section");
+    const zoom = within(dialog).getByText("Zoom").closest<HTMLElement>(".player-options-section");
+    expect(audio).not.toBeNull();
+    expect(fit).not.toBeNull();
+    expect(zoom).not.toBeNull();
+    expect(
+      audio!.compareDocumentPosition(fit!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      audio!.compareDocumentPosition(zoom!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await userEvent.click(within(audio!).getByRole("button", { name: "Retry audio tracks" }));
+    expect(await within(audio!).findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+  });
+
   it("retries failed server audio inventory only after one explicit gesture", async () => {
     const replacement = deferred<Array<{
       index: number;

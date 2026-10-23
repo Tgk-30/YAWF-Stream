@@ -5702,6 +5702,58 @@ function WebviewPlayer({
               <Icon name="xmark" size={15} />
             </button>
           </div>
+          <div className="player-options-section" aria-labelledby="player-audio-track-heading">
+            <span className="t-secondary" id="player-audio-track-heading">Audio track</span>
+            {audioChoices.length > 0 && (
+              <div className="player-options-choice-row">
+                {audioChoices.map((track) => (
+                  <button
+                    type="button"
+                    className={`chip${activeAudioTrack === track.index ? " is-active" : ""}`}
+                    aria-pressed={activeAudioTrack === track.index}
+                    onClick={() => {
+                      if (serverAudioInventoryKnown) changeServerAudioTrack(track.index);
+                      else if (hlsAudioInventoryKnown) changeHlsAudioTrack(track.index);
+                      else changeBrowserAudioTrack(track.index);
+                    }}
+                    key={track.id}
+                  >
+                    {track.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {audioInventoryPending ? (
+              <p className="player-options-status" role="status">
+                Loading audio tracks…
+              </p>
+            ) : serverAudioInventoryStatus === "unavailable" && serverAudioLoaderAvailable ? (
+              <>
+                <p className="player-options-status" role="status">
+                  Audio track inventory is temporarily unavailable.
+                </p>
+                <button
+                  type="button"
+                  className="player-options-action"
+                  onClick={() => startServerAudioInventoryLoad(true)}
+                >
+                  Retry audio tracks
+                </button>
+              </>
+            ) : audioChoices.length === 1 ? (
+              <p className="player-options-status" role="status">
+                This stream reports one audio track.
+              </p>
+            ) : audioChoices.length === 0 && audioSelectionUnavailable ? (
+              <p className="player-options-status" role="status">
+                This browser does not expose alternate audio tracks. If this source contains more than one, use an external player.
+              </p>
+            ) : audioChoices.length === 0 ? (
+              <p className="player-options-status" role="status">
+                This stream does not report selectable audio tracks.
+              </p>
+            ) : null}
+          </div>
           <div className="player-options-section">
             <span className="t-secondary">Video fit</span>
             <div className="player-options-choice-row">
@@ -5836,58 +5888,6 @@ function WebviewPlayer({
               </div>
             </div>
           )}
-          <div className="player-options-section" aria-labelledby="player-audio-track-heading">
-            <span className="t-secondary" id="player-audio-track-heading">Audio track</span>
-            {audioChoices.length > 0 && (
-              <div className="player-options-choice-row">
-                {audioChoices.map((track) => (
-                  <button
-                    type="button"
-                    className={`chip${activeAudioTrack === track.index ? " is-active" : ""}`}
-                    aria-pressed={activeAudioTrack === track.index}
-                    onClick={() => {
-                      if (serverAudioInventoryKnown) changeServerAudioTrack(track.index);
-                      else if (hlsAudioInventoryKnown) changeHlsAudioTrack(track.index);
-                      else changeBrowserAudioTrack(track.index);
-                    }}
-                    key={track.id}
-                  >
-                    {track.label}
-                  </button>
-                ))}
-              </div>
-            )}
-            {audioInventoryPending ? (
-              <p className="player-options-status" role="status">
-                Loading audio tracks…
-              </p>
-            ) : serverAudioInventoryStatus === "unavailable" && serverAudioLoaderAvailable ? (
-              <>
-                <p className="player-options-status" role="status">
-                  Audio track inventory is temporarily unavailable.
-                </p>
-                <button
-                  type="button"
-                  className="player-options-action"
-                  onClick={() => startServerAudioInventoryLoad(true)}
-                >
-                  Retry audio tracks
-                </button>
-              </>
-            ) : audioChoices.length === 1 ? (
-              <p className="player-options-status" role="status">
-                This stream reports one audio track.
-              </p>
-            ) : audioChoices.length === 0 && audioSelectionUnavailable ? (
-              <p className="player-options-status" role="status">
-                This browser does not expose alternate audio tracks. If this source contains more than one, use an external player.
-              </p>
-            ) : audioChoices.length === 0 ? (
-              <p className="player-options-status" role="status">
-                This stream does not report selectable audio tracks.
-              </p>
-            ) : null}
-          </div>
           {browserExternalLinks.map((link) => (
             <a
               className="player-options-action"
