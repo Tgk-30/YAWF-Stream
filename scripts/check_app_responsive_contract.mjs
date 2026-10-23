@@ -176,6 +176,11 @@ const phoneSearchCss = atRuleBlock(
   globalSearchCss,
   "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {",
 );
+const globalSearchBaseRule = ruleBlock(globalSearchCss, ".global-search");
+const coarseSearchCss = atRuleBlock(globalSearchCss, "@media (pointer: coarse) {");
+const coarseSearchClearRule = ruleBlock(coarseSearchCss, ".global-search-clear");
+const coarseNavCss = atRuleBlock(navCss, "@media (pointer: coarse) {");
+const coarseNavCollapseRule = ruleBlock(coarseNavCss, ".nav-rail-collapse");
 const tabletSearchCss = atRuleBlock(
   globalSearchCss,
   "@media (min-width: 700px) and (max-width: 1199px) and (min-height: 501px) {",
@@ -244,6 +249,28 @@ check(
   /\.global-search\s*\{[\s\S]{0,420}calc\(max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)\s*\+[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(phoneSearchCss) &&
     /width:\s*min\(520px,\s*calc\(100% - 48px\)\)/.test(tabletSearchCss),
   "GlobalSearch.css must keep the input and profile clearance inside both native side insets on portrait and short-landscape phones.",
+);
+
+check(
+  "tablet search clears the native top inset without double-insetting mobile sticky search",
+  /top:\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)/.test(globalSearchBaseRule) &&
+    /position:\s*sticky/.test(ruleBlock(phoneSearchCss, ".global-search")) &&
+    /top:\s*var\(--sp-sm\)/.test(ruleBlock(phoneSearchCss, ".global-search")),
+  "GlobalSearch.css must clear the native top inset in its base rule while the already-inset mobile scrollport keeps its local sticky offset.",
+);
+
+check(
+  "coarse search clear control keeps a 44px touch target",
+  /width:\s*44px/.test(coarseSearchClearRule) &&
+    /height:\s*44px/.test(coarseSearchClearRule),
+  "GlobalSearch.css must keep the clear control at least 44px square for coarse pointers.",
+);
+
+check(
+  "coarse navigation collapse control keeps a 44px touch target",
+  /width:\s*44px/.test(coarseNavCollapseRule) &&
+    /height:\s*44px/.test(coarseNavCollapseRule),
+  "NavRail.css must keep the collapse control at least 44px square for coarse pointers.",
 );
 
 check(

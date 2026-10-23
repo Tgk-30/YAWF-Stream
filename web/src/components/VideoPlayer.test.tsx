@@ -736,6 +736,19 @@ describe("VideoPlayer shell", () => {
     );
   });
 
+  it("keeps the labelled Audio shortcut compact below tablet width", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    expect(css).toMatch(
+      /\.player-audio-shortcut\s*\{[^}]*min-height:\s*34px;[^}]*padding-inline:/s,
+    );
+    expect(css).toMatch(
+      /@media \(max-width: 767px\)\s*\{[\s\S]*?\.player-audio-shortcut-label\s*\{[^}]*display:\s*none;/,
+    );
+    expect(css).toMatch(
+      /@media \(pointer: coarse\)\s*\{[\s\S]*?\.player-osd \.chip,[\s\S]*?min-height:\s*44px;/,
+    );
+  });
+
   it("gives the absolute-only scrub track a shrink-safe flexible width", () => {
     const css = readFileSync("src/components/VideoPlayer.css", "utf8");
     expect(css).toMatch(/\.scrubbar\s*\{[^}]*display:\s*flex;/s);
@@ -1239,6 +1252,207 @@ describe("WebviewPlayer", () => {
       "player",
       "external.started",
     );
+  });
+
+  it("places direct iOS players immediately after Audio and before playlist fallbacks", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const target = `https://server.example/api/external-stream/session-1/${"E".repeat(43)}`;
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1"
+        externalPlaybackUrl={target}
+        sourceFileName="Film.mp4"
+        title="Film"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Playback settings" });
+    const audio = within(dialog).getByRole("heading", { name: "Audio track" })
+      .closest<HTMLElement>(".player-options-section");
+    const external = within(dialog).getByText("External player")
+      .closest<HTMLElement>(".player-options-section");
+    const fit = within(dialog).getByText("Video fit")
+      .closest<HTMLElement>(".player-options-section");
+    const vlc = within(dialog).getByRole("link", { name: /Open in VLC/ });
+    const playlist = within(dialog).getByRole("button", { name: /Download player playlist/ });
+
+    expect(audio).not.toBeNull();
+    expect(external).not.toBeNull();
+    expect(fit).not.toBeNull();
+    expect(audio!.compareDocumentPosition(external!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(external!.compareDocumentPosition(fit!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(vlc.compareDocumentPosition(playlist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(vlc).toHaveAttribute(
+      "href",
+      `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(target)}`,
+    );
+  });
+
+  it("keeps Playback settings as the active modal and restores its exact trigger", async () => {
+    const onClose = vi.fn();
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="Focus test"
+        onClose={onClose}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Playback settings" });
+    trigger.blur();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Playback settings" });
+    await waitFor(() => expect(dialog).toHaveFocus());
+
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(screen.getByRole("button", { name: /Keyboard shortcuts/ })).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Playing Focus test" })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("opens eligible multitrack Audio directly and announces the selected track", async () => {
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "fra", label: "French", default: false },
+    ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Audio test"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Audio tracks" });
+    expect(trigger).toHaveTextContent("Audio");
+    fireEvent.click(trigger);
+
+    const heading = await screen.findByRole("heading", { name: "Audio track" });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Audio track, English" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("removes the Audio shortcut after a single-track inventory and restores Settings focus", async () => {
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, language: "eng", label: "English", default: true },
+    ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Single audio test"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByText("This stream reports one audio track.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Audio track, English" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    expect(screen.queryByRole("button", { name: "Audio track, English" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Playback settings" })).toHaveFocus();
+  });
+
+  it("removes an unavailable Audio shortcut while retaining retry in Settings", async () => {
+    const loadAudioTracks = vi.fn(async () => {
+      throw new Error("inventory unavailable");
+    });
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Unavailable audio test"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByText("Audio track inventory is temporarily unavailable.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    expect(screen.queryByRole("button", { name: "Audio tracks" })).toBeNull();
+    const settings = screen.getByRole("button", { name: "Playback settings" });
+    expect(settings).toHaveFocus();
+    fireEvent.click(settings);
+    expect(screen.getByRole("button", { name: "Retry audio tracks" })).toBeInTheDocument();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the multitrack Audio shortcut after a successful Settings retry", async () => {
+    const loadAudioTracks = vi.fn()
+      .mockRejectedValueOnce(new Error("inventory unavailable"))
+      .mockResolvedValueOnce([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Recovered audio test"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByText("Audio track inventory is temporarily unavailable.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+    expect(screen.queryByRole("button", { name: "Audio tracks" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    const audio = screen.getByRole("button", { name: "Audio track, English" });
+    fireEvent.click(audio);
+    await waitFor(() => expect(
+      screen.getByRole("heading", { name: "Audio track" }),
+    ).toHaveFocus());
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(audio).toHaveFocus();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
   });
 
   it("offers the exact Mac IINA settings anchor without claiming the app opened", async () => {

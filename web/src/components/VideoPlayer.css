@@ -318,6 +318,15 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.player-audio-shortcut {
+  gap: calc(5px * var(--density-scale));
+  min-height: 34px;
+  padding-inline: calc(10px * var(--density-scale));
+}
+.player-audio-shortcut-label {
+  font-size: 0.75rem;
+  font-weight: 750;
+}
 .player-skip-button {
   position: relative;
 }
@@ -379,6 +388,9 @@
   display: grid;
   gap: var(--sp-xs);
   margin-bottom: var(--sp-sm);
+}
+.player-options-external .player-options-action:first-of-type {
+  border-top: 0;
 }
 .player-options-choice-row {
   flex-wrap: wrap;
@@ -975,6 +987,12 @@
     width: 44px;
     min-width: 44px;
     height: 44px;
+  }
+}
+
+@media (max-width: 767px) {
+  .player-audio-shortcut-label {
+    display: none;
   }
 }
 

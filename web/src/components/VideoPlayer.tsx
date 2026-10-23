@@ -1043,7 +1043,7 @@ export function VideoPlayer({
   const playerDialogRef = useModalA11y<HTMLDivElement>(
     onClose,
     !useEmbedded,
-    captionsOpen || detailsSection != null,
+    captionsOpen || webMenuOpen || detailsSection != null,
   );
 
   const reportAbsolutePosition = useCallback((next: number) => {
@@ -2699,6 +2699,16 @@ function WebviewPlayer({
   const previousPositionRef = useRef(0);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const optionsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const audioShortcutRef = useRef<HTMLButtonElement | null>(null);
+  const optionsOriginRef = useRef<"settings" | "audio" | null>(null);
+  const optionsWasOpenRef = useRef(false);
+  const optionsDialogRef = useModalA11y<HTMLDivElement>(
+    () => setOptionsOpen(false),
+    optionsOpen,
+  );
+  const audioOptionsRequestedRef = useRef(false);
+  const audioHeadingRef = useRef<HTMLSpanElement | null>(null);
   const [videoFit, setVideoFit] = useState<"contain" | "cover" | "fill">("contain");
   const [videoZoom, setVideoZoom] = useState(1);
   const [videoPanX, setVideoPanX] = useState(0);
@@ -3077,7 +3087,7 @@ function WebviewPlayer({
     onCaptionsOpenChange(captionsOpen);
   }, [captionsOpen, onCaptionsOpenChange]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onMenuOpenChange(optionsOpen);
   }, [onMenuOpenChange, optionsOpen]);
 
@@ -4963,6 +4973,9 @@ function WebviewPlayer({
   };
 
   const toggleOptions = () => {
+    optionsTriggerRef.current?.focus({ preventScroll: true });
+    if (!optionsOpen) optionsOriginRef.current = "settings";
+    audioOptionsRequestedRef.current = false;
     setCaptionsOpen(false);
     setOptionsOpen((open) => !open);
   };
@@ -5408,6 +5421,43 @@ function WebviewPlayer({
   const audioSelectionUnavailable =
     serverAudioInventoryStatus === "unavailable" ||
     (!serverAudioInventoryKnown && !hlsAudioInventoryKnown && !browserAudioApiAvailable);
+  const audioShortcutAvailable = audioChoices.length > 1 || (
+    serverAudioLoaderAvailable && (
+      (serverAudioInventoryStatus === "idle" && initialServerAudioTracks == null) ||
+      serverAudioInventoryStatus === "loading" ||
+      (optionsOpen && optionsOriginRef.current === "audio")
+    )
+  );
+  const activeAudioChoice = audioChoices.find((track) => track.index === activeAudioTrack) ?? null;
+  const audioShortcutLabel = activeAudioChoice == null
+    ? "Audio tracks"
+    : `Audio track, ${activeAudioChoice.label}`;
+
+  useEffect(() => {
+    if (!optionsOpen || !audioOptionsRequestedRef.current) return;
+    audioOptionsRequestedRef.current = false;
+    audioHeadingRef.current?.focus();
+    audioHeadingRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [optionsOpen]);
+
+  const openAudioOptions = () => {
+    audioShortcutRef.current?.focus({ preventScroll: true });
+    optionsOriginRef.current = "audio";
+    audioOptionsRequestedRef.current = true;
+    setCaptionsOpen(false);
+    setOptionsOpen(true);
+  };
+
+  useLayoutEffect(() => {
+    const wasOpen = optionsWasOpenRef.current;
+    optionsWasOpenRef.current = optionsOpen;
+    if (!wasOpen || optionsOpen) return;
+    const origin = optionsOriginRef.current;
+    optionsOriginRef.current = null;
+    if (origin === "audio" && !audioShortcutAvailable) {
+      optionsTriggerRef.current?.focus({ preventScroll: true });
+    }
+  }, [audioShortcutAvailable, optionsOpen]);
 
   return (
     <div
@@ -5548,6 +5598,22 @@ function WebviewPlayer({
             <span ref={clockRef} className="player-time" aria-label="Playback time">
               0:00 / {durationClockLabel(displayedDuration)}
             </span>
+            {audioShortcutAvailable && (
+              <button
+                ref={audioShortcutRef}
+                type="button"
+                className={`chip player-audio-shortcut${optionsOpen ? " is-active" : ""}`}
+                onClick={openAudioOptions}
+                aria-label={audioShortcutLabel}
+                aria-haspopup="dialog"
+                aria-expanded={optionsOpen}
+                title={audioShortcutLabel}
+                tabIndex={chromeVisible ? undefined : -1}
+              >
+                <Icon name="audio" size={17} />
+                <span className="player-audio-shortcut-label">Audio</span>
+              </button>
+            )}
           </div>
 
           <div className="player-osd-group player-osd-transport">
@@ -5661,6 +5727,7 @@ function WebviewPlayer({
               </button>
             )}
             <button
+              ref={optionsTriggerRef}
               type="button"
               className={`chip player-osd-icon-button${optionsOpen ? " is-active" : ""}`}
               onClick={toggleOptions}
@@ -5690,7 +5757,14 @@ function WebviewPlayer({
       </div>
 
       {optionsOpen && (
-        <div className="player-options-menu glass-lit" role="dialog" aria-label="Playback settings">
+        <div
+          ref={optionsDialogRef}
+          className="player-options-menu glass-lit"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Playback settings"
+          tabIndex={-1}
+        >
           <div className="player-options-head">
             <strong>Playback settings</strong>
             <button
@@ -5703,7 +5777,16 @@ function WebviewPlayer({
             </button>
           </div>
           <div className="player-options-section" aria-labelledby="player-audio-track-heading">
-            <span className="t-secondary" id="player-audio-track-heading">Audio track</span>
+            <span
+              ref={audioHeadingRef}
+              className="t-secondary"
+              id="player-audio-track-heading"
+              role="heading"
+              aria-level={2}
+              tabIndex={-1}
+            >
+              Audio track
+            </span>
             {audioChoices.length > 0 && (
               <div className="player-options-choice-row">
                 {audioChoices.map((track) => (
@@ -5753,6 +5836,94 @@ function WebviewPlayer({
                 This stream does not report selectable audio tracks.
               </p>
             ) : null}
+          </div>
+          <div
+            className="player-options-section player-options-external"
+            aria-labelledby="player-external-heading"
+          >
+            <span
+              className="t-secondary"
+              id="player-external-heading"
+              role="heading"
+              aria-level={2}
+            >
+              External player
+            </span>
+            {browserExternalLinks.map((link) => (
+              <a
+                className="player-options-action"
+                href={link.href}
+                key={link.id}
+                onClick={() => recordDiagnostic("player", "external.intent_requested")}
+              >
+                <Icon name="play" size={17} />
+                <span>
+                  <strong>{link.label}</strong>
+                  <small>{link.description}</small>
+                </span>
+              </a>
+            ))}
+            {externalPlaybackAvailable ? (
+              <button
+                type="button"
+                className="player-options-action"
+                onClick={onOpenExternalPlayer}
+              >
+                <Icon name="play" size={17} />
+                <span>
+                  <strong>
+                    {browserExternalGuidance != null
+                      ? "Download player playlist (.m3u)"
+                      : nativeExternalChooser || manualExternalUrl == null
+                      ? "Open in external player"
+                      : "Copy stream link"}
+                  </strong>
+                  <small>
+                    {browserExternalGuidance != null
+                      ? "Save a playlist to open with an installed desktop or mobile player"
+                      : nativeExternalChooser
+                      ? "Choose VLC or another installed video app"
+                      : manualExternalUrl == null
+                      ? "VLC, IINA, mpv, or your device player"
+                      : "Paste into VLC or another player"}
+                  </small>
+                </span>
+              </button>
+            ) : (
+              <p className="player-options-status" role="status">
+                External playback is not available for this protected stream. Retry playback or choose another source.
+              </p>
+            )}
+            {browserExternalGuidance != null && (
+              <p className="player-options-status">{browserExternalGuidance}</p>
+            )}
+            {externalPlaybackAvailable && onCopyExternalLink != null &&
+              (nativeExternalChooser || browserExternalGuidance != null) && (
+              <button
+                type="button"
+                className="player-options-action"
+                onClick={onCopyExternalLink}
+              >
+                <Icon name="copy" size={17} />
+                <span>
+                  <strong>Copy stream link</strong>
+                  <small>Paste it into an installed player</small>
+                </span>
+              </button>
+            )}
+            {externalActionStatus && (
+              <p className="player-options-status" role="status">{externalActionStatus}</p>
+            )}
+            {manualExternalUrl != null && (
+              <a
+                className="player-options-manual-link"
+                href={manualExternalUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+              >
+                Selectable stream link
+              </a>
+            )}
           </div>
           <div className="player-options-section">
             <span className="t-secondary">Video fit</span>
@@ -5888,68 +6059,6 @@ function WebviewPlayer({
               </div>
             </div>
           )}
-          {browserExternalLinks.map((link) => (
-            <a
-              className="player-options-action"
-              href={link.href}
-              key={link.id}
-              onClick={() => recordDiagnostic("player", "external.intent_requested")}
-            >
-              <Icon name="play" size={17} />
-              <span>
-                <strong>{link.label}</strong>
-                <small>{link.description}</small>
-              </span>
-            </a>
-          ))}
-          {externalPlaybackAvailable ? (
-            <button
-              type="button"
-              className="player-options-action"
-              onClick={onOpenExternalPlayer}
-            >
-              <Icon name="play" size={17} />
-              <span>
-                <strong>
-                  {browserExternalGuidance != null
-                    ? "Download player playlist (.m3u)"
-                    : nativeExternalChooser || manualExternalUrl == null
-                    ? "Open in external player"
-                    : "Copy stream link"}
-                </strong>
-                <small>
-                  {browserExternalGuidance != null
-                    ? "Save a playlist to open with an installed desktop or mobile player"
-                    : nativeExternalChooser
-                    ? "Choose VLC or another installed video app"
-                    : manualExternalUrl == null
-                    ? "VLC, IINA, mpv, or your device player"
-                    : "Paste into VLC or another player"}
-                </small>
-              </span>
-            </button>
-          ) : (
-            <p className="player-options-status" role="status">
-              External playback is not available for this protected stream. Retry playback or choose another source.
-            </p>
-          )}
-          {browserExternalGuidance != null && (
-            <p className="player-options-status">{browserExternalGuidance}</p>
-          )}
-          {externalPlaybackAvailable && onCopyExternalLink != null &&
-            (nativeExternalChooser || browserExternalGuidance != null) && (
-            <button
-              type="button"
-              className="player-options-action"
-              onClick={onCopyExternalLink}
-            >
-              <Icon name="copy" size={17} />
-              <span>
-                <strong>Copy stream link</strong>
-                <small>Paste it into an installed player</small>
-              </span>
-            </button>
-          )}
           <button
             type="button"
             className="player-options-action"
@@ -5964,19 +6073,6 @@ function WebviewPlayer({
               <small>Transport, seeking, volume, and fullscreen</small>
             </span>
           </button>
-          {externalActionStatus && (
-            <p className="player-options-status" role="status">{externalActionStatus}</p>
-          )}
-          {manualExternalUrl != null && (
-            <a
-              className="player-options-manual-link"
-              href={manualExternalUrl}
-              target="_blank"
-              rel="noreferrer noopener"
-            >
-              Selectable stream link
-            </a>
-          )}
         </div>
       )}
 
