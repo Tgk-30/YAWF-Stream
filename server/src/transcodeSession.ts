@@ -29,6 +29,7 @@ const REAP_INTERVAL_MS = 30_000;
 const KILL_GRACE_MS = 3000;
 const RETIRED_ASSET_GRACE_MS = 30_000;
 const PROBE_CACHE_IDLE_MS = 5 * 60_000;
+const FAILED_PROBE_RETRY_COOLDOWN_MS = 5_000;
 const MAX_PROBE_CACHE_ENTRIES = 64;
 
 /** Legacy client profile names retained for older app versions. */
@@ -80,6 +81,10 @@ export interface HlsTranscodeOptions {
 export interface TranscodeSourceInfo {
   audioTracks: TranscoderAudioTrack[] | null;
   durationSeconds: number | null;
+}
+
+export interface TranscodeSourceInfoOptions {
+  retryFailed?: boolean;
 }
 
 function encoderArgs(
@@ -318,6 +323,14 @@ interface PendingJob {
   job?: Job;
 }
 
+interface StreamProbeCacheEntry {
+  upstreamUrl: string;
+  promise: Promise<TranscoderStreamProbe | null>;
+  lastAccess: number;
+  state: "pending" | "succeeded" | "failed";
+  settledAt: number | null;
+}
+
 export class TranscodeRegistry {
   private readonly jobs = new Map<string, Job>();
   /** Child processes remain here until Node reports exit or close.
@@ -337,14 +350,7 @@ export class TranscodeRegistry {
   /** One bounded ffprobe per stream session. The same result drives both the
    * client inventory and FFmpeg job construction, avoiding duplicate reads of
    * short-lived provider URLs. */
-  private readonly streamProbes = new Map<
-    string,
-    {
-      upstreamUrl: string;
-      promise: Promise<TranscoderStreamProbe | null>;
-      lastAccess: number;
-    }
-  >();
+  private readonly streamProbes = new Map<string, StreamProbeCacheEntry>();
   private activeProbes = 0;
   private reaper: ReturnType<typeof setInterval> | null = null;
 
@@ -407,47 +413,73 @@ export class TranscodeRegistry {
   private probeStreams(
     sessionId: string,
     upstreamUrl: string,
+    options: TranscodeSourceInfoOptions = {},
   ): Promise<TranscoderStreamProbe | null> {
+    const now = Date.now();
     const cached = this.streamProbes.get(sessionId);
+    let retryingFailed = false;
     if (cached?.upstreamUrl === upstreamUrl) {
-      cached.lastAccess = Date.now();
-      return cached.promise;
+      cached.lastAccess = now;
+      retryingFailed =
+        options.retryFailed === true &&
+        cached.state === "failed" &&
+        cached.settledAt != null &&
+        now - cached.settledAt >= FAILED_PROBE_RETRY_COOLDOWN_MS;
+      if (!retryingFailed) return cached.promise;
     }
     // ffprobe is an external process too. Count it against the same global
     // admission budget as active and warming ffmpeg jobs so opening audio menus
     // across many sessions cannot bypass maxTranscodes.
     if (
       this.activeWorkCount() >= this.config.maxTranscodes ||
-      this.streamProbes.size >= MAX_PROBE_CACHE_ENTRIES
+      (this.streamProbes.size >= MAX_PROBE_CACHE_ENTRIES && !retryingFailed)
     ) {
-      return Promise.resolve(null);
+      // Keep an eligible failed entry in place unless its replacement reserves
+      // the normal process budget. This avoids an eviction gap that could turn
+      // a later ordinary read into an automatic retry.
+      return retryingFailed ? cached!.promise : Promise.resolve(null);
     }
     this.activeProbes += 1;
+    let resolveProbe: (value: TranscoderStreamProbe | null) => void = () => {};
     const promise = new Promise<TranscoderStreamProbe | null>((resolve) => {
-      let settled = false;
-      const finish = (value: TranscoderStreamProbe | null) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        this.activeProbes = Math.max(0, this.activeProbes - 1);
-        resolve(value);
-      };
-      const timer = setTimeout(() => finish(null), 6_000);
-      timer.unref?.();
-      if (this.transcoder.probeStreams == null) {
-        finish(null);
-        return;
-      }
+      resolveProbe = resolve;
+    });
+    const entry: StreamProbeCacheEntry = {
+      upstreamUrl,
+      promise,
+      lastAccess: now,
+      state: "pending",
+      settledAt: null,
+    };
+    // Publish the pending entry before the adapter is called. Test adapters can
+    // settle synchronously, and concurrent callers must still share this exact
+    // promise without resurrecting an entry removed by kill().
+    this.streamProbes.set(sessionId, entry);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (value: TranscoderStreamProbe | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer != null) clearTimeout(timer);
+      this.activeProbes = Math.max(0, this.activeProbes - 1);
+      entry.state = value == null ? "failed" : "succeeded";
+      entry.settledAt = Date.now();
+      resolveProbe(value);
+    };
+    timer = setTimeout(() => finish(null), 6_000);
+    timer.unref?.();
+    if (this.transcoder.probeStreams == null) {
+      finish(null);
+      return promise;
+    }
+    try {
       void this.transcoder.probeStreams(upstreamUrl).then(
         (value) => finish(value),
         () => finish(null),
       );
-    });
-    this.streamProbes.set(sessionId, {
-      upstreamUrl,
-      promise,
-      lastAccess: Date.now(),
-    });
+    } catch {
+      finish(null);
+    }
     return promise;
   }
 
@@ -461,8 +493,9 @@ export class TranscodeRegistry {
   async sourceInfoFor(
     sessionId: string,
     upstreamUrl: string,
+    options: TranscodeSourceInfoOptions = {},
   ): Promise<TranscodeSourceInfo> {
-    const probe = await this.probeStreams(sessionId, upstreamUrl);
+    const probe = await this.probeStreams(sessionId, upstreamUrl, options);
     const durationSeconds = probe?.durationSeconds;
     return {
       audioTracks:

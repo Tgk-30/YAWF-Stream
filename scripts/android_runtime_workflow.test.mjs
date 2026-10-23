@@ -9,6 +9,10 @@ const workflow = readFileSync(
   join(root, ".github/workflows/android-runtime-check.yml"),
   "utf8",
 );
+const api30RuntimeStart = workflow.indexOf("  api30-runtime:");
+const api30GuideStart = workflow.indexOf("  api30-stock-webview-guide:");
+assert.ok(api30RuntimeStart >= 0 && api30GuideStart > api30RuntimeStart);
+const api30Runtime = workflow.slice(api30RuntimeStart, api30GuideStart);
 
 const otaPolicyMutationCommand =
   'python3 scripts/android-runtime-instrumentation/ota_policy_mutation_check.py \\\n' +
@@ -33,13 +37,13 @@ function validateOtaPolicyMutationGate(source) {
 }
 
 test("pins the exact verification artifact while retaining the published channel", () => {
-  assert.match(workflow, /CANDIDATE_RUN_ID: "39515566836"/);
-  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164/);
-  assert.match(workflow, /CANDIDATE_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c/);
-  assert.match(workflow, /name: android-phone-verification-candidate/);
-  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.26/);
-  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003026"/);
-  assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.25/);
+  assert.match(api30Runtime, /CANDIDATE_RUN_ID: "39857024891"/);
+  assert.match(api30Runtime, /CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a/);
+  assert.match(api30Runtime, /CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3/);
+  assert.match(api30Runtime, /name: android-phone-verification-candidate/);
+  assert.match(api30Runtime, /CANDIDATE_VERSION: 2\.3\.31/);
+  assert.match(api30Runtime, /CANDIDATE_VERSION_CODE: "2003031"/);
+  assert.match(api30Runtime, /PUBLISHED_ANDROID_VERSION: 2\.3\.27/);
 });
 
 test("verifies the pinned APK and production invariants before generating local metadata", () => {

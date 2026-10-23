@@ -639,10 +639,18 @@ export function Detail() {
   // handled by useModalA11y. While a player is mounted, the player owns Escape.
   useEffect(() => {
     if (!streamsPageOpen || player != null) return;
-    const inner = rootRef.current?.querySelector<HTMLElement>(".detail-inner");
-    inner?.setAttribute("inert", "");
+    const covered = [
+      rootRef.current?.querySelector<HTMLElement>(":scope > .detail-sticky-chrome"),
+      rootRef.current?.querySelector<HTMLElement>(":scope > .detail-inner"),
+    ].filter((element): element is HTMLElement => element != null);
+    const originallyInert = new Map(
+      covered.map((element) => [element, element.hasAttribute("inert")]),
+    );
+    covered.forEach((element) => element.setAttribute("inert", ""));
     return () => {
-      inner?.removeAttribute("inert");
+      covered.forEach((element) => {
+        if (!originallyInert.get(element)) element.removeAttribute("inert");
+      });
     };
   }, [player, streamsPageOpen]);
   useEffect(() => {
@@ -1758,12 +1766,22 @@ export function Detail() {
       aria-label={`${detailItem.title} details`}
       tabIndex={-1}
     >
+      <div className="detail-sticky-chrome">
+        <button
+          type="button"
+          className="detail-back"
+          onClick={closeDetailScreen}
+          aria-label="Back"
+          title="Back"
+        >
+          <Icon name="xmark" size={17} />
+        </button>
+      </div>
       <div className="detail-inner">
       {item && (
         <DetailHero
           item={item}
           inWatchlist={inWatchlist}
-          onClose={closeDetailScreen}
           onToggleWatchlist={() => toggleWatchlist(detailItem)}
           onRequest={isServerMode() ? () => void requestTitle() : undefined}
           requestState={requestState}
@@ -2203,7 +2221,8 @@ export function Detail() {
               serverOptimizedQualities.length > 0
                 ? {
                     qualities: serverOptimizedQualities,
-                    loadAudioTracks: () => serverStreamAudioTracks(player.fallbackStream!),
+                    loadAudioTracks: (options) =>
+                      serverStreamAudioTracks(player.fallbackStream!, options),
                     loadSourceInfo: () => serverStreamSourceInfo(player.fallbackStream!),
                     defaultQuality: settings.transcode
                       ? settings.dataSaver

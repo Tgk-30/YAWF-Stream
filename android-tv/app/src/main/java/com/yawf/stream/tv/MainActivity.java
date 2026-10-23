@@ -733,15 +733,11 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private static String nullableContentType(String value) throws JSONException {
-        if (value == null || value.isEmpty()) return null;
-        String trimmed = value.trim();
-        if (
-            trimmed.length() > 120 ||
-            !trimmed.matches("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
-        ) {
+        try {
+            return PlaybackContentType.normalize(value);
+        } catch (IllegalArgumentException error) {
             throw new JSONException("Invalid playback content type.");
         }
-        return trimmed;
     }
 
     private JSONObject playbackProgress() {

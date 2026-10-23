@@ -27,13 +27,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CANDIDATE_RUN_ID: "39515566836"
-      CANDIDATE_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164
-      CANDIDATE_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c
-      CANDIDATE_VERSION: 2.3.26
-      CANDIDATE_VERSION_CODE: "2003026"
-      PUBLISHED_ANDROID_VERSION: 2.3.25
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.26.apk
+      CANDIDATE_RUN_ID: "39857024891"
+      CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a
+      CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3
+      CANDIDATE_VERSION: 2.3.31
+      CANDIDATE_VERSION_CODE: "2003031"
+      PUBLISHED_ANDROID_VERSION: 2.3.27
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.31.apk
       EVIDENCE: android-runtime-evidence
       AVD_NAME: yawf-phone-api30-runtime
       EMULATOR_SERIAL: emulator-5554
@@ -266,6 +266,8 @@ jobs:
           set -euo pipefail
           python3 scripts/android-runtime-instrumentation/policy_mutation_check.py \
             | tee "$EVIDENCE/instrumentation-policy-mutations.json"
+          python3 scripts/android-runtime-instrumentation/unknown_source_permission_contract_test.py 2>&1 \
+            | tee "$EVIDENCE/unknown-source-permission-contract.txt"
           python3 scripts/android-runtime-instrumentation/ota_policy_mutation_check.py \
             | tee "$EVIDENCE/ota-policy-mutations.json"
           gradle \
@@ -675,6 +677,194 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-phone-api30-runtime-evidence
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 7
+
+  api30-stock-webview-guide:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    name: Native recovery guide on fresh stock API 30 WebView 83
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CANDIDATE_RUN_ID: "39857024891"
+      CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a
+      CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.31.apk
+      CANDIDATE_VERSION: 2.3.31
+      CANDIDATE_VERSION_CODE: "2003031"
+      EVIDENCE: android-stock-webview-guide-evidence
+      SYSTEM_IMAGE_PACKAGE: system-images;android-30;google_apis;x86_64
+      EMULATOR_SERIAL: emulator-5554
+      AVD_NAME: yawf-stock-webview83-guide
+    steps:
+      - name: Checkout runtime driver
+        uses: actions/checkout@v4
+      - name: Checkout exact candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SOURCE_SHA }}
+          path: candidate-source
+      - name: Download exact signed candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: android-phone-verification-candidate
+          path: candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ env.CANDIDATE_RUN_ID }}
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Set up isolated driver Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+      - name: Verify exact candidate and compile native guidance driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          test "$(git -C candidate-source rev-parse HEAD)" = "$CANDIDATE_SOURCE_SHA"
+          printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$CANDIDATE_APK" | sha256sum --check -
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse0
+          sdkmanager "platform-tools" "emulator" "platforms;android-36" "build-tools;36.0.0" "$SYSTEM_IMAGE_PACKAGE"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          printf '%s\n' "$sdk_root/emulator" "$sdk_root/platform-tools" "$sdk_root/build-tools/36.0.0" >> "$GITHUB_PATH"
+          python3 candidate-source/scripts/verify_android_apk.py \
+            --apk "$CANDIDATE_APK" --version "$CANDIDATE_VERSION" \
+            --certificate-pin candidate-source/web/src-tauri/SIGNING_CERT_SHA256 --sdk "$sdk_root" \
+            | tee "$EVIDENCE/apk-verification.txt"
+          test "$(apkanalyzer manifest version-code "$CANDIDATE_APK")" = "$CANDIDATE_VERSION_CODE"
+          node --test scripts/android_webview83_runtime_driver.test.mjs scripts/runtime_webview_hierarchy_redaction.test.mjs
+          gradle --no-daemon -p scripts/android-runtime-instrumentation :app:assembleDebug :app:assembleDebugAndroidTest
+          image_root="$sdk_root/system-images/android-30/google_apis/x86_64"
+          cp "$image_root/source.properties" "$EVIDENCE/image-source.properties"
+          sha256sum "$image_root/package.xml" "$image_root/source.properties" > "$EVIDENCE/image-metadata-sha256.txt"
+          printf 'sourceRevision=%s\ncandidateRunId=%s\napkSha256=%s\nstartupGuidanceOnly=true\nplaybackTested=false\notaTested=false\n' \
+            "$CANDIDATE_SOURCE_SHA" "$CANDIDATE_RUN_ID" "$CANDIDATE_APK_SHA256" > "$EVIDENCE/binding.txt"
+      - name: Check normal native warning and App info round trip
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          sudo chown "$(id -u):$(id -g)" /dev/kvm
+          sudo chmod 0600 /dev/kvm
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-stock-webview83"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME" "$EVIDENCE/ui"
+          emulator_pid=""
+          cleanup() {
+            result=$?
+            trap - EXIT
+            set +e
+            if [ "$result" -ne 0 ]; then
+              timeout 10s adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$EVIDENCE/workflow-failure.png"
+              timeout 15s adb -s "$EMULATOR_SERIAL" logcat -d -t 1500 \
+                | sed -E 's#https?://[^[:space:]"<>]+#[redacted-url]#g' > "$EVIDENCE/workflow-failure-logcat.txt"
+            fi
+            if [ -n "$emulator_pid" ]; then
+              timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
+              for _ in 1 2 3 4 5; do
+                kill -0 "$emulator_pid" 2>/dev/null || break
+                sleep 2
+              done
+              kill "$emulator_pid" 2>/dev/null
+              wait "$emulator_pid" 2>/dev/null
+              echo 'ownedEmulatorStopped=true' > "$EVIDENCE/cleanup.txt"
+            fi
+            exit "$result"
+          }
+          trap cleanup EXIT
+          if adb devices | awk 'NR>1 && $2=="device" {found=1} END {exit found ? 0 : 1}'; then
+            echo 'An Android device was already attached before this owned run.' >&2
+            exit 1
+          fi
+          printf 'no\n' | avdmanager create avd --force --name "$AVD_NAME" \
+            --package "$SYSTEM_IMAGE_PACKAGE" --device pixel --path "$ANDROID_AVD_HOME/$AVD_NAME"
+          emulator -avd "$AVD_NAME" -port 5554 -accel on -gpu swiftshader_indirect \
+            -no-window -no-audio -no-boot-anim -no-snapshot -camera-back none -camera-front none \
+            -cores 2 -memory 2048 > "$EVIDENCE/emulator.log" 2>&1 &
+          emulator_pid=$!
+          deadline=$((SECONDS + 300))
+          until [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+            test "$SECONDS" -lt "$deadline"
+            kill -0 "$emulator_pid"
+            sleep 2
+          done
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')" = 30
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" = x86_64
+          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate > "$EVIDENCE/stock-webview-before.txt"
+          python3 - <<'PY'
+          import os,re
+          from pathlib import Path
+          dump=(Path(os.environ['EVIDENCE'])/'stock-webview-before.txt').read_text()
+          providers=re.findall(r'Current WebView package \(name, version\): \(([^,]+),\s*([^)]+)\)',dump)
+          assert providers==[('com.google.android.webview','83.0.4103.106')], 'Stock provider identity drifted'
+          PY
+          timeout 120s adb -s "$EMULATOR_SERIAL" install --no-streaming "$CANDIDATE_APK" | tee "$EVIDENCE/product-install.txt"
+          grep -Eq '^Success\r?$' "$EVIDENCE/product-install.txt"
+          installed_path="$(adb -s "$EMULATOR_SERIAL" shell pm path com.tgk30.debridstreamer | tr -d '\r' | sed -n 's/^package://p')"
+          test -n "$installed_path"
+          installed_hash="$(adb -s "$EMULATOR_SERIAL" shell sha256sum "$installed_path" | awk '{print $1}')"
+          test "$installed_hash" = "$CANDIDATE_APK_SHA256"
+          printf '%s\n' "$installed_hash" > "$EVIDENCE/installed-product-sha256.txt"
+          timeout 120s adb -s "$EMULATOR_SERIAL" install --no-streaming scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk
+          timeout 120s adb -s "$EMULATOR_SERIAL" install --no-streaming -t scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          timeout 240s adb -s "$EMULATOR_SERIAL" shell am instrument -w -r \
+            -e class com.yawf.runtimeinstrumentation.RuntimeWebViewCompatibilityTest#unsupportedStockWebViewShowsNativeRecoveryOnly \
+            -e evidenceSubdir persistent-webview-compatibility-flow \
+            -e expectedWebViewPackage com.google.android.webview -e expectedWebViewVersion 83.0.4103.106 \
+            -e expectedWebViewLabel "'Android System WebView'" \
+            com.yawf.runtimeinstrumentation.test/androidx.test.runner.AndroidJUnitRunner \
+            | tee "$EVIDENCE/instrumentation.txt"
+          python3 - <<'PY'
+          import json,os,re,subprocess
+          from pathlib import Path
+          out=Path(os.environ['EVIDENCE'])/'ui'
+          adb=['adb','-s',os.environ['EMULATOR_SERIAL']]
+          base=adb+['exec-out','run-as','com.yawf.runtimeinstrumentation']
+          folder='files/persistent-webview-compatibility-flow'
+          names=subprocess.check_output(base+['ls','-1',folder],text=True,timeout=15).splitlines()
+          assert 0<len(names)<=20
+          allowed=re.compile(r'(?:0[1-8]-[a-z0-9-]+\.(?:png|xml)|actions\.txt|instrumentation-webview-compatibility-receipt\.json)')
+          for name in names:
+              assert allowed.fullmatch(name), 'Unexpected driver evidence filename'
+              data=subprocess.check_output(base+['cat',folder+'/'+name],timeout=30)
+              assert 0<len(data)<=8*1024*1024
+              (out/name).write_bytes(data)
+          receipt=json.loads((out/'instrumentation-webview-compatibility-receipt.json').read_text())
+          assert receipt['outcome']=='passed' and receipt['scope']=='unsupported-webview-startup-guidance-only'
+          for key in ['playbackTested','otaTested','providerInstalledOrUpdated','taskRemovalClaimed']:
+              assert receipt[key] is False
+          assert receipt['hostTaskRemovalCheckRequired'] is True
+          for key in ['exactInitialWarningObserved','settingsReachedOnlyThroughProductButton','exactProviderAppLabelObserved','warningReshownAfterSettingsReturn','productNotForegroundAfterClose']:
+              assert receipt['checks'][key] is True
+          tasks=subprocess.check_output(adb+['shell','dumpsys','activity','recents'],text=True,timeout=15)
+          assert 0<len(tasks)<=256*1024
+          (out/'host-recent-tasks.txt').write_text(tasks)
+          records=re.findall(r'(?:Task|TaskRecord)\{[^\n]+',tasks)
+          assert records, 'Unrecognized task dump format'
+          assert not any('com.tgk30.debridstreamer' in record for record in records), 'YAWF task remains after Close'
+          (out/'host-task-removal-receipt.json').write_text(json.dumps({'removed':True,'scope':'recognized-recent-task-records-only','recordsObserved':len(records)})+'\n')
+          PY
+          grep -Eq '^OK \(1 test\)\r?$' "$EVIDENCE/instrumentation.txt"
+          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate > "$EVIDENCE/stock-webview-after.txt"
+          grep -F 'Current WebView package (name, version): (com.google.android.webview, 83.0.4103.106)' "$EVIDENCE/stock-webview-after.txt"
+      - name: Retain bounded native guidance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-stock-webview83-guide-runtime-evidence
           path: ${{ env.EVIDENCE }}
           if-no-files-found: error
           retention-days: 7

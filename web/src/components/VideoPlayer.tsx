@@ -102,6 +102,7 @@ import {
   type AndroidTVPlaybackProgress,
 } from "../lib/androidTV";
 import type {
+  ServerAudioInventoryLoadOptions,
   ServerAudioTrack,
   ServerOptimizedSource,
   ServerTranscodeQuality,
@@ -130,6 +131,8 @@ export interface PlaybackHandoffState {
   muted: boolean;
   playbackRate: number;
 }
+
+type ServerOptimizedPositionIntent = "follow-current" | "fixed";
 
 function applyMediaPlaybackRate(video: HTMLMediaElement, playbackRate: number): void {
   // The media load algorithm can reset playbackRate to defaultPlaybackRate.
@@ -233,7 +236,9 @@ interface VideoPlayerProps {
    * original-device player without rendering unavailable controls. */
   serverOptimized?: {
     qualities: readonly ServerTranscodeQuality[];
-    loadAudioTracks?: () => Promise<ServerAudioTrack[]>;
+    loadAudioTracks?: (
+      options?: ServerAudioInventoryLoadOptions,
+    ) => Promise<ServerAudioTrack[]>;
     loadSourceInfo?: () => Promise<{
       durationSeconds: number | null;
       tracks?: ServerAudioTrack[];
@@ -315,6 +320,30 @@ function shouldUseNativeHls(video: HTMLVideoElement): boolean {
     kind === "ios" &&
     video.canPlayType("application/vnd.apple.mpegurl") !== ""
   );
+}
+
+const WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS = 0.001;
+
+function nativeHlsSourceWithExactStart(
+  url: string,
+  startPositionSeconds: number | null | undefined,
+): string {
+  const target = Number.isFinite(startPositionSeconds)
+    ? Math.max(0, startPositionSeconds as number)
+    : 0;
+  // WebKit applies a temporal media fragment after HAVE_CURRENT_DATA, but its
+  // media element implementation ignores a fragment whose start is exactly 0.
+  // Clamp sub-millisecond targets to a decimal NPT value that WebKit accepts;
+  // one millisecond remains within the exact handoff tolerance.
+  const fragmentTarget = target < WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS
+    ? WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS
+    : target;
+  const hashIndex = url.indexOf("#");
+  if (hashIndex < 0) return `${url}#t=${fragmentTarget}`;
+  const separator = hashIndex === url.length - 1 || url.endsWith("&") ? "" : "&";
+  // Keep existing non-time fragment parameters. Media fragment processing
+  // uses the last valid temporal parameter, so this exact target wins.
+  return `${url}${separator}t=${fragmentTarget}`;
 }
 
 interface WebKitPlaybackTargetAvailabilityEvent extends Event {
@@ -1368,6 +1397,7 @@ export function VideoPlayer({
       handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
       audioTrack?: number,
       audioPreference?: AudioPreference,
+      positionIntent: ServerOptimizedPositionIntent = "follow-current",
     ) => {
       const owner = playbackOwner;
       if (
@@ -1378,6 +1408,9 @@ export function VideoPlayer({
       ) {
         return;
       }
+      const position = Number.isFinite(absolutePositionSeconds)
+        ? Math.max(0, absolutePositionSeconds)
+        : 0;
       const request = ++optimizationRequestSequenceRef.current;
       const controller = new AbortController();
       optimizationPendingRef.current?.controller.abort();
@@ -1390,9 +1423,6 @@ export function VideoPlayer({
       setServerOptimizationPending(true);
       setServerOptimizationError(null);
       try {
-        const position = Number.isFinite(absolutePositionSeconds)
-          ? Math.max(0, absolutePositionSeconds)
-          : 0;
         latestAbsolutePositionRef.current = position;
         // Resolve the job URL quickly, then give the trusted server manifest
         // the same cold-start budget as hls.js. Device Original remains active
@@ -1469,12 +1499,16 @@ export function VideoPlayer({
           throw new Error("The server did not return a playable HLS manifest.");
         }
         if (!ownsRequest()) return;
-        // Playback can advance while the manifest is warming. Keep the one
-        // server job and seek within its timeline at activation, rather than
-        // replacing it with a second transcode request.
+        // Ordinary quality switches follow playback while the manifest warms.
+        // An explicit out-of-window seek instead owns its requested position;
+        // a late clock event from the old media must not undo that user action.
+        const activationPosition = positionIntent === "fixed"
+          ? position
+          : latestAbsolutePositionRef.current;
+        latestAbsolutePositionRef.current = activationPosition;
         const activationStart = Math.max(
           0,
-          latestAbsolutePositionRef.current - next.timelineOffsetSeconds,
+          activationPosition - next.timelineOffsetSeconds,
         );
         const requestedHandoffState = typeof handoffState === "function"
           ? handoffState()
@@ -1484,7 +1518,7 @@ export function VideoPlayer({
         setFallbackSource(null);
         setSourceSwitchPosition({
           originOwner: owner,
-          position: latestAbsolutePositionRef.current,
+          position: activationPosition,
         });
         setSourceSwitchState(activationHandoffState);
         setOptimizedSource({
@@ -2451,6 +2485,7 @@ function WebviewPlayer({
     handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
     audioTrack?: number,
     audioPreference?: AudioPreference,
+    positionIntent?: ServerOptimizedPositionIntent,
   ) => Promise<void>;
   onSwitchDeviceOriginal: (
     absolutePositionSeconds: number,
@@ -2604,6 +2639,7 @@ function WebviewPlayer({
     "idle" | "loading" | "ready" | "unavailable"
   >("idle");
   const serverAudioLoadSequenceRef = useRef(0);
+  const serverAudioLoadPendingRef = useRef(false);
   const serverAudioLoaderRef = useRef(serverOptimized?.loadAudioTracks);
   serverAudioLoaderRef.current = serverOptimized?.loadAudioTracks;
   const serverAudioLoaderAvailable = serverOptimized?.loadAudioTracks != null;
@@ -2617,8 +2653,49 @@ function WebviewPlayer({
   const mediaArtist = nowPlaying?.episodeLabel ?? subtitle ?? "";
   const mediaArtworkUrl = nowPlaying?.posterUrl ?? "";
 
+  const startServerAudioInventoryLoad = useCallback((retryFailed: boolean) => {
+    const load = serverAudioLoaderRef.current;
+    if (load == null || serverAudioLoadPendingRef.current) return;
+    const request = ++serverAudioLoadSequenceRef.current;
+    serverAudioLoadPendingRef.current = true;
+    setServerAudioInventoryStatus("loading");
+    let loading: Promise<ServerAudioTrack[]>;
+    try {
+      loading = retryFailed ? load({ retryFailed: true }) : load();
+    } catch {
+      serverAudioLoadPendingRef.current = false;
+      if (serverAudioLoadSequenceRef.current === request) {
+        setServerAudioInventoryStatus("unavailable");
+      }
+      return;
+    }
+    void loading.then(
+      (tracks) => {
+        if (serverAudioLoadSequenceRef.current !== request) return;
+        serverAudioLoadPendingRef.current = false;
+        const choices = normalizedServerAudioTracks(tracks)
+          .map((track) => ({
+            index: track.index,
+            id: String(track.index),
+            label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
+            language: track.language?.trim() || null,
+            isDefault: track.default,
+          }));
+        setServerAudioTracks(choices);
+        setServerAudioInventoryStatus("ready");
+      },
+      () => {
+        if (serverAudioLoadSequenceRef.current === request) {
+          serverAudioLoadPendingRef.current = false;
+          setServerAudioInventoryStatus("unavailable");
+        }
+      },
+    );
+  }, []);
+
   useEffect(() => {
     serverAudioLoadSequenceRef.current += 1;
+    serverAudioLoadPendingRef.current = false;
     const choices = normalizedServerAudioTracks(initialServerAudioTracks).map((track) => ({
       index: track.index,
       id: String(track.index),
@@ -2642,31 +2719,15 @@ function WebviewPlayer({
   ]);
 
   useEffect(() => {
-    const load = serverAudioLoaderRef.current;
-    if (!optionsOpen || load == null || serverAudioInventoryStatus !== "idle") return;
-    const request = ++serverAudioLoadSequenceRef.current;
-    setServerAudioInventoryStatus("loading");
-    void load().then(
-      (tracks) => {
-        if (serverAudioLoadSequenceRef.current !== request) return;
-        const choices = normalizedServerAudioTracks(tracks)
-          .map((track) => ({
-            index: track.index,
-            id: String(track.index),
-            label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
-            language: track.language?.trim() || null,
-            isDefault: track.default,
-          }));
-        setServerAudioTracks(choices);
-        setServerAudioInventoryStatus("ready");
-      },
-      () => {
-        if (serverAudioLoadSequenceRef.current === request) {
-          setServerAudioInventoryStatus("unavailable");
-        }
-      },
-    );
-  }, [optionsOpen, serverAudioInventoryStatus, serverAudioLoaderAvailable, serverAudioOwner]);
+    if (!optionsOpen || !serverAudioLoaderAvailable || serverAudioInventoryStatus !== "idle") return;
+    startServerAudioInventoryLoad(false);
+  }, [
+    optionsOpen,
+    serverAudioInventoryStatus,
+    serverAudioLoaderAvailable,
+    serverAudioOwner,
+    startServerAudioInventoryLoad,
+  ]);
 
   if (serverOptimized != null && resolvedServerAudioTrack != null) {
     const selected = serverAudioTracks.find(
@@ -2991,7 +3052,9 @@ function WebviewPlayer({
       absoluteSeekRef.current(time);
     };
     const currentAbsolutePosition = () => video.currentTime + (
-      knownAbsoluteDurationRef.current == null ? 0 : timelineOffsetRef.current
+      knownAbsoluteDurationRef.current != null || optimizedTimelineIsPartial
+        ? timelineOffsetRef.current
+        : 0
     );
     const setActionHandler = (
       action: MediaSessionAction,
@@ -3192,6 +3255,7 @@ function WebviewPlayer({
   // once, when metadata first loads, without re-subscribing the effect.
   const startPositionRef = useRef(startPositionSeconds);
   startPositionRef.current = startPositionSeconds;
+  const nativeExactHlsFragmentRef = useRef(false);
   const sourceSwitchStateRef = useRef(sourceSwitchState);
   sourceSwitchStateRef.current = sourceSwitchState;
   const timelineOffsetRef = useRef(
@@ -3382,7 +3446,12 @@ function WebviewPlayer({
     const confirmExactHandoff = () => {
       if (!exactHandoffPendingRef.current) return true;
       const target = exactTarget();
-      if (!targetIsAvailable(target) || !targetWasReached(target)) return false;
+      if (
+        video.seeking ||
+        video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+        !targetIsAvailable(target) ||
+        !targetWasReached(target)
+      ) return false;
       finishExactHandoff();
       return true;
     };
@@ -3442,6 +3511,11 @@ function WebviewPlayer({
         if (confirmExactHandoff()) return;
         setPlaybackStatus("seeking");
         video.pause();
+        // Native WebKit HLS gets its exact initial position through a temporal
+        // media fragment. Let WebKit apply that fragment once current data is
+        // available instead of issuing an earlier seek that HLS startup can
+        // overwrite with the live edge.
+        if (nativeExactHlsFragmentRef.current) return;
         if (!targetIsAvailable(start)) return;
         try {
           video.currentTime = start;
@@ -3665,6 +3739,7 @@ function WebviewPlayer({
     onPausedChange(handoff?.paused ?? false);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("loadedmetadata", onLoadedMeta);
+    video.addEventListener("loadeddata", applyResume);
     video.addEventListener("durationchange", onDurationChange);
     video.addEventListener("seeked", onSeekedForResume);
     video.addEventListener("progress", onProgressForResume);
@@ -3682,6 +3757,7 @@ function WebviewPlayer({
     return () => {
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("loadedmetadata", onLoadedMeta);
+      video.removeEventListener("loadeddata", applyResume);
       video.removeEventListener("durationchange", onDurationChange);
       video.removeEventListener("seeked", onSeekedForResume);
       video.removeEventListener("progress", onProgressForResume);
@@ -3731,6 +3807,7 @@ function WebviewPlayer({
   useEffect(() => {
     const video = videoRef.current;
     if (video == null) return;
+    nativeExactHlsFragmentRef.current = false;
 
     if (!isHls) {
       setNativeHlsPlayback(false);
@@ -3748,7 +3825,11 @@ function WebviewPlayer({
       } else {
         video.removeAttribute("crossorigin");
       }
-      if (video.src !== url) video.src = url;
+      const sourceUrl = requiresExactHandoffRef.current
+        ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
+        : url;
+      nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
+      if (video.src !== sourceUrl) video.src = sourceUrl;
       return;
     }
 
@@ -3808,7 +3889,11 @@ function WebviewPlayer({
           } else {
             element.removeAttribute("crossorigin");
           }
-          if (element.src !== url) element.src = url;
+          const sourceUrl = requiresExactHandoffRef.current
+            ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
+            : url;
+          nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
+          if (element.src !== sourceUrl) element.src = sourceUrl;
           return;
         }
         onPlaybackErrorRef.current(
@@ -3822,7 +3907,18 @@ function WebviewPlayer({
       // WebContent process. 60s behind + 30s (up to 120s) ahead keeps seeks snappy
       // without the balloon.
       const manifestTimeoutMs = webviewStartupTimeout(engine, url);
+      const configuredStartPosition = startPositionRef.current;
+      // hls.js uses -1 as live-edge startup for EVENT playlists. An exact
+      // handoff instead owns its local target, including a target of zero.
+      const exactHlsStartPosition = requiresExactHandoffRef.current
+        ? Number.isFinite(configuredStartPosition)
+          ? Math.max(0, configuredStartPosition as number)
+          : 0
+        : null;
       instance = new Hls({
+        ...(exactHlsStartPosition == null
+          ? {}
+          : { startPosition: exactHlsStartPosition }),
         backBufferLength: 60,
         maxBufferLength: 30,
         maxMaxBufferLength: 120,
@@ -3979,11 +4075,11 @@ function WebviewPlayer({
     }
   }, [subs.tracks, subs.activeTrackId]);
 
-  const seek = (t: number) => {
+  const seekAbsolute = (t: number) => {
     const video = videoRef.current;
     if (video == null || !Number.isFinite(t)) return;
     const knownDuration = knownAbsoluteDurationRef.current;
-    if (knownDuration == null) {
+    if (knownDuration == null && !optimizedTimelineIsPartial) {
       const localDuration = Number.isFinite(video.duration) && video.duration > 0
         ? video.duration
         : Number.POSITIVE_INFINITY;
@@ -3992,16 +4088,45 @@ function WebviewPlayer({
       scrubberRef.current?.setCurrentTime(localTarget);
       return;
     }
-    const absoluteTarget = Math.min(Math.max(t, 0), knownDuration);
+    const absoluteTarget = knownDuration == null
+      ? Math.max(t, 0)
+      : Math.min(Math.max(t, 0), knownDuration);
     const windowStart = timelineOffsetRef.current;
+    const localTarget = absoluteTarget - windowStart;
     const windowDuration = Number.isFinite(video.duration) && video.duration > 0
       ? video.duration
-      : 0;
-    const windowEnd = windowStart + windowDuration;
-    if (absoluteTarget >= windowStart && absoluteTarget <= windowEnd) {
-      const localTarget = absoluteTarget - windowStart;
+      : null;
+    let hasSeekableRanges = false;
+    let withinSeekableRange = false;
+    if (localTarget >= 0) {
+      try {
+        hasSeekableRanges = video.seekable.length > 0;
+        for (let index = 0; index < video.seekable.length; index += 1) {
+          if (
+            localTarget >= video.seekable.start(index) &&
+            localTarget <= video.seekable.end(index)
+          ) {
+            withinSeekableRange = true;
+            break;
+          }
+        }
+      } catch {
+        // A source swap can invalidate TimeRanges between length and access.
+      }
+    }
+    if (
+      localTarget >= 0 &&
+      (
+        (!hasSeekableRanges && localTarget === 0) ||
+        (hasSeekableRanges
+          ? withinSeekableRange
+          : windowDuration != null && localTarget <= windowDuration)
+      )
+    ) {
       video.currentTime = localTarget;
-      scrubberRef.current?.setCurrentTime(absoluteTarget);
+      scrubberRef.current?.setCurrentTime(
+        knownDuration == null ? localTarget : absoluteTarget,
+      );
       return;
     }
     if (serverOptimized == null || activeServerOptimizedQuality == null) return;
@@ -4022,21 +4147,37 @@ function WebviewPlayer({
         id: selected.id,
         language: selected.language,
       }),
+      "fixed",
     );
   };
-  absoluteSeekRef.current = seek;
+
+  const seek = (t: number) => {
+    const video = videoRef.current;
+    if (video == null || !Number.isFinite(t)) return;
+    if (knownAbsoluteDurationRef.current != null) {
+      seekAbsolute(t);
+      return;
+    }
+    const localDuration = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration
+      : Number.POSITIVE_INFINITY;
+    const localTarget = Math.min(Math.max(t, 0), localDuration);
+    video.currentTime = localTarget;
+    scrubberRef.current?.setCurrentTime(localTarget);
+  };
+  absoluteSeekRef.current = seekAbsolute;
 
   const relativeSeek = (delta: number) => {
     const video = videoRef.current;
     if (video == null) return;
     const knownDuration = knownAbsoluteDurationRef.current;
-    const current = video.currentTime + (knownDuration == null ? 0 : timelineOffsetRef.current);
-    const limit = knownDuration ?? (
-      Number.isFinite(video.duration) && video.duration > 0
-        ? video.duration
-        : Number.POSITIVE_INFINITY
+    const current = video.currentTime + (
+      knownDuration != null || optimizedTimelineIsPartial
+        ? timelineOffsetRef.current
+        : 0
     );
-    seek(Math.min(limit, Math.max(0, current + delta)));
+    const target = Math.max(0, current + delta);
+    seekAbsolute(knownDuration == null ? target : Math.min(knownDuration, target));
   };
 
   const toggleOptions = () => {
@@ -4146,7 +4287,9 @@ function WebviewPlayer({
       };
       const seekBy = (delta: number) => {
         const current = video.currentTime + (
-          knownDuration == null ? 0 : timelineOffsetRef.current
+          knownDuration != null || optimizedTimelineIsPartial
+            ? timelineOffsetRef.current
+            : 0
         );
         seekTo(current + delta);
       };
@@ -4925,6 +5068,19 @@ function WebviewPlayer({
               <p className="player-options-status" role="status">
                 Loading audio tracks…
               </p>
+            ) : serverAudioInventoryStatus === "unavailable" && serverAudioLoaderAvailable ? (
+              <>
+                <p className="player-options-status" role="status">
+                  Audio track inventory is temporarily unavailable.
+                </p>
+                <button
+                  type="button"
+                  className="player-options-action"
+                  onClick={() => startServerAudioInventoryLoad(true)}
+                >
+                  Retry audio tracks
+                </button>
+              </>
             ) : audioChoices.length === 1 ? (
               <p className="player-options-status" role="status">
                 This stream reports one audio track.

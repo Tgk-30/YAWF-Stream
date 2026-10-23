@@ -510,6 +510,171 @@ describe("transcode stream probe admission", () => {
     }
   });
 
+  it("retries only a cooled-down failed probe and coalesces its replacement", async () => {
+    let now = 10_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let releaseReplacement: ((value: {
+      audio: boolean;
+      subtitle: boolean;
+      audioTracks: never[];
+    }) => void) | null = null;
+    const synchronouslyFailed = {
+      then(resolve: (value: null) => unknown) {
+        resolve(null);
+        return Promise.resolve(null);
+      },
+    } as unknown as ReturnType<NonNullable<Transcoder["probeStreams"]>>;
+    const probe = vi.fn()
+      .mockReturnValueOnce(synchronouslyFailed)
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseReplacement = resolve;
+      }));
+    const fixture = probeRegistry(probe, 1);
+    try {
+      await expect(fixture.registry.sourceInfoFor(
+        "retry",
+        "https://provider.example/video",
+      )).resolves.toEqual({ audioTracks: null, durationSeconds: null });
+      expect(probe).toHaveBeenCalledTimes(1);
+
+      now += 4_999;
+      await expect(fixture.registry.sourceInfoFor(
+        "retry",
+        "https://provider.example/video",
+        { retryFailed: true },
+      )).resolves.toEqual({ audioTracks: null, durationSeconds: null });
+      expect(probe).toHaveBeenCalledTimes(1);
+
+      now += 2;
+      await fixture.registry.sourceInfoFor("retry", "https://provider.example/video");
+      expect(probe).toHaveBeenCalledTimes(1);
+      const firstRetry = fixture.registry.sourceInfoFor(
+        "retry",
+        "https://provider.example/video",
+        { retryFailed: true },
+      );
+      const sharedRetry = fixture.registry.sourceInfoFor(
+        "retry",
+        "https://provider.example/video",
+        { retryFailed: true },
+      );
+      expect(probe).toHaveBeenCalledTimes(2);
+      releaseReplacement!({ audio: false, subtitle: false, audioTracks: [] });
+      await expect(Promise.all([firstRetry, sharedRetry])).resolves.toEqual([
+        { audioTracks: [], durationSeconds: null },
+        { audioTracks: [], durationSeconds: null },
+      ]);
+
+      now += 60_000;
+      await expect(fixture.registry.sourceInfoFor(
+        "retry",
+        "https://provider.example/video",
+        { retryFailed: true },
+      )).resolves.toEqual({ audioTracks: [], durationSeconds: null });
+      expect(probe).toHaveBeenCalledTimes(2);
+    } finally {
+      nowSpy.mockRestore();
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("caches a synchronous probe throw and releases its admission slot", async () => {
+    let now = 30_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const probe = vi.fn((upstreamUrl: string) => {
+      if (upstreamUrl.endsWith("/throw") && probe.mock.calls.length === 1) {
+        throw new Error("synchronous probe failure");
+      }
+      return Promise.resolve({ audio: false, subtitle: false, audioTracks: [] });
+    });
+    const fixture = probeRegistry(probe, 1);
+    try {
+      await expect(fixture.registry.sourceInfoFor(
+        "throw",
+        "https://provider.example/throw",
+      )).resolves.toEqual({ audioTracks: null, durationSeconds: null });
+      await expect(fixture.registry.sourceInfoFor(
+        "throw",
+        "https://provider.example/throw",
+      )).resolves.toEqual({ audioTracks: null, durationSeconds: null });
+      expect(probe).toHaveBeenCalledTimes(1);
+
+      await expect(fixture.registry.sourceInfoFor(
+        "other",
+        "https://provider.example/other",
+      )).resolves.toEqual({ audioTracks: [], durationSeconds: null });
+      expect(probe).toHaveBeenCalledTimes(2);
+
+      now += 5_001;
+      await expect(fixture.registry.sourceInfoFor(
+        "throw",
+        "https://provider.example/throw",
+        { retryFailed: true },
+      )).resolves.toEqual({ audioTracks: [], durationSeconds: null });
+      expect(probe).toHaveBeenCalledTimes(3);
+    } finally {
+      nowSpy.mockRestore();
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a retryable failed entry while the global probe budget is full", async () => {
+    let now = 20_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let releaseBlocker: ((value: {
+      audio: boolean;
+      subtitle: boolean;
+      audioTracks: never[];
+    }) => void) | null = null;
+    let failedCalls = 0;
+    const probe = vi.fn((upstreamUrl: string) => {
+      if (upstreamUrl.endsWith("/failed")) {
+        failedCalls += 1;
+        return Promise.resolve(failedCalls === 1
+          ? null
+          : { audio: false, subtitle: false, audioTracks: [] });
+      }
+      return new Promise((resolve) => {
+        releaseBlocker = resolve;
+      });
+    });
+    const fixture = probeRegistry(probe, 1);
+    try {
+      await fixture.registry.sourceInfoFor("failed", "https://provider.example/failed");
+      const blocker = fixture.registry.sourceInfoFor(
+        "blocker",
+        "https://provider.example/blocker",
+      );
+      expect(probe).toHaveBeenCalledTimes(2);
+      now += 5_001;
+
+      await expect(fixture.registry.sourceInfoFor(
+        "failed",
+        "https://provider.example/failed",
+        { retryFailed: true },
+      )).resolves.toEqual({ audioTracks: null, durationSeconds: null });
+      expect(probe).toHaveBeenCalledTimes(2);
+
+      releaseBlocker!({ audio: false, subtitle: false, audioTracks: [] });
+      await blocker;
+      await expect(fixture.registry.sourceInfoFor(
+        "failed",
+        "https://provider.example/failed",
+        { retryFailed: true },
+      )).resolves.toEqual({ audioTracks: [], durationSeconds: null });
+      expect(probe).toHaveBeenCalledTimes(3);
+    } finally {
+      nowSpy.mockRestore();
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["invalid", Number.NaN],
     ["infinite", Number.POSITIVE_INFINITY],
