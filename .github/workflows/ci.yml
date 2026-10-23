@@ -24,6 +24,36 @@ jobs:
       - run: npm test && npm run build
         working-directory: server
 
+  windows-node24-server-compatibility:
+    name: Windows Node24 server compatibility
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Test, typecheck, and build server
+        working-directory: server
+        run: |
+          npm test
+          npm run typecheck
+          npm run build
+
   rust:
     name: Rust format, lint, test, and audit
     runs-on: macos-14

@@ -114,13 +114,13 @@ describe("HLS transcode arguments", () => {
     expect(args.indexOf("-ss")).toBeLessThan(args.indexOf("-i"));
     expect(valueAfter(args, "-c:s")).toBe("webvtt");
     expect(valueAfter(args, "-hls_subtitle_path")).toBe(
-      "/tmp/yawf/%v_subtitles.m3u8",
+      join("/tmp/yawf", "%v_subtitles.m3u8"),
     );
     expect(valueAfter(args, "-var_stream_map")).toContain(
       "s:0,sgroup:subs",
     );
-    expect(args.at(-1)).toBe("/tmp/yawf/%v.m3u8");
-    expect(args).not.toContain("/tmp/yawf/subtitles.vtt");
+    expect(args.at(-1)).toBe(join("/tmp/yawf", "%v.m3u8"));
+    expect(args).not.toContain(join("/tmp/yawf", "subtitles.vtt"));
   });
 
   it.each([
@@ -142,7 +142,9 @@ describe("HLS transcode arguments", () => {
     );
     // FFmpeg 5.1 rejects the optional newer sname field before writing HLS.
     expect(map).not.toContain("sname:");
-    expect(valueAfter(args, "-hls_subtitle_path")).toBe("/tmp/yawf/%v_subtitles.m3u8");
+    expect(valueAfter(args, "-hls_subtitle_path")).toBe(
+      join("/tmp/yawf", "%v_subtitles.m3u8"),
+    );
     expect(valueAfter(args, "-avoid_negative_ts")).toBe("disabled");
   });
 
