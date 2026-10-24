@@ -444,6 +444,13 @@ export function Settings() {
   const serverSession = useServerSession();
   const setServerSession = useSetServerSession();
   const playerMounted = usePlayerMounted();
+  const serverMode = isServerMode();
+  // Server Mode keeps its selected identity in the authenticated session, not
+  // the Local Mode profile registry. Prefix the mode so equal local/server ids
+  // cannot make one draft masquerade as the other during a mode change.
+  const settingsProfileId = serverMode
+    ? `server:${serverSession?.profileId ?? "none"}`
+    : `local:${activeProfile?.id ?? "none"}`;
   // Land where the user's next step is: an unconfigured profile (no debrid
   // token yet) opens on Install & setup - the critical path - instead of the
   // Appearance dial-park. Configured profiles keep the familiar default.
@@ -476,16 +483,19 @@ export function Settings() {
   // Switching profiles swaps the settings under us. The draft was seeded once at
   // mount, so without this it would still hold the PREVIOUS profile's values and
   // Save would write them into the profile just switched to. Keyed on the
-  // profile id (not `settings`) so ordinary edits are never clobbered.
-  const draftProfileId = useRef<string | null>(activeProfile?.id ?? null);
-  useEffect(() => {
-    const id = activeProfile?.id ?? null;
-    if (draftProfileId.current === id) return;
-    draftProfileId.current = id;
+  // mode-qualified profile id (not `settings`) so ordinary settings rerenders
+  // never clobber live edits. Layout timing keeps the prior profile's draft out
+  // of the first paint after a Server Mode session switch.
+  const draftProfileId = useRef(settingsProfileId);
+  const draftProfileGeneration = useRef(0);
+  useLayoutEffect(() => {
+    if (draftProfileId.current === settingsProfileId) return;
+    draftProfileId.current = settingsProfileId;
+    draftProfileGeneration.current += 1;
     setDraft(settings);
     setSaved(false);
     setSaveError(null);
-  }, [activeProfile?.id, settings]);
+  }, [settingsProfileId, settings]);
 
   useEffect(() => {
     let mounted = true;
@@ -503,12 +513,22 @@ export function Settings() {
   }
 
   async function save() {
+    const saveGeneration = draftProfileGeneration.current;
     setSaveError(null);
-    const result = await updateSettings(draft);
-    if (result.ok) {
-      setSaved(true);
-      setProviderStatusRevision((revision) => revision + 1);
-      return;
+    try {
+      const result = await updateSettings(draft);
+      // A profile switch can complete while its prior save is in flight. Its
+      // result belongs to the previous draft and must not change the new
+      // profile's status or surface its write failure. Generation avoids an
+      // A -> B -> A switch accepting the first A's late result.
+      if (draftProfileGeneration.current !== saveGeneration) return;
+      if (result.ok) {
+        setSaved(true);
+        setProviderStatusRevision((revision) => revision + 1);
+        return;
+      }
+    } catch {
+      if (draftProfileGeneration.current !== saveGeneration) return;
     }
     // Don't claim a save that didn't happen (e.g. a keychain write failing
     // closed on desktop). The in-memory value still applies for this session.
@@ -529,7 +549,6 @@ export function Settings() {
     setSaved(true);
   }, [settings, updateSettings]);
 
-  const serverMode = isServerMode();
   const tabs = visibleTabs({ serverMode, simpleMode });
 
   // Redirect off a now-hidden tab (e.g. after flipping to Simple while on

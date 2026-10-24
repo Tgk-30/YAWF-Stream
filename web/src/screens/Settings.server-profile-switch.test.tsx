@@ -4,7 +4,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { defaultSettings } from "../data/settings";
+import { defaultSettings, type AppSettings } from "../data/settings";
 import {
   ServerSessionProvider,
   type ServerSession,
@@ -12,8 +12,13 @@ import {
 } from "../lib/ServerSessionContext";
 import { Settings } from "./Settings";
 
+let mockServerMode = true;
+let mockSettings: AppSettings = defaultSettings();
+let mockActiveProfile: { id: string } | null = null;
+const updateSettings = vi.fn();
+
 vi.mock("../lib/serverMode", () => ({
-  isServerMode: () => true,
+  isServerMode: () => mockServerMode,
   configuredServerURL: () => "https://srv.example.com",
   configuredServerURLSource: () => "saved",
   saveServerURL: vi.fn(),
@@ -51,9 +56,12 @@ vi.mock("../lib/serverApi", () => ({
 
 vi.mock("../store/AppStore", () => ({
   useAppStore: () => ({
-    settings: defaultSettings(),
-    updateSettings: vi.fn(),
+    settings: mockSettings,
+    updateSettings,
     simpleMode: false,
+    activeProfile: mockActiveProfile,
+    profiles: [],
+    multiUserEnabled: false,
   }),
   useSimpleMode: () => false,
 }));
@@ -74,14 +82,17 @@ type Credential = {
 type Deferred<T> = {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
 };
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
     resolve = next;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function jsonResponse(body: unknown): Response {
@@ -157,19 +168,30 @@ const FIRST_PROFILE: ServerSession = {
   simpleMode: false,
 };
 
-function ProfileSwitch({ next }: { next: ServerSession }) {
+function ProfileSwitch({
+  next,
+  previous = FIRST_PROFILE,
+}: {
+  next: ServerSession;
+  previous?: ServerSession;
+}) {
   const setSession = useSetServerSession();
   return (
-    <button type="button" onClick={() => setSession(next)}>
-      Switch test profile
-    </button>
+    <>
+      <button type="button" onClick={() => setSession(next)}>
+        Switch test profile
+      </button>
+      <button type="button" onClick={() => setSession(previous)}>
+        Return test profile
+      </button>
+    </>
   );
 }
 
-function renderSettings(next: ServerSession) {
+function renderSettings(next: ServerSession, initial = FIRST_PROFILE) {
   const wrapper = ({ children }: { children: ReactNode }) => (
-    <ServerSessionProvider initial={FIRST_PROFILE}>
-      <ProfileSwitch next={next} />
+    <ServerSessionProvider initial={initial}>
+      <ProfileSwitch next={next} previous={initial} />
       {children}
     </ServerSessionProvider>
   );
@@ -182,9 +204,188 @@ async function openServerSettings() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockServerMode = true;
+  mockSettings = defaultSettings();
+  mockActiveProfile = null;
+  updateSettings.mockResolvedValue({ ok: true });
 });
 
 describe("Server settings profile refresh", () => {
+  it("uses the server profile identity after child settings load before the session changes", async () => {
+    const ownerSettings = {
+      ...defaultSettings(),
+      autoAdvanceEpisodes: false,
+      defaultPlaybackSpeed: 1.25,
+    };
+    const childSettings = {
+      ...defaultSettings(),
+      autoAdvanceEpisodes: true,
+      defaultPlaybackSpeed: 1.5,
+    };
+    mockSettings = ownerSettings;
+    const view = renderSettings({
+      ...FIRST_PROFILE,
+      profileId: "p2",
+      username: "child",
+      displayName: "Child",
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Playback" }));
+    const dataSaver = screen.getByRole("checkbox", { name: "Data Saver" });
+    const autoAdvance = screen.getByRole("checkbox", { name: "Auto-play next episode" });
+    await userEvent.click(dataSaver);
+    expect(dataSaver).toBeChecked();
+    expect(autoAdvance).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+
+    // ProfilePicker reloads the target settings while the prior session is
+    // still current. This rerender must not discard the owner's live draft.
+    mockSettings = childSettings;
+    view.rerender(<Settings />);
+    expect(dataSaver).toBeChecked();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+
+    // The session changes only after the target settings have replaced the
+    // AppStore value. Server Mode has no local activeProfile to key on.
+    await userEvent.click(screen.getByRole("button", { name: "Switch test profile" }));
+
+    await waitFor(() => {
+      expect(dataSaver).not.toBeChecked();
+      expect(autoAdvance).toBeChecked();
+      expect(screen.getByRole("button", { name: "Up to date" })).toBeDisabled();
+    });
+
+    await userEvent.click(dataSaver);
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    expect(updateSettings).toHaveBeenLastCalledWith({ ...childSettings, dataSaver: true });
+  });
+
+  it("ignores a failed save from the profile that was switched away from", async () => {
+    const ownerSettings = { ...defaultSettings(), autoAdvanceEpisodes: false };
+    const childSettings = { ...defaultSettings(), autoAdvanceEpisodes: true };
+    const pendingSave = deferred<{ ok: boolean }>();
+    mockSettings = ownerSettings;
+    updateSettings.mockReturnValueOnce(pendingSave.promise);
+    const view = renderSettings({
+      ...FIRST_PROFILE,
+      profileId: "p2",
+      username: "child",
+      displayName: "Child",
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Playback" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Data Saver" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+
+    mockSettings = childSettings;
+    view.rerender(<Settings />);
+    await userEvent.click(screen.getByRole("button", { name: "Switch test profile" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Up to date" })).toBeDisabled();
+    });
+
+    await act(async () => {
+      pendingSave.resolve({ ok: false });
+    });
+    expect(screen.getByRole("button", { name: "Up to date" })).toBeDisabled();
+    expect(screen.queryByText(/Could not save to this device/)).not.toBeInTheDocument();
+  });
+
+  it("ignores a rejected save from the profile that was switched away from", async () => {
+    const ownerSettings = { ...defaultSettings(), autoAdvanceEpisodes: false };
+    const childSettings = { ...defaultSettings(), autoAdvanceEpisodes: true };
+    const pendingSave = deferred<{ ok: boolean }>();
+    mockSettings = ownerSettings;
+    updateSettings.mockReturnValueOnce(pendingSave.promise);
+    const view = renderSettings({
+      ...FIRST_PROFILE,
+      profileId: "p2",
+      username: "child",
+      displayName: "Child",
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Playback" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Data Saver" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+
+    mockSettings = childSettings;
+    view.rerender(<Settings />);
+    await userEvent.click(screen.getByRole("button", { name: "Switch test profile" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Up to date" })).toBeDisabled();
+    });
+
+    await act(async () => {
+      pendingSave.reject(new Error("owner save rejected"));
+    });
+    expect(screen.getByRole("button", { name: "Up to date" })).toBeDisabled();
+    expect(screen.queryByText(/Could not save to this device/)).not.toBeInTheDocument();
+  });
+
+  it("does not accept an old save after switching away and back to the same profile", async () => {
+    const ownerSettings = { ...defaultSettings(), autoAdvanceEpisodes: false };
+    const childSettings = { ...defaultSettings(), autoAdvanceEpisodes: true };
+    const pendingSave = deferred<{ ok: boolean }>();
+    mockSettings = ownerSettings;
+    updateSettings.mockReturnValueOnce(pendingSave.promise);
+    const view = renderSettings({
+      ...FIRST_PROFILE,
+      profileId: "p2",
+      username: "child",
+      displayName: "Child",
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Playback" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Data Saver" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+
+    mockSettings = childSettings;
+    view.rerender(<Settings />);
+    await userEvent.click(screen.getByRole("button", { name: "Switch test profile" }));
+    mockSettings = ownerSettings;
+    view.rerender(<Settings />);
+    await userEvent.click(screen.getByRole("button", { name: "Return test profile" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Up to date" })).toBeDisabled();
+    });
+
+    await act(async () => {
+      pendingSave.resolve({ ok: true });
+    });
+    expect(screen.getByRole("button", { name: "Up to date" })).toBeDisabled();
+  });
+
+  it("does not conflate identical local and server ids when the mode changes", async () => {
+    const localSettings = { ...defaultSettings(), interfaceLanguage: "en" };
+    const serverSettings = { ...defaultSettings(), interfaceLanguage: "system" };
+    const sharedSession = { ...FIRST_PROFILE, profileId: "shared" };
+    mockServerMode = false;
+    mockActiveProfile = { id: "shared" };
+    mockSettings = localSettings;
+    const view = renderSettings(sharedSession, sharedSession);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Language & region" }));
+    const interfaceLanguage = screen.getByRole("combobox", { name: "Interface language" });
+    await userEvent.selectOptions(interfaceLanguage, "fr");
+    expect(interfaceLanguage).toHaveValue("fr");
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+
+    mockServerMode = true;
+    mockSettings = serverSettings;
+    view.rerender(<Settings />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Interface language" })).toHaveValue("system");
+      expect(screen.getByRole("button", { name: "Up to date" })).toBeDisabled();
+    });
+  });
+
   it("clears the prior profile credential status immediately on a same-screen profile switch", async () => {
     const secondCredentials = deferred<Response>();
     installFetch([
