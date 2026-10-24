@@ -1,6 +1,7 @@
 package com.yawf.runtimeinstrumentation;
 
 import android.app.UiAutomation;
+import android.os.Build;
 import android.os.SystemClock;
 import android.util.SparseArray;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -17,6 +18,11 @@ import java.util.regex.Pattern;
 final class RuntimeExternalLegalSnapshot {
     private static final int MAX_NODES = 4_096;
     private static final long MAX_TRAVERSAL_MS = 1_000L;
+    private static final int ROOT_PREFETCH_FLAGS =
+            AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST
+                    | AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE;
+    private static final int CHILD_PREFETCH_FLAGS =
+            ROOT_PREFETCH_FLAGS | AccessibilityNodeInfo.FLAG_PREFETCH_SIBLINGS;
 
     private RuntimeExternalLegalSnapshot() {}
 
@@ -67,7 +73,7 @@ final class RuntimeExternalLegalSnapshot {
                 }
                 for (int childIndex = 0; childIndex < childCount; childIndex++) {
                     enforceTimeBound(startedAtMs);
-                    AccessibilityNodeInfo child = node.getChild(childIndex);
+                    AccessibilityNodeInfo child = freshChild(node, childIndex);
                     enforceTimeBound(startedAtMs);
                     if (child == null) {
                         throw new AssertionError("The fresh legal snapshot contained a missing child");
@@ -97,7 +103,6 @@ final class RuntimeExternalLegalSnapshot {
         if (activeRoot == null) {
             throw new AssertionError("The fresh legal snapshot active root was missing");
         }
-        roots.add(activeRoot);
 
         SparseArray<List<AccessibilityWindowInfo>> windowsByDisplay =
                 automation.getWindowsOnAllDisplays();
@@ -115,7 +120,7 @@ final class RuntimeExternalLegalSnapshot {
                 if (window == null) {
                     throw new AssertionError("The fresh legal snapshot contained a missing window");
                 }
-                AccessibilityNodeInfo root = window.getRoot();
+                AccessibilityNodeInfo root = freshWindowRoot(window);
                 enforceTimeBound(startedAtMs);
                 if (root == null) {
                     throw new AssertionError("A fresh legal snapshot window root was missing");
@@ -124,10 +129,27 @@ final class RuntimeExternalLegalSnapshot {
                 enforceSizeBound(roots.size());
             }
         }
+        roots.add(activeRoot);
+        enforceSizeBound(roots.size());
         if (roots.isEmpty()) {
             throw new AssertionError("The fresh legal snapshot had no roots");
         }
         return roots;
+    }
+
+    private static AccessibilityNodeInfo freshWindowRoot(AccessibilityWindowInfo window) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return window.getRoot(ROOT_PREFETCH_FLAGS);
+        }
+        return window.getRoot();
+    }
+
+    private static AccessibilityNodeInfo freshChild(
+            AccessibilityNodeInfo node, int childIndex) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return node.getChild(childIndex, CHILD_PREFETCH_FLAGS);
+        }
+        return node.getChild(childIndex);
     }
 
     private static boolean matches(Pattern bindingTerms, CharSequence value) {

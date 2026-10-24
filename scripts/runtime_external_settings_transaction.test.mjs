@@ -222,7 +222,7 @@ function validateLegalShape(source) {
       || !body.includes('node.getContentDescription()')) {
     failures.push('one-pass guard lost visibility, text, or description checks');
   }
-  if (!body.includes('node.getChild(childIndex)')
+  if (!body.includes('freshChild(node, childIndex)')
       || !body.includes('visited.add(child)')
       || !body.includes('enforceSizeBound(visited.size())')
       || !body.includes('enforceTimeBound(startedAtMs)')) {
@@ -230,8 +230,19 @@ function validateLegalShape(source) {
   }
   if (!roots.includes('automation.getRootInActiveWindow()')
       || !roots.includes('automation.getWindowsOnAllDisplays()')
-      || !roots.includes('window.getRoot()')) {
+      || !source.includes('window.getRoot(ROOT_PREFETCH_FLAGS)')
+      || !source.includes('node.getChild(childIndex, CHILD_PREFETCH_FLAGS)')) {
     failures.push('fresh guard does not cover the UiAutomator root/window scope');
+  }
+  if (roots.indexOf('roots.add(root)') < 0
+      || roots.indexOf('roots.add(root)') >= roots.indexOf('roots.add(activeRoot)')) {
+    failures.push('prefetched window roots do not win active-root deduplication');
+  }
+  if (!source.includes('Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU')
+      || !source.includes('FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST')
+      || !source.includes('FLAG_PREFETCH_UNINTERRUPTIBLE')
+      || !source.includes('FLAG_PREFETCH_SIBLINGS')) {
+    failures.push('fresh guard lost the API 33 prefetch boundary or exact flags');
   }
   if (/androidx\.test\.uiautomator\.(?:By|UiDevice)|findObject|findObjects|runWatchers/.test(source)) {
     failures.push('fresh guard reintroduced ByMatcher or watcher traversal');
@@ -245,7 +256,10 @@ function validateLegalShape(source) {
 const buildStub = `package android.os;
 public final class Build {
     public static final class VERSION { public static int SDK_INT = 36; }
-    public static final class VERSION_CODES { public static final int UPSIDE_DOWN_CAKE = 34; }
+    public static final class VERSION_CODES {
+        public static final int TIRAMISU = 33;
+        public static final int UPSIDE_DOWN_CAKE = 34;
+    }
 }
 `;
 
@@ -294,22 +308,31 @@ public final class SparseArray<T> {
 const accessibilityNodeStub = `package android.view.accessibility;
 import android.os.SystemClock;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 public class AccessibilityNodeInfo {
+    public static final int FLAG_PREFETCH_SIBLINGS = 2;
+    public static final int FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST = 16;
+    public static final int FLAG_PREFETCH_UNINTERRUPTIBLE = 32;
     public final String id;
     public boolean visible = true;
     public CharSequence text;
     public CharSequence description;
     public long accessCostMs;
     public String failureOperation;
+    public boolean prefetched;
+    public int legacyChildCalls;
+    public int flaggedChildCalls;
+    public int lastChildFlags = -1;
     public final List<AccessibilityNodeInfo> children = new ArrayList<>();
     private final Map<Integer, Integer> childReads = new HashMap<>();
     public AccessibilityNodeInfo(String id) { this.id = id; }
     private void before(String operation) {
-        SystemClock.advance(accessCostMs);
+        if (!prefetched) SystemClock.advance(accessCostMs);
         if (operation.equals(failureOperation)) {
             throw new IllegalStateException("RAW_UI_SENTINEL");
         }
@@ -320,8 +343,31 @@ public class AccessibilityNodeInfo {
     public int getChildCount() { before("childCount"); return children.size(); }
     public AccessibilityNodeInfo getChild(int index) {
         before("child");
+        legacyChildCalls++;
         childReads.put(index, childReads.getOrDefault(index, 0) + 1);
         return children.get(index);
+    }
+    public AccessibilityNodeInfo getChild(int index, int prefetchingStrategy) {
+        before("child");
+        flaggedChildCalls++;
+        lastChildFlags = prefetchingStrategy;
+        childReads.put(index, childReads.getOrDefault(index, 0) + 1);
+        AccessibilityNodeInfo child = children.get(index);
+        if (child != null) child.prefetchTree();
+        return child;
+    }
+    public void prefetchTree() {
+        ArrayDeque<AccessibilityNodeInfo> pending = new ArrayDeque<>();
+        HashSet<AccessibilityNodeInfo> seen = new HashSet<>();
+        pending.add(this);
+        while (!pending.isEmpty()) {
+            AccessibilityNodeInfo node = pending.removeFirst();
+            if (!seen.add(node)) continue;
+            node.prefetched = true;
+            for (AccessibilityNodeInfo child : node.children) {
+                if (child != null) pending.addLast(child);
+            }
+        }
     }
     public int childReads(int index) { return childReads.getOrDefault(index, 0); }
     @Override public boolean equals(Object other) {
@@ -338,10 +384,22 @@ public class AccessibilityWindowInfo {
     public AccessibilityNodeInfo root;
     public long accessCostMs;
     public boolean fail;
+    public int legacyRootCalls;
+    public int flaggedRootCalls;
+    public int lastRootFlags = -1;
     public AccessibilityWindowInfo(AccessibilityNodeInfo root) { this.root = root; }
     public AccessibilityNodeInfo getRoot() {
         SystemClock.advance(accessCostMs);
+        legacyRootCalls++;
         if (fail) throw new IllegalStateException("RAW_UI_SENTINEL");
+        return root;
+    }
+    public AccessibilityNodeInfo getRoot(int prefetchingStrategy) {
+        SystemClock.advance(accessCostMs);
+        flaggedRootCalls++;
+        lastRootFlags = prefetchingStrategy;
+        if (fail) throw new IllegalStateException("RAW_UI_SENTINEL");
+        if (root != null) root.prefetchTree();
         return root;
     }
 }
@@ -785,6 +843,7 @@ function executeTransaction(source) {
 
 function androidAccessibilityStubs(root) {
   return [
+    writeSource(root, 'android/os/Build.java', buildStub),
     writeSource(root, 'android/os/SystemClock.java', clockStub),
     writeSource(root, 'android/util/SparseArray.java', sparseArrayStub),
     writeSource(root, 'android/view/accessibility/AccessibilityNodeInfo.java', accessibilityNodeStub),
@@ -798,6 +857,7 @@ function legalHarnessSource(patternLiteral) {
   return `package com.yawf.runtimeinstrumentation;
 
 import android.app.UiAutomation;
+import android.os.Build;
 import android.os.SystemClock;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
@@ -841,7 +901,12 @@ public final class RuntimeExternalLegalSnapshotHarness {
         return automation;
     }
 
-    private static void reset() { SystemClock.reset(0L); }
+    private static void reset() { reset(36); }
+
+    private static void reset(int api) {
+        Build.VERSION.SDK_INT = api;
+        SystemClock.reset(0L);
+    }
 
     private static void originalPatternCoversTextDescriptionAndVisibility() {
         String[] phrases = {
@@ -1009,11 +1074,112 @@ public final class RuntimeExternalLegalSnapshotHarness {
 
         reset();
         AccessibilityNodeInfo slow = node("slow");
-        slow.accessCostMs = 260L;
+        UiAutomation slowAutomation = automation(slow, slow);
+        slowAutomation.accessCostMs = 1_001L;
         expectFailure(AssertionError.class,
                 () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
-                        automation(slow, slow), BINDING_TERMS),
+                        slowAutomation, BINDING_TERMS),
                 "time bound");
+    }
+
+    private static void api36UsesExactPrefetchFlagsAcrossWindowsAndChildren() {
+        reset(36);
+        AccessibilityNodeInfo active = node("active");
+        AccessibilityNodeInfo firstRoot = node("first-root");
+        AccessibilityNodeInfo firstChild = node("first-child");
+        AccessibilityNodeInfo secondRoot = node("second-root");
+        AccessibilityNodeInfo secondChild = node("second-child");
+        firstRoot.children.add(firstChild);
+        secondRoot.children.add(secondChild);
+        UiAutomation automation = new UiAutomation();
+        automation.activeRoot = active;
+        AccessibilityWindowInfo firstWindow = new AccessibilityWindowInfo(firstRoot);
+        AccessibilityWindowInfo secondWindow = new AccessibilityWindowInfo(secondRoot);
+        List<AccessibilityWindowInfo> displayZero = new ArrayList<>();
+        displayZero.add(firstWindow);
+        List<AccessibilityWindowInfo> displayOne = new ArrayList<>();
+        displayOne.add(secondWindow);
+        automation.windows.put(0, displayZero);
+        automation.windows.put(1, displayOne);
+        RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(automation, BINDING_TERMS);
+        check(firstWindow.flaggedRootCalls == 1 && secondWindow.flaggedRootCalls == 1,
+                "API 36 did not prefetch every window root");
+        check(firstWindow.legacyRootCalls == 0 && secondWindow.legacyRootCalls == 0,
+                "API 36 used the legacy window root overload");
+        check(firstWindow.lastRootFlags == (16 | 32)
+                        && secondWindow.lastRootFlags == (16 | 32),
+                "API 36 window root prefetch flags changed");
+        check(firstRoot.flaggedChildCalls == 1 && secondRoot.flaggedChildCalls == 1,
+                "API 36 did not use the flagged child overload");
+        check(firstRoot.lastChildFlags == (2 | 16 | 32)
+                        && secondRoot.lastChildFlags == (2 | 16 | 32),
+                "API 36 child prefetch flags changed");
+
+        reset(36);
+        AccessibilityNodeInfo termsRoot = node("terms-root");
+        AccessibilityNodeInfo termsChild = node("terms-child");
+        termsChild.text = "binding terms";
+        termsRoot.children.add(termsChild);
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation(termsRoot, termsRoot), BINDING_TERMS),
+                "prefetched binding terms");
+    }
+
+    private static void api32UsesLegacyRootAndChildFallback() {
+        reset(32);
+        AccessibilityNodeInfo root = node("legacy-root");
+        AccessibilityNodeInfo child = node("legacy-child");
+        root.children.add(child);
+        AccessibilityWindowInfo window = new AccessibilityWindowInfo(root);
+        UiAutomation automation = new UiAutomation();
+        automation.activeRoot = root;
+        List<AccessibilityWindowInfo> windows = new ArrayList<>();
+        windows.add(window);
+        automation.windows.put(0, windows);
+        RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(automation, BINDING_TERMS);
+        check(window.legacyRootCalls == 1 && window.flaggedRootCalls == 0,
+                "API 32 did not use the legacy window root overload");
+        check(root.legacyChildCalls == 1 && root.flaggedChildCalls == 0,
+                "API 32 did not use the legacy child overload");
+    }
+
+    private static void prefetchedWindowRootWinsDeduplication() {
+        reset(36);
+        AccessibilityNodeInfo active = node("equal-root");
+        active.failureOperation = "text";
+        AccessibilityNodeInfo prefetched = node("equal-root");
+        UiAutomation automation = automation(active, prefetched);
+        RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(automation, BINDING_TERMS);
+        check(!active.prefetched && prefetched.prefetched,
+                "equal active root replaced the prefetched window root");
+    }
+
+    private static AccessibilityNodeInfo binderCostTree() {
+        AccessibilityNodeInfo root = node("binder-root");
+        root.accessCostMs = 3L;
+        for (int index = 0; index < 91; index++) {
+            AccessibilityNodeInfo child = node("binder-child-" + index);
+            child.accessCostMs = 3L;
+            root.children.add(child);
+        }
+        return root;
+    }
+
+    private static void binderCostTreeFitsOnlyWithApi33Prefetch() {
+        reset(36);
+        AccessibilityNodeInfo prefetched = binderCostTree();
+        RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                automation(prefetched, prefetched), BINDING_TERMS);
+        check(SystemClock.uptimeMillis() <= 1_000L,
+                "prefetched 92-node tree exceeded the fixed deadline");
+
+        reset(32);
+        AccessibilityNodeInfo legacy = binderCostTree();
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation(legacy, legacy), BINDING_TERMS),
+                "legacy 92-node binder-cost tree");
     }
 
     private static void everyAccessibleChildIsReadOnceWithoutLegacyMatcher() {
@@ -1041,6 +1207,10 @@ public final class RuntimeExternalLegalSnapshotHarness {
         missingRootsAndUnexpectedErrorsFailClosed();
         graphSizeAndTimeBoundsFailClosed();
         everyAccessibleChildIsReadOnceWithoutLegacyMatcher();
+        api36UsesExactPrefetchFlagsAcrossWindowsAndChildren();
+        api32UsesLegacyRootAndChildFallback();
+        prefetchedWindowRootWinsDeduplication();
+        binderCostTreeFitsOnlyWithApi33Prefetch();
         System.out.println("LEGAL_OK checks=" + checks);
     }
 
@@ -1408,8 +1578,8 @@ final class RuntimeExternalPlayerFlowTest {
 
         RuntimeExternalPlayerFlowTest slow = armedFlow(7_204L);
         AccessibilityNodeInfo slowRoot = new AccessibilityNodeInfo("adapter-slow");
-        slowRoot.accessCostMs = 260L;
         slow.installLegalRoot(slowRoot);
+        slow.instrumentation.automation.accessCostMs = 1_001L;
         assertGuardFailureBeforeSelection(slow, "snapshot time bound");
     }
 
@@ -1726,6 +1896,30 @@ test('executable actual callsite rejects the predecessor split matcher and click
 });
 
 for (const [name, mutate] of [
+  [
+    'API 33 window-root prefetch removal',
+    source => replaceUnique(
+      source,
+      'return window.getRoot(ROOT_PREFETCH_FLAGS);',
+      'return window.getRoot();',
+    ),
+  ],
+  [
+    'API 33 prefetch guard removal',
+    source => {
+      const guarded = 'Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU';
+      assert.equal(source.split(guarded).length - 1, 2);
+      return source.replaceAll(guarded, 'true');
+    },
+  ],
+  [
+    'child sibling-prefetch flag removal',
+    source => replaceUnique(
+      source,
+      'ROOT_PREFETCH_FLAGS | AccessibilityNodeInfo.FLAG_PREFETCH_SIBLINGS',
+      'ROOT_PREFETCH_FLAGS',
+    ),
+  ],
   [
     'visible text omission',
     source => replaceUnique(

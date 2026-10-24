@@ -238,6 +238,12 @@ function playbackSettingsObservation(d, transactionSource, legalSource) {
   ]) assert.match(transactionGuard, new RegExp(`foreground\\.equals\\("${packageName.replaceAll('.', '\\.')}"\\)`));
   assert.match(legalSource, /automation\.getRootInActiveWindow\(\)/);
   assert.match(legalSource, /automation\.getWindowsOnAllDisplays\(\)/);
+  assert.match(legalSource, /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.TIRAMISU/);
+  assert.match(legalSource, /AccessibilityNodeInfo\.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST/);
+  assert.match(legalSource, /AccessibilityNodeInfo\.FLAG_PREFETCH_UNINTERRUPTIBLE/);
+  assert.match(legalSource, /AccessibilityNodeInfo\.FLAG_PREFETCH_SIBLINGS/);
+  assert.match(legalSource, /window\.getRoot\(ROOT_PREFETCH_FLAGS\)/);
+  assert.match(legalSource, /node\.getChild\(childIndex, CHILD_PREFETCH_FLAGS\)/);
   assert.match(legalSource, /node\.isVisibleToUser\(\)/);
   assert.match(legalSource, /node\.getText\(\)/);
   assert.match(legalSource, /node\.getContentDescription\(\)/);
@@ -439,6 +445,12 @@ for (const [name, original, mutate, contract] of [
   ['ignored accessibility cache result', settingsTransaction, s => s.replace(
     'if (!cacheCleared)',
     'if (false)'), h => driverContract(driver, h)],
+  ['legal window-root prefetch removed', externalLegalSnapshot, s => s.replace(
+    'window.getRoot(ROOT_PREFETCH_FLAGS)',
+    'window.getRoot()'), h => driverContract(driver, settingsTransaction, h)],
+  ['legal API guard removed', externalLegalSnapshot, s => s.replaceAll(
+    'Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU',
+    'true'), h => driverContract(driver, settingsTransaction, h)],
   ['settings cache refresh ordering', settingsTransaction, s => s.replace(
     '                long cacheStartedAtMs = SystemClock.uptimeMillis();',
     '                environment.assertNoOutOfScopeApproval();\n                long cacheStartedAtMs = SystemClock.uptimeMillis();'), h => driverContract(driver, h)],
