@@ -21,7 +21,6 @@
   contain: layout;
   transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.media-card:hover,
 .media-card:focus-visible {
   z-index: 6;
   outline: none;
@@ -29,14 +28,16 @@
   will-change: transform;
   transform: translateY(-14px) scale(1.08);
 }
-.media-card:active { transform: scale(0.98); }
-/* A real, offset keyboard-focus ring on the poster (the grid is the most-
-   navigated surface; a 1px hairline isn't enough for remote/keyboard users). */
-.media-card:focus-visible .media-card-poster {
-  outline: 2px solid var(--focus-ring-color);
-  outline-offset: 3px;
+@media (hover: hover) and (pointer: fine) {
+  .media-card:hover {
+    z-index: 6;
+    outline: none;
+    /* Promote to a layer only while interacting (not for every idle poster). */
+    will-change: transform;
+    transform: translateY(-14px) scale(1.08);
+  }
 }
-
+.media-card:active { transform: scale(0.98); }
 .media-card-poster {
   position: relative;
   width: var(--poster-w);
@@ -52,12 +53,23 @@
   transition: box-shadow 0.35s cubic-bezier(0.16, 1, 0.3, 1),
     border-color 0.35s;
 }
-.media-card:hover .media-card-poster,
+/* A real, offset keyboard-focus ring on the poster (the grid is the most-
+   navigated surface; a 1px hairline isn't enough for remote/keyboard users). */
 .media-card:focus-visible .media-card-poster {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 3px;
   border-color: rgba(var(--accent-rgb), 0.55);
   box-shadow: 0 24px 54px -12px rgba(0, 0, 0, 0.66),
     0 0 0 1px rgba(var(--accent-rgb), 0.45),
     0 10px 40px rgba(var(--accent-rgb), 0.32);
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card:hover .media-card-poster {
+    border-color: rgba(var(--accent-rgb), 0.55);
+    box-shadow: 0 24px 54px -12px rgba(0, 0, 0, 0.66),
+      0 0 0 1px rgba(var(--accent-rgb), 0.45),
+      0 10px 40px rgba(var(--accent-rgb), 0.32);
+  }
 }
 
 /* ── "Top 10" ranked treatment ────────────────────────────────────────────
@@ -93,9 +105,13 @@
   user-select: none;
   transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.media-card:hover .media-card-rank,
 .media-card:focus-visible .media-card-rank {
   transform: scale(1.08);
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card:hover .media-card-rank {
+    transform: scale(1.08);
+  }
 }
 
 .media-card-poster img {
@@ -170,10 +186,15 @@
   opacity: 0;
   transition: opacity 0.25s ease-out;
 }
-.media-card:hover .media-card-reveal,
 .media-card:focus-visible .media-card-reveal {
   pointer-events: auto;
   opacity: 1;
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card:hover .media-card-reveal {
+    pointer-events: auto;
+    opacity: 1;
+  }
 }
 .media-card-reveal-inner {
   width: 100%;
@@ -186,10 +207,15 @@
   transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1),
     transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.media-card:hover .media-card-reveal-inner,
 .media-card:focus-visible .media-card-reveal-inner {
   opacity: 1;
   transform: translateY(0);
+}
+@media (hover: hover) and (pointer: fine) {
+  .media-card:hover .media-card-reveal-inner {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .media-card-reveal-title {
   font-size: 0.84375rem;
@@ -237,21 +263,23 @@
   background: #fff;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }
-.media-card-play:hover {
-  transform: scale(1.08);
-  background: rgba(var(--accent-rgb), 1);
-  color: #fff;
-  box-shadow: 0 6px 20px rgba(var(--accent-rgb), 0.55);
-}
 .media-card-more {
   color: #fff;
   background: rgba(255, 255, 255, 0.16);
   border: 1px solid rgba(255, 255, 255, 0.28);
   backdrop-filter: blur(8px);
 }
-.media-card-more:hover {
-  transform: scale(1.08);
-  background: rgba(255, 255, 255, 0.26);
+@media (hover: hover) and (pointer: fine) {
+  .media-card-play:hover {
+    transform: scale(1.08);
+    background: rgba(var(--accent-rgb), 1);
+    color: #fff;
+    box-shadow: 0 6px 20px rgba(var(--accent-rgb), 0.55);
+  }
+  .media-card-more:hover {
+    transform: scale(1.08);
+    background: rgba(255, 255, 255, 0.26);
+  }
 }
 
 /* "Ready to play" badge - a cached resolution exists (auto-resolve). */
@@ -359,8 +387,10 @@
   color: var(--text-primary);
   transition: color 0.2s;
 }
-.media-card:hover .media-card-title {
-  color: var(--text-primary);
+@media (hover: hover) and (pointer: fine) {
+  .media-card:hover .media-card-title {
+    color: var(--text-primary);
+  }
 }
 .media-card-meta {
   display: flex;
