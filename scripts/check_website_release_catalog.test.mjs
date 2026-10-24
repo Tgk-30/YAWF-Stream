@@ -31,8 +31,53 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.42', tag: 'v2.3.42' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.22', tag: 'v2.3.42' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.50', tag: 'v2.3.50' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.46', tag: 'v2.3.46' };",
+  },
+  {
+    name: "server release tag independently of version",
+    from: "tag: 'v2.3.50'",
+    to: "tag: 'v2.3.46'",
+  },
+  {
+    name: "server Debian filename",
+    from: "debridstreamer-server_${SERVER_RELEASE.version}_all.deb",
+    to: "debridstreamer-server_${SERVER_RELEASE.version}_amd64.deb",
+  },
+  {
+    name: "server update manifest filename",
+    from: "serverUpdateManifest: releaseAsset(SERVER_RELEASE, 'server-update.json')",
+    to: "serverUpdateManifest: releaseAsset(SERVER_RELEASE, 'latest.json')",
+  },
+  {
+    name: "server verification filename",
+    from: "Server_${SERVER_RELEASE.version}_verification.json",
+    to: "Server_${SERVER_RELEASE.version}_checksum.json",
+  },
+  {
+    name: "server updater bundle filename",
+    from: "yawf-server-updater_${SERVER_RELEASE.version}.tar.gz",
+    to: "yawf-server-updater_${SERVER_RELEASE.version}.zip",
+  },
+  {
+    name: "Docker source release tag",
+    from: "GITHUB_DOCKER = `${GITHUB_REPO}/tree/${SERVER_RELEASE.tag}/deploy/compose`",
+    to: "GITHUB_DOCKER = `${GITHUB_REPO}/tree/main/deploy/compose`",
+  },
+  {
+    name: "Ubuntu guide release tag",
+    from: "GITHUB_UBUNTU_GUIDE = `${GITHUB_REPO}/blob/${SERVER_RELEASE.tag}/deploy/ubuntu/README.md`",
+    to: "GITHUB_UBUNTU_GUIDE = `${GITHUB_REPO}/blob/main/deploy/ubuntu/README.md`",
+  },
+  {
+    name: "Docker Compose source filename",
+    from: "${SERVER_RELEASE.tag}/deploy/compose/docker-compose.ghcr.yml",
+    to: "${SERVER_RELEASE.tag}/deploy/compose/docker-compose.yml",
+  },
+  {
+    name: "environment example source filename",
+    from: "${SERVER_RELEASE.tag}/deploy/compose/.env.example",
+    to: "${SERVER_RELEASE.tag}/deploy/compose/.env",
   },
   {
     name: "server checksum channel",
