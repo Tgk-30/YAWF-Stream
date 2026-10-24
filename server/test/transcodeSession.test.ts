@@ -320,6 +320,38 @@ function capacityRegistryFixture(maxTranscodes = 2) {
   return { children, dataDir, database, registry };
 }
 
+function observe<T>(promise: Promise<T>) {
+  return promise.then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (error: unknown) => ({ status: "rejected" as const, error }),
+  );
+}
+
+function playableSpawn() {
+  return vi.fn((args: string[]) => {
+    const dir = dirname(args.at(-1)!);
+    writeFileSync(join(dir, "stream.m3u8"), "#EXTM3U\n");
+    for (const quality of ["1080p", "720p", "480p", "360p"]) {
+      writeFileSync(join(dir, `${quality}_seg_00000.ts`), "segment");
+    }
+    const child = new EventEmitter() as EventEmitter & {
+      kill: ReturnType<typeof vi.fn>;
+      stderr: null;
+    };
+    let finished = false;
+    child.kill = vi.fn(() => {
+      if (!finished) {
+        finished = true;
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+      }
+      return true;
+    });
+    child.stderr = null;
+    return child as unknown as ChildProcess;
+  });
+}
+
 describe("transcode staged lifecycle", () => {
   it.each([
     ["playlist", false, false, true],
@@ -442,6 +474,310 @@ describe("transcode staged lifecycle", () => {
     } finally {
       fixture.database.close();
       rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("transcode pre-spawn lifecycle ownership", () => {
+  it("awaits and cancels creation already admitted at data-directory setup", async () => {
+    const parentDir = mkdtempSync(join(tmpdir(), "yawf-transcode-preparation-"));
+    const dataDir = join(parentDir, "not-created-yet");
+    const database = new AppDatabase(":memory:");
+    const probeStreams = vi.fn(async () => ({
+      audio: true,
+      subtitle: false,
+      audioTracks: [],
+    }));
+    const spawnHls = playableSpawn();
+    const registry = new TranscodeRegistry(
+      database,
+      {
+        dataDir,
+        maxTranscodes: 2,
+        transcodeVideoEncoder: "libx264",
+        transcodeStartTimeoutMs: 500,
+      } as ServerConfig,
+      { async detect() { return true; }, probeStreams, spawnHls },
+    );
+    let pending: Promise<string> | null = null;
+    let creationSettled = false;
+    try {
+      pending = registry.ensureJob(
+        "preparation-stop",
+        "https://provider.example/video",
+      );
+      const outcome = observe(pending).finally(() => {
+        creationSettled = true;
+      });
+
+      await registry.stop();
+
+      expect(creationSettled).toBe(true);
+      await expect(outcome).resolves.toMatchObject({
+        status: "rejected",
+        error: { statusCode: 410 },
+      });
+      expect(probeStreams).not.toHaveBeenCalled();
+      expect(spawnHls).not.toHaveBeenCalled();
+      expect(
+        existsSync(dataDir)
+          ? await (await import("node:fs/promises")).readdir(dataDir)
+          : [],
+      ).toEqual([]);
+    } finally {
+      if (pending != null) await Promise.allSettled([pending]);
+      await registry.stop();
+      database.close();
+      rmSync(parentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for probe-stage creation cancellation and never spawns FFmpeg", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-transcode-probe-stop-"));
+    const database = new AppDatabase(":memory:");
+    let resolveProbeStarted: (() => void) | null = null;
+    const probeStarted = new Promise<void>((resolve) => {
+      resolveProbeStarted = resolve;
+    });
+    let settleProbe: ((value: null) => void) | null = null;
+    const probeStreams = vi.fn<NonNullable<Transcoder["probeStreams"]>>(
+      () => new Promise((resolve) => {
+        settleProbe = resolve;
+        resolveProbeStarted!();
+      }),
+    );
+    const spawnHls = playableSpawn();
+    const registry = new TranscodeRegistry(
+      database,
+      {
+        dataDir,
+        maxTranscodes: 2,
+        transcodeVideoEncoder: "libx264",
+        transcodeStartTimeoutMs: 500,
+      } as ServerConfig,
+      { async detect() { return true; }, probeStreams, spawnHls },
+    );
+    let pending: Promise<string> | null = null;
+    try {
+      pending = registry.ensureJob(
+        "probe-stop",
+        "https://provider.example/video",
+      );
+      const outcome = observe(pending);
+      await probeStarted;
+
+      await registry.stop();
+
+      await expect(outcome).resolves.toMatchObject({
+        status: "rejected",
+        error: { statusCode: 410 },
+      });
+      expect(spawnHls).not.toHaveBeenCalled();
+      expect(await (await import("node:fs/promises")).readdir(dataDir)).toEqual([]);
+    } finally {
+      settleProbe?.(null);
+      if (pending != null) await Promise.allSettled([pending]);
+      await registry.stop();
+      database.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("shares one promise across concurrent and repeated shutdown", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-transcode-closed-"));
+    const database = new AppDatabase(":memory:");
+    const probeStreams = vi.fn(async () => ({
+      audio: true,
+      subtitle: false,
+      audioTracks: [],
+    }));
+    const spawnHls = playableSpawn();
+    const registry = new TranscodeRegistry(
+      database,
+      {
+        dataDir,
+        maxTranscodes: 2,
+        transcodeVideoEncoder: "libx264",
+        transcodeStartTimeoutMs: 500,
+      } as ServerConfig,
+      { async detect() { return true; }, probeStreams, spawnHls },
+    );
+    try {
+      const firstStop = registry.stop();
+      const concurrentStop = registry.stop();
+      expect(concurrentStop).toBe(firstStop);
+      await firstStop;
+      expect(registry.stop()).toBe(firstStop);
+      expect(probeStreams).not.toHaveBeenCalled();
+      expect(spawnHls).not.toHaveBeenCalled();
+    } finally {
+      await registry.stop();
+      database.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects new jobs and suppresses new probes after shutdown", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-transcode-closed-admission-"));
+    const database = new AppDatabase(":memory:");
+    const probeStreams = vi.fn(async () => ({
+      audio: true,
+      subtitle: false,
+      audioTracks: [],
+    }));
+    const spawnHls = playableSpawn();
+    const registry = new TranscodeRegistry(
+      database,
+      {
+        dataDir,
+        maxTranscodes: 2,
+        transcodeVideoEncoder: "libx264",
+        transcodeStartTimeoutMs: 500,
+      } as ServerConfig,
+      { async detect() { return true; }, probeStreams, spawnHls },
+    );
+    try {
+      await registry.stop();
+
+      await expect(registry.sourceInfoFor(
+        "after-stop-probe",
+        "https://provider.example/video",
+      )).resolves.toEqual({ audioTracks: null, durationSeconds: null });
+      await expect(registry.ensureJob(
+        "after-stop-job",
+        "https://provider.example/video",
+      )).rejects.toMatchObject({ statusCode: 410 });
+      expect(probeStreams).not.toHaveBeenCalled();
+      expect(spawnHls).not.toHaveBeenCalled();
+    } finally {
+      await registry.stop();
+      database.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("awaits a killed pre-spawn creation and permits only a later explicit restart", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-transcode-probe-kill-"));
+    const database = new AppDatabase(":memory:");
+    let resolveProbeStarted: (() => void) | null = null;
+    const probeStarted = new Promise<void>((resolve) => {
+      resolveProbeStarted = resolve;
+    });
+    let settleFirstProbe: ((value: null) => void) | null = null;
+    const probeStreams = vi.fn<NonNullable<Transcoder["probeStreams"]>>()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        settleFirstProbe = resolve;
+        resolveProbeStarted!();
+      }))
+      .mockResolvedValue({ audio: true, subtitle: false, audioTracks: [] });
+    const spawnHls = playableSpawn();
+    const registry = new TranscodeRegistry(
+      database,
+      {
+        dataDir,
+        maxTranscodes: 2,
+        transcodeVideoEncoder: "libx264",
+        transcodeStartTimeoutMs: 500,
+      } as ServerConfig,
+      { async detect() { return true; }, probeStreams, spawnHls },
+    );
+    let pending: Promise<string> | null = null;
+    try {
+      pending = registry.ensureJob(
+        "killed-before-spawn",
+        "https://provider.example/video",
+      );
+      const outcome = observe(pending);
+      await probeStarted;
+
+      await registry.kill("killed-before-spawn");
+
+      await expect(outcome).resolves.toMatchObject({
+        status: "rejected",
+        error: { statusCode: 410 },
+      });
+      expect(spawnHls).not.toHaveBeenCalled();
+      settleFirstProbe?.(null);
+      await Promise.resolve();
+
+      await expect(registry.ensureJob(
+        "killed-before-spawn",
+        "https://provider.example/video",
+      )).resolves.toEqual(expect.any(String));
+      expect(probeStreams).toHaveBeenCalledTimes(2);
+      expect(spawnHls).toHaveBeenCalledTimes(1);
+    } finally {
+      settleFirstProbe?.(null);
+      if (pending != null) await Promise.allSettled([pending]);
+      await registry.stop();
+      database.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not resurrect a queued replacement that was requested before kill", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-transcode-queued-kill-"));
+    const database = new AppDatabase(":memory:");
+    let resolveProbeStarted: (() => void) | null = null;
+    const probeStarted = new Promise<void>((resolve) => {
+      resolveProbeStarted = resolve;
+    });
+    let settleFirstProbe: ((value: null) => void) | null = null;
+    const probeStreams = vi.fn<NonNullable<Transcoder["probeStreams"]>>()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        settleFirstProbe = resolve;
+        resolveProbeStarted!();
+      }))
+      .mockResolvedValue({ audio: true, subtitle: false, audioTracks: [] });
+    const spawnHls = playableSpawn();
+    const registry = new TranscodeRegistry(
+      database,
+      {
+        dataDir,
+        maxTranscodes: 2,
+        transcodeVideoEncoder: "libx264",
+        transcodeStartTimeoutMs: 500,
+      } as ServerConfig,
+      { async detect() { return true; }, probeStreams, spawnHls },
+    );
+    let initial: Promise<string> | null = null;
+    let queued: Promise<string> | null = null;
+    try {
+      initial = registry.ensureJob(
+        "queued-before-kill",
+        "https://provider.example/video",
+        { quality: "480p" },
+      );
+      const initialOutcome = observe(initial);
+      await probeStarted;
+      queued = registry.ensureJob(
+        "queued-before-kill",
+        "https://provider.example/video",
+        { quality: "360p" },
+      );
+      const queuedOutcome = observe(queued);
+
+      await registry.kill("queued-before-kill");
+
+      await expect(initialOutcome).resolves.toMatchObject({
+        status: "rejected",
+        error: { statusCode: 410 },
+      });
+      await expect(queuedOutcome).resolves.toMatchObject({
+        status: "rejected",
+        error: { statusCode: 410 },
+      });
+      expect(probeStreams).toHaveBeenCalledTimes(1);
+      expect(spawnHls).not.toHaveBeenCalled();
+    } finally {
+      settleFirstProbe?.(null);
+      await Promise.allSettled([
+        ...(initial == null ? [] : [initial]),
+        ...(queued == null ? [] : [queued]),
+      ]);
+      await registry.stop();
+      database.close();
+      rmSync(dataDir, { recursive: true, force: true });
     }
   });
 });
@@ -1220,6 +1556,12 @@ describe("transcode stream probe admission", () => {
 
   it("lets startup join a slow manual retry for only its fast budget without duplicating or cancelling it", async () => {
     vi.useFakeTimers({ now: 70_000 });
+    const retryResult = {
+      audio: true,
+      subtitle: false,
+      audioTracks: [{ index: 0, language: "eng", label: "English", default: true }],
+      durationSeconds: 596.457379,
+    };
     let resolveRetry: ((value: {
       audio: boolean;
       subtitle: boolean;
@@ -1257,6 +1599,41 @@ describe("transcode stream probe admission", () => {
       writeFileSync(join(outputDir, "480p_seg_00000.ts"), "segment");
       return hlsChild as unknown as ChildProcess;
     });
+    const waitForProbeTarget = fixture.registry as unknown as {
+      waitForProbe(
+        sessionId: string,
+        entry: unknown,
+        options: { retryFailed?: boolean; signal?: AbortSignal },
+      ): Promise<unknown>;
+    };
+    const originalWaitForProbe = waitForProbeTarget.waitForProbe.bind(fixture.registry);
+    let markStartupWaiterAttached: (() => void) | null = null;
+    const startupWaiterAttached = new Promise<void>((resolve) => {
+      markStartupWaiterAttached = resolve;
+    });
+    let observeStartupWaiter = false;
+    const waitForProbeSpy = vi.spyOn(waitForProbeTarget, "waitForProbe")
+      .mockImplementation((sessionId, entry, options) => {
+        const result = originalWaitForProbe(sessionId, entry, options);
+        if (
+          observeStartupWaiter &&
+          sessionId === "startup-joins" &&
+          options.retryFailed !== true
+        ) {
+          markStartupWaiterAttached!();
+        }
+        return result;
+      });
+    let retry: Promise<{
+      audioTracks: Array<{
+        index: number;
+        language: string | null;
+        label: string | null;
+        default: boolean;
+      }> | null;
+      durationSeconds: number | null;
+    }> | null = null;
+    let startup: Promise<string> | null = null;
     try {
       await expect(fixture.registry.sourceInfoFor(
         "startup-joins",
@@ -1264,47 +1641,70 @@ describe("transcode stream probe admission", () => {
       )).resolves.toEqual({ audioTracks: null, durationSeconds: null });
       vi.setSystemTime(75_001);
 
-      const retry = fixture.registry.sourceInfoFor(
+      retry = fixture.registry.sourceInfoFor(
         "startup-joins",
         "https://provider.example/video",
         { retryFailed: true },
       );
-      const startup = fixture.registry.ensureJob(
+      const retryOutcome = observe(retry);
+      observeStartupWaiter = true;
+      startup = fixture.registry.ensureJob(
         "startup-joins",
         "https://provider.example/video",
         { quality: "480p" },
       );
+      let startupSettled = false;
+      const startupOutcome = observe(startup).finally(() => {
+        startupSettled = true;
+      });
       expect(probe).toHaveBeenCalledTimes(2);
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        await (await import("node:fs/promises")).readdir(fixture.dataDir);
-      }
+      await startupWaiterAttached;
       const cachedProbe = [...(
         fixture.registry as unknown as {
           streamProbes: Map<string, { waiters: number }>;
         }
       ).streamProbes.values()][0];
       expect(cachedProbe?.waiters).toBe(2);
-      await vi.advanceTimersByTimeAsync(6_000);
-      await expect(startup).resolves.toEqual(expect.any(String));
+      await vi.advanceTimersByTimeAsync(5_999);
+      expect(startupSettled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(startupOutcome).resolves.toEqual({
+        status: "fulfilled",
+        value: expect.any(String),
+      });
       expect(spawnedArgs).not.toBeNull();
       expect(probe).toHaveBeenCalledTimes(2);
       expect(probe.mock.calls[1]?.[1]?.signal?.aborted).toBe(false);
 
-      resolveRetry!({
-        audio: true,
-        subtitle: false,
-        audioTracks: [{ index: 0, language: "eng", label: "English", default: true }],
-        durationSeconds: 596.457379,
-      });
-      await expect(retry).resolves.toEqual({
-        audioTracks: [{ index: 0, language: "eng", label: "English", default: true }],
-        durationSeconds: 596.457379,
+      resolveRetry!(retryResult);
+      await expect(retryOutcome).resolves.toEqual({
+        status: "fulfilled",
+        value: {
+          audioTracks: [{ index: 0, language: "eng", label: "English", default: true }],
+          durationSeconds: 596.457379,
+        },
       });
     } finally {
-      await fixture.registry.stop();
-      fixture.database.close();
-      rmSync(fixture.dataDir, { recursive: true, force: true });
-      vi.useRealTimers();
+      try {
+        resolveRetry?.(retryResult);
+        await vi.advanceTimersByTimeAsync(17_000);
+        await Promise.allSettled([
+          ...(retry == null ? [] : [retry]),
+          ...(startup == null ? [] : [startup]),
+        ]);
+        await fixture.registry.stop();
+      } finally {
+        try {
+          fixture.database.close();
+          rmSync(fixture.dataDir, { recursive: true, force: true });
+        } finally {
+          try {
+            waitForProbeSpy.mockRestore();
+          } finally {
+            vi.useRealTimers();
+          }
+        }
+      }
     }
   });
 

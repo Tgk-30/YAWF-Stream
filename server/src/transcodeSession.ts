@@ -370,6 +370,8 @@ interface StreamProbeCacheEntry {
 }
 
 export class TranscodeRegistry {
+  private lifecycle: "open" | "closing" | "closed" = "open";
+  private stopPromise: Promise<void> | null = null;
   private readonly jobs = new Map<string, Job>();
   /** Child processes remain here until Node reports exit or close.
    * Completed jobs keep their cached assets in `jobs`, but no longer consume
@@ -425,6 +427,7 @@ export class TranscodeRegistry {
   /** Boot sweep (rm temp dirs left by a previous crash) + start the idle/expiry
    *  reaper. Only called when transcoding is active. */
   start(): void {
+    if (this.lifecycle !== "open") return;
     const rows = this.db.sqlite
       .prepare("SELECT transcode_dir FROM stream_sessions WHERE transcode_dir IS NOT NULL")
       .all() as Array<{ transcode_dir: string | null }>;
@@ -438,7 +441,14 @@ export class TranscodeRegistry {
     this.reaper.unref?.();
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.stopPromise != null) return this.stopPromise;
+    this.lifecycle = "closing";
+    this.stopPromise = this.finishStop();
+    return this.stopPromise;
+  }
+
+  private async finishStop(): Promise<void> {
     if (this.reaper != null) {
       clearInterval(this.reaper);
       this.reaper = null;
@@ -446,8 +456,18 @@ export class TranscodeRegistry {
     for (const [id, probe] of this.streamProbes) {
       this.invalidateProbe(id, probe);
     }
-    const ids = new Set([...this.jobs.keys(), ...this.pending.keys()]);
-    await Promise.all([...ids].map((id) => this.kill(id)));
+    const pendingCreations = [...this.pending.values()].map((entry) => entry.promise);
+    const ids = new Set([
+      ...this.jobs.keys(),
+      ...this.pending.keys(),
+      ...this.retired.keys(),
+    ]);
+    try {
+      await Promise.all([...ids].map((id) => this.kill(id)));
+      await Promise.all(pendingCreations.map((creation) => creation.catch(() => undefined)));
+    } finally {
+      this.lifecycle = "closed";
+    }
   }
 
   private invalidateProbe(
@@ -512,7 +532,9 @@ export class TranscodeRegistry {
     upstreamUrl: string,
     options: TranscodeSourceInfoOptions = {},
   ): Promise<TranscoderStreamProbe | null> {
-    if (options.signal?.aborted === true) return Promise.resolve(null);
+    if (this.lifecycle !== "open" || options.signal?.aborted === true) {
+      return Promise.resolve(null);
+    }
     const now = Date.now();
     const cached = this.streamProbes.get(sessionId);
     let retryingFailed = false;
@@ -721,6 +743,7 @@ export class TranscodeRegistry {
       await this.disposeJob(sessionId, pending.job, false);
       pending.job = undefined;
     }
+    await pending?.promise.catch(() => undefined);
     const retired = this.retired.get(sessionId) ?? [];
     this.retired.delete(sessionId);
     await Promise.all(retired.map((item) => this.disposeJob(sessionId, item, false)));
@@ -865,6 +888,10 @@ export class TranscodeRegistry {
     upstreamUrl: string,
     options: HlsTranscodeOptions = {},
   ): Promise<string> {
+    if (this.lifecycle !== "open") {
+      throw Object.assign(new Error("The transcode registry is closed."), { statusCode: 410 });
+    }
+    const requestGeneration = this.generations.get(sessionId) ?? 0;
     const normalizedOptions: HlsTranscodeOptions = {
       profile: options.profile ?? "adaptive",
       quality: options.quality ?? qualityForProfile(options.profile ?? "adaptive"),
@@ -891,9 +918,15 @@ export class TranscodeRegistry {
       // flight. Let that creation settle, then re-evaluate and replace it so we
       // never return a manifest for the wrong playback timeline.
       await inflight.promise.catch(() => undefined);
+      if (
+        this.lifecycle !== "open" ||
+        (this.generations.get(sessionId) ?? 0) !== requestGeneration
+      ) {
+        throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
+      }
       return this.ensureJob(sessionId, upstreamUrl, options);
     }
-    const generation = this.generations.get(sessionId) ?? 0;
+    const generation = requestGeneration;
     const pendingEntry: PendingJob = {
       fingerprint,
       promise: Promise.resolve(""),
@@ -907,7 +940,10 @@ export class TranscodeRegistry {
       generation,
       (job) => {
         pendingEntry.job = job;
-        if ((this.generations.get(sessionId) ?? 0) !== generation) {
+        if (
+          this.lifecycle !== "open" ||
+          (this.generations.get(sessionId) ?? 0) !== generation
+        ) {
           job.cancelled = true;
           void this.disposeJob(sessionId, job, false);
         }
@@ -939,9 +975,29 @@ export class TranscodeRegistry {
     }
 
     await mkdir(this.config.dataDir, { recursive: true });
+    if (
+      this.lifecycle !== "open" ||
+      (this.generations.get(sessionId) ?? 0) !== generation
+    ) {
+      throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
+    }
     const dir = await mkdtemp(join(this.config.dataDir, "transcode-"));
+    if (
+      this.lifecycle !== "open" ||
+      (this.generations.get(sessionId) ?? 0) !== generation
+    ) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
+    }
     let child: ChildProcess;
     const streamProbe = await this.probeStreams(sessionId, upstreamUrl);
+    if (
+      this.lifecycle !== "open" ||
+      (this.generations.get(sessionId) ?? 0) !== generation
+    ) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
+    }
     const processOptions = {
       ...options,
       includeAudio: streamProbe?.audio ?? true,
@@ -1022,7 +1078,10 @@ export class TranscodeRegistry {
         // Atomically make the fully playable replacement visible before the
         // old process and files are touched. A failed warm-up never changes the
         // active map entry or session directory.
-        if ((this.generations.get(sessionId) ?? 0) !== generation) {
+        if (
+          this.lifecycle !== "open" ||
+          (this.generations.get(sessionId) ?? 0) !== generation
+        ) {
           await this.disposeJob(sessionId, job, false);
           throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
         }

@@ -23,6 +23,80 @@ import { AmbientVideo } from "./AmbientVideo";
 import { recordDiagnostic } from "../lib/diagnostics";
 import "./ServerModeGate.css";
 
+const STRUCTURED_ERROR_LIMIT = 8_192;
+const STRUCTURED_ISSUE_LIMIT = 8;
+const GENERIC_AUTH_ERROR = "The request could not be completed. Review the form and try again.";
+
+function knownAuthIssue(
+  issue: unknown,
+  accountCreation: boolean,
+): string | null {
+  if (issue == null || typeof issue !== "object" || Array.isArray(issue)) return null;
+  const { code, path } = issue as { code?: unknown; path?: unknown };
+  if (typeof code !== "string" || !Array.isArray(path) || path.length !== 1) return null;
+  const field = path[0];
+  if (typeof field !== "string") return null;
+
+  if (
+    field === "username"
+    && ["too_small", "too_big", "invalid_format", "invalid_string"].includes(code)
+  ) {
+    return "Username must be 3-64 characters using only letters, numbers, dots, hyphens, or underscores.";
+  }
+  if (field === "username" && code === "invalid_type") return "Enter a username.";
+  if (
+    field === "password"
+    && (code === "too_big" || code === "invalid_type" || (accountCreation && code === "too_small"))
+  ) {
+    return accountCreation
+      ? "Password must be 8-512 characters."
+      : "Enter a password no longer than 512 characters.";
+  }
+  if (field === "displayName" && ["too_small", "too_big", "invalid_type"].includes(code)) {
+    return "Display name must be 1-100 characters.";
+  }
+  if (field === "totpCode" && ["invalid_format", "invalid_string"].includes(code)) {
+    return "Authenticator codes must contain exactly 6 digits.";
+  }
+  if (field === "setupToken" && ["too_small", "too_big", "invalid_type"].includes(code)) {
+    return "Enter the setup token provided by the server administrator.";
+  }
+  if (field === "token" && ["too_small", "too_big", "invalid_type"].includes(code)) {
+    return "This invite link is invalid or incomplete. Request a new invite link.";
+  }
+  return null;
+}
+
+function formatAuthError(error: unknown, accountCreation: boolean): string {
+  const raw = error instanceof Error ? error.message : "Request failed.";
+  if (raw.length > STRUCTURED_ERROR_LIMIT) return GENERIC_AUTH_ERROR;
+  const firstCharacter = raw.trimStart()[0];
+  const looksStructured = firstCharacter === "[" || firstCharacter === "{";
+  if (!looksStructured) return raw;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return GENERIC_AUTH_ERROR;
+  }
+  if (
+    !Array.isArray(parsed)
+    || parsed.length === 0
+    || parsed.length > STRUCTURED_ISSUE_LIMIT
+  ) {
+    return GENERIC_AUTH_ERROR;
+  }
+
+  const guidance: string[] = [];
+  for (const issue of parsed) {
+    const known = knownAuthIssue(issue, accountCreation);
+    if (known == null) return GENERIC_AUTH_ERROR;
+    if (!guidance.includes(known)) guidance.push(known);
+  }
+  return guidance.join(" ");
+}
+
 declare global {
   var __DEBRIDSTREAMER_SETUP_TOKEN__: string | null | undefined;
 }
@@ -515,7 +589,7 @@ function AuthForm({
         : {}),
     })
       .catch((err) => {
-        setError(err instanceof Error ? err.message : "Request failed.");
+        setError(formatAuthError(err, includeDisplayName));
       })
       .finally(() => setBusy(false));
   }
@@ -555,7 +629,7 @@ function AuthForm({
               onChange={(event) => setPassword(event.target.value)}
               autoComplete={includeDisplayName ? "new-password" : "current-password"}
               required
-              minLength={8}
+              minLength={includeDisplayName ? 8 : 1}
             />
           </label>
           {includeSetupToken && initialSetupToken == null && (
@@ -584,7 +658,7 @@ function AuthForm({
               />
             </label>
           )}
-          {error != null && <p className="server-gate-error">{error}</p>}
+          {error != null && <p className="server-gate-error" role="alert">{error}</p>}
           <button className="server-gate-button" type="submit" disabled={busy}>
             {busy ? "Please wait" : submitLabel}
           </button>
