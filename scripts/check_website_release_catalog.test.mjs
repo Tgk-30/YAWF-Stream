@@ -31,12 +31,12 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.52', tag: 'v2.3.52' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.53', tag: 'v2.3.53' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.52'",
+    from: "tag: 'v2.3.53'",
     to: "tag: 'v2.3.51'",
   },
   {

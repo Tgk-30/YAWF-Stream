@@ -142,6 +142,7 @@ export function ProfilePicker({ onClose }: { onClose: () => void }) {
                   role: sw.session.role,
                   avatarColor: sw.session.avatarColor,
                   simpleMode: sw.session.simpleMode,
+                  isKid: sw.session.isKid ?? fallback.isKid,
                 });
               }
             } catch {
@@ -232,6 +233,7 @@ export function ProfilePicker({ onClose }: { onClose: () => void }) {
           role: result.session.role,
           avatarColor: result.session.avatarColor,
           simpleMode: result.session.simpleMode,
+          isKid: result.session.isKid ?? profile.isKid,
         });
       }
       if (result.profiles != null) setProfiles(result.profiles.profiles);

@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateWebsiteReleaseCatalog } from "./check_website_release_catalog.mjs";
+import { validateDockerLatestTagPolicy } from "./check_docker_latest_tag_policy.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const checks = [];
@@ -75,6 +76,7 @@ const releaseAndroidPhoneJob = workflowJob(releaseWorkflow, "android-app");
 const releaseAndroidPhonePublisherJob = workflowJob(releaseWorkflow, "android-app-publish");
 const cleanInstallAndroidPhoneJob = workflowJob(cleanInstallWorkflow, "android-phone");
 const dockerWorkflow = read(".github/workflows/docker-image.yml");
+const dockerLatestTagPolicyFailures = validateDockerLatestTagPolicy(dockerWorkflow);
 const ciWorkflow = read(".github/workflows/ci.yml");
 const cloudflareSiteWorkflow = read(".github/workflows/cloudflare-site.yml");
 const desktopBuildWorkflow = read(".github/workflows/desktop-build.yml");
@@ -792,6 +794,11 @@ check(
   existsSync(join(root, "web/public/manifest.webmanifest")) &&
     existsSync(join(root, "web/public/sw.js")),
   "web/public must contain manifest.webmanifest and sw.js",
+);
+check(
+  "Docker metadata latest-tag policy is explicit",
+  dockerLatestTagPolicyFailures.length === 0,
+  dockerLatestTagPolicyFailures.join("; ") || "Docker metadata must disable implicit latest and preserve version/ref tags",
 );
 check(
   "Server Docker packaging exists",

@@ -18,6 +18,8 @@ export interface ServerSession {
   role: "owner" | "admin" | "member" | "restricted";
   avatarColor?: string | null;
   simpleMode: boolean;
+  /** Existing active-profile restriction returned by the server. */
+  isKid?: boolean;
 }
 
 /** One viewer in the account's "who's watching" picker. */

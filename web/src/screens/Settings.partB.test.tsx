@@ -12,7 +12,7 @@
 // KidsProfilesPanel instead goes through ../lib/serverApi, which we mock.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within, waitFor } from "@testing-library/react";
+import { act, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Settings } from "./Settings";
@@ -21,6 +21,7 @@ import type { AppSettings } from "../data/settings";
 import {
   ServerSessionProvider,
   type ServerSession,
+  useSetServerSession,
 } from "../lib/ServerSessionContext";
 
 // ---- module mocks ---------------------------------------------------------
@@ -57,6 +58,7 @@ const fetchAccountProfiles = vi.fn();
 const setProfileMaturity = vi.fn();
 const exportServerPortableProfile = vi.fn();
 const importServerPortableProfile = vi.fn();
+const testServerDebridToken = vi.fn();
 
 vi.mock("../lib/serverApi", () => ({
   fetchAccountProfiles: () => fetchAccountProfiles(),
@@ -64,7 +66,7 @@ vi.mock("../lib/serverApi", () => ({
   exportServerPortableProfile: () => exportServerPortableProfile(),
   importServerPortableProfile: (bundle: unknown, mode: unknown) =>
     importServerPortableProfile(bundle, mode),
-  testServerDebridToken: vi.fn(),
+  testServerDebridToken: (input: unknown) => testServerDebridToken(input),
 }));
 
 // AppStore - only the slice Settings reads.
@@ -91,7 +93,13 @@ vi.mock("qrcode", () => ({
 
 type Json = Record<string, unknown>;
 let routes: Map<string, { ok: boolean; status: number; body: Json }>;
-let fetchCalls: { method: string; path: string; body: unknown }[];
+let fetchCalls: {
+  method: string;
+  path: string;
+  body: unknown;
+  headers: Headers;
+  credentials: RequestCredentials | undefined;
+}[];
 
 function route(method: string, path: string, body: Json, ok = true, status = 200) {
   routes.set(`${method} ${path}`, { ok, status, body });
@@ -108,6 +116,8 @@ function installFetch() {
       method,
       path,
       body: init?.body != null ? JSON.parse(init.body as string) : undefined,
+      headers: new Headers(init?.headers),
+      credentials: init?.credentials,
     });
     const hit = routes.get(`${method} ${path}`);
     const resolved = hit ?? { ok: true, status: 200, body: {} as Json };
@@ -198,7 +208,32 @@ function seedRefresh(role: ServerSession["role"]) {
   });
 }
 
-function renderSettings(session?: ServerSession | null) {
+function effectiveProviderRows(
+  torboxScope: "profile" | "server" | null,
+): Array<Record<string, unknown>> {
+  return ["real_debrid", "all_debrid", "premiumize", "torbox"].map((provider) => {
+    if (provider !== "torbox" || torboxScope == null) {
+      return { provider, scope: null, id: null, label: null };
+    }
+    return {
+      provider,
+      scope: torboxScope,
+      id: "redacted-id-sentinel",
+      label: "redacted-label-sentinel",
+      profileId: "redacted-profile-sentinel",
+      updatedAt: "2030-01-02T03:04:05.000Z",
+      isActive: true,
+    };
+  });
+}
+
+function routeEffectiveProviderStatus(torboxScope: "profile" | "server" | null) {
+  route("GET", "/api/credentials/effective", {
+    credentials: effectiveProviderRows(torboxScope),
+  });
+}
+
+function renderSettings(session?: ServerSession | null, testControls?: ReactNode) {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <ServerSessionProvider
       initial={
@@ -212,6 +247,7 @@ function renderSettings(session?: ServerSession | null) {
       }
     >
       {children}
+      {testControls}
     </ServerSessionProvider>
   );
   return render(<Settings />, { wrapper });
@@ -220,6 +256,10 @@ function renderSettings(session?: ServerSession | null) {
 async function gotoServerTab() {
   const tabButton = await screen.findByRole("button", { name: "Server" });
   await userEvent.click(tabButton);
+}
+
+async function gotoProvidersTab() {
+  await userEvent.click(await screen.findByRole("button", { name: "Providers" }));
 }
 
 beforeEach(() => {
@@ -232,6 +272,7 @@ beforeEach(() => {
   setProfileMaturity.mockReset();
   exportServerPortableProfile.mockReset();
   importServerPortableProfile.mockReset();
+  testServerDebridToken.mockReset();
   fetchAccountProfiles.mockResolvedValue({ profiles: [], activeProfileId: "p1" });
   setProfileMaturity.mockResolvedValue({ ok: true, profiles: [] });
   importServerPortableProfile.mockResolvedValue({
@@ -241,6 +282,7 @@ beforeEach(() => {
     folders: 0,
     library: 0,
   });
+  testServerDebridToken.mockResolvedValue(true);
   installFetch();
 });
 
@@ -608,7 +650,7 @@ describe("ProfileCredentialPanel overrides", () => {
     const realFetch = global.fetch as unknown as (u: string, i?: RequestInit) => Promise<Response>;
     global.fetch = vi.fn(async (url: string, init?: RequestInit) => {
       if ((init?.method ?? "GET") === "PUT" && String(url).endsWith("/api/profile/credentials")) {
-        fetchCalls.push({ method: "PUT", path: "/api/profile/credentials", body: JSON.parse(init!.body as string) });
+        fetchCalls.push({ method: "PUT", path: "/api/profile/credentials", body: JSON.parse(init!.body as string), headers: new Headers(init?.headers), credentials: init?.credentials });
         await new Promise<void>((r) => (resolveSave = r));
         return { ok: true, status: 200, text: async () => "{}" } as Response;
       }
@@ -914,5 +956,142 @@ describe("ServerConnectionPanel + logout", () => {
     await waitFor(() =>
       expect(fetchCalls.some((c) => c.method === "POST" && c.path === "/api/auth/logout")).toBe(true),
     );
+  });
+});
+
+describe("Settings · Providers in Server Mode", () => {
+  it("refreshes saved scope only after a successful Save, not candidate typing", async () => {
+    routeEffectiveProviderStatus("server");
+    updateSettings.mockResolvedValue({ ok: true });
+    renderSettings();
+    await gotoProvidersTab();
+    await screen.findByText(/This profile uses a TorBox credential shared by the server/);
+    await userEvent.type(screen.getByPlaceholderText("API token"), "new-candidate");
+    expect(fetchCalls.filter((call) => call.path === "/api/credentials/effective")).toHaveLength(1);
+    routeEffectiveProviderStatus("profile");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText(/A TorBox credential is saved for this profile/)).toBeInTheDocument();
+    expect(fetchCalls.filter((call) => call.path === "/api/credentials/effective")).toHaveLength(2);
+  });
+
+  it("does not refresh saved scope after a failed Save", async () => {
+    routeEffectiveProviderStatus("server");
+    updateSettings.mockResolvedValue({ ok: false });
+    renderSettings();
+    await gotoProvidersTab();
+    await screen.findByText(/This profile uses a TorBox credential shared by the server/);
+    await userEvent.type(screen.getByPlaceholderText("API token"), "new-candidate");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await screen.findByText(/Could not save to this device/);
+    expect(fetchCalls.filter((call) => call.path === "/api/credentials/effective")).toHaveLength(1);
+  });
+
+  for (const change of ["token", "provider", "profile"] as const) {
+    it(`ignores a late candidate result after the ${change} changes`, async () => {
+      let finish!: (valid: boolean) => void;
+      testServerDebridToken.mockReturnValue(new Promise<boolean>((resolve) => { finish = resolve; }));
+      function SwitchProfile() {
+        const setSession = useSetServerSession();
+        return <button onClick={() => setSession({ profileId: "p2", username: "other", displayName: "Other", role: "member", simpleMode: false, isKid: false })}>Switch test profile</button>;
+      }
+      routeEffectiveProviderStatus("server");
+      renderSettings(undefined, <SwitchProfile />);
+      await gotoProvidersTab();
+      await screen.findByText(/This profile uses a TorBox credential shared by the server/);
+      await userEvent.type(screen.getByPlaceholderText("API token"), "first-candidate");
+      await userEvent.click(screen.getByRole("button", { name: "Test new token" }));
+      await waitFor(() => expect(testServerDebridToken).toHaveBeenCalledTimes(1));
+      if (change === "token") await userEvent.type(screen.getByPlaceholderText("API token"), "-edited");
+      if (change === "provider") await userEvent.selectOptions(screen.getByRole("combobox", { name: "Debrid provider" }), "real_debrid");
+      if (change === "profile") await userEvent.click(screen.getByRole("button", { name: "Switch test profile" }));
+      await act(async () => { finish(true); });
+      expect(screen.queryByText(/accepted this new token/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/new token could not be verified/)).not.toBeInTheDocument();
+    });
+  }
+
+  it("shows the saved profile scope in Simple Server Mode without filling the candidate input", async () => {
+    mockSimpleMode = true;
+    routeEffectiveProviderStatus("profile");
+    renderSettings();
+    await gotoProvidersTab();
+
+    expect(await screen.findByText(/A TorBox credential is saved for this profile/)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("API token")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Test new token" })).toBeDisabled();
+
+    const effectiveCall = fetchCalls.find((call) => call.path === "/api/credentials/effective");
+    expect(effectiveCall).toMatchObject({
+      method: "GET",
+      body: undefined,
+      credentials: "include",
+    });
+    expect(effectiveCall?.headers.get("x-csrf-token")).toBeNull();
+    expect(effectiveCall?.headers.get("content-type")).toBeNull();
+    expect(screen.queryByText(/redacted-id-sentinel|redacted-label-sentinel|redacted-profile-sentinel|2030-01-02/)).not.toBeInTheDocument();
+  });
+
+  it("uses owner and member-specific shared guidance without offering member admin actions", async () => {
+    routeEffectiveProviderStatus("server");
+    const owner = renderSettings({ profileId: "p1", username: "owner", displayName: "Owner", role: "owner", simpleMode: false });
+    await gotoProvidersTab();
+    expect(await screen.findByText(/Manage shared credentials in Advanced > Server/)).toBeInTheDocument();
+    owner.unmount();
+
+    routeEffectiveProviderStatus("server");
+    const member = renderSettings({ profileId: "p1", username: "member", displayName: "Member", role: "member", simpleMode: false });
+    await gotoProvidersTab();
+    expect(await screen.findByText(/shared by the server administrator/)).toBeInTheDocument();
+    expect(screen.queryByText(/Manage shared credentials in Advanced > Server/)).not.toBeInTheDocument();
+    member.unmount();
+  });
+
+  it("keeps missing separate from errors and retries the existing redacted-status GET", async () => {
+    route("GET", "/api/credentials/effective", { error: "raw status failure" }, false, 500);
+    renderSettings();
+    await gotoProvidersTab();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Saved provider status could not be loaded. No credentials were changed.",
+    );
+    expect(screen.queryByText("raw status failure")).not.toBeInTheDocument();
+
+    routeEffectiveProviderStatus(null);
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText(/No TorBox credential is saved for this profile or shared by the server/)).toBeInTheDocument();
+    expect(fetchCalls.filter((call) => call.path === "/api/credentials/effective")).toHaveLength(2);
+  });
+
+  it("hides replacement and test controls for restricted and kid profiles", async () => {
+    routeEffectiveProviderStatus("server");
+    const restricted = renderSettings({ profileId: "p1", username: "r", displayName: "R", role: "restricted", simpleMode: false });
+    await gotoProvidersTab();
+    expect(await screen.findByText(/Credential changes are unavailable from this profile/)).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("API token")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Test new token" })).not.toBeInTheDocument();
+    restricted.unmount();
+
+    routeEffectiveProviderStatus("server");
+    renderSettings({ profileId: "p1", username: "kid", displayName: "Kid", role: "member", simpleMode: false, isKid: true });
+    await gotoProvidersTab();
+    expect(await screen.findByText(/Credential changes are unavailable from this profile/)).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("API token")).not.toBeInTheDocument();
+  });
+
+  it("tests only the new candidate and gives truthful unsaved success and failure wording", async () => {
+    const user = userEvent.setup();
+    routeEffectiveProviderStatus("server");
+    renderSettings();
+    await gotoProvidersTab();
+    await screen.findByText(/This profile uses a TorBox credential shared by the server/);
+
+    await user.type(screen.getByPlaceholderText("API token"), "candidate-token");
+    await user.click(screen.getByRole("button", { name: "Test new token" }));
+    expect(testServerDebridToken).toHaveBeenCalledWith({ service: "torbox", apiToken: "candidate-token" });
+    expect(await screen.findByText(/accepted this new token. Save changes to use it for this profile/)).toBeInTheDocument();
+
+    testServerDebridToken.mockResolvedValueOnce(false);
+    await user.click(screen.getByRole("button", { name: "Test new token" }));
+    expect(await screen.findByText(/This new token could not be verified. The saved credential was not tested or changed/)).toBeInTheDocument();
+    expect(fetchCalls.some((call) => call.path !== "/api/credentials/effective")).toBe(false);
   });
 });

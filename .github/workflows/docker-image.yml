@@ -9,6 +9,8 @@ on:
       - ".dockerignore"
       - ".github/workflows/docker-image.yml"
       - "scripts/check_release_readiness.mjs"
+      - "scripts/check_docker_latest_tag_policy.mjs"
+      - "scripts/check_docker_latest_tag_policy.test.mjs"
       - "scripts/check_security_decisions.mjs"
       - "scripts/public_repo_preflight.mjs"
       - "scripts/resolve_published_image_manifests.mjs"
@@ -25,6 +27,8 @@ on:
       - ".dockerignore"
       - ".github/workflows/docker-image.yml"
       - "scripts/check_release_readiness.mjs"
+      - "scripts/check_docker_latest_tag_policy.mjs"
+      - "scripts/check_docker_latest_tag_policy.test.mjs"
       - "scripts/check_security_decisions.mjs"
       - "scripts/public_repo_preflight.mjs"
       - "scripts/resolve_published_image_manifests.mjs"
@@ -186,6 +190,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.image.outputs.name }}
+          flavor: |
+            latest=false
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -193,7 +199,6 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=${{ steps.release-version.outputs.version }},enable=${{ steps.release-version.outputs.enabled }}
             type=raw,value=${{ steps.release-version.outputs.major_minor }},enable=${{ steps.release-version.outputs.enabled }}
-            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and publish multi-arch image
         id: publish

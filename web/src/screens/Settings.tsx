@@ -64,6 +64,7 @@ import {
   type ServerUsage,
 } from "./settings/ServerStatusPanels";
 import { AppearanceSettings } from "./settings/AppearanceSettings";
+import { ServerProviderStatus } from "./settings/ServerProviderStatus";
 import { BUG_REPORT_URL } from "../lib/projectLinks";
 import { Field, SegmentedControl } from "./settings/SettingsControls";
 import type {
@@ -424,6 +425,9 @@ async function serverRequest<T>(
   return parsed as T;
 }
 
+const loadSavedProviderStatus = () =>
+  serverRequest<unknown>("GET", "/api/credentials/effective");
+
 export function Settings() {
   const {
     settings,
@@ -452,6 +456,7 @@ export function Settings() {
   // Edit a local draft; "Save" commits it through the store.
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saved, setSaved] = useState(false);
+  const [providerStatusRevision, setProviderStatusRevision] = useState(0);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const settingsScreenRef = useRef<HTMLDivElement>(null);
@@ -502,6 +507,7 @@ export function Settings() {
     const result = await updateSettings(draft);
     if (result.ok) {
       setSaved(true);
+      setProviderStatusRevision((revision) => revision + 1);
       return;
     }
     // Don't claim a save that didn't happen (e.g. a keychain write failing
@@ -683,7 +689,7 @@ export function Settings() {
           <ServerTab key={serverSession?.profileId ?? "no-profile"} />
         )}
         {tab === "keys" && <KeysTab draft={draft} patch={patch} />}
-        {tab === "debrid" && <DebridTab draft={draft} patch={patch} />}
+        {tab === "debrid" && <DebridTab draft={draft} patch={patch} providerStatusRevision={providerStatusRevision} profileId={serverMode ? serverSession?.profileId ?? null : activeProfile?.id ?? null} />}
         {tab === "sources" && <SourcesTab draft={draft} patch={patch} />}
         {tab === "profiles" && !serverMode && (
           <ProfilesTab
@@ -4966,7 +4972,13 @@ const DEBRID_SIGNUP_ID: Record<string, string> = {
   torbox: "torbox",
 };
 
-function DebridTab({ draft, patch }: TabProps) {
+function DebridTab({ draft, patch, providerStatusRevision, profileId }: TabProps & {
+  providerStatusRevision: number;
+  profileId: string | null;
+}) {
+  const serverMode = isServerMode();
+  const serverSession = useServerSession();
+  const kidProfile = serverSession?.isKid === true;
   const serviceOptions = DebridServiceType.allCases();
   const [selectedService, setSelectedService] = useState<
     AppSettings["debridTokens"][number]["service"]
@@ -4974,10 +4986,15 @@ function DebridTab({ draft, patch }: TabProps) {
   const [connectionState, setConnectionState] = useState<
     "idle" | "testing" | "valid" | "failed"
   >("idle");
+  const connectionRequest = useRef(0);
 
-  useEffect(() => {
+  // Invalidate before paint when the visible candidate or profile changes.
+  // A late result must not describe another token or survive a completed save.
+  useLayoutEffect(() => {
+    connectionRequest.current += 1;
     setConnectionState("idle");
-  }, [selectedService, draft.debridTokens]);
+    return () => { connectionRequest.current += 1; };
+  }, [selectedService, draft.debridTokens, profileId, providerStatusRevision]);
 
   function tokenFor(service: AppSettings["debridTokens"][number]["service"]) {
     return draft.debridTokens.find((t) => t.service === service)?.apiToken ?? "";
@@ -5007,6 +5024,7 @@ function DebridTab({ draft, patch }: TabProps) {
   async function testConnection() {
     const apiToken = tokenFor(selectedService).trim();
     if (apiToken.length === 0 || connectionState === "testing") return;
+    const request = ++connectionRequest.current;
     setConnectionState("testing");
     // In server mode the token check must run ON the server: debrid hosts
     // (TorBox in particular) send no CORS headers, so a webview/browser-side
@@ -5019,7 +5037,9 @@ function DebridTab({ draft, patch }: TabProps) {
     } catch {
       valid = false;
     }
-    setConnectionState(valid ? "valid" : "failed");
+    if (request === connectionRequest.current) {
+      setConnectionState(valid ? "valid" : "failed");
+    }
   }
 
   return (
@@ -5027,13 +5047,16 @@ function DebridTab({ draft, patch }: TabProps) {
       <SettingsInfo label={`About ${CONCEPTS.debrid.term}`}>
         <strong>{CONCEPTS.debrid.term}:</strong> {CONCEPTS.debrid.blurb} Choose
         one provider at a time. Saved providers are tried in priority order; the
-        first that has a cached result wins. Tokens stay in this profile, with
-        secure device storage in desktop builds when available. Use only
+        first that has a cached result wins.{" "}
+        {serverMode
+          ? "Server-stored credentials are kept on the server and are not sent back to this device."
+          : "Tokens stay in this profile, with secure device storage in desktop builds when available."}{" "}
+        Use only
         provider accounts and content you are authorized to access. Provider
         terms can restrict credential sharing, automation, or household use.
       </SettingsInfo>
 
-      <Field label="Provider" hint="Real-Debrid is selected first by default.">
+      <Field label="Provider" hint="Choose a provider to view or configure.">
         <select
           aria-label="Debrid provider"
           value={selectedService}
@@ -5051,57 +5074,73 @@ function DebridTab({ draft, patch }: TabProps) {
         </select>
       </Field>
 
-      <Field
-        label={`${DebridServiceType.displayName(selectedService)} token`}
-        hint="Paste the API token for this provider."
-        helpUrl={signupUrl(DEBRID_SIGNUP_ID[selectedService]) ?? undefined}
-        helpLabel={`Find your ${DebridServiceType.displayName(selectedService)} token`}
+      <ServerProviderStatus
+        enabled={serverMode}
+        service={selectedService}
+        profileId={serverSession?.profileId ?? null}
+        role={serverSession?.role ?? null}
+        isKid={kidProfile}
+        loadStatus={loadSavedProviderStatus}
+        refreshVersion={providerStatusRevision}
       >
-        <SecretInput
-          value={tokenFor(selectedService)}
-          onChange={(e) => setToken(selectedService, e.target.value)}
-          placeholder="API token"
-        />
-      </Field>
-
-      <div className="settings-provider-check" aria-live="polite">
-        <button
-          type="button"
-          className="btn"
-          onClick={() => void testConnection()}
-          disabled={
-            tokenFor(selectedService).trim().length === 0 ||
-            connectionState === "testing"
-          }
+        <Field
+          label={`${DebridServiceType.displayName(selectedService)} token`}
+          hint={serverMode
+            ? "Stored tokens are never sent to this device. Leave this blank to keep the saved credential. Saving a new token creates or replaces this profile's override."
+            : "Paste the API token for this provider."}
+          helpUrl={signupUrl(DEBRID_SIGNUP_ID[selectedService]) ?? undefined}
+          helpLabel={`Find your ${DebridServiceType.displayName(selectedService)} token`}
         >
-          {connectionState === "testing" ? "Checking…" : "Test connection"}
-        </button>
-        {connectionState === "valid" && (
-          <span className="settings-provider-result is-valid">
-            <Icon name="check" size={14} /> Connected
-          </span>
-        )}
-        {connectionState === "failed" && (
-          <span className="settings-provider-result is-error">
-            Connection failed. Refresh the token or try again.
-          </span>
-        )}
-      </div>
+          <SecretInput
+            value={tokenFor(selectedService)}
+            onChange={(e) => setToken(selectedService, e.target.value)}
+            placeholder="API token"
+          />
+        </Field>
 
-      {draft.debridTokens.length > 0 && (
-        <div className="settings-url-list">
-          {draft.debridTokens.map((token, index) => (
-            <button
-              key={token.service}
-              type="button"
-              className="chip"
-              onClick={() => setSelectedService(token.service)}
-            >
-              {index + 1}. {DebridServiceType.displayName(token.service)}
-            </button>
-          ))}
+        <div className="settings-provider-check" aria-live="polite">
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void testConnection()}
+            disabled={
+              tokenFor(selectedService).trim().length === 0 ||
+              connectionState === "testing"
+            }
+          >
+            {connectionState === "testing" ? "Checking…" : serverMode ? "Test new token" : "Test connection"}
+          </button>
+          {connectionState === "valid" && (
+            <span className="settings-provider-result is-valid">
+              <Icon name="check" size={14} /> {serverMode
+                ? "The provider accepted this new token. Save changes to use it for this profile."
+                : "Connected"}
+            </span>
+          )}
+          {connectionState === "failed" && (
+            <span className="settings-provider-result is-error">
+              {serverMode
+                ? "This new token could not be verified. The saved credential was not tested or changed."
+                : "Connection failed. Refresh the token or try again."}
+            </span>
+          )}
         </div>
-      )}
+
+        {draft.debridTokens.length > 0 && (
+          <div className="settings-url-list">
+            {draft.debridTokens.map((token, index) => (
+              <button
+                key={token.service}
+                type="button"
+                className="chip"
+                onClick={() => setSelectedService(token.service)}
+              >
+                {index + 1}. {DebridServiceType.displayName(token.service)}
+              </button>
+            ))}
+          </div>
+        )}
+      </ServerProviderStatus>
     </div>
   );
 }

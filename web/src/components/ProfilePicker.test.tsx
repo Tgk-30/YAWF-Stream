@@ -158,6 +158,26 @@ describe("ProfilePicker grid", () => {
 });
 
 describe("ProfilePicker switch", () => {
+  it("preserves the server kid restriction when switching profiles", async () => {
+    switchAccountProfile.mockResolvedValue({
+      session: { profileId: "p3", username: "kiddo", displayName: "Kiddo", role: "member", avatarColor: null, simpleMode: true, isKid: true },
+      profiles: { profiles: [ALICE, BOB, KID], activeProfileId: "p3" },
+    });
+    render(<ProfilePicker onClose={vi.fn()} />);
+    await userEvent.click(screen.getByText("Kiddo"));
+    await waitFor(() => expect(setSession).toHaveBeenCalledWith(expect.objectContaining({ profileId: "p3", isKid: true })));
+  });
+
+  it("keeps the target kid restriction when an older switch response omits it", async () => {
+    switchAccountProfile.mockResolvedValue({
+      session: { profileId: "p3", username: "kiddo", displayName: "Kiddo", role: "member", avatarColor: null, simpleMode: true },
+      profiles: { profiles: [ALICE, BOB, KID], activeProfileId: "p3" },
+    });
+    render(<ProfilePicker onClose={vi.fn()} />);
+    await userEvent.click(screen.getByText("Kiddo"));
+    await waitFor(() => expect(setSession).toHaveBeenCalledWith(expect.objectContaining({ profileId: "p3", isKid: true })));
+  });
+
   it("switches to a non-active profile: reloads data, sets session+profiles, closes", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -186,6 +206,7 @@ describe("ProfilePicker switch", () => {
       role: "member",
       avatarColor: "#22c55e",
       simpleMode: true,
+      isKid: false,
     });
     expect(setProfiles).toHaveBeenCalledWith([ALICE, BOB, KID]);
   });
@@ -539,6 +560,20 @@ describe("ProfilePicker delete (two-step)", () => {
         expect.objectContaining({ profileId: "p1", displayName: "Alice" }),
       ),
     );
+  });
+
+  it("preserves the kid restriction on the active-profile deletion fallback", async () => {
+    mockSession = { profileId: "p2" };
+    deleteAccountProfile.mockResolvedValue({ ok: true, profiles: [KID] });
+    switchAccountProfile.mockResolvedValue({
+      session: { profileId: "p3", username: "kiddo", displayName: "Kiddo", role: "member", avatarColor: null, simpleMode: true, isKid: true },
+      profiles: { profiles: [KID], activeProfileId: "p3" },
+    });
+    render(<ProfilePicker onClose={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Manage profiles" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete Bob" }));
+    await userEvent.click(within(screen.getByRole("group", { name: "Delete Bob?" })).getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(setSession).toHaveBeenCalledWith(expect.objectContaining({ profileId: "p3", isKid: true })));
   });
 
   it("surfaces an error when delete itself fails", async () => {

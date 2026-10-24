@@ -1006,6 +1006,7 @@ export async function switchAccountProfile(
     role: "owner" | "admin" | "member" | "restricted";
     username: string;
     simpleMode: boolean;
+    isKid?: boolean;
   } | null;
   profiles: AccountProfileState | null;
 }> {
