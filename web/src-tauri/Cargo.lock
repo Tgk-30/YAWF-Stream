@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "debridstreamer"
-version = "2.3.49"
+version = "2.3.50"
 dependencies = [
  "dirs 6.0.0",
  "dispatch2",
