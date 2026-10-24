@@ -2665,6 +2665,7 @@ function WebviewPlayer({
   playerPreferencesRef.current = playerPreferences;
   const appliedHlsAudioPreferenceRef = useRef(false);
   const appliedBrowserAudioPreferenceRef = useRef(false);
+  const reconcilingBrowserAudioSelectionRef = useRef(false);
   const audioPreferenceRef = useRef<AudioPreference>({ id: null, language: null });
   const serverAudioModeRef = useRef(serverOptimized?.loadAudioTracks != null);
   serverAudioModeRef.current = serverOptimized?.loadAudioTracks != null;
@@ -3533,6 +3534,7 @@ function WebviewPlayer({
     setBrowserAudioTracks([]);
     setBrowserAudioTrack(-1);
     setBrowserAudioApiAvailable(listEventsAvailable);
+    reconcilingBrowserAudioSelectionRef.current = false;
     if (list == null || !listEventsAvailable) return;
 
     const trackAt = (index: number): BrowserAudioTrack | null =>
@@ -3556,21 +3558,45 @@ function WebviewPlayer({
       return next;
     };
     const selectTrack = (index: number, available: HlsAudioChoice[]) => {
-      for (let candidate = 0; candidate < list.length; candidate += 1) {
-        const track = trackAt(candidate);
-        if (track != null) track.enabled = candidate === index;
-      }
       const selected = available.find((track) => track.index === index) ?? null;
       setBrowserAudioTrack(selected?.index ?? -1);
       audioPreferenceRef.current = {
         id: selected?.id ?? null,
         language: selected?.language ?? null,
       };
+      reconcilingBrowserAudioSelectionRef.current = true;
+      try {
+        for (let candidate = 0; candidate < list.length; candidate += 1) {
+          const track = trackAt(candidate);
+          const shouldEnable = candidate === index;
+          if (track != null && track.enabled !== shouldEnable) {
+            track.enabled = shouldEnable;
+          }
+        }
+      } finally {
+        reconcilingBrowserAudioSelectionRef.current = false;
+      }
     };
     const sync = () => {
+      if (reconcilingBrowserAudioSelectionRef.current) return;
       const available = choices();
       setBrowserAudioTracks(available);
-      let selected = available.find((choice) => trackAt(choice.index)?.enabled) ?? null;
+      const enabled = available.filter((choice) => trackAt(choice.index)?.enabled);
+      let selected = enabled[0] ?? null;
+      if (enabled.length > 1 && appliedBrowserAudioPreferenceRef.current) {
+        const preference = audioPreferenceRef.current;
+        const previous =
+          available.find((track) => track.id === preference.id) ??
+          findPreferredLanguageMatch(
+            preference.language,
+            available,
+            (track) => track.language,
+          );
+        if (previous != null) {
+          selectTrack(previous.index, available);
+          return;
+        }
+      }
       if (!appliedBrowserAudioPreferenceRef.current && available.length > 0) {
         const preferences = playerPreferencesRef.current;
         const perTitlePrefs = preferences?.rememberPerTitleTrackChoices === false
@@ -3596,7 +3622,7 @@ function WebviewPlayer({
         if (match != null) {
           appliedBrowserAudioPreferenceRef.current = true;
           selectTrack(match.index, available);
-          selected = match;
+          return;
         }
       }
       setBrowserAudioTrack(selected?.index ?? -1);
@@ -3612,6 +3638,7 @@ function WebviewPlayer({
     list.addEventListener("change", sync);
     video.addEventListener("loadedmetadata", sync);
     return () => {
+      reconcilingBrowserAudioSelectionRef.current = false;
       list.removeEventListener("addtrack", sync);
       list.removeEventListener("removetrack", sync);
       list.removeEventListener("change", sync);
@@ -5336,16 +5363,25 @@ function WebviewPlayer({
     const video = videoRef.current as BrowserAudioVideoElement | null;
     const list = video?.audioTracks;
     if (list == null) return;
-    for (let index = 0; index < list.length; index += 1) {
-      const track = list[index] ?? list.item?.(index) ?? null;
-      if (track != null) track.enabled = index === next;
-    }
     const selected = browserAudioTracks.find((track) => track.index === next) ?? null;
+    appliedBrowserAudioPreferenceRef.current = true;
     setBrowserAudioTrack(selected?.index ?? -1);
     audioPreferenceRef.current = {
       id: selected?.id ?? null,
       language: selected?.language ?? null,
     };
+    reconcilingBrowserAudioSelectionRef.current = true;
+    try {
+      for (let index = 0; index < list.length; index += 1) {
+        const track = list[index] ?? list.item?.(index) ?? null;
+        const shouldEnable = index === next;
+        if (track != null && track.enabled !== shouldEnable) {
+          track.enabled = shouldEnable;
+        }
+      }
+    } finally {
+      reconcilingBrowserAudioSelectionRef.current = false;
+    }
   };
 
   const changeServerAudioTrack = (next: number) => {
