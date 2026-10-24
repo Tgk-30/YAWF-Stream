@@ -7422,6 +7422,129 @@ describe("HLS source attach", () => {
     expect(screen.getByRole("button", { name: "French" })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("reconciles a duplicate native selection to the prior preference without trapping later native choices", async () => {
+    type MutableAudioTrack = {
+      id: string;
+      label: string;
+      language: string;
+      enabled: boolean;
+      readonly writes: number;
+      setNativeEnabled(value: boolean): void;
+    };
+    const nativeList = () => {
+      const events = new EventTarget();
+      const makeTrack = (
+        id: string,
+        label: string,
+        language: string,
+        initialEnabled: boolean,
+      ): MutableAudioTrack => {
+        let enabled = initialEnabled;
+        let writes = 0;
+        return {
+          id,
+          label,
+          language,
+          get enabled() { return enabled; },
+          set enabled(value: boolean) {
+            writes += 1;
+            if (writes > 8) throw new Error("native audio reconciliation looped");
+            enabled = value;
+            events.dispatchEvent(new Event("change"));
+          },
+          get writes() { return writes; },
+          setNativeEnabled(value: boolean) { enabled = value; },
+        };
+      };
+      const english = makeTrack("en", "English", "eng", true);
+      const french = makeTrack("fr", "French", "fra", false);
+      const tracks = Object.assign(events, {
+        0: english,
+        1: french,
+        length: 2,
+        item(index: number) {
+          return this[index as 0 | 1] ?? null;
+        },
+      });
+      return { tracks, english, french };
+    };
+
+    const preferred = nativeList();
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", {
+      configurable: true,
+      get: () => preferred.tracks,
+    });
+    const onProgress = vi.fn();
+    const mounted = render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="T"
+        playerPreferences={{ defaultAudioLanguage: "French" }}
+        onProgress={onProgress}
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "French" }),
+    ).toHaveAttribute("aria-pressed", "true"));
+    expect(preferred.english.enabled).toBe(false);
+    expect(preferred.french.enabled).toBe(true);
+
+    act(() => { preferred.english.enabled = true; });
+    expect(preferred.english.enabled).toBe(false);
+    expect(preferred.french.enabled).toBe(true);
+    expect(screen.getByRole("button", { name: "French" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(preferred.english.writes + preferred.french.writes).toBeLessThanOrEqual(4);
+
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, value: 12 },
+      duration: { configurable: true, value: 120 },
+    });
+    fireEvent.timeUpdate(video);
+    expect(onProgress).toHaveBeenLastCalledWith(
+      12,
+      120,
+      expect.objectContaining({ preferredAudioId: "fr", preferredAudioLang: "fra" }),
+    );
+
+    act(() => {
+      preferred.english.setNativeEnabled(true);
+      preferred.french.setNativeEnabled(false);
+      preferred.tracks.dispatchEvent(new Event("change"));
+    });
+    expect(preferred.english.enabled).toBe(true);
+    expect(preferred.french.enabled).toBe(false);
+    expect(screen.getByRole("button", { name: "English" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    mounted.unmount();
+
+    const unresolved = nativeList();
+    unresolved.french.setNativeEnabled(true);
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", {
+      configurable: true,
+      get: () => unresolved.tracks,
+    });
+    render(
+      <VideoPlayer
+        url="https://x/other.mp4"
+        title="Other"
+        savedPrefs={{ preferredAudioId: "missing", preferredAudioLang: "zzz" }}
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(unresolved.english.enabled).toBe(true);
+    expect(unresolved.french.enabled).toBe(true);
+    expect(unresolved.english.writes + unresolved.french.writes).toBe(0);
+  });
+
   it("expands browser-native code-only labels without changing browser track IDs", async () => {
     const tracks = Object.assign(new EventTarget(), {
       0: { id: "audio-en", label: "eng", language: "eng", enabled: true },
