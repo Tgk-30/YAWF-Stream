@@ -9,6 +9,19 @@
   max-width: 1280px;
 }
 
+/* Floating search/profile are out of flow here. The 44px clear target bounds
+   the search input and avatar; include the field's vertical padding, border
+   and a gap below its safe-area offset. Reserving the populated search height
+   also avoids moving the header when typing. Sticky search keeps its spacing. */
+@media (min-width: 951px), (min-width: 700px) and (min-height: 501px) {
+  .lib-screen {
+    --lib-floating-row-height: calc(44px + var(--sp-sm) + var(--sp-sm) + 2px);
+    padding-top: calc(
+      max(var(--sp-md), var(--safe-area-top)) + var(--lib-floating-row-height) + var(--sp-md)
+    );
+  }
+}
+
 .lib-h1 {
   margin: 0;
   font-size: 1.75rem;

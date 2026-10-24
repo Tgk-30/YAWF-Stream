@@ -75,6 +75,7 @@ const navCss = read("web/src/components/NavRail.css");
 const heroCss = read("web/src/components/HeroSpotlight.css");
 const globalSearchCss = read("web/src/components/GlobalSearch.css");
 const discoverCss = read("web/src/screens/Discover.css");
+const libraryScreensCss = read("web/src/screens/LibraryScreens.css");
 const themeCss = read("web/src/theme/theme.css");
 const moodCss = read("web/src/components/MoodStrip.css");
 const settingsCss = read("web/src/screens/Settings.css");
@@ -177,6 +178,14 @@ const phoneSearchCss = atRuleBlock(
   "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {",
 );
 const globalSearchBaseRule = ruleBlock(globalSearchCss, ".global-search");
+const libraryAbsoluteHeaderRule = ruleBlock(
+  atRuleBlock(libraryScreensCss, `${trueDesktopNavQuery} {`),
+  ".lib-screen",
+);
+const libraryPhoneRule = ruleBlock(
+  atRuleBlock(libraryScreensCss, "@media (max-width: 699px) {"),
+  ".lib-screen",
+);
 const coarseSearchCss = atRuleBlock(globalSearchCss, "@media (pointer: coarse) {");
 const coarseSearchClearRule = ruleBlock(coarseSearchCss, ".global-search-clear");
 const coarseNavCss = atRuleBlock(navCss, "@media (pointer: coarse) {");
@@ -264,6 +273,15 @@ check(
   /width:\s*44px/.test(coarseSearchClearRule) &&
     /height:\s*44px/.test(coarseSearchClearRule),
   "GlobalSearch.css must keep the clear control at least 44px square for coarse pointers.",
+);
+
+check(
+  "library headers reserve the safe floating search row without double-insetting in-flow search",
+  /--lib-floating-row-height:\s*calc\(44px\s*\+\s*var\(--sp-sm\)\s*\+\s*var\(--sp-sm\)\s*\+\s*2px\)/.test(libraryAbsoluteHeaderRule) &&
+    /padding-top:\s*calc\(\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*\+\s*var\(--lib-floating-row-height\)\s*\+\s*var\(--sp-md\)\s*\)/.test(libraryAbsoluteHeaderRule) &&
+    /padding-top:\s*calc\(64px\s*\*\s*var\(--density-scale\)\)/.test(ruleBlock(libraryScreensCss, ".lib-screen")) &&
+    /padding-top:\s*var\(--sp-lg\)/.test(libraryPhoneRule),
+  "LibraryScreens.css must reserve the safe top, 44px search/profile control, field padding/border and a gap only in absolute-search layouts; phone and short-landscape in-flow spacing must stay unchanged.",
 );
 
 check(
