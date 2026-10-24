@@ -2403,7 +2403,10 @@ export function Detail() {
                     qualities: serverOptimizedQualities,
                     loadAudioTracks: (options) =>
                       serverStreamAudioTracks(player.fallbackStream!, options),
-                    loadSourceInfo: () => serverStreamSourceInfo(player.fallbackStream!),
+                    loadSourceInfo: (options) =>
+                      options == null
+                        ? serverStreamSourceInfo(player.fallbackStream!)
+                        : serverStreamSourceInfo(player.fallbackStream!, options),
                     defaultQuality: settings.transcode
                       ? settings.dataSaver
                         ? "480p"

@@ -8,7 +8,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Suspense, startTransition, useState } from "react";
+import { StrictMode, Suspense, startTransition, useState } from "react";
 import { readFileSync } from "node:fs";
 import type {
   ServerAudioInventoryLoadOptions,
@@ -5556,6 +5556,347 @@ describe("WebviewPlayer", () => {
     expect(loadSourceInfo).toHaveBeenCalledTimes(1);
     expect(document.querySelector(".player-time")?.textContent).toContain("0:00 / --:--");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("waits five seconds, then retries source metadata once with the extended server lane across handler rerenders", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const firstHandler = vi.fn(async (options?: { retryFailed?: boolean; signal?: AbortSignal }) => {
+      if (options?.retryFailed) {
+        return {
+          durationSeconds: 596,
+          tracks: [{ index: 0, language: "eng", label: "English", default: true }],
+        };
+      }
+      throw conflict();
+    });
+    const replacementHandler = vi.fn(async () => ({ durationSeconds: 1 }));
+    const request = vi.fn();
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-409/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Retry source metadata"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: firstHandler, request }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(firstHandler).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-409/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Retry source metadata"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: replacementHandler, request }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+    expect(firstHandler).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(firstHandler).toHaveBeenCalledTimes(2);
+    expect(firstHandler.mock.calls[1]?.[0]).toMatchObject({
+      retryFailed: true,
+      signal: expect.any(AbortSignal),
+    });
+    expect(replacementHandler).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["401", 401],
+    ["403", 403],
+    ["404", 404],
+    ["410", 410],
+    ["network", undefined],
+  ])("does not retry source metadata after a %s or unknown failure", async (_label, status) => {
+    vi.useFakeTimers();
+    const loadSourceInfo = vi.fn(async () => {
+      const error = new Error("not retryable") as Error & { status?: number };
+      if (status != null) error.status = status;
+      throw error;
+    });
+    render(
+      <VideoPlayer
+        url={`https://server.example/api/stream/no-retry-${String(status)}/index.m3u8?quality=480p`}
+        engine="webview-hls-transcode"
+        title="No metadata retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(loadSourceInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels the delayed source-info retry on unmount and owner replacement", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const firstOwner = vi.fn(async () => { throw conflict(); });
+    const secondOwner = vi.fn(async () => { throw conflict(); });
+    const { unmount } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/unmount/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Unmount metadata retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: firstOwner, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(firstOwner).toHaveBeenCalledTimes(1);
+
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-a/index.m3u8?quality=480p"
+        sourceRevision={1}
+        engine="webview-hls-transcode"
+        title="Owner replacement"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: firstOwner, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-b/index.m3u8?quality=480p"
+        sourceRevision={2}
+        engine="webview-hls-transcode"
+        title="Owner replacement"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: secondOwner, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(firstOwner).toHaveBeenCalledTimes(2);
+    // The replacement owner gets its own first retry; the canceled A owner
+    // never gets one after it is replaced.
+    expect(secondOwner).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a delayed A-to-B-to-A retry result from the stale owner generation", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const retry = deferred<{ durationSeconds: number }>();
+    const loadSourceInfo = vi.fn((options?: { retryFailed?: boolean }) =>
+      options?.retryFailed ? retry.promise : Promise.reject(conflict()),
+    );
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-a/index.m3u8?quality=480p"
+        sourceRevision={1}
+        engine="webview-hls-transcode"
+        title="Stale retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(loadSourceInfo).toHaveBeenCalledTimes(2);
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-b/index.m3u8?quality=480p"
+        sourceRevision={2}
+        engine="webview-hls-transcode"
+        title="Stale retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-a/index.m3u8?quality=480p"
+        sourceRevision={1}
+        engine="webview-hls-transcode"
+        title="Stale retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => {
+      retry.resolve({ durationSeconds: 596 });
+      await retry.promise;
+    });
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / --:--");
+  });
+
+  it("adopts retried duration and audio without remounting or replacing playback", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const request = vi.fn();
+    const loadSourceInfo = vi.fn(async (options?: { retryFailed?: boolean }) => {
+      if (!options?.retryFailed) throw conflict();
+      return {
+        durationSeconds: 596,
+        tracks: [
+          { index: 0, language: "eng", label: "English", default: true },
+          { index: 1, language: "fra", label: "French", default: false },
+        ],
+      };
+    });
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/adopt/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Adopt metadata"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request }}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: Number.POSITIVE_INFINITY });
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 3 });
+    fireEvent.loadedMetadata(video);
+    fireEvent.timeUpdate(video);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:03 / 9:56");
+    expect(screen.getByTestId("scrub-bar").getAttribute("data-duration")).toBe("596");
+    const settingsButton = document.querySelector(
+      'button[aria-label="Playback settings"]',
+    ) as HTMLButtonElement;
+    fireEvent.click(settingsButton);
+    expect(screen.getByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("lets successful manual source recovery supersede the delayed automatic retry", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const loadSourceInfo = vi.fn(async () => { throw conflict(); });
+    const loadAudioTracks = vi.fn((options?: ServerAudioInventoryLoadOptions) => {
+      if (!options?.retryFailed) return Promise.reject(new Error("inventory unavailable"));
+      options?.onSourceInfo?.({
+        durationSeconds: 596,
+        tracks: [
+          { index: 0, language: "eng", label: "English", default: true },
+          { index: 1, language: "fra", label: "French", default: false },
+        ],
+      });
+      return Promise.resolve([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+    });
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/manual-recovery/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Manual metadata recovery"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, loadAudioTracks, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(loadSourceInfo).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "French" })).toBeInTheDocument();
+  });
+
+  it("stops after one failed automatic source-info retry", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const loadSourceInfo = vi.fn(async () => { throw conflict(); });
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/retry-once/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Retry once"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(65_000); });
+    expect(loadSourceInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the initial source-info result through StrictMode effect replay", async () => {
+    const sourceInfo = deferred<{
+      durationSeconds: number;
+      tracks: ServerAudioTrack[];
+    }>();
+    const loadSourceInfo = vi.fn(() => sourceInfo.promise);
+    render(
+      <StrictMode>
+        <VideoPlayer
+          url="https://server.example/api/stream/strict-source/video.mp4"
+          engine="webview-direct"
+          title="Strict source info"
+          serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+          onClose={() => {}}
+        />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(loadSourceInfo).toHaveBeenCalled());
+    await act(async () => {
+      sourceInfo.resolve({
+        durationSeconds: 596,
+        tracks: [{ index: 0, language: "eng", label: "English", default: true }],
+      });
+      await sourceInfo.promise;
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / 9:56");
+  });
+
+  it("rejects old manual A metadata after A-to-B-to-A owner reuse", async () => {
+    const oldRetry = deferred<ServerAudioTrack[]>();
+    let oldOptions: ServerAudioInventoryLoadOptions | undefined;
+    let retryCalls = 0;
+    const loadAudioTracks = vi.fn((options?: ServerAudioInventoryLoadOptions) => {
+      if (!options?.retryFailed) return Promise.reject(new Error("inventory unavailable"));
+      retryCalls += 1;
+      if (retryCalls === 1) {
+        oldOptions = options;
+        return oldRetry.promise;
+      }
+      return Promise.reject(new Error("later retry unavailable"));
+    });
+    const player = (owner: "a" | "b", revision: number) => (
+      <VideoPlayer
+        url={`https://server.example/api/stream/manual-${owner}/index.m3u8?quality=480p`}
+        sourceRevision={revision}
+        engine="webview-hls-transcode"
+        title="Manual generation fence"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request: vi.fn() }}
+        onClose={() => {}}
+      />
+    );
+    const { rerender } = render(player("a", 1));
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(oldOptions?.onSourceInfo).toBeTypeOf("function");
+
+    rerender(player("b", 2));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    rerender(player("a", 1));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    await act(async () => {
+      oldOptions!.onSourceInfo!({
+        durationSeconds: 596,
+        tracks: [{ index: 0, language: "eng", label: "English", default: true }],
+      });
+      oldRetry.resolve([{ index: 0, language: "eng", label: "English", default: true }]);
+      await oldRetry.promise;
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / --:--");
   });
 
   it("prefers an original video duration over later source metadata", async () => {

@@ -30,6 +30,7 @@ export const WEBVIEW_STARTUP_TIMEOUT_MS = 20_000;
 export const SERVER_HLS_STARTUP_TIMEOUT_MS = 45_000;
 export const WEBVIEW_FALLBACK_TIMEOUT_MS = 8_000;
 const SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS = 8_000;
+const SERVER_SOURCE_INFO_RETRY_DELAY_MS = 5_000;
 const MAX_SOURCE_DURATION_SECONDS = 86_400;
 const SERVER_OPTIMIZED_RETRY_BASE_MS = 500;
 const SERVER_OPTIMIZED_RETRY_MAX_MS = 4_000;
@@ -244,7 +245,10 @@ interface VideoPlayerProps {
     loadAudioTracks?: (
       options?: ServerAudioInventoryLoadOptions,
     ) => Promise<ServerAudioTrack[]>;
-    loadSourceInfo?: () => Promise<{
+    loadSourceInfo?: (options?: Pick<
+      ServerAudioInventoryLoadOptions,
+      "retryFailed" | "signal"
+    >) => Promise<{
       durationSeconds: number | null;
       tracks?: ServerAudioTrack[];
     }>;
@@ -558,6 +562,12 @@ function normalizedServerAudioTracks(
     seen.add(track.index);
     return true;
   }).slice(0, 32);
+}
+
+function sourceInfoHttpStatus(error: unknown): number | null {
+  if (error == null || typeof error !== "object") return null;
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" && Number.isInteger(status) ? status : null;
 }
 
 function webviewStartupTimeout(engine: PlaybackEngine, sourceUrl: string): number {
@@ -996,6 +1006,21 @@ export function VideoPlayer({
     controller: AbortController;
   } | null>(null);
   const sourceInfoLoadOwnerRef = useRef<string | null>(null);
+  const sourceInfoGenerationRef = useRef(0);
+  const sourceInfoRetryRef = useRef<{
+    owner: string;
+    generation: number;
+    timer: number | null;
+    controller: AbortController | null;
+    retryStarted: boolean;
+  } | null>(null);
+  const cancelSourceInfoRetry = useCallback((owner?: string) => {
+    const pending = sourceInfoRetryRef.current;
+    if (pending == null || (owner != null && pending.owner !== owner)) return;
+    if (pending.timer != null) window.clearTimeout(pending.timer);
+    pending.controller?.abort();
+    sourceInfoRetryRef.current = null;
+  }, []);
   // Async ownership follows the committed player, not a replacement render
   // that React can suspend or abandon while the old owner remains mounted.
   useLayoutEffect(() => {
@@ -1011,14 +1036,19 @@ export function VideoPlayer({
       optimizationRequestSequenceRef.current += 1;
       optimizationPendingRef.current?.controller.abort();
       optimizationPendingRef.current = null;
+      sourceInfoGenerationRef.current += 1;
+      sourceInfoLoadOwnerRef.current = null;
+      cancelSourceInfoRetry();
     };
-  }, []);
+  }, [cancelSourceInfoRetry]);
   useLayoutEffect(() => {
     recoveryRequestSequenceRef.current += 1;
     recoveryPendingRef.current = null;
     optimizationRequestSequenceRef.current += 1;
     optimizationPendingRef.current?.controller.abort();
     optimizationPendingRef.current = null;
+    sourceInfoGenerationRef.current += 1;
+    cancelSourceInfoRetry();
     setServerOptimizationPending(false);
     setServerOptimizationError(null);
     autoOptimizationAttemptedRef.current = null;
@@ -1027,7 +1057,7 @@ export function VideoPlayer({
     setExternalError(null);
     setServerLeaseExpired(false);
     setManualRecoveryPending(false);
-  }, [playbackOwner]);
+  }, [cancelSourceInfoRetry, playbackOwner]);
   const androidTVNative = hasAndroidTVBridge();
   const androidOnCloseRef = useRef(onClose);
   const androidOnProgressRef = useRef(onProgress);
@@ -1230,8 +1260,24 @@ export function VideoPlayer({
       durationSeconds: number | null;
       tracks?: ServerAudioTrack[];
     },
+    generation?: number,
   ) => {
-    if (!playerMountedRef.current || playbackOwnerRef.current !== owner) return;
+    if (
+      !playerMountedRef.current ||
+      playbackOwnerRef.current !== owner ||
+      (generation != null && sourceInfoGenerationRef.current !== generation)
+    ) {
+      return;
+    }
+    const pendingRetry = sourceInfoRetryRef.current;
+    if (
+      pendingRetry?.owner === owner &&
+      (generation == null || pendingRetry.generation === generation)
+    ) {
+      if (pendingRetry.timer != null) window.clearTimeout(pendingRetry.timer);
+      pendingRetry.controller?.abort();
+      sourceInfoRetryRef.current = null;
+    }
     const durationSeconds = sourceInfo.durationSeconds;
     if (
       typeof durationSeconds === "number" &&
@@ -1256,8 +1302,10 @@ export function VideoPlayer({
     }
   }, []);
   const rememberCurrentServerSourceInfo = useCallback(
-    (sourceInfo: ServerStreamSourceInfo) =>
-      rememberServerSourceInfo(playbackOwner, sourceInfo),
+    (sourceInfo: ServerStreamSourceInfo) => {
+      const generation = sourceInfoGenerationRef.current;
+      rememberServerSourceInfo(playbackOwner, sourceInfo, generation);
+    },
     [playbackOwner, rememberServerSourceInfo],
   );
 
@@ -1271,16 +1319,61 @@ export function VideoPlayer({
       return;
     }
     const owner = playbackOwner;
+    const generation = sourceInfoGenerationRef.current;
     sourceInfoLoadOwnerRef.current = owner;
+    const retry = {
+      owner,
+      generation,
+      timer: null as number | null,
+      controller: null as AbortController | null,
+      retryStarted: false,
+    };
+    sourceInfoRetryRef.current = retry;
     void promiseWithinTimeout(
-      Promise.resolve().then(loadSourceInfo),
+      Promise.resolve().then(() => loadSourceInfo()),
       SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS,
       "Source information timed out.",
     ).then((sourceInfo) => {
-      rememberServerSourceInfo(owner, sourceInfo);
-    }).catch(() => {
+      rememberServerSourceInfo(owner, sourceInfo, generation);
+    }).catch((error: unknown) => {
       // Source metadata is an optional enhancement. Playback remains usable
       // with an unknown total when probing is unavailable or times out.
+      if (
+        sourceInfoHttpStatus(error) !== 409 ||
+        sourceInfoRetryRef.current !== retry ||
+        !playerMountedRef.current ||
+        playbackOwnerRef.current !== owner ||
+        sourceInfoGenerationRef.current !== generation
+      ) {
+        if (sourceInfoRetryRef.current === retry) sourceInfoRetryRef.current = null;
+        return;
+      }
+      retry.timer = window.setTimeout(() => {
+        retry.timer = null;
+        if (
+          sourceInfoRetryRef.current !== retry ||
+          retry.retryStarted ||
+          !playerMountedRef.current ||
+          playbackOwnerRef.current !== owner ||
+          sourceInfoGenerationRef.current !== generation
+        ) {
+          return;
+        }
+        retry.retryStarted = true;
+        const controller = new AbortController();
+        retry.controller = controller;
+        // Do not wrap the server's extended retry lane in the ordinary eight
+        // second metadata budget. The server owns its 15-second retry probe.
+        void Promise.resolve().then(() => loadSourceInfo({
+          retryFailed: true,
+          signal: controller.signal,
+        })).then((sourceInfo) => {
+          rememberServerSourceInfo(owner, sourceInfo, generation);
+        }).catch(() => {
+          // A failed retry is terminal for this playback owner.
+          if (sourceInfoRetryRef.current === retry) sourceInfoRetryRef.current = null;
+        });
+      }, SERVER_SOURCE_INFO_RETRY_DELAY_MS);
     });
   }, [mode, playbackOwner, rememberServerSourceInfo, serverOptimized?.loadSourceInfo]);
 
@@ -2905,7 +2998,11 @@ function WebviewPlayer({
         ? load({
             retryFailed: true,
             signal: controller!.signal,
-            onSourceInfo: onServerSourceInfoKnown,
+            onSourceInfo: (sourceInfo) => {
+              if (serverAudioLoadSequenceRef.current === request) {
+                onServerSourceInfoKnown(sourceInfo);
+              }
+            },
           })
         : load();
     } catch {
@@ -2986,6 +3083,7 @@ function WebviewPlayer({
   ]);
 
   useEffect(() => () => {
+    serverAudioLoadSequenceRef.current += 1;
     serverAudioLoadControllerRef.current?.abort();
     serverAudioLoadControllerRef.current = null;
   }, []);

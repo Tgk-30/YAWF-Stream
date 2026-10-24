@@ -272,6 +272,40 @@ describe("Settings shell", () => {
     expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
   });
 
+  it("applies a later visible request without remounting or losing drafts", async () => {
+    mockSettings = {
+      ...defaultSettings(),
+      debridTokens: [{ service: "real_debrid", apiToken: "tok" }],
+    };
+    const { rerender } = render(<Settings />);
+    fireEvent.click(document.querySelector('button[data-tab="keys"]')!);
+    const key = screen.getByPlaceholderText("v3 API key");
+    fireEvent.change(key, { target: { value: "draft-key" } });
+
+    mockPendingSettingsSection = "debrid";
+    rerender(<Settings />);
+
+    await waitFor(() => expect(document.querySelector('button[data-tab="debrid"]')).toHaveClass("is-active"));
+    fireEvent.click(document.querySelector('button[data-tab="keys"]')!);
+    expect(screen.getByPlaceholderText("v3 API key")).toHaveValue("draft-key");
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back safely when a later request targets a hidden section from another tab", async () => {
+    mockSimpleMode = true;
+    const { rerender } = render(<Settings />);
+    fireEvent.click(document.querySelector('button[data-tab="keys"]')!);
+    expect(document.querySelector('button[data-tab="keys"]')).toHaveClass("is-active");
+
+    // Issue the hidden request on the same mounted screen while Keys is active.
+    mockPendingSettingsSection = "sources";
+    rerender(<Settings />);
+
+    await waitFor(() => expect(document.querySelector('button[data-tab="appearance"]')).toHaveClass("is-active"));
+    expect(document.querySelector('button[data-tab="sources"]')).toBeNull();
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+  });
+
   it("opens pending Providers in Simple mode once without saving settings", () => {
     mockSimpleMode = true;
     mockPendingSettingsSection = "debrid";

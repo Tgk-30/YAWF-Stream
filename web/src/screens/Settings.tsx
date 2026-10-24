@@ -469,8 +469,20 @@ export function Settings() {
   const settingsScreenRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (pendingSettingsSection != null) clearPendingSettingsSection();
-  }, [clearPendingSettingsSection, pendingSettingsSection]);
+    if (pendingSettingsSection == null) return;
+
+    // A Settings screen can remain mounted while another screen requests a
+    // category (for example, Detail -> provider setup). Apply the request to
+    // the live tab state, not only to the mount-time initializer. Hidden tabs
+    // follow the existing visible-tab fallback instead of rendering blank.
+    const requestedTab = visibleTabs({ serverMode, simpleMode }).some(
+      (candidate) => candidate.id === pendingSettingsSection,
+    )
+      ? pendingSettingsSection
+      : "appearance";
+    setTab(requestedTab);
+    clearPendingSettingsSection();
+  }, [clearPendingSettingsSection, pendingSettingsSection, serverMode, simpleMode]);
 
   // Every category is its own page-sized task. A long category must not hand
   // its scroll position to the next one, otherwise the next category opens in

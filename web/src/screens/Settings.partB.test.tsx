@@ -73,12 +73,18 @@ vi.mock("../lib/serverApi", () => ({
 let mockSettings: AppSettings;
 const updateSettings = vi.fn();
 let mockSimpleMode = false;
+let mockPendingSettingsSection: import("../lib/settingsNavigation").SettingsSection | null = null;
+const clearPendingSettingsSection = vi.fn(() => {
+  mockPendingSettingsSection = null;
+});
 
 vi.mock("../store/AppStore", () => ({
   useAppStore: () => ({
     settings: mockSettings,
     updateSettings,
     simpleMode: mockSimpleMode,
+    pendingSettingsSection: mockPendingSettingsSection,
+    clearPendingSettingsSection,
   }),
   useSimpleMode: () => mockSimpleMode,
 }));
@@ -265,9 +271,11 @@ async function gotoProvidersTab() {
 beforeEach(() => {
   mockServerMode = true;
   mockSimpleMode = false;
+  mockPendingSettingsSection = null;
   mockSettings = defaultSettings();
   routes = new Map();
   updateSettings.mockReset();
+  clearPendingSettingsSection.mockClear();
   fetchAccountProfiles.mockReset();
   setProfileMaturity.mockReset();
   exportServerPortableProfile.mockReset();
@@ -295,6 +303,22 @@ describe("Settings tab gating (Server Mode)", () => {
     seedRefresh("member");
     renderSettings();
     expect(await screen.findByRole("button", { name: "Server" })).toBeInTheDocument();
+  });
+
+  it("applies a later pending section in Server Mode without saving or clobbering drafts", async () => {
+    const view = renderSettings();
+    await userEvent.click(await screen.findByRole("button", { name: "API keys" }));
+    const key = screen.getByPlaceholderText("v3 API key");
+    await userEvent.type(key, "draft-key");
+
+    mockPendingSettingsSection = "privacy";
+    view.rerender(<Settings />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Privacy" })).toHaveClass("is-active"));
+    await userEvent.click(await screen.findByRole("button", { name: "API keys" }));
+    expect(screen.getByPlaceholderText("v3 API key")).toHaveValue("draft-key");
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+    expect(updateSettings).not.toHaveBeenCalled();
   });
 
   it("hides the Server tab in Simple mode", async () => {

@@ -210,7 +210,10 @@ const serverStreamAudioTracks = vi.fn(async (
   _stream?: unknown,
   _options?: { retryFailed?: boolean },
 ) => []);
-const serverStreamSourceInfo = vi.fn(async (_stream?: unknown) => ({
+const serverStreamSourceInfo = vi.fn(async (
+  _stream?: unknown,
+  _options?: { retryFailed?: boolean; signal?: AbortSignal },
+) => ({
   tracks: [], durationSeconds: 600,
 }));
 vi.mock("../lib/serverApi", () => ({
@@ -223,7 +226,8 @@ vi.mock("../lib/serverApi", () => ({
   serverExternalPlaybackURL: (stream: any) => serverExternalPlaybackURL(stream),
   serverStreamAudioTracks: (stream: any, options?: { retryFailed?: boolean }) =>
     serverStreamAudioTracks(stream, options),
-  serverStreamSourceInfo: (stream: any) => serverStreamSourceInfo(stream),
+  serverStreamSourceInfo: (stream: any, options?: { retryFailed?: boolean; signal?: AbortSignal }) =>
+    options == null ? serverStreamSourceInfo(stream) : serverStreamSourceInfo(stream, options),
   createRequest: (...a: unknown[]) => createRequest(...a),
   fetchServerEpisodes: (...a: unknown[]) => fetchServerEpisodes(...a),
   fetchServerSeasons: (...a: unknown[]) => fetchServerSeasons(...a),
@@ -526,9 +530,20 @@ vi.mock("../components/VideoPlayer", () => ({
       data-scrobble-episode={scrobbleContext?.episode ?? ""}
     >
       {serverOptimized?.loadSourceInfo != null && (
-        <button type="button" onClick={() => void serverOptimized.loadSourceInfo()}>
-          load-source-info
-        </button>
+        <>
+          <button type="button" onClick={() => void serverOptimized.loadSourceInfo()}>
+            load-source-info
+          </button>
+          <button
+            type="button"
+            onClick={() => void serverOptimized.loadSourceInfo({
+              retryFailed: true,
+              signal: new AbortController().signal,
+            })}
+          >
+            retry-source-info
+          </button>
+        </>
       )}
       {serverOptimized?.loadAudioTracks != null && (
         <button
@@ -2597,6 +2612,14 @@ describe("Detail play", () => {
       streamURL: "https://server.example/api/stream/session-1",
       fileName: "show.mkv",
     }));
+    await userEvent.click(screen.getByText("retry-source-info"));
+    expect(serverStreamSourceInfo).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        streamURL: "https://server.example/api/stream/session-1",
+        fileName: "show.mkv",
+      }),
+      { retryFailed: true, signal: expect.any(AbortSignal) },
+    );
     await userEvent.click(screen.getByText("retry-audio-tracks"));
     expect(serverStreamAudioTracks).toHaveBeenCalledWith(
       expect.objectContaining({
