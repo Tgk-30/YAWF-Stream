@@ -26,8 +26,8 @@ final class RuntimeExternalLegalSnapshot {
 
     static final class Diagnostics {
         private final long totalDurationMs;
-        private final long activeRootDurationMs;
-        private final int activeRootCompletedOperations;
+        private final long activeOwnershipDurationMs;
+        private final int activeOwnershipCompletedOperations;
         private final long windowEnumerationDurationMs;
         private final int windowEnumerationCompletedOperations;
         private final long windowRootsDurationMs;
@@ -42,8 +42,8 @@ final class RuntimeExternalLegalSnapshot {
 
         private Diagnostics(State state, boolean traversalComplete) {
             totalDurationMs = SystemClock.uptimeMillis() - state.startedAtMs;
-            activeRootDurationMs = state.activeRootDurationMs;
-            activeRootCompletedOperations = state.activeRootCompletedOperations;
+            activeOwnershipDurationMs = state.activeOwnershipDurationMs;
+            activeOwnershipCompletedOperations = state.activeOwnershipCompletedOperations;
             windowEnumerationDurationMs = state.windowEnumerationDurationMs;
             windowEnumerationCompletedOperations = state.windowEnumerationCompletedOperations;
             windowRootsDurationMs = state.windowRootsDurationMs;
@@ -58,8 +58,8 @@ final class RuntimeExternalLegalSnapshot {
         }
 
         long totalDurationMs() { return totalDurationMs; }
-        long activeRootDurationMs() { return activeRootDurationMs; }
-        int activeRootCompletedOperations() { return activeRootCompletedOperations; }
+        long activeOwnershipDurationMs() { return activeOwnershipDurationMs; }
+        int activeOwnershipCompletedOperations() { return activeOwnershipCompletedOperations; }
         long windowEnumerationDurationMs() { return windowEnumerationDurationMs; }
         int windowEnumerationCompletedOperations() {
             return windowEnumerationCompletedOperations;
@@ -87,7 +87,7 @@ final class RuntimeExternalLegalSnapshot {
     }
 
     private enum Stage {
-        ACTIVE_ROOT,
+        ACTIVE_OWNERSHIP,
         WINDOW_ENUMERATION,
         WINDOW_ROOT,
         CHILD_RETRIEVAL,
@@ -100,8 +100,8 @@ final class RuntimeExternalLegalSnapshot {
 
     private static final class State {
         private final long startedAtMs;
-        private long activeRootDurationMs;
-        private int activeRootCompletedOperations;
+        private long activeOwnershipDurationMs;
+        private int activeOwnershipCompletedOperations;
         private long windowEnumerationDurationMs;
         private int windowEnumerationCompletedOperations;
         private long windowRootsDurationMs;
@@ -211,16 +211,7 @@ final class RuntimeExternalLegalSnapshot {
     private static Set<AccessibilityNodeInfo> freshRoots(
             UiAutomation automation, State state) {
         Set<AccessibilityNodeInfo> roots = new LinkedHashSet<>();
-        AccessibilityNodeInfo activeRoot = perform(
-                state,
-                "active-root",
-                Stage.ACTIVE_ROOT,
-                () -> automation.getRootInActiveWindow());
-        enforceTimeBound(state);
-        if (activeRoot == null) {
-            throw state.failure("The fresh legal snapshot active root was missing");
-        }
-
+        Set<Integer> activeWindowIds = new HashSet<>();
         SparseArray<List<AccessibilityWindowInfo>> windowsByDisplay = perform(
                 state,
                 "window-enumeration",
@@ -250,12 +241,34 @@ final class RuntimeExternalLegalSnapshot {
                 if (root == null) {
                     throw state.failure("A fresh legal snapshot window root was missing");
                 }
+                boolean active = perform(
+                        state, "window-active", Stage.ACTIVE_OWNERSHIP, () -> window.isActive());
+                enforceTimeBound(state);
+                if (active) {
+                    int windowId = perform(
+                            state, "active-window-id", Stage.ACTIVE_OWNERSHIP, () -> window.getId());
+                    enforceTimeBound(state);
+                    int rootWindowId = perform(
+                            state,
+                            "active-root-window-id",
+                            Stage.ACTIVE_OWNERSHIP,
+                            () -> root.getWindowId());
+                    enforceTimeBound(state);
+                    if (rootWindowId != windowId) {
+                        throw state.failure("The fresh legal snapshot active root ownership mismatched");
+                    }
+                    activeWindowIds.add(windowId);
+                    if (activeWindowIds.size() > 1) {
+                        throw state.failure("The fresh legal snapshot active window was ambiguous");
+                    }
+                }
                 roots.add(root);
                 enforceSizeBound(state, roots.size());
             }
         }
-        roots.add(activeRoot);
-        enforceSizeBound(state, roots.size());
+        if (activeWindowIds.isEmpty()) {
+            throw state.failure("The fresh legal snapshot active window was missing");
+        }
         if (roots.isEmpty()) {
             throw state.failure("The fresh legal snapshot had no roots");
         }
@@ -301,8 +314,8 @@ final class RuntimeExternalLegalSnapshot {
 
     private static void incrementCompletedOperations(State state, Stage stage) {
         switch (stage) {
-            case ACTIVE_ROOT:
-                state.activeRootCompletedOperations++;
+            case ACTIVE_OWNERSHIP:
+                state.activeOwnershipCompletedOperations++;
                 break;
             case WINDOW_ENUMERATION:
                 state.windowEnumerationCompletedOperations++;
@@ -320,8 +333,8 @@ final class RuntimeExternalLegalSnapshot {
 
     private static void addDuration(State state, Stage stage, long durationMs) {
         switch (stage) {
-            case ACTIVE_ROOT:
-                state.activeRootDurationMs += durationMs;
+            case ACTIVE_OWNERSHIP:
+                state.activeOwnershipDurationMs += durationMs;
                 break;
             case WINDOW_ENUMERATION:
                 state.windowEnumerationDurationMs += durationMs;

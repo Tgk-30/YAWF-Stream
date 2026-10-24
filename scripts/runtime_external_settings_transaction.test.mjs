@@ -234,15 +234,18 @@ function validateLegalShape(source) {
       || !body.includes('enforceTimeBound(state)')) {
     failures.push('one-pass guard lost graph or bound checks');
   }
-  if (!roots.includes('automation.getRootInActiveWindow()')
+  if (/getRootInActiveWindow|reflect|AccessibilityService/.test(source)
       || !roots.includes('automation.getWindowsOnAllDisplays()')
       || !source.includes('window.getRoot(ROOT_PREFETCH_FLAGS)')
       || !source.includes('node.getChild(childIndex, CHILD_PREFETCH_FLAGS)')) {
     failures.push('fresh guard does not cover the UiAutomator root/window scope');
   }
-  if (roots.indexOf('roots.add(root)') < 0
-      || roots.indexOf('roots.add(root)') >= roots.indexOf('roots.add(activeRoot)')) {
-    failures.push('prefetched window roots do not win active-root deduplication');
+  if (!roots.includes('roots.add(root)') || !roots.includes('window.isActive()')
+      || !roots.includes('window.getId()') || !roots.includes('root.getWindowId()')
+      || !roots.includes('rootWindowId != windowId')
+      || !roots.includes('activeWindowIds.size() > 1')
+      || !roots.includes('activeWindowIds.isEmpty()')) {
+    failures.push('fresh guard lost exact public active-window ownership');
   }
   if (!source.includes('Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU')
       || !source.includes('FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST')
@@ -257,8 +260,8 @@ function validateLegalShape(source) {
     failures.push('fresh guard bounds changed');
   }
   for (const field of [
-    'activeRootDurationMs',
-    'activeRootCompletedOperations',
+    'activeOwnershipDurationMs',
+    'activeOwnershipCompletedOperations',
     'windowEnumerationDurationMs',
     'windowEnumerationCompletedOperations',
     'windowRootsDurationMs',
@@ -280,7 +283,9 @@ function validateLegalShape(source) {
     failures.push('failed traversal is not explicitly marked incomplete');
   }
   for (const postOperationCheck of [
-    '() -> automation.getRootInActiveWindow());\n        enforceTimeBound(state);',
+    '() -> window.isActive());\n                enforceTimeBound(state);',
+    '() -> window.getId());\n                    enforceTimeBound(state);',
+    '() -> root.getWindowId());\n                    enforceTimeBound(state);',
     '() -> automation.getWindowsOnAllDisplays());\n        enforceTimeBound(state);',
     '() -> freshWindowRoot(window));\n                enforceTimeBound(state);',
     '() -> freshChild(node, currentChildIndex));\n                    enforceTimeBound(state);',
@@ -333,14 +338,16 @@ import java.util.List;
 public final class SparseArray<T> {
     private final List<Integer> keys = new ArrayList<>();
     private final List<T> values = new ArrayList<>();
+    public int sizeReads;
+    public int valueReads;
     public void put(int key, T value) {
         int existing = keys.indexOf(key);
         if (existing >= 0) values.set(existing, value);
         else { keys.add(key); values.add(value); }
     }
-    public int size() { return values.size(); }
+    public int size() { sizeReads++; return values.size(); }
     public int keyAt(int index) { return keys.get(index); }
-    public T valueAt(int index) { return values.get(index); }
+    public T valueAt(int index) { valueReads++; return values.get(index); }
 }
 `;
 
@@ -358,6 +365,8 @@ public class AccessibilityNodeInfo {
     public static final int FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST = 16;
     public static final int FLAG_PREFETCH_UNINTERRUPTIBLE = 32;
     public final String id;
+    public int windowId;
+    public long windowIdCostMs;
     public boolean visible = true;
     public CharSequence text;
     public CharSequence description;
@@ -370,7 +379,8 @@ public class AccessibilityNodeInfo {
     public int lastChildFlags = -1;
     public final List<AccessibilityNodeInfo> children = new ArrayList<>();
     private final Map<Integer, Integer> childReads = new HashMap<>();
-    public AccessibilityNodeInfo(String id) { this.id = id; }
+    public AccessibilityNodeInfo(String id) { this.id = id; this.windowId = id.hashCode(); }
+    public int getWindowId() { SystemClock.advance(windowIdCostMs); return windowId; }
     private void before(String operation) {
         if (!prefetched) SystemClock.advance(accessCostMs);
         if (operation.equals(failureOperation)) {
@@ -424,12 +434,21 @@ const accessibilityWindowStub = `package android.view.accessibility;
 import android.os.SystemClock;
 public class AccessibilityWindowInfo {
     public AccessibilityNodeInfo root;
+    public Boolean active;
+    public int id;
+    public long activeCostMs;
+    public long idCostMs;
     public long accessCostMs;
     public boolean fail;
     public int legacyRootCalls;
     public int flaggedRootCalls;
     public int lastRootFlags = -1;
-    public AccessibilityWindowInfo(AccessibilityNodeInfo root) { this.root = root; }
+    public AccessibilityWindowInfo(AccessibilityNodeInfo root) {
+        this.root = root;
+        this.id = root == null ? 0 : root.windowId;
+    }
+    public boolean isActive() { SystemClock.advance(activeCostMs); return Boolean.TRUE.equals(active); }
+    public int getId() { SystemClock.advance(idCostMs); return id; }
     public AccessibilityNodeInfo getRoot() {
         SystemClock.advance(accessCostMs);
         legacyRootCalls++;
@@ -463,6 +482,8 @@ public class UiAutomation {
     public String failureOperation;
     public int activeRootCalls;
     public int windowsCalls;
+    public int windowListSizeReadsAtReturn;
+    public int windowListValueReadsAtReturn;
     public int clearCalls;
     public boolean clearResult = true;
     public boolean clearCache() {
@@ -486,6 +507,17 @@ public class UiAutomation {
         if ("windows".equals(failureOperation)) {
             throw new IllegalStateException("RAW_UI_SENTINEL");
         }
+        for (int display = 0; display < windows.size(); display++) {
+            List<AccessibilityWindowInfo> list = windows.valueAt(display);
+            if (list == null) continue;
+            for (AccessibilityWindowInfo window : list) {
+                if (window != null && window.active == null) {
+                    window.active = window.root != null && window.root.equals(activeRoot);
+                }
+            }
+        }
+        windowListSizeReadsAtReturn = windows.sizeReads;
+        windowListValueReadsAtReturn = windows.valueReads;
         return windows;
     }
 }
@@ -1028,7 +1060,7 @@ public final class RuntimeExternalLegalSnapshotHarness {
                 () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
                         automation, BINDING_TERMS),
                 "second visible window root");
-        check(automation.activeRootCalls == 1 && automation.windowsCalls == 1,
+        check(automation.activeRootCalls == 0 && automation.windowsCalls == 1,
                 "fresh root acquisition count changed");
     }
 
@@ -1137,22 +1169,22 @@ public final class RuntimeExternalLegalSnapshotHarness {
         reset();
         AccessibilityNodeInfo activeRoot = node("active-root-result");
         UiAutomation activeAutomation = automation(activeRoot, activeRoot);
-        activeAutomation.activeRootCostMs = 1_001L;
+        activeAutomation.windows.valueAt(0).get(0).activeCostMs = 1_001L;
         RuntimeExternalLegalSnapshot.Diagnostics active = expectSnapshotFailure(
                 () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
                         activeAutomation, BINDING_TERMS),
-                "delayed active root").diagnostics();
-        check(active.activeRootDurationMs() == 1_001L
-                        && active.activeRootCompletedOperations() == 1,
-                "active-root diagnostics did not retain the completed delayed call");
-        check(active.windowEnumerationCompletedOperations() == 0
+                "delayed active ownership").diagnostics();
+        check(active.activeOwnershipDurationMs() == 1_001L
+                        && active.activeOwnershipCompletedOperations() == 1,
+                "active-ownership diagnostics did not retain the completed delayed call");
+        check(active.windowEnumerationCompletedOperations() == 1
                         && active.visitedNodes() == 0,
-                "active-root diagnostics advanced beyond the failed deadline");
-        check("active-root".equals(active.lastOperation())
+                "active-ownership diagnostics advanced beyond the failed deadline");
+        check("window-active".equals(active.lastOperation())
                         && active.lastOperationCompleted()
                         && active.lastOperationDurationMs() == 1_001L
                         && !active.traversalComplete(),
-                "active-root failure diagnostics were incomplete");
+                "active-ownership failure diagnostics were incomplete");
 
         reset();
         AccessibilityNodeInfo enumerationRoot = node("window-enumeration-result");
@@ -1162,7 +1194,7 @@ public final class RuntimeExternalLegalSnapshotHarness {
                 () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
                         enumerationAutomation, BINDING_TERMS),
                 "delayed window enumeration").diagnostics();
-        check(enumeration.activeRootCompletedOperations() == 1
+        check(enumeration.activeOwnershipCompletedOperations() == 0
                         && enumeration.windowEnumerationDurationMs() == 1_001L
                         && enumeration.windowEnumerationCompletedOperations() == 1,
                 "window-enumeration diagnostics lost completed operations");
@@ -1220,7 +1252,7 @@ public final class RuntimeExternalLegalSnapshotHarness {
         firstRoot.children.add(firstChild);
         secondRoot.children.add(secondChild);
         UiAutomation automation = new UiAutomation();
-        automation.activeRoot = active;
+        automation.activeRoot = firstRoot;
         AccessibilityWindowInfo firstWindow = new AccessibilityWindowInfo(firstRoot);
         AccessibilityWindowInfo secondWindow = new AccessibilityWindowInfo(secondRoot);
         List<AccessibilityWindowInfo> displayZero = new ArrayList<>();
@@ -1348,11 +1380,12 @@ public final class RuntimeExternalLegalSnapshotHarness {
 `;
 }
 
-function executeLegal(source, driverSource = driver) {
+function executeLegal(source, driverSource = driver, harnessSource = null) {
   const root = mkdtempSync(join(tmpdir(), 'yawf-external-settings-legal-'));
   try {
     const sources = [
       ...androidAccessibilityStubs(root),
+      writeSource(root, 'com/yawf/runtimeinstrumentation/RuntimeExternalSettingsTransaction.java', helper),
       writeSource(
         root,
         'com/yawf/runtimeinstrumentation/RuntimeExternalLegalSnapshot.java',
@@ -1361,7 +1394,7 @@ function executeLegal(source, driverSource = driver) {
       writeSource(
         root,
         'com/yawf/runtimeinstrumentation/RuntimeExternalLegalSnapshotHarness.java',
-        legalHarnessSource(bindingPatternLiteral(driverSource)),
+        harnessSource ?? legalHarnessSource(bindingPatternLiteral(driverSource)),
       ),
     ];
     return javaCommands(
@@ -1372,6 +1405,176 @@ function executeLegal(source, driverSource = driver) {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+// Each case executes the unchanged transaction helper around the actual legal
+// helper. The adapter stubs model public Android calls, including late returns;
+// these are behavioral controls, not device timing or regex-only assertions.
+const ownershipCases = [
+  ['one active window without an implicit active-root request', 'automation.activeRootCostMs = 1_001L;', null],
+  ['missing active window', 'primary.active = false;', 'active window was missing'],
+  ['distinct duplicate active windows', `
+    AccessibilityNodeInfo second = new AccessibilityNodeInfo("distinct-active");
+    AccessibilityWindowInfo other = new AccessibilityWindowInfo(second);
+    other.active = true;
+    windows.add(other);`, 'active window was ambiguous'],
+  ['duplicate enumeration deduplicates only the exact window id', `
+    AccessibilityNodeInfo alias = new AccessibilityNodeInfo("fresh-same-window");
+    alias.windowId = root.windowId;
+    AccessibilityWindowInfo other = new AccessibilityWindowInfo(alias);
+    other.active = true;
+    windows.add(other);`, null],
+  ['active root window id mismatch', 'root.windowId++;', 'ownership mismatched'],
+  ['binding terms on another display', `
+    AccessibilityNodeInfo second = new AccessibilityNodeInfo("other-display");
+    second.description = "binding terms";
+    AccessibilityWindowInfo other = new AccessibilityWindowInfo(second);
+    other.active = false;
+    automation.windows.put(7, new ArrayList<>(List.of(other)));`, 'binding legal phrase'],
+  ['same active id retains every enumerated root for legal traversal', `
+    AccessibilityNodeInfo alias = new AccessibilityNodeInfo("same-id-legal");
+    alias.windowId = root.windowId;
+    alias.text = "binding terms";
+    AccessibilityWindowInfo other = new AccessibilityWindowInfo(alias);
+    other.active = true;
+    windows.add(other);`, 'binding legal phrase'],
+  ['null window', 'windows.add(null);', 'missing window'],
+  ['null root', 'primary.root = null;', 'window root was missing'],
+  ['late valid window enumeration', 'automation.windowEnumerationCostMs = 1_001L;', 'time bound', 'window-enumeration'],
+  ['late valid prefetched root', 'primary.accessCostMs = 1_001L;', 'time bound', 'window-root'],
+  ['late valid active flag', 'primary.activeCostMs = 1_001L;', 'time bound', 'window-active'],
+  ['late valid active window id', 'primary.idCostMs = 1_001L;', 'time bound', 'active-window-id'],
+  ['late valid root window id', 'root.windowIdCostMs = 1_001L;', 'time bound', 'active-root-window-id'],
+];
+
+function ownershipHarnessSource([name, configure, failure, stage]) {
+  return `package com.yawf.runtimeinstrumentation;
+import android.app.UiAutomation;
+import android.os.Build;
+import android.os.SystemClock;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
+import androidx.test.uiautomator.Configurator;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+public final class RuntimeExternalLegalSnapshotHarness {
+    private static final Pattern TERMS = Pattern.compile(${bindingPatternLiteral(driver)});
+    private static final int[] counts = new int[4];
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+    private static void zeroIdle() {
+        check(Configurator.getInstance().getWaitForIdleTimeout() == 0L,
+                "ownership transaction escaped zero idle");
+    }
+    public static void main(String[] args) {
+        Build.VERSION.SDK_INT = 36;
+        SystemClock.reset(0L);
+        Configurator.reset(7_311L);
+        UiAutomation automation = new UiAutomation();
+        AccessibilityNodeInfo root = new AccessibilityNodeInfo("primary");
+        AccessibilityWindowInfo primary = new AccessibilityWindowInfo(root);
+        primary.active = true;
+        automation.activeRoot = root;
+        List<AccessibilityWindowInfo> windows = new ArrayList<>();
+        windows.add(primary);
+        automation.windows.put(0, windows);
+        ${configure}
+        RuntimeExternalLegalSnapshot.Failure observed = null;
+        try {
+            RuntimeExternalSettingsTransaction.open(new RuntimeExternalSettingsTransaction.Environment() {
+                public boolean clearAccessibilityCache() {
+                    zeroIdle(); counts[0]++; return automation.clearCache();
+                }
+                public void assertNoOutOfScopeApproval() {
+                    zeroIdle(); counts[1]++;
+                    RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(automation, TERMS);
+                }
+                public RuntimeExternalSettingsTransaction.Observation observePlaybackSettings() {
+                    zeroIdle(); counts[2]++;
+                    return RuntimeExternalSettingsTransaction.Observation.settings(() -> {
+                        zeroIdle(); counts[3]++;
+                    });
+                }
+                public void recordTiming(String stage, long start, long end,
+                        long before, long after, boolean returned) { zeroIdle(); }
+                public void recordSettingsClickTiming(long start, long end,
+                        long before, long after, boolean returned) { zeroIdle(); }
+                public void log(String message) { zeroIdle(); }
+            }, 60_000L);
+        } catch (RuntimeExternalLegalSnapshot.Failure failure) { observed = failure; }
+        check(Configurator.getInstance().getWaitForIdleTimeout() == 7_311L,
+                "ownership transaction did not restore exact idle timeout");
+        check(counts[0] == 1 && counts[1] == 1, "ownership transaction retried its cache or guard");
+        ${failure == null ? `
+        check(observed == null, "valid windows-only ownership was rejected");
+        check(counts[2] == 1 && counts[3] == 1, "valid ownership did not permit one observation and input");
+        ` : `
+        check(observed != null, "${name} unexpectedly passed");
+        check(observed.getMessage().contains("${failure}"), "${name} failed for the wrong reason");
+        check(counts[2] == 0 && counts[3] == 0, "${name} allowed selection or input");
+        check(!observed.diagnostics().traversalComplete(), "failed ownership reported a complete traversal");
+        `}
+        ${stage == null ? '' : `
+        check("${stage}".equals(observed.diagnostics().lastOperation()),
+                "late framework result was consumed before its deadline check");
+        check(observed.diagnostics().lastOperationCompleted()
+                        && observed.diagnostics().lastOperationDurationMs() == 1_001L
+                        && observed.diagnostics().visitedNodes() == 0,
+                "late framework result lost its completed-call/incomplete-tree diagnostics");
+        `}
+        ${stage !== 'window-enumeration' ? '' : `
+        check(automation.windows.sizeReads == automation.windowListSizeReadsAtReturn
+                        && automation.windows.valueReads == automation.windowListValueReadsAtReturn,
+                "post-deadline window enumeration was consumed before refusal");
+        `}
+        check(automation.activeRootCalls == 0, "redundant implicit-HYBRID active root request was made");
+        check(automation.windowsCalls == 1, "all-display snapshot was not acquired exactly once");
+        System.out.println("OWNERSHIP_OK");
+    }
+}
+`;
+}
+
+for (const scenario of ownershipCases) {
+  test(`windows-only behavioral ownership: ${scenario[0]}`, () => {
+    const result = executeLegal(legal, driver, ownershipHarnessSource(scenario));
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /^OWNERSHIP_OK\s*$/);
+  });
+}
+
+const ownershipMutants = [
+  ['missing-active admission', 'missing active window', s => replaceUnique(s, 'if (activeWindowIds.isEmpty()) {', 'if (false) {')],
+  ['distinct-active ambiguity', 'distinct duplicate active windows', s => replaceUnique(s, 'if (activeWindowIds.size() > 1) {', 'if (false) {')],
+  ['root identity binding', 'active root window id mismatch', s => replaceUnique(s, 'if (rootWindowId != windowId) {', 'if (false) {')],
+  ['exact-id duplicate handling', 'duplicate enumeration deduplicates only the exact window id', s => replaceUnique(s, 'activeWindowIds.add(windowId);', 'activeWindowIds.add(activeWindowIds.size());')],
+  ['all-display root retention', 'binding terms on another display', s => replaceUnique(s, '                roots.add(root);', '                if (active) roots.add(root);')],
+  ['all roots sharing the active id', 'same active id retains every enumerated root for legal traversal', s => replaceUnique(s, '                    activeWindowIds.add(windowId);', '                    if (!activeWindowIds.add(windowId)) continue;')],
+  ['null window refusal', 'null window', s => replaceUnique(s, 'throw state.failure(\n                            "The fresh legal snapshot contained a missing window");', 'continue;')],
+  ['null root refusal', 'null root', s => replaceUnique(s, 'throw state.failure("A fresh legal snapshot window root was missing");', 'continue;')],
+  ...[
+    ['window-enumeration', 'late valid window enumeration', '() -> automation.getWindowsOnAllDisplays());\n        enforceTimeBound(state);'],
+    ['window-root', 'late valid prefetched root', '() -> freshWindowRoot(window));\n                enforceTimeBound(state);'],
+    ['window-active', 'late valid active flag', '() -> window.isActive());\n                enforceTimeBound(state);'],
+    ['active-window-id', 'late valid active window id', '() -> window.getId());\n                    enforceTimeBound(state);'],
+    ['active-root-window-id', 'late valid root window id', '() -> root.getWindowId());\n                    enforceTimeBound(state);'],
+  ].map(([name, scenario, check]) => [
+    `${name} immediate deadline`, scenario,
+    s => replaceUnique(s, check, check.split('\n')[0]),
+  ]),
+];
+
+for (const [name, scenarioName, mutate] of ownershipMutants) {
+  test(`windows-only behavioral negative control rejects ${name}`, () => {
+    const scenario = ownershipCases.find(([label]) => label === scenarioName);
+    assert.ok(scenario);
+    const result = executeLegal(mutate(legal), driver, ownershipHarnessSource(scenario));
+    assert.notEqual(result.status, 0, `${name} unexpectedly passed\n${result.stdout}`);
+    assert.match(result.stderr, /java\.lang\.AssertionError:/, 'mutation must compile and fail a runtime assertion');
+    assert.doesNotMatch(result.stderr, /error:|cannot find symbol/);
+  });
 }
 
 function settingsCallsiteBlock(source) {
@@ -1616,7 +1819,7 @@ final class RuntimeExternalPlayerFlowTest {
         flow.executeSettingsCallsite();
         check(flow.instrumentation.automation.clearCalls == 2,
                 "actual adapter did not delegate both cache refreshes");
-        check(flow.instrumentation.automation.activeRootCalls == 2
+        check(flow.instrumentation.automation.activeRootCalls == 0
                         && flow.instrumentation.automation.windowsCalls == 2,
                 "actual adapter did not acquire a fresh root snapshot twice");
         check(flow.device.currentPackageCalls == 2,
@@ -1716,24 +1919,24 @@ final class RuntimeExternalPlayerFlowTest {
     private static void delayedSnapshotStagesFailBeforeSelectionWithDiagnostics() {
         RuntimeExternalPlayerFlowTest activeRoot = armedFlow(7_205L);
         activeRoot.instrumentation.automation.accessCostMs = 0L;
-        activeRoot.instrumentation.automation.activeRootCostMs = 1_001L;
+        activeRoot.instrumentation.automation.windows.valueAt(0).get(0).activeCostMs = 1_001L;
         RuntimeExternalLegalSnapshot.Diagnostics active = timedGuardFailure(
-                activeRoot, "delayed active root", 7_205L);
-        check(active.activeRootDurationMs() == 1_001L
-                        && active.activeRootCompletedOperations() == 1
-                        && active.windowEnumerationCompletedOperations() == 0
-                        && "active-root".equals(active.lastOperation())
+                activeRoot, "delayed active ownership", 7_205L);
+        check(active.activeOwnershipDurationMs() == 1_001L
+                        && active.activeOwnershipCompletedOperations() == 1
+                        && active.windowEnumerationCompletedOperations() == 1
+                        && "window-active".equals(active.lastOperation())
                         && active.lastOperationCompleted()
                         && active.visitedNodes() == 0
                         && !active.traversalComplete(),
-                "delayed active-root diagnostics changed");
+                "delayed active-ownership diagnostics changed");
 
         RuntimeExternalPlayerFlowTest windowEnumeration = armedFlow(7_206L);
         windowEnumeration.instrumentation.automation.accessCostMs = 0L;
         windowEnumeration.instrumentation.automation.windowEnumerationCostMs = 1_001L;
         RuntimeExternalLegalSnapshot.Diagnostics enumeration = timedGuardFailure(
                 windowEnumeration, "delayed window enumeration", 7_206L);
-        check(enumeration.activeRootCompletedOperations() == 1
+        check(enumeration.activeOwnershipCompletedOperations() == 0
                         && enumeration.windowEnumerationDurationMs() == 1_001L
                         && enumeration.windowEnumerationCompletedOperations() == 1
                         && "window-enumeration".equals(enumeration.lastOperation())
@@ -1881,7 +2084,29 @@ final class RuntimeExternalPlayerFlowTest {
                 "final actual click timing was lost after the poll cap");
     }
 
+    private static void publicWindowOwnershipFailsBeforeActualSelection() {
+        ${ownershipCases.filter((scenario) => scenario[2] != null).map(([name, configure, failure, stage], index) => `
+        {
+            long originalIdle = ${7_400 + index}L;
+            RuntimeExternalPlayerFlowTest flow = armedFlow(originalIdle);
+            UiAutomation automation = flow.instrumentation.automation;
+            List<AccessibilityWindowInfo> windows = automation.windows.valueAt(0);
+            AccessibilityWindowInfo primary = windows.get(0);
+            AccessibilityNodeInfo root = primary.root;
+            primary.active = true;
+            ${configure}
+            RuntimeExternalLegalSnapshot.Diagnostics diagnostics = timedGuardFailure(
+                    flow, "${name}", originalIdle);
+            check(automation.activeRootCalls == 0, "actual adapter used redundant active-root acquisition");
+            ${stage == null ? '' : `check("${stage}".equals(diagnostics.lastOperation())
+                    && diagnostics.visitedNodes() == 0 && diagnostics.lastOperationCompleted(),
+                    "actual adapter consumed a post-deadline framework result");`}
+        }
+        `).join('')}
+    }
+
     static void runProbe() {
+        publicWindowOwnershipFailsBeforeActualSelection();
         actualOnePassGuardBeatsThePredecessorModel();
         legalAndForegroundFailuresPrecedeSelectionAndInput();
         snapshotSafetyFailuresPrecedeSelectionAndInput();
@@ -2086,10 +2311,9 @@ test('actual driver adapter uses the real helpers and keeps selection, package, 
 });
 
 for (const [name, check] of [
-  [
-    'active-root post-operation deadline check',
-    '() -> automation.getRootInActiveWindow());\n        enforceTimeBound(state);',
-  ],
+  ['window-active post-operation deadline check', '() -> window.isActive());\n                enforceTimeBound(state);'],
+  ['active-window-id post-operation deadline check', '() -> window.getId());\n                    enforceTimeBound(state);'],
+  ['active-root-window-id post-operation deadline check', '() -> root.getWindowId());\n                    enforceTimeBound(state);'],
   [
     'window-enumeration post-operation deadline check',
     '() -> automation.getWindowsOnAllDisplays());\n        enforceTimeBound(state);',
@@ -2174,11 +2398,11 @@ for (const [name, mutate] of [
     ),
   ],
   [
-    'missing-active-root safety removal',
+    'missing-active-window safety removal',
     source => replaceUnique(
       source,
-      'if (activeRoot == null) {\n            throw state.failure("The fresh legal snapshot active root was missing");\n        }',
-      'if (activeRoot == null) {\n            return roots;\n        }',
+      'if (activeWindowIds.isEmpty()) {\n            throw state.failure("The fresh legal snapshot active window was missing");\n        }',
+      'if (activeWindowIds.isEmpty()) {\n            return roots;\n        }',
     ),
   ],
   [

@@ -1185,11 +1185,11 @@ public final class RuntimeExternalPlayerFlowTest {
             JSONObject diagnostics = new JSONObject();
             diagnostics.put("totalDurationMs", legalSnapshotFailureDiagnostics.totalDurationMs());
             diagnostics.put(
-                    "activeRootDurationMs",
-                    legalSnapshotFailureDiagnostics.activeRootDurationMs());
+                    "activeOwnershipDurationMs",
+                    legalSnapshotFailureDiagnostics.activeOwnershipDurationMs());
             diagnostics.put(
-                    "activeRootCompletedOperations",
-                    legalSnapshotFailureDiagnostics.activeRootCompletedOperations());
+                    "activeOwnershipCompletedOperations",
+                    legalSnapshotFailureDiagnostics.activeOwnershipCompletedOperations());
             diagnostics.put(
                     "windowEnumerationDurationMs",
                     legalSnapshotFailureDiagnostics.windowEnumerationDurationMs());

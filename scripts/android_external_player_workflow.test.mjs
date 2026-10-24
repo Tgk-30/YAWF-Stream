@@ -238,7 +238,13 @@ function playbackSettingsObservation(d, transactionSource, legalSource) {
     'com.google.android.packageinstaller',
     'com.android.packageinstaller',
   ]) assert.match(transactionGuard, new RegExp(`foreground\\.equals\\("${packageName.replaceAll('.', '\\.')}"\\)`));
-  assert.match(legalSource, /automation\.getRootInActiveWindow\(\)/);
+  assert.doesNotMatch(legalSource, /getRootInActiveWindow|reflect|AccessibilityService/);
+  assert.match(legalSource, /window\.isActive\(\)/);
+  assert.match(legalSource, /window\.getId\(\)/);
+  assert.match(legalSource, /root\.getWindowId\(\)/);
+  assert.match(legalSource, /rootWindowId != windowId/);
+  assert.match(legalSource, /activeWindowIds\.size\(\) > 1/);
+  assert.match(legalSource, /activeWindowIds\.isEmpty\(\)/);
   assert.match(legalSource, /automation\.getWindowsOnAllDisplays\(\)/);
   assert.match(legalSource, /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.TIRAMISU/);
   assert.match(legalSource, /AccessibilityNodeInfo\.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST/);
@@ -255,7 +261,7 @@ function playbackSettingsObservation(d, transactionSource, legalSource) {
   for (const field of [
     'legalSnapshotFailureDiagnostics',
     'totalDurationMs',
-    'activeRootCompletedOperations',
+    'activeOwnershipCompletedOperations',
     'windowEnumerationCompletedOperations',
     'windowRootsCompletedOperations',
     'childRetrievalCompletedOperations',
