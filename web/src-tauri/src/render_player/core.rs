@@ -149,6 +149,82 @@ pub struct ObserveSpec {
 pub struct PlayerState(pub std::sync::Mutex<Option<Player>>, std::sync::Mutex<()>);
 
 // ---- mpv event loop → webview events ------------------------------------
+const HOT_PROPERTY_INTERVAL: Duration = Duration::from_millis(200);
+
+#[derive(Default)]
+struct HotPropertyCoalescer {
+    last_emit: HashMap<String, Instant>,
+    pending: HashMap<String, Value>,
+}
+
+impl HotPropertyCoalescer {
+    fn is_hot(name: &str) -> bool {
+        matches!(name, "time-pos" | "demuxer-cache-time")
+    }
+
+    fn offer(&mut self, name: String, data: Value, now: Instant) -> Option<(String, Value)> {
+        if !Self::is_hot(&name) {
+            return Some((name, data));
+        }
+
+        let due = self
+            .last_emit
+            .get(&name)
+            .map(|last| now.saturating_duration_since(*last) >= HOT_PROPERTY_INTERVAL)
+            .unwrap_or(true);
+        if due {
+            self.pending.remove(&name);
+            self.last_emit.insert(name.clone(), now);
+            Some((name, data))
+        } else {
+            self.pending.insert(name, data);
+            None
+        }
+    }
+
+    fn take_due(&mut self, now: Instant) -> Vec<(String, Value)> {
+        let due_names = self
+            .pending
+            .keys()
+            .filter(|name| {
+                self.last_emit
+                    .get(*name)
+                    .map(|last| now.saturating_duration_since(*last) >= HOT_PROPERTY_INTERVAL)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        due_names
+            .into_iter()
+            .filter_map(|name| {
+                let data = self.pending.remove(&name)?;
+                self.last_emit.insert(name.clone(), now);
+                Some((name, data))
+            })
+            .collect()
+    }
+
+    fn next_wait_timeout(&self, now: Instant) -> Option<Duration> {
+        self.pending
+            .keys()
+            .map(|name| {
+                self.last_emit
+                    .get(name)
+                    .map(|last| {
+                        HOT_PROPERTY_INTERVAL.saturating_sub(now.saturating_duration_since(*last))
+                    })
+                    .unwrap_or(Duration::ZERO)
+            })
+            .min()
+    }
+
+    fn clear(&mut self) {
+        self.last_emit.clear();
+        self.pending.clear();
+    }
+}
+
 // Uses raw libmpv2-sys `mpv_wait_event` (libmpv2's safe wrapper panics on a
 // MPV_FORMAT_NONE property change, which happens routinely when a property
 // becomes unavailable). Emits `player-event` = { name, data } to the webview.
@@ -196,13 +272,17 @@ fn spawn_event_thread<R: Runtime>(
         let ctx = mpv.ctx.as_ptr();
         let mut display_width: Option<i64> = None;
         let mut display_height: Option<i64> = None;
-        let mut last_hot_emit: HashMap<String, Instant> = HashMap::new();
-        const HOT_PROPERTY_INTERVAL: Duration = Duration::from_millis(200);
+        let mut hot_properties = HotPropertyCoalescer::default();
         while !stop.load(Ordering::Acquire) {
             let mut pending_properties: HashMap<String, Value> = HashMap::new();
-            // Sleep until libmpv has an event. Player::shutdown calls mpv_wakeup
-            // after setting `stop`, so this has no teardown-latency tradeoff.
-            let mut wait_seconds = -1.0;
+            // Sleep indefinitely while idle. A suppressed hot-property update is
+            // the only reason to use a finite wait, so its latest value is emitted
+            // at the trailing 200 ms deadline even when paused mpv stays quiet.
+            // Player::shutdown still calls mpv_wakeup after setting `stop`.
+            let mut wait_seconds = hot_properties
+                .next_wait_timeout(Instant::now())
+                .map(|timeout| timeout.as_secs_f64())
+                .unwrap_or(-1.0);
             let mut shutdown = false;
             loop {
                 let ev = unsafe { &*libmpv2_sys::mpv_wait_event(ctx, wait_seconds) };
@@ -210,12 +290,16 @@ fn spawn_event_thread<R: Runtime>(
                     libmpv2_sys::mpv_event_id_MPV_EVENT_NONE => {}
                     libmpv2_sys::mpv_event_id_MPV_EVENT_SHUTDOWN => shutdown = true,
                     libmpv2_sys::mpv_event_id_MPV_EVENT_START_FILE => {
+                        pending_properties.clear();
+                        hot_properties.clear();
                         display_width = None;
                         display_height = None;
                         surface.video_file_started();
                         rp_log("RPGEO event=file-start engine=native-mpv dwidth=? dheight=?");
                     }
                     libmpv2_sys::mpv_event_id_MPV_EVENT_END_FILE => {
+                        pending_properties.clear();
+                        hot_properties.clear();
                         let ef = unsafe { &*(ev.data as *mut libmpv2_sys::mpv_event_end_file) };
                         surface.video_playback_ended();
                         rp_log(&format!(
@@ -318,24 +402,21 @@ fn spawn_event_thread<R: Runtime>(
                 wait_seconds = 0.0;
             }
 
-            let now = Instant::now();
-            for (name, data) in pending_properties {
-                let is_hot = matches!(name.as_str(), "time-pos" | "demuxer-cache-time");
-                if is_hot
-                    && last_hot_emit
-                        .get(&name)
-                        .map(|last| now.duration_since(*last) < HOT_PROPERTY_INTERVAL)
-                        .unwrap_or(false)
-                {
-                    continue;
-                }
-                if is_hot {
-                    last_hot_emit.insert(name.clone(), now);
-                }
-                let _ = app.emit("player-event", json!({ "name": name, "data": data }));
-            }
-            if shutdown {
+            if shutdown || stop.load(Ordering::Acquire) {
+                hot_properties.clear();
                 break;
+            }
+
+            let now = Instant::now();
+            let mut ready_properties = Vec::new();
+            for (name, data) in pending_properties {
+                if let Some(ready) = hot_properties.offer(name, data, now) {
+                    ready_properties.push(ready);
+                }
+            }
+            ready_properties.extend(hot_properties.take_due(now));
+            for (name, data) in ready_properties {
+                let _ = app.emit("player-event", json!({ "name": name, "data": data }));
             }
         }
         rp_log("event thread: stopped");
@@ -1508,9 +1589,243 @@ mod tests {
     use super::validate_player_command_request;
     use super::validate_stream_authorization;
     use super::validate_subtitle_payload;
+    use super::HotPropertyCoalescer;
     use super::ObserveSpec;
     use super::MAX_ACCESS_COOKIE_VALUE_BYTES;
+    use serde_json::json;
     use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn hot_property_flushes_the_final_paused_value_at_its_deadline() {
+        let start = Instant::now();
+        let mut coalescer = HotPropertyCoalescer::default();
+
+        assert_eq!(
+            coalescer.offer("time-pos".to_string(), json!(15.3), start),
+            Some(("time-pos".to_string(), json!(15.3)))
+        );
+        assert_eq!(
+            coalescer.offer(
+                "time-pos".to_string(),
+                json!(10.0),
+                start + Duration::from_millis(1)
+            ),
+            None
+        );
+        assert_eq!(
+            coalescer.next_wait_timeout(start + Duration::from_millis(1)),
+            Some(Duration::from_millis(199))
+        );
+        assert!(coalescer
+            .take_due(start + Duration::from_millis(199))
+            .is_empty());
+        assert_eq!(
+            coalescer.take_due(start + Duration::from_millis(200)),
+            vec![("time-pos".to_string(), json!(10.0))]
+        );
+        assert_eq!(coalescer.next_wait_timeout(start), None);
+    }
+
+    #[test]
+    fn hot_property_keeps_the_latest_value_at_a_continuous_rate() {
+        let start = Instant::now();
+        let mut coalescer = HotPropertyCoalescer::default();
+        assert!(coalescer
+            .offer("time-pos".to_string(), json!(0.0), start)
+            .is_some());
+
+        assert_eq!(
+            coalescer.offer(
+                "time-pos".to_string(),
+                json!(1.0),
+                start + Duration::from_millis(50)
+            ),
+            None
+        );
+        assert_eq!(
+            coalescer.offer(
+                "time-pos".to_string(),
+                json!(2.0),
+                start + Duration::from_millis(150)
+            ),
+            None
+        );
+        assert_eq!(
+            coalescer.take_due(start + Duration::from_millis(200)),
+            vec![("time-pos".to_string(), json!(2.0))]
+        );
+
+        assert_eq!(
+            coalescer.offer(
+                "time-pos".to_string(),
+                json!(3.0),
+                start + Duration::from_millis(250)
+            ),
+            None
+        );
+        assert_eq!(
+            coalescer.offer(
+                "time-pos".to_string(),
+                json!(4.0),
+                start + Duration::from_millis(350)
+            ),
+            None
+        );
+        assert!(coalescer
+            .take_due(start + Duration::from_millis(399))
+            .is_empty());
+        assert_eq!(
+            coalescer.take_due(start + Duration::from_millis(400)),
+            vec![("time-pos".to_string(), json!(4.0))]
+        );
+    }
+
+    #[test]
+    fn hot_property_deadlines_are_independent_per_property() {
+        let start = Instant::now();
+        let mut coalescer = HotPropertyCoalescer::default();
+        assert!(coalescer
+            .offer("time-pos".to_string(), json!(0.0), start)
+            .is_some());
+        assert!(coalescer
+            .offer(
+                "demuxer-cache-time".to_string(),
+                json!(20.0),
+                start + Duration::from_millis(50)
+            )
+            .is_some());
+        assert_eq!(
+            coalescer.offer(
+                "time-pos".to_string(),
+                json!(1.0),
+                start + Duration::from_millis(100)
+            ),
+            None
+        );
+        assert_eq!(
+            coalescer.offer(
+                "demuxer-cache-time".to_string(),
+                json!(21.0),
+                start + Duration::from_millis(100)
+            ),
+            None
+        );
+
+        assert_eq!(
+            coalescer.take_due(start + Duration::from_millis(200)),
+            vec![("time-pos".to_string(), json!(1.0))]
+        );
+        assert_eq!(
+            coalescer.next_wait_timeout(start + Duration::from_millis(200)),
+            Some(Duration::from_millis(50))
+        );
+        assert_eq!(
+            coalescer.take_due(start + Duration::from_millis(250)),
+            vec![("demuxer-cache-time".to_string(), json!(21.0))]
+        );
+    }
+
+    #[test]
+    fn cold_properties_emit_immediately_without_an_idle_timeout() {
+        let start = Instant::now();
+        let mut coalescer = HotPropertyCoalescer::default();
+        assert_eq!(
+            coalescer.offer("pause".to_string(), json!(true), start),
+            Some(("pause".to_string(), json!(true)))
+        );
+        assert_eq!(coalescer.next_wait_timeout(start), None);
+        assert!(coalescer
+            .take_due(start + Duration::from_secs(1))
+            .is_empty());
+    }
+
+    #[test]
+    fn clearing_for_a_file_transition_or_stop_discards_pending_values() {
+        let start = Instant::now();
+        let mut coalescer = HotPropertyCoalescer::default();
+        assert!(coalescer
+            .offer("time-pos".to_string(), json!(25.3), start)
+            .is_some());
+        assert_eq!(
+            coalescer.offer(
+                "time-pos".to_string(),
+                json!(10.0),
+                start + Duration::from_millis(1)
+            ),
+            None
+        );
+
+        coalescer.clear();
+
+        assert_eq!(coalescer.next_wait_timeout(start), None);
+        assert!(coalescer
+            .take_due(start + Duration::from_secs(1))
+            .is_empty());
+        assert_eq!(
+            coalescer.offer(
+                "time-pos".to_string(),
+                json!(0.0),
+                start + Duration::from_secs(1)
+            ),
+            Some(("time-pos".to_string(), json!(0.0)))
+        );
+    }
+
+    #[test]
+    fn actual_event_loop_wires_bounded_trailing_delivery_and_lifecycle_clears() {
+        let source = include_str!("core.rs");
+        let event_loop = source
+            .split_once("fn spawn_event_thread")
+            .expect("event thread must exist")
+            .1
+            .split_once("unsafe fn prop_data_to_json")
+            .expect("event thread boundary must exist")
+            .0;
+
+        let start_file = event_loop
+            .split_once("MPV_EVENT_START_FILE")
+            .expect("start-file handling must exist")
+            .1
+            .split_once("MPV_EVENT_END_FILE")
+            .expect("end-file handling must follow start-file")
+            .0;
+        assert!(start_file.contains("pending_properties.clear();"));
+        assert!(start_file.contains("hot_properties.clear();"));
+
+        let end_file = event_loop
+            .split_once("MPV_EVENT_END_FILE")
+            .expect("end-file handling must exist")
+            .1
+            .split_once("MPV_EVENT_PROPERTY_CHANGE")
+            .expect("property handling must follow end-file")
+            .0;
+        assert!(end_file.contains("pending_properties.clear();"));
+        assert!(end_file.contains("hot_properties.clear();"));
+
+        let compact = event_loop
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        let finite_wait = compact
+            .find("hot_properties.next_wait_timeout(Instant::now())")
+            .expect("pending hot values must set the next finite wait");
+        let stop_guard = compact
+            .find("ifshutdown||stop.load(Ordering::Acquire)")
+            .expect("shutdown and stop must guard post-drain emission");
+        let trailing_flush = compact
+            .find("ready_properties.extend(hot_properties.take_due(now));")
+            .expect("each drain must flush due trailing values");
+        let emit = compact
+            .rfind("app.emit(\"player-event\"")
+            .expect("ready properties must be emitted");
+
+        assert!(finite_wait < stop_guard);
+        assert!(stop_guard < trailing_flush);
+        assert!(trailing_flush < emit);
+        assert!(compact[stop_guard..trailing_flush].contains("hot_properties.clear();"));
+        assert!(compact[stop_guard..trailing_flush].contains("break;"));
+    }
 
     #[test]
     fn subtitle_payload_is_bounded_and_webvtt_only() {

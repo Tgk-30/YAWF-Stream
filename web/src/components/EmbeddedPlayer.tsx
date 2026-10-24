@@ -1550,7 +1550,11 @@ export function EmbeddedPlayer({
   }, [paused, ended, nudgeControls]);
 
   const seekTo = useCallback((to: number) => {
-    const next = Math.max(0, to);
+    const duration = durRef.current;
+    const upperBound = Number.isFinite(duration) && duration > 0
+      ? duration
+      : Number.POSITIVE_INFINITY;
+    const next = Math.min(upperBound, Math.max(0, to));
     posRef.current = next;
     scrubberRef.current?.updatePlayback({ pos: next }, true);
     const nextChapterIndex = chapterIndexAt(next, chaptersRef.current);
@@ -1565,12 +1569,10 @@ export function EmbeddedPlayer({
 
   const relSeek = useCallback(
     (delta: number) => {
-      setEnded(false);
-      endedRef.current = false;
-      void command("seek", [delta, "relative"]);
+      seekTo(posRef.current + delta);
       nudgeControls();
     },
-    [nudgeControls],
+    [seekTo, nudgeControls],
   );
 
   const changeVolume = useCallback((v: number) => {

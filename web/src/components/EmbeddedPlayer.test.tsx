@@ -196,6 +196,106 @@ describe("EmbeddedPlayer control geometry", () => {
   });
 });
 
+describe("EmbeddedPlayer precise native seeking", () => {
+  async function renderReadyPlayer(): Promise<void> {
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    await waitFor(() =>
+      expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("pause", false),
+    );
+  }
+
+  it("uses the paused fractional position for an exact absolute skip", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 25.3);
+    emitProperty("pause", true);
+    renderPlayerMock.command.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("seek", [15.3, "absolute"]);
+    expect(renderPlayerMock.command).not.toHaveBeenCalledWith(
+      "seek",
+      expect.arrayContaining(["relative"]),
+    );
+  });
+
+  it("accumulates repeated rapid skips from the optimistic position", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 25.3);
+    renderPlayerMock.command.mockClear();
+    const forward = screen.getByRole("button", { name: "Forward 10 seconds" });
+
+    fireEvent.click(forward);
+    fireEvent.click(forward);
+
+    expect(renderPlayerMock.command).toHaveBeenNthCalledWith(1, "seek", [35.3, "absolute"]);
+    expect(renderPlayerMock.command).toHaveBeenNthCalledWith(2, "seek", [45.3, "absolute"]);
+  });
+
+  it("clamps a backward skip at the lower boundary", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 3.25);
+    renderPlayerMock.command.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("seek", [0, "absolute"]);
+  });
+
+  it("clamps repeated forward skips at a known duration", async () => {
+    await renderReadyPlayer();
+    emitProperty("duration", 30);
+    emitProperty("time-pos", 25.3);
+    renderPlayerMock.command.mockClear();
+    const forward = screen.getByRole("button", { name: "Forward 10 seconds" });
+
+    fireEvent.click(forward);
+    fireEvent.click(forward);
+
+    expect(renderPlayerMock.command).toHaveBeenNthCalledWith(1, "seek", [30, "absolute"]);
+    expect(renderPlayerMock.command).toHaveBeenNthCalledWith(2, "seek", [30, "absolute"]);
+  });
+
+  it("keeps forward seeking available while duration is unknown", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 25.3);
+    renderPlayerMock.command.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Forward 10 seconds" }));
+
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("seek", [35.3, "absolute"]);
+  });
+
+  it("uses the absolute path for a modified keyboard skip", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 100.25);
+    renderPlayerMock.command.mockClear();
+
+    fireEvent.keyDown(window, { key: "ArrowLeft", shiftKey: true });
+
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("seek", [40.25, "absolute"]);
+  });
+
+  it("does not implicitly resume paused playback while skipping", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 25.3);
+    emitProperty("pause", true);
+    renderPlayerMock.setProperty.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Forward 10 seconds" }));
+
+    expect(renderPlayerMock.setProperty).not.toHaveBeenCalledWith("pause", false);
+    expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+  });
+});
+
 describe("EmbeddedPlayer playback controls", () => {
   it("pauses native playback before using the owned external-player handoff", async () => {
     const onOpenExternalPlayer = vi.fn(async () => {});
