@@ -9,7 +9,7 @@ on:
         required: true
         default: false
       external_player_fixture:
-        description: Test the unchanged public phone27 remote external-player flow on a fresh supported API36 emulator
+        description: Test the unchanged public phone42 remote external-player flow on a fresh supported API36 emulator
         type: boolean
         required: true
         default: false
@@ -468,16 +468,16 @@ jobs:
 
   external-player-fixture:
     if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true
-    name: Public phone27 remote external player on fresh API36
+    name: Public phone42 remote external player on fresh API36
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       EVIDENCE: android-external-player-evidence
-      PRODUCT_APK: public-phone27.apk
-      PRODUCT_SHA256: f3e983929db9fb32ed42b9779d94f2f8492c1cf4fae3e0cd29eee91a9492e0eb
-      PRODUCT_SOURCE: 9fc94a237d99b849cfc18a01085bb487915dd978
-      PRODUCT_VERSION: 2.3.27
-      PRODUCT_VERSION_CODE: "2003027"
+      PRODUCT_APK: public-phone42.apk
+      PRODUCT_SHA256: 3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c
+      PRODUCT_SOURCE: ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5
+      PRODUCT_VERSION: 2.3.42
+      PRODUCT_VERSION_CODE: "2003042"
       VLC_APK: VLC-Android-3.7.1-x86_64.apk
       VLC_URL: https://download.videolan.org/pub/videolan/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk
       VLC_CHECKSUM_URL: https://download.videolan.org/pub/videolan/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk.sha256
@@ -491,7 +491,7 @@ jobs:
       VLC_PLAYBACK_ACTIVITY: org.videolan.vlc.gui.video.VideoPlayerActivity
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       EMULATOR_SERIAL: emulator-5554
-      AVD_NAME: yawf-external-phone27-api36
+      AVD_NAME: yawf-external-phone42-api36
     steps:
       - name: Checkout runtime fixture and driver
         uses: actions/checkout@v4
@@ -511,10 +511,10 @@ jobs:
           mkdir -p "$EVIDENCE"
           test "$(git -C public-phone-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
           curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 \
-            'https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.27/YAWF.Stream_Android_2.3.27.apk' \
+            'https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.42/YAWF.Stream_Android_2.3.42.apk' \
             --output "$PRODUCT_APK"
           printf '%s  %s\n' "$PRODUCT_SHA256" "$PRODUCT_APK" | sha256sum --check -
-          test "$(wc -c < "$PRODUCT_APK" | tr -d ' ')" = 88558465
+          test "$(wc -c < "$PRODUCT_APK" | tr -d ' ')" = 88583041
           curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 \
             "$VLC_URL" --output "$VLC_APK"
           curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 30 \
@@ -527,7 +527,7 @@ jobs:
             echo "publicApkSource=$PRODUCT_SOURCE"
             echo "publicApkSha256=$PRODUCT_SHA256"
             echo "publicApkVersion=$PRODUCT_VERSION"
-            echo "interoperability=original-signed-phone27-with-current-fixture-server-and-compiled-web"
+            echo "interoperability=original-signed-phone42-with-current-fixture-server-and-compiled-web"
             echo "productionServerOrProviderProof=false"
             echo "publicOtaProof=false"
             echo "arm16KiBProof=false"
@@ -1023,7 +1023,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-phone27-external-player-runtime-evidence
+          name: android-phone42-external-player-runtime-evidence
           path: ${{ env.EVIDENCE }}
           if-no-files-found: error
           retention-days: 14

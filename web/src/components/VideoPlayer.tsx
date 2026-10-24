@@ -82,6 +82,7 @@ import { registerPlayerMount } from "../lib/attention";
 import { recordDiagnostic } from "../lib/diagnostics";
 import { mediaErrorMessage, nextHlsRecovery } from "../lib/playerReliability";
 import { findPreferredLanguageMatch } from "../lib/languagePreference";
+import { audioTrackLabel } from "../lib/audioTrackLabel";
 import { captionLayout, type CaptionRect } from "../lib/captionLayout";
 import { configuredServerURL } from "../lib/serverMode";
 import {
@@ -2927,7 +2928,11 @@ function WebviewPlayer({
           .map((track) => ({
             index: track.index,
             id: String(track.index),
-            label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
+            label: audioTrackLabel(
+              track.label,
+              track.language,
+              `Audio ${track.index + 1}`,
+            ),
             language: track.language?.trim() || null,
             isDefault: track.default,
           }));
@@ -2954,7 +2959,11 @@ function WebviewPlayer({
     const choices = normalizedServerAudioTracks(initialServerAudioTracks).map((track) => ({
       index: track.index,
       id: String(track.index),
-      label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
+      label: audioTrackLabel(
+        track.label,
+        track.language,
+        `Audio ${track.index + 1}`,
+      ),
       language: track.language?.trim() || null,
       isDefault: track.default,
     }));
@@ -3536,10 +3545,11 @@ function WebviewPlayer({
         next.push({
           index,
           id: track.id?.trim() || String(index),
-          label:
-            track.label?.trim() ||
-            track.language?.trim() ||
+          label: audioTrackLabel(
+            track.label,
+            track.language,
             `Audio ${index + 1}`,
+          ),
           language: track.language?.trim() || null,
         });
       }
@@ -4798,7 +4808,7 @@ function WebviewPlayer({
         const audioChoices = instance?.audioTracks.map((track, index) => ({
           index,
           id: String(index),
-          label: track.name || track.lang || `Audio ${index + 1}`,
+          label: audioTrackLabel(track.name, track.lang, `Audio ${index + 1}`),
           language: track.lang ?? null,
         })) ?? [];
         setHlsAudioInventoryKnown(true);
@@ -4826,7 +4836,7 @@ function WebviewPlayer({
         const audioChoices = instance?.audioTracks.map((track, index) => ({
           index,
           id: String(index),
-          label: track.name || track.lang || `Audio ${index + 1}`,
+          label: audioTrackLabel(track.name, track.lang, `Audio ${index + 1}`),
           language: track.lang ?? null,
         })) ?? [];
         setHlsAudioInventoryKnown(true);

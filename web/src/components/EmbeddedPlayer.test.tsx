@@ -477,6 +477,37 @@ describe("EmbeddedPlayer playback controls", () => {
     expect(screen.getByRole("button", { name: "Audio" })).toBeInTheDocument();
   });
 
+  it("expands native audio codes while retaining titles and subtitle labels", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 7, type: "audio", lang: "eng", title: "eng", codec: "aac", selected: true },
+      {
+        id: 9,
+        type: "audio",
+        lang: "eng",
+        title: "English commentary 5.1",
+        codec: "eac3",
+      },
+      { id: 11, type: "sub", lang: "eng", title: "eng" },
+    ]);
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 3);
+
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "English · aac" })).toBeInTheDocument();
+    const commentary = screen.getByRole("menuitemradio", {
+      name: "English commentary 5.1 · English · eac3",
+    });
+    fireEvent.click(commentary);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("aid", "9");
+
+    fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+    expect(screen.getByRole("menuitemradio", { name: "eng · ENG" })).toBeInTheDocument();
+  });
+
   it("refreshes tracks from the native track-list count event and matches a title when lang is und", async () => {
     renderPlayerMock.getProperty.mockResolvedValue([
       { id: 1, type: "audio", lang: "eng", title: "English 5.1", selected: true },
