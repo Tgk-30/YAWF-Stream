@@ -14,6 +14,7 @@ import { type BrowseContext } from "../data/browse";
 import { HeroSpotlight } from "../components/HeroSpotlight";
 import { ContinueWatchingRail } from "../components/ContinueWatchingRail";
 import { Rail } from "../components/Rail";
+import { EmptyState } from "../components/EmptyState";
 import { useAttentionParked } from "../lib/attention";
 import "./Discover.css";
 
@@ -74,6 +75,22 @@ export function Discover({ onSelect }: DiscoverProps) {
     return railsLoading ? <RailSkeleton title={title} /> : null;
   };
 
+  const hasCatalogContent =
+    data.hero != null ||
+    data.trendingMovies.length > 0 ||
+    data.trendingTV.length > 0 ||
+    data.popularMovies.length > 0 ||
+    data.topRatedMovies.length > 0 ||
+    data.nowPlayingMovies.length > 0 ||
+    data.upcomingMovies.length > 0;
+  const showEmptyCatalog =
+    !railsLoading &&
+    error == null &&
+    source !== "fixtures" &&
+    source !== "offline" &&
+    !hasCatalogContent &&
+    resumable.length === 0;
+
   return (
     <div className="discover">
       {/* The hero lives OUTSIDE the capped content column so it can truly span
@@ -133,6 +150,18 @@ export function Discover({ onSelect }: DiscoverProps) {
       )}
       {resumable.length > 0 && (
         <ContinueWatchingRail records={resumable} onResume={openDetail} />
+      )}
+      {showEmptyCatalog && (
+        <EmptyState
+          icon="discover"
+          title="Nothing to discover yet"
+          subtitle="No discovery titles are available right now. Search the catalog to find something to watch."
+          actions={
+            <button type="button" className="btn btn-prominent" onClick={() => navigate("search")}>
+              Search catalog
+            </button>
+          }
+        />
       )}
 
       <Rail

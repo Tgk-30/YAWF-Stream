@@ -125,6 +125,18 @@ function fullData(): DiscoverData {
   };
 }
 
+function emptyData(): DiscoverData {
+  return {
+    hero: null,
+    trendingMovies: [],
+    trendingTV: [],
+    popularMovies: [],
+    topRatedMovies: [],
+    nowPlayingMovies: [],
+    upcomingMovies: [],
+  };
+}
+
 function historyRecord(
   id: string,
   progress: number,
@@ -167,6 +179,7 @@ describe("Discover skeleton", () => {
     expect(container.querySelectorAll(".skel-rail")).toHaveLength(3);
     expect(container.querySelectorAll(".skel-card")).toHaveLength(18);
     expect(screen.queryByTestId("hero")).toBeNull();
+    expect(screen.queryByText("Nothing to discover yet")).toBeNull();
   });
 
   it("renders the skeleton when not loading but data is still null", () => {
@@ -177,6 +190,21 @@ describe("Discover skeleton", () => {
 });
 
 describe("Discover loaded", () => {
+  it("explains a settled empty catalog and opens Search", async () => {
+    mockDiscover = {
+      data: emptyData(),
+      loading: false,
+      railsLoading: false,
+      source: "live",
+      error: null,
+    };
+    render(<Discover />);
+
+    expect(screen.getByText("Nothing to discover yet")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Search catalog" }));
+    expect(navigate).toHaveBeenCalledWith("search");
+  });
+
   it("labels fixture content and routes to metadata settings", async () => {
     mockDiscover = {
       data: fullData(),
@@ -190,10 +218,63 @@ describe("Discover loaded", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "TMDB rejected the configured key.",
     );
+    expect(screen.getByTestId("hero")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing to discover yet")).toBeNull();
     await userEvent.click(
       screen.getByRole("button", { name: "Open metadata settings" }),
     );
     expect(navigate).toHaveBeenCalledWith("settings");
+  });
+
+  it("does not mislabel an all-empty live error as a successful empty catalog", () => {
+    mockDiscover = {
+      data: emptyData(),
+      loading: false,
+      railsLoading: false,
+      source: "live",
+      error: "Catalog request failed.",
+    };
+    render(<Discover />);
+    expect(screen.queryByText("Nothing to discover yet")).toBeNull();
+  });
+
+  it("keeps the fixture notice instead of adding the live empty explanation", () => {
+    mockDiscover = {
+      data: emptyData(),
+      loading: false,
+      railsLoading: false,
+      source: "fixtures",
+      error: null,
+    };
+    render(<Discover />);
+    expect(screen.getByRole("status")).toHaveTextContent("Sample catalog");
+    expect(screen.queryByText("Nothing to discover yet")).toBeNull();
+  });
+
+  it("keeps the offline notice instead of adding the live empty explanation", () => {
+    mockDiscover = {
+      data: emptyData(),
+      loading: false,
+      railsLoading: false,
+      source: "offline",
+      error: null,
+    };
+    render(<Discover />);
+    expect(screen.getByRole("status")).toHaveTextContent("Offline catalog");
+    expect(screen.queryByText("Nothing to discover yet")).toBeNull();
+  });
+
+  it("keeps progressive rail placeholders instead of showing an empty result", () => {
+    mockDiscover = {
+      data: emptyData(),
+      loading: false,
+      railsLoading: true,
+      source: "live",
+      error: null,
+    };
+    const { container } = render(<Discover />);
+    expect(container.querySelector(".skel-card")).not.toBeNull();
+    expect(screen.queryByText("Nothing to discover yet")).toBeNull();
   });
 
   it("shows the honest Offline state with a Downloads recovery action", async () => {
@@ -214,6 +295,7 @@ describe("Discover loaded", () => {
     mockDiscover = { data: fullData(), loading: false };
     render(<Discover />);
     expect(screen.getByTestId("hero")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing to discover yet")).toBeNull();
 
     const titles = screen.getAllByTestId("rail-title").map((n) => n.textContent);
     expect(titles).toEqual(
@@ -347,11 +429,12 @@ describe("Discover Continue Watching", () => {
   it("surfaces resumable items in the banner rail", () => {
     // 50% → resumable
     mockContinueWatching = [historyRecord("res1", 50, 100)];
-    mockDiscover = { data: fullData(), loading: false };
+    mockDiscover = { data: emptyData(), loading: false };
     render(<Discover />);
     const cw = screen.getByTestId("cw-rail");
     expect(within(cw).getByText("cw-res1")).toBeInTheDocument();
     expect(within(cw).getByTestId("cw-count").textContent).toBe("1");
+    expect(screen.queryByText("Nothing to discover yet")).toBeNull();
   });
 
   it("surfaces an explicit queued next row without treating ordinary zero progress as resumable", () => {

@@ -29,6 +29,7 @@
 }
 
 .app-content {
+  --app-content-safe-top-consumed: 0px;
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
@@ -38,6 +39,26 @@
   /* Reserve the floating rail's footprint; full-bleed media (the hero) escapes
      this with a 100vw breakout so it can reflect through the glass rail. */
   padding-left: var(--nav-safe-left);
+}
+
+/* Keep scrolled tablet PWA content below the native status bar. A physical
+   scrollport inset, not a transform, leaves fixed Detail/player surfaces in
+   viewport coordinates. Floating children subtract this already-used inset. */
+@media (display-mode: standalone) and (pointer: coarse) {
+  @media (min-width: 951px), (min-width: 700px) and (min-height: 501px) {
+    .app-content {
+      --app-content-safe-top-consumed: var(--safe-area-top);
+      margin-top: var(--app-content-safe-top-consumed);
+      height: calc(100vh - var(--app-content-safe-top-consumed));
+    }
+    /* A var() calc with an unsupported unit can invalidate the fallback at
+       computed-value time on older WebViews, so gate the dynamic unit. */
+    @supports (height: 100dvh) {
+      .app-content {
+        height: calc(100dvh - var(--app-content-safe-top-consumed));
+      }
+    }
+  }
 }
 
 .skip-to-content {

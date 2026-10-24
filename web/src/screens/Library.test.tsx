@@ -206,6 +206,7 @@ describe("Library - error", () => {
 
 describe("Library - folders + grid filtering", () => {
   it("renders a chip per non-root folder and filters the grid by folder", async () => {
+    mockWatchlist = [preview("w1", "Unrelated watchlist title")];
     listFoldersImpl = async () => [
       folder("__root__", "Root", "system_root"),
       folder("f-action", "Action"),
@@ -229,6 +230,65 @@ describe("Library - folders + grid filtering", () => {
     await userEvent.click(screen.getByRole("button", { name: "Sci-Fi" }));
     expect(screen.getByText("card:Blade Runner")).toBeInTheDocument();
     expect(screen.queryByText("card:Die Hard")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("card:Unrelated watchlist title"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps a newly created empty folder empty instead of showing the watchlist", async () => {
+    mockWatchlist = [preview("w1", "Tenet")];
+    let created = false;
+    listFoldersImpl = async () =>
+      created
+        ? [folder("__root__", "Root", "system_root"), folder("f-new", "iPad QA48")]
+        : [folder("__root__", "Root", "system_root")];
+    createFolderFn.mockImplementationOnce(async (name) => {
+      created = true;
+      return folder("f-new", String(name));
+    });
+
+    render(<Library />);
+    expect(await screen.findByText("card:Tenet")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /new folder/i }));
+    await userEvent.type(screen.getByPlaceholderText("Folder name"), "iPad QA48");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText("This folder is empty")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Save titles to “iPad QA48”/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("card:Tenet")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "View all saved" }));
+    expect(await screen.findByText("card:Tenet")).toBeInTheDocument();
+    expect(screen.getByText(/Showing your watchlist/i)).toBeInTheDocument();
+  });
+
+  it("keeps an empty folder empty when favorites are saved elsewhere", async () => {
+    mockWatchlist = [preview("w1", "Unrelated watchlist title")];
+    listFoldersImpl = async () => [
+      folder("__root__", "Root", "system_root"),
+      folder("f-action", "Action"),
+      folder("f-empty", "Empty folder"),
+    ];
+    listLibraryImpl = async () => [
+      entry("e1", "f-action", preview("m1", "Die Hard")),
+    ];
+    render(<Library />);
+    await screen.findByText("card:Die Hard");
+
+    await userEvent.click(screen.getByRole("button", { name: "Empty folder" }));
+    expect(screen.getByText("This folder is empty")).toBeInTheDocument();
+    expect(screen.queryByText("card:Die Hard")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("card:Unrelated watchlist title"),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "View all saved" }));
+    expect(screen.getByText("card:Die Hard")).toBeInTheDocument();
+    expect(
+      screen.queryByText("card:Unrelated watchlist title"),
+    ).not.toBeInTheDocument();
   });
 
   it("clicking a grid card opens the detail", async () => {
@@ -256,7 +316,7 @@ describe("Library - folders + grid filtering", () => {
 });
 
 describe("Library - watchlist fallback", () => {
-  it("falls back to the watchlist with a hint when the library is empty", async () => {
+  it("falls back to the watchlist with a hint when All saved has no favorites", async () => {
     mockWatchlist = [preview("w1", "Tenet")];
     render(<Library />);
     expect(await screen.findByText("card:Tenet")).toBeInTheDocument();

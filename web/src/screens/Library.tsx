@@ -186,10 +186,12 @@ export function Library() {
       : entries.filter((e) => e.folderId === selectedFolder);
   const visiblePreviews = visible.map((e) => e.preview);
 
-  // Fall back to surfacing the watchlist when the library proper is empty, so
-  // the grid isn't hollow for a fresh user.
-  const items = visiblePreviews.length > 0 ? visiblePreviews : watchlist;
-  const showingWatchlistFallback = visiblePreviews.length === 0 && watchlist.length > 0;
+  // Surface the watchlist only for a fresh, empty library viewed from All
+  // saved. An empty folder must not borrow unrelated titles from the watchlist.
+  const showingWatchlistFallback =
+    selectedFolder === ALL && entries.length === 0 && watchlist.length > 0;
+  const items = showingWatchlistFallback ? watchlist : visiblePreviews;
+  const showingEmptyFolder = selectedFolder !== ALL && visible.length === 0;
   const hasEntries = entries.length > 0;
   // Finished-title check badges on the grid, from one batched history lookup.
   const watchedIds = useWatchedIds(entries);
@@ -372,6 +374,25 @@ export function Library() {
           title="Couldn't load your library"
           subtitle="Something went wrong reading your saved titles from this device. Try reopening the app."
           note={error}
+        />
+      ) : showingEmptyFolder ? (
+        <EmptyState
+          icon="library"
+          title="This folder is empty"
+          subtitle={
+            selected == null
+              ? "Save titles to this folder, or view all of your saved favorites."
+              : `Save titles to “${selected.name}”, or view all of your saved favorites.`
+          }
+          actions={
+            <button
+              type="button"
+              className="btn btn-prominent"
+              onClick={() => setSelectedFolder(ALL)}
+            >
+              View all saved
+            </button>
+          }
         />
       ) : items.length === 0 ? (
         <EmptyState

@@ -132,6 +132,18 @@ const shortLandscapeNavStart = navCss.indexOf(
 );
 const narrowNavStart = navCss.indexOf("@media (max-width: 380px)", shortLandscapeNavStart);
 const trueDesktopNavQuery = "@media (min-width: 951px), (min-width: 700px) and (min-height: 501px)";
+const standaloneCoarseAppCss = atRuleBlock(
+  appCss,
+  "@media (display-mode: standalone) and (pointer: coarse) {",
+);
+const standaloneScrollportRule = ruleBlock(
+  atRuleBlock(standaloneCoarseAppCss, `${trueDesktopNavQuery} {`),
+  ".app-content",
+);
+const standaloneDynamicScrollportRule = ruleBlock(
+  atRuleBlock(standaloneCoarseAppCss, "@supports (height: 100dvh) {"),
+  ".app-content",
+);
 const desktopBottomNavStart = navCss.indexOf(`${trueDesktopNavQuery} {`, narrowNavStart);
 const mobileNavCss = mobileNavStart >= 0 && extraCompactNavStart > mobileNavStart
   ? navCss.slice(mobileNavStart, extraCompactNavStart)
@@ -240,6 +252,19 @@ check(
 );
 
 check(
+  "standalone coarse non-phone scrollport consumes the top inset without moving fixed overlays",
+  /--app-content-safe-top-consumed:\s*0px;/.test(appContentRule) &&
+    /--app-content-safe-top-consumed:\s*var\(--safe-area-top\);/.test(standaloneScrollportRule) &&
+    /margin-top:\s*var\(--app-content-safe-top-consumed\);/.test(standaloneScrollportRule) &&
+    /height:\s*calc\(100vh - var\(--app-content-safe-top-consumed\)\);/.test(standaloneScrollportRule) &&
+    !/100dvh/.test(standaloneScrollportRule) &&
+    /height:\s*calc\(100dvh - var\(--app-content-safe-top-consumed\)\);/.test(standaloneDynamicScrollportRule) &&
+    !/(?:transform|filter|perspective|contain|will-change|clip-path|--safe-area-top)\s*:/.test(`${appShellRule}\n${appContentRule}\n${standaloneCoarseAppCss}`) &&
+    !/(?:padding|scroll-padding)-(?:top|bottom)\s*:/.test(standaloneCoarseAppCss),
+  "App.css must physically inset only standalone coarse non-phone scrollports, keep legacy height fallback and fixed viewport coordinates, and leave global insets/nav reserves untouched.",
+);
+
+check(
   "short landscape phones cannot inherit the desktop side gutter",
   /@media\s*\(min-width:\s*700px\)\s*and\s*\(max-width:\s*950px\)\s*and\s*\(max-height:\s*500px\)[\s\S]*--nav-rail-width:\s*0px[\s\S]*--nav-safe-left:\s*0px/.test(appCss),
   "web/src/App.css must zero both desktop rail variables when the short-landscape bottom nav is active.",
@@ -262,10 +287,10 @@ check(
 
 check(
   "tablet search clears the native top inset without double-insetting mobile sticky search",
-  /top:\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)/.test(globalSearchBaseRule) &&
+  /top:\s*calc\(max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*-\s*var\(--app-content-safe-top-consumed,\s*0rem\)\)/.test(globalSearchBaseRule) &&
     /position:\s*sticky/.test(ruleBlock(phoneSearchCss, ".global-search")) &&
     /top:\s*var\(--sp-sm\)/.test(ruleBlock(phoneSearchCss, ".global-search")),
-  "GlobalSearch.css must clear the native top inset in its base rule while the already-inset mobile scrollport keeps its local sticky offset.",
+  "GlobalSearch.css must subtract the consumed inset from its complete max offset while mobile sticky search keeps its local offset.",
 );
 
 check(
@@ -278,10 +303,10 @@ check(
 check(
   "library headers reserve the safe floating search row without double-insetting in-flow search",
   /--lib-floating-row-height:\s*calc\(44px\s*\+\s*var\(--sp-sm\)\s*\+\s*var\(--sp-sm\)\s*\+\s*2px\)/.test(libraryAbsoluteHeaderRule) &&
-    /padding-top:\s*calc\(\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*\+\s*var\(--lib-floating-row-height\)\s*\+\s*var\(--sp-md\)\s*\)/.test(libraryAbsoluteHeaderRule) &&
+    /padding-top:\s*calc\(\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*-\s*var\(--app-content-safe-top-consumed,\s*0rem\)\s*\+\s*var\(--lib-floating-row-height\)\s*\+\s*var\(--sp-md\)\s*\)/.test(libraryAbsoluteHeaderRule) &&
     /padding-top:\s*calc\(64px\s*\*\s*var\(--density-scale\)\)/.test(ruleBlock(libraryScreensCss, ".lib-screen")) &&
     /padding-top:\s*var\(--sp-lg\)/.test(libraryPhoneRule),
-  "LibraryScreens.css must reserve the safe top, 44px search/profile control, field padding/border and a gap only in absolute-search layouts; phone and short-landscape in-flow spacing must stay unchanged.",
+  "LibraryScreens.css must reserve the unconsumed safe offset, 44px search/profile control, field padding/border and a gap only in absolute-search layouts; phone and short-landscape in-flow spacing must stay unchanged.",
 );
 
 check(
@@ -450,8 +475,8 @@ check(
 
 check(
   "profile control clears native top and right insets",
-  /\.profile-menu\s*\{[\s\S]{0,160}top:\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)[\s\S]{0,100}right:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)/.test(profileMenuCss),
-  "ProfileMenu.css must preserve its normal spacing while keeping the avatar and popover clear of native top and right insets.",
+  /\.profile-menu\s*\{[\s\S]{0,160}top:\s*calc\(max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*-\s*var\(--app-content-safe-top-consumed,\s*0rem\)\)[\s\S]{0,100}right:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)/.test(profileMenuCss),
+  "ProfileMenu.css must subtract the consumed inset from its complete max offset, preserving normal spacing and the native right inset.",
 );
 
 check(

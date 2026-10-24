@@ -17,7 +17,8 @@
   .lib-screen {
     --lib-floating-row-height: calc(44px + var(--sp-sm) + var(--sp-sm) + 2px);
     padding-top: calc(
-      max(var(--sp-md), var(--safe-area-top)) + var(--lib-floating-row-height) + var(--sp-md)
+      max(var(--sp-md), var(--safe-area-top)) - var(--app-content-safe-top-consumed, 0rem)
+      + var(--lib-floating-row-height) + var(--sp-md)
     );
   }
 }

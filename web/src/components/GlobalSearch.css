@@ -2,7 +2,7 @@
 
 .global-search {
   position: absolute;
-  top: max(var(--sp-md), var(--safe-area-top));
+  top: calc(max(var(--sp-md), var(--safe-area-top)) - var(--app-content-safe-top-consumed, 0rem));
   /* Leave room on the right for the floating profile avatar (44px + gap). */
   right: calc(var(--sp-lg) + 44px + var(--sp-md));
   z-index: 5;
