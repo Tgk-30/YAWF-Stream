@@ -43,10 +43,21 @@ function marker(source, begin, end, indent = 10) {
 
 function workflowContract(w, j) {
   assert.match(w, /permissions:\n  contents: read\n  actions: read/);
+  assert.match(w, /description: Test the unchanged public phone42 remote external-player flow on a fresh supported API36 emulator/);
   assert.match(j, /if: github\.ref_type == 'branch' && inputs\.external_player_fixture == true && inputs\.permission_fixture != true/);
   assert.match(j, /SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64/);
-  assert.match(j, /PRODUCT_SHA256: f3e983929db9fb32ed42b9779d94f2f8492c1cf4fae3e0cd29eee91a9492e0eb/);
-  assert.match(j, /PRODUCT_SOURCE: 9fc94a237d99b849cfc18a01085bb487915dd978/);
+  assert.match(j, /name: Public phone42 remote external player on fresh API36/);
+  assert.match(j, /PRODUCT_APK: public-phone42\.apk/);
+  assert.match(j, /PRODUCT_SHA256: 3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c/);
+  assert.match(j, /PRODUCT_SOURCE: ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5/);
+  assert.match(j, /PRODUCT_VERSION: 2\.3\.42/);
+  assert.match(j, /PRODUCT_VERSION_CODE: "2003042"/);
+  assert.match(j, /AVD_NAME: yawf-external-phone42-api36/);
+  assert.match(j, /releases\/download\/android-v2\.3\.42\/YAWF\.Stream_Android_2\.3\.42\.apk/);
+  assert.match(j, /test "\$\(wc -c < "\$PRODUCT_APK" \| tr -d ' '\)" = 88583041/);
+  assert.match(j, /interoperability=original-signed-phone42-with-current-fixture-server-and-compiled-web/);
+  assert.match(j, /name: android-phone42-external-player-runtime-evidence/);
+  assert.doesNotMatch(j, /phone27|2\.3\.27|2003027|f3e983929d|9fc94a237d/);
   assert.match(j, /VLC_URL: https:\/\/download\.videolan\.org\/pub\/videolan\/vlc-android\/3\.7\.1\/VLC-Android-3\.7\.1-x86_64\.apk/);
   assert.match(j, /VLC_CHECKSUM_URL: https:\/\/download\.videolan\.org\/pub\/videolan\/vlc-android\/3\.7\.1\/VLC-Android-3\.7\.1-x86_64\.apk\.sha256/);
   assert.match(j, /VLC_SHA256: 4646633ede40c4784c5584087cffc5c60cc45b16966ae0b36cedd784d7c4a11e/);
@@ -390,7 +401,12 @@ test('fixture emits bounded token-free media and HTTP diagnostics', () => fixtur
 test('driver preserves the strict product, chooser, VLC, seek, and Back flow', () => driverContract(driver));
 
 for (const [name, original, mutate, contract] of [
-  ['product APK hash', job, s => s.replace('PRODUCT_SHA256: f3e983', 'PRODUCT_SHA256: a3e983'), s => workflowContract(workflow, s)],
+  ['product APK hash', job, s => s.replace('PRODUCT_SHA256: 3e1f72', 'PRODUCT_SHA256: ae1f72'), s => workflowContract(workflow, s)],
+  ['product source', job, s => s.replace('PRODUCT_SOURCE: ae9b35', 'PRODUCT_SOURCE: be9b35'), s => workflowContract(workflow, s)],
+  ['product version', job, s => s.replace('PRODUCT_VERSION: 2.3.42', 'PRODUCT_VERSION: 2.3.41'), s => workflowContract(workflow, s)],
+  ['product version code', job, s => s.replace('PRODUCT_VERSION_CODE: "2003042"', 'PRODUCT_VERSION_CODE: "2003041"'), s => workflowContract(workflow, s)],
+  ['product release URL', job, s => s.replace('android-v2.3.42/YAWF.Stream_Android_2.3.42.apk', 'android-v2.3.41/YAWF.Stream_Android_2.3.41.apk'), s => workflowContract(workflow, s)],
+  ['product APK size', job, s => s.replace('= 88583041', '= 1'), s => workflowContract(workflow, s)],
   ['VLC APK hash', job, s => s.replace('VLC_SHA256: 4646633e', 'VLC_SHA256: a646633e'), s => workflowContract(workflow, s)],
   ['VLC signer', job, s => s.replace('VLC_SIGNER_SHA256: c8768d2c', 'VLC_SIGNER_SHA256: a8768d2c'), s => workflowContract(workflow, s)],
   ['VLC size', job, s => s.replace('VLC_SIZE: "49444910"', 'VLC_SIZE: "1"'), s => workflowContract(workflow, s)],

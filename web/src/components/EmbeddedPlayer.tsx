@@ -39,6 +39,10 @@ import {
   normalizeLanguagePreference,
 } from "../lib/languagePreference";
 import {
+  audioTrackLabel,
+  readableAudioLanguageLabel,
+} from "../lib/audioTrackLabel";
+import {
   PlaybackStallWatchdog,
   type PlaybackStallState,
 } from "../lib/playbackStall";
@@ -310,6 +314,19 @@ function findPreferredTrack(
 
 /** A human label for a track: its title, else language, else "Track N". */
 function trackLabel(t: Track, index: number): string {
+  if (t.type === "audio") {
+    const title = audioTrackLabel(t.title, t.lang, "");
+    const rawLanguage = t.lang?.trim() ?? "";
+    const language = readableAudioLanguageLabel(rawLanguage) ?? rawLanguage.toUpperCase();
+    const bits = [title, language].filter(
+      (value, position, values) =>
+        value.length > 0 &&
+        values.findIndex((candidate) => candidate.toLowerCase() === value.toLowerCase()) === position,
+    );
+    if (bits.length === 0) bits.push(`Track ${index + 1}`);
+    const suffix = t.codec ? ` · ${t.codec}` : "";
+    return bits.join(" · ") + suffix;
+  }
   const bits: string[] = [];
   if (t.title) bits.push(t.title);
   if (t.lang) bits.push(t.lang.toUpperCase());

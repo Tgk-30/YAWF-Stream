@@ -1354,6 +1354,66 @@ describe("WebviewPlayer", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("expands code-only labels from the initial server inventory without changing track indices", async () => {
+    const loadSourceInfo = vi.fn(async () => ({
+      durationSeconds: 600,
+      tracks: [
+        { index: 0, language: "eng", label: "eng", default: true },
+        { index: 1, language: "fre", label: "fre", default: false },
+      ],
+    }));
+    const request = vi.fn(async (_quality: string, _position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&audio=${audioTrack}`,
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p"
+        title="Initial audio labels"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    const trigger = await screen.findByRole("button", { name: "Audio track, English" });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "French" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "French" }));
+
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0, 1));
+  });
+
+  it("expands asynchronously loaded server codes while preserving a custom title", async () => {
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, language: "eng", label: "eng", default: true },
+      { index: 1, language: "eng", label: "English commentary 5.1", default: false },
+      { index: 2, language: "jpn", label: "", default: false },
+    ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Loaded audio labels"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByRole("button", { name: "English" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "English commentary 5.1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Japanese" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Audio track, English" })).toBeInTheDocument();
+  });
+
   it("removes the Audio shortcut after a single-track inventory and restores Settings focus", async () => {
     const loadAudioTracks = vi.fn(async () => [
       { index: 0, language: "eng", label: "English", default: true },
@@ -7311,6 +7371,33 @@ describe("HLS source attach", () => {
     expect(screen.getByRole("button", { name: "English" })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("expands HLS code-only labels in the menu and Audio shortcut", async () => {
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "",
+    );
+    render(<VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    hlsInstances[0].audioTracks = [
+      { name: "eng", lang: "eng" },
+      { name: "fre", lang: "fre" },
+    ];
+    hlsInstances[0].audioTrack = 0;
+    const manifestHandler = hlsInstances[0].on.mock.calls.find(
+      ([event]) => event === "manifestParsed",
+    )?.[1] as (() => void) | undefined;
+    if (manifestHandler == null) throw new Error("manifest handler missing");
+    act(manifestHandler);
+
+    const trigger = screen.getByRole("button", { name: "Audio track, English" });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "English" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "French" }));
+    expect(hlsInstances[0].audioTrack).toBe(1);
+  });
+
   it("selects browser-native audio tracks when AudioTrackList is exposed", async () => {
     const tracks = Object.assign(new EventTarget(), {
       0: { id: "en", label: "English", language: "eng", enabled: true },
@@ -7333,6 +7420,33 @@ describe("HLS source attach", () => {
     expect(tracks[0].enabled).toBe(false);
     expect(tracks[1].enabled).toBe(true);
     expect(screen.getByRole("button", { name: "French" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("expands browser-native code-only labels without changing browser track IDs", async () => {
+    const tracks = Object.assign(new EventTarget(), {
+      0: { id: "audio-en", label: "eng", language: "eng", enabled: true },
+      1: { id: "audio-fr", label: "fre", language: "fre", enabled: false },
+      length: 2,
+      item(index: number) {
+        return this[index as 0 | 1] ?? null;
+      },
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", {
+      configurable: true,
+      get: () => tracks,
+    });
+
+    render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
+    const trigger = await screen.findByRole("button", { name: "Audio track, English" });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "French" }));
+
+    expect(tracks[0].enabled).toBe(false);
+    expect(tracks[1].enabled).toBe(true);
+    expect(screen.getByRole("button", { name: "French" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("explains honestly when the browser does not expose alternate audio", async () => {
