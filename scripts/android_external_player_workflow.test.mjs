@@ -229,6 +229,8 @@ function playbackSettingsObservation(d, transactionSource, legalSource) {
     'private void assertNoOutOfScopeApprovalForSettingsTransaction()',
   );
   assert.match(transactionGuard, /RuntimeExternalLegalSnapshot\.assertNoBindingTermsVisible\(\s*instrumentation\.getUiAutomation\(\), BINDING_TERMS\)/);
+  assert.match(transactionGuard, /catch \(RuntimeExternalLegalSnapshot\.Failure failure\)/);
+  assert.match(transactionGuard, /legalSnapshotFailureDiagnostics = failure\.diagnostics\(\)/);
   for (const packageName of [
     'com.android.permissioncontroller',
     'com.google.android.permissioncontroller',
@@ -238,10 +240,32 @@ function playbackSettingsObservation(d, transactionSource, legalSource) {
   ]) assert.match(transactionGuard, new RegExp(`foreground\\.equals\\("${packageName.replaceAll('.', '\\.')}"\\)`));
   assert.match(legalSource, /automation\.getRootInActiveWindow\(\)/);
   assert.match(legalSource, /automation\.getWindowsOnAllDisplays\(\)/);
+  assert.match(legalSource, /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.TIRAMISU/);
+  assert.match(legalSource, /AccessibilityNodeInfo\.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST/);
+  assert.match(legalSource, /AccessibilityNodeInfo\.FLAG_PREFETCH_UNINTERRUPTIBLE/);
+  assert.match(legalSource, /AccessibilityNodeInfo\.FLAG_PREFETCH_SIBLINGS/);
+  assert.match(legalSource, /window\.getRoot\(ROOT_PREFETCH_FLAGS\)/);
+  assert.match(legalSource, /node\.getChild\(childIndex, CHILD_PREFETCH_FLAGS\)/);
   assert.match(legalSource, /node\.isVisibleToUser\(\)/);
   assert.match(legalSource, /node\.getText\(\)/);
   assert.match(legalSource, /node\.getContentDescription\(\)/);
   assert.doesNotMatch(legalSource, /androidx\.test\.uiautomator\.(?:By|UiDevice)|findObjects?\(/);
+
+  const receipt = methodBody(d, 'private void writeReceipt(String outcome, String failure)');
+  for (const field of [
+    'legalSnapshotFailureDiagnostics',
+    'totalDurationMs',
+    'activeRootCompletedOperations',
+    'windowEnumerationCompletedOperations',
+    'windowRootsCompletedOperations',
+    'childRetrievalCompletedOperations',
+    'lastOperation',
+    'lastOperationDurationMs',
+    'lastOperationCompleted',
+    'visitedNodes',
+    'traversalComplete',
+  ]) assert.match(receipt, new RegExp(`"${field}"`));
+  assert.doesNotMatch(receipt, /getText|getContentDescription|node\.text|node\.description/);
 }
 
 function playbackSettingsPanelObservation(d) {
@@ -439,6 +463,18 @@ for (const [name, original, mutate, contract] of [
   ['ignored accessibility cache result', settingsTransaction, s => s.replace(
     'if (!cacheCleared)',
     'if (false)'), h => driverContract(driver, h)],
+  ['legal window-root prefetch removed', externalLegalSnapshot, s => s.replace(
+    'window.getRoot(ROOT_PREFETCH_FLAGS)',
+    'window.getRoot()'), h => driverContract(driver, settingsTransaction, h)],
+  ['legal API guard removed', externalLegalSnapshot, s => s.replaceAll(
+    'Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU',
+    'true'), h => driverContract(driver, settingsTransaction, h)],
+  ['legal failure diagnostics capture removed', driver, s => s.replace(
+    'legalSnapshotFailureDiagnostics = failure.diagnostics();',
+    'legalSnapshotFailureDiagnostics = null;'), driverContract],
+  ['legal traversal completion diagnostic removed', driver, s => s.replace(
+    'diagnostics.put(\n                    "traversalComplete",\n                    legalSnapshotFailureDiagnostics.traversalComplete());',
+    ''), driverContract],
   ['settings cache refresh ordering', settingsTransaction, s => s.replace(
     '                long cacheStartedAtMs = SystemClock.uptimeMillis();',
     '                environment.assertNoOutOfScopeApproval();\n                long cacheStartedAtMs = SystemClock.uptimeMillis();'), h => driverContract(driver, h)],

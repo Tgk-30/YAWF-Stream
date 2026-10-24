@@ -108,6 +108,7 @@ public final class RuntimeExternalPlayerFlowTest {
     private int captureIndex;
     private int openPlayerClicks;
     private int settingsTransactionTimingEventsOmitted;
+    private RuntimeExternalLegalSnapshot.Diagnostics legalSnapshotFailureDiagnostics;
     private long settingsClickDispatchedAtMs = -1L;
     private long settingsClickFinishedAtMs = -1L;
     private long settingsClickIdleBeforeMs = -1L;
@@ -1052,8 +1053,13 @@ public final class RuntimeExternalPlayerFlowTest {
     }
 
     private void assertNoOutOfScopeApprovalForSettingsTransaction() {
-        RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
-                instrumentation.getUiAutomation(), BINDING_TERMS);
+        try {
+            RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                    instrumentation.getUiAutomation(), BINDING_TERMS);
+        } catch (RuntimeExternalLegalSnapshot.Failure failure) {
+            legalSnapshotFailureDiagnostics = failure.diagnostics();
+            throw failure;
+        }
         String foreground = currentPackage();
         if (foreground.equals("com.android.permissioncontroller")
                 || foreground.equals("com.google.android.permissioncontroller")
@@ -1173,6 +1179,48 @@ public final class RuntimeExternalPlayerFlowTest {
         receipt.put(
                 "settingsTransactionTimingEventsOmitted",
                 settingsTransactionTimingEventsOmitted);
+        if (legalSnapshotFailureDiagnostics == null) {
+            receipt.put("legalSnapshotFailureDiagnostics", JSONObject.NULL);
+        } else {
+            JSONObject diagnostics = new JSONObject();
+            diagnostics.put("totalDurationMs", legalSnapshotFailureDiagnostics.totalDurationMs());
+            diagnostics.put(
+                    "activeRootDurationMs",
+                    legalSnapshotFailureDiagnostics.activeRootDurationMs());
+            diagnostics.put(
+                    "activeRootCompletedOperations",
+                    legalSnapshotFailureDiagnostics.activeRootCompletedOperations());
+            diagnostics.put(
+                    "windowEnumerationDurationMs",
+                    legalSnapshotFailureDiagnostics.windowEnumerationDurationMs());
+            diagnostics.put(
+                    "windowEnumerationCompletedOperations",
+                    legalSnapshotFailureDiagnostics.windowEnumerationCompletedOperations());
+            diagnostics.put(
+                    "windowRootsDurationMs",
+                    legalSnapshotFailureDiagnostics.windowRootsDurationMs());
+            diagnostics.put(
+                    "windowRootsCompletedOperations",
+                    legalSnapshotFailureDiagnostics.windowRootsCompletedOperations());
+            diagnostics.put(
+                    "childRetrievalDurationMs",
+                    legalSnapshotFailureDiagnostics.childRetrievalDurationMs());
+            diagnostics.put(
+                    "childRetrievalCompletedOperations",
+                    legalSnapshotFailureDiagnostics.childRetrievalCompletedOperations());
+            diagnostics.put("lastOperation", legalSnapshotFailureDiagnostics.lastOperation());
+            diagnostics.put(
+                    "lastOperationDurationMs",
+                    legalSnapshotFailureDiagnostics.lastOperationDurationMs());
+            diagnostics.put(
+                    "lastOperationCompleted",
+                    legalSnapshotFailureDiagnostics.lastOperationCompleted());
+            diagnostics.put("visitedNodes", legalSnapshotFailureDiagnostics.visitedNodes());
+            diagnostics.put(
+                    "traversalComplete",
+                    legalSnapshotFailureDiagnostics.traversalComplete());
+            receipt.put("legalSnapshotFailureDiagnostics", diagnostics);
+        }
         if (settingsClickDispatchedAtMs >= 0L) {
             JSONObject settingsClickTiming = new JSONObject();
             settingsClickTiming.put("dispatchUptimeMs", settingsClickDispatchedAtMs);
