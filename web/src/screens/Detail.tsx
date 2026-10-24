@@ -329,6 +329,7 @@ export function Detail() {
     openDetailSources,
     closeDetailSources,
     navigate,
+    openSettingsSection,
     services,
     settings,
     watchlist,
@@ -2288,6 +2289,7 @@ export function Detail() {
             onOpenSettings={() => {
               navigate("settings");
             }}
+            onCheckProvider={() => openSettingsSection("debrid")}
           />
         </div>
       )}
@@ -2351,6 +2353,7 @@ export function Detail() {
                 onOpenSettings={() => {
                   navigate("settings");
                 }}
+                onCheckProvider={() => openSettingsSection("debrid")}
               />
             </div>
           </div>

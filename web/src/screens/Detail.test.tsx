@@ -65,6 +65,7 @@ const downloadsRuntime = vi.hoisted(() => ({
 const closeDetail = vi.fn();
 const openDetail = vi.fn();
 const navigate = vi.fn();
+const openSettingsSection = vi.fn();
 const toggleWatchlist = vi.fn();
 const recordResume = vi.fn();
 const refreshContinueWatching = vi.fn(async () => {});
@@ -93,6 +94,7 @@ vi.mock("../store/AppStore", () => ({
     closeDetail,
     openDetail,
     navigate,
+    openSettingsSection,
     services: mockServices,
     settings: mockSettings,
     watchlist: mockWatchlist,
@@ -1764,6 +1766,57 @@ describe("Detail actions", () => {
     render(<Detail />);
     await userEvent.click(screen.getByText("open-settings"));
     expect(navigate).toHaveBeenCalledWith("settings");
+    expect(openSettingsSection).not.toHaveBeenCalled();
+  });
+
+  it.each(["movie", "episode"] as const)(
+    "opens Providers once after an Invalid API token %s resolution without playing",
+    async (kind) => {
+      serverModeOn = true;
+      streamPickerMode.real = true;
+      mockSettings = { ...defaultSettings(), streamCachedOnly: false };
+      const source = TorrentResult.fromSearch({
+        infoHash: "A".repeat(40),
+        title: kind === "movie" ? "Movie.1080p.mp4" : "Show.S01E03.1080p.mp4",
+        sizeBytes: 1_000,
+        seeders: 5,
+        leechers: 0,
+        indexerName: "Test source",
+      });
+      mockStreams = {
+        ...streamsState(),
+        rows: [{ result: source, cachedOn: null, cacheStatus: "unavailable" }],
+      };
+      resolveServerStream.mockRejectedValueOnce(new Error("Invalid API token"));
+      if (kind === "episode") {
+        mockDetailItem = preview("s1", { type: "series" });
+        mockDetail = detailState({ item: mediaItem({ type: "series" }) });
+        fetchServerSeasons.mockResolvedValue(serverSeasonGuide([3]));
+        fetchServerEpisodes.mockResolvedValue({ episodes: [], numbering: "tmdb" });
+      }
+
+      render(<Detail />);
+      if (kind === "episode") await userEvent.click(screen.getByTestId("pick-episode"));
+      await userEvent.click(screen.getByText(source.title).closest("button")!);
+
+      expect(await screen.findByText("Invalid API token")).toBeInTheDocument();
+      expect(resolveServerStream).toHaveBeenCalledTimes(1);
+      await userEvent.click(screen.getByRole("button", { name: "Check provider" }));
+      expect(openSettingsSection).toHaveBeenCalledExactlyOnceWith("debrid");
+      expect(navigate).not.toHaveBeenCalled();
+      expect(openDetailPlayer).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("player")).toBeNull();
+    },
+  );
+
+  it("keeps the episode picker generic settings route separate from Providers", async () => {
+    mockDetailItem = preview("s1", { type: "series" });
+    mockDetail = detailState({ item: mediaItem({ type: "series" }) });
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await userEvent.click(screen.getByText("open-settings"));
+    expect(navigate).toHaveBeenCalledExactlyOnceWith("settings");
+    expect(openSettingsSection).not.toHaveBeenCalled();
   });
 
   it("forwards a related-item click to openDetail", async () => {

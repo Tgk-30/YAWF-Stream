@@ -272,6 +272,27 @@ describe("Settings shell", () => {
     expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
   });
 
+  it("opens pending Providers in Simple mode once without saving settings", () => {
+    mockSimpleMode = true;
+    mockPendingSettingsSection = "debrid";
+    const { rerender, unmount } = renderAt();
+
+    expect(document.querySelector('button[data-tab="debrid"]')).toHaveClass("is-active");
+    expect(screen.getByPlaceholderText("API token")).toBeInTheDocument();
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+    expect(mockPendingSettingsSection).toBeNull();
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    rerender(<Settings />);
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('button[data-tab="debrid"]')).toHaveClass("is-active");
+    unmount();
+    renderAt();
+    expect(document.querySelector('button[data-tab="install"]')).toHaveClass("is-active");
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
   it("keeps Help and diagnostics visible in Simple mode while hiding Sources", () => {
     mockSimpleMode = true;
     renderAt();
