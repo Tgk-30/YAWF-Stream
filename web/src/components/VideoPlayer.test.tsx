@@ -7753,6 +7753,23 @@ describe("HLS source attach", () => {
     expect(hlsInstances[0].audioTrack).toBe(1);
   });
 
+  it("labels an unnamed HLS undetermined audio track as Audio 3 in the product menu", async () => {
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(() => "");
+    render(<VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    hlsInstances[0].audioTracks = [
+      { name: "eng", lang: "eng" },
+      { name: "", lang: "und" },
+      { name: "", lang: "und" },
+    ];
+    hlsInstances[0].audioTrack = 0;
+    const handler = hlsInstances[0].on.mock.calls.find(([event]) => event === "manifestParsed")?.[1] as (() => void) | undefined;
+    if (handler == null) throw new Error("manifest handler missing");
+    act(handler);
+    fireEvent.click(screen.getByRole("button", { name: "Audio track, English" }));
+    expect(screen.getByRole("button", { name: "Audio 3" })).toBeInTheDocument();
+  });
+
   it("selects browser-native audio tracks when AudioTrackList is exposed", async () => {
     const tracks = Object.assign(new EventTarget(), {
       0: { id: "en", label: "English", language: "eng", enabled: true },

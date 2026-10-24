@@ -41,6 +41,7 @@ import {
 import {
   audioTrackLabel,
   readableAudioLanguageLabel,
+  isUndeterminedLanguage,
 } from "../lib/audioTrackLabel";
 import {
   PlaybackStallWatchdog,
@@ -317,7 +318,8 @@ function trackLabel(t: Track, index: number): string {
   if (t.type === "audio") {
     const title = audioTrackLabel(t.title, t.lang, "");
     const rawLanguage = t.lang?.trim() ?? "";
-    const language = readableAudioLanguageLabel(rawLanguage) ?? rawLanguage.toUpperCase();
+    const language = readableAudioLanguageLabel(rawLanguage) ??
+      (isUndeterminedLanguage(rawLanguage) ? "" : rawLanguage.toUpperCase());
     const bits = [title, language].filter(
       (value, position, values) =>
         value.length > 0 &&

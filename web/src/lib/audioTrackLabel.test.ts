@@ -50,6 +50,20 @@ describe("audioTrackLabel", () => {
     );
   });
 
+  it("uses the numbered fallback for undetermined language metadata", () => {
+    expect(audioTrackLabel("", "und", "Audio 1")).toBe("Audio 1");
+    expect(audioTrackLabel("und", "und", "Audio 2")).toBe("Audio 2");
+    expect(audioTrackLabel("Original", "und", "Audio 3")).toBe("Original");
+    expect(audioTrackLabel("", "original", "Audio 4")).toBe("Audio 4");
+  });
+
+  it("handles whitespace and case around exact undetermined language sentinels", () => {
+    expect(audioTrackLabel("", " UnD ", "Audio 1")).toBe("Audio 1");
+    expect(audioTrackLabel(" UNKNOWN ", " N/A ", "Audio 2")).toBe("Audio 2");
+    expect(audioTrackLabel(" Original ", " ORIGINAL ", "Audio 3")).toBe("Original");
+    expect(audioTrackLabel("", " XyZ ", "Audio 4")).toBe("XyZ");
+  });
+
   it("retains unknown metadata and uses the fallback for absent values", () => {
     expect(audioTrackLabel("xyz", "xyz", "Audio 1")).toBe("xyz");
     expect(audioTrackLabel("", "unknown language", "Audio 2")).toBe(

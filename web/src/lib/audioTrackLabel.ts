@@ -7,6 +7,29 @@ const LANGUAGE_LABELS = new Map(
   PLAYBACK_LANGUAGE_OPTIONS.map(({ value, label }) => [value, label]),
 );
 
+// Exact metadata sentinels indicate that no language was determined. Keep
+// arbitrary unknown text and codes visible, but do not expose these tokens.
+const UNDETERMINED_LANGUAGE_VALUES = new Set([
+  "und",
+  "unknown",
+  "none",
+  "null",
+  "n/a",
+  "na",
+  "default",
+]);
+
+const MISSING_LANGUAGE_TITLE_VALUES = new Set([...UNDETERMINED_LANGUAGE_VALUES, "original"]);
+
+/** Exact metadata sentinels used only when a value is in a language context. */
+export function isUndeterminedLanguage(value: unknown): boolean {
+  return typeof value === "string" && MISSING_LANGUAGE_TITLE_VALUES.has(value.trim().toLowerCase());
+}
+
+function isUndeterminedTitle(value: string): boolean {
+  return UNDETERMINED_LANGUAGE_VALUES.has(value.toLowerCase());
+}
+
 function cleanText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -88,7 +111,7 @@ export function audioTrackLabel(
 ): string {
   const title = cleanText(label);
   const languageValue = cleanText(language);
-  if (title) {
+  if (title && !isUndeterminedTitle(title)) {
     const titleCode = parseLanguageCode(title);
     if (titleCode != null) {
       const languageCode = parseLanguageCode(languageValue);
@@ -98,5 +121,7 @@ export function audioTrackLabel(
     }
     return title;
   }
-  return (readableAudioLanguageLabel(languageValue) ?? languageValue) || fallback;
+  return isUndeterminedLanguage(languageValue)
+    ? fallback
+    : (readableAudioLanguageLabel(languageValue) ?? languageValue) || fallback;
 }

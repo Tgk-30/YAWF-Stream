@@ -508,6 +508,72 @@ describe("EmbeddedPlayer playback controls", () => {
     expect(screen.getByRole("menuitemradio", { name: "eng · ENG" })).toBeInTheDocument();
   });
 
+  it("preserves the predecessor casing for unknown native language labels", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 12, type: "audio", lang: "xyz", title: "", codec: "eac3", selected: true },
+    ]);
+    render(<EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 1);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "xyz · eac3" })).toBeInTheDocument();
+  });
+
+  it("uses numbered fallbacks for blank native original and undetermined languages", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 4, type: "audio", lang: "und", title: "", codec: "aac", selected: true },
+      { id: 5, type: "audio", lang: "original", title: "", codec: "eac3" },
+    ]);
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 2);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "Track 1 · aac" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "Track 2 · eac3" })).toBeInTheDocument();
+  });
+
+  it("keeps an explicit Original native title when the language is original", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 4, type: "audio", lang: "original", title: "Original", codec: "aac", selected: true },
+    ]);
+    render(<EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 1);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "Original · aac" })).toBeInTheDocument();
+  });
+
+  it("suppresses undetermined language beside an explicit Original native title", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 4, type: "audio", lang: "und", title: "Original", codec: "aac", selected: true },
+    ]);
+    render(<EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 1);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "Original · aac" })).toBeInTheDocument();
+  });
+
+  it("keeps meaningful titles and explicit unknown title casing in native labels", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 4, type: "audio", lang: "xyz", title: "Director channel", codec: "eac3", selected: true },
+      { id: 5, type: "audio", lang: "xyz", title: "xYz", codec: "aac" },
+    ]);
+    render(<EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 2);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "Director channel · XYZ · eac3" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "xYz · aac" })).toBeInTheDocument();
+  });
+
   it("refreshes tracks from the native track-list count event and matches a title when lang is und", async () => {
     renderPlayerMock.getProperty.mockResolvedValue([
       { id: 1, type: "audio", lang: "eng", title: "English 5.1", selected: true },
