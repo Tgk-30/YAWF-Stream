@@ -31,13 +31,13 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.50', tag: 'v2.3.50' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.46', tag: 'v2.3.46' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.50', tag: 'v2.3.50' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.50'",
-    to: "tag: 'v2.3.46'",
+    from: "tag: 'v2.3.51'",
+    to: "tag: 'v2.3.50'",
   },
   {
     name: "server Debian filename",
