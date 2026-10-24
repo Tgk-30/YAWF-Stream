@@ -5681,11 +5681,11 @@ describe("WebviewPlayer", () => {
   });
 
   it("rejects a delayed A-to-B-to-A retry result from the stale owner generation", async () => {
-    vi.useFakeTimers();
     const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const initial = deferred<{ durationSeconds: number }>();
     const retry = deferred<{ durationSeconds: number }>();
     const loadSourceInfo = vi.fn((options?: { retryFailed?: boolean }) =>
-      options?.retryFailed ? retry.promise : Promise.reject(conflict()),
+      options?.retryFailed ? retry.promise : initial.promise,
     );
     const { rerender } = render(
       <VideoPlayer
@@ -5697,9 +5697,20 @@ describe("WebviewPlayer", () => {
         onClose={() => {}}
       />,
     );
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    await waitFor(() => expect(loadSourceInfo).toHaveBeenCalledTimes(1));
+    vi.useFakeTimers();
+    await act(async () => {
+      initial.reject(conflict());
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
     expect(loadSourceInfo).toHaveBeenCalledTimes(2);
+    expect(loadSourceInfo.mock.calls[1]?.[0]).toMatchObject({
+      retryFailed: true,
+      signal: expect.any(AbortSignal),
+    });
     rerender(
       <VideoPlayer
         url="https://server.example/api/stream/owner-b/index.m3u8?quality=480p"
@@ -5710,6 +5721,8 @@ describe("WebviewPlayer", () => {
         onClose={() => {}}
       />,
     );
+    vi.useRealTimers();
+    await waitFor(() => expect(hlsInstances).toHaveLength(2));
     rerender(
       <VideoPlayer
         url="https://server.example/api/stream/owner-a/index.m3u8?quality=480p"
@@ -5720,6 +5733,7 @@ describe("WebviewPlayer", () => {
         onClose={() => {}}
       />,
     );
+    await waitFor(() => expect(hlsInstances).toHaveLength(3));
     await act(async () => {
       retry.resolve({ durationSeconds: 596 });
       await retry.promise;
