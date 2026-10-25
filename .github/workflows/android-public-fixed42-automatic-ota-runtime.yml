@@ -1,0 +1,692 @@
+name: Android public fixed 2.3.42 to 2.3.59 automatic OTA runtime check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-public-fixed42-automatic-ota-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  public-fixed42-automatic-ota-api36:
+    if: >-
+      github.repository == 'Tgk-30/YAWF-Stream' &&
+      github.repository_owner == 'Tgk-30' &&
+      github.actor == 'Tgk-30' &&
+      github.ref_type == 'branch'
+    name: Public fixed 2.3.42 to 2.3.59 automatic native updater
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASELINE_VERSION: 2.3.42
+      BASELINE_VERSION_CODE: "2003042"
+      BASELINE_TAG: android-v2.3.42
+      BASELINE_SOURCE_SHA: ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5
+      BASELINE_BUILD_RUN: "40025606020"
+      BASELINE_APK_SHA256: 3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c
+      BASELINE_APK_SIZE: "88583041"
+      BASELINE_MANIFEST_SHA256: 26fedf40c35011ecf3edaa29462c18f04301dafae7dd9e3808e1ea1e2a3001a8
+      BASELINE_VERIFICATION_SHA256: a87360645d7700f7c2ff9a99629d714b7d126fbe5d66a9a2e44a10baad42c4dc
+      TARGET_VERSION: 2.3.59
+      TARGET_VERSION_CODE: "2003059"
+      TARGET_TAG: android-v2.3.59
+      TARGET_SOURCE_SHA: ac885bb98b2672614beb801b5aea11eb2f98ab40
+      TARGET_BUILD_RUN: "40169716770"
+      TARGET_APK_SHA256: 5fe550e66658f3c9ae172c087c656d69e126af2892df05ca15e7e021594dae47
+      TARGET_APK_SIZE: "88644481"
+      TARGET_MANIFEST_SHA256: 8d0f680abc7d52cd467ef79b3fd860e18c7e1dd15a7c5fd765a9d3941c974af6
+      TARGET_VERIFICATION_SHA256: 28ccb986f613b68917a907b5dd9632c02e98185413ce9d09bc745eb564541294
+      BASELINE_APK: public-assets/YAWF.Stream_Android_2.3.42.apk
+      BASELINE_MANIFEST: public-assets/baseline-android-update.json
+      BASELINE_VERIFICATION: public-assets/Android_2.3.42_verification.json
+      BASELINE_CHECKSUMS: public-assets/baseline-SHA256SUMS
+      TARGET_APK: public-assets/YAWF.Stream_Android_2.3.59.apk
+      TARGET_MANIFEST: public-assets/android-update.json
+      TARGET_VERIFICATION: public-assets/Android_2.3.59_verification.json
+      TARGET_CHECKSUMS: public-assets/SHA256SUMS
+      RELEASE_PAGES: public-release-pages
+      AUTOMATIC_ADMISSION_INPUT: public-assets/fixed42-automatic-admission-input.json
+      AUTOMATIC_BINDING: public-assets/fixed42-automatic-admission.json
+      UPDATER_SOURCE_SHA256: 129df15e095ed5ce8933d17ab9a0329da79244e14ac046df18c3fad32e01163d
+      SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
+      AVD_NAME: yawf-public-fixed42-automatic-ota-api36
+      EMULATOR_SERIAL: emulator-5554
+      EMULATOR_GPU: swiftshader_indirect
+      EVIDENCE: android-public-fixed42-automatic-ota-runtime-evidence
+      OTA_MODE: public-fixed42-to59-initial-cancel-due-resume-v1
+
+    steps:
+      - name: Checkout automatic runtime gate
+        uses: actions/checkout@v4
+
+      - name: Set up pinned Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.1"
+          check-latest: false
+
+      - name: Validate immutable fixed profile before downloads or SDK setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE" public-assets "$RELEASE_PAGES"
+          python3 - <<'PY'
+          import os
+          import re
+
+          exact = {
+              "BASELINE_VERSION": "2.3.42",
+              "BASELINE_VERSION_CODE": "2003042",
+              "BASELINE_TAG": "android-v2.3.42",
+              "BASELINE_SOURCE_SHA": "ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5",
+              "BASELINE_BUILD_RUN": "40025606020",
+              "BASELINE_APK_SHA256": "3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c",
+              "BASELINE_APK_SIZE": "88583041",
+              "BASELINE_MANIFEST_SHA256": "26fedf40c35011ecf3edaa29462c18f04301dafae7dd9e3808e1ea1e2a3001a8",
+              "BASELINE_VERIFICATION_SHA256": "a87360645d7700f7c2ff9a99629d714b7d126fbe5d66a9a2e44a10baad42c4dc",
+              "TARGET_VERSION": "2.3.59",
+              "TARGET_VERSION_CODE": "2003059",
+              "TARGET_TAG": "android-v2.3.59",
+              "TARGET_SOURCE_SHA": "ac885bb98b2672614beb801b5aea11eb2f98ab40",
+              "TARGET_BUILD_RUN": "40169716770",
+              "TARGET_APK_SHA256": "5fe550e66658f3c9ae172c087c656d69e126af2892df05ca15e7e021594dae47",
+              "TARGET_APK_SIZE": "88644481",
+              "TARGET_MANIFEST_SHA256": "8d0f680abc7d52cd467ef79b3fd860e18c7e1dd15a7c5fd765a9d3941c974af6",
+              "TARGET_VERIFICATION_SHA256": "28ccb986f613b68917a907b5dd9632c02e98185413ce9d09bc745eb564541294",
+              "UPDATER_SOURCE_SHA256": "129df15e095ed5ce8933d17ab9a0329da79244e14ac046df18c3fad32e01163d",
+              "OTA_MODE": "public-fixed42-to59-initial-cancel-due-resume-v1",
+          }
+          for name, value in exact.items():
+              assert os.environ.get(name) == value, f"{name} does not match the fixed profile"
+          for name in ("BASELINE_SOURCE_SHA", "TARGET_SOURCE_SHA"):
+              assert re.fullmatch(r"[0-9a-f]{40}", os.environ[name])
+          for name in (
+              "BASELINE_APK_SHA256", "BASELINE_MANIFEST_SHA256",
+              "BASELINE_VERIFICATION_SHA256", "TARGET_APK_SHA256",
+              "TARGET_MANIFEST_SHA256", "TARGET_VERIFICATION_SHA256",
+              "UPDATER_SOURCE_SHA256",
+          ):
+              assert re.fullmatch(r"[0-9a-f]{64}", os.environ[name])
+          PY
+
+      - name: Fetch exact public assets and bounded official release history
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl_args=(
+            --fail --silent --show-error --location
+            --proto '=https' --proto-redir '=https'
+            --connect-timeout 15 --max-time 180
+            --retry 2 --retry-max-time 240
+          )
+          repo="https://github.com/Tgk-30/YAWF-Stream/releases/download"
+          curl "${curl_args[@]}" \
+            "$repo/$BASELINE_TAG/YAWF.Stream_Android_${BASELINE_VERSION}.apk" \
+            --output "$BASELINE_APK"
+          curl "${curl_args[@]}" "$repo/$BASELINE_TAG/android-update.json" \
+            --output "$BASELINE_MANIFEST"
+          curl "${curl_args[@]}" \
+            "$repo/$BASELINE_TAG/Android_${BASELINE_VERSION}_verification.json" \
+            --output "$BASELINE_VERIFICATION"
+          curl "${curl_args[@]}" "$repo/$BASELINE_TAG/SHA256SUMS" \
+            --output "$BASELINE_CHECKSUMS"
+          curl "${curl_args[@]}" \
+            "$repo/$TARGET_TAG/YAWF.Stream_Android_${TARGET_VERSION}.apk" \
+            --output "$TARGET_APK"
+          curl "${curl_args[@]}" "$repo/$TARGET_TAG/android-update.json" \
+            --output "$TARGET_MANIFEST"
+          curl "${curl_args[@]}" \
+            "$repo/$TARGET_TAG/Android_${TARGET_VERSION}_verification.json" \
+            --output "$TARGET_VERIFICATION"
+          curl "${curl_args[@]}" "$repo/$TARGET_TAG/SHA256SUMS" \
+            --output "$TARGET_CHECKSUMS"
+
+          reached_end=false
+          for page in 1 2 3 4 5 6 7 8 9 10; do
+            output="$RELEASE_PAGES/page-$page.json"
+            curl "${curl_args[@]}" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/Tgk-30/YAWF-Stream/releases?per_page=20&page=$page" \
+              --output "$output"
+            count="$(python3 -c 'import json,sys; value=json.load(open(sys.argv[1])); assert isinstance(value,list); print(len(value))' "$output")"
+            test "$count" -le 20
+            if [ "$count" -lt 20 ]; then
+              reached_end=true
+              break
+            fi
+          done
+          test "$reached_end" = true
+
+      - name: Checkout exact official baseline source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASELINE_SOURCE_SHA }}
+          path: baseline-source
+
+      - name: Checkout exact official target source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SOURCE_SHA }}
+          path: target-source
+
+      - name: Admit both official public releases, assets, sources, and actual bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C baseline-source rev-parse HEAD)" = "$BASELINE_SOURCE_SHA"
+          test "$(git -C target-source rev-parse HEAD)" = "$TARGET_SOURCE_SHA"
+          printf '%s  %s\n' "$UPDATER_SOURCE_SHA256" \
+            baseline-source/scripts/android/YawfAndroidUpdater.kt | sha256sum -c -
+          printf '%s  %s\n' "$UPDATER_SOURCE_SHA256" \
+            target-source/scripts/android/YawfAndroidUpdater.kt | sha256sum -c -
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def digest(path):
+              return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+          def normalized_release(release):
+              return {
+                  "tagName": release.get("tag_name"),
+                  "isDraft": release.get("draft"),
+                  "isPrerelease": release.get("prerelease"),
+                  "publishedAt": release.get("published_at"),
+                  "targetCommitish": release.get("target_commitish"),
+                  "assets": [{
+                      "name": asset.get("name"),
+                      "state": asset.get("state"),
+                      "url": asset.get("browser_download_url"),
+                      "digest": asset.get("digest"),
+                      "size": asset.get("size"),
+                  } for asset in release.get("assets", [])],
+              }
+
+          def artifact(prefix, release):
+              apk = Path(os.environ[f"{prefix}_APK"])
+              manifest = Path(os.environ[f"{prefix}_MANIFEST"])
+              verification = Path(os.environ[f"{prefix}_VERIFICATION"])
+              checksums = Path(os.environ[f"{prefix}_CHECKSUMS"])
+              return {
+                  "release": normalized_release(release),
+                  "manifest": json.loads(manifest.read_text()),
+                  "verification": json.loads(verification.read_text()),
+                  "checksums": checksums.read_text(),
+                  "updaterSourceSha256": os.environ["UPDATER_SOURCE_SHA256"],
+                  "observed": {
+                      "apkSha256": digest(apk),
+                      "apkSize": apk.stat().st_size,
+                      "manifestSha256": digest(manifest),
+                      "manifestSize": manifest.stat().st_size,
+                      "verificationSha256": digest(verification),
+                      "verificationSize": verification.stat().st_size,
+                      "checksumsSha256": digest(checksums),
+                      "checksumsSize": checksums.stat().st_size,
+                  },
+              }
+
+          pages = sorted(Path(os.environ["RELEASE_PAGES"]).glob("page-*.json"))
+          releases = [release for page in pages for release in json.loads(page.read_text())]
+          selected = {}
+          for prefix in ("BASELINE", "TARGET"):
+              tag = os.environ[f"{prefix}_TAG"]
+              matches = [release for release in releases if release.get("tag_name") == tag]
+              assert len(matches) == 1, f"{prefix.lower()} public release is missing or ambiguous"
+              selected[prefix] = matches[0]
+          value = {
+              "profile": os.environ["OTA_MODE"],
+              "baseline": artifact("BASELINE", selected["BASELINE"]),
+              "target": artifact("TARGET", selected["TARGET"]),
+          }
+          Path(os.environ["AUTOMATIC_ADMISSION_INPUT"]).write_text(
+              json.dumps(value, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+          node scripts/android_public_fixed42_automatic_ota_admission.mjs \
+            "$AUTOMATIC_ADMISSION_INPUT" > "$AUTOMATIC_BINDING"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def digest(path):
+              return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+          admitted = json.loads(Path(os.environ["AUTOMATIC_BINDING"]).read_text())
+          exact = {
+              "profile": os.environ["OTA_MODE"],
+              "otaMode": os.environ["OTA_MODE"],
+              "baselineVersion": os.environ["BASELINE_VERSION"],
+              "baselineVersionCode": os.environ["BASELINE_VERSION_CODE"],
+              "baselineSha256": os.environ["BASELINE_APK_SHA256"],
+              "baselineSize": os.environ["BASELINE_APK_SIZE"],
+              "baselineSourceRevision": os.environ["BASELINE_SOURCE_SHA"],
+              "baselineBuildRun": os.environ["BASELINE_BUILD_RUN"],
+              "baselineManifestSha256": os.environ["BASELINE_MANIFEST_SHA256"],
+              "baselineVerificationSha256": os.environ["BASELINE_VERIFICATION_SHA256"],
+              "targetVersion": os.environ["TARGET_VERSION"],
+              "targetVersionCode": os.environ["TARGET_VERSION_CODE"],
+              "targetSha256": os.environ["TARGET_APK_SHA256"],
+              "targetSize": os.environ["TARGET_APK_SIZE"],
+              "targetSourceRevision": os.environ["TARGET_SOURCE_SHA"],
+              "targetBuildRun": os.environ["TARGET_BUILD_RUN"],
+              "targetManifestSha256": os.environ["TARGET_MANIFEST_SHA256"],
+              "targetVerificationSha256": os.environ["TARGET_VERIFICATION_SHA256"],
+              "updaterSourceSha256": os.environ["UPDATER_SOURCE_SHA256"],
+              "targetPublicRelease": "true",
+          }
+          for key, expected in exact.items():
+              assert admitted.get(key) == expected, f"admitted {key} differs from fixed profile"
+          for prefix in ("BASELINE", "TARGET"):
+              assert digest(os.environ[f"{prefix}_APK"]) == os.environ[f"{prefix}_APK_SHA256"]
+              assert Path(os.environ[f"{prefix}_APK"]).stat().st_size == int(os.environ[f"{prefix}_APK_SIZE"])
+              assert digest(os.environ[f"{prefix}_MANIFEST"]) == os.environ[f"{prefix}_MANIFEST_SHA256"]
+              assert digest(os.environ[f"{prefix}_VERIFICATION"]) == os.environ[f"{prefix}_VERIFICATION_SHA256"]
+          PY
+          python3 scripts/android_public_ota_runtime_check.py \
+            --verify-inputs-only \
+            --automatic-binding "$AUTOMATIC_BINDING" \
+            --baseline-apk "$BASELINE_APK" \
+            --target-apk "$TARGET_APK" \
+            --target-manifest "$TARGET_MANIFEST" \
+            --target-verification "$TARGET_VERIFICATION" \
+            --target-checksums "$TARGET_CHECKSUMS" \
+            --release-pages "$RELEASE_PAGES" \
+            --evidence "$EVIDENCE"
+
+      - name: Record exact public binding and non-claims
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C target-source rev-parse HEAD)" = "$TARGET_SOURCE_SHA"
+          {
+            echo "baselineVersion=$BASELINE_VERSION"
+            echo "baselineVersionCode=$BASELINE_VERSION_CODE"
+            echo "baselineSourceRevision=$BASELINE_SOURCE_SHA"
+            echo "baselineBuildRun=$BASELINE_BUILD_RUN"
+            echo "baselineManifestSha256=$BASELINE_MANIFEST_SHA256"
+            echo "baselineVerificationSha256=$BASELINE_VERIFICATION_SHA256"
+            echo "targetVersion=$TARGET_VERSION"
+            echo "targetVersionCode=$TARGET_VERSION_CODE"
+            echo "targetSourceRevision=$TARGET_SOURCE_SHA"
+            echo "targetBuildRun=$TARGET_BUILD_RUN"
+            echo "targetManifestSha256=$TARGET_MANIFEST_SHA256"
+            echo "targetVerificationSha256=$TARGET_VERIFICATION_SHA256"
+            echo "updaterSourceSha256=$UPDATER_SOURCE_SHA256"
+            echo "runtimeProfile=$OTA_MODE"
+            echo "otaMode=$OTA_MODE"
+            echo "transaction=official-public-automatic-native-update"
+            echo "freshOwnedEmulator=true"
+            echo "preOfferManualDiscoveries=0"
+            echo "postInstallManualInspectionChecks=1"
+            echo "postInstallNativeOkClosures=1"
+            echo "automaticDiscoveryProofIncludesPostInstallInspection=false"
+            echo "persistenceProof=task-relaunch-only"
+            echo "independentColdProcessProof=false"
+            echo "weeklyElapsedSchedulingProof=false"
+            echo "physicalDeviceProof=false"
+            echo "realPublicRuntimeProof=pending-this-workflow-success"
+          } > "$EVIDENCE/binding.txt"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK command line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Set up pinned Gradle for isolated instrumentation
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
+      - name: Verify official image metadata and install exact SDK tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse0
+          timeout 180s sdkmanager --list --channel=0 > "$EVIDENCE/sdkmanager-official-metadata.txt"
+          SDK_METADATA="$EVIDENCE/sdkmanager-official-metadata.txt" \
+          SYSTEM_IMAGE_PACKAGE="$SYSTEM_IMAGE_PACKAGE" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          metadata = Path(os.environ["SDK_METADATA"]).read_text()
+          package = os.environ["SYSTEM_IMAGE_PACKAGE"]
+          section = None
+          exact = []
+          for line in metadata.splitlines():
+              heading = line.strip().casefold()
+              if heading == "installed packages:":
+                  section = "installed"
+                  continue
+              if heading == "available packages:":
+                  section = "available"
+                  continue
+              if heading == "available updates:":
+                  section = None
+                  continue
+              if section is not None and "|" in line and line.split("|", 1)[0].strip() == package:
+                  exact.append(section)
+          assert exact, f"official SDK metadata did not advertise exact {package}"
+          PY
+          sdkmanager \
+            "platform-tools" \
+            "emulator" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "$SYSTEM_IMAGE_PACKAGE"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          build_tools="$sdk_root/build-tools/36.0.0"
+          test -x "$build_tools/apksigner"
+          test -x "$sdk_root/emulator/emulator"
+          command -v apkanalyzer
+          image_root="$sdk_root/system-images/android-36/google_apis/x86_64"
+          test -f "$image_root/package.xml"
+          test -f "$image_root/source.properties"
+          sha256sum "$image_root/package.xml" "$image_root/source.properties" \
+            > "$EVIDENCE/system-image-metadata-sha256.txt"
+          {
+            echo "$build_tools"
+            echo "$sdk_root/emulator"
+            echo "$sdk_root/platform-tools"
+          } >> "$GITHUB_PATH"
+
+      - name: Verify public APKs, metadata, signatures, and source pins offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(stat -c %s "$BASELINE_APK")" = "$BASELINE_APK_SIZE"
+          test "$(stat -c %s "$TARGET_APK")" = "$TARGET_APK_SIZE"
+          printf '%s  %s\n' "$BASELINE_APK_SHA256" "$BASELINE_APK" | sha256sum -c -
+          printf '%s  %s\n' "$TARGET_APK_SHA256" "$TARGET_APK" | sha256sum -c -
+          test "$(apkanalyzer manifest application-id "$BASELINE_APK")" = "com.tgk30.debridstreamer"
+          test "$(apkanalyzer manifest version-name "$BASELINE_APK")" = "$BASELINE_VERSION"
+          test "$(apkanalyzer manifest version-code "$BASELINE_APK")" = "$BASELINE_VERSION_CODE"
+          test "$(apkanalyzer manifest application-id "$TARGET_APK")" = "com.tgk30.debridstreamer"
+          test "$(apkanalyzer manifest version-name "$TARGET_APK")" = "$TARGET_VERSION"
+          test "$(apkanalyzer manifest version-code "$TARGET_APK")" = "$TARGET_VERSION_CODE"
+          python3 target-source/scripts/verify_android_apk.py \
+            --apk "$BASELINE_APK" \
+            --version "$BASELINE_VERSION" \
+            --certificate-pin target-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" \
+            | tee "$EVIDENCE/baseline-offline-verification.txt"
+          python3 target-source/scripts/verify_android_apk.py \
+            --apk "$TARGET_APK" \
+            --version "$TARGET_VERSION" \
+            --certificate-pin target-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" \
+            | tee "$EVIDENCE/target-offline-verification.txt"
+          python3 scripts/android_public_ota_runtime_check.py \
+            --verify-apks-only \
+            --automatic-binding "$AUTOMATIC_BINDING" \
+            --apksigner "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/36.0.0/apksigner" \
+            --apkanalyzer "$(command -v apkanalyzer)" \
+            --baseline-apk "$BASELINE_APK" \
+            --target-apk "$TARGET_APK" \
+            --evidence "$EVIDENCE"
+
+      - name: Test gate policies and build isolated instrumentation APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = "v24.22.1"
+          python3 -m py_compile scripts/android_public_ota_runtime_check.py
+          python3 scripts/android_diagnostics_bounded.test.py 2>&1 \
+            | tee "$EVIDENCE/diagnostic-retention-tests.txt"
+          python3 scripts/android_public_ota_runtime_check.py --self-test \
+            | tee "$EVIDENCE/host-self-tests.txt"
+          python3 scripts/android_public_automatic_ota_host.test.py 2>&1 \
+            | tee "$EVIDENCE/automatic-host-tests.txt"
+          python3 scripts/android_public_fixed42_automatic_ota_host.test.py 2>&1 \
+            | tee "$EVIDENCE/fixed42-automatic-host-tests.txt"
+          node --test \
+            scripts/android_public_ota_runtime_check.test.mjs \
+            scripts/android_legacy_reconsent_policy.test.mjs \
+            scripts/android_public_automatic_ota_driver.test.mjs \
+            scripts/android_public_automatic_ota_workflow.test.mjs \
+            scripts/android_public_fixed42_automatic_ota_admission.test.mjs \
+            scripts/android_public_fixed42_automatic_ota_policy.test.mjs \
+            scripts/android_public_fixed42_automatic_ota_driver.test.mjs \
+            scripts/android_public_fixed42_automatic_ota_workflow.test.mjs \
+            | tee "$EVIDENCE/workflow-contract-tests.txt"
+          python3 scripts/android-runtime-instrumentation/unknown_source_permission_contract_test.py 2>&1 \
+            | tee "$EVIDENCE/unknown-source-permission-contract.txt"
+          python3 scripts/android-runtime-instrumentation/ota_policy_mutation_check.py \
+            | tee "$EVIDENCE/ota-policy-mutations.json"
+          gradle \
+            --project-dir scripts/android-runtime-instrumentation \
+            --no-daemon \
+            --max-workers=2 \
+            :app:testDebugUnitTest \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest
+          app_apk="scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk"
+          test_apk="scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+          test -f "$app_apk"
+          test -f "$test_apk"
+          app_sha="$(sha256sum "$app_apk" | awk '{print $1}')"
+          test_sha="$(sha256sum "$test_apk" | awk '{print $1}')"
+          test "$(apkanalyzer manifest application-id "$app_apk")" = "com.yawf.runtimeinstrumentation"
+          test "$(apkanalyzer manifest application-id "$test_apk")" = "com.yawf.runtimeinstrumentation.test"
+          apkanalyzer manifest print "$app_apk" > "$EVIDENCE/instrumentation-app-manifest.xml"
+          apkanalyzer manifest print "$test_apk" > "$EVIDENCE/instrumentation-test-manifest.xml"
+          if grep -Eqi 'INTERNET|REQUEST_INSTALL_PACKAGES|BIND_ACCESSIBILITY_SERVICE|MANAGE_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE' \
+            "$EVIDENCE/instrumentation-app-manifest.xml" "$EVIDENCE/instrumentation-test-manifest.xml"; then
+            echo "::error::The isolated OTA harness requested a forbidden permission" >&2
+            exit 1
+          fi
+          {
+            echo "HARNESS_APP_APK=$app_apk"
+            echo "HARNESS_TEST_APK=$test_apk"
+            echo "HARNESS_APP_SHA256=$app_sha"
+            echo "HARNESS_TEST_SHA256=$test_sha"
+          } >> "$GITHUB_ENV"
+          printf '%s  %s\n%s  %s\n' \
+            "$app_sha" "$app_apk" "$test_sha" "$test_apk" \
+            > "$EVIDENCE/instrumentation-apk-sha256.txt"
+
+      - name: Run one public automatic native OTA on a fresh stock API 36 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          test -r /dev/kvm -a -w /dev/kvm
+          stat -c 'kvmOwner=%u kvmGroup=%g kvmMode=%a' /dev/kvm > "$EVIDENCE/kvm.txt"
+
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-public-fixed42-automatic-ota-android"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          run_evidence="$EVIDENCE/run-1"
+          mkdir -p "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME" "$run_evidence"
+          emulator_pid=""
+
+          collect_failure() {
+            set +e
+            if [ -s "$run_evidence/host-driver-result.json" ]; then
+              cp "$run_evidence/host-driver-result.json" \
+                "$run_evidence/workflow-failure-receipt.txt"
+            else
+              echo "failure=workflow-before-host-receipt" \
+                > "$run_evidence/workflow-failure-receipt.txt"
+            fi
+            if [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null)" != "device" ]; then
+              echo "deviceEvidence=unavailable" >> "$run_evidence/workflow-failure-receipt.txt"
+              return 0
+            fi
+            temp="$run_evidence/.failure.png.tmp"
+            if timeout 20s adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$temp" && [ -s "$temp" ]; then
+              mv "$temp" "$run_evidence/workflow-failure.png"
+            else
+              rm -f "$temp"
+            fi
+            capture_text() {
+              name="$1"
+              shift
+              temp="$run_evidence/.failure-$name.tmp"
+              if timeout 30s adb -s "$EMULATOR_SERIAL" "$@" \
+                | sed -E 's#https?://[^ ]+#<redacted-url>#g' > "$temp" && [ -s "$temp" ]; then
+                mv "$temp" "$run_evidence/workflow-failure-$name.txt"
+              else
+                rm -f "$temp"
+              fi
+            }
+            capture_text activity shell dumpsys activity activities
+            capture_text logcat logcat -d -v threadtime
+            capture_text anr shell dumpsys dropbox --print data_app_anr
+          }
+
+          stop_owned_emulator() {
+            set +e
+            if [ -z "$emulator_pid" ]; then
+              echo "emulatorStopped=not-started" > "$run_evidence/cleanup.txt"
+              return 0
+            fi
+            timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1 || true
+            for _ in 1 2 3 4 5; do
+              if ! kill -0 "$emulator_pid" 2>/dev/null; then
+                wait "$emulator_pid" 2>/dev/null || true
+                echo "emulatorStopped=true" > "$run_evidence/cleanup.txt"
+                emulator_pid=""
+                return 0
+              fi
+              sleep 2
+            done
+            kill "$emulator_pid" 2>/dev/null || true
+            wait "$emulator_pid" 2>/dev/null || true
+            echo "emulatorStopped=true-forced-owned-pid" > "$run_evidence/cleanup.txt"
+            emulator_pid=""
+          }
+
+          on_exit() {
+            status=$?
+            if [ "$status" -ne 0 ]; then collect_failure; fi
+            stop_owned_emulator
+            exit "$status"
+          }
+          trap on_exit EXIT
+
+          if adb devices | awk 'NR > 1 && $2 == "device" { found=1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::An Android device was already attached before the owned run" >&2
+            exit 1
+          fi
+          printf 'no\n' | avdmanager create avd \
+            --force \
+            --name "$AVD_NAME" \
+            --package "$SYSTEM_IMAGE_PACKAGE" \
+            --device pixel \
+            --path "$ANDROID_AVD_HOME/$AVD_NAME" \
+            2>&1 | tee "$run_evidence/avd-create.txt"
+          emulator -version | tee "$run_evidence/emulator-version.txt"
+          nohup emulator \
+            -avd "$AVD_NAME" \
+            -port 5554 \
+            -accel on \
+            -gpu "$EMULATOR_GPU" \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -no-snapshot \
+            -camera-back none \
+            -camera-front none \
+            -cores 2 \
+            -memory 2048 \
+            > "$run_evidence/emulator.log" 2>&1 &
+          emulator_pid=$!
+          echo "$emulator_pid" > "$run_evidence/emulator.pid"
+
+          deadline=$((SECONDS + 300))
+          until [ "$(adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null || true)" = device ] && \
+            [ "$(adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::Fresh API 36 emulator did not boot before the deadline" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          api="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')"
+          abi="$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')"
+          page_size="$(adb -s "$EMULATOR_SERIAL" shell getconf PAGE_SIZE | tr -d '\r')"
+          test "$api" = 36
+          test "$abi" = x86_64
+          test "$page_size" = 4096
+          {
+            echo "apiLevel=$api"
+            echo "primaryAbi=$abi"
+            echo "pageSize=$page_size"
+            echo "systemImagePackage=$SYSTEM_IMAGE_PACKAGE"
+            echo "gpuBackend=$EMULATOR_GPU"
+          } > "$run_evidence/device-binding.txt"
+
+          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate \
+            > "$run_evidence/stock-webview-provider.txt"
+          PROVIDER_DUMP="$run_evidence/stock-webview-provider.txt" python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          value = Path(os.environ["PROVIDER_DUMP"]).read_text()
+          match = re.search(r"Current WebView package \(name, version\): \(([^,]+),\s*([^)]+)\)", value)
+          assert match is not None, "stock WebView provider is missing"
+          package, version = match.group(1).strip(), match.group(2).strip()
+          assert re.fullmatch(r"[A-Za-z0-9._]+", package)
+          assert re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version)
+          assert int(version.split(".", 1)[0]) >= 90
+          Path(os.environ["PROVIDER_DUMP"]).with_suffix(".json").write_text(json.dumps({
+              "classification": "stock-system-image-provider",
+              "package": package,
+              "version": version,
+              "minimumMajor": 90,
+              "latestSecurityBrowserProof": False,
+          }, indent=2) + "\n")
+          PY
+
+          python3 scripts/android_public_ota_runtime_check.py \
+            --adb adb \
+            --automatic-binding "$AUTOMATIC_BINDING" \
+            --serial "$EMULATOR_SERIAL" \
+            --apksigner "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/36.0.0/apksigner" \
+            --apkanalyzer "$(command -v apkanalyzer)" \
+            --baseline-apk "$BASELINE_APK" \
+            --target-apk "$TARGET_APK" \
+            --target-manifest "$TARGET_MANIFEST" \
+            --target-verification "$TARGET_VERIFICATION" \
+            --target-checksums "$TARGET_CHECKSUMS" \
+            --release-pages "$RELEASE_PAGES" \
+            --harness-app "$HARNESS_APP_APK" \
+            --harness-test "$HARNESS_TEST_APK" \
+            --harness-app-sha256 "$HARNESS_APP_SHA256" \
+            --harness-test-sha256 "$HARNESS_TEST_SHA256" \
+            --evidence "$run_evidence" \
+            --flow-timeout 720
+
+          trap - EXIT
+          stop_owned_emulator
+
+      - name: Upload bounded public OTA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-public-fixed42-automatic-ota-api36-evidence
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14

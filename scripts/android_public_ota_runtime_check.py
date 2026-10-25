@@ -40,6 +40,8 @@ HARNESS_CLASS = (
 STRICT_OTA_MODE = "strict"
 LEGACY_MANUAL_RECONSENT_MODE = "legacy-manual-reconsent"
 AUTOMATIC_OTA_MODE = "automatic-initial-cancel-due-resume"
+FIXED42_AUTOMATIC_OTA_PROFILE = "public-fixed42-to59-initial-cancel-due-resume-v1"
+FIXED42_EVIDENCE_SUBDIR = "fixed42-automatic-public-ota-flow"
 EVIDENCE_SUBDIR = "persistent-ota-flow"
 BASELINE_VERSION = "2.3.25"
 BASELINE_CODE = 2_003_025
@@ -64,6 +66,23 @@ AUTOMATIC_BASELINE_SOURCE = "9fc94a237d99b849cfc18a01085bb487915dd978"
 AUTOMATIC_BASELINE_TAG = "android-v2.3.27"
 AUTOMATIC_BASELINE_APK_NAME = "YAWF.Stream_Android_2.3.27.apk"
 MINIMUM_AUTOMATIC_TARGET_CODE = 2_003_031
+FIXED42_BASELINE_VERSION = "2.3.42"
+FIXED42_BASELINE_CODE = 2_003_042
+FIXED42_BASELINE_SHA256 = "3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c"
+FIXED42_BASELINE_SIZE = 88_583_041
+FIXED42_BASELINE_SOURCE = "ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5"
+FIXED42_BASELINE_MANIFEST_SHA256 = "26fedf40c35011ecf3edaa29462c18f04301dafae7dd9e3808e1ea1e2a3001a8"
+FIXED42_BASELINE_VERIFICATION_SHA256 = "a87360645d7700f7c2ff9a99629d714b7d126fbe5d66a9a2e44a10baad42c4dc"
+FIXED42_BASELINE_BUILD_RUN = 40_025_606_020
+FIXED42_TARGET_VERSION = "2.3.59"
+FIXED42_TARGET_CODE = 2_003_059
+FIXED42_TARGET_SHA256 = "5fe550e66658f3c9ae172c087c656d69e126af2892df05ca15e7e021594dae47"
+FIXED42_TARGET_SIZE = 88_644_481
+FIXED42_TARGET_SOURCE = "ac885bb98b2672614beb801b5aea11eb2f98ab40"
+FIXED42_TARGET_BUILD_RUN = 40_169_716_770
+FIXED42_TARGET_MANIFEST_SHA256 = "8d0f680abc7d52cd467ef79b3fd860e18c7e1dd15a7c5fd765a9d3941c974af6"
+FIXED42_TARGET_VERIFICATION_SHA256 = "28ccb986f613b68917a907b5dd9632c02e98185413ce9d09bc745eb564541294"
+FIXED42_UPDATER_SHA256 = "129df15e095ed5ce8933d17ab9a0329da79244e14ac046df18c3fad32e01163d"
 EMERGENCY_36_VERSION = "2.3.36"
 EMERGENCY_36_CODE = 2_003_036
 EMERGENCY_36_SOURCE = "b9f51773232fa546ed3a95ec3e9169780f7df244"
@@ -130,6 +149,11 @@ class RuntimeBinding:
     signer_pin: str
     target_manifest_sha256: str | None = None
     target_verification_sha256: str | None = None
+    profile: str | None = None
+    baseline_manifest_sha256: str | None = None
+    baseline_verification_sha256: str | None = None
+    baseline_build_run: int | None = None
+    updater_source_sha256: str | None = None
 
 
 LEGACY_BINDING = RuntimeBinding(
@@ -171,6 +195,72 @@ def _decimal_string(value: object, label: str) -> int:
     return parsed
 
 
+def _load_fixed42_automatic_binding(value: object) -> RuntimeBinding:
+    """Load the exact output of the separately named fixed 2.3.42 to 2.3.59 admission."""
+    expected = {
+        "profile": FIXED42_AUTOMATIC_OTA_PROFILE,
+        "evidenceSubdir": FIXED42_EVIDENCE_SUBDIR,
+        "otaMode": FIXED42_AUTOMATIC_OTA_PROFILE,
+        "baselineVersion": FIXED42_BASELINE_VERSION,
+        "baselineVersionCode": str(FIXED42_BASELINE_CODE),
+        "baselineTag": "android-v2.3.42",
+        "baselineApkName": "YAWF.Stream_Android_2.3.42.apk",
+        "baselineSha256": FIXED42_BASELINE_SHA256,
+        "baselineSize": str(FIXED42_BASELINE_SIZE),
+        "baselineSourceRevision": FIXED42_BASELINE_SOURCE,
+        "baselineManifestSha256": FIXED42_BASELINE_MANIFEST_SHA256,
+        "baselineVerificationSha256": FIXED42_BASELINE_VERIFICATION_SHA256,
+        "baselineBuildRun": str(FIXED42_BASELINE_BUILD_RUN),
+        "targetVersion": FIXED42_TARGET_VERSION,
+        "targetVersionCode": str(FIXED42_TARGET_CODE),
+        "targetTag": "android-v2.3.59",
+        "targetApkName": "YAWF.Stream_Android_2.3.59.apk",
+        "targetSha256": FIXED42_TARGET_SHA256,
+        "targetSize": str(FIXED42_TARGET_SIZE),
+        "signerSha256": SIGNER_PIN,
+        "targetSourceRevision": FIXED42_TARGET_SOURCE,
+        "targetManifestSha256": FIXED42_TARGET_MANIFEST_SHA256,
+        "targetVerificationSha256": FIXED42_TARGET_VERIFICATION_SHA256,
+        "targetBuildRun": str(FIXED42_TARGET_BUILD_RUN),
+        "updaterSourceSha256": FIXED42_UPDATER_SHA256,
+        "targetPublicRelease": "true",
+    }
+    if not isinstance(value, dict) or set(value) != set(expected):
+        raise RuntimeGateError("Fixed42 automatic admission keys are not exact")
+    for key, wanted in expected.items():
+        if value.get(key) != wanted:
+            raise RuntimeGateError(f"Fixed42 automatic admission {key} mismatch")
+    return RuntimeBinding(
+        automatic=True,
+        ota_mode=FIXED42_AUTOMATIC_OTA_PROFILE,
+        evidence_subdir=FIXED42_EVIDENCE_SUBDIR,
+        baseline_version=FIXED42_BASELINE_VERSION,
+        baseline_code=FIXED42_BASELINE_CODE,
+        baseline_sha256=FIXED42_BASELINE_SHA256,
+        baseline_size=FIXED42_BASELINE_SIZE,
+        baseline_source=FIXED42_BASELINE_SOURCE,
+        baseline_tag="android-v2.3.42",
+        baseline_apk_name="YAWF.Stream_Android_2.3.42.apk",
+        target_version=FIXED42_TARGET_VERSION,
+        target_code=FIXED42_TARGET_CODE,
+        target_sha256=FIXED42_TARGET_SHA256,
+        target_size=FIXED42_TARGET_SIZE,
+        target_source=FIXED42_TARGET_SOURCE,
+        target_build_run=FIXED42_TARGET_BUILD_RUN,
+        target_tag="android-v2.3.59",
+        target_apk_name="YAWF.Stream_Android_2.3.59.apk",
+        target_verification_name="Android_2.3.59_verification.json",
+        signer_pin=SIGNER_PIN,
+        target_manifest_sha256=FIXED42_TARGET_MANIFEST_SHA256,
+        target_verification_sha256=FIXED42_TARGET_VERIFICATION_SHA256,
+        profile=FIXED42_AUTOMATIC_OTA_PROFILE,
+        baseline_manifest_sha256=FIXED42_BASELINE_MANIFEST_SHA256,
+        baseline_verification_sha256=FIXED42_BASELINE_VERIFICATION_SHA256,
+        baseline_build_run=FIXED42_BASELINE_BUILD_RUN,
+        updater_source_sha256=FIXED42_UPDATER_SHA256,
+    )
+
+
 def load_automatic_binding(path: Path) -> RuntimeBinding:
     """Load only the exact output of admitAutomaticPublicTuple."""
     if not path.is_file() or path.stat().st_size > 16 * 1024:
@@ -179,6 +269,8 @@ def load_automatic_binding(path: Path) -> RuntimeBinding:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RuntimeGateError("Automatic admission file is invalid JSON") from error
+    if isinstance(value, dict) and value.get("profile") == FIXED42_AUTOMATIC_OTA_PROFILE:
+        return _load_fixed42_automatic_binding(value)
     expected_keys = {
         "evidenceSubdir", "otaMode", "baselineVersion", "baselineVersionCode",
         "baselineSha256", "baselineSize", "targetVersion", "targetVersionCode",
@@ -1001,6 +1093,107 @@ def validate_receipt(
                 raise RuntimeGateError(
                     f"Automatic instrumentation receipt {key} mismatch"
                 )
+    elif ota_mode == FIXED42_AUTOMATIC_OTA_PROFILE:
+        if binding.profile != FIXED42_AUTOMATIC_OTA_PROFILE:
+            raise RuntimeGateError("Fixed42 receipt requires the exact admitted profile")
+        for key, expected_value in expected.items():
+            actual = value.get(key)
+            if type(actual) is not type(expected_value) or actual != expected_value:
+                raise RuntimeGateError(f"Fixed42 common instrumentation receipt {key} mismatch")
+        fixed_expected: dict[str, object] = {
+            "runtimeProfile": FIXED42_AUTOMATIC_OTA_PROFILE,
+            "baselineSourceRevision": FIXED42_BASELINE_SOURCE,
+            "baselineManifestSha256": FIXED42_BASELINE_MANIFEST_SHA256,
+            "baselineVerificationSha256": FIXED42_BASELINE_VERIFICATION_SHA256,
+            "baselineBuildRun": FIXED42_BASELINE_BUILD_RUN,
+            "targetVersionCode": FIXED42_TARGET_CODE,
+            "targetSize": FIXED42_TARGET_SIZE,
+            "targetIdentityAdmitted": True,
+            "targetSourceRevision": FIXED42_TARGET_SOURCE,
+            "targetManifestSha256": FIXED42_TARGET_MANIFEST_SHA256,
+            "targetVerificationSha256": FIXED42_TARGET_VERIFICATION_SHA256,
+            "targetBuildRun": FIXED42_TARGET_BUILD_RUN,
+            "updaterSourceSha256": FIXED42_UPDATER_SHA256,
+            "legacyManualReconsentUsed": False,
+            "initialManualProgressObserved": False,
+            "initialManualCancelWon": False,
+            "initialEnableCheckingTitleObserved": True,
+            "initialEnableCheckingMessageObserved": True,
+            "initialEnableCancelObserved": True,
+            "initialEnableTerminalResultExcludedBeforeCancel": True,
+            "initialEnableCancelSelections": 1,
+            "initialEnableCancelWon": True,
+            "initialEnableSettledResultExclusionSamples": 3,
+            "preOfferManualDiscoveries": 0,
+            "automaticOfferAbsentSameForeground": True,
+            "deferredAutomaticOfferObserved": True,
+            "weeklyOnAtDeferredOffer": True,
+            "automaticDiscoveryObserved": True,
+            "weeklyElapsedSchedulingProven": False,
+            "productUpdateSelections": 1,
+            "productInstallSelections": 1,
+            "systemUpdateSelections": 1,
+            "systemOpenSelections": 1,
+            "postInstallManualInspectionChecks": 1,
+            "postInstallExactUpToDate59Observed": True,
+            "weeklyOnAfterUpdate": True,
+            "postInstallNativeOkClosures": 1,
+            "postInstallNativeCancelClosures": 0,
+            "automaticDiscoveryProofIncludesPostInstallInspection": False,
+            "sampleCatalogFixtureUsed": True,
+            "liveCatalogProviderProof": False,
+            "profileNameMarker": "Fixed42OTA59Marker",
+            "profileNameInitialDistinct": True,
+            "profileNameSetTextActions": 1,
+            "profileNameImmediateExact": True,
+            "profileNameCloseReopenExact": True,
+            "profileNamePostInstallSetTextActions": 0,
+            "profilePersistedWarm": True,
+            "appearancePersistedWarm": True,
+            "watchlistPersistedWarm": True,
+            "folderPersistedWarm": True,
+            "visibleTaskDismissalObserved": True,
+            "visibleTaskDismissalSwipes": 1,
+            "independentColdProcessProof": False,
+            "profilePersistedAfterTaskRelaunch": True,
+            "appearancePersistedAfterTaskRelaunch": True,
+            "watchlistPersistedAfterTaskRelaunch": True,
+            "folderPersistedAfterTaskRelaunch": True,
+            "permissionCleanupToggleSelections": 1,
+        }
+        for key, expected_value in fixed_expected.items():
+            actual = value.get(key)
+            if type(actual) is not type(expected_value) or actual != expected_value:
+                raise RuntimeGateError(f"Fixed42 instrumentation receipt {key} mismatch")
+        trigger = value.get("automaticTriggerReturnOrdinal")
+        deferred = value.get("deferredOfferReturnOrdinal")
+        offer_ordinal = value.get("automaticOfferOrdinal")
+        inspection_ordinal = value.get("postInstallInspectionOrdinal")
+        if (
+            type(trigger) is not int
+            or type(deferred) is not int
+            or type(offer_ordinal) is not int
+            or type(inspection_ordinal) is not int
+            or trigger < 1
+            or deferred != trigger + 1
+            or offer_ordinal != deferred
+            or inspection_ordinal <= offer_ordinal
+        ):
+            raise RuntimeGateError("Fixed42 receipt event ordering mismatch")
+        captures = value.get("captures")
+        if type(captures) is not int or captures < 1 or captures > 40:
+            raise RuntimeGateError("Fixed42 receipt capture count is invalid")
+        exact_keys = (
+            set(expected)
+            | set(fixed_expected)
+            | {
+                "otaMode", "automaticTriggerReturnOrdinal",
+                "deferredOfferReturnOrdinal", "automaticOfferOrdinal",
+                "postInstallInspectionOrdinal", "captures", "failure",
+            }
+        )
+        if set(value) != exact_keys:
+            raise RuntimeGateError("Fixed42 instrumentation receipt keys are not exact")
     if value.get("failure") is not None:
         raise RuntimeGateError("Instrumentation receipt retained a failure")
 
@@ -1008,7 +1201,7 @@ def validate_receipt(
 def automatic_instrumentation_arguments(binding: RuntimeBinding) -> list[str]:
     if not binding.automatic:
         raise RuntimeGateError("Automatic instrumentation requires an automatic binding")
-    return [
+    arguments = [
         "shell", "am", "instrument", "-w", "-r",
         "-e", "class", HARNESS_CLASS,
         "-e", "evidenceSubdir", binding.evidence_subdir,
@@ -1028,8 +1221,18 @@ def automatic_instrumentation_arguments(binding: RuntimeBinding) -> list[str]:
         "-e", "targetVerificationSha256", binding.target_verification_sha256 or "",
         "-e", "targetBuildRun", str(binding.target_build_run),
         "-e", "targetPublicRelease", "true",
-        HARNESS_INSTRUMENTATION,
     ]
+    if binding.profile == FIXED42_AUTOMATIC_OTA_PROFILE:
+        arguments.extend([
+            "-e", "runtimeProfile", FIXED42_AUTOMATIC_OTA_PROFILE,
+            "-e", "baselineSourceRevision", binding.baseline_source,
+            "-e", "baselineManifestSha256", binding.baseline_manifest_sha256 or "",
+            "-e", "baselineVerificationSha256", binding.baseline_verification_sha256 or "",
+            "-e", "baselineBuildRun", str(binding.baseline_build_run or 0),
+            "-e", "updaterSourceSha256", binding.updater_source_sha256 or "",
+        ])
+    arguments.append(HARNESS_INSTRUMENTATION)
+    return arguments
 
 
 class AdmittedAdb:
@@ -1055,6 +1258,7 @@ class AdmittedAdb:
         if automatic_binding is not None and not automatic_binding.automatic:
             raise RuntimeGateError("Automatic ADB admission requires an automatic binding")
         self.automatic_binding = automatic_binding
+        self._assert_fixed42_install_inputs_are_not_target()
         self.harness_install_count = 0
         self.baseline_install_count = 0
         self.baseline_installed = False
@@ -1063,6 +1267,35 @@ class AdmittedAdb:
         self.final_pulled = False
         self.automatic_instrumentation_started = False
         self.commands: list[tuple[str, ...]] = []
+
+    def _assert_fixed42_install_inputs_are_not_target(self) -> None:
+        binding = self.automatic_binding
+        if binding is None or binding.profile != FIXED42_AUTOMATIC_OTA_PROFILE:
+            return
+        for label, candidate in (
+            ("baseline", self.baseline_apk),
+            ("harness app", self.harness_app),
+            ("harness test", self.harness_test),
+        ):
+            try:
+                same_file = candidate == self.target_apk or candidate.samefile(self.target_apk)
+                digest = sha256_file(candidate)
+            except OSError as error:
+                raise RuntimeGateError(
+                    f"Fixed42 {label} input identity could not be verified"
+                ) from error
+            if same_file:
+                raise RuntimeGateError(
+                    f"Fixed42 {label} input aliases the target APK"
+                )
+            if digest == FIXED42_TARGET_SHA256:
+                raise RuntimeGateError(
+                    f"Fixed42 {label} input contains the target APK bytes"
+                )
+            if label == "baseline" and digest != FIXED42_BASELINE_SHA256:
+                raise RuntimeGateError(
+                    "Fixed42 baseline install input is not the admitted official APK"
+                )
 
     def _execute(
         self,
@@ -1239,6 +1472,7 @@ class AdmittedAdb:
         return self._execute(expected, timeout=timeout, check=check)
 
     def install_harness(self, app_hash: str, test_hash: str) -> None:
+        self._assert_fixed42_install_inputs_are_not_target()
         if self.baseline_installed:
             raise RuntimeGateError("Harness installation is forbidden after baseline")
         if self.harness_install_count != 0:
@@ -1249,6 +1483,7 @@ class AdmittedAdb:
             (self.harness_app, ["install", "--no-streaming", "-r"]),
             (self.harness_test, ["install", "--no-streaming", "-r", "-t"]),
         ):
+            self._assert_fixed42_install_inputs_are_not_target()
             result = self._execute([*flags, str(path)], timeout=120)
             if "Success" not in result.stdout:
                 raise RuntimeGateError("Harness install did not report Success")
@@ -1257,6 +1492,7 @@ class AdmittedAdb:
             raise RuntimeGateError("Exactly two harness APK installs are required")
 
     def install_baseline_once(self) -> None:
+        self._assert_fixed42_install_inputs_are_not_target()
         if self.baseline_installed:
             raise RuntimeGateError("Baseline product install may occur exactly once")
         if self.baseline_install_count != 0:
@@ -1630,6 +1866,13 @@ class OtaRuntimeDriver:
             result_receipt.update({
                 "persistenceProof": "task-relaunch-only",
                 "independentColdProcessProof": False,
+            })
+        if self.binding.profile == FIXED42_AUTOMATIC_OTA_PROFILE:
+            result_receipt.update({
+                "runtimeProfile": FIXED42_AUTOMATIC_OTA_PROFILE,
+                "preOfferManualDiscoveries": 0,
+                "postInstallManualInspectionChecks": 1,
+                "automaticDiscoveryProofIncludesPostInstallInspection": False,
             })
         self.write(
             "RESULT.json",
