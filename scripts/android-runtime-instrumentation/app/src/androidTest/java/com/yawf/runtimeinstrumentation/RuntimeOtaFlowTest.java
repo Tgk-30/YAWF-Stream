@@ -62,6 +62,35 @@ public final class RuntimeOtaFlowTest {
     private static final Pattern VERSION = Pattern.compile("\\d+\\.\\d+\\.\\d+");
     private static final String AUTOMATIC_OTA_MODE = "automatic-initial-cancel-due-resume";
     private static final String AUTOMATIC_EVIDENCE_SUBDIR = "automatic-public-ota-flow";
+    private static final String FIXED42_AUTOMATIC_OTA_PROFILE =
+            "public-fixed42-to59-initial-cancel-due-resume-v1";
+    private static final String FIXED42_EVIDENCE_SUBDIR = "fixed42-automatic-public-ota-flow";
+    private static final String FIXED42_BASELINE_VERSION = "2.3.42";
+    private static final long FIXED42_BASELINE_VERSION_CODE = 2_003_042L;
+    private static final String FIXED42_BASELINE_SHA256 =
+            "3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c";
+    private static final long FIXED42_BASELINE_SIZE = 88_583_041L;
+    private static final String FIXED42_BASELINE_SOURCE =
+            "ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5";
+    private static final String FIXED42_BASELINE_MANIFEST_SHA256 =
+            "26fedf40c35011ecf3edaa29462c18f04301dafae7dd9e3808e1ea1e2a3001a8";
+    private static final String FIXED42_BASELINE_VERIFICATION_SHA256 =
+            "a87360645d7700f7c2ff9a99629d714b7d126fbe5d66a9a2e44a10baad42c4dc";
+    private static final long FIXED42_BASELINE_BUILD_RUN = 40_025_606_020L;
+    private static final String FIXED42_TARGET_VERSION = "2.3.59";
+    private static final long FIXED42_TARGET_VERSION_CODE = 2_003_059L;
+    private static final String FIXED42_TARGET_SHA256 =
+            "5fe550e66658f3c9ae172c087c656d69e126af2892df05ca15e7e021594dae47";
+    private static final long FIXED42_TARGET_SIZE = 88_644_481L;
+    private static final String FIXED42_TARGET_SOURCE =
+            "ac885bb98b2672614beb801b5aea11eb2f98ab40";
+    private static final String FIXED42_TARGET_MANIFEST_SHA256 =
+            "8d0f680abc7d52cd467ef79b3fd860e18c7e1dd15a7c5fd765a9d3941c974af6";
+    private static final String FIXED42_TARGET_VERIFICATION_SHA256 =
+            "28ccb986f613b68917a907b5dd9632c02e98185413ce9d09bc745eb564541294";
+    private static final long FIXED42_TARGET_BUILD_RUN = 40_169_716_770L;
+    private static final String FIXED42_UPDATER_SHA256 =
+            "129df15e095ed5ce8933d17ab9a0329da79244e14ac046df18c3fad32e01163d";
     private static final String AUTOMATIC_BASELINE_VERSION = "2.3.27";
     private static final long AUTOMATIC_BASELINE_VERSION_CODE = 2_003_027L;
     private static final String AUTOMATIC_BASELINE_SHA256 =
@@ -69,6 +98,8 @@ public final class RuntimeOtaFlowTest {
     private static final long AUTOMATIC_BASELINE_SIZE = 88_558_465L;
     private static final long MINIMUM_AUTOMATIC_TARGET_VERSION_CODE = 2_003_031L;
     private static final String AUTOMATIC_PROFILE_NAME = "Auto OTA Profile";
+    private static final String FIXED42_PROFILE_NAME = "Fixed42OTA59Marker";
+    private static final String FIXED42_APPEARANCE_SUMMARY = "Quiet focus";
     private static final String AUTOMATIC_APPEARANCE = "Apply Quiet focus style";
     private static final String AUTOMATIC_SAMPLE_TITLE = "Blade Runner 2049";
     private static final String AUTOMATIC_FOLDER_NAME = "Automatic OTA public upgrade";
@@ -117,6 +148,15 @@ public final class RuntimeOtaFlowTest {
     private boolean targetIdentityAdmitted;
     private boolean initialManualProgressObserved;
     private boolean initialManualCancelWon;
+    private boolean initialEnableCheckingTitleObserved;
+    private boolean initialEnableCheckingMessageObserved;
+    private boolean initialEnableCancelObserved;
+    private boolean initialEnableTerminalResultExcludedBeforeCancel;
+    private int initialEnableCancelSelections;
+    private boolean initialEnableCancelWon;
+    private int initialEnableSettledResultExclusionSamples;
+    private int preOfferManualDiscoveries;
+    private boolean weeklyOnAtDeferredOffer;
     private boolean automaticOfferAbsentSameForeground;
     private boolean deferredAutomaticOfferObserved;
     private boolean automaticDiscoveryObserved;
@@ -134,6 +174,24 @@ public final class RuntimeOtaFlowTest {
     private int visibleLauncherReturnOrdinal;
     private int automaticTriggerReturnOrdinal;
     private int deferredOfferReturnOrdinal;
+    private int automaticOfferOrdinal;
+    private int postInstallInspectionOrdinal;
+    private int postInstallManualInspectionChecks;
+    private boolean postInstallExactUpToDate59Observed;
+    private boolean weeklyOnAfterUpdate;
+    private int postInstallNativeOkClosures;
+    private int postInstallNativeCancelClosures;
+    private int productUpdateSelections;
+    private boolean profileNameInitialDistinct;
+    private int profileNameSetTextActions;
+    private boolean profileNameImmediateExact;
+    private boolean profileNameCloseReopenExact;
+    private int profileNamePostInstallSetTextActions;
+    private String admittedBaselineSourceRevision;
+    private String admittedBaselineManifestSha256;
+    private String admittedBaselineVerificationSha256;
+    private long admittedBaselineBuildRun;
+    private String admittedUpdaterSourceSha256;
     private String profileNameBeforeUpdate;
     private int permissionCleanupToggleSelections;
     private int productInstallSelections;
@@ -146,7 +204,9 @@ public final class RuntimeOtaFlowTest {
         device = UiDevice.getInstance(instrumentation);
         Bundle arguments = InstrumentationRegistry.getArguments();
         otaMode = arguments.getString("otaMode", "strict");
-        String expectedSubdir = isAutomaticMode() ? AUTOMATIC_EVIDENCE_SUBDIR : EVIDENCE_SUBDIR;
+        String expectedSubdir = isFixed42AutomaticMode()
+                ? FIXED42_EVIDENCE_SUBDIR
+                : (isAutomaticMode() ? AUTOMATIC_EVIDENCE_SUBDIR : EVIDENCE_SUBDIR);
         String subdir = arguments.getString("evidenceSubdir", expectedSubdir);
         assertTrue("Unsafe evidence subdirectory", SAFE_SUBDIR.matcher(subdir).matches());
         assertEquals("Unexpected evidence subdirectory", expectedSubdir, subdir);
@@ -218,7 +278,11 @@ public final class RuntimeOtaFlowTest {
     }
 
     private boolean isAutomaticMode() {
-        return AUTOMATIC_OTA_MODE.equals(otaMode);
+        return AUTOMATIC_OTA_MODE.equals(otaMode) || isFixed42AutomaticMode();
+    }
+
+    private boolean isFixed42AutomaticMode() {
+        return FIXED42_AUTOMATIC_OTA_PROFILE.equals(otaMode);
     }
 
     private void admitAutomaticTargetIdentity(Bundle arguments) {
@@ -231,6 +295,61 @@ public final class RuntimeOtaFlowTest {
         admittedTargetManifestSha256 = arguments.getString("targetManifestSha256", "");
         admittedTargetVerificationSha256 = arguments.getString("targetVerificationSha256", "");
         admittedTargetBuildRun = parseLongArgument(arguments, "targetBuildRun");
+
+        if (isFixed42AutomaticMode()) {
+            admittedBaselineSourceRevision = arguments.getString("baselineSourceRevision", "");
+            admittedBaselineManifestSha256 = arguments.getString("baselineManifestSha256", "");
+            admittedBaselineVerificationSha256 =
+                    arguments.getString("baselineVerificationSha256", "");
+            admittedBaselineBuildRun = parseLongArgument(arguments, "baselineBuildRun");
+            admittedUpdaterSourceSha256 = arguments.getString("updaterSourceSha256", "");
+            assertEquals("Fixed42 runtime profile mismatch", FIXED42_AUTOMATIC_OTA_PROFILE,
+                    arguments.getString("runtimeProfile", ""));
+            assertEquals("Fixed42 baseline version mismatch",
+                    FIXED42_BASELINE_VERSION, admittedBaselineVersion);
+            assertEquals("Fixed42 baseline versionCode mismatch",
+                    FIXED42_BASELINE_VERSION_CODE,
+                    parseLongArgument(arguments, "baselineVersionCode"));
+            assertEquals("Fixed42 baseline APK digest mismatch",
+                    FIXED42_BASELINE_SHA256, arguments.getString("baselineSha256", ""));
+            assertEquals("Fixed42 baseline APK size mismatch",
+                    FIXED42_BASELINE_SIZE, parseLongArgument(arguments, "baselineSize"));
+            assertEquals("Fixed42 baseline source mismatch",
+                    FIXED42_BASELINE_SOURCE, admittedBaselineSourceRevision);
+            assertEquals("Fixed42 baseline manifest digest mismatch",
+                    FIXED42_BASELINE_MANIFEST_SHA256, admittedBaselineManifestSha256);
+            assertEquals("Fixed42 baseline verification digest mismatch",
+                    FIXED42_BASELINE_VERIFICATION_SHA256, admittedBaselineVerificationSha256);
+            assertEquals("Fixed42 baseline build run mismatch",
+                    FIXED42_BASELINE_BUILD_RUN, admittedBaselineBuildRun);
+            assertEquals("Fixed42 target version mismatch",
+                    FIXED42_TARGET_VERSION, admittedTargetVersion);
+            assertEquals("Fixed42 target versionCode mismatch",
+                    FIXED42_TARGET_VERSION_CODE, admittedTargetVersionCode);
+            assertEquals("Fixed42 target APK name mismatch",
+                    "YAWF.Stream_Android_2.3.59.apk",
+                    arguments.getString("targetApkName", ""));
+            assertEquals("Fixed42 target APK digest mismatch",
+                    FIXED42_TARGET_SHA256, admittedTargetSha256);
+            assertEquals("Fixed42 target APK size mismatch",
+                    FIXED42_TARGET_SIZE, admittedTargetSize);
+            assertEquals("Fixed42 target source mismatch",
+                    FIXED42_TARGET_SOURCE, admittedTargetSourceRevision);
+            assertEquals("Fixed42 target manifest digest mismatch",
+                    FIXED42_TARGET_MANIFEST_SHA256, admittedTargetManifestSha256);
+            assertEquals("Fixed42 target verification digest mismatch",
+                    FIXED42_TARGET_VERIFICATION_SHA256, admittedTargetVerificationSha256);
+            assertEquals("Fixed42 target build run mismatch",
+                    FIXED42_TARGET_BUILD_RUN, admittedTargetBuildRun);
+            assertEquals("Fixed42 updater source digest mismatch",
+                    FIXED42_UPDATER_SHA256, admittedUpdaterSourceSha256);
+            assertEquals("Fixed42 signer continuity mismatch",
+                    OtaFlowPolicy.SIGNER_SHA256, arguments.getString("signerSha256", ""));
+            assertEquals("Fixed42 public release admission was not explicit",
+                    "true", arguments.getString("targetPublicRelease", ""));
+            targetIdentityAdmitted = true;
+            return;
+        }
 
         assertEquals("Automatic baseline version mismatch",
                 AUTOMATIC_BASELINE_VERSION, admittedBaselineVersion);
@@ -272,23 +391,32 @@ public final class RuntimeOtaFlowTest {
     private void runAutomaticFlow() throws Exception {
         assertNoBindingTerms();
         device.wakeUp();
-        launchProductFromVisibleLauncher("public 2.3.27 baseline");
+        launchProductFromVisibleLauncher("public " + admittedBaselineVersion + " baseline");
 
         waitFor(By.text("Enable Android update checks?"), UI_WAIT_MS,
                 "initial native update consent");
         capture("automatic-initial-consent");
-        click(
-                By.res("android", "button1")
-                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
-                        .text(Pattern.compile("\\AEnable\\z", Pattern.CASE_INSENSITIVE)),
-                "Enable",
-                SHORT_WAIT_MS,
-                true);
-        cancelInitialManualCheckBeforeResult();
+        if (isFixed42AutomaticMode()) {
+            enableAndCancelInitialFixed42CheckNoIdle();
+        } else {
+            click(
+                    By.res("android", "button1")
+                            .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                            .text(Pattern.compile("\\AEnable\\z", Pattern.CASE_INSENSITIVE)),
+                    "Enable",
+                    SHORT_WAIT_MS,
+                    true);
+            cancelInitialManualCheckBeforeResult();
+        }
 
         completeNormalSetupExact();
-        seedMeaningfulLocalState();
-        assertMeaningfulLocalState("before-update", false);
+        if (isFixed42AutomaticMode()) {
+            seedFixed42MeaningfulLocalState();
+            assertFixed42MeaningfulLocalState("before-update", false);
+        } else {
+            seedMeaningfulLocalState();
+            assertMeaningfulLocalState("before-update", false);
+        }
 
         automaticTriggerReturnOrdinal =
                 returnToProductThroughVisibleLauncher("automatic-check-trigger");
@@ -302,13 +430,25 @@ public final class RuntimeOtaFlowTest {
         waitFor(By.text(offerTitle), UI_WAIT_MS, "deferred exact public target offer");
         waitFor(By.text(offerMessage), SHORT_WAIT_MS, "deferred exact offer message");
         deferredAutomaticOfferObserved = true;
-        automaticDiscoveryObserved = initialManualCancelWon
-                && deferredAutomaticOfferObserved
-                && AutomaticOtaDriverChecks.deferredOfferIsFromLaterReturn(
-                        automaticTriggerReturnOrdinal,
-                        deferredOfferReturnOrdinal,
-                        automaticOfferAbsentSameForeground,
-                        false);
+        if (isFixed42AutomaticMode()) {
+            automaticDiscoveryObserved = initialEnableCancelWon
+                    && automaticOfferAbsentSameForeground
+                    && deferredAutomaticOfferObserved
+                    && AutomaticOtaDriverChecks.deferredOfferIsFromLaterReturn(
+                            automaticTriggerReturnOrdinal,
+                            deferredOfferReturnOrdinal,
+                            automaticOfferAbsentSameForeground,
+                            false);
+        } else {
+            automaticDiscoveryObserved = initialManualCancelWon
+                    && automaticOfferAbsentSameForeground
+                    && deferredAutomaticOfferObserved
+                    && AutomaticOtaDriverChecks.deferredOfferIsFromLaterReturn(
+                            automaticTriggerReturnOrdinal,
+                            deferredOfferReturnOrdinal,
+                            automaticOfferAbsentSameForeground,
+                            false);
+        }
         UiObject2 weekly = waitFor(
                 By.text("Check automatically each week")
                         .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
@@ -316,7 +456,15 @@ public final class RuntimeOtaFlowTest {
                 SHORT_WAIT_MS,
                 "retained weekly checkbox on deferred offer");
         assertTrue("Initial Enable did not retain automatic checks", weekly.isChecked());
+        if (isFixed42AutomaticMode()) {
+            weeklyOnAtDeferredOffer = true;
+            automaticOfferOrdinal = deferredOfferReturnOrdinal;
+            assertEquals("Fixed42 automatic profile forbids pre-offer manual discovery",
+                    0, preOfferManualDiscoveries);
+        }
         capture("automatic-deferred-target-offer");
+        productUpdateSelections++;
+        assertEquals("Product Update must be selected exactly once", 1, productUpdateSelections);
         click(nativeProductButton(OtaFlowPolicy.UPDATE), "Update", SHORT_WAIT_MS, true);
 
         waitFor(By.text("Downloading update"), UI_WAIT_MS, "DownloadManager progress dialog");
@@ -345,10 +493,18 @@ public final class RuntimeOtaFlowTest {
         waitFor(By.text("Discover"), UI_WAIT_MS, "updated Discover");
         updatedProductObserved = true;
         capture("automatic-updated-product-open");
-        assertMeaningfulLocalState("warm-after-update", true);
+        if (isFixed42AutomaticMode()) {
+            assertFixed42MeaningfulLocalState("warm-after-update", true);
+        } else {
+            assertMeaningfulLocalState("warm-after-update", true);
+        }
 
         dismissVisibleRecentTaskAndRelaunchThroughLauncher();
-        assertMeaningfulLocalState("after-task-relaunch", true);
+        if (isFixed42AutomaticMode()) {
+            assertFixed42MeaningfulLocalState("after-task-relaunch", true);
+        } else {
+            assertMeaningfulLocalState("after-task-relaunch", true);
+        }
         assertFalse("FirstRun returned after automatic OTA",
                 hasAnyWithoutIdleDelay(By.text("How do you want to use YAWF Stream?")));
         assertFalse("Setup reminder returned after automatic OTA", hasSetupReminder());
@@ -363,6 +519,9 @@ public final class RuntimeOtaFlowTest {
                         && appearancePersistedAfterTaskRelaunch
                         && watchlistPersistedAfterTaskRelaunch
                         && folderPersistedAfterTaskRelaunch);
+        if (isFixed42AutomaticMode()) {
+            inspectFixed42PostInstallAutomaticRetention();
+        }
     }
 
     private void cancelInitialManualCheckBeforeResult() throws IOException {
@@ -396,6 +555,143 @@ public final class RuntimeOtaFlowTest {
         fail("Initial manual cancellation did not settle");
     }
 
+    private void enableAndCancelInitialFixed42CheckNoIdle() throws IOException {
+        String progressTitle = "Checking for updates";
+        String progressMessage = "Checking the official YAWF Stream Android release channel.";
+        BySelector enableSelector = By.res("android", "button1")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.Button")
+                .text(Pattern.compile("\\AEnable\\z", Pattern.CASE_INSENSITIVE))
+                .clickable(true)
+                .enabled(true);
+        BySelector titleSelector = nativeDialogText(progressTitle);
+        BySelector messageSelector = nativeDialogText(progressMessage);
+        BySelector cancelSelector = By.res("android", "button2")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.Button")
+                .text(Pattern.compile("\\ACancel\\z", Pattern.CASE_INSENSITIVE))
+                .clickable(true)
+                .enabled(true);
+        Configurator configurator = Configurator.getInstance();
+        long previousIdleTimeout = configurator.getWaitForIdleTimeout();
+        long enableClickUptimeMs = -1L;
+        long checkingObservedUptimeMs = -1L;
+        long cancelSelectedUptimeMs = -1L;
+        long cancelSettledUptimeMs = -1L;
+        boolean cancellationSettled = false;
+        configurator.setWaitForIdleTimeout(0L);
+        try {
+            assertTrue("Initial Enable cache could not be refreshed before safety guard",
+                    instrumentation.getUiAutomation().clearCache());
+            List<UiObject2> enables = device.findObjects(enableSelector);
+            assertEquals("Initial Enable was absent or ambiguous before safety guard",
+                    1, enables.size());
+            assertNoBindingTermsAtCurrentIdlePolicy();
+            assertTrue("Initial Enable cache could not be refreshed after safety guard",
+                    instrumentation.getUiAutomation().clearCache());
+            List<UiObject2> freshEnables = device.findObjects(enableSelector);
+            assertEquals("Initial Enable disappeared or became ambiguous after safety guard",
+                    1, freshEnables.size());
+            enableClickUptimeMs = SystemClock.uptimeMillis();
+            freshEnables.get(0).click();
+            log("Selected one exact native Enable with UiAutomator idle waiting disabled");
+
+            long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+            while (SystemClock.uptimeMillis() < deadline) {
+                boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+                if (!cacheCleared) {
+                    SystemClock.sleep(100);
+                    continue;
+                }
+                assertNoInitialEnableResultVisibleAtCurrentIdlePolicy();
+                List<UiObject2> titles = cacheCleared
+                        ? device.findObjects(titleSelector) : new ArrayList<>();
+                List<UiObject2> messages = cacheCleared
+                        ? device.findObjects(messageSelector) : new ArrayList<>();
+                List<UiObject2> cancels = cacheCleared
+                        ? device.findObjects(cancelSelector) : new ArrayList<>();
+                assertTrue("Initial Enable CHECKING title was ambiguous", titles.size() <= 1);
+                assertTrue("Initial Enable CHECKING message was ambiguous", messages.size() <= 1);
+                assertTrue("Initial Enable Cancel was ambiguous", cancels.size() <= 1);
+                if (titles.size() == 1 && messages.size() == 1 && cancels.size() == 1) {
+                    UiObject2 cancel = cancels.get(0);
+                    assertTrue("Initial Enable Cancel was disabled", cancel.isEnabled());
+                    assertTrue("Initial Enable Cancel was not clickable", cancel.isClickable());
+                    initialEnableCheckingTitleObserved = true;
+                    initialEnableCheckingMessageObserved = true;
+                    initialEnableCancelObserved = true;
+                    initialEnableTerminalResultExcludedBeforeCancel = true;
+                    checkingObservedUptimeMs = SystemClock.uptimeMillis();
+                    break;
+                }
+                SystemClock.sleep(100);
+            }
+            assertTrue("Initial Enable did not expose exact CHECKING title",
+                    initialEnableCheckingTitleObserved);
+            assertTrue("Initial Enable did not expose exact CHECKING message",
+                    initialEnableCheckingMessageObserved);
+            assertTrue("Initial Enable did not expose one native Cancel",
+                    initialEnableCancelObserved);
+
+            assertTrue("Initial Enable cache could not be refreshed before Cancel",
+                    instrumentation.getUiAutomation().clearCache());
+            assertNoInitialEnableResultVisibleAtCurrentIdlePolicy();
+            List<UiObject2> freshCancels = device.findObjects(cancelSelector);
+            assertEquals("Initial Enable Cancel disappeared or became ambiguous before selection",
+                    1, freshCancels.size());
+            initialEnableCancelSelections++;
+            assertEquals("Initial Enable Cancel must be selected exactly once",
+                    1, initialEnableCancelSelections);
+            freshCancels.get(0).click();
+            cancelSelectedUptimeMs = SystemClock.uptimeMillis();
+            log("Selected one exact native Cancel during the fresh initial Enable check");
+
+            deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+            int settled = 0;
+            while (SystemClock.uptimeMillis() < deadline) {
+                boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+                if (!cacheCleared) {
+                    settled = 0;
+                    SystemClock.sleep(100);
+                    continue;
+                }
+                assertNoInitialEnableResultVisibleAtCurrentIdlePolicy();
+                boolean progressGone = cacheCleared
+                        && device.findObjects(titleSelector).isEmpty()
+                        && device.findObjects(messageSelector).isEmpty()
+                        && device.findObjects(cancelSelector).isEmpty();
+                if (progressGone) {
+                    settled++;
+                    if (settled >= ABSENT_SETTLED_SAMPLES) {
+                        initialEnableSettledResultExclusionSamples = settled;
+                        initialEnableCancelWon = true;
+                        cancelSettledUptimeMs = SystemClock.uptimeMillis();
+                        cancellationSettled = true;
+                        break;
+                    }
+                } else {
+                    settled = 0;
+                }
+                SystemClock.sleep(100);
+            }
+        } finally {
+            configurator.setWaitForIdleTimeout(previousIdleTimeout);
+        }
+        assertTrue("Initial Enable cancellation did not settle before a terminal result",
+                cancellationSettled);
+        assertTrue("Initial Enable timing observations were incomplete",
+                enableClickUptimeMs >= 0L
+                        && checkingObservedUptimeMs >= enableClickUptimeMs
+                        && cancelSelectedUptimeMs >= checkingObservedUptimeMs
+                        && cancelSettledUptimeMs >= cancelSelectedUptimeMs);
+        log("Initial Enable no-idle timing checkingMs="
+                + (checkingObservedUptimeMs - enableClickUptimeMs)
+                + " cancelMs=" + (cancelSelectedUptimeMs - enableClickUptimeMs)
+                + " settledMs=" + (cancelSettledUptimeMs - enableClickUptimeMs));
+        capture("fixed42-initial-enable-cancel-settled");
+        log("Initial Enable check cancellation settled before any terminal result");
+    }
+
     private void assertNoInitialManualResultVisible() {
         assertFalse("Initial manual check returned up-to-date before Cancel",
                 hasAnyWithoutIdleDelay(By.text("YAWF Stream is up to date")));
@@ -403,6 +699,16 @@ public final class RuntimeOtaFlowTest {
                 hasAnyWithoutIdleDelay(By.text("Update check unavailable")));
         assertFalse("Initial manual check returned target offer before Cancel",
                 hasAnyWithoutIdleDelay(By.text(
+                        "YAWF Stream " + admittedTargetVersion + " is available")));
+    }
+
+    private void assertNoInitialEnableResultVisibleAtCurrentIdlePolicy() {
+        assertFalse("Initial Enable check returned up-to-date before Cancel",
+                device.hasObject(nativeDialogText("YAWF Stream is up to date")));
+        assertFalse("Initial Enable check returned failure before Cancel",
+                device.hasObject(nativeDialogText("Update check unavailable")));
+        assertFalse("Initial Enable check returned target offer before Cancel",
+                device.hasObject(nativeDialogText(
                         "YAWF Stream " + admittedTargetVersion + " is available")));
     }
 
@@ -561,6 +867,445 @@ public final class RuntimeOtaFlowTest {
         assertTrue("Weekly automatic checks did not survive OTA", weekly.isChecked());
         capture("post-update-up-to-date");
         click(nativeProductButton(OtaFlowPolicy.OK), "OK", SHORT_WAIT_MS, true);
+    }
+
+    private void seedFixed42MeaningfulLocalState() throws IOException {
+        openFixed42ProfileDialog();
+        UiObject2 initialName = waitForFixed42ProfileNameField("initial profile name");
+        String initialValue = initialName.getText();
+        profileNameInitialDistinct = initialValue != null
+                && !FIXED42_PROFILE_NAME.equals(initialValue);
+        assertTrue("Fixed42 profile marker must differ from the observed initial value",
+                profileNameInitialDistinct);
+        profileNameSetTextActions++;
+        assertEquals("Fixed42 profile marker admits exactly one setText action",
+                1, profileNameSetTextActions);
+        initialName.setText(FIXED42_PROFILE_NAME);
+        UiObject2 immediateName = waitForFixed42ProfileNameField("immediate profile name read");
+        profileNameImmediateExact = FIXED42_PROFILE_NAME.equals(immediateName.getText());
+        assertTrue("Fixed42 profile marker was not immediately exact", profileNameImmediateExact);
+        capture("fixed42-profile-name-immediate-exact");
+        closeFixed42ProfileDialog("after the initial write");
+
+        openFixed42ProfileDialog();
+        UiObject2 reopenedName = waitForFixed42ProfileNameField("close-reopen profile name read");
+        profileNameCloseReopenExact = FIXED42_PROFILE_NAME.equals(reopenedName.getText());
+        assertTrue("Fixed42 profile marker was not exact after close and reopen",
+                profileNameCloseReopenExact);
+        capture("fixed42-profile-name-close-reopen-exact");
+        closeFixed42ProfileDialog("after close-reopen verification");
+
+        openSettingsFromProductNavigation();
+        selectFixed42SettingsCategory("Appearance", "Choose a style");
+        waitForFixed42AppearanceSummary("Midnight Studio");
+        UiObject2 quiet = scrollUntilVisibleExactProduct(
+                By.desc(AUTOMATIC_APPEARANCE)
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.ToggleButton")
+                        .clickable(true)
+                        .enabled(true),
+                "exact Quiet focus ToggleButton",
+                Direction.DOWN);
+        assertNoBindingTerms();
+        quiet.click();
+        waitForFixed42AppearanceSummary(FIXED42_APPEARANCE_SUMMARY);
+        navigateProductRoute("Discover");
+
+        waitFor(By.text("Sample catalog"), UI_WAIT_MS, "Sample catalog classification");
+        UiObject2 title = scrollUntilVisibleProductSemanticOnAnyRoute(
+                AUTOMATIC_SAMPLE_TITLE, "android.widget.Button", true, Direction.DOWN);
+        title.click();
+        String detailDialogIdentity = AUTOMATIC_SAMPLE_TITLE + " details";
+        waitForUniqueExactProductDialog(detailDialogIdentity, SHORT_WAIT_MS);
+        UiObject2 watchlist = waitForFixed42DialogSemantic(
+                detailDialogIdentity, "Watchlist", true, "Watchlist action");
+        watchlist.click();
+        waitForFixed42DialogSemantic(
+                detailDialogIdentity, "In watchlist", true, "In watchlist state");
+        device.pressBack();
+        assertTrue("Fixed42 exact sample detail did not close",
+                waitForUniqueExactProductDialogGone(detailDialogIdentity, SHORT_WAIT_MS));
+
+        navigateProductRoute("Watchlist");
+        waitForFixed42Semantic(AUTOMATIC_SAMPLE_TITLE, true, "watchlisted sample title");
+        UiObject2 newFolder = waitForFixed42Semantic("+ New folder", true, "new folder action");
+        newFolder.click();
+        UiObject2 folderName = waitForFixed42Semantic(
+                "New watchlist folder name", true, "new folder name field");
+        assertEquals("Fixed42 folder-name field class mismatch",
+                "android.widget.EditText", folderName.getClassName());
+        folderName.setText(AUTOMATIC_FOLDER_NAME);
+        waitForExactTextValue(folderName, AUTOMATIC_FOLDER_NAME, "seeded folder name");
+        waitForFixed42Semantic("Save", true, "folder Save").click();
+        waitForFixed42Semantic(AUTOMATIC_FOLDER_NAME, true, "saved custom folder");
+
+        String moveLabel = "Move " + AUTOMATIC_SAMPLE_TITLE + " to folder";
+        UiObject2 folderSelect = waitForFixed42FolderSelect(moveLabel, "All");
+        folderSelect.click();
+        click(
+                By.text(AUTOMATIC_FOLDER_NAME)
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.CheckedTextView")
+                        .enabled(true),
+                AUTOMATIC_FOLDER_NAME,
+                SHORT_WAIT_MS,
+                true);
+        waitForFixed42FolderSelect(moveLabel, AUTOMATIC_FOLDER_NAME);
+        capture("fixed42-local-data-seeded");
+    }
+
+    private void assertFixed42MeaningfulLocalState(String phase, boolean afterUpdate)
+            throws IOException {
+        navigateProductRoute("Discover");
+        openFixed42ProfileDialog();
+        UiObject2 name = waitForFixed42ProfileNameField(phase + " profile marker read");
+        assertEquals(phase + " fixed42 profile marker mismatch",
+                FIXED42_PROFILE_NAME, name.getText());
+        closeFixed42ProfileDialog("during " + phase);
+
+        openSettingsFromProductNavigation();
+        selectFixed42SettingsCategory("Appearance", "Choose a style");
+        waitForFixed42AppearanceSummary(FIXED42_APPEARANCE_SUMMARY);
+
+        navigateProductRoute("Watchlist");
+        waitForFixed42Semantic(AUTOMATIC_SAMPLE_TITLE, true, phase + " watchlist marker");
+        waitForFixed42Semantic(AUTOMATIC_FOLDER_NAME, true, phase + " folder marker");
+        waitForFixed42FolderSelect(
+                "Move " + AUTOMATIC_SAMPLE_TITLE + " to folder", AUTOMATIC_FOLDER_NAME);
+        capture("fixed42-state-" + phase);
+
+        if (afterUpdate && phase.startsWith("warm")) {
+            profilePersistedWarm = true;
+            appearancePersistedWarm = true;
+            watchlistPersistedWarm = true;
+            folderPersistedWarm = true;
+        } else if (afterUpdate && phase.startsWith("after-task-relaunch")) {
+            profilePersistedAfterTaskRelaunch = true;
+            appearancePersistedAfterTaskRelaunch = true;
+            watchlistPersistedAfterTaskRelaunch = true;
+            folderPersistedAfterTaskRelaunch = true;
+        }
+    }
+
+    private void inspectFixed42PostInstallAutomaticRetention() throws IOException {
+        assertTrue("Postinstall inspection cannot precede the automatic offer",
+                automaticOfferOrdinal >= 1);
+        assertEquals("Postinstall inspection cannot establish pre-offer automatic discovery",
+                0, preOfferManualDiscoveries);
+        openSettingsAndAssertSimple("fixed42-post-install-automatic-retention");
+        selectFixed42SettingsCategory("Help & updates", "Android APK updates");
+        postInstallManualInspectionChecks++;
+        assertEquals("Fixed42 postinstall Settings inspection must run exactly once",
+                1, postInstallManualInspectionChecks);
+        tapVisibleAndroidUpdateCheckCard("fixed42-post-install-update-inspection");
+
+        String resultTitle = "YAWF Stream is up to date";
+        String resultMessage = "No newer signed Android phone release is available.";
+        waitFor(nativeDialogText(resultTitle), UI_WAIT_MS,
+                "fixed42 exact postinstall up-to-date title");
+        waitFor(nativeDialogText(resultMessage), SHORT_WAIT_MS,
+                "fixed42 exact postinstall up-to-date message");
+        postInstallExactUpToDate59Observed = true;
+        List<UiObject2> weeklyMatches = device.findObjects(
+                By.text("Check automatically each week")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.CheckBox"));
+        assertEquals("Fixed42 postinstall weekly checkbox was absent or ambiguous",
+                1, weeklyMatches.size());
+        UiObject2 weekly = weeklyMatches.get(0);
+        assertTrue("Fixed42 postinstall weekly checkbox was disabled", weekly.isEnabled());
+        assertTrue("Fixed42 postinstall weekly checkbox was not checkable", weekly.isCheckable());
+        assertTrue("Fixed42 postinstall weekly automatic checks were not retained",
+                weekly.isChecked());
+        weeklyOnAfterUpdate = true;
+        postInstallInspectionOrdinal = automaticOfferOrdinal + 1;
+        capture("fixed42-post-install-up-to-date-weekly-on");
+        postInstallNativeOkClosures++;
+        assertEquals("Fixed42 postinstall result must close through one native OK",
+                1, postInstallNativeOkClosures);
+        click(nativeProductButton(OtaFlowPolicy.OK),
+                "fixed42 postinstall native OK", SHORT_WAIT_MS, true);
+        assertTrue("Fixed42 postinstall up-to-date result did not close",
+                device.wait(Until.gone(nativeDialogText(resultTitle)), SHORT_WAIT_MS));
+        assertEquals("Fixed42 postinstall inspection must not use native Cancel",
+                0, postInstallNativeCancelClosures);
+        log("Completed one bounded postinstall manual inspection after automatic discovery proof");
+    }
+
+    private UiObject2 waitForFixed42ProfileNameField(String label) {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            instrumentation.getUiAutomation().clearCache();
+            UiObject2 dialog = findUniqueExactProductDialog("Profile");
+            if (dialog != null) {
+                Rect dialogBounds = dialog.getVisibleBounds();
+                List<UiObject2> candidates = dialog.findObjects(
+                        By.clazz("android.widget.EditText")
+                                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                                .enabled(true));
+                List<UiObject2> valid = new ArrayList<>();
+                for (UiObject2 candidate : candidates) {
+                    Rect bounds = candidate.getVisibleBounds();
+                    if (!bounds.isEmpty()
+                            && dialogBounds.contains(bounds)
+                            && bounds.left >= 0
+                            && bounds.top >= 0
+                            && bounds.right <= device.getDisplayWidth()
+                            && bounds.bottom <= device.getDisplayHeight()) {
+                        valid.add(candidate);
+                    }
+                }
+                assertTrue("Fixed42 Profile exposed ambiguous visible enabled EditText fields",
+                        valid.size() <= 1);
+                if (valid.size() == 1) {
+                    log("Reacquired one exact Profile EditText for " + label);
+                    return valid.get(0);
+                }
+            }
+            SystemClock.sleep(150);
+        }
+        fail("Timed out waiting for one exact visible Profile EditText: " + label);
+        return null;
+    }
+
+    private UiObject2 findUniqueFreshFixed42Button(String label) {
+        List<UiObject2> matches = new ArrayList<>();
+        addDistinctUiObjects(matches, device.findObjects(
+                By.text(label)
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.Button")
+                        .clickable(true)
+                        .enabled(true)));
+        addDistinctUiObjects(matches, device.findObjects(
+                By.desc(label)
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.Button")
+                        .clickable(true)
+                        .enabled(true)));
+        List<UiObject2> visible = new ArrayList<>();
+        for (UiObject2 match : matches) {
+            Rect bounds = match.getVisibleBounds();
+            if (!bounds.isEmpty()
+                    && bounds.left >= 0
+                    && bounds.top >= 0
+                    && bounds.right <= device.getDisplayWidth()
+                    && bounds.bottom <= device.getDisplayHeight()) {
+                visible.add(match);
+            }
+        }
+        assertTrue("Fixed42 exact product button was ambiguous: " + label, visible.size() <= 1);
+        return visible.size() == 1 ? visible.get(0) : null;
+    }
+
+    private UiObject2 clickFreshFixed42Button(String label, long timeoutMs) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        while (SystemClock.uptimeMillis() < deadline) {
+            instrumentation.getUiAutomation().clearCache();
+            if (findUniqueFreshFixed42Button(label) == null) {
+                SystemClock.sleep(150);
+                continue;
+            }
+            assertNoBindingTerms();
+            instrumentation.getUiAutomation().clearCache();
+            UiObject2 fresh = findUniqueFreshFixed42Button(label);
+            assertNotNull("Fixed42 exact product button disappeared after safety guard: " + label,
+                    fresh);
+            fresh.click();
+            log("Clicked one fresh exact fixed42 product button: " + label);
+            return fresh;
+        }
+        fail("Timed out waiting for one fresh exact fixed42 product button: " + label);
+        return null;
+    }
+
+    private void openFixed42ProfileDialog() {
+        clickFreshFixed42Button("Your profile", UI_WAIT_MS);
+        waitForUniqueExactProductDialog("Profile", SHORT_WAIT_MS);
+        log("Opened exact fixed42 Profile dialog from a fresh guarded control");
+    }
+
+    private void closeFixed42ProfileDialog(String phase) {
+        clickFreshFixed42Button("Close", SHORT_WAIT_MS);
+        assertTrue("Fixed42 Profile dialog did not close " + phase,
+                waitForUniqueExactProductDialogGone("Profile", SHORT_WAIT_MS));
+    }
+
+    private void selectFixed42SettingsCategory(String target, String contentAnchor) {
+        String[] categories = {
+                "Appearance", "Language & region", "Playback", "Privacy", "Install & setup",
+                "Help & updates"
+        };
+        UiObject2 collapsed = null;
+        for (int attempt = 0; attempt < 8 && collapsed == null; attempt++) {
+            List<UiObject2> matches = new ArrayList<>();
+            for (String category : categories) {
+                addDistinctUiObjects(matches, device.findObjects(
+                        By.text(category)
+                                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                                .clazz("android.view.View")
+                                .clickable(true)
+                                .enabled(true)));
+            }
+            List<UiObject2> visible = new ArrayList<>();
+            for (UiObject2 match : matches) {
+                if (isVisibleAboveBottomNavigation(match)) visible.add(match);
+            }
+            assertTrue("Fixed42 Settings category selector was ambiguous", visible.size() <= 1);
+            if (visible.size() == 1) {
+                collapsed = visible.get(0);
+                break;
+            }
+            int width = device.getDisplayWidth();
+            int height = device.getDisplayHeight();
+            device.swipe(width / 2, height / 3, width / 2, (height * 3) / 4, 25);
+            device.waitForIdle(500);
+        }
+        assertNotNull("Fixed42 Settings category selector was unavailable", collapsed);
+        assertNoBindingTerms();
+        collapsed.click();
+        BySelector targetRow = By.text(target)
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.CheckedTextView")
+                .enabled(true);
+        List<UiObject2> rows = device.wait(Until.findObjects(targetRow), SHORT_WAIT_MS);
+        assertNotNull("Fixed42 native Settings picker did not expose " + target, rows);
+        assertEquals("Fixed42 native Settings picker target was ambiguous", 1, rows.size());
+        rows.get(0).click();
+        assertTrue("Fixed42 native Settings picker did not close",
+                device.wait(Until.gone(By.clazz("android.widget.ListView")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)), SHORT_WAIT_MS));
+        waitFor(
+                By.text(contentAnchor)
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.TextView"),
+                SHORT_WAIT_MS,
+                target + " content anchor");
+        log("Selected exact fixed42 Settings category " + target);
+    }
+
+    private UiObject2 waitForFixed42AppearanceSummary(String exactStyle) {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            List<UiObject2> matches = device.findObjects(
+                    By.text(exactStyle)
+                            .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                            .clazz("android.widget.TextView"));
+            List<UiObject2> summaries = new ArrayList<>();
+            for (UiObject2 match : matches) {
+                boolean clickableAncestor = false;
+                UiObject2 parent = match.getParent();
+                for (int depth = 0; depth < 6 && parent != null; depth++) {
+                    if (parent.isClickable()) {
+                        clickableAncestor = true;
+                        break;
+                    }
+                    parent = parent.getParent();
+                }
+                if (!clickableAncestor && !match.getVisibleBounds().isEmpty()) summaries.add(match);
+            }
+            assertTrue("Fixed42 selected appearance summary was ambiguous", summaries.size() <= 1);
+            if (summaries.size() == 1) return summaries.get(0);
+            SystemClock.sleep(150);
+        }
+        fail("Timed out waiting for exact selected appearance summary " + exactStyle);
+        return null;
+    }
+
+    private UiObject2 waitForFixed42Semantic(String identity, boolean clickable, String label) {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            List<UiObject2> matches = new ArrayList<>();
+            addDistinctUiObjects(matches, device.findObjects(
+                    By.text(identity).pkg(OtaFlowPolicy.PRODUCT_PACKAGE).enabled(true)));
+            addDistinctUiObjects(matches, device.findObjects(
+                    By.desc(identity).pkg(OtaFlowPolicy.PRODUCT_PACKAGE).enabled(true)));
+            List<UiObject2> visible = new ArrayList<>();
+            for (UiObject2 match : matches) {
+                if ((!clickable || match.isClickable()) && isVisibleAboveBottomNavigation(match)) {
+                    visible.add(match);
+                }
+            }
+            assertTrue("Fixed42 semantic control was ambiguous: " + label, visible.size() <= 1);
+            if (visible.size() == 1) return visible.get(0);
+            UiObject2 scrollable = device.findObject(By.scrollable(true));
+            if (scrollable != null) {
+                configureSettingsScrollGesture(scrollable);
+                scrollable.scroll(Direction.DOWN, 0.75f);
+                device.waitForIdle(500);
+            } else {
+                SystemClock.sleep(150);
+            }
+        }
+        fail("Timed out waiting for fixed42 semantic control: " + label);
+        return null;
+    }
+
+    private UiObject2 waitForFixed42DialogSemantic(
+            String dialogIdentity, String identity, boolean clickable, String label) {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            UiObject2 dialog = findUniqueExactProductDialog(dialogIdentity);
+            if (dialog != null) {
+                List<UiObject2> matches = new ArrayList<>();
+                addDistinctUiObjects(matches, dialog.findObjects(
+                        By.text(identity).pkg(OtaFlowPolicy.PRODUCT_PACKAGE).enabled(true)));
+                addDistinctUiObjects(matches, dialog.findObjects(
+                        By.desc(identity).pkg(OtaFlowPolicy.PRODUCT_PACKAGE).enabled(true)));
+                List<UiObject2> valid = new ArrayList<>();
+                for (UiObject2 match : matches) {
+                    if (!clickable || match.isClickable()) valid.add(match);
+                }
+                assertTrue("Fixed42 dialog semantic was ambiguous: " + label, valid.size() <= 1);
+                if (valid.size() == 1) return valid.get(0);
+                UiObject2 scrollable = dialog.findObject(By.scrollable(true));
+                if (scrollable != null) scrollable.scroll(Direction.DOWN, 0.75f);
+            }
+            SystemClock.sleep(150);
+        }
+        fail("Timed out waiting for fixed42 dialog semantic: " + label);
+        return null;
+    }
+
+    private UiObject2 waitForFixed42FolderSelect(String moveLabel, String expectedValue) {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            List<UiObject2> values = device.findObjects(
+                    By.text(expectedValue)
+                            .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                            .clazz("android.view.View")
+                            .clickable(true)
+                            .enabled(true));
+            List<UiObject2> exact = new ArrayList<>();
+            for (UiObject2 value : values) {
+                UiObject2 parent = value.getParent();
+                if (parent == null || !isVisibleAboveBottomNavigation(value)) continue;
+                boolean hasMove = parent.findObjects(
+                        By.text("Move ")
+                                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                                .clazz("android.widget.TextView")).size() == 1;
+                boolean hasTitle = parent.findObjects(
+                        By.text(AUTOMATIC_SAMPLE_TITLE)
+                                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                                .clazz("android.widget.TextView")).size() == 1;
+                boolean hasSuffix = parent.findObjects(
+                        By.text(" to folder")
+                                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                                .clazz("android.widget.TextView")).size() == 1;
+                if (hasMove && hasTitle && hasSuffix) exact.add(value);
+            }
+            assertTrue("Fixed42 exact folder select was ambiguous for " + moveLabel,
+                    exact.size() <= 1);
+            if (exact.size() == 1) return exact.get(0);
+            UiObject2 scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("No scrollable container while seeking fixed42 folder select",
+                    scrollable);
+            configureSettingsScrollGesture(scrollable);
+            scrollable.scroll(Direction.DOWN, 0.75f);
+            device.waitForIdle(500);
+        }
+        fail("Timed out waiting for exact fixed42 folder select " + moveLabel
+                + " with value " + expectedValue);
+        return null;
     }
 
     private void seedMeaningfulLocalState() throws IOException {
@@ -1698,6 +2443,12 @@ public final class RuntimeOtaFlowTest {
                 .text(button.textPattern());
     }
 
+    private BySelector nativeDialogText(String text) {
+        return By.text(text)
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.TextView");
+    }
+
     private UiObject2 waitFor(BySelector selector, long timeoutMs, String label) {
         UiObject2 object = device.wait(Until.findObject(selector), timeoutMs);
         assertNotNull("Timed out waiting for " + label, object);
@@ -1744,6 +2495,13 @@ public final class RuntimeOtaFlowTest {
         if (hasAnyWithoutIdleDelay(
                 By.text(OtaFlowPolicy.BINDING_TERMS_PATTERN),
                 By.desc(OtaFlowPolicy.BINDING_TERMS_PATTERN))) {
+            fail("Refusing to act while a binding-terms phrase is visible");
+        }
+    }
+
+    private void assertNoBindingTermsAtCurrentIdlePolicy() {
+        if (device.hasObject(By.text(OtaFlowPolicy.BINDING_TERMS_PATTERN))
+                || device.hasObject(By.desc(OtaFlowPolicy.BINDING_TERMS_PATTERN))) {
             fail("Refusing to act while a binding-terms phrase is visible");
         }
     }
@@ -1823,6 +2581,7 @@ public final class RuntimeOtaFlowTest {
         receipt.put("permissionBackReturnObserved", permissionBackReturnObserved);
         receipt.put("otaMode", otaMode == null ? "strict" : otaMode);
         receipt.put("legacyManualReconsentUsed", legacyManualReconsentUsed);
+        receipt.put("productUpdateSelections", productUpdateSelections);
         receipt.put("productInstallSelections", productInstallSelections);
         receipt.put("systemUpdateSelections", systemUpdateSelections);
         receipt.put("systemOpenSelections", systemOpenSelections);
@@ -1851,6 +2610,47 @@ public final class RuntimeOtaFlowTest {
             receipt.put("watchlistPersistedAfterTaskRelaunch", watchlistPersistedAfterTaskRelaunch);
             receipt.put("folderPersistedAfterTaskRelaunch", folderPersistedAfterTaskRelaunch);
             receipt.put("permissionCleanupToggleSelections", permissionCleanupToggleSelections);
+            if (isFixed42AutomaticMode()) {
+                receipt.put("runtimeProfile", FIXED42_AUTOMATIC_OTA_PROFILE);
+                receipt.put("baselineSourceRevision", admittedBaselineSourceRevision);
+                receipt.put("baselineManifestSha256", admittedBaselineManifestSha256);
+                receipt.put("baselineVerificationSha256", admittedBaselineVerificationSha256);
+                receipt.put("baselineBuildRun", admittedBaselineBuildRun);
+                receipt.put("updaterSourceSha256", admittedUpdaterSourceSha256);
+                receipt.put("initialEnableCheckingTitleObserved",
+                        initialEnableCheckingTitleObserved);
+                receipt.put("initialEnableCheckingMessageObserved",
+                        initialEnableCheckingMessageObserved);
+                receipt.put("initialEnableCancelObserved", initialEnableCancelObserved);
+                receipt.put("initialEnableTerminalResultExcludedBeforeCancel",
+                        initialEnableTerminalResultExcludedBeforeCancel);
+                receipt.put("initialEnableCancelSelections", initialEnableCancelSelections);
+                receipt.put("initialEnableCancelWon", initialEnableCancelWon);
+                receipt.put("initialEnableSettledResultExclusionSamples",
+                        initialEnableSettledResultExclusionSamples);
+                receipt.put("preOfferManualDiscoveries", preOfferManualDiscoveries);
+                receipt.put("weeklyOnAtDeferredOffer", weeklyOnAtDeferredOffer);
+                receipt.put("automaticTriggerReturnOrdinal", automaticTriggerReturnOrdinal);
+                receipt.put("deferredOfferReturnOrdinal", deferredOfferReturnOrdinal);
+                receipt.put("automaticOfferOrdinal", automaticOfferOrdinal);
+                receipt.put("postInstallInspectionOrdinal", postInstallInspectionOrdinal);
+                receipt.put("postInstallManualInspectionChecks",
+                        postInstallManualInspectionChecks);
+                receipt.put("postInstallExactUpToDate59Observed",
+                        postInstallExactUpToDate59Observed);
+                receipt.put("weeklyOnAfterUpdate", weeklyOnAfterUpdate);
+                receipt.put("postInstallNativeOkClosures", postInstallNativeOkClosures);
+                receipt.put("postInstallNativeCancelClosures",
+                        postInstallNativeCancelClosures);
+                receipt.put("automaticDiscoveryProofIncludesPostInstallInspection", false);
+                receipt.put("profileNameMarker", FIXED42_PROFILE_NAME);
+                receipt.put("profileNameInitialDistinct", profileNameInitialDistinct);
+                receipt.put("profileNameSetTextActions", profileNameSetTextActions);
+                receipt.put("profileNameImmediateExact", profileNameImmediateExact);
+                receipt.put("profileNameCloseReopenExact", profileNameCloseReopenExact);
+                receipt.put("profileNamePostInstallSetTextActions",
+                        profileNamePostInstallSetTextActions);
+            }
         }
         receipt.put("captures", captureIndex);
         receipt.put(
