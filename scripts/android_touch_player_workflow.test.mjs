@@ -269,6 +269,80 @@ function selectPlayerSeekRange(nodes, display = DISPLAY) {
   return candidates[0] ?? null;
 }
 
+function scanPlayerAxFrame(nodes, { requestPlayingPauseFocus = false, focusActionResult = true } = {}) {
+  const dialogs = nodes.filter((node) => node.packageName === PRODUCT_PACKAGE
+    && node.className === "android.app.Dialog" && node.text === PLAYER_DIALOG_TITLE);
+  if (dialogs.length > 1) throw new Error("ambiguous active player dialog");
+  const nestedDialogs = nodes.filter((node) => node.packageName === PRODUCT_PACKAGE
+    && node.className === "android.app.Dialog" && node.text !== PLAYER_DIALOG_TITLE
+    && insideActivePlayerDialog(node)).length;
+  const transports = nodes.filter((node) => node.packageName === PRODUCT_PACKAGE
+    && node.className === "android.widget.ToggleButton"
+    && (node.text === "Pause" || node.text === "Play"
+      || node.description === "Pause" || node.description === "Play")
+    && node.visible === true && node.enabled === true && node.clickable === true
+    && validBounds(node.bounds, 44, 44) && insideActivePlayerDialog(node));
+  const pauses = transports.filter((node) => node.text === "Pause" || node.description === "Pause");
+  const plays = transports.filter((node) => node.text === "Play" || node.description === "Play");
+  if (pauses.length > 1 || plays.length > 1) throw new Error("ambiguous active-player transport");
+  if (pauses.length === 1 && plays.length === 1) throw new Error("both Play and Pause exposed");
+  const seek = selectPlayerSeekRange(nodes);
+  const semanticClocks = nodes.filter(insideActivePlayerDialog)
+    .flatMap((node) => [parseThirtySecondClock(node.text), parseThirtySecondClock(node.description)])
+    .filter((position) => position >= 0);
+  if (semanticClocks.some((position) => Math.abs(position - semanticClocks[0]) > 1)) {
+    throw new Error("conflicting semantic clocks");
+  }
+  if (seek != null && semanticClocks.length > 0
+    && Math.abs(seek.range.current - semanticClocks[0]) > 1) {
+    throw new Error("native range disagrees with semantic clock");
+  }
+  const snapshot = {
+    activeDialogs: dialogs.length,
+    nestedDialogs,
+    pauseControls: pauses.length,
+    playControls: plays.length,
+    seekBars: seek == null ? 0 : 1,
+    focusedPauseControls: pauses.filter((node) => node.focused === true).length,
+    nativeRange: seek?.range ?? null,
+    semanticClock: semanticClocks[0] ?? -1,
+    pauseFocusActionAttempted: false,
+    pauseFocusActionSucceeded: false,
+  };
+  if (requestPlayingPauseFocus && dialogs.length === 1 && nestedDialogs === 0 && pauses.length === 1
+    && plays.length === 0 && snapshot.focusedPauseControls === 0) {
+    if (pauses[0].focusable !== true) throw new Error("Pause is not focusable");
+    snapshot.pauseFocusActionAttempted = true;
+    snapshot.pauseFocusActionSucceeded = focusActionResult;
+  }
+  return snapshot;
+}
+
+function verifyFocusedPlayingSnapshot(frames, focusActionResult = true) {
+  const observed = scanPlayerAxFrame(frames[0] ?? [], {
+    requestPlayingPauseFocus: true,
+    focusActionResult,
+  });
+  if (observed.pauseControls !== 1 || observed.playControls !== 0) {
+    throw new Error("playing Pause not observed");
+  }
+  if (observed.pauseFocusActionAttempted && !observed.pauseFocusActionSucceeded) {
+    throw new Error("focus action failed");
+  }
+  const verified = observed.pauseFocusActionAttempted
+    ? scanPlayerAxFrame(frames[1] ?? [])
+    : observed;
+  if (verified.activeDialogs !== 1 || verified.nestedDialogs !== 0
+    || verified.pauseControls !== 1 || verified.playControls !== 0
+    || verified.focusedPauseControls !== 1) {
+    throw new Error("fresh focused playing state not verified");
+  }
+  return {
+    position: verified.nativeRange == null ? -1 : Math.round(verified.nativeRange.current),
+    focusActions: observed.pauseFocusActionAttempted ? 1 : 0,
+  };
+}
+
 test("dispatch is opt-in and mutually excludes every older runtime route", () => {
   assert.match(workflow, /touch_player_fixture:\n\s+description:[^\n]+\n\s+type: boolean\n\s+required: true\n\s+default: false/);
   assert.match(workflow, /api36-current-runtime:\n\s+if:[^\n]+inputs\.touch_player_fixture != true/);
@@ -582,14 +656,187 @@ test("active-player AX selection executes run4 shapes and rejects identity and r
     { ...run4Seek, bounds: { left: 28, top: 1400, right: 1052, bottom: 1518 } },
   ]), /ambiguous bounded native SeekBar/);
 
-  const rangeReader = exactSlice(driver, "private float[] readNativeSeekRange()", "\n    private void refreshObservation()");
+  const rangeReader = exactSlice(
+    driver,
+    "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
+    "\n    private int mergeObservedClock(",
+  );
+  assert.equal((rangeReader.match(/getRootInActiveWindow\(\)/g) ?? []).length, 1);
   assert.match(rangeReader, /node\.getRangeInfo\(\)/);
   assert.match(rangeReader, /node\.getBoundsInScreen\(bounds\)/);
   assert.match(rangeReader, /node\.isVisibleToUser\(\)/);
   assert.match(rangeReader, /parsePlaybackPosition\(/);
   assert.match(rangeReader, /Multiple bounded native SeekBars/);
-  assert.doesNotMatch(rangeReader, /startsWith\("Seek"\)|description\s*!=\s*null/);
+  assert.match(rangeReader, /AccessibilityNodeInfo\.obtain\(node\)/);
+  assert.match(rangeReader, /performAction\(AccessibilityNodeInfo\.ACTION_FOCUS\)/);
+  assert.doesNotMatch(rangeReader, /startsWith\("Seek"\)/);
   assert.doesNotMatch(rangeReader, /centerX|width\(\).*current|current.*width\(\)/);
+  assert.doesNotMatch(rangeReader, /device\.findObjects|UiObject2/);
+});
+
+test("single AX snapshot keeps delayed playing observation strict across normal autohide", () => {
+  assert.match(driver, /private static final class PlayerAxSnapshot/);
+  const snapshotReader = exactSlice(
+    driver,
+    "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
+    "\n    private int mergeObservedClock(",
+  );
+  assert.equal((snapshotReader.match(/getRootInActiveWindow\(\)/g) ?? []).length, 1,
+    "each observation must use one fresh native tree root");
+  assert.match(snapshotReader, /snapshot\.activeDialogs/);
+  assert.match(snapshotReader, /snapshot\.pauseControls/);
+  assert.match(snapshotReader, /snapshot\.playControls/);
+  assert.match(snapshotReader, /snapshot\.nativeRange/);
+  assert.match(snapshotReader, /snapshot\.focusedPauseControls/);
+  assert.match(snapshotReader, /performAction\(AccessibilityNodeInfo\.ACTION_FOCUS\)/);
+
+  const dialog = playerDialog();
+  const container = { parent: dialog };
+  const playingPause = {
+    packageName: PRODUCT_PACKAGE, className: "android.widget.ToggleButton",
+    text: "Pause", description: "", visible: true, enabled: true, clickable: true,
+    focusable: true, focused: false,
+    bounds: { left: 443, top: 876, right: 603, bottom: 1047 }, parent: container,
+  };
+  const focusedPause = { ...playingPause, focused: true };
+  const playingSeek = {
+    packageName: PRODUCT_PACKAGE, className: "android.widget.SeekBar",
+    text: "0:13 of 0:30, Seek", description: "", range: { min: 0, current: 13, max: 30 },
+    visible: true, enabled: true, clickable: true,
+    bounds: { left: 28, top: 1572, right: 1052, bottom: 1690 }, parent: container,
+  };
+  const hiddenAfterSlowIndependentScan = [dialog];
+  const run5Timing = {
+    revealMs: 71_457,
+    pauseSnapshotMs: 75_458,
+    rangeFailureMs: 77_863,
+  };
+  assert.ok(run5Timing.pauseSnapshotMs - run5Timing.revealMs > 3_200,
+    "run5's Pause scan returned after the normal chrome timer");
+  assert.ok(run5Timing.rangeFailureMs > run5Timing.pauseSnapshotMs);
+  assert.equal(selectPlayerTransport([dialog, playingPause], "Pause"), playingPause);
+  assert.equal(selectPlayerSeekRange(hiddenAfterSlowIndependentScan), null,
+    "the run5-style later independent scan loses the transient range");
+  assert.deepEqual(verifyFocusedPlayingSnapshot([
+    [dialog, playingPause, playingSeek],
+    [dialog, focusedPause, playingSeek],
+  ]), { position: 13, focusActions: 1 });
+
+  assert.throws(() => verifyFocusedPlayingSnapshot([
+    [dialog, playingPause, playingSeek],
+  ]), /fresh focused playing state/);
+  assert.throws(() => verifyFocusedPlayingSnapshot([
+    [dialog, { ...playingPause, focusable: false }, playingSeek],
+  ]), /not focusable/);
+  assert.throws(() => verifyFocusedPlayingSnapshot([
+    [dialog, playingPause, playingSeek],
+    [dialog, focusedPause, playingSeek],
+  ], false), /focus action failed/);
+  assert.throws(() => verifyFocusedPlayingSnapshot([
+    [dialog, playingPause, playingSeek],
+    [dialog, { ...focusedPause, text: "Play" }, playingSeek],
+  ]), /fresh focused playing state/);
+  assert.equal(verifyFocusedPlayingSnapshot([
+    [dialog, playingPause, { ...playingSeek, range: null }],
+    [dialog, focusedPause, { ...playingSeek, range: null }],
+  ]).position, -1, "semantic clock without RangeInfo must not become a position");
+  assert.throws(() => verifyFocusedPlayingSnapshot([
+    [dialog, { ...playingPause, packageName: "other.package" }, playingSeek],
+  ]), /playing Pause not observed/);
+  assert.throws(() => verifyFocusedPlayingSnapshot([
+    [dialog, { ...playingPause, parent: { parent: null } }, playingSeek],
+  ]), /playing Pause not observed/);
+  assert.throws(() => scanPlayerAxFrame([
+    dialog, playingPause, { ...playingPause, bounds: { left: 200, top: 876, right: 360, bottom: 1047 } },
+  ]), /ambiguous/);
+  assert.throws(() => scanPlayerAxFrame([
+    dialog, playingPause, { ...playingPause, text: "Play" }, playingSeek,
+  ]), /both Play and Pause/);
+  assert.equal(scanPlayerAxFrame([
+    dialog, playingPause, { ...playingSeek, range: { min: 0, current: Number.NaN, max: 30 } },
+  ]).nativeRange, null);
+  assert.equal(scanPlayerAxFrame([
+    dialog, playingPause, { ...playingSeek, bounds: { left: 0, top: 0, right: 43, bottom: 44 } },
+  ]).nativeRange, null);
+
+  const revealMethod = exactSlice(
+    driver,
+    "static boolean shouldRevealPlayerSurface(",
+    "\n    private int revealPlayerSurfaceOnceIfHidden(",
+  );
+  const shouldReveal = (snapshot, reveals) => snapshot.nestedDialogs === 0
+    && executeJavaBooleanReturn(revealMethod,
+      ["activeDialogs", "pauseControls", "playControls", "reveals"],
+      [snapshot.activeDialogs, snapshot.pauseControls, snapshot.playControls, reveals]);
+  const waitForPosition = (frames) => {
+    let reveals = 0;
+    for (const nodes of frames) {
+      const snapshot = scanPlayerAxFrame(nodes);
+      if (snapshot.nativeRange != null) {
+        return { position: Math.round(snapshot.nativeRange.current), reveals };
+      }
+      if (shouldReveal(snapshot, reveals)) reveals++;
+    }
+    return { position: -1, reveals };
+  };
+  assert.deepEqual(waitForPosition([
+    [dialog],
+    [dialog, focusedPause, playingSeek],
+  ]), { position: 13, reveals: 1 });
+  assert.deepEqual(waitForPosition([[dialog], [dialog], [dialog]]), { position: -1, reveals: 1 });
+  assert.deepEqual(waitForPosition([
+    [dialog, { ...playingSeek, text: "0:13 of 0:30, Seek", range: null }],
+  ]), { position: -1, reveals: 1 }, "semantic text must not waive native RangeInfo");
+
+  const observerMethods = [
+    exactSlice(driver, "private int waitForPlaybackPositionAtLeast(", "\n    private int waitForPlaybackPositionAtMost("),
+    exactSlice(driver, "private int waitForPlaybackPositionAtMost(", "\n    private int waitForPlaybackPositionAvailable("),
+    exactSlice(driver, "private int waitForPlaybackPositionAvailable(", "\n    private float[] waitForNativeSeekRange("),
+    exactSlice(driver, "private float[] waitForNativeSeekRange(", "\n    private PlayerAxSnapshot readPlayerAxSnapshot("),
+  ];
+  for (const observer of observerMethods) {
+    assert.match(observer, /long deadline = SystemClock\.uptimeMillis\(\) \+ timeoutMs/);
+    assert.match(observer, /readPlayerAxSnapshot\(false\)/);
+    assert.match(observer, /revealPlayerSurfaceOnceIfHidden\(/);
+    assert.doesNotMatch(observer, /parsePlaybackPosition|centerX|width\(\).*position/);
+  }
+  assert.match(observerMethods[1], /last >= 0 && last <= maximum/,
+    "an absent native range must not satisfy an at-most wait");
+  assert.match(observerMethods[2], /snapshot\.playbackPositionSeconds\(\)/);
+  assert.match(observerMethods[3], /snapshot\.copyNativeRange\(\)/);
+  assert.doesNotMatch(driver, /private int readPlaybackPosition\(/);
+});
+
+test("native Pause focus is blocked before input when the exact player has a nested modal", () => {
+  const snapshotReader = exactSlice(
+    driver,
+    "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
+    "\n    private int mergeObservedClock(",
+  );
+  assert.match(snapshotReader, /if \(requestPlayingPauseFocus\s*&& snapshot\.activeDialogs == 1\s*&& snapshot\.nestedDialogs == 0\s*&& snapshot\.pauseControls == 1/);
+
+  const dialog = playerDialog();
+  const container = { parent: dialog };
+  const nestedModal = {
+    packageName: PRODUCT_PACKAGE,
+    className: "android.app.Dialog",
+    text: "Audio tracks",
+    parent: container,
+  };
+  const playingPause = {
+    packageName: PRODUCT_PACKAGE, className: "android.widget.ToggleButton",
+    text: "Pause", description: "", visible: true, enabled: true, clickable: true,
+    focusable: true, focused: false,
+    bounds: { left: 443, top: 876, right: 603, bottom: 1047 }, parent: container,
+  };
+  const snapshot = scanPlayerAxFrame([dialog, nestedModal, playingPause], {
+    requestPlayingPauseFocus: true,
+  });
+  assert.equal(snapshot.activeDialogs, 1);
+  assert.equal(snapshot.nestedDialogs, 1);
+  assert.equal(snapshot.pauseControls, 1);
+  assert.equal(snapshot.pauseFocusActionAttempted, false,
+    "a nested player modal must suppress ACTION_FOCUS before any input is sent");
 });
 
 test("hidden touch chrome gets one exact-dialog surface reveal and bounded failure-only diagnostics", () => {
@@ -611,21 +858,25 @@ test("hidden touch chrome gets one exact-dialog surface reveal and bounded failu
   assert.equal(reveal(1, 0, 1, 0), false);
   assert.equal(reveal(1, 0, 0, 1), false);
 
-  const initialWait = exactSlice(driver, "private UiObject2 waitForInitialPlayingTransport()", "\n    static boolean shouldRevealPlayerSurface(");
+  const initialWait = exactSlice(driver, "private PlayerAxSnapshot waitForInitialPlayingTransport()", "\n    static boolean shouldRevealPlayerSurface(");
   assert.match(initialWait, /long deadline = started \+ MEDIA_WAIT_MS/);
-  assert.match(initialWait, /activePlayerDialogCount\(\)/);
-  assert.match(initialWait, /playerTransportCandidates\("Pause"\)/);
-  assert.match(initialWait, /playerTransportCandidates\("Play"\)/);
-  assert.match(initialWait, /revealPlayerSurfaceOnceIfHidden\(reveals, "initial playing transport"\)/);
+  assert.match(initialWait, /readPlayerAxSnapshot\(true\)/);
+  assert.match(initialWait, /readPlayerAxSnapshot\(false\)/);
+  assert.match(initialWait, /focused\.pauseControls == 1 && focused\.playControls == 0/);
+  assert.match(initialWait, /focused\.focusedPauseControls == 1/);
+  assert.match(initialWait, /revealPlayerSurfaceOnceIfHidden\([\s\S]*"initial playing transport", snapshot\)/);
   assert.match(initialWait, /nextSnapshot = now \+ 2_000/);
   assert.match(initialWait, /checks\.put\("initialSurfaceRevealUsed", reveals == 1\)/);
+  assert.match(initialWait, /checks\.put\("initialPlayingControlFocusActionUsed", focusActionUsed\)/);
+  assert.match(initialWait, /checks\.put\("initialPlayingControlFocusActionSucceeded",[\s\S]*snapshot\.pauseFocusActionSucceeded\)/);
+  assert.match(initialWait, /checks\.put\("initialPlayingStatePreservedAcrossFocus", true\)/);
   assert.doesNotMatch(initialWait, /capture\(|dumpWindowHierarchy|evaluateJavascript|executeShellCommand/);
 
   const capture = exactSlice(driver, "private void capture(String label)", "\n    private void log(String value)");
   assert.ok(capture.indexOf("device.takeScreenshot") < capture.indexOf("device.dumpWindowHierarchy"));
   assert.match(driver, /private static final int MAX_NATIVE_POLL_SNAPSHOTS = 72/);
   assert.match(driver, /nativePollDiagnostics\.size\(\) >= MAX_NATIVE_POLL_SNAPSHOTS/);
-  assert.match(driver, /stage=failure-range nativeRangePresent=%d currentMillis=%d maximumMillis=%d/);
+  assert.match(driver, /stage=failure-range nativeRangePresent=%d currentMillis=%d maximumMillis=%d semanticClockSeconds=%d focusedPause=%d/);
   assert.match(driver, /if \(failure != null\) \{\s*receipt\.put\("failureNativePollDiagnostics"/);
   assert.match(driver, /receipt\.put\("nativePollDiagnosticsTruncated", nativePollDiagnosticsTruncated\)/);
   assert.doesNotMatch(driver, /receipt\.put\("failureNativePollDiagnostics"[^]*?else/);
@@ -664,8 +915,8 @@ test("every explicit player-control wait reveals hidden chrome once and requires
     "private int revealPlayerSurfaceOnceIfHidden(",
     "\n    private void recordFailureNativeSnapshot()",
   );
-  assert.match(revealHelper, /hasNestedPlayerDialog\(\)/);
-  assert.match(revealHelper, /shouldRevealPlayerSurface\(dialogs, pauses\.size\(\), plays\.size\(\), reveals\)/);
+  assert.match(revealHelper, /snapshot\.nestedDialogs > 0/);
+  assert.match(revealHelper, /shouldRevealPlayerSurface\(snapshot\.activeDialogs,[\s\S]*snapshot\.pauseControls, snapshot\.playControls, reveals\)/);
   assert.match(revealHelper, /device\.click\(x, y\)/);
   assert.match(revealHelper, /return updatedReveals/);
   assert.doesNotMatch(revealHelper, /evaluateJavascript|executeShellCommand|setText|deadline/);
@@ -771,7 +1022,7 @@ test("selected-audio receipt binding follows the product's shared integer-second
 test("driver disables animated idle waits and refreshes public accessibility observations", () => {
   assert.match(driver, /Configurator\.getInstance\(\)\.setWaitForIdleTimeout\(0\)/);
   assert.match(driver, /private void refreshObservation\(\) \{\s*instrumentation\.getUiAutomation\(\)\.clearCache\(\)/);
-  assert.match(driver, /private float\[\] readNativeSeekRange\(\) \{\s*refreshObservation\(\)/);
+  assert.match(driver, /private PlayerAxSnapshot readPlayerAxSnapshot\(boolean requestPlayingPauseFocus\) \{\s*refreshObservation\(\)/);
   assert.match(driver, /private void capture\(String label\) throws IOException \{\s*refreshObservation\(\)/);
   assert.doesNotMatch(driver, /executeShellCommand|java\.lang\.reflect|setAccessible\(/);
 });
