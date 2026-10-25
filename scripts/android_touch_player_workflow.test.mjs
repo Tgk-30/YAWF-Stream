@@ -171,6 +171,104 @@ function validServer() {
   };
 }
 
+function javaIntConstant(name) {
+  const match = driver.match(new RegExp(`private static final int ${name} = ([0-9_]+);`));
+  assert.ok(match, `missing Java integer constant ${name}`);
+  return Number(match[1].replaceAll("_", ""));
+}
+
+function executeJavaBooleanReturn(methodSource, parameterNames, values) {
+  const match = methodSource.match(/return\s+([\s\S]*?);/);
+  assert.ok(match, "missing Java boolean return expression");
+  const expression = match[1]
+    .replaceAll("MAX_SURFACE_REVEALS", String(javaIntConstant("MAX_SURFACE_REVEALS")))
+    .replaceAll("Float.isFinite", "Number.isFinite")
+    .replace(/(\d+)f\b/g, "$1");
+  return Function(...parameterNames, `"use strict"; return (${expression});`)(...values);
+}
+
+const PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
+const PLAYER_DIALOG_TITLE = "Playing Synthetic Fixture Movie (2026)";
+const DISPLAY = { width: 1080, height: 1920 };
+
+function playerDialog(parent = null) {
+  return { packageName: PRODUCT_PACKAGE, className: "android.app.Dialog", text: PLAYER_DIALOG_TITLE, parent };
+}
+
+function insideActivePlayerDialog(node) {
+  let current = node;
+  for (let depth = 0; depth < 20 && current != null; depth++) {
+    if (current.packageName === PRODUCT_PACKAGE
+      && current.className === "android.app.Dialog"
+      && current.text === PLAYER_DIALOG_TITLE) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+function validBounds(bounds, minimumWidth, minimumHeight, display = DISPLAY) {
+  return bounds != null && bounds.left >= 0 && bounds.top >= 0
+    && bounds.right <= display.width && bounds.bottom <= display.height
+    && bounds.right - bounds.left >= minimumWidth
+    && bounds.bottom - bounds.top >= minimumHeight;
+}
+
+function selectPlayerTransport(nodes, label, display = DISPLAY) {
+  const candidates = nodes.filter((node) => node.packageName === PRODUCT_PACKAGE
+    && node.className === "android.widget.ToggleButton"
+    && (node.text === label || node.description === label)
+    && node.clickable === true && node.enabled === true
+    && insideActivePlayerDialog(node)
+    && validBounds(node.bounds, 44, 44, display));
+  if (candidates.length > 1) throw new Error("ambiguous active-player transport");
+  return candidates[0] ?? null;
+}
+
+function parseThirtySecondClock(value) {
+  const match = String(value ?? "").match(/.*?(\d{1,2}):(\d{2})\s*(?:of|\/)\s*0:30.*?/i);
+  if (match == null) return -1;
+  const minutes = Number(match[1]);
+  const seconds = Number(match[2]);
+  return minutes <= 59 && seconds <= 59 ? minutes * 60 + seconds : -1;
+}
+
+function executeRangeValues(range, bounds, display = DISPLAY) {
+  const method = exactSlice(
+    driver,
+    "static boolean isBoundedNativeSeekRangeValues(",
+    "\n    private void refreshObservation()",
+  );
+  return executeJavaBooleanReturn(method, [
+    "minimum", "current", "maximum", "left", "top", "right", "bottom", "displayWidth", "displayHeight",
+  ], [
+    range.min, range.current, range.max,
+    bounds.left, bounds.top, bounds.right, bounds.bottom, display.width, display.height,
+  ]);
+}
+
+function selectPlayerSeekRange(nodes, display = DISPLAY) {
+  const dialogs = nodes.filter((node) => node.packageName === PRODUCT_PACKAGE
+    && node.className === "android.app.Dialog" && node.text === PLAYER_DIALOG_TITLE);
+  if (dialogs.length > 1) throw new Error("ambiguous active player dialog");
+  if (dialogs.length !== 1) return null;
+  const candidates = [];
+  for (const node of nodes) {
+    if (node.packageName !== PRODUCT_PACKAGE || node.className !== "android.widget.SeekBar"
+      || !insideActivePlayerDialog(node) || node.range == null
+      || node.visible !== true || node.enabled !== true || node.clickable !== true
+      || !executeRangeValues(node.range, node.bounds, display)) continue;
+    for (const value of [node.text, node.description]) {
+      const position = parseThirtySecondClock(value);
+      if (position >= 0 && Math.abs(position - node.range.current) > 1) {
+        throw new Error("SeekBar label disagrees with native range");
+      }
+    }
+    candidates.push(node);
+  }
+  if (candidates.length > 1) throw new Error("ambiguous bounded native SeekBar");
+  return candidates[0] ?? null;
+}
+
 test("dispatch is opt-in and mutually excludes every older runtime route", () => {
   assert.match(workflow, /touch_player_fixture:\n\s+description:[^\n]+\n\s+type: boolean\n\s+required: true\n\s+default: false/);
   assert.match(workflow, /api36-current-runtime:\n\s+if:[^\n]+inputs\.touch_player_fixture != true/);
@@ -411,6 +509,206 @@ test("clickable-label lookup rejects nonclickable ancestor traps and admits only
   assert.throws(() => resolve([button, second]), /ambiguous/);
 });
 
+test("active-player AX selection executes run4 shapes and rejects identity and range mutants", () => {
+  assert.ok(driver.includes('private static final String PLAYER_DIALOG_TITLE = "Playing Synthetic Fixture Movie (2026)";'),
+    "driver must bind controls to the exact active fixture-player dialog");
+  assert.match(driver, /By\.clazz\("android\.widget\.ToggleButton"\)\.pkg\(PRODUCT_PACKAGE\)/);
+  assert.match(driver, /By\.clazz\("android\.widget\.SeekBar"\)\.pkg\(PRODUCT_PACKAGE\)/);
+  assert.match(driver, /if \(!isInsideActivePlayerDialog\(candidate\)\) continue/);
+
+  const dialog = playerDialog();
+  const playerContainer = { parent: dialog };
+  const detailDialog = {
+    packageName: PRODUCT_PACKAGE, className: "android.app.Dialog",
+    text: "Synthetic Fixture Movie details", parent: null,
+  };
+  const backgroundPlay = {
+    packageName: PRODUCT_PACKAGE, className: "android.widget.Button", text: "Play", description: "",
+    clickable: true, enabled: true, bounds: { left: 84, top: 895, right: 480, bottom: 1029 }, parent: detailDialog,
+  };
+  const playerPlay = {
+    packageName: PRODUCT_PACKAGE, className: "android.widget.ToggleButton", text: "Play", description: "",
+    clickable: true, enabled: true, bounds: { left: 443, top: 876, right: 603, bottom: 1047 }, parent: playerContainer,
+  };
+  assert.equal(selectPlayerTransport([backgroundPlay, playerPlay], "Play"), playerPlay);
+  assert.equal(selectPlayerTransport([backgroundPlay], "Play"), null);
+  assert.equal(selectPlayerTransport([{ ...playerPlay, className: "android.widget.Button" }], "Play"), null);
+  assert.equal(selectPlayerTransport([{ ...playerPlay, packageName: "other.package" }], "Play"), null);
+  assert.equal(selectPlayerTransport([{ ...playerPlay, parent: detailDialog }], "Play"), null);
+  assert.equal(selectPlayerTransport([{ ...playerPlay, bounds: { left: 0, top: 0, right: 43, bottom: 44 } }], "Play"), null);
+  assert.throws(() => selectPlayerTransport([
+    playerPlay,
+    { ...playerPlay, bounds: { left: 200, top: 876, right: 360, bottom: 1047 } },
+  ], "Play"), /ambiguous/);
+
+  const run4Seek = {
+    packageName: PRODUCT_PACKAGE, className: "android.widget.SeekBar",
+    text: "0:30 of 0:30, Seek", description: "", range: { min: 0, current: 30, max: 30 },
+    visible: true, enabled: true, clickable: true,
+    bounds: { left: 28, top: 1572, right: 1052, bottom: 1690 }, parent: { parent: dialog },
+  };
+  assert.equal(selectPlayerSeekRange([dialog, run4Seek]), run4Seek);
+  assert.equal(parseThirtySecondClock(run4Seek.text), 30);
+  assert.equal(selectPlayerSeekRange([dialog, { ...run4Seek, text: "", description: "" }])?.range.current, 30);
+  const rejected = [
+    { ...run4Seek, packageName: "other.package" },
+    { ...run4Seek, className: "android.view.View" },
+    { ...run4Seek, range: null },
+    { ...run4Seek, range: { min: 0, current: Number.NaN, max: 30 } },
+    { ...run4Seek, range: { min: 0, current: 31, max: 30 } },
+    { ...run4Seek, range: { min: 1, current: 20, max: 30 } },
+    { ...run4Seek, range: { min: 0, current: 20, max: 28 } },
+    { ...run4Seek, visible: false },
+    { ...run4Seek, enabled: false },
+    { ...run4Seek, clickable: false },
+    { ...run4Seek, bounds: { left: 0, top: 0, right: 43, bottom: 44 } },
+    { ...run4Seek, bounds: { left: 28, top: 1572, right: 1100, bottom: 1690 } },
+    { ...run4Seek, parent: { parent: detailDialog } },
+  ];
+  for (const mutant of rejected) assert.equal(selectPlayerSeekRange([dialog, mutant]), null);
+  assert.throws(() => selectPlayerSeekRange([
+    dialog, { ...run4Seek, text: "0:25 of 0:30, Seek" },
+  ]), /disagrees/);
+  assert.throws(() => selectPlayerSeekRange([
+    dialog, run4Seek,
+    { ...run4Seek, bounds: { left: 28, top: 1400, right: 1052, bottom: 1518 } },
+  ]), /ambiguous bounded native SeekBar/);
+
+  const rangeReader = exactSlice(driver, "private float[] readNativeSeekRange()", "\n    private void refreshObservation()");
+  assert.match(rangeReader, /node\.getRangeInfo\(\)/);
+  assert.match(rangeReader, /node\.getBoundsInScreen\(bounds\)/);
+  assert.match(rangeReader, /node\.isVisibleToUser\(\)/);
+  assert.match(rangeReader, /parsePlaybackPosition\(/);
+  assert.match(rangeReader, /Multiple bounded native SeekBars/);
+  assert.doesNotMatch(rangeReader, /startsWith\("Seek"\)|description\s*!=\s*null/);
+  assert.doesNotMatch(rangeReader, /centerX|width\(\).*current|current.*width\(\)/);
+});
+
+test("hidden touch chrome gets one exact-dialog surface reveal and bounded failure-only diagnostics", () => {
+  const revealMethod = exactSlice(
+    driver,
+    "static boolean shouldRevealPlayerSurface(",
+    "\n    private void recordFailureNativeSnapshot()",
+  );
+  const reveal = (activeDialogs, pauseControls, playControls, reveals) => executeJavaBooleanReturn(
+    revealMethod,
+    ["activeDialogs", "pauseControls", "playControls", "reveals"],
+    [activeDialogs, pauseControls, playControls, reveals],
+  );
+  assert.equal(javaIntConstant("MAX_SURFACE_REVEALS"), 1);
+  assert.equal(reveal(1, 0, 0, 0), true);
+  assert.equal(reveal(0, 0, 0, 0), false);
+  assert.equal(reveal(2, 0, 0, 0), false);
+  assert.equal(reveal(1, 1, 0, 0), false);
+  assert.equal(reveal(1, 0, 1, 0), false);
+  assert.equal(reveal(1, 0, 0, 1), false);
+
+  const initialWait = exactSlice(driver, "private UiObject2 waitForInitialPlayingTransport()", "\n    static boolean shouldRevealPlayerSurface(");
+  assert.match(initialWait, /long deadline = started \+ MEDIA_WAIT_MS/);
+  assert.match(initialWait, /activePlayerDialogCount\(\)/);
+  assert.match(initialWait, /playerTransportCandidates\("Pause"\)/);
+  assert.match(initialWait, /playerTransportCandidates\("Play"\)/);
+  assert.match(initialWait, /revealPlayerSurfaceOnceIfHidden\(reveals, "initial playing transport"\)/);
+  assert.match(initialWait, /nextSnapshot = now \+ 2_000/);
+  assert.match(initialWait, /checks\.put\("initialSurfaceRevealUsed", reveals == 1\)/);
+  assert.doesNotMatch(initialWait, /capture\(|dumpWindowHierarchy|evaluateJavascript|executeShellCommand/);
+
+  const capture = exactSlice(driver, "private void capture(String label)", "\n    private void log(String value)");
+  assert.ok(capture.indexOf("device.takeScreenshot") < capture.indexOf("device.dumpWindowHierarchy"));
+  assert.match(driver, /private static final int MAX_NATIVE_POLL_SNAPSHOTS = 72/);
+  assert.match(driver, /nativePollDiagnostics\.size\(\) >= MAX_NATIVE_POLL_SNAPSHOTS/);
+  assert.match(driver, /stage=failure-range nativeRangePresent=%d currentMillis=%d maximumMillis=%d/);
+  assert.match(driver, /if \(failure != null\) \{\s*receipt\.put\("failureNativePollDiagnostics"/);
+  assert.match(driver, /receipt\.put\("nativePollDiagnosticsTruncated", nativePollDiagnosticsTruncated\)/);
+  assert.doesNotMatch(driver, /receipt\.put\("failureNativePollDiagnostics"[^]*?else/);
+});
+
+test("every explicit player-control wait reveals hidden chrome once and requires a fresh target", () => {
+  const transportWait = exactSlice(
+    driver,
+    "private UiObject2 waitForPlayerTransport(",
+    "\n    private void clickPlayerTransport(",
+  );
+  assert.match(transportWait, /revealPlayerSurfaceOnceIfHidden\(reveals, description\)/,
+    "transport waits must recover normal chrome autohide");
+  assert.match(transportWait, /long deadline = SystemClock\.uptimeMillis\(\) \+ timeoutMs/);
+  const labeledWait = exactSlice(
+    driver,
+    "private UiObject2 waitForPlayerLabeledClickable(",
+    "\n    private void clickPlayerLabeled(",
+  );
+  const seekWait = exactSlice(
+    driver,
+    "private UiObject2 waitForPlayerSeekBar(",
+    "\n    private boolean isBoundedVisibleTarget(",
+  );
+  const audioWait = exactSlice(
+    driver,
+    "private void openCurrentAudioSheet(",
+    "\n    private boolean hasPlayerTextOrDescription(",
+  );
+  for (const source of [labeledWait, seekWait, audioWait]) {
+    assert.match(source, /revealPlayerSurfaceOnceIfHidden\(/);
+    assert.match(source, /long deadline = SystemClock\.uptimeMillis\(\) \+ (?:timeoutMs|MEDIA_WAIT_MS)/);
+  }
+  const revealHelper = exactSlice(
+    driver,
+    "private int revealPlayerSurfaceOnceIfHidden(",
+    "\n    private void recordFailureNativeSnapshot()",
+  );
+  assert.match(revealHelper, /hasNestedPlayerDialog\(\)/);
+  assert.match(revealHelper, /shouldRevealPlayerSurface\(dialogs, pauses\.size\(\), plays\.size\(\), reveals\)/);
+  assert.match(revealHelper, /device\.click\(x, y\)/);
+  assert.match(revealHelper, /return updatedReveals/);
+  assert.doesNotMatch(revealHelper, /evaluateJavascript|executeShellCommand|setText|deadline/);
+
+  const revealMethod = exactSlice(
+    driver,
+    "static boolean shouldRevealPlayerSurface(",
+    "\n    private int revealPlayerSurfaceOnceIfHidden(",
+  );
+  const reveal = (frame, reveals) => !frame.nested && executeJavaBooleanReturn(
+    revealMethod,
+    ["activeDialogs", "pauseControls", "playControls", "reveals"],
+    [frame.activeDialogs, frame.pauseControls, frame.playControls, reveals],
+  );
+  const runWait = (frames) => {
+    let reveals = 0;
+    let inputs = 0;
+    for (let index = 0; index < frames.length; index++) {
+      const frame = frames[index];
+      if (frame.requestedControl === true) return { found: true, inputs, index };
+      if (reveal(frame, reveals)) {
+        reveals++;
+        inputs++;
+      }
+    }
+    return { found: false, inputs, index: -1 };
+  };
+  const hidden = {
+    activeDialogs: 1, pauseControls: 0, playControls: 0,
+    nested: false, requestedControl: false,
+  };
+  assert.deepEqual(runWait([
+    hidden,
+    { ...hidden, pauseControls: 1, requestedControl: true },
+  ]), { found: true, inputs: 1, index: 1 });
+  assert.deepEqual(runWait([hidden, hidden, hidden]), { found: false, inputs: 1, index: -1 });
+  assert.deepEqual(runWait([{ ...hidden, nested: true }, { ...hidden, nested: true }]),
+    { found: false, inputs: 0, index: -1 });
+  assert.deepEqual(runWait([{ ...hidden, playControls: 1 }, { ...hidden, playControls: 1 }]),
+    { found: false, inputs: 0, index: -1 });
+  assert.deepEqual(runWait([{ ...hidden, requestedControl: true }]),
+    { found: true, inputs: 0, index: 0 });
+
+  const runFlow = exactSlice(driver, "private void runFlow()", "\n    private void openCurrentAudioSheet(");
+  assert.doesNotMatch(runFlow, /assertNotNull\([^\n]+findPlayerTransport/);
+  for (const description of [
+    "paused Play after transport seeks", "paused Play after scrub",
+    "paused Play after audio handoff", "paused Play after side double tap",
+  ]) assert.ok(runFlow.includes(description), description);
+});
+
 test("driver stays in product UI and exercises every touch-player behavior", () => {
   for (const text of [
     "RuntimeTouchPlayerFlowTest", "firstDecodeClockAdvanced", "centralPauseResume",
@@ -449,7 +747,7 @@ test("layout checks bind the visible transport state at each call site", () => {
   assert.match(driver, /assertCoreLayout\("landscape", "Play"\)/);
   assert.match(driver, /assertCoreLayout\("portrait-return", "Play"\)/);
   assert.match(driver, /private void assertCoreLayout\(String label, String expectedPlayPauseLabel\)/);
-  assert.match(driver, /waitForLabeledClickable\(\s*expectedPlayPauseLabel, SHORT_WAIT_MS/);
+  assert.match(driver, /waitForPlayerTransport\(\s*expectedPlayPauseLabel, SHORT_WAIT_MS/);
   assert.doesNotMatch(driver, /private void assertCoreLayout\(String label\) \{/);
 });
 
@@ -477,17 +775,17 @@ test("driver uses observed language labels and reopens the source-remounted audi
   const audio = driver.slice(driver.indexOf('transition("two-track-audio-handoff")'),
     driver.indexOf('transition("paused-side-double-tap-after-hls")'));
   assert.match(audio, /openCurrentAudioSheet\("Audio tracks", "Audio track, " \+ ENGLISH\)/);
-  assert.match(audio, /waitForLabeledClickable\("Audio track, " \+ JAPANESE/);
-  assert.match(audio, /!hasTextOrDescription\("Close audio tracks"\)/);
+  assert.match(audio, /waitForPlayerLabeledClickable\("Audio track, " \+ JAPANESE/);
+  assert.match(audio, /!hasPlayerTextOrDescription\("Close audio tracks"\)/);
   assert.match(audio, /openCurrentAudioSheet\("Audio track, " \+ JAPANESE\)/);
-  assert.match(audio, /clickLabeled\("Close audio tracks", "close persisted audio tracks"/);
+  assert.match(audio, /clickPlayerLabeled\("Close audio tracks", "close persisted audio tracks"/);
 });
 
 test("driver positions paused playback away from either clamp before one ten-second side double tap", () => {
   assert.match(driver, /seekBounds\.left \+ seekBounds\.width\(\) \* 2 \/ 3/);
   const doubleTap = driver.slice(driver.indexOf('transition("paused-side-double-tap-after-hls")'),
     driver.indexOf('transition("orientation-round-trip")'));
-  assert.match(doubleTap, /clickLabeled\("Back 10 seconds", "paused Back 10 before side double tap"/);
+  assert.match(doubleTap, /clickPlayerLabeled\("Back 10 seconds", "paused Back 10 before side double tap"/);
   assert.match(doubleTap, /beforeDoubleTap >= 8 && beforeDoubleTap <= 12/);
   assert.match(doubleTap, /waitForPlaybackPositionAtLeast\(beforeDoubleTap \+ 9/);
   assert.match(doubleTap, /doubleTapDelta >= 9/);

@@ -49,6 +49,7 @@ public final class RuntimeTouchPlayerFlowTest {
     private static final String EVIDENCE_SUBDIR = "touch-player-flow";
     private static final String FIXTURE_URL = "http://127.0.0.1:43120";
     private static final String MOVIE_TITLE = "Synthetic Fixture Movie";
+    private static final String PLAYER_DIALOG_TITLE = "Playing Synthetic Fixture Movie (2026)";
     private static final String CONNECT_SERVER_LABEL =
             "Connect to a server Already have a server or an invite link? Paste the address and sign in.";
     private static final String SOURCE_CONTROL_LABEL =
@@ -63,6 +64,8 @@ public final class RuntimeTouchPlayerFlowTest {
     private static final int MAX_CAPTURES = 28;
     private static final int MAX_ACTION_LINES = 220;
     private static final int MAX_PHASES = 48;
+    private static final int MAX_NATIVE_POLL_SNAPSHOTS = 72;
+    private static final int MAX_SURFACE_REVEALS = 1;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
     private static final long MAX_HIERARCHY_BYTES = 1024L * 1024L;
     private static final Pattern SAFE_SUBDIR = Pattern.compile("[A-Za-z0-9._-]{1,64}");
@@ -80,7 +83,10 @@ public final class RuntimeTouchPlayerFlowTest {
     private File evidenceDir;
     private final List<String> actions = new ArrayList<>();
     private final List<String> phases = new ArrayList<>();
+    private final List<String> nativePollDiagnostics = new ArrayList<>();
     private final Map<String, Object> checks = new LinkedHashMap<>();
+    private boolean nativePollDiagnosticsTruncated;
+    private int surfaceRevealCount;
     private int captureIndex;
     private long startedAtMs;
     private String phase = "not-started";
@@ -110,6 +116,7 @@ public final class RuntimeTouchPlayerFlowTest {
             outcome = "passed";
         } catch (Throwable caught) {
             failure = caught.getClass().getSimpleName() + ": " + safe(caught.getMessage());
+            try { recordFailureNativeSnapshot(); } catch (Throwable ignored) { log("Failure AX snapshot unavailable"); }
             try { capture("failure"); } catch (Throwable ignored) { log("Failure capture unavailable"); }
             throw caught;
         } finally {
@@ -160,7 +167,7 @@ public final class RuntimeTouchPlayerFlowTest {
         guardedClick(source, "synthetic source");
 
         transition("first-decode");
-        waitForLabeledClickable("Pause", MEDIA_WAIT_MS, "playing touch-player control");
+        waitForInitialPlayingTransport();
         int first = waitForPlaybackPositionAtLeast(0, MEDIA_WAIT_MS);
         capture("playing-clock-initial");
         int advanced = waitForPlaybackPositionAtLeast(first + 1, MEDIA_WAIT_MS);
@@ -170,31 +177,30 @@ public final class RuntimeTouchPlayerFlowTest {
         assertCoreLayout("portrait-playing", "Pause");
 
         transition("central-pause-resume");
-        clickLabeled("Pause", "central Pause", SHORT_WAIT_MS);
-        waitForLabeledClickable("Play", SHORT_WAIT_MS, "central Play after pause");
+        clickPlayerTransport("Pause", "central Pause", SHORT_WAIT_MS);
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "central Play after pause");
         int paused = waitForPlaybackPositionAtLeast(advanced, SHORT_WAIT_MS);
         SystemClock.sleep(1_500);
         assertTrue("Playback advanced while central control reported paused",
                 Math.abs(readPlaybackPosition() - paused) <= 1);
-        clickLabeled("Play", "central Play", SHORT_WAIT_MS);
-        waitForLabeledClickable("Pause", SHORT_WAIT_MS, "central Pause after resume");
+        clickPlayerTransport("Play", "central Play", SHORT_WAIT_MS);
+        waitForPlayerTransport("Pause", SHORT_WAIT_MS, "central Pause after resume");
         waitForPlaybackPositionAtLeast(paused + 1, MEDIA_WAIT_MS);
-        clickLabeled("Pause", "central Pause before seek checks", SHORT_WAIT_MS);
-        waitForLabeledClickable("Play", SHORT_WAIT_MS, "paused central Play");
+        clickPlayerTransport("Pause", "central Pause before seek checks", SHORT_WAIT_MS);
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused central Play");
         checks.put("centralPauseResume", true);
 
         transition("paused-transport-and-scrub");
         int beforeForward = readPlaybackPosition();
-        clickLabeled("Forward 10 seconds", "paused Forward 10", SHORT_WAIT_MS);
+        clickPlayerLabeled("Forward 10 seconds", "paused Forward 10", SHORT_WAIT_MS);
         int afterForward = waitForPlaybackPositionAtLeast(Math.min(29, beforeForward + 8), MEDIA_WAIT_MS);
-        clickLabeled("Back 10 seconds", "paused Back 10", SHORT_WAIT_MS);
+        clickPlayerLabeled("Back 10 seconds", "paused Back 10", SHORT_WAIT_MS);
         int afterBack = waitForPlaybackPositionAtMost(Math.max(0, afterForward - 8), MEDIA_WAIT_MS);
         assertTrue("Back 10 did not reverse the prior paused seek", afterBack < afterForward);
-        assertNotNull("Paused Play control disappeared during transport seeks", findLabeledClickable("Play"));
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play after transport seeks");
         checks.put("pausedBackForward", true);
 
-        UiObject2 seek = waitFor(By.clazz("android.widget.SeekBar").pkg(PRODUCT_PACKAGE),
-                SHORT_WAIT_MS, "semantic touch scrub slider");
+        UiObject2 seek = waitForPlayerSeekBar(SHORT_WAIT_MS, "semantic touch scrub slider");
         Rect seekBounds = seek.getVisibleBounds();
         assertTrue("Touch scrub target was narrower than 44 px", seekBounds.width() >= 44);
         int beforeScrub = readPlaybackPosition();
@@ -202,7 +208,7 @@ public final class RuntimeTouchPlayerFlowTest {
                 seekBounds.left + seekBounds.width() * 2 / 3, seekBounds.centerY(), 24);
         int afterScrub = waitForPlaybackPositionAtLeast(Math.max(beforeScrub + 3, 18), MEDIA_WAIT_MS);
         assertTrue("Touch scrub produced no measured forward delta", afterScrub > beforeScrub);
-        assertNotNull("Scrub unexpectedly resumed playback", findLabeledClickable("Play"));
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play after scrub");
         checks.put("touchScrubDeltaSeconds", afterScrub - beforeScrub);
         capture("paused-after-scrub");
 
@@ -212,15 +218,15 @@ public final class RuntimeTouchPlayerFlowTest {
                 preAudioSwitchPosition > 0 && preAudioSwitchPosition <= 30);
         checks.put("preAudioSwitchAbsolutePositionSeconds", preAudioSwitchPosition);
         openCurrentAudioSheet("Audio tracks", "Audio track, " + ENGLISH);
-        waitForLabeledClickable(ENGLISH, MEDIA_WAIT_MS, "English audio track");
-        guardedClick(waitForLabeledClickable(JAPANESE, MEDIA_WAIT_MS, "Japanese audio track"),
+        waitForPlayerLabeledClickable(ENGLISH, MEDIA_WAIT_MS, "English audio track");
+        guardedClick(waitForPlayerLabeledClickable(JAPANESE, MEDIA_WAIT_MS, "Japanese audio track"),
                 "Japanese audio track");
         // The product remounts the source after an audio choice, which closes this sheet.
-        waitForLabeledClickable("Audio track, " + JAPANESE, MEDIA_WAIT_MS,
+        waitForPlayerLabeledClickable("Audio track, " + JAPANESE, MEDIA_WAIT_MS,
                 "Japanese Audio action after source handoff");
         assertTrue("Audio sheet remained open after source handoff",
-                !hasTextOrDescription("Close audio tracks"));
-        assertNotNull("Audio handoff changed paused state", findLabeledClickable("Play"));
+                !hasPlayerTextOrDescription("Close audio tracks"));
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play after audio handoff");
         int postHandoffPosition = waitForPlaybackPositionAtLeast(
                 Math.max(1, preAudioSwitchPosition - 1), MEDIA_WAIT_MS);
         assertTrue("Audio handoff restarted or moved the absolute clock",
@@ -228,18 +234,18 @@ public final class RuntimeTouchPlayerFlowTest {
         checks.put("postHandoffAbsolutePositionSeconds", postHandoffPosition);
         assertAbsoluteThirtySecondTimeline();
         openCurrentAudioSheet("Audio track, " + JAPANESE);
-        waitForLabeledClickable(ENGLISH, MEDIA_WAIT_MS, "English audio track after handoff");
-        waitForLabeledClickable(JAPANESE, MEDIA_WAIT_MS, "Japanese audio track after handoff");
+        waitForPlayerLabeledClickable(ENGLISH, MEDIA_WAIT_MS, "English audio track after handoff");
+        waitForPlayerLabeledClickable(JAPANESE, MEDIA_WAIT_MS, "Japanese audio track after handoff");
         capture("japanese-persisted-sheet-reopened");
-        clickLabeled("Close audio tracks", "close persisted audio tracks", SHORT_WAIT_MS);
-        waitForLabeledClickable("Audio track, " + JAPANESE, MEDIA_WAIT_MS,
+        clickPlayerLabeled("Close audio tracks", "close persisted audio tracks", SHORT_WAIT_MS);
+        waitForPlayerLabeledClickable("Audio track, " + JAPANESE, MEDIA_WAIT_MS,
                 "persisted Japanese Audio action after closing sheet");
         checks.put("twoRealAudioTracksObserved", true);
         checks.put("japaneseSelectionPersistedAfterHandoff", true);
 
         transition("paused-side-double-tap-after-hls");
         int beforePositioning = readPlaybackPosition();
-        clickLabeled("Back 10 seconds", "paused Back 10 before side double tap", SHORT_WAIT_MS);
+        clickPlayerLabeled("Back 10 seconds", "paused Back 10 before side double tap", SHORT_WAIT_MS);
         int beforeDoubleTap = waitForPlaybackPositionAtMost(beforePositioning - 8, MEDIA_WAIT_MS);
         assertTrue("Back 10 did not place the paused clock in the non-clamped double-tap window",
                 beforeDoubleTap >= 8 && beforeDoubleTap <= 12);
@@ -252,7 +258,7 @@ public final class RuntimeTouchPlayerFlowTest {
         int doubleTapDelta = afterDoubleTap - beforeDoubleTap;
         assertTrue("Side double tap did not seek forward exactly once", doubleTapDelta >= 9);
         assertTrue("Side double tap sought more than one ten-second step", doubleTapDelta <= 11);
-        assertNotNull("Side double tap changed paused playback state", findLabeledClickable("Play"));
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play after side double tap");
         checks.put("pausedSideDoubleTapSingleSeek", true);
         checks.put("pausedSideDoubleTapDeltaSeconds", doubleTapDelta);
         capture("after-side-double-tap");
@@ -282,7 +288,7 @@ public final class RuntimeTouchPlayerFlowTest {
         checks.put("portraitReturnWidthPx", portraitReturnWidth);
         checks.put("portraitReturnHeightPx", portraitReturnHeight);
         assertCoreLayout("portrait-return", "Play");
-        waitForLabeledClickable("Audio track, " + JAPANESE, SHORT_WAIT_MS,
+        waitForPlayerLabeledClickable("Audio track, " + JAPANESE, SHORT_WAIT_MS,
                 "Japanese Audio action after orientation round trip");
         checks.put("portraitLandscapePortrait", true);
         checks.put("audioSelectionPersistedAcrossOrientation", true);
@@ -293,23 +299,36 @@ public final class RuntimeTouchPlayerFlowTest {
     private void openCurrentAudioSheet(String... acceptedActionLabels) {
         UiObject2 action = null;
         long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
+        int reveals = 0;
         while (SystemClock.uptimeMillis() < deadline && action == null) {
             refreshObservation();
             for (String label : acceptedActionLabels) {
-                action = findLabeledClickable(label);
+                action = findPlayerLabeledClickable(label);
                 if (action != null) break;
             }
-            if (action == null) SystemClock.sleep(250);
+            if (action == null) {
+                int updatedReveals = revealPlayerSurfaceOnceIfHidden(reveals, "current Audio action");
+                if (updatedReveals != reveals) {
+                    reveals = updatedReveals;
+                    continue;
+                }
+                SystemClock.sleep(250);
+            }
         }
         assertNotNull("No expected current Audio action was exposed", action);
         guardedClick(action, "current Audio action");
         waitForTextOrDescription("Audio tracks", SHORT_WAIT_MS, "Audio tracks dialog");
     }
 
-    private boolean hasTextOrDescription(String label) {
+    private boolean hasPlayerTextOrDescription(String label) {
         refreshObservation();
-        return device.hasObject(By.text(exactLabel(label)).pkg(PRODUCT_PACKAGE))
-                || device.hasObject(By.desc(exactLabel(label)).pkg(PRODUCT_PACKAGE));
+        for (UiObject2 node : device.findObjects(By.text(exactLabel(label)).pkg(PRODUCT_PACKAGE))) {
+            if (isInsideActivePlayerDialog(node)) return true;
+        }
+        for (UiObject2 node : device.findObjects(By.desc(exactLabel(label)).pkg(PRODUCT_PACKAGE))) {
+            if (isInsideActivePlayerDialog(node)) return true;
+        }
+        return false;
     }
 
     private void assertAbsoluteThirtySecondTimeline() {
@@ -322,12 +341,12 @@ public final class RuntimeTouchPlayerFlowTest {
     }
 
     private void assertCoreLayout(String label, String expectedPlayPauseLabel) {
-        UiObject2 back = waitForLabeledClickable("Back 10 seconds", SHORT_WAIT_MS, label + " Back 10");
-        UiObject2 playPause = waitForLabeledClickable(
+        UiObject2 back = waitForPlayerLabeledClickable("Back 10 seconds", SHORT_WAIT_MS, label + " Back 10");
+        UiObject2 playPause = waitForPlayerTransport(
                 expectedPlayPauseLabel, SHORT_WAIT_MS, label + " " + expectedPlayPauseLabel);
-        UiObject2 forward = waitForLabeledClickable("Forward 10 seconds", SHORT_WAIT_MS, label + " Forward 10");
-        UiObject2 seek = waitFor(By.clazz("android.widget.SeekBar").pkg(PRODUCT_PACKAGE), SHORT_WAIT_MS, label + " Seek");
-        UiObject2 close = waitForLabeledClickable("Close player", SHORT_WAIT_MS, label + " Close");
+        UiObject2 forward = waitForPlayerLabeledClickable("Forward 10 seconds", SHORT_WAIT_MS, label + " Forward 10");
+        UiObject2 seek = waitForPlayerSeekBar(SHORT_WAIT_MS, label + " Seek");
+        UiObject2 close = waitForPlayerLabeledClickable("Close player", SHORT_WAIT_MS, label + " Close");
         for (UiObject2 object : new UiObject2[] { back, playPause, forward, seek, close }) {
             Rect bounds = object.getVisibleBounds();
             assertTrue(label + " control was outside display width", bounds.left >= 0 && bounds.right <= device.getDisplayWidth());
@@ -337,6 +356,119 @@ public final class RuntimeTouchPlayerFlowTest {
         assertTrue(label + " transport controls overlapped", !back.getVisibleBounds().intersect(playPause.getVisibleBounds())
                 && !playPause.getVisibleBounds().intersect(forward.getVisibleBounds()));
         log("Verified bounded non-overlapping transport, seek, and close controls: " + label);
+    }
+
+    private UiObject2 waitForInitialPlayingTransport() {
+        long started = SystemClock.uptimeMillis();
+        long deadline = started + MEDIA_WAIT_MS;
+        long nextSnapshot = started;
+        long revealEligibleAt = started + 250;
+        int reveals = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoOutOfScopeApproval();
+            refreshObservation();
+            List<UiObject2> pauses = playerTransportCandidates("Pause");
+            List<UiObject2> plays = playerTransportCandidates("Play");
+            List<UiObject2> seeks = playerSeekBarCandidates();
+            int dialogs = activePlayerDialogCount();
+            assertTrue("Ambiguous active player dialogs", dialogs <= 1);
+            assertTrue("Ambiguous Pause controls inside the active player", pauses.size() <= 1);
+            assertTrue("Ambiguous Play controls inside the active player", plays.size() <= 1);
+            assertTrue("Ambiguous SeekBars inside the active player", seeks.size() <= 1);
+            long now = SystemClock.uptimeMillis();
+            if (now >= nextSnapshot) {
+                recordNativePollSnapshot("first-decode", dialogs, pauses.size(), plays.size(), seeks.size(), reveals);
+                nextSnapshot = now + 2_000;
+            }
+            if (pauses.size() == 1) {
+                recordNativePollSnapshot("pause-observed", dialogs, 1, plays.size(), seeks.size(), reveals);
+                checks.put("initialSurfaceRevealUsed", reveals == 1);
+                return pauses.get(0);
+            }
+            if (now - started >= 2_000 && plays.size() == 1) {
+                recordNativePollSnapshot("play-observed-before-pause", dialogs, 0, 1, seeks.size(), reveals);
+                fail("Player exposed Play before a playing Pause state was observed");
+            }
+            int updatedReveals = now >= revealEligibleAt
+                    ? revealPlayerSurfaceOnceIfHidden(reveals, "initial playing transport")
+                    : reveals;
+            if (updatedReveals != reveals) {
+                reveals = updatedReveals;
+                continue;
+            }
+            SystemClock.sleep(200);
+        }
+        recordNativePollSnapshot("pause-timeout", activePlayerDialogCount(),
+                playerTransportCandidates("Pause").size(), playerTransportCandidates("Play").size(),
+                playerSeekBarCandidates().size(), reveals);
+        fail("Timed out waiting for playing touch-player control after " + reveals + " bounded surface reveals");
+        return null;
+    }
+
+    static boolean shouldRevealPlayerSurface(
+            int activeDialogs, int pauseControls, int playControls, int reveals) {
+        return activeDialogs == 1 && pauseControls == 0 && playControls == 0
+                && reveals < MAX_SURFACE_REVEALS;
+    }
+
+    private int revealPlayerSurfaceOnceIfHidden(int reveals, String waitingFor) {
+        if (reveals >= MAX_SURFACE_REVEALS) return reveals;
+        refreshObservation();
+        int dialogs = activePlayerDialogCount();
+        List<UiObject2> pauses = playerTransportCandidates("Pause");
+        List<UiObject2> plays = playerTransportCandidates("Play");
+        List<UiObject2> seeks = playerSeekBarCandidates();
+        assertTrue("Ambiguous active player dialogs", dialogs <= 1);
+        assertTrue("Ambiguous Pause controls inside the active player", pauses.size() <= 1);
+        assertTrue("Ambiguous Play controls inside the active player", plays.size() <= 1);
+        assertTrue("Ambiguous SeekBars inside the active player", seeks.size() <= 1);
+        if (hasNestedPlayerDialog()
+                || !shouldRevealPlayerSurface(dialogs, pauses.size(), plays.size(), reveals)) {
+            return reveals;
+        }
+        int x = device.getDisplayWidth() / 2;
+        int y = device.getDisplayHeight() * 45 / 100;
+        assertTrue("Native player surface reveal tap failed", device.click(x, y));
+        int updatedReveals = reveals + 1;
+        surfaceRevealCount++;
+        log("Tapped the active player surface once while waiting for " + waitingFor);
+        recordNativePollSnapshot("surface-reveal", dialogs, 0, 0, seeks.size(), surfaceRevealCount);
+        SystemClock.sleep(250);
+        return updatedReveals;
+    }
+
+    private void recordFailureNativeSnapshot() {
+        refreshObservation();
+        recordNativePollSnapshot("failure", activePlayerDialogCount(),
+                playerTransportCandidates("Pause").size(), playerTransportCandidates("Play").size(),
+                playerSeekBarCandidates().size(), surfaceRevealCount);
+        float[] range = readNativeSeekRange();
+        recordNativeRangeSnapshot(range);
+    }
+
+    private void recordNativeRangeSnapshot(float[] range) {
+        if (nativePollDiagnostics.size() >= MAX_NATIVE_POLL_SNAPSHOTS) {
+            nativePollDiagnosticsTruncated = true;
+            return;
+        }
+        int currentMillis = range == null ? -1 : Math.round(range[0] * 1_000f);
+        int maximumMillis = range == null ? -1 : Math.round(range[1] * 1_000f);
+        nativePollDiagnostics.add(String.format(Locale.ROOT,
+                "elapsedMs=%d stage=failure-range nativeRangePresent=%d currentMillis=%d maximumMillis=%d",
+                SystemClock.uptimeMillis() - startedAtMs, range == null ? 0 : 1,
+                currentMillis, maximumMillis));
+    }
+
+    private void recordNativePollSnapshot(
+            String stage, int dialogs, int pauses, int plays, int seekBars, int reveals) {
+        if (nativePollDiagnostics.size() >= MAX_NATIVE_POLL_SNAPSHOTS) {
+            nativePollDiagnosticsTruncated = true;
+            return;
+        }
+        nativePollDiagnostics.add(String.format(Locale.ROOT,
+                "elapsedMs=%d stage=%s activePlayerDialogs=%d pauseToggles=%d playToggles=%d playerSeekBars=%d reveals=%d display=%dx%d",
+                SystemClock.uptimeMillis() - startedAtMs, safe(stage), dialogs, pauses, plays, seekBars, reveals,
+                device.getDisplayWidth(), device.getDisplayHeight()));
     }
 
     private int waitForPlaybackPositionAtLeast(int minimum, long timeoutMs) {
@@ -373,6 +505,7 @@ public final class RuntimeTouchPlayerFlowTest {
         nodes.addAll(device.findObjects(By.desc(PLAYBACK_CLOCK).pkg(PRODUCT_PACKAGE)));
         int best = -1;
         for (UiObject2 node : nodes) {
+            if (!isInsideActivePlayerDialog(node)) continue;
             best = Math.max(best, parsePlaybackPosition(node.getText()));
             best = Math.max(best, parsePlaybackPosition(node.getContentDescription()));
         }
@@ -390,41 +523,97 @@ public final class RuntimeTouchPlayerFlowTest {
         AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
         if (root == null) return null;
         List<AccessibilityNodeInfo> pending = new ArrayList<>();
+        List<Boolean> pendingInsidePlayer = new ArrayList<>();
         pending.add(root);
+        pendingInsidePlayer.add(false);
         int visited = 0;
+        int playerDialogs = 0;
+        float[] candidate = null;
+        Rect candidateBounds = null;
         try {
             while (!pending.isEmpty() && visited < 2_048) {
-                AccessibilityNodeInfo node = pending.remove(pending.size() - 1);
+                int last = pending.size() - 1;
+                AccessibilityNodeInfo node = pending.remove(last);
+                boolean parentInsidePlayer = pendingInsidePlayer.remove(last);
                 visited++;
                 try {
                     CharSequence packageName = node.getPackageName();
                     CharSequence className = node.getClassName();
-                    CharSequence description = node.getContentDescription();
-                    AccessibilityNodeInfo.RangeInfo range = node.getRangeInfo();
-                    if (PRODUCT_PACKAGE.contentEquals(packageName)
-                            && "android.widget.SeekBar".contentEquals(className)
-                            && description != null
-                            && description.toString().startsWith("Seek")
-                            && range != null
-                            && range.getMin() == 0f
-                            && range.getMax() >= 29f
-                            && range.getMax() <= 31f) {
-                        float current = range.getCurrent();
-                        return Float.isFinite(current) ? new float[] { current, range.getMax() } : null;
+                    CharSequence text = node.getText();
+                    boolean isPlayerDialog = PRODUCT_PACKAGE.equals(String.valueOf(packageName))
+                            && "android.app.Dialog".equals(String.valueOf(className))
+                            && PLAYER_DIALOG_TITLE.equals(String.valueOf(text));
+                    if (isPlayerDialog) playerDialogs++;
+                    boolean insidePlayer = parentInsidePlayer || isPlayerDialog;
+                    if (insidePlayer
+                            && PRODUCT_PACKAGE.equals(String.valueOf(packageName))
+                            && "android.widget.SeekBar".equals(String.valueOf(className))) {
+                        AccessibilityNodeInfo.RangeInfo range = node.getRangeInfo();
+                        Rect bounds = new Rect();
+                        node.getBoundsInScreen(bounds);
+                        if (isBoundedNativeSeekRange(range, bounds, node.isVisibleToUser(),
+                                node.isEnabled(), node.isClickable(),
+                                device.getDisplayWidth(), device.getDisplayHeight())) {
+                            float current = range.getCurrent();
+                            int textPosition = parsePlaybackPosition(
+                                    text == null ? null : text.toString());
+                            CharSequence description = node.getContentDescription();
+                            int descriptionPosition = parsePlaybackPosition(
+                                    description == null ? null : description.toString());
+                            if (textPosition >= 0) {
+                                assertTrue("SeekBar text disagreed with its native range",
+                                        Math.abs(textPosition - current) <= 1f);
+                            }
+                            if (descriptionPosition >= 0) {
+                                assertTrue("SeekBar description disagreed with its native range",
+                                        Math.abs(descriptionPosition - current) <= 1f);
+                            }
+                            if (candidate != null) {
+                                fail("Multiple bounded native SeekBars were exposed inside the active player: "
+                                        + candidateBounds + " and " + bounds);
+                            }
+                            candidate = new float[] { current, range.getMax() };
+                            candidateBounds = bounds;
+                        }
                     }
                     for (int index = 0; index < node.getChildCount(); index++) {
                         AccessibilityNodeInfo child = node.getChild(index);
-                        if (child != null) pending.add(child);
+                        if (child != null) {
+                            pending.add(child);
+                            pendingInsidePlayer.add(insidePlayer);
+                        }
                     }
                 } finally {
                     if (node != root) node.recycle();
                 }
             }
+            if (!pending.isEmpty()) fail("Accessibility tree exceeded the bounded native scan");
+            if (playerDialogs > 1) fail("Multiple exact active player dialogs were exposed");
+            return playerDialogs == 1 ? candidate : null;
         } finally {
             for (AccessibilityNodeInfo node : pending) node.recycle();
             root.recycle();
         }
-        return null;
+    }
+
+    static boolean isBoundedNativeSeekRange(
+            AccessibilityNodeInfo.RangeInfo range, Rect bounds, boolean visible, boolean enabled,
+            boolean clickable, int displayWidth, int displayHeight) {
+        if (range == null || bounds == null || !visible || !enabled || !clickable) return false;
+        return isBoundedNativeSeekRangeValues(
+                range.getMin(), range.getCurrent(), range.getMax(),
+                bounds.left, bounds.top, bounds.right, bounds.bottom,
+                displayWidth, displayHeight);
+    }
+
+    static boolean isBoundedNativeSeekRangeValues(
+            float minimum, float current, float maximum,
+            int left, int top, int right, int bottom, int displayWidth, int displayHeight) {
+        return Float.isFinite(minimum) && Float.isFinite(current) && Float.isFinite(maximum)
+                && minimum == 0f && maximum >= 29f && maximum <= 31f
+                && current >= minimum && current <= maximum
+                && left >= 0 && top >= 0 && right <= displayWidth && bottom <= displayHeight
+                && right - left >= 44 && bottom - top > 0;
     }
 
     private void refreshObservation() {
@@ -560,6 +749,164 @@ public final class RuntimeTouchPlayerFlowTest {
         collectClickableAncestors(candidates, device.findObjects(By.desc(pattern).pkg(PRODUCT_PACKAGE)));
         if (candidates.size() > 1) fail("Ambiguous controls for exact label: " + label);
         return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private int activePlayerDialogCount() {
+        int count = 0;
+        for (UiObject2 candidate : device.findObjects(
+                By.clazz("android.app.Dialog").pkg(PRODUCT_PACKAGE))) {
+            if (isActivePlayerDialog(candidate)) count++;
+        }
+        return count;
+    }
+
+    private boolean isActivePlayerDialog(UiObject2 candidate) {
+        return candidate != null
+                && PRODUCT_PACKAGE.equals(candidate.getApplicationPackage())
+                && "android.app.Dialog".equals(candidate.getClassName())
+                && PLAYER_DIALOG_TITLE.equals(candidate.getText());
+    }
+
+    private boolean isInsideActivePlayerDialog(UiObject2 node) {
+        UiObject2 current = node;
+        for (int depth = 0; depth < 20 && current != null; depth++) {
+            if (isActivePlayerDialog(current)) return true;
+            current = current.getParent();
+        }
+        return false;
+    }
+
+    private boolean hasNestedPlayerDialog() {
+        for (UiObject2 candidate : device.findObjects(
+                By.clazz("android.app.Dialog").pkg(PRODUCT_PACKAGE))) {
+            if (!isActivePlayerDialog(candidate) && isInsideActivePlayerDialog(candidate)) return true;
+        }
+        return false;
+    }
+
+    private List<UiObject2> playerTransportCandidates(String label) {
+        List<UiObject2> candidates = new ArrayList<>();
+        for (UiObject2 candidate : device.findObjects(
+                By.clazz("android.widget.ToggleButton").pkg(PRODUCT_PACKAGE))) {
+            if (!label.equals(candidate.getText()) && !label.equals(candidate.getContentDescription())) continue;
+            if (!candidate.isClickable() || !candidate.isEnabled()) continue;
+            if (!isInsideActivePlayerDialog(candidate)) continue;
+            Rect bounds = candidate.getVisibleBounds();
+            if (!isBoundedVisibleTarget(bounds, 44, 44)) continue;
+            candidates.add(candidate);
+        }
+        return candidates;
+    }
+
+    private UiObject2 findPlayerTransport(String label) {
+        refreshObservation();
+        assertTrue("Ambiguous active player dialogs", activePlayerDialogCount() <= 1);
+        List<UiObject2> candidates = playerTransportCandidates(label);
+        if (candidates.size() > 1) fail("Ambiguous active-player transport controls for exact label: " + label);
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private UiObject2 waitForPlayerTransport(String label, long timeoutMs, String description) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        int reveals = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoOutOfScopeApproval();
+            UiObject2 found = findPlayerTransport(label);
+            if (found != null) return found;
+            int updatedReveals = revealPlayerSurfaceOnceIfHidden(reveals, description);
+            if (updatedReveals != reveals) {
+                reveals = updatedReveals;
+                continue;
+            }
+            SystemClock.sleep(200);
+        }
+        fail("Timed out waiting for active-player " + description);
+        return null;
+    }
+
+    private void clickPlayerTransport(String label, String description, long timeoutMs) {
+        guardedClick(waitForPlayerTransport(label, timeoutMs, description), description);
+    }
+
+    private UiObject2 findPlayerLabeledClickable(String label) {
+        refreshObservation();
+        Pattern pattern = exactLabel(label);
+        List<UiObject2> labeled = new ArrayList<>();
+        collectClickableAncestors(labeled, device.findObjects(By.text(pattern).pkg(PRODUCT_PACKAGE)));
+        collectClickableAncestors(labeled, device.findObjects(By.desc(pattern).pkg(PRODUCT_PACKAGE)));
+        List<UiObject2> candidates = new ArrayList<>();
+        for (UiObject2 candidate : labeled) {
+            if (!isInsideActivePlayerDialog(candidate)) continue;
+            Rect bounds = candidate.getVisibleBounds();
+            if (!isBoundedVisibleTarget(bounds, 1, 1)) continue;
+            candidates.add(candidate);
+        }
+        if (candidates.size() > 1) fail("Ambiguous active-player controls for exact label: " + label);
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private UiObject2 waitForPlayerLabeledClickable(String label, long timeoutMs, String description) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        int reveals = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoOutOfScopeApproval();
+            UiObject2 found = findPlayerLabeledClickable(label);
+            if (found != null) return found;
+            int updatedReveals = revealPlayerSurfaceOnceIfHidden(reveals, description);
+            if (updatedReveals != reveals) {
+                reveals = updatedReveals;
+                continue;
+            }
+            SystemClock.sleep(200);
+        }
+        fail("Timed out waiting for active-player " + description);
+        return null;
+    }
+
+    private void clickPlayerLabeled(String label, String description, long timeoutMs) {
+        guardedClick(waitForPlayerLabeledClickable(label, timeoutMs, description), description);
+    }
+
+    private List<UiObject2> playerSeekBarCandidates() {
+        List<UiObject2> candidates = new ArrayList<>();
+        for (UiObject2 candidate : device.findObjects(
+                By.clazz("android.widget.SeekBar").pkg(PRODUCT_PACKAGE))) {
+            if (!candidate.isClickable() || !candidate.isEnabled()) continue;
+            if (!isInsideActivePlayerDialog(candidate)) continue;
+            Rect bounds = candidate.getVisibleBounds();
+            if (!isBoundedVisibleTarget(bounds, 44, 1)) continue;
+            candidates.add(candidate);
+        }
+        return candidates;
+    }
+
+    private UiObject2 waitForPlayerSeekBar(long timeoutMs, String description) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        int reveals = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoOutOfScopeApproval();
+            refreshObservation();
+            assertTrue("Ambiguous active player dialogs", activePlayerDialogCount() <= 1);
+            List<UiObject2> candidates = playerSeekBarCandidates();
+            if (candidates.size() > 1) fail("Ambiguous SeekBars inside the active player");
+            if (candidates.size() == 1) return candidates.get(0);
+            int updatedReveals = revealPlayerSurfaceOnceIfHidden(reveals, description);
+            if (updatedReveals != reveals) {
+                reveals = updatedReveals;
+                continue;
+            }
+            SystemClock.sleep(200);
+        }
+        fail("Timed out waiting for active-player " + description);
+        return null;
+    }
+
+    private boolean isBoundedVisibleTarget(Rect bounds, int minimumWidth, int minimumHeight) {
+        return bounds != null
+                && bounds.left >= 0 && bounds.top >= 0
+                && bounds.right <= device.getDisplayWidth()
+                && bounds.bottom <= device.getDisplayHeight()
+                && bounds.width() >= minimumWidth && bounds.height() >= minimumHeight;
     }
 
     private void collectClickableAncestors(List<UiObject2> candidates, List<UiObject2> matches) {
@@ -700,6 +1047,10 @@ public final class RuntimeTouchPlayerFlowTest {
         receipt.put("manualDecodedPlaybackReviewCaptureLabels",
                 new JSONArray().put("playing-clock-initial").put("playing-clock-advanced"));
         receipt.put("decodeBasis", "Automated accessibility clocks and server receipts are provisional; retained before/after PNG pixels require root manual review before any decoded-playback claim");
+        if (failure != null) {
+            receipt.put("failureNativePollDiagnostics", new JSONArray(nativePollDiagnostics));
+            receipt.put("nativePollDiagnosticsTruncated", nativePollDiagnosticsTruncated);
+        }
         writeBounded(new File(evidenceDir, "instrumentation-touch-player-receipt.json"),
                 receipt.toString(2) + "\n", 32 * 1024);
     }
