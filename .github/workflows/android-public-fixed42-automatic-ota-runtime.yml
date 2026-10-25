@@ -518,6 +518,33 @@ jobs:
           mkdir -p "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME" "$run_evidence"
           emulator_pid=""
 
+          collect_fixed42_host_failure_diagnostics() {
+            emulator_pid_liveness="not-started"
+            emulator_exit_status="not-started"
+            if [ -n "$emulator_pid" ]; then
+              if kill -0 "$emulator_pid" 2>/dev/null; then
+                emulator_pid_liveness="alive"
+                emulator_exit_status="not-exited"
+              else
+                emulator_pid_liveness="dead"
+                wait "$emulator_pid"
+                emulator_exit_status="$?"
+              fi
+            fi
+            resolved_adb="$(command -v adb || true)"
+            if [ -z "$resolved_adb" ]; then resolved_adb="adb"; fi
+            python3 scripts/android_public_ota_runtime_check.py \
+              --fixed42-host-failure-diagnostics \
+              --adb "$resolved_adb" \
+              --serial "$EMULATOR_SERIAL" \
+              --emulator-pid "$emulator_pid" \
+              --emulator-pid-liveness "$emulator_pid_liveness" \
+              --emulator-exit-status "$emulator_exit_status" \
+              --runner-temp "$RUNNER_TEMP" \
+              --workspace "$GITHUB_WORKSPACE" \
+              --evidence "$run_evidence"
+          }
+
           collect_failure() {
             set +e
             if [ -s "$run_evidence/host-driver-result.json" ]; then
@@ -527,7 +554,12 @@ jobs:
               echo "failure=workflow-before-host-receipt" \
                 > "$run_evidence/workflow-failure-receipt.txt"
             fi
-            if [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null)" != "device" ]; then
+            if ! collect_fixed42_host_failure_diagnostics; then
+              echo "hostDiagnostics=failed" >> "$run_evidence/workflow-failure-receipt.txt"
+            fi
+            if ! python3 scripts/android_public_ota_runtime_check.py \
+              --fixed42-device-capture-gate \
+              --evidence "$run_evidence"; then
               echo "deviceEvidence=unavailable" >> "$run_evidence/workflow-failure-receipt.txt"
               return 0
             fi

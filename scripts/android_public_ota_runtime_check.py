@@ -17,7 +17,9 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,7 +27,7 @@ import time
 import traceback
 import unittest
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 PRODUCT_PACKAGE = "com.tgk30.debridstreamer"
 HARNESS_PACKAGE = "com.yawf.runtimeinstrumentation"
@@ -474,6 +476,238 @@ def bounded_diagnostic_retention(
     ):
         raise RuntimeGateError("Diagnostic retention invariant failed")
     return retained_bytes.decode("utf-8", "strict"), receipt
+
+
+def subprocess_output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value
+
+
+def retain_diagnostic_stream(
+    evidence: Path, stem: str, stream: str, value: str
+) -> dict[str, object]:
+    retained, receipt = bounded_diagnostic_retention(value)
+    (evidence / f"{stem}-{stream}.txt").write_text(retained, encoding="utf-8")
+    (evidence / f"{stem}-{stream}-retention.json").write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return receipt
+
+
+def observe_host_command(args: Sequence[str], timeout: float) -> tuple[dict[str, object], str, str]:
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            list(args), capture_output=True, timeout=timeout, check=False, text=True
+        )
+        stdout = subprocess_output_text(result.stdout)
+        stderr = subprocess_output_text(result.stderr)
+        return ({
+            "returnCode": result.returncode,
+            "timedOut": False,
+            "elapsedMilliseconds": round((time.monotonic() - started) * 1000),
+        }, stdout, stderr)
+    except subprocess.TimeoutExpired as error:
+        return ({
+            "returnCode": None,
+            "timedOut": True,
+            "elapsedMilliseconds": round((time.monotonic() - started) * 1000),
+        }, subprocess_output_text(error.stdout), subprocess_output_text(error.stderr))
+    except OSError as error:
+        return ({
+            "returnCode": None,
+            "timedOut": False,
+            "elapsedMilliseconds": round((time.monotonic() - started) * 1000),
+            "dispatchError": type(error).__name__,
+        }, "", str(error))
+
+
+def collect_fixed42_host_failure_diagnostics(
+    *,
+    evidence: Path,
+    adb: str,
+    serial: str,
+    emulator_pid: str,
+    emulator_pid_liveness: str,
+    emulator_exit_status: str,
+    runner_temp: Path,
+    workspace: Path,
+) -> dict[str, object]:
+    """Retain bounded host health without changing ADB or emulator state."""
+    evidence.mkdir(parents=True, exist_ok=True)
+    if emulator_pid and (not emulator_pid.isdigit() or int(emulator_pid) <= 0):
+        raise RuntimeGateError("Owned emulator PID diagnostic is invalid")
+    if emulator_pid_liveness not in {"not-started", "alive", "dead"}:
+        raise RuntimeGateError("Owned emulator liveness diagnostic is invalid")
+    if not (
+        emulator_exit_status in {"not-started", "not-exited"}
+        or emulator_exit_status.isdigit()
+    ):
+        raise RuntimeGateError("Owned emulator exit-status diagnostic is invalid")
+
+    report: dict[str, object] = {
+        "schemaVersion": 1,
+        "profile": FIXED42_AUTOMATIC_OTA_PROFILE,
+        "ownedEmulator": {
+            "pid": int(emulator_pid) if emulator_pid else None,
+            "liveness": emulator_pid_liveness,
+            "exitStatus": (
+                int(emulator_exit_status)
+                if emulator_exit_status.isdigit()
+                else emulator_exit_status
+            ),
+        },
+        "filesystem": {},
+        "memoryKiB": {"MemAvailable": None, "MemFree": None, "SwapFree": None},
+        "adb": {},
+        "diagnosticErrors": [],
+    }
+    errors = report["diagnosticErrors"]
+    assert isinstance(errors, list)
+
+    filesystems = report["filesystem"]
+    assert isinstance(filesystems, dict)
+    for label, path in (("runnerTemp", runner_temp), ("workspace", workspace)):
+        try:
+            stats = os.statvfs(path)
+            filesystems[label] = {
+                "availableBytes": stats.f_bavail * stats.f_frsize,
+                "availableInodes": stats.f_favail,
+            }
+        except OSError as error:
+            filesystems[label] = {
+                "availableBytes": None,
+                "availableInodes": None,
+                "observationError": type(error).__name__,
+            }
+            errors.append(f"filesystem:{label}:{type(error).__name__}")
+
+    memory = report["memoryKiB"]
+    assert isinstance(memory, dict)
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, separator, rest = line.partition(":")
+            if separator and key in {"MemAvailable", "MemFree", "SwapFree"}:
+                match = re.fullmatch(r"\s*(\d+)\s+kB\s*", rest)
+                if match is not None:
+                    memory[key] = int(match.group(1))
+        for key in ("MemAvailable", "MemFree", "SwapFree"):
+            if memory[key] is None:
+                errors.append(f"memory:{key}:unavailable")
+    except OSError as error:
+        errors.append(f"memory:read:{type(error).__name__}")
+
+    resolved_value = shutil.which(adb) if not Path(adb).is_absolute() else adb
+    resolved_adb = Path(resolved_value).resolve() if resolved_value else None
+    adb_report = report["adb"]
+    assert isinstance(adb_report, dict)
+    adb_report["requestedPath"] = adb
+    adb_report["resolvedPath"] = str(resolved_adb) if resolved_adb else None
+    if resolved_adb is None or not resolved_adb.is_file() or not os.access(resolved_adb, os.X_OK):
+        adb_report["executableAvailable"] = False
+        adb_report["executableSha256"] = None
+        errors.append("adb:executable:unavailable")
+        for stem in ("workflow-adb-version", "workflow-adb-get-state"):
+            retain_diagnostic_stream(evidence, stem, "stdout", "")
+            retain_diagnostic_stream(evidence, stem, "stderr", "ADB executable unavailable\n")
+            adb_report["version" if stem.endswith("version") else "getState"] = {
+                "returnCode": None,
+                "timedOut": False,
+                "elapsedMilliseconds": 0,
+                "dispatched": False,
+            }
+    else:
+        adb_report["executableAvailable"] = True
+        try:
+            adb_report["executableSha256"] = sha256_file(resolved_adb)
+        except OSError as error:
+            adb_report["executableSha256"] = None
+            errors.append(f"adb:sha256:{type(error).__name__}")
+        for key, stem, command in (
+            ("version", "workflow-adb-version", [str(resolved_adb), "version"]),
+            (
+                "getState", "workflow-adb-get-state",
+                [str(resolved_adb), "-s", serial, "get-state"],
+            ),
+        ):
+            observation, stdout, stderr = observe_host_command(command, 5)
+            observation["dispatched"] = True
+            observation["stdoutRetention"] = retain_diagnostic_stream(
+                evidence, stem, "stdout", stdout
+            )
+            observation["stderrRetention"] = retain_diagnostic_stream(
+                evidence, stem, "stderr", stderr
+            )
+            adb_report[key] = observation
+
+    (evidence / "workflow-host-diagnostics.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return report
+
+
+def fixed42_device_capture_available(evidence: Path) -> bool:
+    """Admit failure-time device reads only from one complete bounded get-state receipt."""
+    try:
+        def bounded_bytes(name: str, limit: int) -> bytes:
+            path = evidence / name
+            if not path.is_file():
+                raise RuntimeGateError(f"Missing {name}")
+            with path.open("rb") as stream:
+                value = stream.read(limit + 1)
+            if len(value) > limit:
+                raise RuntimeGateError(f"Oversized {name}")
+            return value
+
+        report_bytes = bounded_bytes("workflow-host-diagnostics.json", 64 * 1024)
+        receipt_bytes = bounded_bytes(
+            "workflow-adb-get-state-stdout-retention.json", 64 * 1024
+        )
+        stdout_bytes = bounded_bytes(
+            "workflow-adb-get-state-stdout.txt", MAX_HOST_EVIDENCE_BYTES
+        )
+        report = json.loads(report_bytes.decode("utf-8", "strict"))
+        receipt = json.loads(receipt_bytes.decode("utf-8", "strict"))
+        if not isinstance(report, dict) or not isinstance(receipt, dict):
+            return False
+        if report.get("profile") != FIXED42_AUTOMATIC_OTA_PROFILE:
+            return False
+        adb = report.get("adb")
+        get_state = adb.get("getState") if isinstance(adb, dict) else None
+        if not isinstance(get_state, dict):
+            return False
+        if (
+            type(get_state.get("returnCode")) is not int
+            or get_state["returnCode"] != 0
+            or get_state.get("timedOut") is not False
+            or get_state.get("dispatched") is not True
+            or get_state.get("stdoutRetention") != receipt
+            or stdout_bytes != b"device\n"
+        ):
+            return False
+        expected_size = len(stdout_bytes)
+        return (
+            receipt.get("truncated") is False
+            and receipt.get("strategy") == "full-redacted-utf8"
+            and type(receipt.get("rawOriginalUtf8Bytes")) is int
+            and receipt["rawOriginalUtf8Bytes"] == expected_size
+            and receipt.get("rawOriginalSha256") == hashlib.sha256(stdout_bytes).hexdigest()
+            and type(receipt.get("redactedUtf8Bytes")) is int
+            and receipt["redactedUtf8Bytes"] == expected_size
+            and type(receipt.get("retainedSourceUtf8Bytes")) is int
+            and receipt["retainedSourceUtf8Bytes"] == expected_size
+            and receipt.get("markerUtf8Bytes") == 0
+            and receipt.get("storedUtf8Bytes") == expected_size
+            and receipt.get("omittedRedactedUtf8Bytes") == 0
+        )
+    except (
+        OSError, UnicodeError, json.JSONDecodeError, RuntimeGateError,
+        RecursionError, TypeError,
+    ):
+        return False
 
 
 def validate_file(path: Path, expected_hash: str, expected_size: int, label: str) -> None:
@@ -1262,6 +1496,7 @@ class AdmittedAdb:
         self.harness_install_count = 0
         self.baseline_install_count = 0
         self.baseline_installed = False
+        self.baseline_pull_attempted = False
         self.baseline_pulled = False
         self.installer_success_receipt = False
         self.final_pulled = False
@@ -1507,10 +1742,112 @@ class AdmittedAdb:
         self.baseline_install_count = 1
         self.baseline_installed = True
 
-    def pull_baseline_once(self, remote: str, destination: Path) -> None:
-        if not self.baseline_installed or self.baseline_pulled:
+    def pull_baseline_once(
+        self,
+        remote: str,
+        destination: Path,
+        *,
+        diagnostic_writer: Callable[[str, str], None] | None = None,
+    ) -> None:
+        fixed42 = (
+            self.automatic_binding is not None
+            and self.automatic_binding.profile == FIXED42_AUTOMATIC_OTA_PROFILE
+        )
+        if (
+            not self.baseline_installed
+            or self.baseline_pulled
+            or (fixed42 and self.baseline_pull_attempted)
+        ):
             raise RuntimeGateError("Baseline pull scope is invalid")
-        self._execute(["pull", remote, str(destination)], timeout=180)
+        if not fixed42:
+            self._execute(["pull", remote, str(destination)], timeout=180)
+            self.baseline_pulled = True
+            return
+        if diagnostic_writer is None:
+            raise RuntimeGateError("Fixed42 baseline pull requires diagnostic retention")
+
+        diagnostic_writer(
+            "baseline-pull-attempt.json",
+            json.dumps({
+                "profile": FIXED42_AUTOMATIC_OTA_PROFILE,
+                "phase": "before-dispatch",
+                "attemptOrdinal": 1,
+                "timeoutSeconds": 180,
+                "remoteKind": "installed-package-base-apk",
+                "destinationName": destination.name,
+            }, indent=2, sort_keys=True) + "\n",
+        )
+        args = ["pull", remote, str(destination)]
+        self.baseline_pull_attempted = True
+        self.commands.append(tuple(args))
+        started = time.monotonic()
+        timeout_error: subprocess.TimeoutExpired | None = None
+        result: subprocess.CompletedProcess[str] | None = None
+        try:
+            result = subprocess.run(
+                [self.executable, "-s", self.serial, *args],
+                capture_output=True,
+                timeout=180,
+                check=False,
+                text=True,
+            )
+            stdout = subprocess_output_text(result.stdout)
+            stderr = subprocess_output_text(result.stderr)
+            return_code: int | None = result.returncode
+            timed_out = False
+        except subprocess.TimeoutExpired as error:
+            timeout_error = error
+            stdout = subprocess_output_text(error.stdout)
+            stderr = subprocess_output_text(error.stderr)
+            return_code = None
+            timed_out = True
+
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        try:
+            partial_bytes: int | None = destination.stat().st_size if destination.exists() else 0
+        except OSError:
+            partial_bytes = None
+
+        process_error: RuntimeGateError | None = None
+        if timed_out:
+            process_error = RuntimeGateError("ADB command timed out (180s): pull")
+        elif return_code != 0:
+            process_error = RuntimeGateError(
+                f"ADB command failed ({return_code}): pull\n"
+                + redact(stdout + "\n" + stderr)[-4000:]
+            )
+
+        diagnostic_error: Exception | None = None
+        try:
+            for stream, value in (("stdout", stdout), ("stderr", stderr)):
+                retained, receipt = bounded_diagnostic_retention(value)
+                diagnostic_writer(f"baseline-pull-{stream}.txt", retained)
+                diagnostic_writer(
+                    f"baseline-pull-{stream}-retention.json",
+                    json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+                )
+            diagnostic_writer(
+                "baseline-pull-result.json",
+                json.dumps({
+                    "profile": FIXED42_AUTOMATIC_OTA_PROFILE,
+                    "dispatched": True,
+                    "returnCode": return_code,
+                    "timedOut": timed_out,
+                    "elapsedMilliseconds": elapsed_ms,
+                    "partialDestinationBytes": partial_bytes,
+                    "partialDestinationUsedForAdmission": False,
+                    "admittedForIdentityValidation": False,
+                }, indent=2, sort_keys=True) + "\n",
+            )
+        except Exception as error:
+            diagnostic_error = error
+
+        if process_error is not None:
+            if timeout_error is not None:
+                raise process_error from timeout_error
+            raise process_error
+        if diagnostic_error is not None:
+            raise RuntimeGateError("Fixed42 baseline pull diagnostics could not be retained") from diagnostic_error
         self.baseline_pulled = True
 
     def mark_installer_success_receipt(self) -> None:
@@ -1679,7 +2016,12 @@ class OtaRuntimeDriver:
         ):
             raise RuntimeGateError("Installed baseline version identity mismatch")
         pulled = self.evidence / f"installed-baseline-{self.binding.baseline_version}.apk"
-        self.adb.pull_baseline_once(self.base_path(), pulled)
+        if self.binding.profile == FIXED42_AUTOMATIC_OTA_PROFILE:
+            self.adb.pull_baseline_once(
+                self.base_path(), pulled, diagnostic_writer=self.write
+            )
+        else:
+            self.adb.pull_baseline_once(self.base_path(), pulled)
         validate_file(
             pulled,
             self.binding.baseline_sha256,
@@ -2382,8 +2724,17 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     verification_mode = parser.add_mutually_exclusive_group()
     verification_mode.add_argument("--verify-inputs-only", action="store_true")
     verification_mode.add_argument("--verify-apks-only", action="store_true")
+    verification_mode.add_argument(
+        "--fixed42-host-failure-diagnostics", action="store_true"
+    )
+    verification_mode.add_argument("--fixed42-device-capture-gate", action="store_true")
     parser.add_argument("--adb", default="adb")
     parser.add_argument("--serial")
+    parser.add_argument("--emulator-pid", default="")
+    parser.add_argument("--emulator-pid-liveness")
+    parser.add_argument("--emulator-exit-status")
+    parser.add_argument("--runner-temp", type=Path)
+    parser.add_argument("--workspace", type=Path)
     parser.add_argument("--apksigner")
     parser.add_argument("--apkanalyzer")
     parser.add_argument("--automatic-binding", type=Path)
@@ -2410,7 +2761,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     if args.self_test is None:
-        if args.verify_apks_only:
+        if args.fixed42_device_capture_gate:
+            required = ["evidence"]
+        elif args.fixed42_host_failure_diagnostics:
+            required = [
+                "serial", "emulator_pid_liveness", "emulator_exit_status",
+                "runner_temp", "workspace", "evidence",
+            ]
+        elif args.verify_apks_only:
             required = [
                 "baseline_apk", "target_apk", "apksigner", "apkanalyzer",
                 "automatic_binding", "evidence",
@@ -2420,7 +2778,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                 "baseline_apk", "target_apk", "target_manifest", "target_verification",
                 "target_checksums", "release_pages", "evidence",
             ]
-        if not args.verify_inputs_only and not args.verify_apks_only:
+        if (
+            not args.verify_inputs_only
+            and not args.verify_apks_only
+            and not args.fixed42_host_failure_diagnostics
+            and not args.fixed42_device_capture_gate
+        ):
             required += [
                 "serial", "apksigner", "harness_app", "harness_test",
                 "harness_app_sha256", "harness_test_sha256",
@@ -2439,6 +2802,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.self_test is not None:
         return run_self_tests(args.self_test or None)
+    if args.fixed42_device_capture_gate:
+        return 0 if fixed42_device_capture_available(args.evidence) else 1
+    if args.fixed42_host_failure_diagnostics:
+        try:
+            collect_fixed42_host_failure_diagnostics(
+                evidence=args.evidence,
+                adb=args.adb,
+                serial=args.serial,
+                emulator_pid=args.emulator_pid,
+                emulator_pid_liveness=args.emulator_pid_liveness,
+                emulator_exit_status=args.emulator_exit_status,
+                runner_temp=args.runner_temp,
+                workspace=args.workspace,
+            )
+            return 0
+        except Exception as caught:
+            print(f"{type(caught).__name__}: {caught}", file=sys.stderr)
+            return 1
     if args.verify_inputs_only:
         try:
             binding = binding_from_args(args)
