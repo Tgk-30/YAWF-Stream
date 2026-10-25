@@ -62,6 +62,10 @@ function bindingPatternLiteral(source) {
 
 function validateIntegration(source, helperSource, legalSource) {
   const failures = [];
+  const testEntry = methodBody(
+    source,
+    'public void productionApkCompletesServerModeExternalPlayerFlow() throws Throwable',
+  );
   const runFlow = methodBody(source, 'private void runFlow()');
   const transaction = methodBody(source, 'private void openPlaybackSettingsTransaction()');
   const observation = methodBody(
@@ -130,8 +134,32 @@ function validateIntegration(source, helperSource, legalSource) {
   }
   if (!source.includes('receipt.put("settingsTransactionTimings"')
       || !source.includes('"settingsTransactionTimingEventsOmitted"')
-      || !source.includes('receipt.put("settingsClickTiming", settingsClickTiming)')) {
+      || !source.includes('receipt.put("settingsClickTiming", settingsClickTiming)')
+      || !source.includes('"externalLegalSnapshotFailureDiagnostics"')
+      || !source.includes('new JSONArray(externalLegalSnapshotFailureDiagnostics)')
+      || !source.includes('"externalLegalSnapshotFailureDiagnosticsOmitted"')) {
     failures.push('bounded settings timing receipt changed');
+  }
+  const legalDiagnosticRecorder = methodBody(
+    source,
+    'private void recordExternalLegalSnapshotFailureDiagnostics(Throwable failure)',
+  );
+  if (!source.includes('MAX_EXTERNAL_LEGAL_SNAPSHOT_FAILURE_DIAGNOSTICS = 8')
+      || !legalDiagnosticRecorder.includes(
+        'RuntimeExternalLegalSnapshot.failureDiagnostics(failure)',
+      )
+      || !legalDiagnosticRecorder.includes(
+        'externalLegalSnapshotFailureDiagnostics.add(safe(diagnostics))',
+      )) {
+    failures.push('legal snapshot failure diagnostics are not sanitized and bounded');
+  }
+  const diagnosticRecord = testEntry.indexOf(
+    'recordExternalLegalSnapshotFailureDiagnostics(caught);',
+  );
+  const originalRethrow = testEntry.indexOf('throw caught;');
+  if (!(diagnosticRecord >= 0 && diagnosticRecord < originalRethrow)
+      || !testEntry.includes('caught.addSuppressed(diagnosticsFailure);')) {
+    failures.push('legal snapshot diagnostics can mask or miss the original failure');
   }
 
   const requiredObservationFragments = [
@@ -267,6 +295,18 @@ function validateLegalShape(source) {
   ) || source.includes('FLAG_PREFETCH_UNINTERRUPTIBLE')) {
     failures.push('fresh guard lost its public interruptible breadth-first prefetch strategy');
   }
+  if (!source.includes('static String failureDiagnostics(Throwable failure)')
+      || !source.includes('failure.addSuppressed(new DiagnosticsAttachment(')
+      || !source.includes('maxPublicCallMs')
+      || !source.includes('activeRootMs')
+      || !source.includes('inventoryMs')
+      || !source.includes('windowRootMs')
+      || !source.includes('traversalMs')) {
+    failures.push('fresh guard lost bounded failure diagnostics');
+  }
+  if (/getWindowId\(\)|window\.getId\(\)/.test(source)) {
+    failures.push('fresh guard elides a later root by window identity');
+  }
   return failures;
 }
 
@@ -333,6 +373,7 @@ public class AccessibilityNodeInfo {
     public static int plainChildCalls;
     public static int prefetchedChildCalls;
     public final String id;
+    public int windowId;
     public boolean visible = true;
     public CharSequence text;
     public CharSequence description;
@@ -377,6 +418,7 @@ public class AccessibilityNodeInfo {
         return child;
     }
     public int childReads(int index) { return childReads.getOrDefault(index, 0); }
+    public int getWindowId() { return windowId; }
     public static void resetPrefetchMetrics() {
         plainChildCalls = 0;
         prefetchedChildCalls = 0;
@@ -410,9 +452,14 @@ public class AccessibilityWindowInfo {
     public static int plainRootCalls;
     public static int prefetchedRootCalls;
     public AccessibilityNodeInfo root;
+    public int id;
     public long accessCostMs;
     public boolean fail;
-    public AccessibilityWindowInfo(AccessibilityNodeInfo root) { this.root = root; }
+    public AccessibilityWindowInfo(AccessibilityNodeInfo root) {
+        this.root = root;
+        this.id = root == null ? 0 : root.windowId;
+    }
+    public int getId() { return id; }
     public AccessibilityNodeInfo getRoot() {
         SystemClock.advance(accessCostMs);
         plainRootCalls++;
@@ -1123,6 +1170,124 @@ public final class RuntimeExternalLegalSnapshotHarness {
                 "raw automation diagnostic escaped the guard");
     }
 
+    private static String requireDiagnostics(Throwable failure, String label) {
+        String diagnostics = RuntimeExternalLegalSnapshot.failureDiagnostics(failure);
+        check(diagnostics != null && diagnostics.length() > 0,
+                label + " did not retain snapshot diagnostics");
+        return diagnostics;
+    }
+
+    private static UiAutomation oneWindowAutomation(
+            AccessibilityNodeInfo activeRoot, AccessibilityWindowInfo window) {
+        UiAutomation automation = new UiAutomation();
+        automation.activeRoot = activeRoot;
+        List<AccessibilityWindowInfo> windows = new ArrayList<>();
+        windows.add(window);
+        automation.windows.put(0, windows);
+        return automation;
+    }
+
+    private static void sameWindowIdentityNeverElidesTheLaterRoot() {
+        reset();
+        AccessibilityNodeInfo active = node("RAW_ACTIVE_NODE_ID");
+        active.windowId = 7;
+        AccessibilityNodeInfo later = node("RAW_LATER_NODE_ID");
+        later.windowId = 7;
+        later.description = "binding terms https://private.invalid/token";
+        AccessibilityWindowInfo legalWindow = new AccessibilityWindowInfo(later);
+        legalWindow.id = 7;
+        legalWindow.accessCostMs = 80L;
+        UiAutomation legalAutomation = oneWindowAutomation(active, legalWindow);
+        legalAutomation.accessCostMs = 20L;
+        Throwable legalFailure = expectFailure(
+                AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        legalAutomation, BINDING_TERMS),
+                "same-window later legal root");
+        check("Refusing to act while a binding legal phrase is visible"
+                        .equals(legalFailure.getMessage()),
+                "snapshot diagnostics masked the legal failure");
+        String legalDiagnostics = requireDiagnostics(
+                legalFailure, "same-window later legal root");
+        check(legalDiagnostics.equals(
+                        "currentPhase=traversal-description totalMs=120 activeRootMs=20 "
+                                + "inventoryMs=20 windowRootMs=80 traversalMs=0 "
+                                + "maxPublicCallMs=80 displays=1 windows=1 roots=2 "
+                                + "visited=2 visible=2 skipped=0 childFetches=0"),
+                "same-window diagnostics were incomplete: " + legalDiagnostics);
+        check(!legalDiagnostics.contains("RAW_ACTIVE_NODE_ID")
+                        && !legalDiagnostics.contains("RAW_LATER_NODE_ID")
+                        && !legalDiagnostics.contains("binding terms")
+                        && !legalDiagnostics.contains("https://"),
+                "raw accessibility content escaped the snapshot diagnostics");
+        check(AccessibilityWindowInfo.prefetchedRootCalls == 1,
+                "same-window legal root was not fetched exactly once");
+
+        reset();
+        AccessibilityNodeInfo nullActive = node("same-window-null-active");
+        nullActive.windowId = 7;
+        AccessibilityWindowInfo nullWindow = new AccessibilityWindowInfo(null);
+        nullWindow.id = 7;
+        Throwable nullFailure = expectFailure(
+                AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        oneWindowAutomation(nullActive, nullWindow), BINDING_TERMS),
+                "same-window null root");
+        check("A fresh legal snapshot window root was missing".equals(nullFailure.getMessage()),
+                "snapshot diagnostics masked the null-root failure");
+        check(requireDiagnostics(nullFailure, "same-window null root")
+                        .contains("currentPhase=window-root"),
+                "null-root diagnostics lost the current phase");
+        check(AccessibilityWindowInfo.prefetchedRootCalls == 1,
+                "same-window null root was not fetched exactly once");
+
+        reset();
+        AccessibilityNodeInfo throwingActive = node("same-window-throw-active");
+        throwingActive.windowId = 7;
+        AccessibilityNodeInfo throwingRoot = node("RAW_THROWING_ROOT_ID");
+        throwingRoot.windowId = 7;
+        AccessibilityWindowInfo throwingWindow = new AccessibilityWindowInfo(throwingRoot);
+        throwingWindow.id = 7;
+        throwingWindow.fail = true;
+        Throwable throwingFailure = expectFailure(
+                AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        oneWindowAutomation(throwingActive, throwingWindow), BINDING_TERMS),
+                "same-window throwing root");
+        check("The fresh legal snapshot could not be verified: IllegalStateException"
+                        .equals(throwingFailure.getMessage()),
+                "snapshot diagnostics masked the root exception");
+        String throwingDiagnostics = requireDiagnostics(
+                throwingFailure, "same-window throwing root");
+        check(throwingDiagnostics.contains("currentPhase=window-root")
+                        && !throwingDiagnostics.contains("RAW_THROWING_ROOT_ID")
+                        && !throwingDiagnostics.contains("RAW_UI_SENTINEL"),
+                "throwing-root diagnostics were unsafe or incomplete");
+        check(AccessibilityWindowInfo.prefetchedRootCalls == 1,
+                "same-window throwing root was not fetched exactly once");
+    }
+
+    private static void traversalDiagnosticsCountVisibilityAndChildFetches() {
+        reset();
+        AccessibilityNodeInfo root = node("counter-root");
+        AccessibilityNodeInfo hidden = node("counter-hidden");
+        hidden.visible = false;
+        AccessibilityNodeInfo legal = node("counter-legal");
+        legal.description = "license agreement";
+        root.children.add(hidden);
+        root.children.add(legal);
+        Throwable failure = expectFailure(
+                AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        automation(root, root), BINDING_TERMS),
+                "visibility and child counters");
+        String diagnostics = requireDiagnostics(failure, "visibility and child counters");
+        check(diagnostics.contains("visited=3 visible=2 skipped=1 childFetches=2"),
+                "traversal counters were incomplete: " + diagnostics);
+        check(hidden.childReads(0) == 0,
+                "diagnostic observation traversed an invisible subtree");
+    }
+
     private static void graphSizeAndTimeBoundsFailClosed() {
         reset();
         AccessibilityNodeInfo cycle = node("cycle");
@@ -1228,6 +1393,8 @@ public final class RuntimeExternalLegalSnapshotHarness {
         originalPatternCoversTextDescriptionAndVisibility();
         multipleRootsAndDisplaysAreCovered();
         missingRootsAndUnexpectedErrorsFailClosed();
+        sameWindowIdentityNeverElidesTheLaterRoot();
+        traversalDiagnosticsCountVisibilityAndChildFetches();
         graphSizeAndTimeBoundsFailClosed();
         everyAccessibleChildIsReadOnceWithoutLegacyMatcher();
         coldNinetySevenNodeSnapshotUsesPublicPrefetchWithoutNarrowingScope();
@@ -1288,6 +1455,10 @@ function driverAdapterSource(source) {
   );
   const currentPackage = methodBody(source, 'private String currentPackage()');
   const recordTiming = methodBody(source, 'private void recordSettingsTransactionTiming(');
+  const recordLegalFailureDiagnostics = methodBody(
+    source,
+    'private void recordExternalLegalSnapshotFailureDiagnostics(Throwable failure)',
+  );
   const recordClickTiming = methodBody(source, 'private void recordSettingsClickTiming(');
   const recordRailObservation = methodBody(source, 'private void recordSettingsRailObservation(');
   const findDialog = methodBody(source, 'private UiObject2 findUniqueExactProductDialog(String label)');
@@ -1325,15 +1496,18 @@ final class RuntimeExternalPlayerFlowTest {
     private static final long MEDIA_WAIT_MS = 60_000L;
     private static final int MAX_SETTINGS_TRANSACTION_TIMING_EVENTS = 64;
     private static final int MAX_SETTINGS_RAIL_OBSERVATIONS = 16;
+    private static final int MAX_EXTERNAL_LEGAL_SNAPSHOT_FAILURE_DIAGNOSTICS = 8;
     private static final Pattern BINDING_TERMS = Pattern.compile(${bindingPatternLiteral(source)});
 
     private final FakeInstrumentation instrumentation = new FakeInstrumentation();
     private final UiDevice device = new UiDevice();
     private final List<String> settingsTransactionTimings = new ArrayList<>();
     private final List<String> settingsRailObservations = new ArrayList<>();
+    private final List<String> externalLegalSnapshotFailureDiagnostics = new ArrayList<>();
     private final Map<String, Object> checks = new LinkedHashMap<>();
     private int settingsTransactionTimingEventsOmitted;
     private int settingsRailObservationEventsOmitted;
+    private int externalLegalSnapshotFailureDiagnosticsOmitted;
     private long settingsClickDispatchedAtMs = -1L;
     private long settingsClickFinishedAtMs = -1L;
     private long settingsClickIdleBeforeMs = -1L;
@@ -1358,6 +1532,8 @@ final class RuntimeExternalPlayerFlowTest {
             long idleBeforeMs,
             long idleAfterMs,
             boolean returned) {${recordTiming}}
+    private void recordExternalLegalSnapshotFailureDiagnostics(
+            Throwable failure) {${recordLegalFailureDiagnostics}}
     private void recordSettingsClickTiming(
             long dispatchedAtMs,
             long finishedAtMs,
@@ -1625,10 +1801,15 @@ final class RuntimeExternalPlayerFlowTest {
 
     private static void assertGuardFailureBeforeSelection(
             RuntimeExternalPlayerFlowTest flow, String label) {
-        expectFailure(AssertionError.class, flow::executeSettingsCallsite, label);
+        Throwable failure = expectFailure(
+                AssertionError.class, flow::executeSettingsCallsite, label);
+        flow.recordExternalLegalSnapshotFailureDiagnostics(failure);
         check(flow.device.selectionQueries == 0
                         && flow.revealAttempts == 0 && flow.settingsAttempts == 0,
                 label + " allowed a selection query or click");
+        check(flow.externalLegalSnapshotFailureDiagnostics.size() == 1
+                        && flow.externalLegalSnapshotFailureDiagnosticsOmitted == 0,
+                label + " did not retain one bounded legal diagnostic");
     }
 
     private static void duplicateScopeAndBoundsRemainFailClosed() {
@@ -1713,12 +1894,36 @@ final class RuntimeExternalPlayerFlowTest {
                 "final actual click timing was lost after the poll cap");
     }
 
+    private static void legalFailureDiagnosticsAreBoundedWithoutMaskingFailure() {
+        RuntimeExternalPlayerFlowTest flow = armedFlow(9_100L);
+        AccessibilityNodeInfo slowRoot = new AccessibilityNodeInfo("bounded-diagnostic-root");
+        slowRoot.accessCostMs = 260L;
+        flow.installLegalRoot(slowRoot);
+        Throwable failure = expectFailure(
+                AssertionError.class, flow::executeSettingsCallsite, "bounded diagnostic failure");
+        String originalMessage = failure.getMessage();
+        for (int index = 0; index < 9; index++) {
+            flow.recordExternalLegalSnapshotFailureDiagnostics(failure);
+        }
+        check(flow.externalLegalSnapshotFailureDiagnostics.size() == 8
+                        && flow.externalLegalSnapshotFailureDiagnosticsOmitted == 1,
+                "legal failure diagnostic cap changed");
+        check(originalMessage.equals(failure.getMessage()),
+                "recording diagnostics masked the original failure");
+        String diagnostics = flow.externalLegalSnapshotFailureDiagnostics.get(0);
+        check(diagnostics.contains("currentPhase=traversal-")
+                        && diagnostics.contains("maxPublicCallMs=260")
+                        && diagnostics.length() < 500,
+                "legal failure diagnostics were unbounded or incomplete");
+    }
+
     static void runProbe() {
         actualOnePassGuardBeatsThePredecessorModel();
         legalAndForegroundFailuresPrecedeSelectionAndInput();
         snapshotSafetyFailuresPrecedeSelectionAndInput();
         duplicateScopeAndBoundsRemainFailClosed();
         boundedDiagnosticsRetainTheFinalClickTiming();
+        legalFailureDiagnosticsAreBoundedWithoutMaskingFailure();
     }
 
     private static final class FakeInstrumentation {
@@ -1968,6 +2173,28 @@ for (const [name, mutate] of [
     ),
   ],
   [
+    'same-window root-fetch elision',
+    source => replaceUnique(
+      source,
+      'root = window.getRoot(PREFETCHING_STRATEGY);',
+      'root = window.getId() == activeRoot.getWindowId()\n'
+        + '                            ? activeRoot\n'
+        + '                            : window.getRoot(PREFETCHING_STRATEGY);',
+    ),
+  ],
+  [
+    'AssertionError diagnostics omission',
+    source => replaceUnique(
+      source,
+      '            attachDiagnostics(failure, diagnostics);\n',
+      '',
+    ),
+  ],
+  [
+    'window diagnostic counter omission',
+    source => replaceUnique(source, '                diagnostics.windowCount++;\n', ''),
+  ],
+  [
     'visible text omission',
     source => replaceUnique(
       source,
@@ -2027,7 +2254,14 @@ for (const [name, mutate] of [
     'unexpected-error fail-closed conversion removal',
     source => replaceUnique(
       source,
-      '} catch (RuntimeException failure) {\n            throw new AssertionError(\n                    "The fresh legal snapshot could not be verified: "\n                            + failure.getClass().getSimpleName());\n        }',
+      '} catch (RuntimeException failure) {\n'
+        + '            diagnostics.finish();\n'
+        + '            AssertionError converted = new AssertionError(\n'
+        + '                    "The fresh legal snapshot could not be verified: "\n'
+        + '                            + failure.getClass().getSimpleName());\n'
+        + '            attachDiagnostics(converted, diagnostics);\n'
+        + '            throw converted;\n'
+        + '        }',
       '} catch (RuntimeException failure) {\n            throw failure;\n        }',
     ),
   ],
@@ -2187,6 +2421,23 @@ for (const [name, mutate] of [
       '        return;',
     ),
   ],
+  [
+    'legal failure diagnostic recorder omission',
+    source => replaceUnique(
+      source,
+      '        String diagnostics = RuntimeExternalLegalSnapshot.failureDiagnostics(failure);',
+      '        String diagnostics = null;',
+    ),
+  ],
+  [
+    'legal failure diagnostic cap removal',
+    source => replaceUnique(
+      source,
+      'if (externalLegalSnapshotFailureDiagnostics.size()\n'
+        + '                >= MAX_EXTERNAL_LEGAL_SNAPSHOT_FAILURE_DIAGNOSTICS) {',
+      'if (false) {',
+    ),
+  ],
 ]) {
   test(`executable actual adapter rejects ${name}`, () => {
     const mutated = mutate(driver);
@@ -2246,6 +2497,23 @@ for (const [name, mutate] of [
       source,
       '            receipt.put("settingsClickTiming", settingsClickTiming);',
       '            receipt.put("settingsClickTiming", JSONObject.NULL);',
+    ),
+  ],
+  [
+    'legal failure diagnostic catch omission',
+    source => replaceUnique(
+      source,
+      '                recordExternalLegalSnapshotFailureDiagnostics(caught);',
+      '                return;',
+    ),
+  ],
+  [
+    'legal failure diagnostic receipt omission',
+    source => replaceUnique(
+      source,
+      '                "externalLegalSnapshotFailureDiagnostics",\n'
+        + '                new JSONArray(externalLegalSnapshotFailureDiagnostics));',
+      '                "externalLegalSnapshotFailureDiagnostics", JSONObject.NULL);',
     ),
   ],
 ]) {

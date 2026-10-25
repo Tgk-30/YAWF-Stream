@@ -162,7 +162,7 @@ function workflowContract(w, j) {
 
   assert.match(j, /\(cd public-phone-source\/web && npm ci && npm run build\)/);
   assert.match(j, /\(cd public-phone-source\/server && npm ci\)/);
-  assert.match(j, /public-phone-source\/server\/node_modules\/tsx\/dist\/cli\.mjs scripts\/android_external_player_server_fixture\.mts/);
+  assert.match(j, /node --import "\$GITHUB_WORKSPACE\/public-phone-source\/server\/node_modules\/tsx\/dist\/loader\.mjs" \\\n\s+scripts\/android_external_player_server_fixture\.mts/);
   assert.match(j, /--repo "\$GITHUB_WORKSPACE\/public-phone-source"/);
   assert.match(j, /source-runtime-admission\.json/);
   assert.match(j, /fixtureHarnessSource/);
@@ -243,7 +243,7 @@ function exactReleasedSourceContract(j) {
   assert.match(j, /HOSTED_UI_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
   assert.match(j, /SERVER_RUNTIME_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
   assert.match(j, /\(cd public-phone-source\/web && npm ci && npm run build\)/);
-  assert.match(j, /public-phone-source\/server\/node_modules\/tsx\/dist\/cli\.mjs scripts\/android_external_player_server_fixture\.mts/);
+  assert.match(j, /node --import "\$GITHUB_WORKSPACE\/public-phone-source\/server\/node_modules\/tsx\/dist\/loader\.mjs" \\\n\s+scripts\/android_external_player_server_fixture\.mts/);
   assert.match(j, /--repo "\$GITHUB_WORKSPACE\/public-phone-source"/);
   assert.match(j, /assert release_source==os\.environ\['PRODUCT_SOURCE'\]==os\.environ\['HOSTED_UI_SOURCE'\]==os\.environ\['SERVER_RUNTIME_SOURCE'\]/);
   assert.match(j, /web=inventory\(Path\('web\/dist'\),512,64\*1024\*1024\)/);
@@ -758,7 +758,9 @@ for (const [name, original, mutate, contract] of [
   ['product APK size', job, s => s.replace('PRODUCT_SIZE: "88644481"', 'PRODUCT_SIZE: "1"'), s => workflowContract(workflow, s)],
   ['wrong hosted UI build root', job, s => s.replace('(cd public-phone-source/web && npm ci && npm run build)', '(cd web && npm ci && npm run build)'), s => workflowContract(workflow, s)],
   ['wrong server dependency root', job, s => s.replace('(cd public-phone-source/server && npm ci)', '(cd server && npm ci)'), s => workflowContract(workflow, s)],
-  ['wrong fixture module loader', job, s => s.replace('public-phone-source/server/node_modules/tsx/dist/cli.mjs', 'server/node_modules/tsx/dist/cli.mjs'), s => workflowContract(workflow, s)],
+  ['CLI fixture launcher', job, s => s.replace(
+    'node --import "$GITHUB_WORKSPACE/public-phone-source/server/node_modules/tsx/dist/loader.mjs"',
+    'node public-phone-source/server/node_modules/tsx/dist/cli.mjs'), s => workflowContract(workflow, s)],
   ['wrong fixture served source', job, s => s.replace('--repo "$GITHUB_WORKSPACE/public-phone-source"', '--repo "$GITHUB_WORKSPACE"'), s => workflowContract(workflow, s)],
   ['VLC APK hash', job, s => s.replace('VLC_SHA256: 4646633e', 'VLC_SHA256: a646633e'), s => workflowContract(workflow, s)],
   ['VLC signer', job, s => s.replace('VLC_SIGNER_SHA256: c8768d2c', 'VLC_SIGNER_SHA256: a8768d2c'), s => workflowContract(workflow, s)],

@@ -86,6 +86,7 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final int MAX_PHASES = 48;
     private static final int MAX_SETTINGS_TRANSACTION_TIMING_EVENTS = 64;
     private static final int MAX_SETTINGS_RAIL_OBSERVATIONS = 16;
+    private static final int MAX_EXTERNAL_LEGAL_SNAPSHOT_FAILURE_DIAGNOSTICS = 8;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
     private static final long MAX_HIERARCHY_BYTES = 1024L * 1024L;
     private static final Pattern SAFE_SUBDIR = Pattern.compile("[A-Za-z0-9._-]{1,64}");
@@ -107,11 +108,13 @@ public final class RuntimeExternalPlayerFlowTest {
     private final List<String> phases = new ArrayList<>();
     private final List<String> settingsTransactionTimings = new ArrayList<>();
     private final List<String> settingsRailObservations = new ArrayList<>();
+    private final List<String> externalLegalSnapshotFailureDiagnostics = new ArrayList<>();
     private final Map<String, Object> checks = new LinkedHashMap<>();
     private int captureIndex;
     private int openPlayerClicks;
     private int settingsTransactionTimingEventsOmitted;
     private int settingsRailObservationEventsOmitted;
+    private int externalLegalSnapshotFailureDiagnosticsOmitted;
     private long settingsClickDispatchedAtMs = -1L;
     private long settingsClickFinishedAtMs = -1L;
     private long settingsClickIdleBeforeMs = -1L;
@@ -185,6 +188,11 @@ public final class RuntimeExternalPlayerFlowTest {
             runFlow();
             outcome = "passed";
         } catch (Throwable caught) {
+            try {
+                recordExternalLegalSnapshotFailureDiagnostics(caught);
+            } catch (RuntimeException diagnosticsFailure) {
+                caught.addSuppressed(diagnosticsFailure);
+            }
             failure = caught.getClass().getSimpleName() + ": " + safe(caught.getMessage());
             try {
                 capture("failure");
@@ -1127,6 +1135,17 @@ public final class RuntimeExternalPlayerFlowTest {
                 returned));
     }
 
+    private void recordExternalLegalSnapshotFailureDiagnostics(Throwable failure) {
+        String diagnostics = RuntimeExternalLegalSnapshot.failureDiagnostics(failure);
+        if (diagnostics == null) return;
+        if (externalLegalSnapshotFailureDiagnostics.size()
+                >= MAX_EXTERNAL_LEGAL_SNAPSHOT_FAILURE_DIAGNOSTICS) {
+            externalLegalSnapshotFailureDiagnosticsOmitted++;
+            return;
+        }
+        externalLegalSnapshotFailureDiagnostics.add(safe(diagnostics));
+    }
+
     private void recordSettingsClickTiming(
             long dispatchedAtMs,
             long finishedAtMs,
@@ -1233,6 +1252,12 @@ public final class RuntimeExternalPlayerFlowTest {
         receipt.put(
                 "settingsRailObservationEventsOmitted",
                 settingsRailObservationEventsOmitted);
+        receipt.put(
+                "externalLegalSnapshotFailureDiagnostics",
+                new JSONArray(externalLegalSnapshotFailureDiagnostics));
+        receipt.put(
+                "externalLegalSnapshotFailureDiagnosticsOmitted",
+                externalLegalSnapshotFailureDiagnosticsOmitted);
         if (settingsClickDispatchedAtMs >= 0L) {
             JSONObject settingsClickTiming = new JSONObject();
             settingsClickTiming.put("dispatchUptimeMs", settingsClickDispatchedAtMs);

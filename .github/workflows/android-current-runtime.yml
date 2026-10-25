@@ -819,15 +819,253 @@ jobs:
           mkdir -p "$ANDROID_AVD_HOME" "$EVIDENCE/ui"
           fixture_output="$RUNNER_TEMP/yawf-external-fixture"
           emulator_pid=""
+          emulator_identity=""
+          emulator_state="not-started"
           fixture_pid=""
+          fixture_identity=""
+          fixture_state="not-started"
           activity_monitor_pid=""
+          activity_monitor_identity=""
+          activity_monitor_state="not-started"
           activity_monitor_stop="$RUNNER_TEMP/yawf-vlc-activity-monitor.stop"
           test ! -e "$activity_monitor_stop"
           export ACTIVITY_MONITOR_STOP="$activity_monitor_stop"
+          # BEGIN EXTERNAL_OWNED_CHILD_LIFECYCLE
+          cleanup_progress_events=0
+          record_cleanup_progress() {
+            local role="$1"
+            local state="$2"
+            if [ "$cleanup_progress_events" -ge 64 ]; then return 0; fi
+            printf 'role=%s state=%s\n' "$role" "$state" >> "$EVIDENCE/cleanup-progress.txt"
+            cleanup_progress_events=$((cleanup_progress_events + 1))
+          }
+          owned_child_snapshot() {
+            local pid="$1"
+            local fingerprint_name="$2"
+            local ppid_name="$3"
+            local parent=""
+            local fingerprint=""
+            local state=""
+            if ! [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then return 1; fi
+            if [ -r "/proc/$pid/stat" ]; then
+              local stat_line=""
+              local stat_rest=""
+              local -a stat_fields=()
+              IFS= read -r stat_line < "/proc/$pid/stat" || return 1
+              stat_rest="${stat_line##*) }"
+              read -r -a stat_fields <<< "$stat_rest"
+              [ "${#stat_fields[@]}" -ge 20 ] || return 1
+              state="${stat_fields[0]}"
+              parent="${stat_fields[1]}"
+              fingerprint="proc:${parent}:${stat_fields[19]}"
+            else
+              parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+              state="$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+              fingerprint="$(ps -o lstart= -p "$pid" 2>/dev/null)"
+              [ -n "$parent" ] && [ -n "$state" ] && [ -n "$fingerprint" ] || return 1
+              fingerprint="ps:${parent}:${fingerprint}"
+            fi
+            case "$state" in Z*) return 4 ;; esac
+            printf -v "$fingerprint_name" '%s' "$fingerprint"
+            printf -v "$ppid_name" '%s' "$parent"
+          }
+          capture_owned_child_identity() {
+            local pid="$1"
+            local expected_marker="$2"
+            local role="$3"
+            local identity_name="$4"
+            local deadline=$((SECONDS + 5))
+            local snapshot_fingerprint=""
+            local snapshot_parent=""
+            local command_line=""
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              if owned_child_snapshot "$pid" snapshot_fingerprint snapshot_parent; then
+                command_line="$(ps -o command= -p "$pid" 2>/dev/null)"
+                if [ "$snapshot_parent" = "$$" ] && [[ "$command_line" == *"$expected_marker"* ]]; then
+                  printf -v "$identity_name" '%s' "$snapshot_fingerprint"
+                  record_cleanup_progress "$role" identity-captured
+                  return 0
+                fi
+              fi
+              sleep 0.05
+            done
+            record_cleanup_progress "$role" identity-capture-failed
+            return 1
+          }
+          owned_child_identity_status() {
+            local pid="$1"
+            local expected_identity="$2"
+            local current_fingerprint=""
+            local current_parent=""
+            local snapshot_status=0
+            if owned_child_snapshot "$pid" current_fingerprint current_parent; then
+              snapshot_status=0
+            else
+              snapshot_status=$?
+            fi
+            if [ "$snapshot_status" -eq 4 ]; then return 1; fi
+            if [ "$snapshot_status" -ne 0 ]; then
+              if builtin kill -0 "$pid" 2>/dev/null; then return 3; fi
+              return 1
+            fi
+            if [ "$current_parent" != "$$" ] || [ "$current_fingerprint" != "$expected_identity" ]; then
+              return 2
+            fi
+            return 0
+          }
+          wait_for_owned_child_exit() {
+            local pid="$1"
+            local expected_identity="$2"
+            local seconds="$3"
+            local deadline=$((SECONDS + seconds))
+            local identity_status=0
+            while true; do
+              if owned_child_identity_status "$pid" "$expected_identity"; then
+                identity_status=0
+              else
+                identity_status=$?
+              fi
+              if [ "$identity_status" -eq 1 ]; then return 0; fi
+              if [ "$identity_status" -eq 2 ] || [ "$identity_status" -eq 3 ]; then return 2; fi
+              if [ "$SECONDS" -ge "$deadline" ]; then return 1; fi
+              sleep 0.1
+            done
+          }
+          send_owned_signal() {
+            local signal="$1"
+            local pid="$2"
+            builtin kill "-$signal" "$pid"
+          }
+          owned_child_stopped() {
+            case "$1" in
+              already-exited|exited-after-term|exited-after-kill) printf 'true\n' ;;
+              *) printf 'false\n' ;;
+            esac
+          }
+          terminate_owned_child() {
+            local role="$1"
+            local pid="$2"
+            local expected_identity="$3"
+            local term_seconds="$4"
+            local kill_seconds="$5"
+            local result_name="$6"
+            local identity_status=0
+            local wait_status=0
+            if [ -z "$pid" ]; then
+              printf -v "$result_name" '%s' not-started
+              return 0
+            fi
+            if [ -z "$expected_identity" ]; then
+              printf -v "$result_name" '%s' identity-unavailable
+              record_cleanup_progress "$role" identity-unavailable
+              return 1
+            fi
+            if owned_child_identity_status "$pid" "$expected_identity"; then
+              identity_status=0
+            else
+              identity_status=$?
+            fi
+            if [ "$identity_status" -eq 1 ]; then
+              wait "$pid" 2>/dev/null || true
+              printf -v "$result_name" '%s' already-exited
+              record_cleanup_progress "$role" already-exited
+              return 0
+            fi
+            if [ "$identity_status" -ne 0 ]; then
+              printf -v "$result_name" '%s' identity-mismatch
+              record_cleanup_progress "$role" identity-mismatch
+              return 1
+            fi
+            record_cleanup_progress "$role" term-attempted
+            if ! send_owned_signal TERM "$pid" 2>/dev/null; then
+              record_cleanup_progress "$role" term-signal-failed
+            else
+              record_cleanup_progress "$role" term-sent
+            fi
+            if wait_for_owned_child_exit "$pid" "$expected_identity" "$term_seconds"; then
+              wait_status=0
+            else
+              wait_status=$?
+            fi
+            if [ "$wait_status" -eq 0 ]; then
+              wait "$pid" 2>/dev/null || true
+              printf -v "$result_name" '%s' exited-after-term
+              record_cleanup_progress "$role" exited-after-term
+              return 0
+            fi
+            if [ "$wait_status" -eq 2 ]; then
+              printf -v "$result_name" '%s' identity-mismatch
+              record_cleanup_progress "$role" identity-mismatch
+              return 1
+            fi
+            record_cleanup_progress "$role" kill-attempted
+            if ! send_owned_signal KILL "$pid" 2>/dev/null; then
+              if owned_child_identity_status "$pid" "$expected_identity"; then
+                identity_status=0
+              else
+                identity_status=$?
+              fi
+              if [ "$identity_status" -eq 1 ]; then
+                wait "$pid" 2>/dev/null || true
+                printf -v "$result_name" '%s' already-exited
+                record_cleanup_progress "$role" already-exited
+                return 0
+              fi
+              if [ "$identity_status" -ne 0 ]; then
+                printf -v "$result_name" '%s' identity-mismatch
+                record_cleanup_progress "$role" identity-mismatch
+                return 1
+              fi
+              printf -v "$result_name" '%s' kill-signal-failed-still-running
+              record_cleanup_progress "$role" kill-signal-failed-still-running
+              return 1
+            fi
+            record_cleanup_progress "$role" kill-sent
+            if wait_for_owned_child_exit "$pid" "$expected_identity" "$kill_seconds"; then
+              wait_status=0
+            else
+              wait_status=$?
+            fi
+            if [ "$wait_status" -eq 0 ]; then
+              wait "$pid" 2>/dev/null || true
+              printf -v "$result_name" '%s' exited-after-kill
+              record_cleanup_progress "$role" exited-after-kill
+              return 0
+            fi
+            if [ "$wait_status" -eq 2 ]; then
+              printf -v "$result_name" '%s' identity-mismatch
+              record_cleanup_progress "$role" identity-mismatch
+              return 1
+            fi
+            printf -v "$result_name" '%s' still-running-after-kill
+            record_cleanup_progress "$role" still-running-after-kill
+            return 1
+          }
+          finish_owned_cleanup() {
+            local original_status="$1"
+            local activity_stopped=""
+            local emulator_stopped=""
+            local fixture_stopped=""
+            activity_stopped="$(owned_child_stopped "$activity_monitor_state")"
+            emulator_stopped="$(owned_child_stopped "$emulator_state")"
+            fixture_stopped="$(owned_child_stopped "$fixture_state")"
+            {
+              printf 'workflowExit=%s\n' "$original_status"
+              printf 'activityMonitorIdentityCaptured=%s\n' "$([ -n "$activity_monitor_identity" ] && printf true || printf false)"
+              printf 'activityMonitorState=%s\nactivityMonitorStopped=%s\n' "$activity_monitor_state" "$activity_stopped"
+              printf 'emulatorIdentityCaptured=%s\n' "$([ -n "$emulator_identity" ] && printf true || printf false)"
+              printf 'emulatorState=%s\nemulatorStopped=%s\n' "$emulator_state" "$emulator_stopped"
+              printf 'fixtureIdentityCaptured=%s\n' "$([ -n "$fixture_identity" ] && printf true || printf false)"
+              printf 'fixtureState=%s\nfixtureStopped=%s\n' "$fixture_state" "$fixture_stopped"
+              printf 'progressEvents=%s\ncleanupCompleted=true\n' "$cleanup_progress_events"
+            } > "$EVIDENCE/cleanup.txt"
+            exit "$original_status"
+          }
+          # END EXTERNAL_OWNED_CHILD_LIFECYCLE
           collect_bounded_player_logcat() {
             if [ -f "$EVIDENCE/player-logcat.txt" ]; then return 0; fi
             set +e
-            timeout 20s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime -t 12000 2>/dev/null \
+            timeout --kill-after=2s 20s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime -t 12000 2>/dev/null \
               | python3 -c '
           import re,sys
           url=re.compile(r"(?i)https?://[^\s\"\x27<>]+")
@@ -863,40 +1101,44 @@ jobs:
             set +e
             if [ -n "$activity_monitor_pid" ]; then
               : > "$activity_monitor_stop"
-              wait "$activity_monitor_pid" 2>/dev/null
+              terminate_owned_child activity-monitor "$activity_monitor_pid" \
+                "$activity_monitor_identity" 7 3 activity_monitor_state
+              activity_monitor_pid=""
             fi
             if [ -n "$emulator_pid" ]; then
               collect_bounded_player_logcat
-              if [ "$status" != 0 ] && [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" emu avd name 2>/dev/null | tr -d '\r' | head -1)" = "$AVD_NAME" ]; then
-                timeout 15s adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$EVIDENCE/workflow-failure.png"
-                timeout 20s adb -s "$EMULATOR_SERIAL" shell uiautomator dump /data/local/tmp/yawf-external-failure.xml > "$EVIDENCE/workflow-failure-dump.txt" 2>&1
-                timeout 10s adb -s "$EMULATOR_SERIAL" exec-out cat /data/local/tmp/yawf-external-failure.xml \
+              if [ "$status" != 0 ] && [ "$(timeout --kill-after=2s 5s adb -s "$EMULATOR_SERIAL" emu avd name 2>/dev/null | tr -d '\r' | head -1)" = "$AVD_NAME" ]; then
+                timeout --kill-after=2s 15s adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$EVIDENCE/workflow-failure.png"
+                timeout --kill-after=2s 20s adb -s "$EMULATOR_SERIAL" shell uiautomator dump /data/local/tmp/yawf-external-failure.xml > "$EVIDENCE/workflow-failure-dump.txt" 2>&1
+                timeout --kill-after=2s 10s adb -s "$EMULATOR_SERIAL" exec-out cat /data/local/tmp/yawf-external-failure.xml \
                   | sed -E 's#https?://[^[:space:]"<>]+#[redacted-url]#g' > "$EVIDENCE/workflow-failure.xml"
               fi
-              timeout 10s adb -s "$EMULATOR_SERIAL" reverse --remove tcp:43120 >/dev/null 2>&1
-              timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
-              kill "$emulator_pid" 2>/dev/null
-              wait "$emulator_pid" 2>/dev/null
+              timeout --kill-after=2s 10s adb -s "$EMULATOR_SERIAL" reverse --remove tcp:43120 >/dev/null 2>&1
+              timeout --kill-after=2s 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
+              terminate_owned_child emulator "$emulator_pid" "$emulator_identity" \
+                5 3 emulator_state
             fi
             if [ -n "$fixture_pid" ]; then
-              kill "$fixture_pid" 2>/dev/null
-              wait "$fixture_pid" 2>/dev/null
+              terminate_owned_child fixture "$fixture_pid" "$fixture_identity" \
+                5 3 fixture_state
             fi
             for name in smoke-result.json external-capability-runtime.json media-probe.json; do
               if [ -f "$fixture_output/$name" ]; then
                 cp "$fixture_output/$name" "$EVIDENCE/$name"
               fi
             done
-            printf 'workflowExit=%s\nownedEmulatorStopAttempted=true\nownedFixtureStopAttempted=true\n' "$status" > "$EVIDENCE/cleanup.txt"
-            exit "$status"
+            finish_owned_cleanup "$status"
           }
           trap cleanup EXIT
           ffmpeg -hide_banner -filters > "$EVIDENCE/ffmpeg-filters.txt" 2>&1
           grep -E '\bdrawtext\b' "$EVIDENCE/ffmpeg-filters.txt"
           test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
-          node public-phone-source/server/node_modules/tsx/dist/cli.mjs scripts/android_external_player_server_fixture.mts \
+          node --import "$GITHUB_WORKSPACE/public-phone-source/server/node_modules/tsx/dist/loader.mjs" \
+            scripts/android_external_player_server_fixture.mts \
             --repo "$GITHUB_WORKSPACE/public-phone-source" --output "$fixture_output" > "$EVIDENCE/fixture.log" 2>&1 &
           fixture_pid=$!
+          capture_owned_child_identity "$fixture_pid" \
+            scripts/android_external_player_server_fixture.mts fixture fixture_identity
           deadline=$((SECONDS + 180))
           until grep -Fq '[fixture] READY server-mode-ui loopback' "$EVIDENCE/fixture.log"; do
             kill -0 "$fixture_pid"
@@ -908,6 +1150,7 @@ jobs:
             -gpu swiftshader_indirect -feature -Vulkan -cores 2 -memory 2048 \
             > "$EVIDENCE/emulator.log" 2>&1 &
           emulator_pid=$!
+          capture_owned_child_identity "$emulator_pid" "-avd $AVD_NAME" emulator emulator_identity
           deadline=$((SECONDS + 300))
           until [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
             kill -0 "$emulator_pid"
@@ -1086,6 +1329,8 @@ jobs:
               time.sleep(0.25)
           PYACTIVITY
           activity_monitor_pid=$!
+          capture_owned_child_identity "$activity_monitor_pid" "python3 -" \
+            activity-monitor activity_monitor_identity
           set +e
           timeout 480s adb -s "$EMULATOR_SERIAL" shell am instrument -w -r \
             -e class com.yawf.runtimeinstrumentation.RuntimeExternalPlayerFlowTest \
@@ -1095,7 +1340,8 @@ jobs:
           instrumentation_status=${PIPESTATUS[0]}
           set -e
           : > "$activity_monitor_stop"
-          wait "$activity_monitor_pid"
+          terminate_owned_child activity-monitor "$activity_monitor_pid" \
+            "$activity_monitor_identity" 7 3 activity_monitor_state
           activity_monitor_pid=""
           export INSTRUMENTATION_STATUS="$instrumentation_status"
           cp "$fixture_output/smoke-result.json" "$EVIDENCE/smoke-result.json"
