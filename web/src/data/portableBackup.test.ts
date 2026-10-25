@@ -169,6 +169,74 @@ describe("portable local backup", () => {
     ).toEqual(conversion.bundle);
   });
 
+  it("converts all playback preferences into optional portable history fields", async () => {
+    const store = new DexieStore(`portable-prefs-${crypto.randomUUID()}`);
+    stores.push(store);
+    for (const [mediaId, playbackSpeed] of [["movie-slow", 0.25], ["movie-fast", 3]] as const) {
+      await store.recordHistory({
+        mediaId,
+        progressSeconds: 42,
+        durationSeconds: 100,
+        completed: false,
+        preferredAudioId: "audio-jpn",
+        preferredAudioLang: "jpn",
+        preferredSubId: null,
+        playbackSpeed,
+        subtitleDelay: -0.4,
+        subtitlePosition: 82,
+        preview: { id: mediaId, type: "movie", title: "Preferences" },
+      });
+    }
+
+    const conversion = portableProfileBundleFromBackup(
+      await exportPortableBackup(store),
+    );
+    for (const [mediaId, playbackSpeed] of [["movie-slow", 0.25], ["movie-fast", 3]] as const) {
+      expect(conversion.bundle.history).toContainEqual(expect.objectContaining({
+        mediaId,
+        preferredAudioId: "audio-jpn",
+        preferredAudioLang: "jpn",
+        preferredSubId: null,
+        playbackSpeed,
+        subtitleDelay: -0.4,
+        subtitlePosition: 82,
+      }));
+    }
+    expect(conversion.skippedRows).toBe(0);
+    expect(
+      parsePortableProfileBundle(JSON.stringify(conversion.bundle)),
+    ).toEqual(conversion.bundle);
+  });
+
+  it("parses both native playback speed boundaries in a direct portable v1 bundle", () => {
+    const history = [0.25, 3].map((playbackSpeed, index) => ({
+      mediaId: `direct-speed-${index}`,
+      episodeId: null,
+      progressSeconds: 10,
+      durationSeconds: 100,
+      completed: false,
+      queuedNext: false,
+      lastWatched: `2026-10-25T10:00:0${index}.000Z`,
+      streamQuality: null,
+      preview: { id: `direct-speed-${index}`, type: "movie", title: "Speed" },
+      playbackSpeed,
+    }));
+    const bundle = {
+      product: "YAWF Stream",
+      format: "yawf-profile-portable",
+      version: 1,
+      createdAt: "2026-10-25T10:01:00.000Z",
+      settings: [],
+      watchlist: [],
+      history,
+      folders: [],
+      library: [],
+    };
+
+    expect(parsePortableProfileBundle(JSON.stringify(bundle)).history)
+      .toEqual(history);
+  });
+
   it("rejects malformed and secret-bearing Server Mode profile bundles", () => {
     expect(() => parsePortableProfileBundle("{")).toThrow("not valid JSON");
     expect(() =>

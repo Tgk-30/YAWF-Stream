@@ -132,6 +132,12 @@ interface ServerHistoryResponse {
     lastWatched: string;
     streamQuality: string | null;
     preview: MediaPreview;
+    preferredAudioId?: string | null;
+    preferredAudioLang?: string | null;
+    preferredSubId?: string | null;
+    playbackSpeed?: number | null;
+    subtitleDelay?: number | null;
+    subtitlePosition?: number | null;
   }>;
 }
 
@@ -147,6 +153,12 @@ function mapHistory(row: ServerHistoryResponse["items"][number]): WatchHistoryRe
     lastWatched: row.lastWatched,
     streamQuality: row.streamQuality,
     preview: row.preview,
+    preferredAudioId: row.preferredAudioId ?? null,
+    preferredAudioLang: row.preferredAudioLang ?? null,
+    preferredSubId: row.preferredSubId ?? null,
+    playbackSpeed: row.playbackSpeed ?? null,
+    subtitleDelay: row.subtitleDelay ?? null,
+    subtitlePosition: row.subtitlePosition ?? null,
   };
 }
 
@@ -357,7 +369,10 @@ export class RemoteStore implements Store, SecretStore {
     const queuedNext = entry.queuedNext ?? false;
     const streamQuality = entry.streamQuality ?? null;
     const lastWatched = entry.lastWatched ?? nowISO();
-    await this.api.put(`/api/history/${encodeURIComponent(entry.mediaId)}`, {
+    const response = await this.api.put<{
+      ok?: boolean;
+      item?: ServerHistoryResponse["items"][number];
+    }>(`/api/history/${encodeURIComponent(entry.mediaId)}`, {
       episodeId,
       progressSeconds,
       durationSeconds,
@@ -366,12 +381,24 @@ export class RemoteStore implements Store, SecretStore {
       streamQuality,
       preview: entry.preview,
       lastWatched,
+      ...(entry.preferredAudioId === undefined
+        ? {} : { preferredAudioId: entry.preferredAudioId }),
+      ...(entry.preferredAudioLang === undefined
+        ? {} : { preferredAudioLang: entry.preferredAudioLang }),
+      ...(entry.preferredSubId === undefined
+        ? {} : { preferredSubId: entry.preferredSubId }),
+      ...(entry.playbackSpeed === undefined
+        ? {} : { playbackSpeed: entry.playbackSpeed }),
+      ...(entry.subtitleDelay === undefined
+        ? {} : { subtitleDelay: entry.subtitleDelay }),
+      ...(entry.subtitlePosition === undefined
+        ? {} : { subtitlePosition: entry.subtitlePosition }),
     });
-    // The PUT is authoritative; build the record locally instead of re-fetching
-    // up to 500 history rows to re-find the row we just wrote - that read-back
-    // could page the new row out (when >500 newer rows exist) and spuriously
-    // throw even though the write succeeded.
-    return {
+    if (response.item != null) return mapHistory(response.item);
+    // Older servers return only { ok: true }. Keep that response compatible by
+    // building the submitted record locally rather than re-fetching up to 500
+    // history rows, which could page the new row out and spuriously throw.
+    const record: WatchHistoryRecord = {
       id: historyKey(entry.mediaId, episodeId),
       mediaId: entry.mediaId,
       episodeId,
@@ -383,6 +410,25 @@ export class RemoteStore implements Store, SecretStore {
       streamQuality,
       preview: entry.preview,
     };
+    if (entry.preferredAudioId !== undefined) {
+      record.preferredAudioId = entry.preferredAudioId;
+    }
+    if (entry.preferredAudioLang !== undefined) {
+      record.preferredAudioLang = entry.preferredAudioLang;
+    }
+    if (entry.preferredSubId !== undefined) {
+      record.preferredSubId = entry.preferredSubId;
+    }
+    if (entry.playbackSpeed !== undefined) {
+      record.playbackSpeed = entry.playbackSpeed;
+    }
+    if (entry.subtitleDelay !== undefined) {
+      record.subtitleDelay = entry.subtitleDelay;
+    }
+    if (entry.subtitlePosition !== undefined) {
+      record.subtitlePosition = entry.subtitlePosition;
+    }
+    return record;
   }
 
   async deleteHistory(mediaId: string, episodeId?: string | null): Promise<void> {

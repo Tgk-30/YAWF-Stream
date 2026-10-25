@@ -469,13 +469,24 @@ export class DexieStore extends Dexie implements Store, SecretStore {
       lastWatched: entry.lastWatched ?? nowISO(),
       streamQuality: entry.streamQuality ?? null,
       preview: entry.preview,
-      preferredAudioId: entry.preferredAudioId ?? prev?.preferredAudioId ?? null,
-      preferredAudioLang:
-        entry.preferredAudioLang ?? prev?.preferredAudioLang ?? null,
-      preferredSubId: entry.preferredSubId ?? prev?.preferredSubId ?? null,
-      playbackSpeed: entry.playbackSpeed ?? prev?.playbackSpeed ?? null,
-      subtitleDelay: entry.subtitleDelay ?? prev?.subtitleDelay ?? null,
-      subtitlePosition: entry.subtitlePosition ?? prev?.subtitlePosition ?? null,
+      preferredAudioId: entry.preferredAudioId === undefined
+        ? prev?.preferredAudioId ?? null
+        : entry.preferredAudioId,
+      preferredAudioLang: entry.preferredAudioLang === undefined
+        ? prev?.preferredAudioLang ?? null
+        : entry.preferredAudioLang,
+      preferredSubId: entry.preferredSubId === undefined
+        ? prev?.preferredSubId ?? null
+        : entry.preferredSubId,
+      playbackSpeed: entry.playbackSpeed === undefined
+        ? prev?.playbackSpeed ?? null
+        : entry.playbackSpeed,
+      subtitleDelay: entry.subtitleDelay === undefined
+        ? prev?.subtitleDelay ?? null
+        : entry.subtitleDelay,
+      subtitlePosition: entry.subtitlePosition === undefined
+        ? prev?.subtitlePosition ?? null
+        : entry.subtitlePosition,
     };
     await this.transaction("rw", this.watchHistory, async () => {
       if (record.queuedNext) {

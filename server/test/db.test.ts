@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { AppDatabase, databaseLockPath, migrateDatabase } from "../src/db.js";
+import { MIGRATIONS } from "../src/schema.js";
 import {
   createLegacyServerFixture,
   LEGACY_SERVER_FIXTURES,
@@ -69,7 +70,69 @@ describe("AppDatabase", () => {
   });
 
   it("keeps every released migration immutable", () => {
-    expect(migrationHashes()).toEqual(RELEASED_MIGRATION_HASHES);
+    expect(migrationHashes().slice(0, RELEASED_MIGRATION_HASHES.length))
+      .toEqual(RELEASED_MIGRATION_HASHES);
+    expect(migrationHashes()).toHaveLength(RELEASED_MIGRATION_HASHES.length + 1);
+  });
+
+  it("snapshots and upgrades a v11 database with nullable playback preferences", () => {
+    const path = temporaryDatabasePath(tempDirs);
+    createLegacyServerFixture(path, 7);
+    const sqlite = new DatabaseSync(path);
+    try {
+      for (const [version, sql] of MIGRATIONS) {
+        if (version <= 7 || version > 11) continue;
+        sqlite.exec(sql);
+        sqlite.prepare(
+          "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        ).run(version, `2026-10-${String(version).padStart(2, "0")}T00:00:00.000Z`);
+      }
+    } finally {
+      sqlite.close();
+    }
+
+    const db = new AppDatabase(path);
+    try {
+      const snapshots = readdirSync(join(path, "..", "backups"));
+      expect(snapshots).toEqual([
+        expect.stringMatching(/^pre-upgrade-v11-to-v12-.*\.sqlite$/),
+      ]);
+      const snapshotPath = join(path, "..", "backups", snapshots[0]!);
+      expect(statSync(snapshotPath).mode & 0o777).toBe(0o600);
+      const snapshot = new DatabaseSync(snapshotPath);
+      try {
+        const snapshotColumns = snapshot.prepare("PRAGMA table_info(watch_history)")
+          .all() as Array<{ name: string }>;
+        expect(snapshotColumns.some((column) => column.name === "preferred_audio_id"))
+          .toBe(false);
+        expect(
+          snapshot.prepare(
+            "SELECT progress_seconds FROM watch_history WHERE media_id = 'series-fixture'",
+          ).get(),
+        ).toEqual({ progress_seconds: 420 });
+      } finally {
+        snapshot.close();
+      }
+      expect(
+        db.sqlite.prepare(
+          `SELECT preferred_audio_id, preferred_audio_lang, preferred_sub_id,
+                  playback_speed, subtitle_delay, subtitle_position
+           FROM watch_history WHERE media_id = 'series-fixture'`,
+        ).get(),
+      ).toEqual({
+        preferred_audio_id: null,
+        preferred_audio_lang: null,
+        preferred_sub_id: null,
+        playback_speed: null,
+        subtitle_delay: null,
+        subtitle_position: null,
+      });
+      expect(
+        db.sqlite.prepare("SELECT MAX(version) AS version FROM schema_migrations").get(),
+      ).toEqual({ version: 12 });
+    } finally {
+      db.close();
+    }
   });
 
   for (const fixture of LEGACY_SERVER_FIXTURES) {
@@ -82,12 +145,12 @@ describe("AppDatabase", () => {
         const snapshots = readdirSync(join(path, "..", "backups"));
         expect(snapshots).toHaveLength(1);
         expect(snapshots[0]).toMatch(
-          new RegExp(`^pre-upgrade-v${fixture.version}-to-v11-.*\\.sqlite$`),
+          new RegExp(`^pre-upgrade-v${fixture.version}-to-v12-.*\\.sqlite$`),
         );
         const versions = db.sqlite
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all() as Array<{ version: number }>;
-        expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         expect(
           db.sqlite.prepare("SELECT value FROM profile_settings WHERE key = 'ui_theme'").get(),
         ).toEqual({ value: "midnight" });
@@ -156,7 +219,7 @@ describe("AppDatabase", () => {
       sqlite.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (99, ?)")
         .run("2035-01-01T00:00:00.000Z");
       expect(() => migrateDatabase(sqlite)).toThrow(
-        "Database schema version 99 is newer than supported version 11.",
+        "Database schema version 99 is newer than supported version 12.",
       );
     } finally {
       sqlite.close();
