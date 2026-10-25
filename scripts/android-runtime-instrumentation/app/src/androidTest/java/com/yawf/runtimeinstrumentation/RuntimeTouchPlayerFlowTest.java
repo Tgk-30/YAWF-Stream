@@ -569,7 +569,7 @@ public final class RuntimeTouchPlayerFlowTest {
                 if (current.isClickable() && current.isEnabled()) break;
                 current = current.getParent();
             }
-            if (current == null) continue;
+            if (current == null || !current.isClickable() || !current.isEnabled()) continue;
             boolean duplicate = false;
             for (UiObject2 existing : candidates) {
                 if (existing.getVisibleBounds().equals(current.getVisibleBounds())) duplicate = true;

@@ -381,6 +381,36 @@ test("fixture uses exact two-track bytes, live ffprobe, real proxy, and real tra
   assert.match(fixture, /Blocked unexpected outbound request/);
 });
 
+test("clickable-label lookup rejects nonclickable ancestor traps and admits only unique enabled controls", () => {
+  const method = driver.slice(driver.indexOf("private void collectClickableAncestors"), driver.indexOf("private static Pattern exactLabel"));
+  assert.match(method, /current\.isClickable\(\) && current\.isEnabled\(\)/);
+  assert.match(method, /current == null \|\| !current\.isClickable\(\) \|\| !current\.isEnabled\(\)/);
+  const resolve = (matches) => {
+    const candidates = [];
+    for (const match of matches) {
+      let current = match;
+      for (let depth = 0; depth < 6 && current != null; depth++) {
+        if (current.clickable && current.enabled) break;
+        current = current.parent;
+      }
+      if (current == null || !current.clickable || !current.enabled) continue;
+      if (!candidates.some((existing) => existing.id === current.id)) candidates.push(current);
+    }
+    if (candidates.length > 1) throw new Error("ambiguous");
+    return candidates[0] ?? null;
+  };
+  const button = { id: "sign-in", clickable: true, enabled: true, parent: null };
+  const trap = { id: "heading", clickable: false, enabled: true };
+  let cursor = trap;
+  for (let i = 0; i < 6; i++) { cursor.parent = { id: `ancestor-${i}`, clickable: false, enabled: true }; cursor = cursor.parent; }
+  cursor.parent = button;
+  assert.equal(resolve([trap]), null);
+  assert.equal(resolve([button]), button);
+  assert.equal(resolve([{ id: "disabled", clickable: false, enabled: true, parent: { id: "disabled-ancestor", clickable: true, enabled: false } }]), null);
+  const second = { id: "other", clickable: true, enabled: true, parent: null };
+  assert.throws(() => resolve([button, second]), /ambiguous/);
+});
+
 test("driver stays in product UI and exercises every touch-player behavior", () => {
   for (const text of [
     "RuntimeTouchPlayerFlowTest", "firstDecodeClockAdvanced", "centralPauseResume",
