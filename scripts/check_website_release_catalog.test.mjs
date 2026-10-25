@@ -16,7 +16,7 @@ for (const { name, from, to } of [
   },
   {
     name: "Android phone tag",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.59', tag: 'android-v2.3.59' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.61', tag: 'android-v2.3.61' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.13' };",
   },
   {
@@ -31,12 +31,12 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.59', tag: 'v2.3.59' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.61', tag: 'v2.3.61' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.59'",
+    from: "tag: 'v2.3.61'",
     to: "tag: 'v2.3.51'",
   },
   {
