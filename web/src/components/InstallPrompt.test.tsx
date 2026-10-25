@@ -6,7 +6,7 @@
 // Android no-event menu fallback, the plain-HTTP explanation that replaces it
 // when the origin is not a secure context, and dismissal.
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { BeforeInstallPromptEvent } from "../lib/platform";
@@ -47,6 +47,10 @@ function fakePromptEvent(outcome: "accepted" | "dismissed") {
 }
 
 describe("isInstallPromptEligible", () => {
+  afterEach(() => {
+    delete (window as typeof window & { YawfAndroidTV?: unknown }).YawfAndroidTV;
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     delete (
@@ -87,6 +91,43 @@ describe("isInstallPromptEligible", () => {
     expect(container).toBeEmptyDOMElement();
     expect(screen.queryByText("Install YAWF Stream")).not.toBeInTheDocument();
     expect(getInsets).not.toHaveBeenCalled();
+  });
+
+  it("suppresses the card in a complete native Android TV bridge without invoking native methods", () => {
+    const play = vi.fn();
+    const stop = vi.fn();
+    Object.defineProperty(window, "YawfAndroidTV", {
+      configurable: true,
+      writable: true,
+      value: { play, stop },
+    });
+    const { container } = render(
+      isInstallPromptEligible() ? <InstallPrompt onDismiss={() => {}} /> : null,
+    );
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByText("Install YAWF Stream")).not.toBeInTheDocument();
+    expect(play).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("does not suppress a mobile browser for a missing or partial Android TV bridge", () => {
+    const fixtures = [
+      undefined,
+      { play: vi.fn() },
+      { stop: vi.fn() },
+    ];
+    for (const bridge of fixtures) {
+      if (bridge === undefined) {
+        delete (window as typeof window & { YawfAndroidTV?: unknown }).YawfAndroidTV;
+      } else {
+        Object.defineProperty(window, "YawfAndroidTV", {
+          configurable: true,
+          writable: true,
+          value: bridge,
+        });
+      }
+      expect(isInstallPromptEligible()).toBe(true);
+    }
   });
 
   it("is never eligible once running standalone (already installed)", () => {

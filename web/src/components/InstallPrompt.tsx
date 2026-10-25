@@ -13,6 +13,7 @@ import {
   isStandaloneDisplay,
 } from "../lib/platform";
 import { isAndroidAppUiContext } from "../lib/androidExternalPlayer";
+import { hasAndroidTVBridge } from "../lib/androidTV";
 import { isTauri } from "../lib/tauri";
 import {
   consumeInstallPrompt,
@@ -27,6 +28,7 @@ export function isInstallPromptEligible(): boolean {
   return (
     !isTauri() &&
     !isAndroidAppUiContext() &&
+    !hasAndroidTVBridge() &&
     !isStandaloneDisplay() &&
     isMobileBrowser()
   );
