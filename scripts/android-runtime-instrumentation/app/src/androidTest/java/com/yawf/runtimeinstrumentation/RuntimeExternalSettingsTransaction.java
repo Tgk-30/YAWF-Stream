@@ -9,6 +9,7 @@ import androidx.test.uiautomator.Configurator;
 final class RuntimeExternalSettingsTransaction {
     private static final long TRANSACTION_IDLE_TIMEOUT_MS = 0L;
     private static final long POLL_INTERVAL_MS = 250L;
+    private static final int MAX_PLAYBACK_ACTIONS_RAIL_PANS = 3;
 
     interface ClickTarget {
         void click();
@@ -36,43 +37,134 @@ final class RuntimeExternalSettingsTransaction {
                 long idleAfterMs,
                 boolean returned);
 
+        void recordRailObservation(String state, int completedPanAttempts);
+
         void log(String message);
     }
 
     static final class Observation {
         private final ClickTarget revealTarget;
+        private final ClickTarget railPanTarget;
         private final ClickTarget settingsTarget;
+        private final String state;
 
-        private Observation(ClickTarget revealTarget, ClickTarget settingsTarget) {
-            if (revealTarget != null && settingsTarget != null) {
-                throw new AssertionError("A settings observation cannot expose two click targets");
+        private Observation(
+                ClickTarget revealTarget,
+                ClickTarget railPanTarget,
+                ClickTarget settingsTarget,
+                String state) {
+            int targetCount = (revealTarget == null ? 0 : 1)
+                    + (railPanTarget == null ? 0 : 1)
+                    + (settingsTarget == null ? 0 : 1);
+            if (targetCount > 1) {
+                throw new AssertionError("A settings observation cannot expose multiple input targets");
             }
             this.revealTarget = revealTarget;
+            this.railPanTarget = railPanTarget;
             this.settingsTarget = settingsTarget;
+            this.state = state;
         }
 
         static Observation waiting() {
-            return new Observation(null, null);
+            return new Observation(null, null, null, "player-dialog-unavailable");
         }
 
         static Observation reveal(ClickTarget target) {
             if (target == null) {
                 throw new AssertionError("The reveal target was missing");
             }
-            return new Observation(target, null);
+            return new Observation(
+                    target, null, null, "player-dialog-visible-controls-hidden");
+        }
+
+        static Observation railPan(ClickTarget target) {
+            if (target == null) {
+                throw new AssertionError("The Playback actions rail pan target was missing");
+            }
+            return new Observation(
+                    null, target, null, "exact-playback-actions-rail-visible");
         }
 
         static Observation settings(ClickTarget target) {
             if (target == null) {
                 throw new AssertionError("The Playback settings target was missing");
             }
-            return new Observation(null, target);
+            return new Observation(null, null, target, "playback-settings-visible");
+        }
+    }
+
+    static final class Result {
+        final int railObservationCount;
+        final int railPanAttempts;
+        final boolean revealTapPerformed;
+        final int settingsClickCount;
+
+        Result(
+                int railObservationCount,
+                int railPanAttempts,
+                boolean revealTapPerformed,
+                int settingsClickCount) {
+            if (railObservationCount < 0
+                    || railPanAttempts < 0
+                    || railPanAttempts > MAX_PLAYBACK_ACTIONS_RAIL_PANS
+                    || (railPanAttempts == 0 && railObservationCount != 0)
+                    || (railPanAttempts > 0 && railObservationCount < railPanAttempts)
+                    || settingsClickCount != 1) {
+                throw new AssertionError("The settings rail transaction result was incomplete");
+            }
+            this.railObservationCount = railObservationCount;
+            this.railPanAttempts = railPanAttempts;
+            this.revealTapPerformed = revealTapPerformed;
+            this.settingsClickCount = settingsClickCount;
         }
     }
 
     private RuntimeExternalSettingsTransaction() {}
 
-    static void open(Environment environment, long timeoutMs) {
+    private static String chooseNextSettingsAction(
+            boolean settingsVisible,
+            boolean railVisible,
+            boolean revealVisible,
+            boolean revealTapPerformed,
+            int railPanAttempts) {
+        if (railPanAttempts < 0 || railPanAttempts > MAX_PLAYBACK_ACTIONS_RAIL_PANS) {
+            throw new AssertionError("Playback actions rail pan count escaped its fixed bound");
+        }
+        if (settingsVisible) {
+            return "click-settings";
+        }
+        if (railVisible) {
+            if (railPanAttempts >= MAX_PLAYBACK_ACTIONS_RAIL_PANS) {
+                throw new AssertionError("Playback settings remained hidden after three rail pans");
+            }
+            return "pan-rail";
+        }
+        if (revealVisible && !revealTapPerformed) return "reveal";
+        return "wait";
+    }
+
+    private static void runFreshLegalGuard(
+            Environment environment,
+            Configurator configurator,
+            String stage) {
+        long startedAtMs = SystemClock.uptimeMillis();
+        long idleBeforeMs = configurator.getWaitForIdleTimeout();
+        boolean returned = false;
+        try {
+            environment.assertNoOutOfScopeApproval();
+            returned = true;
+        } finally {
+            environment.recordTiming(
+                    stage,
+                    startedAtMs,
+                    SystemClock.uptimeMillis(),
+                    idleBeforeMs,
+                    configurator.getWaitForIdleTimeout(),
+                    returned);
+        }
+    }
+
+    static Result open(Environment environment, long timeoutMs) {
         if (environment == null) {
             throw new AssertionError("The settings transaction environment was missing");
         }
@@ -91,6 +183,9 @@ final class RuntimeExternalSettingsTransaction {
 
             long deadline = SystemClock.uptimeMillis() + timeoutMs;
             boolean revealTapPerformed = false;
+            int railObservationCount = 0;
+            int railPanAttempts = 0;
+            String lastRailObservation = null;
             while (SystemClock.uptimeMillis() < deadline) {
                 long cacheStartedAtMs = SystemClock.uptimeMillis();
                 long cacheIdleBeforeMs = configurator.getWaitForIdleTimeout();
@@ -112,21 +207,7 @@ final class RuntimeExternalSettingsTransaction {
                     throw new AssertionError("Accessibility cache refresh failed");
                 }
 
-                long guardStartedAtMs = SystemClock.uptimeMillis();
-                long guardIdleBeforeMs = configurator.getWaitForIdleTimeout();
-                boolean guardReturned = false;
-                try {
-                    environment.assertNoOutOfScopeApproval();
-                    guardReturned = true;
-                } finally {
-                    environment.recordTiming(
-                            "fresh-legal-guard",
-                            guardStartedAtMs,
-                            SystemClock.uptimeMillis(),
-                            guardIdleBeforeMs,
-                            configurator.getWaitForIdleTimeout(),
-                            guardReturned);
-                }
+                runFreshLegalGuard(environment, configurator, "fresh-legal-guard");
 
                 long acquisitionStartedAtMs = SystemClock.uptimeMillis();
                 long acquisitionIdleBeforeMs = configurator.getWaitForIdleTimeout();
@@ -148,7 +229,23 @@ final class RuntimeExternalSettingsTransaction {
                     throw new AssertionError("The settings observation was missing");
                 }
 
-                if (observation.settingsTarget != null) {
+                String railObservation = observation.state
+                        + " pansCompleted=" + railPanAttempts;
+                if (!railObservation.equals(lastRailObservation)) {
+                    environment.recordRailObservation(observation.state, railPanAttempts);
+                    if (observation.railPanTarget != null) railObservationCount++;
+                    lastRailObservation = railObservation;
+                }
+
+                String nextAction = chooseNextSettingsAction(
+                        observation.settingsTarget != null,
+                        observation.railPanTarget != null,
+                        observation.revealTarget != null,
+                        revealTapPerformed,
+                        railPanAttempts);
+                if ("click-settings".equals(nextAction)) {
+                    runFreshLegalGuard(
+                            environment, configurator, "fresh-input-legal-guard");
                     long clickDispatchedAtMs = SystemClock.uptimeMillis();
                     long clickIdleBeforeMs = configurator.getWaitForIdleTimeout();
                     boolean clickReturned = false;
@@ -164,9 +261,35 @@ final class RuntimeExternalSettingsTransaction {
                                 clickReturned);
                     }
                     environment.log("Clicked freshly observed semantic control: Playback settings");
-                    return;
+                    return new Result(
+                            railObservationCount,
+                            railPanAttempts,
+                            revealTapPerformed,
+                            1);
                 }
-                if (observation.revealTarget != null && !revealTapPerformed) {
+                if ("pan-rail".equals(nextAction)) {
+                    runFreshLegalGuard(
+                            environment, configurator, "fresh-input-legal-guard");
+                    railPanAttempts++;
+                    long panStartedAtMs = SystemClock.uptimeMillis();
+                    long panIdleBeforeMs = configurator.getWaitForIdleTimeout();
+                    boolean panReturned = false;
+                    try {
+                        observation.railPanTarget.click();
+                        panReturned = true;
+                    } finally {
+                        environment.recordTiming(
+                                "playback-actions-rail-pan-" + railPanAttempts,
+                                panStartedAtMs,
+                                SystemClock.uptimeMillis(),
+                                panIdleBeforeMs,
+                                configurator.getWaitForIdleTimeout(),
+                                panReturned);
+                    }
+                    environment.log("Panned the exact observed Playback actions rail to the right");
+                } else if ("reveal".equals(nextAction)) {
+                    runFreshLegalGuard(
+                            environment, configurator, "fresh-input-legal-guard");
                     revealTapPerformed = true;
                     long revealStartedAtMs = SystemClock.uptimeMillis();
                     long revealIdleBeforeMs = configurator.getWaitForIdleTimeout();

@@ -1158,6 +1158,39 @@ jobs:
           assert checks['expectedHandlerForegroundObserved'] is True
           assert checks['vlcPlayerSurfaceObserved'] is True
           assert checks['permissionGrantUsed'] is False
+          assert type(checks['playbackActionsRailPanAttempts']) is int
+          assert 0<=checks['playbackActionsRailPanAttempts']<=3
+          assert type(checks['playbackActionsRailObservationCount']) is int
+          if checks['playbackActionsRailPanAttempts']==0:
+              assert checks['playbackActionsRailObserved'] is False
+              assert checks['playbackActionsRailObservationCount']==0
+          else:
+              assert checks['playbackActionsRailObserved'] is True
+              assert checks['playbackActionsRailObservationCount']>=checks['playbackActionsRailPanAttempts']
+          assert checks['playbackSettingsClickCount']==1
+          assert type(checks['playbackSettingsRevealTapPerformed']) is bool
+          rail_observations=r['settingsRailObservations']
+          assert 1<=len(rail_observations)<=16
+          assert r['settingsRailObservationEventsOmitted']==0
+          allowed_rail_states={
+              'player-dialog-unavailable',
+              'player-dialog-visible-controls-hidden',
+              'exact-playback-actions-rail-visible',
+              'playback-settings-visible',
+          }
+          assert all(type(value) is str and len(value)<=100 and
+                     value.split(' completedPanAttempts=',1)[0] in allowed_rail_states
+                     for value in rail_observations)
+          assert sum(value.startswith('exact-playback-actions-rail-visible ') for value in rail_observations)==checks['playbackActionsRailObservationCount']
+          timings=r['settingsTransactionTimings']
+          assert r['settingsTransactionTimingEventsOmitted']==0
+          assert sum(value.startswith('fresh-input-legal-guard ') for value in timings)==(
+              checks['playbackActionsRailPanAttempts']+1+
+              (1 if checks['playbackSettingsRevealTapPerformed'] else 0))
+          assert sum(value.startswith('playback-actions-rail-pan-') for value in timings)==checks['playbackActionsRailPanAttempts']
+          settings_click=r['settingsClickTiming']
+          assert settings_click['idleBeforeMs']==0 and settings_click['idleAfterMs']==0
+          assert settings_click['returned'] is True
           if checks['vlcOnboardingObserved']:
               assert checks['vlcStorageAccessDenied'] is True
           assert checks['manualMovingElapsedTimeCapturePair'] is True

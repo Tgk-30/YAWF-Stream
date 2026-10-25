@@ -52,6 +52,7 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final String PLAYER_DIALOG_LABEL =
             "Playing Synthetic Fixture Movie (2026)";
     private static final String PLAYBACK_SETTINGS_LABEL = "Playback settings";
+    private static final String PLAYBACK_ACTIONS_LABEL = "Playback actions";
     private static final String EXTERNAL_PLAYER_LABEL =
             "Open in external player Choose VLC or another installed video app";
     private static final String SYSTEM_UI_PACKAGE = "com.android.systemui";
@@ -84,6 +85,7 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final int MAX_ACTION_LINES = 220;
     private static final int MAX_PHASES = 48;
     private static final int MAX_SETTINGS_TRANSACTION_TIMING_EVENTS = 64;
+    private static final int MAX_SETTINGS_RAIL_OBSERVATIONS = 16;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
     private static final long MAX_HIERARCHY_BYTES = 1024L * 1024L;
     private static final Pattern SAFE_SUBDIR = Pattern.compile("[A-Za-z0-9._-]{1,64}");
@@ -104,10 +106,12 @@ public final class RuntimeExternalPlayerFlowTest {
     private final List<String> actions = new ArrayList<>();
     private final List<String> phases = new ArrayList<>();
     private final List<String> settingsTransactionTimings = new ArrayList<>();
+    private final List<String> settingsRailObservations = new ArrayList<>();
     private final Map<String, Object> checks = new LinkedHashMap<>();
     private int captureIndex;
     private int openPlayerClicks;
     private int settingsTransactionTimingEventsOmitted;
+    private int settingsRailObservationEventsOmitted;
     private long settingsClickDispatchedAtMs = -1L;
     private long settingsClickFinishedAtMs = -1L;
     private long settingsClickIdleBeforeMs = -1L;
@@ -669,7 +673,7 @@ public final class RuntimeExternalPlayerFlowTest {
     }
 
     private void openPlaybackSettingsTransaction() {
-        RuntimeExternalSettingsTransaction.open(
+        RuntimeExternalSettingsTransaction.Result result = RuntimeExternalSettingsTransaction.open(
                 new RuntimeExternalSettingsTransaction.Environment() {
                     @Override
                     public boolean clearAccessibilityCache() {
@@ -720,11 +724,23 @@ public final class RuntimeExternalPlayerFlowTest {
                     }
 
                     @Override
+                    public void recordRailObservation(
+                            String state, int completedPanAttempts) {
+                        RuntimeExternalPlayerFlowTest.this.recordSettingsRailObservation(
+                                state, completedPanAttempts);
+                    }
+
+                    @Override
                     public void log(String message) {
                         RuntimeExternalPlayerFlowTest.this.log(message);
                     }
                 },
                 MEDIA_WAIT_MS);
+        checks.put("playbackActionsRailObserved", result.railObservationCount > 0);
+        checks.put("playbackActionsRailObservationCount", result.railObservationCount);
+        checks.put("playbackActionsRailPanAttempts", result.railPanAttempts);
+        checks.put("playbackSettingsRevealTapPerformed", result.revealTapPerformed);
+        checks.put("playbackSettingsClickCount", result.settingsClickCount);
     }
 
     private RuntimeExternalSettingsTransaction.Observation observePlaybackSettingsTransaction() {
@@ -738,8 +754,33 @@ public final class RuntimeExternalPlayerFlowTest {
             assertVisibleBounds(settings, PLAYBACK_SETTINGS_LABEL);
             return RuntimeExternalSettingsTransaction.Observation.settings(settings::click);
         }
+        UiObject2 rail = findUniquePlaybackActionsRailWithin(playerDialog);
+        if (rail != null) {
+            return RuntimeExternalSettingsTransaction.Observation.railPan(
+                    () -> rail.scroll(Direction.RIGHT, 0.72f));
+        }
         assertVisibleBounds(playerDialog, "playing movie dialog");
         return RuntimeExternalSettingsTransaction.Observation.reveal(playerDialog::click);
+    }
+
+    private UiObject2 findUniquePlaybackActionsRailWithin(UiObject2 dialog) {
+        List<UiObject2> candidates = new ArrayList<>();
+        for (UiObject2 candidate : dialog.findObjects(
+                By.clazz("android.view.View")
+                        .pkg(PRODUCT_PACKAGE)
+                        .text(exactLabel(PLAYBACK_ACTIONS_LABEL))
+                        .scrollable(true))) {
+            if (!hasVisibleBounds(candidate)) continue;
+            Rect bounds = candidate.getVisibleBounds();
+            if (bounds.width() <= bounds.height()) {
+                fail("Exact Playback actions rail was not horizontal");
+            }
+            candidates.add(candidate);
+        }
+        if (candidates.size() > 1) {
+            fail("Ambiguous exact visible Playback actions rails inside the player dialog");
+        }
+        return candidates.isEmpty() ? null : candidates.get(0);
     }
 
     private UiObject2 waitForUniquePlaybackSettingsDialog() {
@@ -1102,6 +1143,21 @@ public final class RuntimeExternalPlayerFlowTest {
         settingsClickReturned = returned;
     }
 
+    private void recordSettingsRailObservation(String state, int completedPanAttempts) {
+        if (completedPanAttempts < 0 || completedPanAttempts > 3) {
+            fail("Playback actions rail observation escaped its fixed pan bound");
+        }
+        if (settingsRailObservations.size() >= MAX_SETTINGS_RAIL_OBSERVATIONS) {
+            settingsRailObservationEventsOmitted++;
+            return;
+        }
+        settingsRailObservations.add(String.format(
+                Locale.ROOT,
+                "%s completedPanAttempts=%d",
+                safe(state),
+                completedPanAttempts));
+    }
+
     private void transition(String next) {
         phase = next;
         if (phases.size() >= MAX_PHASES) fail("Phase receipt exceeded bound");
@@ -1173,6 +1229,10 @@ public final class RuntimeExternalPlayerFlowTest {
         receipt.put(
                 "settingsTransactionTimingEventsOmitted",
                 settingsTransactionTimingEventsOmitted);
+        receipt.put("settingsRailObservations", new JSONArray(settingsRailObservations));
+        receipt.put(
+                "settingsRailObservationEventsOmitted",
+                settingsRailObservationEventsOmitted);
         if (settingsClickDispatchedAtMs >= 0L) {
             JSONObject settingsClickTiming = new JSONObject();
             settingsClickTiming.put("dispatchUptimeMs", settingsClickDispatchedAtMs);

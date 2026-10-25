@@ -147,6 +147,14 @@ function workflowContract(w, j) {
   assert.match(j, /checks\['permissionGrantUsed'\] is False/);
   assert.match(j, /checks\['semanticSeekGesturePerformed'\] is True/);
   assert.match(j, /checks\['singleBackReturnedToProduct'\] is True/);
+  assert.match(j, /checks\['playbackActionsRailObserved'\] is True/);
+  assert.match(j, /0<=checks\['playbackActionsRailPanAttempts'\]<=3/);
+  assert.match(j, /if checks\['playbackActionsRailPanAttempts'\]==0:/);
+  assert.match(j, /checks\['playbackActionsRailObserved'\] is False/);
+  assert.match(j, /checks\['playbackSettingsClickCount'\]==1/);
+  assert.match(j, /r\['settingsRailObservationEventsOmitted'\]==0/);
+  assert.match(j, /r\['settingsTransactionTimingEventsOmitted'\]==0/);
+  assert.match(j, /settings_click\['idleBeforeMs'\]==0 and settings_click\['idleAfterMs'\]==0/);
   assert.match(j, /event\['phase'\]=='live'.*status'\)==206/s);
   assert.match(j, /event\['lifecycle'\]\['finishObserved'\] is True/);
   assert.match(j, /event\['lifecycle'\]\['prematureCloseObserved'\] is False/);
@@ -296,24 +304,72 @@ function exactServerModeAdmission() {
   });
 }
 
+function settingsRailPolicyProbe(source) {
+  const body = methodBody(source, 'private static String chooseNextSettingsAction(');
+  const directory = mkdtempSync(join(tmpdir(), 'yawf-settings-rail-policy-'));
+  const javaSource = `public final class SettingsRailPolicyProbe {
+    private static final int MAX_PLAYBACK_ACTIONS_RAIL_PANS = 3;
+    private static String chooseNextSettingsAction(
+        boolean settingsVisible, boolean railVisible, boolean revealVisible,
+        boolean revealTapPerformed, int railPanAttempts) {${body}}
+    private static void expect(String expected, String actual) {
+      if (!expected.equals(actual)) throw new AssertionError(expected + " != " + actual);
+    }
+    private static void expectFailure(boolean settings, boolean rail, boolean reveal,
+        boolean revealed, int pans) {
+      try {
+        chooseNextSettingsAction(settings, rail, reveal, revealed, pans);
+        throw new AssertionError("invalid state was admitted");
+      } catch (AssertionError expected) {
+        if ("invalid state was admitted".equals(expected.getMessage())) throw expected;
+      }
+    }
+    public static void main(String[] args) {
+      expect("wait", chooseNextSettingsAction(false, false, false, false, 0));
+      expect("reveal", chooseNextSettingsAction(false, false, true, false, 0));
+      expect("wait", chooseNextSettingsAction(false, false, true, true, 0));
+      expect("pan-rail", chooseNextSettingsAction(false, true, false, false, 0));
+      expect("pan-rail", chooseNextSettingsAction(false, true, false, false, 2));
+      expect("click-settings", chooseNextSettingsAction(true, false, false, false, 0));
+      expect("click-settings", chooseNextSettingsAction(true, false, false, false, 1));
+      expectFailure(false, false, false, false, -1);
+      expectFailure(false, true, false, false, 3);
+      expectFailure(false, false, false, false, 4);
+    }
+  }`;
+  const file = join(directory, 'SettingsRailPolicyProbe.java');
+  writeFileSync(file, javaSource);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome ? join(javaHome, 'bin', 'javac') : 'javac';
+  const java = javaHome ? join(javaHome, 'bin', 'java') : 'java';
+  const compile = spawnSync(javac, ['-d', directory, file], { encoding: 'utf8' });
+  if (compile.status !== 0) return compile;
+  return spawnSync(java, ['-cp', directory, 'SettingsRailPolicyProbe'], { encoding: 'utf8' });
+}
+
 function playbackSettingsObservation(d, transactionSource, legalSource) {
   assert.equal((d.match(/openPlaybackSettingsTransaction\(\);/g) ?? []).length, 1);
   assert.match(d, /MEDIA_WAIT_MS = 60_000/);
   assert.match(d, /PLAYER_DIALOG_LABEL =\s*\n?\s*"Playing Synthetic Fixture Movie \(2026\)"/);
   assert.match(d, /PLAYBACK_SETTINGS_LABEL = "Playback settings"/);
   const call = methodBody(d, 'private void openPlaybackSettingsTransaction()');
-  assert.match(call, /RuntimeExternalSettingsTransaction\.open\(/);
+  assert.match(call, /RuntimeExternalSettingsTransaction\.Result result = RuntimeExternalSettingsTransaction\.open\(/);
   assert.match(call, /return instrumentation\.getUiAutomation\(\)\.clearCache\(\)/);
   assert.match(call, /RuntimeExternalPlayerFlowTest\.this\s*\.assertNoOutOfScopeApprovalForSettingsTransaction\(\)/);
   assert.match(call, /return observePlaybackSettingsTransaction\(\)/);
   assert.match(call, /recordSettingsTransactionTiming\(/);
   assert.match(call, /recordSettingsClickTiming\(/);
+  assert.match(call, /recordSettingsRailObservation\(/);
   assert.match(call, /RuntimeExternalPlayerFlowTest\.this\.log\(message\)/);
   assert.match(call, /MEDIA_WAIT_MS/);
+  assert.match(call, /checks\.put\("playbackActionsRailPanAttempts", result\.railPanAttempts\)/);
+  assert.match(call, /checks\.put\("playbackSettingsClickCount", result\.settingsClickCount\)/);
   assert.match(d, /MAX_SETTINGS_TRANSACTION_TIMING_EVENTS = 64/);
+  assert.match(d, /MAX_SETTINGS_RAIL_OBSERVATIONS = 16/);
   assert.match(d, /receipt\.put\("settingsTransactionTimings", new JSONArray\(settingsTransactionTimings\)\)/);
   assert.match(d, /"settingsTransactionTimingEventsOmitted"/);
   assert.match(d, /receipt\.put\("settingsClickTiming", settingsClickTiming\)/);
+  assert.match(d, /receipt\.put\("settingsRailObservations", new JSONArray\(settingsRailObservations\)\)/);
 
   const observation = methodBody(
     d,
@@ -325,28 +381,40 @@ function playbackSettingsObservation(d, transactionSource, legalSource) {
   assert.match(observation, /settings != null && hasVisibleBounds\(settings\)/);
   assert.match(observation, /assertVisibleBounds\(settings, PLAYBACK_SETTINGS_LABEL\)/);
   assert.match(observation, /Observation\.settings\(settings::click\)/);
+  assert.match(observation, /UiObject2 rail = findUniquePlaybackActionsRailWithin\(playerDialog\)/);
+  assert.match(observation, /Observation\.railPan\(\s*\(\) -> rail\.scroll\(Direction\.RIGHT, 0\.72f\)\)/);
   assert.match(observation, /assertVisibleBounds\(playerDialog, "playing movie dialog"\)/);
   assert.match(observation, /Observation\.reveal\(playerDialog::click\)/);
   assert.doesNotMatch(observation, /\.click\s*\(|device\.click|capture\(/);
 
   const helperBody = methodBody(
     transactionSource,
-    'static void open(Environment environment, long timeoutMs)',
+    'static Result open(Environment environment, long timeoutMs)',
   );
   assert.match(helperBody, /configurator\.setWaitForIdleTimeout\(TRANSACTION_IDLE_TIMEOUT_MS\)/);
   assert.match(helperBody, /Build\.VERSION\.SDK_INT < Build\.VERSION_CODES\.UPSIDE_DOWN_CAKE/);
   assert.match(helperBody, /if \(!cacheCleared\)/);
   const apiGuard = helperBody.indexOf('Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE');
   const cacheRefresh = helperBody.indexOf('environment.clearAccessibilityCache()');
-  const policyGuard = helperBody.indexOf('environment.assertNoOutOfScopeApproval()');
+  const policyGuard = helperBody.indexOf('runFreshLegalGuard(environment, configurator, "fresh-legal-guard")');
   const freshObservation = helperBody.indexOf('environment.observePlaybackSettings()');
   assert.ok(apiGuard < cacheRefresh && cacheRefresh < policyGuard && policyGuard < freshObservation);
-  assert.match(helperBody, /observation\.revealTarget != null && !revealTapPerformed/);
+  assert.doesNotMatch(helperBody, /environment\.assertNoOutOfScopeApproval\(\)/);
+  assert.match(helperBody, /observation\.revealTarget != null/);
   assert.equal((helperBody.match(/observation\.revealTarget\.click\(\)/g) ?? []).length, 1);
+  assert.equal((helperBody.match(/observation\.railPanTarget\.click\(\)/g) ?? []).length, 1);
   assert.equal((helperBody.match(/observation\.settingsTarget\.click\(\)/g) ?? []).length, 1);
-  for (const stage of ['cache', 'fresh-legal-guard', 'settings-acquisition', 'reveal-click']) {
+  for (const stage of ['cache', 'fresh-legal-guard', 'fresh-input-legal-guard',
+    'settings-acquisition', 'reveal-click', 'playback-actions-rail-pan-']) {
     assert.match(helperBody, new RegExp(`"${stage}"`));
   }
+  const policy = methodBody(
+    transactionSource,
+    'private static String chooseNextSettingsAction(',
+  );
+  assert.match(policy, /railPanAttempts < 0/);
+  assert.match(policy, /railPanAttempts >= MAX_PLAYBACK_ACTIONS_RAIL_PANS/);
+  assert.match(policy, /revealVisible && !revealTapPerformed/);
   assert.match(helperBody, /environment\.recordSettingsClickTiming\(/);
   assert.match(helperBody, /finally \{\s*configurator\.setWaitForIdleTimeout\(previousIdleTimeoutMs\)/);
 
@@ -565,6 +633,73 @@ test('rejects server-mode source mismatch', () => {
   assert.throws(() => fixtureContract(fixture.replace(
     'source.split(SERVER_MODE_SOURCE_BINDING).length !== 2', 'false')));
 });
+test('executes pure bounded settings rail transaction policy and rejects mutants', () => {
+  assert.equal(settingsRailPolicyProbe(settingsTransaction).status, 0);
+  for (const mutant of [
+    mutateMethod(settingsTransaction, 'private static String chooseNextSettingsAction(',
+      'railPanAttempts < 0', 'false'),
+    mutateMethod(settingsTransaction, 'private static String chooseNextSettingsAction(',
+      'railPanAttempts >= MAX_PLAYBACK_ACTIONS_RAIL_PANS',
+      'railPanAttempts > MAX_PLAYBACK_ACTIONS_RAIL_PANS'),
+    mutateMethod(settingsTransaction, 'private static String chooseNextSettingsAction(',
+      'revealVisible && !revealTapPerformed', 'revealVisible'),
+  ]) {
+    assert.notEqual(mutant, settingsTransaction);
+    assert.notEqual(settingsRailPolicyProbe(mutant).status, 0);
+  }
+});
+test('clicks directly observed exact settings without manufacturing a rail pan', () => {
+  assert.equal(settingsRailPolicyProbe(settingsTransaction).status, 0);
+  const policy = methodBody(
+    settingsTransaction, 'private static String chooseNextSettingsAction(');
+  assert.doesNotMatch(policy, /if \(settingsVisible\) \{\s*if \(railPanAttempts <= 0\)/);
+  assert.match(settingsTransaction,
+    /railPanAttempts == 0 && railObservationCount != 0/);
+  assert.match(settingsTransaction,
+    /railPanAttempts > 0 && railObservationCount < railPanAttempts/);
+  const forcedPanPrerequisite = mutateMethod(
+    settingsTransaction,
+    'private static String chooseNextSettingsAction(',
+    'if (settingsVisible) {',
+    'if (settingsVisible) {\n            if (railPanAttempts <= 0) {\n                throw new AssertionError("forced rail pan prerequisite");\n            }',
+  );
+  assert.notEqual(forcedPanPrerequisite, settingsTransaction);
+  assert.notEqual(settingsRailPolicyProbe(forcedPanPrerequisite).status, 0);
+});
+test('driver admits only the exact visible player action rail and no coordinate fallback', () => {
+  const observation = methodBody(
+    driver, 'private RuntimeExternalSettingsTransaction.Observation observePlaybackSettingsTransaction()');
+  assert.match(observation, /findUniquePlaybackActionsRailWithin\(playerDialog\)/);
+  assert.match(observation, /Observation\.railPan\(\s*\(\) -> rail\.scroll\(Direction\.RIGHT, 0\.72f\)\)/);
+  assert.doesNotMatch(observation, /device\.swipe|device\.click/);
+  const rail = methodBody(driver, 'private UiObject2 findUniquePlaybackActionsRailWithin(');
+  assert.match(rail, /dialog\.findObjects\(/);
+  assert.match(rail, /By\.clazz\("android\.view\.View"\)/);
+  assert.match(rail, /\.pkg\(PRODUCT_PACKAGE\)/);
+  assert.match(rail, /\.text\(exactLabel\(PLAYBACK_ACTIONS_LABEL\)\)/);
+  assert.match(rail, /\.scrollable\(true\)/);
+  assert.match(rail, /hasVisibleBounds\(candidate\)/);
+  assert.match(rail, /bounds\.width\(\) <= bounds\.height\(\)/);
+  assert.match(rail, /candidates\.size\(\) > 1/);
+});
+test('transaction freshly guards every input and records bounded rail observations', () => {
+  const transaction = methodBody(
+    settingsTransaction, 'static Result open(Environment environment, long timeoutMs)');
+  assert.match(settingsTransaction, /MAX_PLAYBACK_ACTIONS_RAIL_PANS = 3/);
+  assert.match(transaction, /"fresh-input-legal-guard"/);
+  assert.equal((transaction.match(/runFreshLegalGuard\(/g) ?? []).length, 4);
+  assert.equal((transaction.match(/observation\.settingsTarget\.click\(\)/g) ?? []).length, 1);
+  assert.equal((transaction.match(/observation\.revealTarget\.click\(\)/g) ?? []).length, 1);
+  assert.equal((transaction.match(/observation\.railPanTarget\.click\(\)/g) ?? []).length, 1);
+  assert.match(transaction, /environment\.recordRailObservation\(/);
+  assert.match(transaction, /if \(observation\.railPanTarget != null\) railObservationCount\+\+/);
+  assert.match(transaction, /railPanAttempts\+\+/);
+  assert.match(transaction, /return new Result\(/);
+  assert.match(driver, /MAX_SETTINGS_RAIL_OBSERVATIONS = 16/);
+  assert.match(driver, /settingsRailObservationEventsOmitted/);
+  assert.match(driver, /receipt\.put\("settingsRailObservations", new JSONArray\(settingsRailObservations\)\)/);
+  assert.match(driver, /checks\.put\("playbackActionsRailPanAttempts", result\.railPanAttempts\)/);
+});
 test('workflow pins and admits only the exact official VLC fixture handler', () => workflowContract(workflow, job));
 test('external workflow contract is bounded before the following distinct job', () => {
   assert.doesNotMatch(job, /^  touch-player-fixture:/m);
@@ -667,8 +802,8 @@ for (const [name, original, mutate, contract] of [
     'UiObject2 playerDialog = requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "playing movie dialog");'), driverContract],
   ['invisible player dialog admitted', driver, s => s.replace('playerDialog == null || !hasVisibleBounds(playerDialog)', 'false'), driverContract],
   ['repeated reveal tap', settingsTransaction, s => s.replace(
-    'observation.revealTarget != null && !revealTapPerformed',
-    'observation.revealTarget != null'), h => driverContract(driver, h)],
+    'revealVisible && !revealTapPerformed',
+    'revealVisible'), h => driverContract(driver, h)],
   ['unscoped playing dialog', driver, s => s.replace(
     '.pkg(PRODUCT_PACKAGE)\n                        .text(exactLabel(label))',
     '.text(exactLabel(label))'), driverContract],
