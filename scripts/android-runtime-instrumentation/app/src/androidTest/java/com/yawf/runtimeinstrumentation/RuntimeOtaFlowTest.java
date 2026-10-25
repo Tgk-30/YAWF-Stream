@@ -900,17 +900,9 @@ public final class RuntimeOtaFlowTest {
         selectFixed42SettingsCategory("Appearance", "Choose a style");
         captureFixed42Appearance("fixed42-appearance-anchor");
         waitForFixed42AppearanceSummary("Midnight Studio");
-        UiObject2 quiet = scrollUntilVisibleExactProductWithFirstScrollObservation(
-                By.desc(AUTOMATIC_APPEARANCE)
-                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
-                        .clazz("android.widget.ToggleButton")
-                        .clickable(true)
-                        .enabled(true),
-                "exact Quiet focus ToggleButton",
-                Direction.DOWN,
+        clickFreshFixed42AppearanceStyle(
+                AUTOMATIC_APPEARANCE,
                 "fixed42-appearance-after-first-scroll");
-        assertNoBindingTerms();
-        quiet.click();
         waitForFixed42AppearanceSummary(FIXED42_APPEARANCE_SUMMARY);
         navigateProductRoute("Discover");
 
@@ -1186,9 +1178,92 @@ public final class RuntimeOtaFlowTest {
         log("Selected exact fixed42 Settings category " + target);
     }
 
+    private List<UiObject2> findExactFixed42AppearanceStyleControls(String exactButtonText) {
+        List<UiObject2> matches = device.findObjects(
+                By.text(exactButtonText)
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.ToggleButton")
+                        .clickable(true)
+                        .enabled(true));
+        List<UiObject2> valid = new ArrayList<>();
+        for (UiObject2 candidate : matches) {
+            Rect candidateBounds = candidate.getVisibleBounds();
+            if (Fixed42AppearancePolicy.isExactStyleControl(
+                    candidate.getText(),
+                    candidate.getContentDescription(),
+                    candidate.getClassName(),
+                    candidate.getApplicationPackage(),
+                    candidate.isClickable(),
+                    candidate.isEnabled(),
+                    candidateBounds.left,
+                    candidateBounds.top,
+                    candidateBounds.right,
+                    candidateBounds.bottom,
+                    device.getDisplayWidth(),
+                    device.getDisplayHeight(),
+                    fixed42BottomNavigationTop(),
+                    exactButtonText,
+                    OtaFlowPolicy.PRODUCT_PACKAGE)) {
+                valid.add(candidate);
+            }
+        }
+        return valid;
+    }
+
+    private void clickFreshFixed42AppearanceStyle(
+            String exactButtonText, String firstScrollCaptureLabel) throws IOException {
+        assertTrue("Appearance style selection is restricted to the fixed42 profile",
+                isFixed42AutomaticMode());
+        for (int attempt = 0; attempt < 12; attempt++) {
+            assertTrue("Fixed42 Appearance style cache refresh failed",
+                    instrumentation.getUiAutomation().clearCache());
+            List<UiObject2> candidates =
+                    findExactFixed42AppearanceStyleControls(exactButtonText);
+            assertTrue("Fixed42 exact Appearance style control was ambiguous",
+                    candidates.size() <= 1);
+            if (candidates.size() == 1) {
+                assertNoBindingTerms();
+                assertTrue("Fixed42 Appearance style guarded cache refresh failed",
+                        instrumentation.getUiAutomation().clearCache());
+                List<UiObject2> fresh =
+                        findExactFixed42AppearanceStyleControls(exactButtonText);
+                assertTrue("Fixed42 exact Appearance style control disappeared or duplicated",
+                        Fixed42AppearancePolicy.hasUniqueCandidate(fresh.size()));
+                fresh.get(0).click();
+                device.waitForIdle(750);
+                log("Clicked one fresh exact fixed42 Appearance style control: "
+                        + exactButtonText);
+                return;
+            }
+            UiObject2 scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("No scrollable container while seeking fixed42 Appearance style",
+                    scrollable);
+            assertNoBindingTerms();
+            scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("Scrollable container disappeared while seeking fixed42 Appearance style",
+                    scrollable);
+            configureSettingsScrollGesture(scrollable);
+            boolean canStillScroll = scrollable.scroll(Direction.DOWN, 0.75f);
+            log("Performed bounded Settings scroll gesture while seeking exact "
+                    + exactButtonText + "; canStillScroll=" + canStillScroll);
+            device.waitForIdle(750);
+            if (attempt == 0 && firstScrollCaptureLabel != null) {
+                captureFixed42Appearance(firstScrollCaptureLabel);
+            }
+        }
+        fail("Could not place exact fixed42 Appearance style above bottom navigation: "
+                + exactButtonText);
+    }
+
     private UiObject2 waitForFixed42AppearanceSummary(String exactStyle) {
+        assertTrue("Appearance summary observation is restricted to the fixed42 profile",
+                isFixed42AutomaticMode());
         long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
-        while (SystemClock.uptimeMillis() < deadline) {
+        for (int attempt = 0;
+                attempt < 12 && SystemClock.uptimeMillis() < deadline;
+                attempt++) {
+            assertTrue("Fixed42 Appearance summary cache refresh failed",
+                    instrumentation.getUiAutomation().clearCache());
             List<UiObject2> matches = device.findObjects(
                     By.text(exactStyle)
                             .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
@@ -1204,14 +1279,59 @@ public final class RuntimeOtaFlowTest {
                     }
                     parent = parent.getParent();
                 }
-                if (!clickableAncestor && !match.getVisibleBounds().isEmpty()) summaries.add(match);
+                Rect summaryBounds = match.getVisibleBounds();
+                if (Fixed42AppearancePolicy.isExactSummary(
+                        match.getText(),
+                        match.getContentDescription(),
+                        match.getClassName(),
+                        match.getApplicationPackage(),
+                        match.isClickable(),
+                        match.isEnabled(),
+                        summaryBounds.left,
+                        summaryBounds.top,
+                        summaryBounds.right,
+                        summaryBounds.bottom,
+                        device.getDisplayWidth(),
+                        device.getDisplayHeight(),
+                        fixed42BottomNavigationTop(),
+                        clickableAncestor,
+                        exactStyle,
+                        OtaFlowPolicy.PRODUCT_PACKAGE)) {
+                    summaries.add(match);
+                }
             }
             assertTrue("Fixed42 selected appearance summary was ambiguous", summaries.size() <= 1);
             if (summaries.size() == 1) return summaries.get(0);
-            SystemClock.sleep(150);
+            UiObject2 scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("No scrollable container while seeking fixed42 Appearance summary",
+                    scrollable);
+            assertNoBindingTerms();
+            scrollable = device.findObject(By.scrollable(true));
+            assertNotNull("Scrollable container disappeared while seeking fixed42 Appearance summary",
+                    scrollable);
+            configureSettingsScrollGesture(scrollable);
+            boolean canStillScroll = scrollable.scroll(Direction.UP, 0.75f);
+            log("Performed bounded Settings scroll gesture while seeking exact selected summary "
+                    + exactStyle + "; canStillScroll=" + canStillScroll);
+            device.waitForIdle(750);
         }
         fail("Timed out waiting for exact selected appearance summary " + exactStyle);
         return null;
+    }
+
+    private int fixed42BottomNavigationTop() {
+        List<UiObject2> navigationMatches = device.findObjects(
+                By.text("Primary")
+                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.view.View")
+                        .clickable(false)
+                        .enabled(true));
+        assertEquals("Exact bottom navigation container was absent or ambiguous",
+                1, navigationMatches.size());
+        UiObject2 navigation = navigationMatches.get(0);
+        Rect navigationBounds = navigation.getVisibleBounds();
+        assertFalse("Exact bottom navigation bounds were empty", navigationBounds.isEmpty());
+        return navigationBounds.top;
     }
 
     private UiObject2 waitForFixed42Semantic(String identity, boolean clickable, String label) {
@@ -1839,15 +1959,6 @@ public final class RuntimeOtaFlowTest {
 
     private UiObject2 scrollUntilVisibleExactProduct(
             BySelector selector, String label, Direction direction) throws IOException {
-        return scrollUntilVisibleExactProductWithFirstScrollObservation(
-                selector, label, direction, null);
-    }
-
-    private UiObject2 scrollUntilVisibleExactProductWithFirstScrollObservation(
-            BySelector selector,
-            String label,
-            Direction direction,
-            String firstScrollCaptureLabel) throws IOException {
         for (int attempt = 0; attempt < 12; attempt++) {
             UiObject2 found = device.findObject(selector);
             if (found != null && isVisibleAboveBottomNavigation(found)) {
@@ -1863,9 +1974,6 @@ public final class RuntimeOtaFlowTest {
             log("Performed bounded Settings scroll gesture while seeking exact " + label
                     + "; canStillScroll=" + canStillScroll);
             device.waitForIdle(750);
-            if (attempt == 0 && firstScrollCaptureLabel != null) {
-                captureFixed42Appearance(firstScrollCaptureLabel);
-            }
         }
         fail("Could not place exact " + label + " above bottom navigation");
         return null;
@@ -1995,6 +2103,89 @@ public final class RuntimeOtaFlowTest {
                     : Fixed42DialogClosurePolicy.PRESENT;
         } catch (StaleObjectException stale) {
             return Fixed42DialogClosurePolicy.STALE;
+        }
+    }
+
+    private static final class Fixed42AppearancePolicy {
+        private static boolean empty(String value) {
+            return value == null || value.isEmpty();
+        }
+
+        static boolean isExactStyleControl(
+                String text,
+                String description,
+                String className,
+                String packageName,
+                boolean clickable,
+                boolean enabled,
+                int left,
+                int top,
+                int right,
+                int bottom,
+                int displayWidth,
+                int displayHeight,
+                int navigationTop,
+                String expectedText,
+                String expectedPackage) {
+            return expectedText.equals(text)
+                    && empty(description)
+                    && "android.widget.ToggleButton".equals(className)
+                    && expectedPackage.equals(packageName)
+                    && clickable
+                    && enabled
+                    && visibleAboveNavigation(
+                            left, top, right, bottom,
+                            displayWidth, displayHeight, navigationTop);
+        }
+
+        static boolean isExactSummary(
+                String text,
+                String description,
+                String className,
+                String packageName,
+                boolean clickable,
+                boolean enabled,
+                int left,
+                int top,
+                int right,
+                int bottom,
+                int displayWidth,
+                int displayHeight,
+                int navigationTop,
+                boolean clickableAncestor,
+                String expectedText,
+                String expectedPackage) {
+            return expectedText.equals(text)
+                    && empty(description)
+                    && "android.widget.TextView".equals(className)
+                    && expectedPackage.equals(packageName)
+                    && !clickable
+                    && enabled
+                    && visibleAboveNavigation(
+                            left, top, right, bottom,
+                            displayWidth, displayHeight, navigationTop)
+                    && !clickableAncestor;
+        }
+
+        private static boolean visibleAboveNavigation(
+                int left,
+                int top,
+                int right,
+                int bottom,
+                int displayWidth,
+                int displayHeight,
+                int navigationTop) {
+            return left >= 0
+                    && top >= 0
+                    && right > left
+                    && bottom > top
+                    && right <= displayWidth
+                    && bottom <= displayHeight
+                    && bottom <= navigationTop;
+        }
+
+        static boolean hasUniqueCandidate(int count) {
+            return count == 1;
         }
     }
 

@@ -154,8 +154,9 @@ function fixedDataContract(java) {
   need(freshButton, "instrumentation.getUiAutomation().clearCache()", "fresh profile control is not reacquired");
   assert.equal(seed.includes('By.desc("Your name")'), false, "fixed profile assumed an unproven WebView description mapping");
   assert.equal(verify.includes('By.desc("Your name")'), false, "fixed profile verification assumed an unproven description mapping");
-  need(seed, '.clazz("android.widget.ToggleButton")', "appearance candidate class is absent");
+  need(seed, 'clickFreshFixed42AppearanceStyle(\n                AUTOMATIC_APPEARANCE,', "appearance selection is not freshly guarded");
   need(seed, "waitForFixed42AppearanceSummary(FIXED42_APPEARANCE_SUMMARY)", "appearance summary is not observed");
+  need(verify, "waitForFixed42AppearanceSummary(FIXED42_APPEARANCE_SUMMARY)", "appearance persistence summary is not mandatory");
   assert.equal(seed.includes("quiet.isChecked()"), false, "WebView checked state cannot admit baseline42 appearance");
   need(seed, "waitForFixed42FolderSelect(moveLabel, AUTOMATIC_FOLDER_NAME)", "folder marker is not exact");
   assert.equal(folder.includes("By.desc(moveLabel)"), false, "folder select assumed an unproven WebView description mapping");
@@ -176,14 +177,14 @@ function fixedAppearanceAnchorObservationContract(java) {
     "fixed42 Appearance anchor observation must be captured exactly once",
   );
   const capture = seed.indexOf('captureFixed42Appearance("fixed42-appearance-anchor")');
-  const selectorSearch = seed.indexOf("scrollUntilVisibleExactProductWithFirstScrollObservation(");
+  const selectorSearch = seed.indexOf("clickFreshFixed42AppearanceStyle(");
   assert.ok(capture >= 0 && capture < selectorSearch,
     "fixed42 Appearance anchor observation must precede the unproven widget search");
 }
 
 function fixedAppearanceFirstScrollObservationContract(java) {
   const seed = methodBody(java, "seedFixed42MeaningfulLocalState");
-  need(seed, "scrollUntilVisibleExactProductWithFirstScrollObservation(",
+  need(seed, "clickFreshFixed42AppearanceStyle(",
     "fixed42 Appearance did not request the bounded first-scroll observation");
   need(seed, '"fixed42-appearance-after-first-scroll"',
     "fixed42 Appearance first-scroll observation label is missing");
@@ -193,16 +194,16 @@ function fixedAppearanceFirstScrollObservationContract(java) {
     "fixed42 Appearance first-scroll observation may be requested only once",
   );
 
-  const helper = methodBody(java, "scrollUntilVisibleExactProductWithFirstScrollObservation");
+  const helper = methodBody(java, "clickFreshFixed42AppearanceStyle");
   need(helper, "for (int attempt = 0; attempt < 12; attempt++)",
     "bounded exact-product search changed its scroll-attempt cap");
-  assert.equal((helper.match(/scrollable\.scroll\(direction, 0\.75f\)/g) ?? []).length, 1,
+  assert.equal((helper.match(/scrollable\.scroll\(Direction\.DOWN, 0\.75f\)/g) ?? []).length, 1,
     "observation helper must retain one normal scroll operation per attempt");
   assert.equal(helper.includes("device.swipe("), false,
     "observation helper added a non-normal scroll input");
-  assert.equal(helper.includes(".click()"), false,
-    "observation helper added a click");
-  const scroll = helper.indexOf("scrollable.scroll(direction, 0.75f)");
+  assert.equal((helper.match(/\.click\(\)/g) ?? []).length, 1,
+    "fixed42 observation and selection helper must click exactly once");
+  const scroll = helper.indexOf("scrollable.scroll(Direction.DOWN, 0.75f)");
   const settled = helper.indexOf("device.waitForIdle(750)", scroll);
   const cap = helper.indexOf("if (attempt == 0 && firstScrollCaptureLabel != null)", settled);
   const capture = helper.indexOf("captureFixed42Appearance(firstScrollCaptureLabel)", cap);
@@ -211,9 +212,65 @@ function fixedAppearanceFirstScrollObservationContract(java) {
   assert.equal((helper.match(/captureFixed42Appearance\(firstScrollCaptureLabel\)/g) ?? []).length, 1,
     "first-scroll observation helper has more than one capture site");
 
-  const defaultHelper = methodBody(java, "scrollUntilVisibleExactProduct");
-  need(defaultHelper, "selector, label, direction, null",
-    "ordinary exact-product searches must opt out of the diagnostic observation");
+  assert.equal(java.includes("scrollUntilVisibleExactProductWithFirstScrollObservation"), false,
+    "fixed42 observation must not leave a generic diagnostic selector path");
+}
+
+function fixedAppearanceSelectionContract(java) {
+  const helper = methodBody(java, "clickFreshFixed42AppearanceStyle");
+  const candidates = methodBody(java, "findExactFixed42AppearanceStyleControls");
+  const summary = methodBody(java, "waitForFixed42AppearanceSummary");
+  const navigation = methodBody(java, "fixed42BottomNavigationTop");
+  for (const token of [
+    "isFixed42AutomaticMode()",
+    "instrumentation.getUiAutomation().clearCache()",
+    "assertNoBindingTerms()",
+    "findExactFixed42AppearanceStyleControls(exactButtonText)",
+    "Fixed42AppearancePolicy.hasUniqueCandidate(fresh.size())",
+    "fresh.get(0).click()",
+  ]) need(helper, token, `fixed42 exact Appearance selection lost ${token}`);
+  assert.equal((helper.match(/fresh\.get\(0\)\.click\(\)/g) ?? []).length, 1,
+    "fixed42 Appearance style must click exactly once");
+  for (const token of [
+    "By.text(exactButtonText)",
+    '.clazz("android.widget.ToggleButton")',
+    ".pkg(OtaFlowPolicy.PRODUCT_PACKAGE)",
+    ".clickable(true)",
+    ".enabled(true)",
+    "Fixed42AppearancePolicy.isExactStyleControl(",
+    "candidateBounds.left",
+    "fixed42BottomNavigationTop()",
+  ]) need(candidates, token, `fixed42 exact Appearance candidate lost ${token}`);
+  assert.equal(candidates.includes("By.desc("), false,
+    "fixed42 Appearance selection must not assume a description mapping");
+  assert.equal(candidates.includes("checkable("), false,
+    "fixed42 Appearance selection must not admit checkable state");
+  assert.equal(candidates.includes("device.click("), false,
+    "fixed42 Appearance selection must not use coordinates");
+
+  for (const token of [
+    "long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS",
+    "attempt < 12 && SystemClock.uptimeMillis() < deadline",
+    "By.text(exactStyle)",
+    '.clazz("android.widget.TextView")',
+    ".pkg(OtaFlowPolicy.PRODUCT_PACKAGE)",
+    "Fixed42AppearancePolicy.isExactSummary(",
+    "clickableAncestor",
+    "scrollable.scroll(Direction.UP, 0.75f)",
+    "configureSettingsScrollGesture(scrollable)",
+  ]) need(summary, token, `fixed42 selected summary lost ${token}`);
+  assert.equal(summary.includes("By.desc("), false,
+    "fixed42 selected summary must use exact source-observed text");
+  for (const token of [
+    'By.text("Primary")',
+    '.clazz("android.view.View")',
+    ".pkg(OtaFlowPolicy.PRODUCT_PACKAGE)",
+    ".clickable(false)",
+    "1, navigationMatches.size()",
+    "return navigationBounds.top",
+  ]) need(navigation, token, `fixed42 bottom navigation fact lost ${token}`);
+  assert.equal(navigation.includes("By.desc("), false,
+    "fixed42 bottom navigation must use the source-observed text fact");
 }
 
 function fixedAppearanceFreshCacheContract(java) {
@@ -414,6 +471,7 @@ ${policy}
         System.out.println("fixed42-dialog-closure-policy-ok");
     }
 }
+
 `;
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-dialog-policy-"));
   const sourceFile = path.join(directory, "Fixed42DialogClosurePolicyHarness.java");
@@ -429,6 +487,94 @@ ${policy}
     });
     assert.equal(run.status, 0, `fixed42 policy harness failed: ${run.stderr}`);
     assert.equal(run.stdout.trim(), "fixed42-dialog-closure-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function runFixed42AppearancePolicyHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42AppearancePolicy");
+  const harness = `
+public final class Fixed42AppearancePolicyHarness {
+${policy}
+
+    private static void require(boolean condition, String message) {
+        if (!condition) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        String text = "Apply Quiet focus style";
+        String product = "com.tgk30.debridstreamer";
+        require(Fixed42AppearancePolicy.isExactStyleControl(
+                text, "", "android.widget.ToggleButton", product,
+                true, true, 63, 1199, 989, 1456, 1080, 1920, 1669,
+                text, product), "sanitized XML style control must pass");
+        require(!Fixed42AppearancePolicy.isExactStyleControl(
+                "Quiet focus", "", "android.widget.ToggleButton", product,
+                true, true, 63, 1199, 989, 1456, 1080, 1920, 1669,
+                text, product), "wrong text must fail");
+        require(!Fixed42AppearancePolicy.isExactStyleControl(
+                text, "described", "android.widget.ToggleButton", product,
+                true, true, 63, 1199, 989, 1456, 1080, 1920, 1669,
+                text, product), "wrong description must fail");
+        require(!Fixed42AppearancePolicy.isExactStyleControl(
+                text, "", "android.widget.Button", product,
+                true, true, 63, 1199, 989, 1456, 1080, 1920, 1669,
+                text, product), "wrong role must fail");
+        require(!Fixed42AppearancePolicy.isExactStyleControl(
+                text, "", "android.widget.ToggleButton", "other.package",
+                true, true, 63, 1199, 989, 1456, 1080, 1920, 1669,
+                text, product), "wrong package must fail");
+        require(!Fixed42AppearancePolicy.isExactStyleControl(
+                text, "", "android.widget.ToggleButton", product,
+                true, true, 63, 1199, 989, 1700, 1080, 1920, 1669,
+                text, product), "covered bounds must fail");
+        require(Fixed42AppearancePolicy.hasUniqueCandidate(1), "one candidate must pass");
+        require(!Fixed42AppearancePolicy.hasUniqueCandidate(2), "duplicates must fail");
+
+        require(Fixed42AppearancePolicy.isExactSummary(
+                "Quiet focus", "", "android.widget.TextView", product,
+                false, true, 63, 918, 286, 958, 1080, 1920, 1669,
+                false, "Quiet focus", product),
+                "sanitized XML selected header must pass");
+        require(!Fixed42AppearancePolicy.isExactSummary(
+                "Quiet focus", "", "android.view.View", product,
+                false, true, 354, 1254, 931, 1302, 1080, 1920, 1669,
+                true, "Quiet focus", product),
+                "card label must not pass as selected header");
+        require(!Fixed42AppearancePolicy.isExactSummary(
+                "Quiet focus", "described", "android.widget.TextView", product,
+                false, true, 63, 918, 286, 958, 1080, 1920, 1669,
+                false, "Quiet focus", product),
+                "described summary must fail");
+        require(!Fixed42AppearancePolicy.isExactSummary(
+                "Quiet focus", "", "android.widget.TextView", product,
+                false, true, 63, 1660, 286, 1700, 1080, 1920, 1669,
+                false, "Quiet focus", product),
+                "covered summary must fail");
+        require(!Fixed42AppearancePolicy.isExactSummary(
+                "Quiet focus", "", "android.widget.TextView", product,
+                false, true, 63, 918, 286, 958, 1080, 1920, 1669,
+                true, "Quiet focus", product),
+                "clickable ancestor must fail");
+        System.out.println("fixed42-appearance-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-appearance-policy-"));
+  const sourceFile = path.join(directory, "Fixed42AppearancePolicyHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `fixed42 Appearance policy javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand, ["-cp", directory, "Fixed42AppearancePolicyHarness"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, `fixed42 Appearance policy harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-appearance-policy-ok");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -499,8 +645,12 @@ test("fixed critical interval enters zero-idle before Enable and captures only a
 
 test("fixed baseline42 source-derived selector candidates fail closed and remain read-only after install", () => {
   fixedDataContract(source);
-  const mutated = source.replace('.clazz("android.widget.ToggleButton")', '.clazz("android.widget.Button")');
-  assert.throws(() => fixedDataContract(mutated));
+  const mutated = source.replace(
+    'By.text(exactButtonText)\n                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)\n                        .clazz("android.widget.ToggleButton")',
+    'By.text(exactButtonText)\n                        .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)\n                        .clazz("android.widget.Button")',
+  );
+  assert.notEqual(mutated, source, "fixed42 Appearance role mutation anchor was absent");
+  assert.throws(() => fixedAppearanceSelectionContract(mutated));
   const invalidProfile = source.replace(
     "UiObject2 initialName = waitForFixed42ProfileNameField(\"initial profile name\");",
     'UiObject2 initialName = waitFor(By.desc("Your name"), SHORT_WAIT_MS, "initial profile name");',
@@ -508,6 +658,11 @@ test("fixed baseline42 source-derived selector candidates fail closed and remain
   assert.throws(() => fixedDataContract(invalidProfile));
   const receipt = methodBody(source, "writeReceipt");
   need(receipt, 'receipt.put("profileNamePostInstallSetTextActions",', "receipt omits postinstall write count");
+});
+
+test("fixed42 selects the source-observed Appearance text once and requires the real summary header", () => {
+  fixedAppearanceSelectionContract(source);
+  runFixed42AppearancePolicyHarness(source);
 });
 
 test("fixed42 captures the fresh Appearance viewport immediately after its admitted anchor", () => {
@@ -535,7 +690,7 @@ test("fixed42 captures at most one settled observation after the first normal Ap
 
   const extraScroll = source.replace(
     "device.waitForIdle(750);\n            if (attempt == 0 && firstScrollCaptureLabel != null)",
-    "device.waitForIdle(750);\n            scrollable.scroll(direction, 0.75f);\n            if (attempt == 0 && firstScrollCaptureLabel != null)",
+    "device.waitForIdle(750);\n            scrollable.scroll(Direction.DOWN, 0.75f);\n            if (attempt == 0 && firstScrollCaptureLabel != null)",
   );
   assert.notEqual(extraScroll, source, "extra diagnostic scroll mutant anchor was absent");
   assert.throws(() => fixedAppearanceFirstScrollObservationContract(extraScroll));
