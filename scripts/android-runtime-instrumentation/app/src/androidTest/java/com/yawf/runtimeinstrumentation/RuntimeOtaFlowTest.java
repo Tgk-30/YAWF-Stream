@@ -2251,10 +2251,15 @@ public final class RuntimeOtaFlowTest {
 
         boolean drawerGestureSent = false;
         Fixed42LauncherObservation ready = null;
+        Fixed42LauncherDiagnostics diagnostics = new Fixed42LauncherDiagnostics();
         while (Fixed42LauncherReadinessPolicy.withinDeadline(
                 startedAt, SystemClock.uptimeMillis())) {
+            long observationStartedAt = SystemClock.uptimeMillis();
             Fixed42LauncherObservation observation = observeFixed42LauncherReadiness(
                     appLabel, launcherPackage);
+            diagnostics.record(observation.state, observation.diagnostic,
+                    Fixed42LauncherDiagnostics.durationMs(
+                            observationStartedAt, SystemClock.uptimeMillis()));
             if (observation.state == Fixed42LauncherReadinessPolicy.READY) {
                 ready = observation;
                 break;
@@ -2262,8 +2267,12 @@ public final class RuntimeOtaFlowTest {
             if (observation.state == Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON
                     && !drawerGestureSent) {
                 assertNoBindingTerms();
+                observationStartedAt = SystemClock.uptimeMillis();
                 Fixed42LauncherObservation beforeDrawer = observeFixed42LauncherReadiness(
                         appLabel, launcherPackage);
+                diagnostics.record(beforeDrawer.state, beforeDrawer.diagnostic,
+                        Fixed42LauncherDiagnostics.durationMs(
+                                observationStartedAt, SystemClock.uptimeMillis()));
                 if (beforeDrawer.state == Fixed42LauncherReadinessPolicy.READY) {
                     ready = beforeDrawer;
                     break;
@@ -2282,6 +2291,12 @@ public final class RuntimeOtaFlowTest {
             } else {
                 SystemClock.sleep(150);
             }
+        }
+        if (ready == null) {
+            log(diagnostics.timeoutLine(
+                    drawerGestureSent,
+                    Fixed42LauncherDiagnostics.durationMs(
+                            startedAt, SystemClock.uptimeMillis())));
         }
         assertNotNull("Timed out waiting for exact fixed42 launcher readiness", ready);
 
@@ -2314,7 +2329,14 @@ public final class RuntimeOtaFlowTest {
         if (!launcherForeground) {
             int state = Fixed42LauncherReadinessPolicy.classify(
                     false, 0, false, 0, false, false, false);
-            return new Fixed42LauncherObservation(state, null);
+            return new Fixed42LauncherObservation(
+                    state, null,
+                    fixed42LauncherPrimitiveDiagnostic(
+                            "foreground", false, false, "unknown",
+                            0, false,
+                            0, false, false,
+                            0, false, false,
+                            "not-evaluated", 0, false));
         }
         List<AccessibilityNodeInfo> owned = new ArrayList<>();
         List<Integer> parents = new ArrayList<>();
@@ -2332,7 +2354,14 @@ public final class RuntimeOtaFlowTest {
                 int state = Fixed42LauncherReadinessPolicy.classify(
                         launcherForeground, 0, false,
                         0, false, false, false);
-                return new Fixed42LauncherObservation(state, null);
+                return new Fixed42LauncherObservation(
+                        state, null,
+                        fixed42LauncherPrimitiveDiagnostic(
+                                "root-unavailable", launcherForeground,
+                                false, "unknown", 0, false,
+                                0, false, false,
+                                0, false, false,
+                                "not-evaluated", 0, false));
             }
             owned.add(root);
             parents.add(-1);
@@ -2365,7 +2394,14 @@ public final class RuntimeOtaFlowTest {
             if (stale) {
                 int state = Fixed42LauncherReadinessPolicy.classify(
                         launcherForeground, 0, false, 0, false, false, true);
-                return new Fixed42LauncherObservation(state, null);
+                return new Fixed42LauncherObservation(
+                        state, null,
+                        fixed42LauncherPrimitiveDiagnostic(
+                                "stale-child", launcherForeground,
+                                true, "unknown", owned.size(), true,
+                                0, false, false,
+                                0, false, false,
+                                "not-evaluated", 0, false));
             }
 
             List<Fixed42AxNode> nodes = new ArrayList<>();
@@ -2406,7 +2442,37 @@ public final class RuntimeOtaFlowTest {
             int state = Fixed42LauncherReadinessPolicy.classify(
                     launcherForeground, rootCount, rootExact,
                     iconCount, iconExact, iconFullyVisible, false);
-            return new Fixed42LauncherObservation(state, iconBounds);
+            boolean rootBoundsMatch = launcherRoot != null
+                    && launcherRoot.bounds.equals(new Rect(0, 0, width, height));
+            Fixed42LauncherIconDiagnostic iconDiagnostic = icon == null
+                    ? Fixed42LauncherIconDiagnostic.notEvaluated()
+                    : iconFullyVisible
+                            ? Fixed42LauncherIconDiagnostic.visible()
+                            : fixed42LauncherIconDiagnostic(
+                                    nodes, iconIndex, rootIndex,
+                                    launcherPackage, width, height);
+            String rejectionReason;
+            if (state == Fixed42LauncherReadinessPolicy.READY) {
+                rejectionReason = "ready";
+            } else if (rootCount == 0) {
+                rejectionReason = "root-absent";
+            } else if (iconCount == 0) {
+                rejectionReason = "icon-absent";
+            } else {
+                rejectionReason = "icon-clipped";
+            }
+            boolean activeRootPackageMatch = !nodes.isEmpty()
+                    && launcherPackage.equals(nodes.get(0).packageName);
+            return new Fixed42LauncherObservation(
+                    state, iconBounds,
+                    fixed42LauncherPrimitiveDiagnostic(
+                            rejectionReason, launcherForeground,
+                            true, activeRootPackageMatch ? "match" : "mismatch",
+                            nodes.size(), false,
+                            rootCount, rootExact, rootBoundsMatch,
+                            iconCount, iconExact, iconFullyVisible,
+                            iconDiagnostic.reason, iconDiagnostic.ancestryDepth,
+                            iconDiagnostic.reachedRoot));
         } finally {
             fixed42RecycleNodes(owned);
         }
@@ -2437,6 +2503,92 @@ public final class RuntimeOtaFlowTest {
             cursor = ancestor.parentIndex;
         }
         return false;
+    }
+
+    private Fixed42LauncherIconDiagnostic fixed42LauncherIconDiagnostic(
+            List<Fixed42AxNode> nodes,
+            int iconIndex,
+            int rootIndex,
+            String launcherPackage,
+            int width,
+            int height) {
+        if (iconIndex < 0 || rootIndex < 0) {
+            return Fixed42LauncherIconDiagnostic.rejected(
+                    "disconnected", 0);
+        }
+        Rect iconBounds = nodes.get(iconIndex).bounds;
+        if (!fixed42FullBounds(iconBounds, width, height)) {
+            return Fixed42LauncherIconDiagnostic.rejected(
+                    "bounds", 0);
+        }
+        int cursor = iconIndex;
+        for (int depth = 0;
+                cursor >= 0 && depth < FIXED42_LAUNCHER_ANCESTOR_LIMIT;
+                depth++) {
+            Fixed42AxNode ancestor = nodes.get(cursor);
+            int observedDepth = depth + 1;
+            if (!ancestor.visible) {
+                return Fixed42LauncherIconDiagnostic.rejected(
+                        "ancestor-hidden",
+                        observedDepth);
+            }
+            if (!launcherPackage.equals(ancestor.packageName)) {
+                return Fixed42LauncherIconDiagnostic.rejected(
+                        "ancestor-package",
+                        observedDepth);
+            }
+            if (!fixed42FullBounds(ancestor.bounds, width, height)) {
+                return Fixed42LauncherIconDiagnostic.rejected(
+                        "ancestor-bounds",
+                        observedDepth);
+            }
+            if (!ancestor.bounds.contains(iconBounds)) {
+                return Fixed42LauncherIconDiagnostic.rejected(
+                        "ancestor-containment",
+                        observedDepth);
+            }
+            if (cursor == rootIndex) {
+                return new Fixed42LauncherIconDiagnostic(
+                        "visible",
+                        observedDepth, true);
+            }
+            cursor = ancestor.parentIndex;
+        }
+        return Fixed42LauncherIconDiagnostic.rejected(
+                "disconnected",
+                FIXED42_LAUNCHER_ANCESTOR_LIMIT);
+    }
+
+    private static String fixed42LauncherPrimitiveDiagnostic(
+            String rejectionReason,
+            boolean launcherForeground,
+            boolean activeRootPresent,
+            String activeRootPackageMatch,
+            int nodeCount,
+            boolean nullChildObserved,
+            int rootCount,
+            boolean rootExact,
+            boolean rootBoundsMatch,
+            int iconCount,
+            boolean iconExact,
+            boolean iconFullyVisible,
+            String iconRejectionReason,
+            int iconAncestryDepth,
+            boolean iconReachedRoot) {
+        return new StringBuilder("reject=").append(rejectionReason)
+                .append(" foreground=").append(launcherForeground)
+                .append(" activeRoot=").append(activeRootPresent)
+                .append(" activePkg=").append(activeRootPackageMatch)
+                .append(" nodes=").append(nodeCount)
+                .append(" nullChild=").append(nullChildObserved)
+                .append(" root=").append(rootCount).append('/')
+                .append(rootExact).append('/').append(rootBoundsMatch)
+                .append(" icon=").append(iconCount).append('/')
+                .append(iconExact).append('/').append(iconFullyVisible)
+                .append(" iconReject=").append(iconRejectionReason)
+                .append(" ancestry=").append(iconAncestryDepth).append('/')
+                .append(iconReachedRoot)
+                .toString();
     }
 
     private UiObject2 findFreshFixed42LauncherIcon(
@@ -3352,10 +3504,82 @@ public final class RuntimeOtaFlowTest {
     private static final class Fixed42LauncherObservation {
         final int state;
         final Rect iconBounds;
+        final String diagnostic;
 
-        Fixed42LauncherObservation(int state, Rect iconBounds) {
+        Fixed42LauncherObservation(int state, Rect iconBounds, String diagnostic) {
             this.state = state;
             this.iconBounds = iconBounds == null ? null : new Rect(iconBounds);
+            this.diagnostic = diagnostic;
+        }
+    }
+
+    private static final class Fixed42LauncherIconDiagnostic {
+        final String reason;
+        final int ancestryDepth;
+        final boolean reachedRoot;
+
+        Fixed42LauncherIconDiagnostic(String reason, int ancestryDepth, boolean reachedRoot) {
+            this.reason = reason;
+            this.ancestryDepth = ancestryDepth;
+            this.reachedRoot = reachedRoot;
+        }
+
+        static Fixed42LauncherIconDiagnostic notEvaluated() {
+            return new Fixed42LauncherIconDiagnostic("not-evaluated", 0, false);
+        }
+
+        static Fixed42LauncherIconDiagnostic visible() {
+            return new Fixed42LauncherIconDiagnostic("visible", 0, true);
+        }
+
+        static Fixed42LauncherIconDiagnostic rejected(String reason, int ancestryDepth) {
+            return new Fixed42LauncherIconDiagnostic(reason, ancestryDepth, false);
+        }
+    }
+
+    private static final class Fixed42LauncherDiagnostics {
+        private static final String EMPTY_PRIMITIVES =
+                "reject=none foreground=false activeRoot=false activePkg=unknown"
+                        + " nodes=0 nullChild=false root=0/false/false"
+                        + " icon=0/false/false iconReject=not-evaluated ancestry=0/false";
+        private final int[] stateCounts = new int[4];
+        private int samples;
+        private int lastState = -1;
+        private long lastObservationMs = -1L;
+        private long maxObservationMs = -1L;
+        private String lastPrimitives = EMPTY_PRIMITIVES;
+
+        void record(int state, String primitives, long observationMs) {
+            if (samples < Integer.MAX_VALUE) samples++;
+            if (state >= 0
+                    && state < stateCounts.length
+                    && stateCounts[state] < Integer.MAX_VALUE) {
+                stateCounts[state]++;
+            }
+            lastState = state;
+            lastPrimitives = primitives;
+            lastObservationMs = observationMs;
+            if (observationMs > maxObservationMs) maxObservationMs = observationMs;
+        }
+
+        String timeoutLine(boolean drawerGestureSent, long elapsedMs) {
+            return new StringBuilder("Fixed42 launcher readiness timeout")
+                    .append(" samples=").append(samples)
+                    .append(" states=").append(joinCounts(stateCounts))
+                    .append(" lastState=").append(lastState)
+                    .append(" drawer=").append(drawerGestureSent)
+                    .append(" elapsedMs=").append(elapsedMs)
+                    .append(" observeMs=").append(lastObservationMs).append('/').append(maxObservationMs)
+                    .append(' ').append(lastPrimitives)
+                    .toString();
+        }
+
+        static long durationMs(long startedAt, long finishedAt) {
+            return finishedAt >= startedAt ? finishedAt - startedAt : -1L;
+        }
+
+        private static String joinCounts(int[] counts) {
+            return counts[0] + "/" + counts[1] + "/" + counts[2] + "/" + counts[3];
         }
     }
 

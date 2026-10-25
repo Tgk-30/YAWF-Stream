@@ -1502,6 +1502,185 @@ public final class Fixed42LauncherReadinessPolicyHarness {
   }
 }
 
+function fixed42LauncherDiagnosticsContract(java) {
+  const launch = methodBody(java, "launchFixed42ProductFromVisibleLauncher");
+  const observe = methodBody(java, "observeFixed42LauncherReadiness");
+  const iconReason = methodBody(java, "fixed42LauncherIconDiagnostic");
+  const primitives = methodBody(java, "fixed42LauncherPrimitiveDiagnostic");
+  const diagnostics = nestedClassDeclaration(java, "Fixed42LauncherDiagnostics");
+
+  for (const token of [
+    "Fixed42LauncherDiagnostics diagnostics = new Fixed42LauncherDiagnostics();",
+    "diagnostics.record(observation.state, observation.diagnostic,",
+    "diagnostics.record(beforeDrawer.state, beforeDrawer.diagnostic,",
+    "Fixed42LauncherDiagnostics.durationMs(",
+    "if (ready == null) {",
+    "log(diagnostics.timeoutLine(",
+    'assertNotNull("Timed out waiting for exact fixed42 launcher readiness", ready)',
+  ]) need(launch, token, `fixed42 launcher timeout diagnostic lost ${token}`);
+  assert.equal((launch.match(/diagnostics\.record\(/g) ?? []).length, 2,
+    "every existing bounded readiness observation must be recorded once");
+  assert.equal((launch.match(/log\(diagnostics\.timeoutLine\(/g) ?? []).length, 1,
+    "fixed42 launcher timeout must emit one diagnostic line");
+
+  const failureGuard = launch.indexOf("if (ready == null) {");
+  const failureLog = launch.indexOf("log(diagnostics.timeoutLine(", failureGuard);
+  const timeout = launch.indexOf(
+    'assertNotNull("Timed out waiting for exact fixed42 launcher readiness", ready)',
+    failureLog,
+  );
+  assert.ok(failureGuard >= 0 && failureGuard < failureLog && failureLog < timeout,
+    "launcher diagnostic is not failure-only and immediately before the unchanged timeout");
+  const failureBlock = launch.slice(failureGuard, timeout);
+  assert.doesNotMatch(failureBlock,
+    /observeFixed42LauncherReadiness|device\.|\.click\(|\.swipe\(|SystemClock\.sleep/,
+    "launcher timeout diagnostic added a query, wait, or input");
+  assert.doesNotMatch(failureBlock, /appLabel|launcherPackage/,
+    "launcher timeout diagnostic leaked raw label or package values");
+
+  for (const token of [
+    '"foreground"',
+    '"root-unavailable"',
+    '"stale-child"',
+    "boolean rootBoundsMatch = launcherRoot != null",
+    'rejectionReason = "root-absent"',
+    'rejectionReason = "icon-absent"',
+    'rejectionReason = "icon-clipped"',
+    "activeRootPackageMatch",
+    "iconDiagnostic.reason",
+    "iconDiagnostic.ancestryDepth",
+    "iconDiagnostic.reachedRoot",
+  ]) need(observe, token, `fixed42 launcher primitive observation lost ${token}`);
+  const classify = observe.lastIndexOf("Fixed42LauncherReadinessPolicy.classify(");
+  const rootBoundsDiagnostic = observe.indexOf("boolean rootBoundsMatch = launcherRoot != null");
+  const iconDiagnostic = observe.indexOf("fixed42LauncherIconDiagnostic(");
+  assert.ok(classify >= 0 && classify < rootBoundsDiagnostic
+      && rootBoundsDiagnostic < iconDiagnostic,
+  "diagnostic primitive work must follow the unchanged acceptance predicate");
+
+  for (const token of [
+    '"bounds"',
+    '"ancestor-hidden"',
+    '"ancestor-package"',
+    '"ancestor-bounds"',
+    '"ancestor-containment"',
+    '"disconnected"',
+    "observedDepth",
+  ]) need(iconReason, token, `fixed42 launcher icon rejection diagnostic lost ${token}`);
+  assert.doesNotMatch(iconReason,
+    /getChild|getPackageName|getClassName|getText|getContentDescription|getBoundsInScreen|isVisibleToUser/,
+    "icon rejection diagnostic added an accessibility property or tree query");
+
+  for (const token of [
+    'new StringBuilder("reject=").append(rejectionReason)',
+    '.append(" foreground=")',
+    '.append(" activeRoot=")',
+    '.append(" activePkg=")',
+    '.append(" nodes=")',
+    '.append(" nullChild=")',
+    '.append(" root=")',
+    '.append(" icon=")',
+    '.append(" iconReject=")',
+    '.append(" ancestry=")',
+  ]) need(primitives, token, `fixed42 launcher primitive diagnostic lost ${token}`);
+  assert.doesNotMatch(primitives,
+    /appLabel|launcherPackage|packageName|className|contentDescription|\.text\b|\.description\b/,
+    "launcher primitive diagnostic references raw accessibility identity values");
+
+  for (const token of [
+    "private final int[] stateCounts = new int[4]",
+    "if (samples < Integer.MAX_VALUE) samples++",
+    "stateCounts[state]++",
+    "lastState = state",
+    "lastPrimitives = primitives",
+    "lastObservationMs = observationMs",
+    "if (observationMs > maxObservationMs)",
+    'new StringBuilder("Fixed42 launcher readiness timeout")',
+    '.append(" samples=").append(samples)',
+    '.append(" states=").append(joinCounts(stateCounts))',
+    '.append(" lastState=").append(lastState)',
+    '.append(" drawer=")',
+    '.append(" elapsedMs=")',
+    '.append(" observeMs=")',
+    ".append(' ').append(lastPrimitives)",
+    "finishedAt >= startedAt ? finishedAt - startedAt : -1L",
+  ]) need(diagnostics, token, `fixed42 launcher diagnostic binding lost ${token}`);
+  assert.doesNotMatch(diagnostics,
+    /appLabel|launcherPackage|packageName|className|contentDescription|\.text\b|\.description\b/,
+    "bounded launcher diagnostics reference raw accessibility identity values");
+}
+
+function runFixed42LauncherDiagnosticsHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42LauncherReadinessPolicy");
+  const diagnostics = nestedClassDeclaration(java, "Fixed42LauncherDiagnostics");
+  const harness = `
+public final class Fixed42LauncherDiagnosticsHarness {
+    private static final long SHORT_WAIT_MS = 20_000L;
+    ${policy}
+    ${diagnostics}
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    public static void main(String[] ignored) {
+        Fixed42LauncherDiagnostics values = new Fixed42LauncherDiagnostics();
+        values.record(Fixed42LauncherReadinessPolicy.WAITING_FOR_LAUNCHER,
+                "reject=foreground foreground=false activeRoot=false activePkg=unknown"
+                        + " nodes=0 nullChild=false root=0/false/false"
+                        + " icon=0/false/false iconReject=not-evaluated ancestry=0/false",
+                2L);
+        values.record(Fixed42LauncherReadinessPolicy.STALE,
+                "reject=stale-child foreground=true activeRoot=true activePkg=unknown"
+                        + " nodes=7 nullChild=true root=0/false/false"
+                        + " icon=0/false/false iconReject=not-evaluated ancestry=0/false",
+                5L);
+        values.record(Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON,
+                "reject=icon-clipped foreground=true activeRoot=true activePkg=match"
+                        + " nodes=57 nullChild=false root=1/true/true"
+                        + " icon=1/true/false iconReject=ancestor-bounds ancestry=3/false",
+                9L);
+        String line = values.timeoutLine(true, 20_003L);
+        for (String token : new String[] {
+                "samples=3", "states=1/1/1/0", "lastState=1",
+                "reject=icon-clipped", "drawer=true", "elapsedMs=20003",
+                "observeMs=9/9", "foreground=true", "activeRoot=true",
+                "activePkg=match", "nodes=57", "nullChild=false",
+                "root=1/true/true", "icon=1/true/false",
+                "iconReject=ancestor-bounds", "ancestry=3/false"
+        }) require(line.contains(token), "missing diagnostic token: " + token);
+        require(!line.contains("YAWF") && !line.contains("com.")
+                        && !line.contains("android.widget"),
+                "diagnostic leaked a raw accessibility identity");
+        require(line.length() <= 500 && line.indexOf('\\n') < 0,
+                "diagnostic must remain one bounded line");
+        require(Fixed42LauncherDiagnostics.durationMs(100L, 150L) == 50L,
+                "duration must retain monotonic elapsed time");
+        require(Fixed42LauncherDiagnostics.durationMs(150L, 100L) == -1L,
+                "duration must mark a non-monotonic sample");
+        System.out.println("fixed42-launcher-diagnostics-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-launcher-diagnostics-"));
+  const sourceFile = path.join(directory, "Fixed42LauncherDiagnosticsHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `fixed42 launcher diagnostic javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand, ["-cp", directory, "Fixed42LauncherDiagnosticsHarness"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, `fixed42 launcher diagnostic harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-launcher-diagnostics-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function fixed42MainProofDiagnosticContract(java) {
   const observe = methodBody(java, "observeFixed42SeedSnapshot");
   const mainStart = observe.indexOf('int mainIndex = fixed42UniqueResource(nodes, "main-content");');
@@ -1849,6 +2028,70 @@ test("fixed42 launcher waits through one bounded public transition before one fr
     assert.throws(
       () => runFixed42LauncherReadinessPolicyHarness(mutant),
       `fixed42 launcher policy mutant survived: ${before}`,
+    );
+  }
+});
+
+test("fixed42 launcher timeout emits one failure-only primitive diagnostic", () => {
+  fixed42LauncherDiagnosticsContract(source);
+  runFixed42LauncherDiagnosticsHarness(source);
+
+  const structuralMutants = [
+    ["success-log", source.replace("if (ready == null) {", "if (true) {")],
+    ["raw-label", source.replace(
+      "log(diagnostics.timeoutLine(",
+      "log(appLabel + diagnostics.timeoutLine(",
+    )],
+    ["extra-query", source.replace(
+      "            log(diagnostics.timeoutLine(",
+      "            observeFixed42LauncherReadiness(appLabel, launcherPackage);\n"
+        + "            log(diagnostics.timeoutLine(",
+    )],
+    ["unrecorded-fresh-drawer", source.replace(
+      "                diagnostics.record(beforeDrawer.state, beforeDrawer.diagnostic,",
+      "                diagnostics.record(observation.state, observation.diagnostic,",
+    )],
+    ["icon-reason-query", source.replace(
+      `                    "disconnected", 0);
+        }
+        Rect iconBounds = nodes.get(iconIndex).bounds;`,
+      `                    "disconnected", 0);
+        }
+        nodes.get(iconIndex).info.getBoundsInScreen(new Rect());
+        Rect iconBounds = nodes.get(iconIndex).bounds;`,
+    )],
+  ];
+  for (const [label, mutant] of structuralMutants) {
+    assert.notEqual(mutant, source, `fixed42 launcher diagnostic ${label} mutant anchor was absent`);
+    assert.throws(
+      () => fixed42LauncherDiagnosticsContract(mutant),
+      `fixed42 launcher diagnostic ${label} mutant survived`,
+    );
+  }
+
+  const executableMutants = [
+    source.replace(
+      "stateCounts[state]++;",
+      "stateCounts[0]++;",
+    ),
+    source.replace(
+      ".append(' ').append(lastPrimitives)",
+      '.append(" reject=none")',
+    ),
+    source.replace(
+      "lastState = state;",
+      "lastState = -1;",
+    ),
+    source.replace(
+      "if (observationMs > maxObservationMs)",
+      "if (observationMs < maxObservationMs)",
+    ),
+  ];
+  for (const mutant of executableMutants) {
+    assert.notEqual(mutant, source, "fixed42 launcher diagnostic executable mutant anchor was absent");
+    assert.throws(
+      () => runFixed42LauncherDiagnosticsHarness(mutant),
+      "fixed42 launcher diagnostic executable mutant survived",
     );
   }
 });
