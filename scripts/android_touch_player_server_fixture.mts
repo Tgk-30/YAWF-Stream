@@ -18,6 +18,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildLiveProbeReceipt } from "./android-touch-player-fixture/live-probe-contract.mjs";
 import { copyAdmittedMedia } from "./android-touch-player-fixture/media-contract.mjs";
 
 interface FixtureCLI {
@@ -169,7 +170,12 @@ const allowedMedia = new Set(["synthetic.mp4"]);
 
 function generateFixtureMedia(): void {
   const admitted = copyAdmittedMedia(FIXTURE_DIR, MEDIA_DIR);
-  const result = spawnSync("ffprobe", [
+  const versionResult = spawnSync("ffprobe", ["-version"], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const liveResult = spawnSync("ffprobe", [
     "-v", "error",
     "-show_entries",
     "format=format_name,duration,size:stream=index,codec_type,codec_name,codec_tag_string,width,height,r_frame_rate,sample_rate,channels,channel_layout:stream_tags=language,name:stream_disposition=default",
@@ -180,37 +186,28 @@ function generateFixtureMedia(): void {
     maxBuffer: 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  if (result.error != null || result.status !== 0) {
-    throw new Error("The installed ffprobe could not inspect the admitted touch-player media.");
+  let parsedLive: unknown = null;
+  if (liveResult.error == null && liveResult.status === 0) {
+    try {
+      parsedLive = JSON.parse(liveResult.stdout);
+    } catch {
+      parsedLive = null;
+    }
   }
-  const live = JSON.parse(result.stdout) as {
-    streams?: Array<Record<string, any>>;
-    format?: Record<string, any>;
-  };
-  if (!Array.isArray(live.streams) || live.streams.length !== 3 || live.format == null) {
-    throw new Error("Live ffprobe did not report exactly one video and two audio streams.");
+  const { receipt, encoded } = buildLiveProbeReceipt({
+    admitted,
+    versionResult: {
+      ok: versionResult.error == null && versionResult.status === 0,
+      stdout: versionResult.stdout,
+    },
+    liveResult: { ok: liveResult.error == null && liveResult.status === 0 },
+    parsedLive,
+  });
+  writeFileSync(MEDIA_PROBE_PATH, encoded, { mode: 0o600, flag: "wx" });
+  if (!receipt.validation.ok) {
+    const failedFields = receipt.validation.failedFields.map((entry: { field: string }) => entry.field).join(", ");
+    throw new Error(`Live ffprobe contract failed: ${failedFields}.`);
   }
-  const [video, english, japanese] = live.streams;
-  const language = (stream: Record<string, any>): string | null =>
-    typeof stream.tags?.language === "string" ? stream.tags.language : null;
-  const label = (stream: Record<string, any>): string | null =>
-    typeof stream.tags?.name === "string" ? stream.tags.name : null;
-  if (
-    video?.codec_type !== "video" || video.codec_name !== "h264" ||
-    video.width !== 320 || video.height !== 180 || video.r_frame_rate !== "30/1" ||
-    english?.codec_type !== "audio" || english.codec_name !== "aac" ||
-    english.sample_rate !== "48000" || english.channels !== 1 ||
-    language(english) !== "eng" || label(english) !== "Synthetic English 440 Hz tone" ||
-    english.disposition?.default !== 1 ||
-    japanese?.codec_type !== "audio" || japanese.codec_name !== "aac" ||
-    japanese.sample_rate !== "48000" || japanese.channels !== 1 ||
-    language(japanese) !== "jpn" || label(japanese) !== "Synthetic Japanese 880 Hz tone" ||
-    japanese.disposition?.default !== 0 ||
-    Number(live.format.duration) !== 30
-  ) {
-    throw new Error("Live ffprobe facts differ from the exact admitted two-track fixture.");
-  }
-  writeFileSync(MEDIA_PROBE_PATH, `${JSON.stringify({ admitted, live }, null, 2)}\n`, { mode: 0o600 });
 }
 
 function boundedPort(raw: string | undefined, fallback: number): number {

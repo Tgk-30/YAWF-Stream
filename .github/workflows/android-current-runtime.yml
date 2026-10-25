@@ -1122,7 +1122,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node --test scripts/android_touch_player_workflow.test.mjs
+          node --test scripts/android_touch_player_workflow.test.mjs scripts/android-touch-player-fixture/live-probe-contract.test.mjs
           node --check scripts/android-touch-player-fixture/media-contract.mjs
           node --check scripts/android_touch_player_server_fixture.mts
 
