@@ -143,9 +143,14 @@ function validUi() {
     evidenceStatus: "provisional", decodedPlaybackClaimed: false,
     manualDecodedPlaybackReviewRequired: true,
     manualDecodedPlaybackReviewCaptureLabels: ["playing-clock-initial", "playing-clock-advanced"],
+    strictSeekSemanticObserved: true, nativeSeekRangeObserved: false,
+    playbackClockObservationBasis: "native-seekbar-aria-valuetext",
     checks: {
       nativeUiAutomationOnly: true, webViewInjectionUsed: false, privatePreferencesUsed: false,
       permissionGrantUsed: false, firstDecodeClockAdvanced: true, centralPauseResume: true,
+      strictSeekSemanticObserved: true, nativeSeekRangeObserved: false,
+      playbackClockObservationBasis: "native-seekbar-aria-valuetext",
+      pausedClockBeforeResumeSeconds: 3,
       pausedBackForward: true, touchScrubDeltaSeconds: 8, twoRealAudioTracksObserved: true,
       japaneseSelectionPersistedAfterHandoff: true, normalHlsMetadataReady: true,
       preAudioSwitchAbsolutePositionSeconds: 20, postHandoffAbsolutePositionSeconds: 20,
@@ -191,6 +196,17 @@ const PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
 const PLAYER_DIALOG_TITLE = "Playing Synthetic Fixture Movie (2026)";
 const DISPLAY = { width: 1080, height: 1920 };
 
+function javaPatternConstant(name) {
+  const match = driver.match(new RegExp(
+    `private static final Pattern ${name} = Pattern\\.compile\\(\\n\\s*("(?:[^"\\\\]|\\\\.)*")\\);`,
+  ));
+  assert.ok(match, `missing Java pattern constant ${name}`);
+  return new RegExp(JSON.parse(match[1]));
+}
+
+const SEEK_VALUE_ONLY = javaPatternConstant("SEEK_VALUE_ONLY");
+const SEEK_VALUE_WITH_NAME = javaPatternConstant("SEEK_VALUE_WITH_NAME");
+
 function playerDialog(parent = null) {
   return { packageName: PRODUCT_PACKAGE, className: "android.app.Dialog", text: PLAYER_DIALOG_TITLE, parent };
 }
@@ -224,12 +240,23 @@ function selectPlayerTransport(nodes, label, display = DISPLAY) {
   return candidates[0] ?? null;
 }
 
-function parseThirtySecondClock(value) {
-  const match = String(value ?? "").match(/.*?(\d{1,2}):(\d{2})\s*(?:of|\/)\s*0:30.*?/i);
-  if (match == null) return -1;
-  const minutes = Number(match[1]);
-  const seconds = Number(match[2]);
-  return minutes <= 59 && seconds <= 59 ? minutes * 60 + seconds : -1;
+function parseStrictSeekSemantic(text, description) {
+  const rawText = String(text ?? "");
+  const rawDescription = String(description ?? "");
+  let match;
+  if (rawDescription === "" && (match = rawText.match(SEEK_VALUE_WITH_NAME)) != null) {
+    // Chromium may combine aria-valuetext and the accessible name in node text.
+  } else if (rawDescription === "Seek"
+      && (match = rawText.match(SEEK_VALUE_ONLY)) != null) {
+    // Chromium may expose aria-valuetext as text and the accessible name separately.
+  } else {
+    return null;
+  }
+  const current = Number(match[1]) * 60 + Number(match[2]);
+  const total = Number(match[3]) * 60 + Number(match[4]);
+  if (Number(match[2]) > 59 || Number(match[4]) > 59 || total !== 30
+      || current < 0 || current > total) return null;
+  return { current, total };
 }
 
 function executeRangeValues(range, bounds, display = DISPLAY) {
@@ -246,7 +273,7 @@ function executeRangeValues(range, bounds, display = DISPLAY) {
   ]);
 }
 
-function selectPlayerSeekRange(nodes, display = DISPLAY) {
+function selectPlayerSeekObservation(nodes, display = DISPLAY) {
   const dialogs = nodes.filter((node) => node.packageName === PRODUCT_PACKAGE
     && node.className === "android.app.Dialog" && node.text === PLAYER_DIALOG_TITLE);
   if (dialogs.length > 1) throw new Error("ambiguous active player dialog");
@@ -254,18 +281,20 @@ function selectPlayerSeekRange(nodes, display = DISPLAY) {
   const candidates = [];
   for (const node of nodes) {
     if (node.packageName !== PRODUCT_PACKAGE || node.className !== "android.widget.SeekBar"
-      || !insideActivePlayerDialog(node) || node.range == null
+      || !insideActivePlayerDialog(node)
       || node.visible !== true || node.enabled !== true || node.clickable !== true
-      || !executeRangeValues(node.range, node.bounds, display)) continue;
-    for (const value of [node.text, node.description]) {
-      const position = parseThirtySecondClock(value);
-      if (position >= 0 && Math.abs(position - node.range.current) > 1) {
-        throw new Error("SeekBar label disagrees with native range");
+      || !validBounds(node.bounds, 44, 1, display)) continue;
+    const semantic = parseStrictSeekSemantic(node.text, node.description);
+    if (semantic == null) continue;
+    if (node.range != null) {
+      if (!executeRangeValues(node.range, node.bounds, display)) continue;
+      if (Math.abs(semantic.current - node.range.current) > 1) {
+        throw new Error("SeekBar aria-valuetext disagrees with native range");
       }
     }
-    candidates.push(node);
+    candidates.push({ node, semantic, range: node.range ?? null });
   }
-  if (candidates.length > 1) throw new Error("ambiguous bounded native SeekBar");
+  if (candidates.length > 1) throw new Error("ambiguous strict native SeekBar");
   return candidates[0] ?? null;
 }
 
@@ -286,17 +315,7 @@ function scanPlayerAxFrame(nodes, { requestPlayingPauseFocus = false, focusActio
   const plays = transports.filter((node) => node.text === "Play" || node.description === "Play");
   if (pauses.length > 1 || plays.length > 1) throw new Error("ambiguous active-player transport");
   if (pauses.length === 1 && plays.length === 1) throw new Error("both Play and Pause exposed");
-  const seek = selectPlayerSeekRange(nodes);
-  const semanticClocks = nodes.filter(insideActivePlayerDialog)
-    .flatMap((node) => [parseThirtySecondClock(node.text), parseThirtySecondClock(node.description)])
-    .filter((position) => position >= 0);
-  if (semanticClocks.some((position) => Math.abs(position - semanticClocks[0]) > 1)) {
-    throw new Error("conflicting semantic clocks");
-  }
-  if (seek != null && semanticClocks.length > 0
-    && Math.abs(seek.range.current - semanticClocks[0]) > 1) {
-    throw new Error("native range disagrees with semantic clock");
-  }
+  const seek = selectPlayerSeekObservation(nodes);
   const snapshot = {
     activeDialogs: dialogs.length,
     nestedDialogs,
@@ -305,7 +324,8 @@ function scanPlayerAxFrame(nodes, { requestPlayingPauseFocus = false, focusActio
     seekBars: seek == null ? 0 : 1,
     focusedPauseControls: pauses.filter((node) => node.focused === true).length,
     nativeRange: seek?.range ?? null,
-    semanticClock: semanticClocks[0] ?? -1,
+    semanticClock: seek?.semantic.current ?? -1,
+    semanticTotal: seek?.semantic.total ?? -1,
     pauseFocusActionAttempted: false,
     pauseFocusActionSucceeded: false,
   };
@@ -338,7 +358,7 @@ function verifyFocusedPlayingSnapshot(frames, focusActionResult = true) {
     throw new Error("fresh focused playing state not verified");
   }
   return {
-    position: verified.nativeRange == null ? -1 : Math.round(verified.nativeRange.current),
+    position: verified.semanticClock,
     focusActions: observed.pauseFocusActionAttempted ? 1 : 0,
   };
 }
@@ -591,6 +611,69 @@ test("clickable-label lookup rejects nonclickable ancestor traps and admits only
   assert.throws(() => resolve([button, second]), /ambiguous/);
 });
 
+test("strict same-SeekBar aria-valuetext contract admits only exact native observations", async (t) => {
+  const dialog = playerDialog();
+  const base = {
+    packageName: PRODUCT_PACKAGE, className: "android.widget.SeekBar",
+    text: "0:20 of 0:30, Seek", description: "", range: null,
+    visible: true, enabled: true, clickable: true,
+    bounds: { left: 28, top: 1572, right: 1052, bottom: 1690 }, parent: { parent: dialog },
+  };
+  const cases = [
+    ["empty description with combined exact text", base, true],
+    ["split exact label and value text", { ...base, text: "0:20 of 0:30", description: "Seek" }, true],
+    ["arbitrary suffix", { ...base, text: "0:20 of 0:30, Seek now" }, false],
+    ["wrong accessible label", { ...base, text: "0:20 of 0:30", description: "Timeline" }, false],
+    ["unrelated clock node", { ...base, className: "android.widget.TextView" }, false],
+    ["hidden slider", { ...base, visible: false }, false],
+    ["disabled slider", { ...base, enabled: false }, false],
+    ["clock beyond total", { ...base, text: "0:31 of 0:30, Seek" }, false],
+    ["wrong total", { ...base, text: "0:20 of 0:29, Seek" }, false],
+  ];
+  for (const [name, candidate, admitted] of cases) {
+    await t.test(name, () => {
+      assert.match(driver, /static int\[\] parseStrictSeekSemantic\(/,
+        "Java driver must own the exact same-node semantic parser");
+      const observed = selectPlayerSeekObservation([dialog, candidate]);
+      assert.equal(observed != null, admitted);
+    });
+  }
+  await t.test("ambiguous strict sliders", () => {
+    assert.match(driver, /Multiple strict semantic SeekBars/);
+    assert.throws(() => selectPlayerSeekObservation([
+      dialog, base, { ...base, bounds: { left: 28, top: 1400, right: 1052, bottom: 1518 } },
+    ]), /ambiguous strict native SeekBar/);
+  });
+  await t.test("optional numeric range agreement", () => {
+    assert.match(driver, /aria-valuetext disagreed with its native range/);
+    assert.equal(selectPlayerSeekObservation([
+      dialog, { ...base, range: { min: 0, current: 20, max: 30 } },
+    ]).semantic.current, 20);
+    assert.throws(() => selectPlayerSeekObservation([
+      dialog, { ...base, range: { min: 0, current: 16, max: 30 } },
+    ]), /disagrees/);
+  });
+});
+
+test("initial playing choreography reuses one native snapshot and lowers paused clock with bounded input", () => {
+  const runFlow = exactSlice(driver, "private void runFlow()", "\n    private void openCurrentAudioSheet(");
+  assert.match(driver, /private void assertCoreLayoutSnapshot\(/);
+  assert.match(runFlow, /assertCoreLayoutSnapshot\("portrait-playing", initialPlaying, "Pause"\)/);
+  assert.doesNotMatch(runFlow, /assertCoreLayout\("portrait-playing", "Pause"\)/);
+  assert.ok(runFlow.indexOf('capture("playing-clock-advanced")')
+    < runFlow.indexOf('clickPlayerTransport("Pause", "central Pause"'));
+  assert.ok(runFlow.indexOf('clickPlayerTransport("Pause", "central Pause"')
+    < runFlow.indexOf("positionPausedClockAtMostFive()"));
+  assert.ok(runFlow.indexOf("positionPausedClockAtMostFive()")
+    < runFlow.indexOf('clickPlayerTransport("Play", "central Play"'));
+  const lower = exactSlice(driver, "private int positionPausedClockAtMostFive()", "\n    private void openCurrentAudioSheet(");
+  assert.match(lower, /for \(int attempt = 0; attempt < 3/);
+  assert.match(lower, /clickPlayerLabeled\("Back 10 seconds"/);
+  assert.match(lower, /position <= 5/);
+  assert.match(lower, /waitForPlaybackPositionAtMost\(/);
+  assert.doesNotMatch(lower, /evaluateJavascript|executeShellCommand|setText/);
+});
+
 test("active-player AX selection executes run4 shapes and rejects identity and range mutants", () => {
   assert.ok(driver.includes('private static final String PLAYER_DIALOG_TITLE = "Playing Synthetic Fixture Movie (2026)";'),
     "driver must bind controls to the exact active fixture-player dialog");
@@ -629,13 +712,13 @@ test("active-player AX selection executes run4 shapes and rejects identity and r
     visible: true, enabled: true, clickable: true,
     bounds: { left: 28, top: 1572, right: 1052, bottom: 1690 }, parent: { parent: dialog },
   };
-  assert.equal(selectPlayerSeekRange([dialog, run4Seek]), run4Seek);
-  assert.equal(parseThirtySecondClock(run4Seek.text), 30);
-  assert.equal(selectPlayerSeekRange([dialog, { ...run4Seek, text: "", description: "" }])?.range.current, 30);
+  assert.equal(selectPlayerSeekObservation([dialog, run4Seek]).node, run4Seek);
+  assert.deepEqual(parseStrictSeekSemantic(run4Seek.text, run4Seek.description), { current: 30, total: 30 });
+  assert.equal(selectPlayerSeekObservation([dialog, { ...run4Seek, range: null }]).semantic.current, 30);
+  assert.equal(selectPlayerSeekObservation([dialog, { ...run4Seek, text: "", description: "" }]), null);
   const rejected = [
     { ...run4Seek, packageName: "other.package" },
     { ...run4Seek, className: "android.view.View" },
-    { ...run4Seek, range: null },
     { ...run4Seek, range: { min: 0, current: Number.NaN, max: 30 } },
     { ...run4Seek, range: { min: 0, current: 31, max: 30 } },
     { ...run4Seek, range: { min: 1, current: 20, max: 30 } },
@@ -647,26 +730,26 @@ test("active-player AX selection executes run4 shapes and rejects identity and r
     { ...run4Seek, bounds: { left: 28, top: 1572, right: 1100, bottom: 1690 } },
     { ...run4Seek, parent: { parent: detailDialog } },
   ];
-  for (const mutant of rejected) assert.equal(selectPlayerSeekRange([dialog, mutant]), null);
-  assert.throws(() => selectPlayerSeekRange([
+  for (const mutant of rejected) assert.equal(selectPlayerSeekObservation([dialog, mutant]), null);
+  assert.throws(() => selectPlayerSeekObservation([
     dialog, { ...run4Seek, text: "0:25 of 0:30, Seek" },
   ]), /disagrees/);
-  assert.throws(() => selectPlayerSeekRange([
+  assert.throws(() => selectPlayerSeekObservation([
     dialog, run4Seek,
     { ...run4Seek, bounds: { left: 28, top: 1400, right: 1052, bottom: 1518 } },
-  ]), /ambiguous bounded native SeekBar/);
+  ]), /ambiguous strict native SeekBar/);
 
   const rangeReader = exactSlice(
     driver,
     "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
-    "\n    private int mergeObservedClock(",
+    "\n    private Rect uniqueBounds(",
   );
   assert.equal((rangeReader.match(/getRootInActiveWindow\(\)/g) ?? []).length, 1);
   assert.match(rangeReader, /node\.getRangeInfo\(\)/);
   assert.match(rangeReader, /node\.getBoundsInScreen\(bounds\)/);
   assert.match(rangeReader, /node\.isVisibleToUser\(\)/);
-  assert.match(rangeReader, /parsePlaybackPosition\(/);
-  assert.match(rangeReader, /Multiple bounded native SeekBars/);
+  assert.match(rangeReader, /parseStrictSeekSemantic\(/);
+  assert.match(rangeReader, /Multiple strict semantic SeekBars/);
   assert.match(rangeReader, /AccessibilityNodeInfo\.obtain\(node\)/);
   assert.match(rangeReader, /performAction\(AccessibilityNodeInfo\.ACTION_FOCUS\)/);
   assert.doesNotMatch(rangeReader, /startsWith\("Seek"\)/);
@@ -679,7 +762,7 @@ test("single AX snapshot keeps delayed playing observation strict across normal 
   const snapshotReader = exactSlice(
     driver,
     "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
-    "\n    private int mergeObservedClock(",
+    "\n    private Rect uniqueBounds(",
   );
   assert.equal((snapshotReader.match(/getRootInActiveWindow\(\)/g) ?? []).length, 1,
     "each observation must use one fresh native tree root");
@@ -715,7 +798,7 @@ test("single AX snapshot keeps delayed playing observation strict across normal 
     "run5's Pause scan returned after the normal chrome timer");
   assert.ok(run5Timing.rangeFailureMs > run5Timing.pauseSnapshotMs);
   assert.equal(selectPlayerTransport([dialog, playingPause], "Pause"), playingPause);
-  assert.equal(selectPlayerSeekRange(hiddenAfterSlowIndependentScan), null,
+  assert.equal(selectPlayerSeekObservation(hiddenAfterSlowIndependentScan), null,
     "the run5-style later independent scan loses the transient range");
   assert.deepEqual(verifyFocusedPlayingSnapshot([
     [dialog, playingPause, playingSeek],
@@ -739,7 +822,7 @@ test("single AX snapshot keeps delayed playing observation strict across normal 
   assert.equal(verifyFocusedPlayingSnapshot([
     [dialog, playingPause, { ...playingSeek, range: null }],
     [dialog, focusedPause, { ...playingSeek, range: null }],
-  ]).position, -1, "semantic clock without RangeInfo must not become a position");
+  ]).position, 13, "strict same-node aria-valuetext remains valid without RangeInfo");
   assert.throws(() => verifyFocusedPlayingSnapshot([
     [dialog, { ...playingPause, packageName: "other.package" }, playingSeek],
   ]), /playing Pause not observed/);
@@ -772,8 +855,8 @@ test("single AX snapshot keeps delayed playing observation strict across normal 
     let reveals = 0;
     for (const nodes of frames) {
       const snapshot = scanPlayerAxFrame(nodes);
-      if (snapshot.nativeRange != null) {
-        return { position: Math.round(snapshot.nativeRange.current), reveals };
+      if (snapshot.semanticClock >= 0) {
+        return { position: snapshot.semanticClock, reveals };
       }
       if (shouldReveal(snapshot, reveals)) reveals++;
     }
@@ -786,13 +869,13 @@ test("single AX snapshot keeps delayed playing observation strict across normal 
   assert.deepEqual(waitForPosition([[dialog], [dialog], [dialog]]), { position: -1, reveals: 1 });
   assert.deepEqual(waitForPosition([
     [dialog, { ...playingSeek, text: "0:13 of 0:30, Seek", range: null }],
-  ]), { position: -1, reveals: 1 }, "semantic text must not waive native RangeInfo");
+  ]), { position: 13, reveals: 0 }, "strict same-node aria-valuetext does not require RangeInfo");
 
   const observerMethods = [
     exactSlice(driver, "private int waitForPlaybackPositionAtLeast(", "\n    private int waitForPlaybackPositionAtMost("),
     exactSlice(driver, "private int waitForPlaybackPositionAtMost(", "\n    private int waitForPlaybackPositionAvailable("),
-    exactSlice(driver, "private int waitForPlaybackPositionAvailable(", "\n    private float[] waitForNativeSeekRange("),
-    exactSlice(driver, "private float[] waitForNativeSeekRange(", "\n    private PlayerAxSnapshot readPlayerAxSnapshot("),
+    exactSlice(driver, "private int waitForPlaybackPositionAvailable(", "\n    private int waitForStrictTimelineTotal("),
+    exactSlice(driver, "private int waitForStrictTimelineTotal(", "\n    private PlayerAxSnapshot readPlayerAxSnapshot("),
   ];
   for (const observer of observerMethods) {
     assert.match(observer, /long deadline = SystemClock\.uptimeMillis\(\) \+ timeoutMs/);
@@ -801,9 +884,9 @@ test("single AX snapshot keeps delayed playing observation strict across normal 
     assert.doesNotMatch(observer, /parsePlaybackPosition|centerX|width\(\).*position/);
   }
   assert.match(observerMethods[1], /last >= 0 && last <= maximum/,
-    "an absent native range must not satisfy an at-most wait");
+    "an absent strict semantic clock must not satisfy an at-most wait");
   assert.match(observerMethods[2], /snapshot\.playbackPositionSeconds\(\)/);
-  assert.match(observerMethods[3], /snapshot\.copyNativeRange\(\)/);
+  assert.match(observerMethods[3], /snapshot\.clockTotalSeconds/);
   assert.doesNotMatch(driver, /private int readPlaybackPosition\(/);
 });
 
@@ -811,7 +894,7 @@ test("native Pause focus is blocked before input when the exact player has a nes
   const snapshotReader = exactSlice(
     driver,
     "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
-    "\n    private int mergeObservedClock(",
+    "\n    private Rect uniqueBounds(",
   );
   assert.match(snapshotReader, /if \(requestPlayingPauseFocus\s*&& snapshot\.activeDialogs == 1\s*&& snapshot\.nestedDialogs == 0\s*&& snapshot\.pauseControls == 1/);
 
@@ -998,11 +1081,15 @@ test("driver emits provisional decode evidence, exact handoff clocks, and measur
   assert.match(driver, /receipt\.put\("evidenceStatus", "provisional"\)/);
   assert.match(driver, /receipt\.put\("decodedPlaybackClaimed", false\)/);
   assert.match(driver, /receipt\.put\("manualDecodedPlaybackReviewRequired", true\)/);
+  assert.match(driver, /receipt\.put\("strictSeekSemanticObserved", strictSeekSemanticObserved\)/);
+  assert.match(driver, /receipt\.put\("nativeSeekRangeObserved", nativeSeekRangeObserved\)/);
+  assert.match(driver, /receipt\.put\("playbackClockObservationBasis", observationBasis\)/);
   assert.doesNotMatch(driver, /receipt\.put\("decodedPlaybackClaimed", "passed"\.equals\(outcome\)\)/);
 });
 
 test("layout checks bind the visible transport state at each call site", () => {
-  assert.match(driver, /assertCoreLayout\("portrait-playing", "Pause"\)/);
+  assert.match(driver, /assertCoreLayoutSnapshot\("portrait-playing", initialPlaying, "Pause"\)/);
+  assert.doesNotMatch(driver, /assertCoreLayout\("portrait-playing", "Pause"\)/);
   assert.match(driver, /assertCoreLayout\("landscape", "Play"\)/);
   assert.match(driver, /assertCoreLayout\("portrait-return", "Play"\)/);
   assert.match(driver, /private void assertCoreLayout\(String label, String expectedPlayPauseLabel\)/);
@@ -1050,7 +1137,7 @@ test("driver positions paused playback away from either clamp before one ten-sec
   assert.match(doubleTap, /doubleTapDelta >= 9/);
   assert.match(doubleTap, /doubleTapDelta <= 11/);
   assert.match(driver, /assertAbsoluteThirtySecondTimeline\(\)/);
-  assert.match(driver, /range\[1\] >= 29f && range\[1\] <= 31f/);
+  assert.match(driver, /assertEquals\("HLS audio handoff changed the absolute 30 second timeline", 30, total\)/);
 });
 
 test("bounded receipt validator accepts complete evidence and kills each semantic omission", () => {
@@ -1058,9 +1145,25 @@ test("bounded receipt validator accepts complete evidence and kills each semanti
   assert.equal(accepted.outcome, "provisional");
   assert.equal(accepted.decodedPlaybackClaimed, false);
   assert.equal(accepted.manualDecodedPlaybackReviewRequired, true);
+  assert.equal(accepted.playbackClockObservationBasis, "native-seekbar-aria-valuetext");
+  assert.equal(accepted.nativeSeekRangeObserved, false);
   assert.equal(accepted.selectedAudioHlsStartSeconds, 20);
+  const withRange = validUi();
+  withRange.nativeSeekRangeObserved = true;
+  withRange.checks.nativeSeekRangeObserved = true;
+  withRange.playbackClockObservationBasis = "native-seekbar-range-plus-aria-valuetext";
+  withRange.checks.playbackClockObservationBasis = "native-seekbar-range-plus-aria-valuetext";
+  assert.equal(validateTouchPlayerEvidence(withRange, validServer()).nativeSeekRangeObserved, true);
   const mutants = [
     () => { const x = validUi(); x.checks.firstDecodeClockAdvanced = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.strictSeekSemanticObserved = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.strictSeekSemanticObserved = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.playbackClockObservationBasis = "none"; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.playbackClockObservationBasis = "none"; return [x, validServer()]; },
+    () => { const x = validUi(); x.nativeSeekRangeObserved = true; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.nativeSeekRangeObserved = true; return [x, validServer()]; },
+    () => { const x = validUi(); x.playbackClockObservationBasis = "native-seekbar-range-plus-aria-valuetext"; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.pausedClockBeforeResumeSeconds = 6; return [x, validServer()]; },
     () => { const x = validUi(); x.checks.touchScrubDeltaSeconds = 0; return [x, validServer()]; },
     () => { const x = validUi(); x.decodedPlaybackClaimed = true; return [x, validServer()]; },
     () => { const x = validUi(); x.manualDecodedPlaybackReviewRequired = false; return [x, validServer()]; },

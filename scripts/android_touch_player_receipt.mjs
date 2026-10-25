@@ -28,7 +28,22 @@ export function validateTouchPlayerEvidence(ui, server) {
   assert.equal(ui?.checks?.webViewInjectionUsed, false);
   assert.equal(ui?.checks?.privatePreferencesUsed, false);
   assert.equal(ui?.checks?.permissionGrantUsed, false);
+  assert.equal(ui?.strictSeekSemanticObserved, true);
+  assert.equal(ui?.checks?.strictSeekSemanticObserved, true);
+  assert.equal(typeof ui?.nativeSeekRangeObserved, "boolean");
+  assert.equal(ui?.checks?.nativeSeekRangeObserved, ui.nativeSeekRangeObserved);
+  const observationBasis = ui?.playbackClockObservationBasis;
+  assert.equal(ui?.checks?.playbackClockObservationBasis, observationBasis);
+  assert.ok([
+    "native-seekbar-aria-valuetext",
+    "native-seekbar-range-plus-aria-valuetext",
+  ].includes(observationBasis));
+  assert.equal(ui.nativeSeekRangeObserved,
+    observationBasis === "native-seekbar-range-plus-aria-valuetext");
   for (const key of REQUIRED_TRUE) assert.equal(ui.checks[key], true, key);
+  assert.ok(Number.isInteger(ui.checks.pausedClockBeforeResumeSeconds));
+  assert.ok(ui.checks.pausedClockBeforeResumeSeconds >= 0
+    && ui.checks.pausedClockBeforeResumeSeconds <= 5);
   assert.ok(Number.isInteger(ui.checks.touchScrubDeltaSeconds));
   assert.ok(ui.checks.touchScrubDeltaSeconds >= 3 && ui.checks.touchScrubDeltaSeconds <= 25);
   const preAudioSwitch = ui.checks.preAudioSwitchAbsolutePositionSeconds;
@@ -79,6 +94,8 @@ export function validateTouchPlayerEvidence(ui, server) {
     outcome: "provisional",
     decodedPlaybackClaimed: false,
     manualDecodedPlaybackReviewRequired: true,
+    playbackClockObservationBasis: observationBasis,
+    nativeSeekRangeObserved: ui.nativeSeekRangeObserved,
     uiChecks: REQUIRED_TRUE.length + 16,
     serverEvents: events.length,
     realProxyObserved: true,
