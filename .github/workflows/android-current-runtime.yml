@@ -698,7 +698,47 @@ jobs:
               return {'files':files,'fileCount':len(files),'totalBytes':total}
           web=inventory(Path('web/dist'),512,64*1024*1024)
           server=inventory(Path('server/src'),2048,32*1024*1024)
+          assert web['fileCount']==85, 'Exact ac885 web build must contain 85 files'
           index=next(item for item in web['files'] if item['path']=='index.html')
+          server_mode_route='/server-mode.js'
+          server_mode_body=b'globalThis.__DEBRIDSTREAMER_SERVER_URL__ = globalThis.location.origin;\n'
+          server_mode_content_type='text/javascript; charset=utf-8'
+          server_mode_cache_control='no-store'
+          server_mode_binding='''  app.get("/server-mode.js", async (_request, reply) => {
+              reply.header("content-type", "text/javascript; charset=utf-8");
+              reply.header("cache-control", "no-store");
+              return reply.send(
+                "globalThis.__DEBRIDSTREAMER_SERVER_URL__ = globalThis.location.origin;\\n",
+              );
+            });'''
+          server_app=root/'server/src/app.ts'
+          server_app_text=server_app.read_text()
+          assert server_app_text.count(server_mode_binding)==1, 'Exact server-mode source binding is missing or duplicated'
+          server_mode_stub=next(item for item in web['files'] if item['path']==server_mode_route[1:])
+          assert server_mode_stub=={
+              'path':'server-mode.js',
+              'bytes':247,
+              'sha256':'beb74b650355356f4bf15582982ba9f9f30532bb38337a3604d29bf29c136101',
+          }, 'Exact ac885 Local Mode dist stub identity changed'
+          served_static=[item for item in web['files'] if item['path']!=server_mode_stub['path']]
+          assert len(served_static)==84, 'Exact ac885 static web profile must contain 84 byte-identical routes'
+          dynamic_server_mode={
+              'route':server_mode_route,
+              'profile':'server-mode-origin-override',
+              'why':'production-server-origin-injection-overrides-local-mode-dist-stub',
+              'distStub':server_mode_stub,
+              'servedOverride':{
+                  'bytes':len(server_mode_body),
+                  'sha256':hashlib.sha256(server_mode_body).hexdigest(),
+                  'contentType':server_mode_content_type,
+                  'cacheControl':server_mode_cache_control,
+              },
+              'source':{
+                  'path':'server/src/app.ts',
+                  'sha256':sha256(server_app),
+                  'bindingSha256':hashlib.sha256(server_mode_binding.encode()).hexdigest(),
+              },
+          }
           fixture=Path('scripts/android_external_player_server_fixture.mts').resolve()
           driver_source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
           release_source=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
@@ -717,6 +757,8 @@ jobs:
               'hostedUi':{
                   'sourceRevision':release_source,
                   'webDist':{'indexSha256':index['sha256'],**web},
+                  'servedStaticWebDist':served_static,
+                  'dynamicWebRoutes':[dynamic_server_mode],
               },
               'serverRuntime':{
                   'sourceRevision':release_source,
@@ -1088,7 +1130,13 @@ jobs:
           assert source['nativeApp']['sourceRevision']==os.environ['PRODUCT_SOURCE']
           assert source['hostedUi']['sourceRevision']==os.environ['HOSTED_UI_SOURCE']
           assert source['serverRuntime']['sourceRevision']==os.environ['SERVER_RUNTIME_SOURCE']
-          assert smoke['servedWebDist']==source['hostedUi']['webDist']['files']
+          assert smoke['webDistInventory']==source['hostedUi']['webDist']['files']
+          assert smoke['servedStaticWebDist']==source['hostedUi']['servedStaticWebDist']
+          assert smoke['dynamicWebRoutes']==source['hostedUi']['dynamicWebRoutes']
+          assert len(smoke['webDistInventory'])==85
+          assert len(smoke['servedStaticWebDist'])==84
+          assert len(smoke['dynamicWebRoutes'])==1
+          assert len(smoke['servedStaticWebDist'])+len(smoke['dynamicWebRoutes'])==len(smoke['webDistInventory'])
           assert smoke['webIndexSha256']==source['hostedUi']['webDist']['indexSha256']
           checks=r['checks']
           assert r['outcome']=='passed' and checks['openPlayerClicks']==1

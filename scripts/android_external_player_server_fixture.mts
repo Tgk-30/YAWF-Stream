@@ -94,12 +94,46 @@ const WEB_DIST = join(REPO, "web", "dist");
 const MEDIA_DIR = join(ARTIFACT_DIR, "media");
 const MAX_WEB_DIST_FILES = 512;
 const MAX_WEB_DIST_BYTES = 64 * 1024 * 1024;
+const EXPECTED_WEB_DIST_FILES = 85;
+const EXPECTED_STATIC_WEB_DIST_FILES = 84;
 
 type AdmittedWebDistEntry = {
   path: string;
   bytes: number;
   sha256: string;
 };
+
+type DynamicWebRouteAdmission = {
+  route: string;
+  profile: "server-mode-origin-override";
+  why: "production-server-origin-injection-overrides-local-mode-dist-stub";
+  distStub: AdmittedWebDistEntry;
+  servedOverride: {
+    bytes: number;
+    sha256: string;
+    contentType: string;
+    cacheControl: string;
+  };
+  source: {
+    path: "server/src/app.ts";
+    sha256: string;
+    bindingSha256: string;
+  };
+};
+
+const SERVER_MODE_ROUTE = "/server-mode.js";
+const SERVER_MODE_BODY = "globalThis.__DEBRIDSTREAMER_SERVER_URL__ = globalThis.location.origin;\n";
+const SERVER_MODE_CONTENT_TYPE = "text/javascript; charset=utf-8";
+const SERVER_MODE_CACHE_CONTROL = "no-store";
+const SERVER_MODE_DIST_STUB_BYTES = 247;
+const SERVER_MODE_DIST_STUB_SHA256 = "beb74b650355356f4bf15582982ba9f9f30532bb38337a3604d29bf29c136101";
+const SERVER_MODE_SOURCE_BINDING = `  app.get("/server-mode.js", async (_request, reply) => {
+    reply.header("content-type", "text/javascript; charset=utf-8");
+    reply.header("cache-control", "no-store");
+    return reply.send(
+      "globalThis.__DEBRIDSTREAMER_SERVER_URL__ = globalThis.location.origin;\\n",
+    );
+  });`;
 
 function admittedWebDist(): AdmittedWebDistEntry[] {
   const files: AdmittedWebDistEntry[] = [];
@@ -132,10 +166,106 @@ function admittedWebDist(): AdmittedWebDistEntry[] {
     }
   };
   visit(WEB_DIST);
-  if (files.length === 0 || !files.some((entry) => entry.path === "index.html")) {
-    throw new Error("Compiled web asset inventory lacks index.html.");
+  if (files.length !== EXPECTED_WEB_DIST_FILES || !files.some((entry) => entry.path === "index.html")) {
+    throw new Error("Compiled web asset inventory does not contain the exact 85-file source build.");
   }
   return files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+}
+
+function admittedServerModeOverride(
+  source: string,
+  distStub: AdmittedWebDistEntry,
+): DynamicWebRouteAdmission {
+  if (
+    distStub.path !== SERVER_MODE_ROUTE.slice(1) ||
+    distStub.bytes !== SERVER_MODE_DIST_STUB_BYTES ||
+    distStub.sha256 !== SERVER_MODE_DIST_STUB_SHA256
+  ) {
+    throw new Error("The dynamic server-mode route must account for its exact dist stub.");
+  }
+  if (source.split(SERVER_MODE_SOURCE_BINDING).length !== 2) {
+    throw new Error("Exact server-mode route source binding is missing or duplicated.");
+  }
+  return {
+    route: SERVER_MODE_ROUTE,
+    profile: "server-mode-origin-override",
+    why: "production-server-origin-injection-overrides-local-mode-dist-stub",
+    distStub,
+    servedOverride: {
+      bytes: Buffer.byteLength(SERVER_MODE_BODY),
+      sha256: createHash("sha256").update(SERVER_MODE_BODY).digest("hex"),
+      contentType: SERVER_MODE_CONTENT_TYPE,
+      cacheControl: SERVER_MODE_CACHE_CONTROL,
+    },
+    source: {
+      path: "server/src/app.ts",
+      sha256: createHash("sha256").update(source).digest("hex"),
+      bindingSha256: createHash("sha256").update(SERVER_MODE_SOURCE_BINDING).digest("hex"),
+    },
+  };
+}
+
+function verifyStaticWebAsset(entry: AdmittedWebDistEntry, served: Buffer): AdmittedWebDistEntry {
+  const servedSha256 = createHash("sha256").update(served).digest("hex");
+  if (served.length !== entry.bytes || servedSha256 !== entry.sha256) {
+    throw new Error("Compiled static web asset response differs from its exact admitted dist bytes.");
+  }
+  return { path: entry.path, bytes: served.length, sha256: servedSha256 };
+}
+
+function verifyServerModeOverride(
+  admission: DynamicWebRouteAdmission,
+  served: Buffer,
+  contentType: string | undefined,
+  cacheControl: string | undefined,
+): DynamicWebRouteAdmission {
+  const servedSha256 = createHash("sha256").update(served).digest("hex");
+  if (
+    admission.route !== SERVER_MODE_ROUTE ||
+    !served.equals(Buffer.from(SERVER_MODE_BODY)) ||
+    served.length !== admission.servedOverride.bytes ||
+    servedSha256 !== admission.servedOverride.sha256 ||
+    contentType !== admission.servedOverride.contentType ||
+    cacheControl !== admission.servedOverride.cacheControl
+  ) {
+    throw new Error("Dynamic server-mode route differs from its exact source-bound override profile.");
+  }
+  return {
+    ...admission,
+    servedOverride: {
+      bytes: served.length,
+      sha256: servedSha256,
+      contentType,
+      cacheControl,
+    },
+  };
+}
+
+function assertCompleteWebAccounting(
+  inventory: AdmittedWebDistEntry[],
+  servedStatic: AdmittedWebDistEntry[],
+  dynamicRoutes: DynamicWebRouteAdmission[],
+): void {
+  const paths = inventory.map((entry) => entry.path);
+  const sortedPaths = [...paths].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  if (new Set(paths).size !== paths.length || JSON.stringify(paths) !== JSON.stringify(sortedPaths)) {
+    throw new Error("Compiled web inventory is duplicated or reordered.");
+  }
+  if (dynamicRoutes.length !== 1 || dynamicRoutes[0]?.route !== SERVER_MODE_ROUTE) {
+    throw new Error("Exact dynamic web route inventory is missing or reordered.");
+  }
+  const dynamicStub = inventory.find((entry) => entry.path === SERVER_MODE_ROUTE.slice(1));
+  if (dynamicStub == null || JSON.stringify(dynamicRoutes[0].distStub) !== JSON.stringify(dynamicStub)) {
+    throw new Error("Dynamic web route does not account for its exact dist stub.");
+  }
+  const expectedStatic = inventory.filter((entry) => entry.path !== dynamicStub.path);
+  if (
+    servedStatic.length !== EXPECTED_STATIC_WEB_DIST_FILES ||
+    servedStatic.length + dynamicRoutes.length !== inventory.length ||
+    JSON.stringify(servedStatic) !== JSON.stringify(expectedStatic)
+  ) {
+    throw new Error("Static web asset accounting excluded, corrupted, or reordered an admitted file.");
+  }
 }
 
 const HOST = "127.0.0.1";
@@ -964,8 +1094,14 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
     throw new Error("External capability range response did not preserve byte identity or boundaries.");
   }
 
-  const servedWebDist: AdmittedWebDistEntry[] = [];
-  for (const entry of admittedWebDist()) {
+  const webDistInventory = admittedWebDist();
+  const serverModeDistStub = webDistInventory.find((entry) => entry.path === SERVER_MODE_ROUTE.slice(1));
+  if (serverModeDistStub == null) throw new Error("Compiled web inventory lacks the server-mode dist stub.");
+  const serverAppSource = readFileSync(join(REPO, "server", "src", "app.ts"), "utf8");
+  const serverModeAdmission = admittedServerModeOverride(serverAppSource, serverModeDistStub);
+  const servedStaticWebDist: AdmittedWebDistEntry[] = [];
+  for (const entry of webDistInventory) {
+    if (entry.path === serverModeDistStub.path) continue;
     const url = entry.path === "index.html"
       ? "/"
       : `/${entry.path.split("/").map((part) => encodeURIComponent(part)).join("/")}`;
@@ -975,12 +1111,17 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
       throw new Error("Compiled web root did not return HTML.");
     }
     const served = Buffer.from(response.rawPayload as Buffer);
-    const servedSha256 = createHash("sha256").update(served).digest("hex");
-    if (served.length !== entry.bytes || servedSha256 !== entry.sha256) {
-      throw new Error("Compiled web asset response differs from its exact admitted source bytes.");
-    }
-    servedWebDist.push({ path: entry.path, bytes: served.length, sha256: servedSha256 });
+    servedStaticWebDist.push(verifyStaticWebAsset(entry, served));
   }
+  const serverModeResponse = await inject(app, client, { method: "GET", url: SERVER_MODE_ROUTE });
+  expectStatus(serverModeResponse, 200, "dynamic server-mode route");
+  const dynamicWebRoutes = [verifyServerModeOverride(
+    serverModeAdmission,
+    Buffer.from(serverModeResponse.rawPayload as Buffer),
+    serverModeResponse.headers["content-type"],
+    serverModeResponse.headers["cache-control"],
+  )];
+  assertCompleteWebAccounting(webDistInventory, servedStaticWebDist, dynamicWebRoutes);
 
   return {
     ok: true,
@@ -1002,12 +1143,15 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
       "external-capability-full-body-sha256",
       "external-capability-playable-response-headers",
       "external-capability-range-byte-identity",
-      "compiled-web-dist-byte-identity",
+      "compiled-static-web-dist-byte-identity",
+      "source-bound-dynamic-server-mode-route",
     ],
     mediaBytes: expected.length,
     mediaSha256: createHash("sha256").update(expected).digest("hex"),
-    webIndexSha256: servedWebDist.find((entry) => entry.path === "index.html")?.sha256,
-    servedWebDist,
+    webIndexSha256: servedStaticWebDist.find((entry) => entry.path === "index.html")?.sha256,
+    webDistInventory,
+    servedStaticWebDist,
+    dynamicWebRoutes,
     unexpectedOutboundAllowed: false,
   };
 }

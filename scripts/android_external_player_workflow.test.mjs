@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -159,8 +160,11 @@ function workflowContract(w, j) {
   assert.match(j, /fixtureHarnessSource/);
   assert.match(j, /hostedUiSource/);
   assert.match(j, /serverRuntimeSource/);
-  assert.match(j, /servedWebDist/);
-  assert.match(j, /assert smoke\['servedWebDist'\]==source\['hostedUi'\]\['webDist'\]\['files'\]/);
+  assert.match(j, /servedStaticWebDist/);
+  assert.match(j, /dynamicWebRoutes/);
+  assert.match(j, /assert smoke\['webDistInventory'\]==source\['hostedUi'\]\['webDist'\]\['files'\]/);
+  assert.match(j, /assert smoke\['servedStaticWebDist'\]==source\['hostedUi'\]\['servedStaticWebDist'\]/);
+  assert.match(j, /assert smoke\['dynamicWebRoutes'\]==source\['hostedUi'\]\['dynamicWebRoutes'\]/);
 }
 
 function fixtureContract(f) {
@@ -194,10 +198,27 @@ function fixtureContract(f) {
   assert.match(f, /externalFull\.headers\["content-disposition"\] != null/);
   assert.match(f, /MAX_WEB_DIST_FILES = 512/);
   assert.match(f, /MAX_WEB_DIST_BYTES = 64 \* 1024 \* 1024/);
+  assert.match(f, /EXPECTED_WEB_DIST_FILES = 85/);
+  assert.match(f, /EXPECTED_STATIC_WEB_DIST_FILES = 84/);
   assert.match(f, /function admittedWebDist\(\)/);
-  assert.match(f, /Compiled web asset response differs from its exact admitted source bytes/);
+  assert.match(f, /function admittedServerModeOverride\(/);
+  assert.match(f, /function verifyStaticWebAsset\(/);
+  assert.match(f, /function verifyServerModeOverride\(/);
+  assert.match(f, /function assertCompleteWebAccounting\(/);
+  assert.match(f, /const SERVER_MODE_ROUTE = "\/server-mode\.js"/);
+  assert.match(f, /const SERVER_MODE_BODY = "globalThis\.__DEBRIDSTREAMER_SERVER_URL__ = globalThis\.location\.origin;\\n"/);
+  assert.match(f, /const SERVER_MODE_CONTENT_TYPE = "text\/javascript; charset=utf-8"/);
+  assert.match(f, /const SERVER_MODE_CACHE_CONTROL = "no-store"/);
+  assert.match(f, /const SERVER_MODE_DIST_STUB_BYTES = 247/);
+  assert.match(f, /const SERVER_MODE_DIST_STUB_SHA256 = "beb74b650355356f4bf15582982ba9f9f30532bb38337a3604d29bf29c136101"/);
+  assert.match(f, /source\.split\(SERVER_MODE_SOURCE_BINDING\)\.length !== 2/);
+  assert.match(f, /servedStatic\.length \+ dynamicRoutes\.length !== inventory\.length/);
+  assert.match(f, /servedStatic\.length !== EXPECTED_STATIC_WEB_DIST_FILES/);
+  assert.match(f, /Compiled static web asset response differs from its exact admitted dist bytes/);
+  assert.match(f, /Dynamic server-mode route differs from its exact source-bound override profile/);
   assert.match(f, /servedSha256 !== entry\.sha256/);
-  assert.match(f, /servedWebDist/);
+  assert.match(f, /servedStaticWebDist/);
+  assert.match(f, /dynamicWebRoutes/);
   assert.doesNotMatch(f, /externalReceiptEvents\.push\([^)]*(?:rawUrl|externalPath|capability)/s);
   assert.doesNotMatch(f, /\/Volumes\/Work\/|\/private\/tmp\/ds-/);
 }
@@ -219,16 +240,60 @@ function exactReleasedSourceContract(j) {
   assert.match(j, /assert release_source==os\.environ\['PRODUCT_SOURCE'\]==os\.environ\['HOSTED_UI_SOURCE'\]==os\.environ\['SERVER_RUNTIME_SOURCE'\]/);
   assert.match(j, /web=inventory\(Path\('web\/dist'\),512,64\*1024\*1024\)/);
   assert.match(j, /server=inventory\(Path\('server\/src'\),2048,32\*1024\*1024\)/);
+  assert.match(j, /assert web\['fileCount'\]==85/);
+  assert.match(j, /assert len\(served_static\)==84/);
   assert.match(j, /'packageLockSha256':sha256\(root\/'server\/package-lock\.json'\)/);
   assert.match(j, /'role':'test-only-separate-from-app'/);
-  assert.match(j, /assert smoke\['servedWebDist'\]==source\['hostedUi'\]\['webDist'\]\['files'\]/);
+  assert.match(j, /server_mode_binding=/);
+  assert.match(j, /'bytes':247/);
+  assert.match(j, /'sha256':'beb74b650355356f4bf15582982ba9f9f30532bb38337a3604d29bf29c136101'/);
+  assert.match(j, /'profile':'server-mode-origin-override'/);
+  assert.match(j, /'why':'production-server-origin-injection-overrides-local-mode-dist-stub'/);
+  assert.match(j, /assert smoke\['webDistInventory'\]==source\['hostedUi'\]\['webDist'\]\['files'\]/);
+  assert.match(j, /assert smoke\['servedStaticWebDist'\]==source\['hostedUi'\]\['servedStaticWebDist'\]/);
+  assert.match(j, /assert smoke\['dynamicWebRoutes'\]==source\['hostedUi'\]\['dynamicWebRoutes'\]/);
+  assert.match(j, /assert len\(smoke\['servedStaticWebDist'\]\)==84/);
 }
 
 function servedWebDistContract(f) {
   assert.match(f, /MAX_WEB_DIST_FILES = 512/);
   assert.match(f, /MAX_WEB_DIST_BYTES = 64 \* 1024 \* 1024/);
   assert.match(f, /servedSha256 !== entry\.sha256/);
-  assert.match(f, /servedWebDist/);
+  assert.match(f, /webDistInventory/);
+  assert.match(f, /servedStaticWebDist/);
+  assert.match(f, /dynamicWebRoutes/);
+}
+
+const serverModeRoute = '/server-mode.js';
+const serverModeBody = 'globalThis.__DEBRIDSTREAMER_SERVER_URL__ = globalThis.location.origin;\n';
+const serverModeDistStubSha256 = 'beb74b650355356f4bf15582982ba9f9f30532bb38337a3604d29bf29c136101';
+const serverModeSourceBinding = `  app.get("/server-mode.js", async (_request, reply) => {
+    reply.header("content-type", "text/javascript; charset=utf-8");
+    reply.header("cache-control", "no-store");
+    return reply.send(
+      "globalThis.__DEBRIDSTREAMER_SERVER_URL__ = globalThis.location.origin;\\n",
+    );
+  });`;
+
+function executableFixtureHelper(signature, parameters, constants = {}) {
+  const body = methodBody(fixture, signature);
+  const names = ['createHash', 'Buffer', ...Object.keys(constants)];
+  const values = [createHash, Buffer, ...Object.values(constants)];
+  return Function(...names, `return function (${parameters}) {${body}}`)(...values);
+}
+
+function exactServerModeAdmission() {
+  const admit = executableFixtureHelper(
+    'function admittedServerModeOverride(',
+    'source, distStub',
+    { SERVER_MODE_ROUTE: serverModeRoute, SERVER_MODE_BODY: serverModeBody,
+      SERVER_MODE_CONTENT_TYPE: 'text/javascript; charset=utf-8',
+      SERVER_MODE_CACHE_CONTROL: 'no-store', SERVER_MODE_SOURCE_BINDING: serverModeSourceBinding,
+      SERVER_MODE_DIST_STUB_BYTES: 247, SERVER_MODE_DIST_STUB_SHA256: serverModeDistStubSha256 },
+  );
+  return admit(serverModeSourceBinding, {
+    path: 'server-mode.js', bytes: 247, sha256: serverModeDistStubSha256,
+  });
 }
 
 function playbackSettingsObservation(d, transactionSource, legalSource) {
@@ -438,6 +503,68 @@ function driverContract(
 test('workflow pins exact public phone59 APK identity', () => public59PinsContract(job));
 test('workflow builds and serves exact released ac885 source', () => exactReleasedSourceContract(job));
 test('fixture verifies every bounded compiled web asset as served', () => servedWebDistContract(fixture));
+test('executes exact source-bound server-mode override admission', () => {
+  const admission = exactServerModeAdmission();
+  assert.equal(admission.route, serverModeRoute);
+  assert.equal(admission.servedOverride.sha256, createHash('sha256').update(serverModeBody).digest('hex'));
+  assert.equal(admission.source.path, 'server/src/app.ts');
+});
+test('rejects wrong server-mode override body', () => {
+  const verify = executableFixtureHelper(
+    'function verifyServerModeOverride(', 'admission, served, contentType, cacheControl',
+    { SERVER_MODE_ROUTE: serverModeRoute, SERVER_MODE_BODY: serverModeBody },
+  );
+  assert.throws(() => verify(exactServerModeAdmission(), Buffer.from('wrong\n'),
+    'text/javascript; charset=utf-8', 'no-store'));
+  assert.throws(() => fixtureContract(fixture.replace(
+    'const SERVER_MODE_BODY = "globalThis.__DEBRIDSTREAMER_SERVER_URL__ = globalThis.location.origin;\\n"',
+    'const SERVER_MODE_BODY = "wrong\\n"')));
+});
+test('rejects wrong server-mode override route', () => {
+  const verify = executableFixtureHelper(
+    'function verifyServerModeOverride(', 'admission, served, contentType, cacheControl',
+    { SERVER_MODE_ROUTE: serverModeRoute, SERVER_MODE_BODY: serverModeBody },
+  );
+  assert.throws(() => verify({ ...exactServerModeAdmission(), route: '/other.js' },
+    Buffer.from(serverModeBody), 'text/javascript; charset=utf-8', 'no-store'));
+  assert.throws(() => fixtureContract(fixture.replace(
+    'const SERVER_MODE_ROUTE = "/server-mode.js"', 'const SERVER_MODE_ROUTE = "/other.js"')));
+});
+test('rejects corruption of an ordinary static asset', () => {
+  const verify = executableFixtureHelper('function verifyStaticWebAsset(', 'entry, served');
+  const body = Buffer.from('expected');
+  const entry = { path: 'assets/app.js', bytes: body.length, sha256: createHash('sha256').update(body).digest('hex') };
+  assert.throws(() => verify(entry, Buffer.from('corrupt!')));
+  assert.throws(() => fixtureContract(fixture.replace('servedSha256 !== entry.sha256', 'false')));
+});
+test('rejects static exclusion bypass and reordered inventory', () => {
+  const verify = executableFixtureHelper(
+    'function assertCompleteWebAccounting(', 'inventory, servedStatic, dynamicRoutes',
+    { SERVER_MODE_ROUTE: serverModeRoute, EXPECTED_STATIC_WEB_DIST_FILES: 2 },
+  );
+  const dynamic = exactServerModeAdmission();
+  const first = { path: 'assets/app.js', bytes: 1, sha256: '1'.repeat(64) };
+  const last = { path: 'index.html', bytes: 1, sha256: '2'.repeat(64) };
+  assert.doesNotThrow(() => verify([first, last, dynamic.distStub], [first, last], [dynamic]));
+  assert.throws(() => verify([first, last, dynamic.distStub], [last], [dynamic]));
+  assert.throws(() => verify([last, first, dynamic.distStub], [first, last], [dynamic]));
+  assert.throws(() => fixtureContract(fixture.replace(
+    'servedStatic.length + dynamicRoutes.length !== inventory.length', 'false')));
+});
+test('rejects server-mode source mismatch', () => {
+  const admit = executableFixtureHelper(
+    'function admittedServerModeOverride(', 'source, distStub',
+    { SERVER_MODE_ROUTE: serverModeRoute, SERVER_MODE_BODY: serverModeBody,
+      SERVER_MODE_CONTENT_TYPE: 'text/javascript; charset=utf-8',
+      SERVER_MODE_CACHE_CONTROL: 'no-store', SERVER_MODE_SOURCE_BINDING: serverModeSourceBinding,
+      SERVER_MODE_DIST_STUB_BYTES: 247, SERVER_MODE_DIST_STUB_SHA256: serverModeDistStubSha256 },
+  );
+  assert.throws(() => admit(serverModeSourceBinding.replace('no-store', 'public'), {
+    path: 'server-mode.js', bytes: 247, sha256: serverModeDistStubSha256,
+  }));
+  assert.throws(() => fixtureContract(fixture.replace(
+    'source.split(SERVER_MODE_SOURCE_BINDING).length !== 2', 'false')));
+});
 test('workflow pins and admits only the exact official VLC fixture handler', () => workflowContract(workflow, job));
 test('external workflow contract is bounded before the following distinct job', () => {
   assert.doesNotMatch(job, /^  touch-player-fixture:/m);
