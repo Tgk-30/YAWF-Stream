@@ -230,6 +230,7 @@ const configuredJavaHome = process.env.JAVA_HOME;
 const javac = configuredJavaHome ? join(configuredJavaHome, "bin", "javac") : "javac";
 const java = configuredJavaHome ? join(configuredJavaHome, "bin", "java") : "java";
 const strictSeekProbeCache = new Map();
+const stablePausedPositionProbeCache = new Map();
 
 function spawnDiagnostics(result) {
   return [result?.error?.stack ?? result?.error?.message, result?.stdout, result?.stderr]
@@ -301,6 +302,104 @@ ${parser}
     }
     const result = { sourceHash, compile, run };
     strictSeekProbeCache.set(sourceHash, result);
+    return result;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function stablePausedPositionProbe(source) {
+  const sourceHash = createHash("sha256").update(source).digest("hex");
+  if (stablePausedPositionProbeCache.has(sourceHash)) {
+    return stablePausedPositionProbeCache.get(sourceHash);
+  }
+  if (configuredJavaHome) {
+    assert.ok(existsSync(javac), `configured JAVA_HOME has no compiler: ${javac}`);
+    assert.ok(existsSync(java), `configured JAVA_HOME has no runtime: ${java}`);
+  }
+  const gate = exactSlice(
+    source,
+    "    private static final class StablePausedPositionGate {",
+    "\n\n    @Test",
+  );
+  const probeSource = `public final class StablePausedPositionProbe {
+${gate}
+    private static void expect(int expected, StablePausedPositionGate gate,
+            int position, int activeDialogs, int nestedDialogs,
+            int pauseControls, int playControls, int seekBars) {
+        int actual = gate.observe(position, activeDialogs, nestedDialogs,
+                pauseControls, playControls, seekBars);
+        if (actual != expected) {
+            throw new AssertionError("expected " + expected + " but observed " + actual
+                    + " for position=" + position + " state=" + activeDialogs + "/"
+                    + nestedDialogs + "/" + pauseControls + "/" + playControls
+                    + "/" + seekBars);
+        }
+    }
+
+    private static StablePausedPositionGate gate() {
+        return new StablePausedPositionGate(8, 12, 2);
+    }
+
+    public static void main(String[] args) {
+        StablePausedPositionGate transientZero = gate();
+        expect(-1, transientZero, 0, 1, 0, 0, 1, 1);
+        expect(-1, transientZero, 0, 1, 0, 0, 1, 1);
+        expect(-1, transientZero, 9, 1, 0, 0, 1, 1);
+        expect(9, transientZero, 9, 1, 0, 0, 1, 1);
+
+        StablePausedPositionGate pausedTransition = gate();
+        expect(-1, pausedTransition, 9, 1, 0, 0, 1, 1);
+        expect(-1, pausedTransition, 9, 1, 0, 1, 0, 1);
+        expect(-1, pausedTransition, 9, 1, 0, 0, 1, 1);
+        expect(9, pausedTransition, 9, 1, 0, 0, 1, 1);
+
+        StablePausedPositionGate dialogTransition = gate();
+        expect(-1, dialogTransition, 9, 1, 0, 0, 1, 1);
+        expect(-1, dialogTransition, 9, 1, 1, 0, 1, 1);
+        expect(-1, dialogTransition, 9, 1, 0, 0, 1, 1);
+        expect(9, dialogTransition, 9, 1, 0, 0, 1, 1);
+
+        StablePausedPositionGate seekTransition = gate();
+        expect(-1, seekTransition, 9, 1, 0, 0, 1, 1);
+        expect(-1, seekTransition, 9, 1, 0, 0, 1, 0);
+        expect(-1, seekTransition, 9, 1, 0, 0, 1, 1);
+        expect(9, seekTransition, 9, 1, 0, 0, 1, 1);
+
+        StablePausedPositionGate changingPosition = gate();
+        expect(-1, changingPosition, 9, 1, 0, 0, 1, 1);
+        expect(-1, changingPosition, 10, 1, 0, 0, 1, 1);
+        expect(10, changingPosition, 10, 1, 0, 0, 1, 1);
+
+        StablePausedPositionGate lowerBoundary = gate();
+        expect(-1, lowerBoundary, 7, 1, 0, 0, 1, 1);
+        expect(-1, lowerBoundary, 8, 1, 0, 0, 1, 1);
+        expect(8, lowerBoundary, 8, 1, 0, 0, 1, 1);
+
+        StablePausedPositionGate upperBoundary = gate();
+        expect(-1, upperBoundary, 13, 1, 0, 0, 1, 1);
+        expect(-1, upperBoundary, 12, 1, 0, 0, 1, 1);
+        expect(12, upperBoundary, 12, 1, 0, 0, 1, 1);
+    }
+}`;
+  const directory = mkdtempSync(join(tmpdir(), "yawf-stable-paused-position-"));
+  try {
+    const file = join(directory, "StablePausedPositionProbe.java");
+    writeFileSync(file, probeSource);
+    const compile = spawnSync(javac, ["-encoding", "UTF-8", "-d", directory, file], {
+      encoding: "utf8",
+    });
+    assert.equal(compile.error, undefined,
+      `required javac is unavailable (${javac})\n${spawnDiagnostics(compile)}`);
+    const run = compile.status === 0
+      ? spawnSync(java, ["-cp", directory, "StablePausedPositionProbe"], { encoding: "utf8" })
+      : null;
+    if (run != null) {
+      assert.equal(run.error, undefined,
+        `required java runtime is unavailable (${java})\n${spawnDiagnostics(run)}`);
+    }
+    const result = { sourceHash, compile, run };
+    stablePausedPositionProbeCache.set(sourceHash, result);
     return result;
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -1291,6 +1390,71 @@ test("driver positions paused playback away from either clamp before one ten-sec
   assert.match(doubleTap, /doubleTapDelta <= 11/);
   assert.match(driver, /assertAbsoluteThirtySecondTimeline\(\)/);
   assert.match(driver, /assertEquals\("HLS audio handoff changed the absolute 30 second timeline", 30, total\)/);
+});
+
+test("exact Java paused-position gate rejects reload transitions and admits only stable inclusive observations", () => {
+  const accepted = stablePausedPositionProbe(driver);
+  assert.equal(accepted.compile.status, 0,
+    `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
+  assert.equal(accepted.run.status, 0, `${accepted.run.stdout}\n${accepted.run.stderr}`);
+
+  const mutants = [
+    exactMutation(
+      driver,
+      "&& position >= minimum && position <= maximum;",
+      ";",
+    ),
+    exactMutation(
+      driver,
+      "&& pauseControls == 0 && playControls == 1 && seekBars == 1",
+      "&& seekBars == 1",
+    ),
+    exactMutation(
+      driver,
+      "candidatePosition = -1;\n                consistentObservationCount = 0;",
+      "candidatePosition = candidatePosition;\n                consistentObservationCount = consistentObservationCount;",
+    ),
+    exactMutation(
+      driver,
+      "consistentObservationCount >= requiredObservations",
+      "consistentObservationCount >= 1",
+    ),
+    exactMutation(driver, "position == candidatePosition", "position >= candidatePosition"),
+    exactMutation(
+      driver,
+      "&& pauseControls == 0 && playControls == 1 && seekBars == 1",
+      "&& pauseControls == 0 && playControls == 1",
+    ),
+  ];
+  for (const mutant of mutants) {
+    const rejected = stablePausedPositionProbe(mutant);
+    assert.equal(rejected.compile.status, 0,
+      `${rejected.compile.stdout}\n${rejected.compile.stderr}`);
+    assert.notEqual(rejected.run.status, 0,
+      "mutated exact Java paused-position gate unexpectedly satisfied the transition oracle");
+  }
+
+  const doubleTap = driver.slice(driver.indexOf('transition("paused-side-double-tap-after-hls")'),
+    driver.indexOf('transition("complete")'));
+  assert.match(doubleTap,
+    /waitForStablePausedPlaybackPositionInRange\(\s*8, 12, MEDIA_WAIT_MS,/);
+  assert.doesNotMatch(doubleTap, /waitForPlaybackPositionAtMost\(beforePositioning - 8/);
+
+  const waiter = exactSlice(
+    driver,
+    "private int waitForStablePausedPlaybackPositionInRange(",
+    "\n    private int waitForPlaybackPositionAvailable(",
+  );
+  assert.match(waiter, /long deadline = SystemClock\.uptimeMillis\(\) \+ timeoutMs/);
+  assert.match(waiter, /PlayerAxSnapshot snapshot = readPlayerAxSnapshot\(false\)/);
+  assert.match(waiter, /gate\.observe\(\s*lastPosition, lastActiveDialogs, lastNestedDialogs,\s*lastPauseControls, lastPlayControls, lastSeekBars\)/);
+  assert.match(waiter, /if \(stablePosition >= 0\) return stablePosition/);
+  assert.match(waiter, /revealPlayerSurfaceOnceIfHidden\(/);
+  assert.match(waiter, /SystemClock\.sleep\(250\)/);
+  assert.match(waiter, /inclusive range \[%d,%d\] with two stable exact paused observations/);
+  assert.match(waiter, /lastPosition=%d activeDialogs=%d nestedDialogs=%d pauseControls=%d/);
+  assert.match(waiter, /playControls=%d seekBars=%d candidate=%d consistentObservations=%d/);
+  assert.doesNotMatch(waiter, /device\.click|evaluateJavascript|executeShellCommand|setText/);
 });
 
 test("exact Playback actions rail pans to a reachable non-launched external action and closes", () => {

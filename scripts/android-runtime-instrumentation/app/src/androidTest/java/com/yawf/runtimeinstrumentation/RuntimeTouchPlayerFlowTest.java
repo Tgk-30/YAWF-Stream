@@ -130,6 +130,51 @@ public final class RuntimeTouchPlayerFlowTest {
         }
     }
 
+    private static final class StablePausedPositionGate {
+        private final int minimum;
+        private final int maximum;
+        private final int requiredObservations;
+        private int candidatePosition = -1;
+        private int consistentObservationCount;
+
+        StablePausedPositionGate(int minimum, int maximum, int requiredObservations) {
+            if (minimum < 0 || maximum < minimum || requiredObservations < 2) {
+                throw new IllegalArgumentException("Invalid stable paused-position gate");
+            }
+            this.minimum = minimum;
+            this.maximum = maximum;
+            this.requiredObservations = requiredObservations;
+        }
+
+        int observe(
+                int position, int activeDialogs, int nestedDialogs,
+                int pauseControls, int playControls, int seekBars) {
+            boolean exactPausedPosition = activeDialogs == 1 && nestedDialogs == 0
+                    && pauseControls == 0 && playControls == 1 && seekBars == 1
+                    && position >= minimum && position <= maximum;
+            if (!exactPausedPosition) {
+                candidatePosition = -1;
+                consistentObservationCount = 0;
+                return -1;
+            }
+            if (position == candidatePosition) {
+                consistentObservationCount++;
+            } else {
+                candidatePosition = position;
+                consistentObservationCount = 1;
+            }
+            return consistentObservationCount >= requiredObservations ? candidatePosition : -1;
+        }
+
+        int candidatePosition() {
+            return candidatePosition;
+        }
+
+        int consistentObservationCount() {
+            return consistentObservationCount;
+        }
+    }
+
     @Test
     public void productionHostCompletesSharedTouchPlayerFlow() throws Throwable {
         instrumentation = InstrumentationRegistry.getInstrumentation();
@@ -337,7 +382,9 @@ public final class RuntimeTouchPlayerFlowTest {
         int beforePositioning = waitForPlaybackPositionAvailable(
                 SHORT_WAIT_MS, "paused clock before double-tap positioning");
         clickPlayerLabeled("Back 10 seconds", "paused Back 10 before side double tap", SHORT_WAIT_MS);
-        int beforeDoubleTap = waitForPlaybackPositionAtMost(beforePositioning - 8, MEDIA_WAIT_MS);
+        int beforeDoubleTap = waitForStablePausedPlaybackPositionInRange(
+                8, 12, MEDIA_WAIT_MS,
+                "paused double-tap clock after Back 10 from " + beforePositioning);
         assertTrue("Back 10 did not place the paused clock in the non-clamped double-tap window",
                 beforeDoubleTap >= 8 && beforeDoubleTap <= 12);
         waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play before side double tap");
@@ -884,6 +931,48 @@ public final class RuntimeTouchPlayerFlowTest {
             SystemClock.sleep(250);
         }
         fail("Native SeekBar position did not fall to " + maximum + "; last=" + last);
+        return -1;
+    }
+
+    private int waitForStablePausedPlaybackPositionInRange(
+            int minimum, int maximum, long timeoutMs, String description) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        StablePausedPositionGate gate = new StablePausedPositionGate(minimum, maximum, 2);
+        int reveals = 0;
+        int lastPosition = -1;
+        int lastActiveDialogs = 0;
+        int lastNestedDialogs = 0;
+        int lastPauseControls = 0;
+        int lastPlayControls = 0;
+        int lastSeekBars = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoOutOfScopeApproval();
+            PlayerAxSnapshot snapshot = readPlayerAxSnapshot(false);
+            lastPosition = snapshot.playbackPositionSeconds();
+            lastActiveDialogs = snapshot.activeDialogs;
+            lastNestedDialogs = snapshot.nestedDialogs;
+            lastPauseControls = snapshot.pauseControls;
+            lastPlayControls = snapshot.playControls;
+            lastSeekBars = snapshot.seekBars;
+            int stablePosition = gate.observe(
+                    lastPosition, lastActiveDialogs, lastNestedDialogs,
+                    lastPauseControls, lastPlayControls, lastSeekBars);
+            if (stablePosition >= 0) return stablePosition;
+            int updatedReveals = revealPlayerSurfaceOnceIfHidden(
+                    reveals, description, snapshot);
+            if (updatedReveals != reveals) {
+                reveals = updatedReveals;
+                continue;
+            }
+            SystemClock.sleep(250);
+        }
+        fail(String.format(Locale.ROOT,
+                "Timed out waiting for %s in inclusive range [%d,%d] with two stable exact paused observations; "
+                        + "lastPosition=%d activeDialogs=%d nestedDialogs=%d pauseControls=%d "
+                        + "playControls=%d seekBars=%d candidate=%d consistentObservations=%d",
+                description, minimum, maximum, lastPosition, lastActiveDialogs, lastNestedDialogs,
+                lastPauseControls, lastPlayControls, lastSeekBars,
+                gate.candidatePosition(), gate.consistentObservationCount()));
         return -1;
     }
 
