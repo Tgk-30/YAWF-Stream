@@ -44,6 +44,10 @@ LEGACY_MANUAL_RECONSENT_MODE = "legacy-manual-reconsent"
 AUTOMATIC_OTA_MODE = "automatic-initial-cancel-due-resume"
 FIXED42_AUTOMATIC_OTA_PROFILE = "public-fixed42-to59-initial-cancel-due-resume-v1"
 FIXED42_EVIDENCE_SUBDIR = "fixed42-automatic-public-ota-flow"
+FIXED42_TO61_AUTOMATIC_OTA_PROFILE = (
+    "public-fixed42-to61-initial-cancel-due-resume-v1"
+)
+FIXED42_TO61_EVIDENCE_SUBDIR = "fixed42-to61-automatic-public-ota-flow"
 EVIDENCE_SUBDIR = "persistent-ota-flow"
 BASELINE_VERSION = "2.3.25"
 BASELINE_CODE = 2_003_025
@@ -85,6 +89,31 @@ FIXED42_TARGET_BUILD_RUN = 40_169_716_770
 FIXED42_TARGET_MANIFEST_SHA256 = "8d0f680abc7d52cd467ef79b3fd860e18c7e1dd15a7c5fd765a9d3941c974af6"
 FIXED42_TARGET_VERIFICATION_SHA256 = "28ccb986f613b68917a907b5dd9632c02e98185413ce9d09bc745eb564541294"
 FIXED42_UPDATER_SHA256 = "129df15e095ed5ce8933d17ab9a0329da79244e14ac046df18c3fad32e01163d"
+FIXED42_TO61_TARGET_VERSION = "2.3.61"
+FIXED42_TO61_TARGET_CODE = 2_003_061
+FIXED42_TO61_TARGET_SHA256 = "a4696ab0533cdc99e3f5e373031d89e58a6cd8f6742a9107085220765bb5b247"
+FIXED42_TO61_TARGET_SIZE = 88_640_385
+FIXED42_TO61_TARGET_SOURCE = "e2dee689276610ffb1685a6f47ac37f183f35a7e"
+FIXED42_TO61_TARGET_BUILD_RUN = 40_238_512_551
+FIXED42_TO61_TARGET_MANIFEST_SHA256 = (
+    "8828c76dd0696c7b70d548fcfdbb4657076825c5b40e5fa81b2ce1dd23be9815"
+)
+FIXED42_TO61_TARGET_VERIFICATION_SHA256 = (
+    "25afa6bca5261b02a0372eb0fc88934573ae2bce0091bd526007f963fe5b26b2"
+)
+FIXED42_TO61_INITIAL_ENABLE_QUERY_TIMING_LIMIT = 32
+FIXED42_TO61_INITIAL_ENABLE_QUERY_TIMING_MAX_BYTES = 256
+FIXED42_TO61_INITIAL_ENABLE_QUERY_TIMING_PATTERN = re.compile(
+    r"\Asequence=(0|[1-9][0-9]*) "
+    r"phase=(checking-terminal|checking-progress|checking-cancel|"
+    r"fresh-terminal|fresh-cancel|settled-terminal|settled-progress|"
+    r"settled-cancel) "
+    r"startUptimeMs=(0|[1-9][0-9]*) "
+    r"finishUptimeMs=(0|[1-9][0-9]*) "
+    r"counts=(0|[1-9][0-9]*)(?:,(0|[1-9][0-9]*))*\Z"
+)
+JAVA_INT_MAX = 2_147_483_647
+JAVA_LONG_MAX = 9_223_372_036_854_775_807
 EMERGENCY_36_VERSION = "2.3.36"
 EMERGENCY_36_CODE = 2_003_036
 EMERGENCY_36_SOURCE = "b9f51773232fa546ed3a95ec3e9169780f7df244"
@@ -263,6 +292,79 @@ def _load_fixed42_automatic_binding(value: object) -> RuntimeBinding:
     )
 
 
+def _load_fixed42_to61_automatic_binding(value: object) -> RuntimeBinding:
+    """Load the exact output of the separate fixed 2.3.42 to 2.3.61 admission."""
+    expected = {
+        "profile": FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+        "evidenceSubdir": FIXED42_TO61_EVIDENCE_SUBDIR,
+        "otaMode": FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+        "baselineVersion": FIXED42_BASELINE_VERSION,
+        "baselineVersionCode": str(FIXED42_BASELINE_CODE),
+        "baselineTag": "android-v2.3.42",
+        "baselineApkName": "YAWF.Stream_Android_2.3.42.apk",
+        "baselineSha256": FIXED42_BASELINE_SHA256,
+        "baselineSize": str(FIXED42_BASELINE_SIZE),
+        "baselineSourceRevision": FIXED42_BASELINE_SOURCE,
+        "baselineManifestSha256": FIXED42_BASELINE_MANIFEST_SHA256,
+        "baselineVerificationSha256": FIXED42_BASELINE_VERIFICATION_SHA256,
+        "baselineBuildRun": str(FIXED42_BASELINE_BUILD_RUN),
+        "targetVersion": FIXED42_TO61_TARGET_VERSION,
+        "targetVersionCode": str(FIXED42_TO61_TARGET_CODE),
+        "targetTag": "android-v2.3.61",
+        "targetApkName": "YAWF.Stream_Android_2.3.61.apk",
+        "targetSha256": FIXED42_TO61_TARGET_SHA256,
+        "targetSize": str(FIXED42_TO61_TARGET_SIZE),
+        "signerSha256": SIGNER_PIN,
+        "targetSourceRevision": FIXED42_TO61_TARGET_SOURCE,
+        "targetManifestSha256": FIXED42_TO61_TARGET_MANIFEST_SHA256,
+        "targetVerificationSha256": FIXED42_TO61_TARGET_VERIFICATION_SHA256,
+        "targetBuildRun": str(FIXED42_TO61_TARGET_BUILD_RUN),
+        "updaterSourceSha256": FIXED42_UPDATER_SHA256,
+        "targetPublicRelease": "true",
+    }
+    if not isinstance(value, dict) or set(value) != set(expected):
+        raise RuntimeGateError("Fixed42-to61 automatic admission keys are not exact")
+    for key, wanted in expected.items():
+        if value.get(key) != wanted:
+            raise RuntimeGateError(f"Fixed42-to61 automatic admission {key} mismatch")
+    return RuntimeBinding(
+        automatic=True,
+        ota_mode=FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+        evidence_subdir=FIXED42_TO61_EVIDENCE_SUBDIR,
+        baseline_version=FIXED42_BASELINE_VERSION,
+        baseline_code=FIXED42_BASELINE_CODE,
+        baseline_sha256=FIXED42_BASELINE_SHA256,
+        baseline_size=FIXED42_BASELINE_SIZE,
+        baseline_source=FIXED42_BASELINE_SOURCE,
+        baseline_tag="android-v2.3.42",
+        baseline_apk_name="YAWF.Stream_Android_2.3.42.apk",
+        target_version=FIXED42_TO61_TARGET_VERSION,
+        target_code=FIXED42_TO61_TARGET_CODE,
+        target_sha256=FIXED42_TO61_TARGET_SHA256,
+        target_size=FIXED42_TO61_TARGET_SIZE,
+        target_source=FIXED42_TO61_TARGET_SOURCE,
+        target_build_run=FIXED42_TO61_TARGET_BUILD_RUN,
+        target_tag="android-v2.3.61",
+        target_apk_name="YAWF.Stream_Android_2.3.61.apk",
+        target_verification_name="Android_2.3.61_verification.json",
+        signer_pin=SIGNER_PIN,
+        target_manifest_sha256=FIXED42_TO61_TARGET_MANIFEST_SHA256,
+        target_verification_sha256=FIXED42_TO61_TARGET_VERIFICATION_SHA256,
+        profile=FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+        baseline_manifest_sha256=FIXED42_BASELINE_MANIFEST_SHA256,
+        baseline_verification_sha256=FIXED42_BASELINE_VERIFICATION_SHA256,
+        baseline_build_run=FIXED42_BASELINE_BUILD_RUN,
+        updater_source_sha256=FIXED42_UPDATER_SHA256,
+    )
+
+
+def is_fixed42_binding(binding: RuntimeBinding | None) -> bool:
+    return binding is not None and binding.profile in {
+        FIXED42_AUTOMATIC_OTA_PROFILE,
+        FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+    }
+
+
 def load_automatic_binding(path: Path) -> RuntimeBinding:
     """Load only the exact output of admitAutomaticPublicTuple."""
     if not path.is_file() or path.stat().st_size > 16 * 1024:
@@ -273,6 +375,8 @@ def load_automatic_binding(path: Path) -> RuntimeBinding:
         raise RuntimeGateError("Automatic admission file is invalid JSON") from error
     if isinstance(value, dict) and value.get("profile") == FIXED42_AUTOMATIC_OTA_PROFILE:
         return _load_fixed42_automatic_binding(value)
+    if isinstance(value, dict) and value.get("profile") == FIXED42_TO61_AUTOMATIC_OTA_PROFILE:
+        return _load_fixed42_to61_automatic_binding(value)
     expected_keys = {
         "evidenceSubdir", "otaMode", "baselineVersion", "baselineVersionCode",
         "baselineSha256", "baselineSize", "targetVersion", "targetVersionCode",
@@ -535,6 +639,7 @@ def collect_fixed42_host_failure_diagnostics(
     emulator_exit_status: str,
     runner_temp: Path,
     workspace: Path,
+    profile: str = FIXED42_AUTOMATIC_OTA_PROFILE,
 ) -> dict[str, object]:
     """Retain bounded host health without changing ADB or emulator state."""
     evidence.mkdir(parents=True, exist_ok=True)
@@ -547,10 +652,15 @@ def collect_fixed42_host_failure_diagnostics(
         or emulator_exit_status.isdigit()
     ):
         raise RuntimeGateError("Owned emulator exit-status diagnostic is invalid")
+    if profile not in {
+        FIXED42_AUTOMATIC_OTA_PROFILE,
+        FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+    }:
+        raise RuntimeGateError("Fixed42 host diagnostic profile is invalid")
 
     report: dict[str, object] = {
         "schemaVersion": 1,
-        "profile": FIXED42_AUTOMATIC_OTA_PROFILE,
+        "profile": profile,
         "ownedEmulator": {
             "pid": int(emulator_pid) if emulator_pid else None,
             "liveness": emulator_pid_liveness,
@@ -649,7 +759,10 @@ def collect_fixed42_host_failure_diagnostics(
     return report
 
 
-def fixed42_device_capture_available(evidence: Path) -> bool:
+def fixed42_device_capture_available(
+    evidence: Path,
+    profile: str = FIXED42_AUTOMATIC_OTA_PROFILE,
+) -> bool:
     """Admit failure-time device reads only from one complete bounded get-state receipt."""
     try:
         def bounded_bytes(name: str, limit: int) -> bytes:
@@ -673,7 +786,7 @@ def fixed42_device_capture_available(evidence: Path) -> bool:
         receipt = json.loads(receipt_bytes.decode("utf-8", "strict"))
         if not isinstance(report, dict) or not isinstance(receipt, dict):
             return False
-        if report.get("profile") != FIXED42_AUTOMATIC_OTA_PROFILE:
+        if report.get("profile") != profile:
             return False
         adb = report.get("adb")
         get_state = adb.get("getState") if isinstance(adb, dict) else None
@@ -708,6 +821,15 @@ def fixed42_device_capture_available(evidence: Path) -> bool:
         RecursionError, TypeError,
     ):
         return False
+
+
+def fixed42_diagnostic_profile(binding_path: Path | None) -> str:
+    if binding_path is None:
+        return FIXED42_AUTOMATIC_OTA_PROFILE
+    binding = load_automatic_binding(binding_path)
+    if not is_fixed42_binding(binding) or binding.profile is None:
+        raise RuntimeGateError("Fixed42 diagnostics require an exact fixed42 binding")
+    return binding.profile
 
 
 def validate_file(path: Path, expected_hash: str, expected_size: int, label: str) -> None:
@@ -1256,6 +1378,68 @@ def validate_final_identity(
         raise RuntimeGateError("Last-update time did not change across OTA")
 
 
+def validate_fixed42_to61_initial_enable_query_diagnostics(
+    value: dict[str, object],
+) -> None:
+    """Validate bounded producer metadata without using it as behavioral proof."""
+    timings = value.get("initialEnableQueryGroupTimings")
+    drops = value.get("initialEnableQueryGroupTimingDrops")
+    limit = value.get("initialEnableQueryGroupTimingLimit")
+    if (
+        type(limit) is not int
+        or limit != FIXED42_TO61_INITIAL_ENABLE_QUERY_TIMING_LIMIT
+    ):
+        raise RuntimeGateError("Fixed42-to61 query timing limit mismatch")
+    if type(drops) is not int or drops < 0 or drops > JAVA_INT_MAX:
+        raise RuntimeGateError("Fixed42-to61 query timing drop count is invalid")
+    if type(timings) is not list or not timings or len(timings) > limit:
+        raise RuntimeGateError("Fixed42-to61 query timing list is invalid")
+    if drops > 0 and len(timings) != limit:
+        raise RuntimeGateError("Fixed42-to61 query timing drops lost retained entries")
+    if drops > JAVA_INT_MAX - len(timings):
+        raise RuntimeGateError("Fixed42-to61 query timing sequence exceeded Java range")
+
+    expected_sequence = drops + 1
+    previous_finish = -1
+    for entry in timings:
+        if (
+            type(entry) is not str
+            or len(entry.encode("utf-8"))
+            > FIXED42_TO61_INITIAL_ENABLE_QUERY_TIMING_MAX_BYTES
+        ):
+            raise RuntimeGateError("Fixed42-to61 query timing entry is invalid")
+        match = FIXED42_TO61_INITIAL_ENABLE_QUERY_TIMING_PATTERN.fullmatch(entry)
+        if match is None:
+            raise RuntimeGateError("Fixed42-to61 query timing entry shape is invalid")
+        sequence = int(match.group(1))
+        phase = match.group(2)
+        started_at = int(match.group(3))
+        finished_at = int(match.group(4))
+        counts = [int(part) for part in entry.rsplit("counts=", 1)[1].split(",")]
+        expected_count_length = (
+            3 if phase.endswith("terminal")
+            else 2 if phase.endswith("progress")
+            else 1
+        )
+        if sequence != expected_sequence or sequence > JAVA_INT_MAX:
+            raise RuntimeGateError("Fixed42-to61 query timing sequence is invalid")
+        if (
+            started_at > JAVA_LONG_MAX
+            or finished_at > JAVA_LONG_MAX
+            or finished_at < started_at
+            or started_at < previous_finish
+        ):
+            raise RuntimeGateError("Fixed42-to61 query timing clock is invalid")
+        if (
+            len(counts) != expected_count_length
+            or any(count > expected_count_length for count in counts)
+            or sum(counts) > expected_count_length
+        ):
+            raise RuntimeGateError("Fixed42-to61 query timing counts are invalid")
+        expected_sequence += 1
+        previous_finish = finished_at
+
+
 def validate_receipt(
     value: dict[str, object],
     ota_mode: str = STRICT_OTA_MODE,
@@ -1327,26 +1511,35 @@ def validate_receipt(
                 raise RuntimeGateError(
                     f"Automatic instrumentation receipt {key} mismatch"
                 )
-    elif ota_mode == FIXED42_AUTOMATIC_OTA_PROFILE:
-        if binding.profile != FIXED42_AUTOMATIC_OTA_PROFILE:
+    elif ota_mode in {
+        FIXED42_AUTOMATIC_OTA_PROFILE,
+        FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+    }:
+        if binding.profile != ota_mode:
             raise RuntimeGateError("Fixed42 receipt requires the exact admitted profile")
+        is_to61 = ota_mode == FIXED42_TO61_AUTOMATIC_OTA_PROFILE
+        postinstall_result_key = (
+            "postInstallExactUpToDate61Observed"
+            if is_to61 else "postInstallExactUpToDate59Observed"
+        )
+        profile_marker = "Fixed42OTA61Marker" if is_to61 else "Fixed42OTA59Marker"
         for key, expected_value in expected.items():
             actual = value.get(key)
             if type(actual) is not type(expected_value) or actual != expected_value:
                 raise RuntimeGateError(f"Fixed42 common instrumentation receipt {key} mismatch")
         fixed_expected: dict[str, object] = {
-            "runtimeProfile": FIXED42_AUTOMATIC_OTA_PROFILE,
+            "runtimeProfile": ota_mode,
             "baselineSourceRevision": FIXED42_BASELINE_SOURCE,
             "baselineManifestSha256": FIXED42_BASELINE_MANIFEST_SHA256,
             "baselineVerificationSha256": FIXED42_BASELINE_VERIFICATION_SHA256,
             "baselineBuildRun": FIXED42_BASELINE_BUILD_RUN,
-            "targetVersionCode": FIXED42_TARGET_CODE,
-            "targetSize": FIXED42_TARGET_SIZE,
+            "targetVersionCode": binding.target_code,
+            "targetSize": binding.target_size,
             "targetIdentityAdmitted": True,
-            "targetSourceRevision": FIXED42_TARGET_SOURCE,
-            "targetManifestSha256": FIXED42_TARGET_MANIFEST_SHA256,
-            "targetVerificationSha256": FIXED42_TARGET_VERIFICATION_SHA256,
-            "targetBuildRun": FIXED42_TARGET_BUILD_RUN,
+            "targetSourceRevision": binding.target_source,
+            "targetManifestSha256": binding.target_manifest_sha256,
+            "targetVerificationSha256": binding.target_verification_sha256,
+            "targetBuildRun": binding.target_build_run,
             "updaterSourceSha256": FIXED42_UPDATER_SHA256,
             "legacyManualReconsentUsed": False,
             "initialManualProgressObserved": False,
@@ -1369,14 +1562,14 @@ def validate_receipt(
             "systemUpdateSelections": 1,
             "systemOpenSelections": 1,
             "postInstallManualInspectionChecks": 1,
-            "postInstallExactUpToDate59Observed": True,
+            postinstall_result_key: True,
             "weeklyOnAfterUpdate": True,
             "postInstallNativeOkClosures": 1,
             "postInstallNativeCancelClosures": 0,
             "automaticDiscoveryProofIncludesPostInstallInspection": False,
             "sampleCatalogFixtureUsed": True,
             "liveCatalogProviderProof": False,
-            "profileNameMarker": "Fixed42OTA59Marker",
+            "profileNameMarker": profile_marker,
             "profileNameInitialDistinct": True,
             "profileNameSetTextActions": 1,
             "profileNameImmediateExact": True,
@@ -1399,6 +1592,14 @@ def validate_receipt(
             actual = value.get(key)
             if type(actual) is not type(expected_value) or actual != expected_value:
                 raise RuntimeGateError(f"Fixed42 instrumentation receipt {key} mismatch")
+        diagnostic_keys: set[str] = set()
+        if is_to61:
+            diagnostic_keys = {
+                "initialEnableQueryGroupTimings",
+                "initialEnableQueryGroupTimingDrops",
+                "initialEnableQueryGroupTimingLimit",
+            }
+            validate_fixed42_to61_initial_enable_query_diagnostics(value)
         trigger = value.get("automaticTriggerReturnOrdinal")
         deferred = value.get("deferredOfferReturnOrdinal")
         offer_ordinal = value.get("automaticOfferOrdinal")
@@ -1425,6 +1626,7 @@ def validate_receipt(
                 "deferredOfferReturnOrdinal", "automaticOfferOrdinal",
                 "postInstallInspectionOrdinal", "captures", "failure",
             }
+            | diagnostic_keys
         )
         if set(value) != exact_keys:
             raise RuntimeGateError("Fixed42 instrumentation receipt keys are not exact")
@@ -1456,9 +1658,9 @@ def automatic_instrumentation_arguments(binding: RuntimeBinding) -> list[str]:
         "-e", "targetBuildRun", str(binding.target_build_run),
         "-e", "targetPublicRelease", "true",
     ]
-    if binding.profile == FIXED42_AUTOMATIC_OTA_PROFILE:
+    if is_fixed42_binding(binding):
         arguments.extend([
-            "-e", "runtimeProfile", FIXED42_AUTOMATIC_OTA_PROFILE,
+            "-e", "runtimeProfile", binding.profile or "",
             "-e", "baselineSourceRevision", binding.baseline_source,
             "-e", "baselineManifestSha256", binding.baseline_manifest_sha256 or "",
             "-e", "baselineVerificationSha256", binding.baseline_verification_sha256 or "",
@@ -1505,8 +1707,14 @@ class AdmittedAdb:
 
     def _assert_fixed42_install_inputs_are_not_target(self) -> None:
         binding = self.automatic_binding
-        if binding is None or binding.profile != FIXED42_AUTOMATIC_OTA_PROFILE:
+        if not is_fixed42_binding(binding):
             return
+        assert binding is not None
+        target_sha256 = (
+            FIXED42_TO61_TARGET_SHA256
+            if binding.profile == FIXED42_TO61_AUTOMATIC_OTA_PROFILE
+            else FIXED42_TARGET_SHA256
+        )
         for label, candidate in (
             ("baseline", self.baseline_apk),
             ("harness app", self.harness_app),
@@ -1523,11 +1731,11 @@ class AdmittedAdb:
                 raise RuntimeGateError(
                     f"Fixed42 {label} input aliases the target APK"
                 )
-            if digest == FIXED42_TARGET_SHA256:
+            if digest == target_sha256:
                 raise RuntimeGateError(
                     f"Fixed42 {label} input contains the target APK bytes"
                 )
-            if label == "baseline" and digest != FIXED42_BASELINE_SHA256:
+            if label == "baseline" and digest != binding.baseline_sha256:
                 raise RuntimeGateError(
                     "Fixed42 baseline install input is not the admitted official APK"
                 )
@@ -1749,10 +1957,7 @@ class AdmittedAdb:
         *,
         diagnostic_writer: Callable[[str, str], None] | None = None,
     ) -> None:
-        fixed42 = (
-            self.automatic_binding is not None
-            and self.automatic_binding.profile == FIXED42_AUTOMATIC_OTA_PROFILE
-        )
+        fixed42 = is_fixed42_binding(self.automatic_binding)
         if (
             not self.baseline_installed
             or self.baseline_pulled
@@ -1769,7 +1974,7 @@ class AdmittedAdb:
         diagnostic_writer(
             "baseline-pull-attempt.json",
             json.dumps({
-                "profile": FIXED42_AUTOMATIC_OTA_PROFILE,
+                "profile": self.automatic_binding.profile,
                 "phase": "before-dispatch",
                 "attemptOrdinal": 1,
                 "timeoutSeconds": 180,
@@ -1829,7 +2034,7 @@ class AdmittedAdb:
             diagnostic_writer(
                 "baseline-pull-result.json",
                 json.dumps({
-                    "profile": FIXED42_AUTOMATIC_OTA_PROFILE,
+                    "profile": self.automatic_binding.profile,
                     "dispatched": True,
                     "returnCode": return_code,
                     "timedOut": timed_out,
@@ -2016,7 +2221,7 @@ class OtaRuntimeDriver:
         ):
             raise RuntimeGateError("Installed baseline version identity mismatch")
         pulled = self.evidence / f"installed-baseline-{self.binding.baseline_version}.apk"
-        if self.binding.profile == FIXED42_AUTOMATIC_OTA_PROFILE:
+        if is_fixed42_binding(self.binding):
             self.adb.pull_baseline_once(
                 self.base_path(), pulled, diagnostic_writer=self.write
             )
@@ -2209,9 +2414,9 @@ class OtaRuntimeDriver:
                 "persistenceProof": "task-relaunch-only",
                 "independentColdProcessProof": False,
             })
-        if self.binding.profile == FIXED42_AUTOMATIC_OTA_PROFILE:
+        if is_fixed42_binding(self.binding):
             result_receipt.update({
-                "runtimeProfile": FIXED42_AUTOMATIC_OTA_PROFILE,
+                "runtimeProfile": self.binding.profile,
                 "preOfferManualDiscoveries": 0,
                 "postInstallManualInspectionChecks": 1,
                 "automaticDiscoveryProofIncludesPostInstallInspection": False,
@@ -2803,9 +3008,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.self_test is not None:
         return run_self_tests(args.self_test or None)
     if args.fixed42_device_capture_gate:
-        return 0 if fixed42_device_capture_available(args.evidence) else 1
+        try:
+            profile = fixed42_diagnostic_profile(args.automatic_binding)
+        except Exception as caught:
+            print(f"{type(caught).__name__}: {caught}", file=sys.stderr)
+            return 1
+        return 0 if fixed42_device_capture_available(args.evidence, profile) else 1
     if args.fixed42_host_failure_diagnostics:
         try:
+            profile = fixed42_diagnostic_profile(args.automatic_binding)
             collect_fixed42_host_failure_diagnostics(
                 evidence=args.evidence,
                 adb=args.adb,
@@ -2815,6 +3026,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 emulator_exit_status=args.emulator_exit_status,
                 runner_temp=args.runner_temp,
                 workspace=args.workspace,
+                profile=profile,
             )
             return 0
         except Exception as caught:
