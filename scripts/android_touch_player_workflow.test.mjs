@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -206,6 +207,92 @@ function javaPatternConstant(name) {
 
 const SEEK_VALUE_ONLY = javaPatternConstant("SEEK_VALUE_ONLY");
 const SEEK_VALUE_WITH_NAME = javaPatternConstant("SEEK_VALUE_WITH_NAME");
+const configuredJavaHome = process.env.JAVA_HOME;
+const javac = configuredJavaHome ? join(configuredJavaHome, "bin", "javac") : "javac";
+const java = configuredJavaHome ? join(configuredJavaHome, "bin", "java") : "java";
+const strictSeekProbeCache = new Map();
+
+function spawnDiagnostics(result) {
+  return [result?.error?.stack ?? result?.error?.message, result?.stdout, result?.stderr]
+    .filter(Boolean).join("\n");
+}
+
+function strictSeekParserProbe(source) {
+  const sourceHash = createHash("sha256").update(source).digest("hex");
+  if (strictSeekProbeCache.has(sourceHash)) return strictSeekProbeCache.get(sourceHash);
+  if (configuredJavaHome) {
+    assert.ok(existsSync(javac), `configured JAVA_HOME has no compiler: ${javac}`);
+    assert.ok(existsSync(java), `configured JAVA_HOME has no runtime: ${java}`);
+  }
+  const patterns = exactSlice(
+    source,
+    "    private static final Pattern SEEK_VALUE_ONLY",
+    "\n\n    private Instrumentation",
+  );
+  const parser = exactSlice(
+    source,
+    "    static int[] parseStrictSeekSemantic(",
+    "\n    static boolean isBoundedNativeSeekRange(",
+  );
+  const probeSource = `import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public final class StrictSeekSemanticProbe {
+${patterns}
+${parser}
+    private static void expect(int current, int total, String text, String description) {
+        int[] parsed = parseStrictSeekSemantic(text, description);
+        if (parsed == null || parsed[0] != current || parsed[1] != total) {
+            throw new AssertionError("valid case rejected: " + text + " / " + description);
+        }
+    }
+
+    private static void reject(String text, String description) {
+        if (parseStrictSeekSemantic(text, description) != null) {
+            throw new AssertionError("invalid case admitted: " + text + " / " + description);
+        }
+    }
+
+    public static void main(String[] args) {
+        expect(20, 30, "0:20 of 0:30, Seek", "");
+        expect(20, 30, "0:20 of 0:30", "Seek");
+        reject("0:20 of 0:30, Seek now", "");
+        reject("0:20 of 0:30", "Timeline");
+        reject("0:60 of 0:30, Seek", "");
+        reject("0:31 of 0:30, Seek", "");
+        reject("0:20 of 0:29, Seek", "");
+        reject("0:20 of 0:60, Seek", "");
+    }
+}`;
+  const directory = mkdtempSync(join(tmpdir(), "yawf-strict-seek-semantic-"));
+  try {
+    const file = join(directory, "StrictSeekSemanticProbe.java");
+    writeFileSync(file, probeSource);
+    const compile = spawnSync(javac, ["-encoding", "UTF-8", "-d", directory, file], {
+      encoding: "utf8",
+    });
+    assert.equal(compile.error, undefined,
+      `required javac is unavailable (${javac})\n${spawnDiagnostics(compile)}`);
+    const run = compile.status === 0
+      ? spawnSync(java, ["-cp", directory, "StrictSeekSemanticProbe"], { encoding: "utf8" })
+      : null;
+    if (run != null) {
+      assert.equal(run.error, undefined,
+        `required java runtime is unavailable (${java})\n${spawnDiagnostics(run)}`);
+    }
+    const result = { sourceHash, compile, run };
+    strictSeekProbeCache.set(sourceHash, result);
+    return result;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function exactMutation(source, before, after) {
+  const mutated = source.replace(before, after);
+  assert.notEqual(mutated, source, `mutation target missing: ${before}`);
+  return mutated;
+}
 
 function playerDialog(parent = null) {
   return { packageName: PRODUCT_PACKAGE, className: "android.app.Dialog", text: PLAYER_DIALOG_TITLE, parent };
@@ -653,6 +740,41 @@ test("strict same-SeekBar aria-valuetext contract admits only exact native obser
       dialog, { ...base, range: { min: 0, current: 16, max: 30 } },
     ]), /disagrees/);
   });
+});
+
+test("exact Java strict Seek parser executes on JDK 17 and kills body and pattern mutants", () => {
+  const accepted = strictSeekParserProbe(driver);
+  assert.equal(accepted.compile.status, 0,
+    `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
+  assert.equal(accepted.run.status, 0, `${accepted.run.stdout}\n${accepted.run.stderr}`);
+
+  const mutants = [
+    exactMutation(
+      driver,
+      "if (total != 30 || current < 0 || current > total) return null;",
+      "if (current < 0 || current > total) return null;",
+    ),
+    exactMutation(
+      driver,
+      "if (total != 30 || current < 0 || current > total) return null;",
+      "if (total != 30 || current < 0) return null;",
+    ),
+    exactMutation(driver, "), Seek$\");", "), Seek.*\");"),
+    exactMutation(
+      driver,
+      '} else if ("Seek".equals(exactDescription)) {',
+      "} else if (!exactDescription.isEmpty()) {",
+    ),
+  ];
+  for (const mutant of mutants) {
+    const rejected = strictSeekParserProbe(mutant);
+    assert.equal(rejected.compile.status, 0,
+      `${rejected.compile.stdout}\n${rejected.compile.stderr}`);
+    assert.notEqual(rejected.run.status, 0,
+      "mutated exact Java parser unexpectedly satisfied the boundary oracle");
+  }
+  assert.equal(strictSeekParserProbe(driver), accepted,
+    "identical frozen driver text must reuse the one compiled probe result");
 });
 
 test("initial playing choreography reuses one native snapshot and lowers paused clock with bounded input", () => {
