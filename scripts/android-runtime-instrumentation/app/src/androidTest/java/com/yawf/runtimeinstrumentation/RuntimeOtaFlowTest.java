@@ -1134,9 +1134,38 @@ public final class RuntimeOtaFlowTest {
 
             int mainIndex = fixed42UniqueResource(nodes, "main-content");
             Fixed42AxNode main = nodes.get(mainIndex);
+            boolean packageMatch = product.equals(main.packageName);
+            boolean classMatch = "android.view.View".equals(main.className);
+            boolean visible = main.visible;
+            boolean scrollable = main.scrollable;
+            boolean clickable = main.clickable;
+            boolean enabled = main.enabled;
+            Rect expectedMainBounds = new Rect(0, 0, width, height);
+            boolean boundsMatch = main.bounds.equals(expectedMainBounds);
+            boolean mainIdentityMatches = packageMatch
+                    && classMatch
+                    && visible
+                    && scrollable
+                    && !clickable
+                    && enabled;
+            if (!(mainIdentityMatches && boundsMatch)) {
+                log("Fixed42 main-content proof failed"
+                        + " packageMatch=" + packageMatch
+                        + " classMatch=" + classMatch
+                        + " visible=" + visible
+                        + " scrollable=" + scrollable
+                        + " clickable=" + clickable
+                        + " enabled=" + enabled
+                        + " boundsMatch=" + boundsMatch
+                        + " rawLeft=" + main.bounds.left
+                        + " rawTop=" + main.bounds.top
+                        + " rawRight=" + main.bounds.right
+                        + " rawBottom=" + main.bounds.bottom
+                        + " expectedWidth=" + width
+                        + " expectedHeight=" + height);
+            }
             assertTrue("Fixed42 main-content identity changed",
-                    main.matches(product, "android.view.View", true, false)
-                            && main.bounds.equals(new Rect(0, 0, width, height)));
+                    mainIdentityMatches && boundsMatch);
 
             int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);
             Fixed42AxNode discover = nodes.get(discoverIndex);

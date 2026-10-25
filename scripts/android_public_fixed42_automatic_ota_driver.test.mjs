@@ -1287,6 +1287,66 @@ function fixed42TwoAxisSeedContract(java) {
     "driver invented a non-public UiObject2 node accessor");
 }
 
+function fixed42MainProofDiagnosticContract(java) {
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const mainStart = observe.indexOf('int mainIndex = fixed42UniqueResource(nodes, "main-content");');
+  const discoverStart = observe.indexOf(
+    'int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
+    mainStart,
+  );
+  assert.ok(mainStart >= 0 && discoverStart > mainStart,
+    "fixed42 main-content proof block is not bounded before Discover observation");
+  const block = observe.slice(mainStart, discoverStart);
+
+  for (const token of [
+    "boolean packageMatch = product.equals(main.packageName);",
+    'boolean classMatch = "android.view.View".equals(main.className);',
+    "boolean visible = main.visible;",
+    "boolean scrollable = main.scrollable;",
+    "boolean clickable = main.clickable;",
+    "boolean enabled = main.enabled;",
+    "Rect expectedMainBounds = new Rect(0, 0, width, height);",
+    "boolean boundsMatch = main.bounds.equals(expectedMainBounds);",
+    `boolean mainIdentityMatches = packageMatch
+                    && classMatch
+                    && visible
+                    && scrollable
+                    && !clickable
+                    && enabled;`,
+    "if (!(mainIdentityMatches && boundsMatch)) {",
+    'log("Fixed42 main-content proof failed"',
+    '" packageMatch=" + packageMatch',
+    '" classMatch=" + classMatch',
+    '" visible=" + visible',
+    '" scrollable=" + scrollable',
+    '" clickable=" + clickable',
+    '" enabled=" + enabled',
+    '" boundsMatch=" + boundsMatch',
+    '" rawLeft=" + main.bounds.left',
+    '" rawTop=" + main.bounds.top',
+    '" rawRight=" + main.bounds.right',
+    '" rawBottom=" + main.bounds.bottom',
+    '" expectedWidth=" + width',
+    '" expectedHeight=" + height',
+    `assertTrue("Fixed42 main-content identity changed",
+                    mainIdentityMatches && boundsMatch);`,
+  ]) need(block, token, `fixed42 main proof diagnostic lost ${token}`);
+
+  assert.equal((block.match(/\blog\(/g) ?? []).length, 1,
+    "fixed42 main proof must emit exactly one failure-only diagnostic");
+  const failure = block.indexOf("if (!(mainIdentityMatches && boundsMatch)) {");
+  const diagnostic = block.indexOf('log("Fixed42 main-content proof failed"', failure);
+  const assertion = block.indexOf('assertTrue("Fixed42 main-content identity changed"', diagnostic);
+  assert.ok(failure >= 0 && failure < diagnostic && diagnostic < assertion,
+    "fixed42 main proof diagnostic is not failure-only and before the unchanged assertion");
+  const logStatement = block.slice(diagnostic, block.indexOf(");", diagnostic) + 2);
+  assert.doesNotMatch(logStatement, /main\.(?:packageName|className)|text|description/i,
+    "fixed42 main proof diagnostic leaked raw accessibility identity or text");
+  assert.doesNotMatch(block,
+    /getRootInActiveWindow|clearCache|device\.(?:click|swipe|waitForIdle)|performAction|\.click\(|SystemClock\.sleep/,
+    "fixed42 main proof diagnostic added an accessibility query, input, wait, or action");
+}
+
 function fixed42FinalClickDeadlineContract(java) {
   assert.match(
     java,
@@ -1503,6 +1563,37 @@ test("fixed42 Blade seed uses one guarded public-scroll budget and one fresh ord
   for (const [label, mutant] of mutants) {
     assert.notEqual(mutant, source, "fixed42 structural mutant anchor was absent");
     assert.throws(() => fixed42TwoAxisSeedContract(mutant), `${label} mutant survived`);
+  }
+});
+
+test("fixed42 main-content proof logs bounded primitive predicates only on failure", () => {
+  fixed42MainProofDiagnosticContract(source);
+
+  const mutants = [
+    ["always-log", source.replace(
+      "if (!(mainIdentityMatches && boundsMatch)) {",
+      "if (true) {",
+    )],
+    ["visible-relaxed", source.replace(
+      "                    && visible\n                    && scrollable",
+      "                    && scrollable",
+    )],
+    ["clickable-inverted", source.replace("                    && !clickable", "                    && clickable")],
+    ["raw-package", source.replace(
+      '" packageMatch=" + packageMatch',
+      '" packageMatch=" + main.packageName',
+    )],
+    ["bounds-relaxed", source.replace(
+      "                    mainIdentityMatches && boundsMatch);",
+      "                    mainIdentityMatches);",
+    )],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, source, `fixed42 main proof ${label} mutant anchor was absent`);
+    assert.throws(
+      () => fixed42MainProofDiagnosticContract(mutant),
+      `fixed42 main proof ${label} mutant survived`,
+    );
   }
 });
 
