@@ -11,7 +11,15 @@ const fixture = readFileSync(new URL('./android_external_player_server_fixture.m
 const driver = readFileSync(new URL('./android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalPlayerFlowTest.java', import.meta.url), 'utf8');
 const settingsTransaction = readFileSync(new URL('./android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalSettingsTransaction.java', import.meta.url), 'utf8');
 const externalLegalSnapshot = readFileSync(new URL('./android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeExternalLegalSnapshot.java', import.meta.url), 'utf8');
-const job = workflow.slice(workflow.indexOf('  external-player-fixture:\n'));
+function topLevelJob(source, name) {
+  const begin = source.indexOf(`  ${name}:\n`);
+  assert.ok(begin >= 0, `Missing workflow job: ${name}`);
+  const after = source.slice(begin + 1);
+  const next = after.search(/^  [A-Za-z0-9_-]+:\n/m);
+  return source.slice(begin, next >= 0 ? begin + 1 + next : source.length);
+}
+
+const job = topLevelJob(workflow, 'external-player-fixture');
 
 function methodBody(source, signature) {
   const signatureIndex = source.indexOf(signature);
@@ -375,6 +383,19 @@ function driverContract(
 }
 
 test('workflow pins and admits only the exact official VLC fixture handler', () => workflowContract(workflow, job));
+test('external workflow contract is bounded before the following distinct job', () => {
+  assert.doesNotMatch(job, /^  touch-player-fixture:/m);
+  assert.match(job, /# BEGIN EXTERNAL_VLC_HANDLER_POLICY/);
+  assert.notEqual(
+    job,
+    job.replace('VLC_SHA256: 4646633e', 'VLC_SHA256: a646633e'),
+    'external-job mutation must remain observable within the bounded section',
+  );
+  assert.throws(() => workflowContract(
+    workflow,
+    job.replace('VLC_SHA256: 4646633e', 'VLC_SHA256: a646633e'),
+  ));
+});
 test('executes the VLC minimum SDK admission against aapt2 badging', () => {
   const line = job.split('\n').find(value => value.includes('minSdkVersion:'))?.trim();
   assert.ok(line, 'Missing exact minimum SDK admission');
