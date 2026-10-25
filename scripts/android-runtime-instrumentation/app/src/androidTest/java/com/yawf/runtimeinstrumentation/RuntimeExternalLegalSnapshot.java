@@ -17,6 +17,8 @@ import java.util.regex.Pattern;
 final class RuntimeExternalLegalSnapshot {
     private static final int MAX_NODES = 4_096;
     private static final long MAX_TRAVERSAL_MS = 1_000L;
+    private static final int PREFETCHING_STRATEGY =
+            AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST;
 
     private RuntimeExternalLegalSnapshot() {}
 
@@ -67,7 +69,8 @@ final class RuntimeExternalLegalSnapshot {
                 }
                 for (int childIndex = 0; childIndex < childCount; childIndex++) {
                     enforceTimeBound(startedAtMs);
-                    AccessibilityNodeInfo child = node.getChild(childIndex);
+                    AccessibilityNodeInfo child =
+                            node.getChild(childIndex, PREFETCHING_STRATEGY);
                     enforceTimeBound(startedAtMs);
                     if (child == null) {
                         throw new AssertionError("The fresh legal snapshot contained a missing child");
@@ -115,7 +118,7 @@ final class RuntimeExternalLegalSnapshot {
                 if (window == null) {
                     throw new AssertionError("The fresh legal snapshot contained a missing window");
                 }
-                AccessibilityNodeInfo root = window.getRoot();
+                AccessibilityNodeInfo root = window.getRoot(PREFETCHING_STRATEGY);
                 enforceTimeBound(startedAtMs);
                 if (root == null) {
                     throw new AssertionError("A fresh legal snapshot window root was missing");

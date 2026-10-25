@@ -91,12 +91,14 @@ function validateIntegration(source, helperSource, legalSource) {
   }
 
   const requiredTransactionFragments = [
-    'RuntimeExternalSettingsTransaction.open(',
+    'RuntimeExternalSettingsTransaction.Result result = RuntimeExternalSettingsTransaction.open(',
     'return instrumentation.getUiAutomation().clearCache();',
     '.assertNoOutOfScopeApprovalForSettingsTransaction();',
     'return observePlaybackSettingsTransaction();',
     'recordSettingsTransactionTiming(',
     'recordSettingsClickTiming(',
+    'recordSettingsRailObservation(',
+    'checks.put("playbackActionsRailPanAttempts", result.railPanAttempts)',
     'RuntimeExternalPlayerFlowTest.this.log(message);',
     'MEDIA_WAIT_MS',
   ];
@@ -140,6 +142,9 @@ function validateIntegration(source, helperSource, legalSource) {
     'settings != null && hasVisibleBounds(settings)',
     'assertVisibleBounds(settings, PLAYBACK_SETTINGS_LABEL)',
     'Observation.settings(settings::click)',
+    'findUniquePlaybackActionsRailWithin(playerDialog)',
+    'Observation.railPan(',
+    'rail.scroll(Direction.RIGHT, 0.72f)',
     'assertVisibleBounds(playerDialog, "playing movie dialog")',
     'Observation.reveal(playerDialog::click)',
   ];
@@ -172,27 +177,41 @@ function validateIntegration(source, helperSource, legalSource) {
 
 function validateHelperShape(source) {
   const failures = [];
-  const body = methodBody(source, 'static void open(Environment environment, long timeoutMs)');
+  const body = methodBody(source, 'static Result open(Environment environment, long timeoutMs)');
+  const policy = methodBody(source, 'private static String chooseNextSettingsAction(');
+  const freshGuard = methodBody(source, 'private static void runFreshLegalGuard(');
   const zero = body.indexOf('configurator.setWaitForIdleTimeout(TRANSACTION_IDLE_TIMEOUT_MS)');
   const api = body.indexOf('Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE');
   const cache = body.indexOf('environment.clearAccessibilityCache()');
-  const guard = body.indexOf('environment.assertNoOutOfScopeApproval()');
+  const guard = body.indexOf('runFreshLegalGuard(environment, configurator, "fresh-legal-guard")');
   const observe = body.indexOf('environment.observePlaybackSettings()');
   const settingsClick = body.indexOf('observation.settingsTarget.click()');
+  const railPan = body.indexOf('observation.railPanTarget.click()');
   const revealClick = body.indexOf('observation.revealTarget.click()');
   const restore = body.indexOf('configurator.setWaitForIdleTimeout(previousIdleTimeoutMs)');
   if (!(zero >= 0 && zero < api && api < cache && cache < guard && guard < observe)) {
     failures.push('API/cache/guard/acquire sequence is not zero-idle and fail-closed');
   }
-  if (!(observe < settingsClick && observe < revealClick)) {
+  if (!(observe < settingsClick && observe < railPan && observe < revealClick)) {
     failures.push('helper clicks before the fresh semantic observation');
   }
   if ((body.match(/observation\.settingsTarget\.click\(\)/g) ?? []).length !== 1
+      || (body.match(/observation\.railPanTarget\.click\(\)/g) ?? []).length !== 1
       || (body.match(/observation\.revealTarget\.click\(\)/g) ?? []).length !== 1
-      || !/observation\.revealTarget != null && !revealTapPerformed/.test(body)) {
-    failures.push('helper does not cap settings and conditional reveal input to one each');
+      || !/revealVisible && !revealTapPerformed/.test(policy)
+      || !/railPanAttempts >= MAX_PLAYBACK_ACTIONS_RAIL_PANS/.test(policy)) {
+    failures.push('helper does not bound settings, rail, and conditional reveal input');
   }
-  for (const stage of ['cache', 'fresh-legal-guard', 'settings-acquisition', 'reveal-click']) {
+  if (!freshGuard.includes('environment.assertNoOutOfScopeApproval()')
+      || !freshGuard.includes('environment.recordTiming(')
+      || !freshGuard.includes('stage')) {
+    failures.push('fresh legal guard no longer records its exact guarded call');
+  }
+  if ((body.match(/runFreshLegalGuard\(/g) ?? []).length !== 4) {
+    failures.push('each possible input no longer has its own fresh legal guard');
+  }
+  for (const stage of ['cache', 'fresh-legal-guard', 'fresh-input-legal-guard',
+    'settings-acquisition', 'playback-actions-rail-pan-', 'reveal-click']) {
     if (!body.includes(`"${stage}"`)) failures.push(`missing bounded timing stage: ${stage}`);
   }
   if (!body.includes('environment.recordSettingsClickTiming(')) {
@@ -206,6 +225,10 @@ function validateHelperShape(source) {
       || !/SystemClock\.sleep\(POLL_INTERVAL_MS\)/.test(body)
       || !/POLL_INTERVAL_MS = 250L/.test(source)) {
     failures.push('helper changed the bounded 250 ms observation loop');
+  }
+  if (!body.includes('environment.recordRailObservation(observation.state, railPanAttempts)')
+      || !body.includes('return new Result(')) {
+    failures.push('helper lost the bounded rail receipt or typed result');
   }
   return failures;
 }
@@ -222,7 +245,7 @@ function validateLegalShape(source) {
       || !body.includes('node.getContentDescription()')) {
     failures.push('one-pass guard lost visibility, text, or description checks');
   }
-  if (!body.includes('node.getChild(childIndex)')
+  if (!body.includes('node.getChild(childIndex, PREFETCHING_STRATEGY)')
       || !body.includes('visited.add(child)')
       || !body.includes('enforceSizeBound(visited.size())')
       || !body.includes('enforceTimeBound(startedAtMs)')) {
@@ -230,7 +253,7 @@ function validateLegalShape(source) {
   }
   if (!roots.includes('automation.getRootInActiveWindow()')
       || !roots.includes('automation.getWindowsOnAllDisplays()')
-      || !roots.includes('window.getRoot()')) {
+      || !roots.includes('window.getRoot(PREFETCHING_STRATEGY)')) {
     failures.push('fresh guard does not cover the UiAutomator root/window scope');
   }
   if (/androidx\.test\.uiautomator\.(?:By|UiDevice)|findObject|findObjects|runWatchers/.test(source)) {
@@ -238,6 +261,11 @@ function validateLegalShape(source) {
   }
   if (!source.includes('MAX_NODES = 4_096') || !source.includes('MAX_TRAVERSAL_MS = 1_000L')) {
     failures.push('fresh guard bounds changed');
+  }
+  if (!source.includes(
+    'AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST',
+  ) || source.includes('FLAG_PREFETCH_UNINTERRUPTIBLE')) {
+    failures.push('fresh guard lost its public interruptible breadth-first prefetch strategy');
   }
   return failures;
 }
@@ -293,17 +321,25 @@ public final class SparseArray<T> {
 
 const accessibilityNodeStub = `package android.view.accessibility;
 import android.os.SystemClock;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 public class AccessibilityNodeInfo {
+    public static final int FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST = 16;
+    private static final int MAX_PREFETCHED_NODES = 50;
+    public static int plainChildCalls;
+    public static int prefetchedChildCalls;
     public final String id;
     public boolean visible = true;
     public CharSequence text;
     public CharSequence description;
     public long accessCostMs;
+    public long coldChildCostMs;
+    public long prefetchCostMs;
+    public boolean prefetched;
     public String failureOperation;
     public final List<AccessibilityNodeInfo> children = new ArrayList<>();
     private final Map<Integer, Integer> childReads = new HashMap<>();
@@ -320,10 +356,46 @@ public class AccessibilityNodeInfo {
     public int getChildCount() { before("childCount"); return children.size(); }
     public AccessibilityNodeInfo getChild(int index) {
         before("child");
+        plainChildCalls++;
         childReads.put(index, childReads.getOrDefault(index, 0) + 1);
-        return children.get(index);
+        AccessibilityNodeInfo child = children.get(index);
+        if (child != null && !child.prefetched) SystemClock.advance(coldChildCostMs);
+        return child;
+    }
+    public AccessibilityNodeInfo getChild(int index, int strategy) {
+        before("child");
+        if (strategy != FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST) {
+            throw new IllegalArgumentException("unexpected prefetch strategy");
+        }
+        prefetchedChildCalls++;
+        childReads.put(index, childReads.getOrDefault(index, 0) + 1);
+        AccessibilityNodeInfo child = children.get(index);
+        if (child != null && !child.prefetched) {
+            SystemClock.advance(prefetchCostMs);
+            prefetchBreadthFirst(child);
+        }
+        return child;
     }
     public int childReads(int index) { return childReads.getOrDefault(index, 0); }
+    public static void resetPrefetchMetrics() {
+        plainChildCalls = 0;
+        prefetchedChildCalls = 0;
+    }
+    public static void prefetchBreadthFirst(AccessibilityNodeInfo root) {
+        if (root == null) return;
+        ArrayDeque<AccessibilityNodeInfo> pending = new ArrayDeque<>();
+        pending.addLast(root);
+        int prefetchedCount = 0;
+        while (!pending.isEmpty() && prefetchedCount < MAX_PREFETCHED_NODES) {
+            AccessibilityNodeInfo current = pending.removeFirst();
+            if (current.prefetched) continue;
+            current.prefetched = true;
+            prefetchedCount++;
+            for (AccessibilityNodeInfo child : current.children) {
+                if (child != null && !child.prefetched) pending.addLast(child);
+            }
+        }
+    }
     @Override public boolean equals(Object other) {
         return other instanceof AccessibilityNodeInfo
                 && Objects.equals(id, ((AccessibilityNodeInfo) other).id);
@@ -335,14 +407,34 @@ public class AccessibilityNodeInfo {
 const accessibilityWindowStub = `package android.view.accessibility;
 import android.os.SystemClock;
 public class AccessibilityWindowInfo {
+    public static int plainRootCalls;
+    public static int prefetchedRootCalls;
     public AccessibilityNodeInfo root;
     public long accessCostMs;
     public boolean fail;
     public AccessibilityWindowInfo(AccessibilityNodeInfo root) { this.root = root; }
     public AccessibilityNodeInfo getRoot() {
         SystemClock.advance(accessCostMs);
+        plainRootCalls++;
         if (fail) throw new IllegalStateException("RAW_UI_SENTINEL");
         return root;
+    }
+    public AccessibilityNodeInfo getRoot(int strategy) {
+        SystemClock.advance(accessCostMs);
+        if (strategy != AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST) {
+            throw new IllegalArgumentException("unexpected prefetch strategy");
+        }
+        prefetchedRootCalls++;
+        if (fail) throw new IllegalStateException("RAW_UI_SENTINEL");
+        if (root != null && !root.prefetched) {
+            SystemClock.advance(root.prefetchCostMs);
+            AccessibilityNodeInfo.prefetchBreadthFirst(root);
+        }
+        return root;
+    }
+    public static void resetPrefetchMetrics() {
+        plainRootCalls = 0;
+        prefetchedRootCalls = 0;
     }
 }
 `;
@@ -433,14 +525,18 @@ public final class RuntimeExternalSettingsTransactionHarness {
         int guardCalls;
         int observeCalls;
         int revealAttempts;
+        int railPanAttempts;
         int settingsAttempts;
         int logs;
         int settingsClickTimings;
+        int railObservationCalls;
         boolean settingsClickReturned;
         boolean cacheResult = true;
         long guardCostMs;
         final List<String> timingStages = new ArrayList<>();
         final List<Boolean> timingReturned = new ArrayList<>();
+        final List<String> railObservationStates = new ArrayList<>();
+        final List<Integer> railObservationPans = new ArrayList<>();
 
         @Override
         public boolean clearAccessibilityCache() {
@@ -487,6 +583,14 @@ public final class RuntimeExternalSettingsTransactionHarness {
         }
 
         @Override
+        public void recordRailObservation(String state, int completedPanAttempts) {
+            requireZeroIdle("rail observation");
+            railObservationCalls++;
+            railObservationStates.add(state);
+            railObservationPans.add(completedPanAttempts);
+        }
+
+        @Override
         public void log(String message) {
             requireZeroIdle("transaction log");
             logs++;
@@ -503,6 +607,13 @@ public final class RuntimeExternalSettingsTransactionHarness {
             return () -> {
                 requireZeroIdle("settings click");
                 settingsAttempts++;
+            };
+        }
+
+        RuntimeExternalSettingsTransaction.ClickTarget railPanTarget() {
+            return () -> {
+                requireZeroIdle("rail pan");
+                railPanAttempts++;
             };
         }
     }
@@ -524,15 +635,25 @@ public final class RuntimeExternalSettingsTransactionHarness {
             }
         };
         environment.guardCostMs = 300L;
-        RuntimeExternalSettingsTransaction.open(environment, 60_000L);
+        RuntimeExternalSettingsTransaction.Result result =
+                RuntimeExternalSettingsTransaction.open(environment, 60_000L);
         check(environment.clearCalls == 1, "success cache refresh count changed");
-        check(environment.guardCalls == 1, "success guard count changed");
+        check(environment.guardCalls == 2, "success guard count changed");
         check(environment.observeCalls == 1, "success observation count changed");
         check(environment.settingsAttempts == 1, "success settings click count changed");
         check(environment.revealAttempts == 0, "success unexpectedly revealed controls");
         check(environment.timingStages.equals(List.of(
-                        "cache", "fresh-legal-guard", "settings-acquisition")),
+                        "cache", "fresh-legal-guard", "settings-acquisition",
+                        "fresh-input-legal-guard")),
                 "success timing stages changed");
+        check(environment.railObservationCalls == 1
+                        && environment.railObservationStates.equals(
+                                List.of("playback-settings-visible"))
+                        && environment.railObservationPans.equals(List.of(0)),
+                "success rail observation receipt changed");
+        check(result.railObservationCount == 0 && result.railPanAttempts == 0
+                        && !result.revealTapPerformed && result.settingsClickCount == 1,
+                "success typed result changed");
         check(environment.settingsClickTimings == 1 && environment.settingsClickReturned,
                 "success actual click timing changed");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
@@ -553,15 +674,25 @@ public final class RuntimeExternalSettingsTransactionHarness {
                 return RuntimeExternalSettingsTransaction.Observation.settings(settingsTarget());
             }
         };
-        RuntimeExternalSettingsTransaction.open(environment, 60_000L);
+        RuntimeExternalSettingsTransaction.Result result =
+                RuntimeExternalSettingsTransaction.open(environment, 60_000L);
         check(environment.revealAttempts == 1, "reveal was not single-use");
         check(environment.settingsAttempts == 1, "settings was not single-use");
-        check(environment.clearCalls == 4 && environment.guardCalls == 4
+        check(environment.clearCalls == 4 && environment.guardCalls == 6
                         && environment.observeCalls == 4,
                 "each retry did not repeat cache, guard, and fresh acquisition");
-        check(environment.timingStages.size() == 13
+        check(environment.timingStages.size() == 15
                         && environment.timingStages.contains("reveal-click"),
                 "reveal timing stages changed");
+        check(environment.railObservationCalls == 2
+                        && environment.railObservationStates.equals(List.of(
+                                "player-dialog-visible-controls-hidden",
+                                "playback-settings-visible"))
+                        && environment.railObservationPans.equals(List.of(0, 0)),
+                "reveal rail observation receipt changed");
+        check(result.railObservationCount == 0 && result.railPanAttempts == 0
+                        && result.revealTapPerformed && result.settingsClickCount == 1,
+                "reveal typed result changed");
         check(environment.settingsClickTimings == 1 && environment.settingsClickReturned,
                 "reveal flow lost final click timing");
         check(Configurator.getInstance().getWaitForIdleTimeout() == original,
@@ -841,7 +972,11 @@ public final class RuntimeExternalLegalSnapshotHarness {
         return automation;
     }
 
-    private static void reset() { SystemClock.reset(0L); }
+    private static void reset() {
+        SystemClock.reset(0L);
+        AccessibilityNodeInfo.resetPrefetchMetrics();
+        AccessibilityWindowInfo.resetPrefetchMetrics();
+    }
 
     private static void originalPatternCoversTextDescriptionAndVisibility() {
         String[] phrases = {
@@ -1035,12 +1170,67 @@ public final class RuntimeExternalLegalSnapshotHarness {
                 "one-pass guard invoked a ByMatcher watcher scan");
     }
 
+    private static List<AccessibilityNodeInfo> coldTree(
+            String prefix, int count, long childCostMs, long prefetchCostMs) {
+        List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+        for (int index = 0; index < count; index++) {
+            AccessibilityNodeInfo node = node(prefix + "-" + index);
+            node.coldChildCostMs = childCostMs;
+            node.prefetchCostMs = prefetchCostMs;
+            nodes.add(node);
+            if (index > 0) nodes.get((index - 1) / 4).children.add(node);
+        }
+        return nodes;
+    }
+
+    private static UiAutomation coldNinetySevenNodeAutomation(
+            List<AccessibilityNodeInfo> active,
+            List<AccessibilityNodeInfo> otherDisplay) {
+        UiAutomation automation = automation(active.get(0), active.get(0));
+        List<AccessibilityWindowInfo> displayOne = new ArrayList<>();
+        displayOne.add(new AccessibilityWindowInfo(otherDisplay.get(0)));
+        automation.windows.put(1, displayOne);
+        return automation;
+    }
+
+    private static void coldNinetySevenNodeSnapshotUsesPublicPrefetchWithoutNarrowingScope() {
+        reset();
+        List<AccessibilityNodeInfo> active = coldTree("cold-active", 70, 25L, 25L);
+        List<AccessibilityNodeInfo> otherDisplay =
+                coldTree("cold-other-display", 27, 25L, 25L);
+        RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                coldNinetySevenNodeAutomation(active, otherDisplay), BINDING_TERMS);
+        check(SystemClock.uptimeMillis() <= 1_000L,
+                "97-node cold snapshot exceeded the unchanged time bound");
+        check(AccessibilityWindowInfo.prefetchedRootCalls == 2
+                        && AccessibilityWindowInfo.plainRootCalls == 0,
+                "a cold all-display window root bypassed public prefetch");
+        check(AccessibilityNodeInfo.prefetchedChildCalls == 95
+                        && AccessibilityNodeInfo.plainChildCalls == 0,
+                "a cold accessible child bypassed public prefetch");
+        check(active.get(69).prefetched && otherDisplay.get(26).prefetched,
+                "public prefetch did not cover the complete bounded graph");
+
+        reset();
+        active = coldTree("legal-active", 70, 25L, 25L);
+        otherDisplay = coldTree("legal-other-display", 27, 25L, 25L);
+        otherDisplay.get(26).description = "Prefix binding terms suffix";
+        final List<AccessibilityNodeInfo> legalActive = active;
+        final List<AccessibilityNodeInfo> legalOtherDisplay = otherDisplay;
+        expectFailure(AssertionError.class,
+                () -> RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                        coldNinetySevenNodeAutomation(
+                                legalActive, legalOtherDisplay), BINDING_TERMS),
+                "last node on another display");
+    }
+
     public static void main(String[] args) {
         originalPatternCoversTextDescriptionAndVisibility();
         multipleRootsAndDisplaysAreCovered();
         missingRootsAndUnexpectedErrorsFailClosed();
         graphSizeAndTimeBoundsFailClosed();
         everyAccessibleChildIsReadOnceWithoutLegacyMatcher();
+        coldNinetySevenNodeSnapshotUsesPublicPrefetchWithoutNarrowingScope();
         System.out.println("LEGAL_OK checks=" + checks);
     }
 
@@ -1099,7 +1289,9 @@ function driverAdapterSource(source) {
   const currentPackage = methodBody(source, 'private String currentPackage()');
   const recordTiming = methodBody(source, 'private void recordSettingsTransactionTiming(');
   const recordClickTiming = methodBody(source, 'private void recordSettingsClickTiming(');
+  const recordRailObservation = methodBody(source, 'private void recordSettingsRailObservation(');
   const findDialog = methodBody(source, 'private UiObject2 findUniqueExactProductDialog(String label)');
+  const findRail = methodBody(source, 'private UiObject2 findUniquePlaybackActionsRailWithin(');
   const findScopedLabel = methodBody(source, 'private UiObject2 findLabeledClickableWithin(');
   const collectScoped = methodBody(source, 'private void collectClickableAncestorsWithin(');
   const clickableScoped = methodBody(source, 'private UiObject2 clickableAncestorWithin(');
@@ -1118,8 +1310,10 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import androidx.test.uiautomator.Configurator;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -1127,14 +1321,19 @@ final class RuntimeExternalPlayerFlowTest {
     private static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
     private static final String PLAYER_DIALOG_LABEL = "Playing Synthetic Fixture Movie (2026)";
     private static final String PLAYBACK_SETTINGS_LABEL = "Playback settings";
+    private static final String PLAYBACK_ACTIONS_LABEL = "Playback actions";
     private static final long MEDIA_WAIT_MS = 60_000L;
     private static final int MAX_SETTINGS_TRANSACTION_TIMING_EVENTS = 64;
+    private static final int MAX_SETTINGS_RAIL_OBSERVATIONS = 16;
     private static final Pattern BINDING_TERMS = Pattern.compile(${bindingPatternLiteral(source)});
 
     private final FakeInstrumentation instrumentation = new FakeInstrumentation();
     private final UiDevice device = new UiDevice();
     private final List<String> settingsTransactionTimings = new ArrayList<>();
+    private final List<String> settingsRailObservations = new ArrayList<>();
+    private final Map<String, Object> checks = new LinkedHashMap<>();
     private int settingsTransactionTimingEventsOmitted;
+    private int settingsRailObservationEventsOmitted;
     private long settingsClickDispatchedAtMs = -1L;
     private long settingsClickFinishedAtMs = -1L;
     private long settingsClickIdleBeforeMs = -1L;
@@ -1165,7 +1364,10 @@ final class RuntimeExternalPlayerFlowTest {
             long idleBeforeMs,
             long idleAfterMs,
             boolean returned) {${recordClickTiming}}
+    private void recordSettingsRailObservation(
+            String state, int completedPanAttempts) {${recordRailObservation}}
     private UiObject2 findUniqueExactProductDialog(String label) {${findDialog}}
+    private UiObject2 findUniquePlaybackActionsRailWithin(UiObject2 dialog) {${findRail}}
     private UiObject2 findLabeledClickableWithin(
             UiObject2 boundary, String label, String description) {${findScopedLabel}}
     private void collectClickableAncestorsWithin(
@@ -1316,11 +1518,11 @@ final class RuntimeExternalPlayerFlowTest {
         flow.executeSettingsCallsite();
         check(flow.instrumentation.automation.clearCalls == 2,
                 "actual adapter did not delegate both cache refreshes");
-        check(flow.instrumentation.automation.activeRootCalls == 2
-                        && flow.instrumentation.automation.windowsCalls == 2,
-                "actual adapter did not acquire a fresh root snapshot twice");
-        check(flow.device.currentPackageCalls == 2,
-                "actual adapter did not preserve both foreground checks");
+        check(flow.instrumentation.automation.activeRootCalls == 4
+                        && flow.instrumentation.automation.windowsCalls == 4,
+                "actual adapter did not acquire a fresh root snapshot before every input");
+        check(flow.device.currentPackageCalls == 4,
+                "actual adapter did not preserve every foreground check");
         check(flow.device.legacyMatcherRuns == 0,
                 "fresh legal guard reran ByMatcher watchers");
         check(flow.revealAttempts == 1 && flow.settingsAttempts == 1,
@@ -1556,6 +1758,7 @@ final class RuntimeExternalPlayerFlowTest {
         final boolean enabled;
         final boolean visible;
         final Rect bounds;
+        boolean scrollable;
         final List<UiObject2> children = new ArrayList<>();
         UiObject2 parent;
         Runnable onClick = () -> {};
@@ -1590,6 +1793,11 @@ final class RuntimeExternalPlayerFlowTest {
             for (UiObject2 child : children) child.collect(selector, found, true);
         }
         void click() { onClick.run(); }
+        void scroll(Direction direction, float fraction) {
+            check(direction == Direction.RIGHT && fraction == 0.72f,
+                    "unexpected Playback actions rail gesture");
+            onClick.run();
+        }
         boolean isClickable() { return clickable; }
         boolean isEnabled() { return enabled; }
         UiObject2 getParent() { return parent; }
@@ -1612,18 +1820,23 @@ final class RuntimeExternalPlayerFlowTest {
         String pkg;
         Pattern text;
         Pattern desc;
+        Boolean scrollable;
         BySelector clazz(String value) { clazz = value; return this; }
         BySelector pkg(String value) { pkg = value; return this; }
         BySelector text(Pattern value) { text = value; return this; }
         BySelector desc(Pattern value) { desc = value; return this; }
+        BySelector scrollable(boolean value) { scrollable = value; return this; }
         boolean matches(UiObject2 object) {
             return (clazz == null || clazz.equals(object.className))
                     && (pkg == null || pkg.equals(object.applicationPackage))
                     && (text == null || object.text != null && text.matcher(object.text).matches())
                     && (desc == null || object.contentDescription != null
-                            && desc.matcher(object.contentDescription).matches());
+                            && desc.matcher(object.contentDescription).matches())
+                    && (scrollable == null || scrollable == object.scrollable);
         }
     }
+
+    private enum Direction { RIGHT }
 
     private static final class Rect {
         final int left;
@@ -1700,7 +1913,7 @@ test('actual transaction helper keeps zero-idle ordering, bounded input, timings
   assert.match(result.stdout, /^OK checks=\d+\s*$/);
 });
 
-test('actual fresh legal helper executes one bounded traversal over the original pattern and root scope', () => {
+test('actual fresh legal helper preserves full scope and the 1s bound on a 97-node cold model', () => {
   assert.deepEqual(validateLegalShape(legal), []);
   const result = executeLegal(legal);
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -1726,6 +1939,34 @@ test('executable actual callsite rejects the predecessor split matcher and click
 });
 
 for (const [name, mutate] of [
+  [
+    'plain window-root fetch mutation',
+    source => replaceUnique(
+      source,
+      'window.getRoot(PREFETCHING_STRATEGY)',
+      'window.getRoot()',
+    ),
+  ],
+  [
+    'plain child fetch mutation',
+    source => replaceUnique(
+      source,
+      'node.getChild(childIndex, PREFETCHING_STRATEGY)',
+      'node.getChild(childIndex)',
+    ),
+  ],
+  [
+    'plain root-and-child cold predecessor',
+    source => replaceUnique(
+      replaceUnique(
+        source,
+        'window.getRoot(PREFETCHING_STRATEGY)',
+        'window.getRoot()',
+      ),
+      'node.getChild(childIndex, PREFETCHING_STRATEGY)',
+      'node.getChild(childIndex)',
+    ),
+  ],
   [
     'visible text omission',
     source => replaceUnique(
@@ -1839,8 +2080,8 @@ for (const [name, mutate] of [
     'repeated the conditional reveal',
     source => replaceUnique(
       source,
-      'observation.revealTarget != null && !revealTapPerformed',
-      'observation.revealTarget != null',
+      'revealVisible && !revealTapPerformed',
+      'revealVisible',
     ),
   ],
   [
@@ -1856,8 +2097,8 @@ for (const [name, mutate] of [
     'fresh guard timing omission',
     source => replaceUnique(
       source,
-      '                    environment.recordTiming(\n                            "fresh-legal-guard",',
-      '                    if (false) environment.recordTiming(\n                            "fresh-legal-guard",',
+      '            environment.recordTiming(\n                    stage,',
+      '            if (false) environment.recordTiming(\n                    stage,',
     ),
   ],
   [

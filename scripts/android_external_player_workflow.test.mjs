@@ -432,6 +432,13 @@ function playbackSettingsObservation(d, transactionSource, legalSource) {
   ]) assert.match(transactionGuard, new RegExp(`foreground\\.equals\\("${packageName.replaceAll('.', '\\.')}"\\)`));
   assert.match(legalSource, /automation\.getRootInActiveWindow\(\)/);
   assert.match(legalSource, /automation\.getWindowsOnAllDisplays\(\)/);
+  assert.match(legalSource,
+    /PREFETCHING_STRATEGY\s*=\s*\n?\s*AccessibilityNodeInfo\.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST/);
+  assert.match(legalSource, /window\.getRoot\(PREFETCHING_STRATEGY\)/);
+  assert.match(legalSource, /node\.getChild\(childIndex, PREFETCHING_STRATEGY\)/);
+  assert.doesNotMatch(legalSource, /FLAG_PREFETCH_UNINTERRUPTIBLE/);
+  assert.match(legalSource, /MAX_NODES = 4_096/);
+  assert.match(legalSource, /MAX_TRAVERSAL_MS = 1_000L/);
   assert.match(legalSource, /node\.isVisibleToUser\(\)/);
   assert.match(legalSource, /node\.getText\(\)/);
   assert.match(legalSource, /node\.getContentDescription\(\)/);
@@ -785,6 +792,12 @@ for (const [name, original, mutate, contract] of [
   ['ignored accessibility cache result', settingsTransaction, s => s.replace(
     'if (!cacheCleared)',
     'if (false)'), h => driverContract(driver, h)],
+  ['external legal window-root prefetch', externalLegalSnapshot, s => s.replace(
+    'window.getRoot(PREFETCHING_STRATEGY)',
+    'window.getRoot()'), h => driverContract(driver, settingsTransaction, h)],
+  ['external legal child prefetch', externalLegalSnapshot, s => s.replace(
+    'node.getChild(childIndex, PREFETCHING_STRATEGY)',
+    'node.getChild(childIndex)'), h => driverContract(driver, settingsTransaction, h)],
   ['settings cache refresh ordering', settingsTransaction, s => s.replace(
     '                long cacheStartedAtMs = SystemClock.uptimeMillis();',
     '                environment.assertNoOutOfScopeApproval();\n                long cacheStartedAtMs = SystemClock.uptimeMillis();'), h => driverContract(driver, h)],
