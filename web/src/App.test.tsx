@@ -598,6 +598,69 @@ describe("App routing", () => {
     expect(navigate).toHaveBeenCalledWith("library");
   });
 
+  it("focuses changed routes without scrolling and cancels pending route focus", () => {
+    let nextFrame = 40;
+    const callbacks = new Map<number, FrameRequestCallback>();
+    const requestFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        const frame = nextFrame;
+        nextFrame += 1;
+        callbacks.set(frame, callback);
+        return frame;
+      });
+    const cancelFrame = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation((frame) => {
+        callbacks.delete(frame);
+      });
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+
+    try {
+      const { rerender, unmount } = render(<App />);
+
+      // Initial paint announces the route without moving keyboard focus.
+      expect(requestFrame).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      store = makeStore({ route: "watchlist" });
+      rerender(<App />);
+      expect(requestFrame).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("global-search")).toBeInTheDocument();
+      const watchlistFrame = screen.getByLabelText("Watchlist page");
+      const watchlistFrameId = requestFrame.mock.results[0]?.value;
+      const watchlistFocus = callbacks.get(watchlistFrameId);
+      expect(watchlistFocus).toBeTypeOf("function");
+
+      act(() => watchlistFocus?.(16));
+      callbacks.delete(watchlistFrameId);
+
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(focus.mock.instances[0]).toBe(watchlistFrame);
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      expect(watchlistFrame).toHaveFocus();
+
+      store = makeStore({ route: "history" });
+      rerender(<App />);
+      expect(requestFrame).toHaveBeenCalledTimes(2);
+      const historyFrameId = requestFrame.mock.results[1]?.value;
+      const staleHistoryFocus = callbacks.get(historyFrameId);
+      expect(staleHistoryFocus).toBeTypeOf("function");
+
+      unmount();
+      expect(cancelFrame).toHaveBeenLastCalledWith(historyFrameId);
+
+      // Even if a stale browser callback is delivered after cleanup, the ref is
+      // detached and must not move focus behind the unmounted route.
+      act(() => staleHistoryFocus?.(32));
+      expect(focus).toHaveBeenCalledTimes(1);
+    } finally {
+      focus.mockRestore();
+      cancelFrame.mockRestore();
+      requestFrame.mockRestore();
+    }
+  });
+
   it("wires Discover onSelect to openDetail", () => {
     render(<App />);
     fireEvent.click(screen.getByTestId("screen-discover"));
