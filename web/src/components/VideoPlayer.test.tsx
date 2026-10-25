@@ -3376,6 +3376,75 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it("keeps confirmed semantic audio metadata through a same-track quality switch", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "fra", label: "French", default: false },
+    ]);
+    const request = vi.fn(async (
+      quality: ServerTranscodeQuality,
+      position: number,
+      audioTrack?: number,
+    ) => ({
+      url: `https://server.example/api/stream/session-${String(request.mock.calls.length)}/index.m3u8?quality=${quality}&start=${position}&audio=${String(audioTrack)}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality,
+      audioTrack,
+    }));
+    const onProgress = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-0/index.m3u8?quality=480p&audio=0"
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{
+          qualities: ["480p", "720p"],
+          defaultQuality: "480p",
+          loadAudioTracks,
+          request,
+        }}
+        onProgress={onProgress}
+        onClose={() => {}}
+      />,
+    );
+    const initialVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "French" }));
+    await waitFor(() => expect(request).toHaveBeenNthCalledWith(1, "480p", 0, 1));
+    const frenchVideo = await waitFor(() => {
+      const current = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(current).not.toBe(initialVideo);
+      return current;
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "720p" }));
+    await waitFor(() => expect(request).toHaveBeenNthCalledWith(2, "720p", 0, 1));
+    const qualityVideo = await waitFor(() => {
+      const current = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(current).not.toBe(frenchVideo);
+      return current;
+    });
+    Object.defineProperties(qualityVideo, {
+      currentTime: { configurable: true, value: 0 },
+      duration: { configurable: true, value: 100 },
+    });
+    markCurrentMediaDataReady(qualityVideo);
+    fireEvent.loadedData(qualityVideo);
+    const reportClock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6_000);
+    fireEvent.timeUpdate(qualityVideo);
+    reportClock.mockRestore();
+
+    expect(onProgress).toHaveBeenLastCalledWith(
+      0,
+      100,
+      expect.objectContaining({ preferredAudioId: "1", preferredAudioLang: "fra" }),
+    );
+  });
+
   it("finishes a deferred server inventory when its inline loader identity changes", async () => {
     const inventory = deferred<Array<{
       index: number;
@@ -5842,6 +5911,343 @@ describe("WebviewPlayer", () => {
     expect(screen.getByRole("button", { name: "English" }).getAttribute("aria-pressed")).toBe("true");
     expect(request).toHaveBeenCalledTimes(2);
   }, 15_000);
+
+  it("restores a manual logical audio choice after the same source gets a fresh server stream", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/optimized/index.m3u8?quality=480p&start=${position}&audio=${String(audioTrack)}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    const initialTracks = [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "jpn", label: "Japanese", default: false },
+    ] satisfies ServerAudioTrack[];
+    const refreshedTracks = [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 3, language: "jpn", label: "Japanese", default: false },
+    ] satisfies ServerAudioTrack[];
+    const player = (
+      sourceRevision: number,
+      sourceUrl: string,
+      tracks: readonly ServerAudioTrack[],
+      sourceFileName = "same-fixture.mkv",
+    ) => (
+      <VideoPlayer
+        url={sourceUrl}
+        sourceRevision={sourceRevision}
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        sourceFileName={sourceFileName}
+        scrobbleContext={{ tmdbId: 42, type: "movie" }}
+        timelineOffsetSeconds={sourceRevision === 1 ? 0 : 10}
+        initialHandoffState={sourceRevision === 1
+          ? null
+          : { paused: true, volume: 1, muted: false, playbackRate: 1 }}
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo: async () => ({ durationSeconds: 30, tracks: [...tracks] }),
+          loadAudioTracks: async () => [...tracks],
+          request,
+        }}
+        onClose={() => {}}
+      />
+    );
+    const view = render(player(
+      1,
+      "https://server.example/api/stream/old/index.m3u8?quality=480p&audio=0",
+      initialTracks,
+    ));
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Japanese" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0, 1));
+
+    (HTMLMediaElement.prototype.play as ReturnType<typeof vi.fn>).mockClear();
+    view.rerender(player(
+      2,
+      "https://server.example/api/stream/fresh/index.m3u8?quality=480p&start=10&audio=0",
+      refreshedTracks,
+    ));
+
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 10, 3));
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+
+    request.mockClear();
+    view.rerender(player(
+      3,
+      "https://server.example/api/stream/fresh-2/index.m3u8?quality=480p&start=10&audio=0",
+      [{ index: 0, language: "eng", label: "English", default: true }],
+    ));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect((await screen.findByRole("button", { name: "English" })).getAttribute(
+      "aria-pressed",
+    )).toBe("true");
+    expect(request).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    view.rerender(player(
+      4,
+      "https://server.example/api/stream/different/index.m3u8?quality=480p&start=10&audio=0",
+      refreshedTracks,
+      "different-fixture.mkv",
+    ));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect((await screen.findByRole("button", { name: "Japanese" })).getAttribute(
+      "aria-pressed",
+    )).toBe("false");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("uses the genuine source label to distinguish same-language tracks after retry reordering", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/optimized/index.m3u8?quality=480p&start=${position}&audio=${String(audioTrack)}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    const player = (
+      revision: number,
+      tracks: readonly ServerAudioTrack[],
+    ) => (
+      <VideoPlayer
+        url={`https://server.example/api/stream/${revision}/index.m3u8?quality=480p&audio=0`}
+        sourceRevision={revision}
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        sourceFileName="same-fixture.mkv"
+        scrobbleContext={{ tmdbId: 42, type: "movie" }}
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo: async () => ({ durationSeconds: 30, tracks: [...tracks] }),
+          loadAudioTracks: async () => [...tracks],
+          request,
+        }}
+        onClose={() => {}}
+      />
+    );
+    const view = render(player(1, [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "jpn", label: "Japanese Commentary", default: false },
+      { index: 2, language: "jpn", label: "Japanese Main", default: false },
+    ]));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Japanese Main" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0, 2));
+
+    view.rerender(player(2, [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 3, language: "jpn", label: "Japanese Commentary", default: false },
+      { index: 4, language: "jpn", label: "Japanese Main", default: false },
+    ]));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0, 4));
+    expect(request).not.toHaveBeenCalledWith("480p", 0, 3);
+  });
+
+  it("invalidates a labeled manual choice when only a different same-language track remains", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const sourceInfoLoaded = vi.fn();
+    const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/optimized/index.m3u8?quality=480p&start=${position}&audio=${String(audioTrack)}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    const player = (revision: number, tracks: readonly ServerAudioTrack[]) => (
+      <VideoPlayer
+        url={`https://server.example/api/stream/${revision}/index.m3u8?quality=480p&audio=0`}
+        sourceRevision={revision}
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        sourceFileName="same-fixture.mkv"
+        scrobbleContext={{ tmdbId: 42, type: "movie" }}
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo: async () => {
+            sourceInfoLoaded(revision);
+            return { durationSeconds: 30, tracks: [...tracks] };
+          },
+          loadAudioTracks: async () => [...tracks],
+          request,
+        }}
+        onClose={() => {}}
+      />
+    );
+    const view = render(player(1, [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "jpn", label: "Japanese Commentary", default: false },
+      { index: 2, language: "jpn", label: "Japanese Main", default: false },
+    ]));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Japanese Commentary" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0, 1));
+
+    request.mockClear();
+    view.rerender(player(2, [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 3, language: "jpn", label: "Japanese Main", default: false },
+    ]));
+    await waitFor(() => expect(sourceInfoLoaded).toHaveBeenCalledWith(2));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(request).not.toHaveBeenCalled();
+
+    view.rerender(player(3, [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 4, language: "jpn", label: "Japanese Commentary", default: false },
+    ]));
+    await waitFor(() => expect(sourceInfoLoaded).toHaveBeenCalledWith(3));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("invalidates a retained manual language after a complete same-source inventory omits it", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const sourceInfoLoaded = vi.fn();
+    const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/optimized/index.m3u8?quality=480p&start=${position}&audio=${String(audioTrack)}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    const player = (revision: number, tracks: readonly ServerAudioTrack[]) => (
+      <VideoPlayer
+        url={`https://server.example/api/stream/${revision}/index.m3u8?quality=480p&audio=0`}
+        sourceRevision={revision}
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        sourceFileName="same-fixture.mkv"
+        scrobbleContext={{ tmdbId: 42, type: "movie" }}
+        serverOptimized={{
+          qualities: ["480p"],
+          loadSourceInfo: async () => {
+            sourceInfoLoaded(revision);
+            return { durationSeconds: 30, tracks: [...tracks] };
+          },
+          loadAudioTracks: async () => [...tracks],
+          request,
+        }}
+        onClose={() => {}}
+      />
+    );
+    const view = render(player(1, [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "jpn", label: "Japanese", default: false },
+    ]));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Japanese" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0, 1));
+
+    request.mockClear();
+    view.rerender(player(2, [
+      { index: 0, language: "eng", label: "English", default: true },
+    ]));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(await screen.findByRole("button", { name: "English" })).toBeDefined();
+    await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+    expect(request).not.toHaveBeenCalled();
+
+    view.rerender(player(3, [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 4, language: "jpn", label: "Japanese", default: false },
+    ]));
+    await waitFor(() => expect(sourceInfoLoaded).toHaveBeenCalledWith(3));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("does not retain a requested language when the server authoritatively applies another track", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const sourceInfoLoaded = vi.fn();
+    const onProgress = vi.fn();
+    const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/optimized/index.m3u8?quality=480p&start=${position}&audio=${String(audioTrack)}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", {
+      status: 200,
+      headers: { "x-yawf-transcode-audio": "0" },
+    })));
+    const player = (revision: number, japaneseIndex: number) => {
+      const tracks = [
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: japaneseIndex, language: "jpn", label: "Japanese", default: false },
+      ] satisfies ServerAudioTrack[];
+      return (
+        <VideoPlayer
+          url={`https://server.example/api/stream/${revision}/index.m3u8?quality=480p&audio=0`}
+          sourceRevision={revision}
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          sourceFileName="same-fixture.mkv"
+          scrobbleContext={{ tmdbId: 42, type: "movie" }}
+          serverOptimized={{
+            qualities: ["480p"],
+            loadSourceInfo: async () => {
+              sourceInfoLoaded(revision);
+              return { durationSeconds: 30, tracks };
+            },
+            loadAudioTracks: async () => tracks,
+            request,
+          }}
+          onProgress={onProgress}
+          onClose={() => {}}
+        />
+      );
+    };
+    const view = render(player(1, 1));
+    const initialVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Japanese" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0, 1));
+    const appliedVideo = await waitFor(() => {
+      const current = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(current).not.toBe(initialVideo);
+      return current;
+    });
+    Object.defineProperty(appliedVideo, "currentTime", { configurable: true, value: 0 });
+    Object.defineProperty(appliedVideo, "duration", { configurable: true, value: 30 });
+    markCurrentMediaDataReady(appliedVideo);
+    fireEvent.loadedData(appliedVideo);
+    const reportClock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6_000);
+    fireEvent.timeUpdate(appliedVideo);
+    reportClock.mockRestore();
+    expect(onProgress).toHaveBeenLastCalledWith(
+      0,
+      30,
+      expect.objectContaining({ preferredAudioId: "0", preferredAudioLang: "eng" }),
+    );
+
+    request.mockClear();
+    view.rerender(player(2, 3));
+    await waitFor(() => expect(sourceInfoLoaded).toHaveBeenCalledWith(2));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
 
   it("keeps an explicit initial audio zero when source metadata defaults to another track", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
