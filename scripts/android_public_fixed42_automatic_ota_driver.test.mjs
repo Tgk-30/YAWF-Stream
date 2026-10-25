@@ -1287,6 +1287,221 @@ function fixed42TwoAxisSeedContract(java) {
     "driver invented a non-public UiObject2 node accessor");
 }
 
+function fixed42LauncherReadinessContract(java) {
+  const dispatch = methodBody(java, "launchProductFromVisibleLauncher");
+  const fixed = methodBody(java, "launchFixed42ProductFromVisibleLauncher");
+  const observe = methodBody(java, "observeFixed42LauncherReadiness");
+  const clipping = methodBody(java, "fixed42LauncherIconFullyVisible");
+  const fresh = methodBody(java, "findFreshFixed42LauncherIcon");
+  const legacy = methodBody(java, "launchVisibleAppFromLauncher");
+  const policy = nestedClassDeclaration(java, "Fixed42LauncherReadinessPolicy");
+
+  for (const token of [
+    "if (isFixed42AutomaticMode())",
+    "launchFixed42ProductFromVisibleLauncher(phase)",
+    'launchVisibleAppFromLauncher("YAWF Stream", OtaFlowPolicy.PRODUCT_PACKAGE, phase)',
+  ]) need(dispatch, token, `fixed42 launcher dispatch lost ${token}`);
+  assert.equal(legacy.includes("launchFixed42ProductFromVisibleLauncher"), false,
+    "legacy launcher helper entered the fixed42 readiness observer");
+  assert.equal((java.match(/launchFixed42ProductFromVisibleLauncher\s*\(/g) ?? []).length, 2,
+    "fixed42 launcher helper must have one declaration and one profile-gated call");
+
+  for (const token of [
+    "long startedAt = SystemClock.uptimeMillis();",
+    "device.getLauncherPackageName()",
+    "device.pressHome()",
+    "Fixed42LauncherReadinessPolicy.withinDeadline(",
+    "observeFixed42LauncherReadiness(",
+    "Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON",
+    "&& !drawerGestureSent",
+    "assertNoBindingTerms();",
+    "device.swipe(width / 2, height - 2, width / 2, height / 4, 30)",
+    "drawerGestureSent = true;",
+    'assertNotNull("Timed out waiting for exact fixed42 launcher readiness", ready)',
+    'assertEquals("Fixed42 launcher icon bounds changed before click"',
+    "findFreshFixed42LauncherIcon(",
+    "freshIcon.click()",
+    "device.wait(Until.hasObject(By.pkg(OtaFlowPolicy.PRODUCT_PACKAGE)), UI_WAIT_MS)",
+  ]) need(fixed, token, `fixed42 launcher readiness flow lost ${token}`);
+  assert.equal((fixed.match(/startedAt\s*=/g) ?? []).length, 1,
+    "fixed42 launcher readiness reset its original monotonic deadline");
+  assert.equal((fixed.match(/device\.pressHome\(\)/g) ?? []).length, 1,
+    "fixed42 launcher readiness must issue one Home input");
+  assert.equal((fixed.match(/device\.swipe\(/g) ?? []).length, 1,
+    "fixed42 launcher readiness must have one drawer gesture site");
+  assert.equal((fixed.match(/drawerGestureSent = true;/g) ?? []).length, 1,
+    "fixed42 launcher readiness must permanently consume its one drawer gesture");
+  assert.equal((fixed.match(/freshIcon\.click\(\)/g) ?? []).length, 1,
+    "fixed42 launcher readiness must have one fresh icon click site");
+  assert.ok(fixed.indexOf("long startedAt = SystemClock.uptimeMillis();")
+      < fixed.indexOf("device.getLauncherPackageName()")
+      && fixed.indexOf("device.getLauncherPackageName()") < fixed.indexOf("device.pressHome()"),
+  "fixed42 original deadline must cover launcher discovery and Home transition");
+  const finalBounds = fixed.indexOf('assertEquals("Fixed42 launcher icon bounds changed before click"');
+  const finalDeadline = fixed.lastIndexOf("Fixed42LauncherReadinessPolicy.withinDeadline(");
+  const click = fixed.indexOf("freshIcon.click()");
+  assert.ok(finalBounds >= 0 && finalBounds < finalDeadline && finalDeadline < click,
+    "fresh bounds and original deadline do not immediately guard the sole icon click");
+  assert.doesNotMatch(fixed,
+    /startActivity|executeShellCommand|ComponentName|findUniqueLauncherObject|device\.click\(/,
+    "fixed42 launcher readiness added a shortcut, shell, generic selector or coordinate click");
+
+  for (const token of [
+    "if (!launcherForeground)",
+    "false, 0, false, 0, false, false, false",
+    "Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE",
+    "instrumentation.getUiAutomation().clearCache()",
+    "instrumentation.getUiAutomation()",
+    ".getRootInActiveWindow()",
+    "childCount <= FIXED42_LAUNCHER_CHILD_LIMIT",
+    "owned.size() < FIXED42_LAUNCHER_NODE_LIMIT",
+    "if (child == null)",
+    "stale = true",
+    "fixed42RecycleNodes(owned)",
+    "new Fixed42AxNode(owned.get(index), parents.get(index))",
+    "launcherResource.equals(node.resourceName)",
+    "node.semanticEquals(appLabel)",
+    'launcherPackage, "android.widget.FrameLayout", false, false',
+    'launcherPackage, "android.widget.TextView", false, true',
+    "launcherRoot.bounds.equals(new Rect(0, 0, width, height))",
+    "fixed42LauncherIconFullyVisible(",
+    "false, false, true",
+  ]) need(observe, token, `fixed42 launcher observation lost ${token}`);
+  assert.ok(observe.indexOf("if (!launcherForeground)")
+      < observe.indexOf("instrumentation.getUiAutomation().clearCache()"),
+  "non-launcher foreground must wait without traversing an unrelated tree");
+  for (const token of [
+    "!fixed42FullBounds(iconBounds, width, height)",
+    "cursor >= 0 && depth < FIXED42_LAUNCHER_ANCESTOR_LIMIT",
+    "!ancestor.visible",
+    "!launcherPackage.equals(ancestor.packageName)",
+    "!fixed42FullBounds(ancestor.bounds, width, height)",
+    "!ancestor.bounds.contains(iconBounds)",
+    "if (cursor == rootIndex) return true;",
+  ]) need(clipping, token, `fixed42 launcher clipping proof lost ${token}`);
+  for (const token of [
+    "launcherPackage, device.getCurrentPackageName()",
+    "By.text(appLabel).pkg(launcherPackage)",
+    "By.desc(appLabel).pkg(launcherPackage)",
+    'assertEquals("Expected one fresh exact fixed42 launcher icon", 1, matches.size())',
+    '"android.widget.TextView", icon.getClassName()',
+    "icon.isClickable() && icon.isEnabled()",
+    "expectedBounds, icon.getVisibleBounds()",
+  ]) need(fresh, token, `fresh fixed42 launcher icon proof lost ${token}`);
+  for (const token of [
+    "if (stale) return STALE;",
+    "if (rootCount > 1 || iconCount > 1)",
+    "if (!launcherForeground) return WAITING_FOR_LAUNCHER;",
+    "if (!rootExact)",
+    "if (iconCount == 0) return WAITING_FOR_ICON;",
+    "if (!iconExact)",
+    "if (!iconFullyVisible) return WAITING_FOR_ICON;",
+    "return READY;",
+    "now >= startedAt && now - startedAt < SHORT_WAIT_MS",
+  ]) need(policy, token, `fixed42 launcher policy lost ${token}`);
+}
+
+function runFixed42LauncherReadinessPolicyHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42LauncherReadinessPolicy");
+  const harness = `
+public final class Fixed42LauncherReadinessPolicyHarness {
+    private static final long SHORT_WAIT_MS = 20_000L;
+    ${policy}
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static void reject(Runnable operation, String message) {
+        try {
+            operation.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError(message);
+    }
+
+    public static void main(String[] ignored) {
+        int nonLauncher = Fixed42LauncherReadinessPolicy.classify(
+                false, 0, false, 0, false, false, false);
+        require(nonLauncher == Fixed42LauncherReadinessPolicy.WAITING_FOR_LAUNCHER,
+                "non-launcher foreground must never become ready");
+        int rootPending = Fixed42LauncherReadinessPolicy.classify(
+                true, 0, false, 0, false, false, false);
+        require(rootPending == Fixed42LauncherReadinessPolicy.WAITING_FOR_LAUNCHER,
+                "missing launcher root must remain pending");
+        int iconPending = Fixed42LauncherReadinessPolicy.classify(
+                true, 1, true, 0, false, false, false);
+        require(iconPending == Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON,
+                "exact launcher without its icon must wait before input");
+        int stale = Fixed42LauncherReadinessPolicy.classify(
+                true, 0, false, 0, false, false, true);
+        require(stale == Fixed42LauncherReadinessPolicy.STALE,
+                "stale snapshot must not mean absent or ready");
+        int ready = Fixed42LauncherReadinessPolicy.classify(
+                true, 1, true, 1, true, true, false);
+        require(ready == Fixed42LauncherReadinessPolicy.READY,
+                "fresh exact visible icon must become ready");
+
+        reject(() -> Fixed42LauncherReadinessPolicy.classify(
+                true, 2, true, 0, false, false, false),
+                "duplicate launcher roots must fail closed");
+        reject(() -> Fixed42LauncherReadinessPolicy.classify(
+                true, 1, true, 2, true, true, false),
+                "ambiguous exact icons must fail closed");
+        reject(() -> Fixed42LauncherReadinessPolicy.classify(
+                true, 1, false, 0, false, false, false),
+                "wrong launcher identity must fail closed");
+        int clipped = Fixed42LauncherReadinessPolicy.classify(
+                true, 1, true, 1, true, false, false);
+        require(clipped == Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON,
+                "clipped transition icon must remain non-actionable");
+        reject(() -> Fixed42LauncherReadinessPolicy.classify(
+                true, 1, true, 1, false, true, false),
+                "wrong icon identity must fail closed");
+
+        require(Fixed42LauncherReadinessPolicy.withinDeadline(1_000L, 20_999L),
+                "readiness must retain the last bounded millisecond");
+        require(!Fixed42LauncherReadinessPolicy.withinDeadline(1_000L, 21_000L),
+                "readiness timeout must fail at its exact boundary");
+        require(!Fixed42LauncherReadinessPolicy.withinDeadline(2_000L, 1_999L),
+                "non-monotonic time must fail closed");
+
+        int clicks = 0;
+        int[] transition = new int[] {stale, nonLauncher, rootPending, iconPending, ready};
+        for (int state : transition) {
+            if (state == Fixed42LauncherReadinessPolicy.READY) clicks++;
+        }
+        require(clicks == 1, "stale launcher transition must admit one fresh click only");
+        int timedOutClicks = 0;
+        int[] timedOut = new int[] {stale, nonLauncher, rootPending, iconPending, clipped};
+        for (int state : timedOut) {
+            if (state == Fixed42LauncherReadinessPolicy.READY) timedOutClicks++;
+        }
+        require(timedOutClicks == 0, "timeout path must not manufacture readiness");
+        System.out.println("fixed42-launcher-readiness-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-launcher-readiness-"));
+  const sourceFile = path.join(directory, "Fixed42LauncherReadinessPolicyHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `fixed42 launcher policy javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand, ["-cp", directory, "Fixed42LauncherReadinessPolicyHarness"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, `fixed42 launcher policy harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-launcher-readiness-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function fixed42MainProofDiagnosticContract(java) {
   const observe = methodBody(java, "observeFixed42SeedSnapshot");
   const mainStart = observe.indexOf('int mainIndex = fixed42UniqueResource(nodes, "main-content");');
@@ -1563,6 +1778,78 @@ test("fixed42 Blade seed uses one guarded public-scroll budget and one fresh ord
   for (const [label, mutant] of mutants) {
     assert.notEqual(mutant, source, "fixed42 structural mutant anchor was absent");
     assert.throws(() => fixed42TwoAxisSeedContract(mutant), `${label} mutant survived`);
+  }
+});
+
+test("fixed42 launcher waits through one bounded public transition before one fresh icon click", () => {
+  fixed42LauncherReadinessContract(source);
+  runFixed42LauncherReadinessPolicyHarness(source);
+
+  const structuralMutants = [
+    ["profile-gate", source.replace(
+      "if (isFixed42AutomaticMode()) {\n            launchFixed42ProductFromVisibleLauncher(phase);",
+      "if (false) {\n            launchFixed42ProductFromVisibleLauncher(phase);",
+    )],
+    ["deadline-reset", source.replace(
+      "observeFixed42LauncherReadiness(\n                appLabel, launcherPackage);\n        assertEquals(\"Fixed42 launcher icon was not freshly ready before click\"",
+      "observeFixed42LauncherReadiness(\n                appLabel, launcherPackage);\n        startedAt = SystemClock.uptimeMillis();\n        assertEquals(\"Fixed42 launcher icon was not freshly ready before click\"",
+    )],
+    ["second-drawer", source.replace(
+      "drawerGestureSent = true;",
+      "device.swipe(width / 2, height - 2, width / 2, height / 4, 30);\n                drawerGestureSent = true;",
+    )],
+    ["drawer-repeat", source.replace(
+      "                    && !drawerGestureSent) {",
+      "                    && true) {",
+    )],
+    ["second-click", source.replace(
+      "freshIcon.click();",
+      "freshIcon.click();\n        freshIcon.click();",
+    )],
+    ["current-package", source.replace(
+      "device.getLauncherPackageName()",
+      "device.getCurrentPackageName()",
+    )],
+    ["broad-icon-class", source.replace(
+      'launcherPackage, "android.widget.TextView", false, true',
+      'launcherPackage, "android.view.View", false, true',
+    )],
+    ["clipping-removed", source.replace(
+      "!fixed42FullBounds(iconBounds, width, height)",
+      "false",
+    )],
+  ];
+  for (const [label, mutant] of structuralMutants) {
+    assert.notEqual(mutant, source, `fixed42 launcher ${label} mutant anchor was absent`);
+    assert.throws(
+      () => fixed42LauncherReadinessContract(mutant),
+      `fixed42 launcher ${label} mutant survived`,
+    );
+  }
+
+  const policy = nestedClassDeclaration(source, "Fixed42LauncherReadinessPolicy");
+  const policyMutations = [
+    ["if (stale) return STALE;", "if (stale) return READY;"],
+    ["if (rootCount > 1 || iconCount > 1)", "if (rootCount > 2 || iconCount > 2)"],
+    [
+      "if (!launcherForeground) return WAITING_FOR_LAUNCHER;",
+      "if (!launcherForeground) return READY;",
+    ],
+    ["if (!iconExact)", "if (false)"],
+    [
+      "if (!iconFullyVisible) return WAITING_FOR_ICON;",
+      "if (!iconFullyVisible) return READY;",
+    ],
+    ["now - startedAt < SHORT_WAIT_MS", "now - startedAt <= SHORT_WAIT_MS"],
+  ];
+  for (const [before, after] of policyMutations) {
+    const mutantPolicy = policy.replace(before, after);
+    assert.notEqual(mutantPolicy, policy, `fixed42 launcher policy mutant anchor was absent: ${before}`);
+    const mutant = source.replace(policy, mutantPolicy);
+    assert.throws(
+      () => runFixed42LauncherReadinessPolicyHarness(mutant),
+      `fixed42 launcher policy mutant survived: ${before}`,
+    );
   }
 });
 

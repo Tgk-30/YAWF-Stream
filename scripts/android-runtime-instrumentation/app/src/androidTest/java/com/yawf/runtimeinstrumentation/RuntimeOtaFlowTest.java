@@ -115,6 +115,9 @@ public final class RuntimeOtaFlowTest {
     private static final long FIXED42_SEED_SCROLL_SETTLE_MS = 600L;
     private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
     private static final int FIXED42_SEED_AX_CHILD_LIMIT = 128;
+    private static final int FIXED42_LAUNCHER_ANCESTOR_LIMIT = 16;
+    private static final int FIXED42_LAUNCHER_NODE_LIMIT = 256;
+    private static final int FIXED42_LAUNCHER_CHILD_LIMIT = 128;
     private static final String QUICK_SETUP_ACKNOWLEDGEMENT =
             "I understand the privacy, reliability, catalog, and playback limits and want to use Quick setup.";
 
@@ -2229,7 +2232,236 @@ public final class RuntimeOtaFlowTest {
     }
 
     private void launchProductFromVisibleLauncher(String phase) {
+        if (isFixed42AutomaticMode()) {
+            launchFixed42ProductFromVisibleLauncher(phase);
+            return;
+        }
         launchVisibleAppFromLauncher("YAWF Stream", OtaFlowPolicy.PRODUCT_PACKAGE, phase);
+    }
+
+    private void launchFixed42ProductFromVisibleLauncher(String phase) {
+        String appLabel = "YAWF Stream";
+        long startedAt = SystemClock.uptimeMillis();
+        String launcherPackage = device.getLauncherPackageName();
+        assertNotNull("Default launcher package was unavailable for " + appLabel,
+                launcherPackage);
+        assertFalse("Product package was registered as the default launcher",
+                OtaFlowPolicy.PRODUCT_PACKAGE.equals(launcherPackage));
+        device.pressHome();
+
+        boolean drawerGestureSent = false;
+        Fixed42LauncherObservation ready = null;
+        while (Fixed42LauncherReadinessPolicy.withinDeadline(
+                startedAt, SystemClock.uptimeMillis())) {
+            Fixed42LauncherObservation observation = observeFixed42LauncherReadiness(
+                    appLabel, launcherPackage);
+            if (observation.state == Fixed42LauncherReadinessPolicy.READY) {
+                ready = observation;
+                break;
+            }
+            if (observation.state == Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON
+                    && !drawerGestureSent) {
+                assertNoBindingTerms();
+                Fixed42LauncherObservation beforeDrawer = observeFixed42LauncherReadiness(
+                        appLabel, launcherPackage);
+                if (beforeDrawer.state == Fixed42LauncherReadinessPolicy.READY) {
+                    ready = beforeDrawer;
+                    break;
+                }
+                assertEquals("Fixed42 drawer gesture lost its exact launcher surface",
+                        Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON,
+                        beforeDrawer.state);
+                assertTrue("Fixed42 launcher deadline elapsed before its drawer gesture",
+                        Fixed42LauncherReadinessPolicy.withinDeadline(
+                                startedAt, SystemClock.uptimeMillis()));
+                int width = device.getDisplayWidth();
+                int height = device.getDisplayHeight();
+                assertTrue("Fixed42 launcher drawer gesture was not accepted",
+                        device.swipe(width / 2, height - 2, width / 2, height / 4, 30));
+                drawerGestureSent = true;
+            } else {
+                SystemClock.sleep(150);
+            }
+        }
+        assertNotNull("Timed out waiting for exact fixed42 launcher readiness", ready);
+
+        assertNoBindingTerms();
+        assertTrue("Fixed42 launcher deadline elapsed before its fresh icon proof",
+                Fixed42LauncherReadinessPolicy.withinDeadline(
+                        startedAt, SystemClock.uptimeMillis()));
+        Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(
+                appLabel, launcherPackage);
+        assertEquals("Fixed42 launcher icon was not freshly ready before click",
+                Fixed42LauncherReadinessPolicy.READY, fresh.state);
+        assertEquals("Fixed42 launcher icon bounds changed before click",
+                ready.iconBounds, fresh.iconBounds);
+        UiObject2 freshIcon = findFreshFixed42LauncherIcon(
+                appLabel, launcherPackage, fresh.iconBounds);
+        assertTrue("Fixed42 launcher deadline elapsed before its icon click",
+                Fixed42LauncherReadinessPolicy.withinDeadline(
+                        startedAt, SystemClock.uptimeMillis()));
+        freshIcon.click();
+        assertTrue(appLabel + " package did not become visible for " + phase,
+                device.wait(Until.hasObject(By.pkg(OtaFlowPolicy.PRODUCT_PACKAGE)), UI_WAIT_MS));
+        device.waitForIdle(2_000);
+        log("Opened " + appLabel
+                + " through its exact visible fixed42 launcher icon for " + phase);
+    }
+
+    private Fixed42LauncherObservation observeFixed42LauncherReadiness(
+            String appLabel, String launcherPackage) {
+        boolean launcherForeground = launcherPackage.equals(device.getCurrentPackageName());
+        if (!launcherForeground) {
+            int state = Fixed42LauncherReadinessPolicy.classify(
+                    false, 0, false, 0, false, false, false);
+            return new Fixed42LauncherObservation(state, null);
+        }
+        List<AccessibilityNodeInfo> owned = new ArrayList<>();
+        List<Integer> parents = new ArrayList<>();
+        try {
+            assertTrue("Fixed42 launcher cache refresh requires API 34 or newer",
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+            assertTrue("Fixed42 launcher accessibility cache refresh failed",
+                    instrumentation.getUiAutomation().clearCache());
+            int width = device.getDisplayWidth();
+            int height = device.getDisplayHeight();
+            String launcherResource = launcherPackage + ":id/launcher";
+            AccessibilityNodeInfo root = instrumentation.getUiAutomation()
+                    .getRootInActiveWindow();
+            if (root == null) {
+                int state = Fixed42LauncherReadinessPolicy.classify(
+                        launcherForeground, 0, false,
+                        0, false, false, false);
+                return new Fixed42LauncherObservation(state, null);
+            }
+            owned.add(root);
+            parents.add(-1);
+            boolean stale = false;
+            launcherTraversal:
+            for (int cursor = 0; cursor < owned.size(); cursor++) {
+                AccessibilityNodeInfo node = owned.get(cursor);
+                int childCount = node.getChildCount();
+                assertTrue("Fixed42 launcher child count exceeded its bound",
+                        childCount >= 0 && childCount <= FIXED42_LAUNCHER_CHILD_LIMIT);
+                for (int childIndex = 0; childIndex < childCount; childIndex++) {
+                    AccessibilityNodeInfo child = node.getChild(childIndex);
+                    if (child == null) {
+                        stale = true;
+                        break launcherTraversal;
+                    }
+                    assertTrue("Fixed42 launcher traversal exceeded its node bound",
+                            owned.size() < FIXED42_LAUNCHER_NODE_LIMIT);
+                    for (AccessibilityNodeInfo existing : owned) {
+                        if (existing.equals(child)) {
+                            child.recycle();
+                            throw new AssertionError(
+                                    "Fixed42 launcher snapshot returned a duplicate node");
+                        }
+                    }
+                    owned.add(child);
+                    parents.add(cursor);
+                }
+            }
+            if (stale) {
+                int state = Fixed42LauncherReadinessPolicy.classify(
+                        launcherForeground, 0, false, 0, false, false, true);
+                return new Fixed42LauncherObservation(state, null);
+            }
+
+            List<Fixed42AxNode> nodes = new ArrayList<>();
+            for (int index = 0; index < owned.size(); index++) {
+                nodes.add(new Fixed42AxNode(owned.get(index), parents.get(index)));
+            }
+            int rootCount = 0;
+            int rootIndex = -1;
+            int iconCount = 0;
+            int iconIndex = -1;
+            for (int index = 0; index < nodes.size(); index++) {
+                Fixed42AxNode node = nodes.get(index);
+                if (launcherResource.equals(node.resourceName)) {
+                    rootCount++;
+                    rootIndex = index;
+                }
+                if (node.semanticEquals(appLabel)) {
+                    iconCount++;
+                    iconIndex = index;
+                }
+            }
+            Fixed42AxNode launcherRoot = rootCount == 1 ? nodes.get(rootIndex) : null;
+            boolean rootExact = launcherRoot != null
+                    && launcherRoot.matches(
+                            launcherPackage, "android.widget.FrameLayout", false, false)
+                    && launcherRoot.bounds.equals(new Rect(0, 0, width, height));
+            Fixed42AxNode icon = iconCount == 1 ? nodes.get(iconIndex) : null;
+            boolean iconExact = false;
+            boolean iconFullyVisible = false;
+            Rect iconBounds = null;
+            if (icon != null) {
+                iconBounds = new Rect(icon.bounds);
+                iconExact = icon.matches(
+                        launcherPackage, "android.widget.TextView", false, true);
+                iconFullyVisible = fixed42LauncherIconFullyVisible(
+                        nodes, iconIndex, rootIndex, launcherPackage, width, height);
+            }
+            int state = Fixed42LauncherReadinessPolicy.classify(
+                    launcherForeground, rootCount, rootExact,
+                    iconCount, iconExact, iconFullyVisible, false);
+            return new Fixed42LauncherObservation(state, iconBounds);
+        } finally {
+            fixed42RecycleNodes(owned);
+        }
+    }
+
+    private boolean fixed42LauncherIconFullyVisible(
+            List<Fixed42AxNode> nodes,
+            int iconIndex,
+            int rootIndex,
+            String launcherPackage,
+            int width,
+            int height) {
+        if (iconIndex < 0 || rootIndex < 0) return false;
+        Rect iconBounds = nodes.get(iconIndex).bounds;
+        if (!fixed42FullBounds(iconBounds, width, height)) return false;
+        int cursor = iconIndex;
+        for (int depth = 0;
+                cursor >= 0 && depth < FIXED42_LAUNCHER_ANCESTOR_LIMIT;
+                depth++) {
+            Fixed42AxNode ancestor = nodes.get(cursor);
+            if (!ancestor.visible
+                    || !launcherPackage.equals(ancestor.packageName)
+                    || !fixed42FullBounds(ancestor.bounds, width, height)
+                    || !ancestor.bounds.contains(iconBounds)) {
+                return false;
+            }
+            if (cursor == rootIndex) return true;
+            cursor = ancestor.parentIndex;
+        }
+        return false;
+    }
+
+    private UiObject2 findFreshFixed42LauncherIcon(
+            String appLabel, String launcherPackage, Rect expectedBounds) {
+        assertEquals("Fixed42 launcher package left the foreground before click",
+                launcherPackage, device.getCurrentPackageName());
+        List<UiObject2> matches = new ArrayList<>();
+        addDistinctUiObjects(matches,
+                device.findObjects(By.text(appLabel).pkg(launcherPackage)));
+        addDistinctUiObjects(matches,
+                device.findObjects(By.desc(appLabel).pkg(launcherPackage)));
+        assertEquals("Expected one fresh exact fixed42 launcher icon", 1, matches.size());
+        UiObject2 icon = matches.get(0);
+        assertEquals("Fresh fixed42 launcher icon package changed",
+                launcherPackage, icon.getApplicationPackage());
+        assertEquals("Fresh fixed42 launcher icon class changed",
+                "android.widget.TextView", icon.getClassName());
+        assertTrue("Fresh fixed42 launcher icon identity changed",
+                appLabel.equals(icon.getText())
+                        || appLabel.equals(icon.getContentDescription()));
+        assertTrue("Fresh fixed42 launcher icon was not actionable",
+                icon.isClickable() && icon.isEnabled());
+        assertEquals("Fresh fixed42 launcher icon was clipped or moved",
+                expectedBounds, icon.getVisibleBounds());
+        return icon;
     }
 
     private void launchVisibleAppFromLauncher(String appLabel, String expectedPackage, String phase) {
@@ -2931,6 +3163,50 @@ public final class RuntimeOtaFlowTest {
         }
     }
 
+    private static final class Fixed42LauncherReadinessPolicy {
+        static final int WAITING_FOR_LAUNCHER = 0;
+        static final int WAITING_FOR_ICON = 1;
+        static final int STALE = 2;
+        static final int READY = 3;
+
+        static int classify(
+                boolean launcherForeground,
+                int rootCount,
+                boolean rootExact,
+                int iconCount,
+                boolean iconExact,
+                boolean iconFullyVisible,
+                boolean stale) {
+            if (stale) return STALE;
+            if (rootCount < 0 || iconCount < 0) {
+                throw new AssertionError("Fixed42 launcher counts were invalid");
+            }
+            if (rootCount > 1 || iconCount > 1) {
+                throw new AssertionError("Fixed42 launcher observation was ambiguous");
+            }
+            if (!launcherForeground) return WAITING_FOR_LAUNCHER;
+            if (rootCount == 0) {
+                if (iconCount != 0) {
+                    throw new AssertionError("Fixed42 launcher icon had no exact root");
+                }
+                return WAITING_FOR_LAUNCHER;
+            }
+            if (!rootExact) {
+                throw new AssertionError("Fixed42 launcher root identity changed");
+            }
+            if (iconCount == 0) return WAITING_FOR_ICON;
+            if (!iconExact) {
+                throw new AssertionError("Fixed42 launcher icon identity changed");
+            }
+            if (!iconFullyVisible) return WAITING_FOR_ICON;
+            return READY;
+        }
+
+        static boolean withinDeadline(long startedAt, long now) {
+            return now >= startedAt && now - startedAt < SHORT_WAIT_MS;
+        }
+    }
+
     private static final class Fixed42SeedPolicy {
         static final int ABSENT = Integer.MIN_VALUE;
         static final int PHASE_VERTICAL = 0;
@@ -3070,6 +3346,16 @@ public final class RuntimeOtaFlowTest {
                 if (values[index] != ABSENT) return index;
             }
             return -1;
+        }
+    }
+
+    private static final class Fixed42LauncherObservation {
+        final int state;
+        final Rect iconBounds;
+
+        Fixed42LauncherObservation(int state, Rect iconBounds) {
+            this.state = state;
+            this.iconBounds = iconBounds == null ? null : new Rect(iconBounds);
         }
     }
 
