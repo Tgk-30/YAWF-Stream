@@ -9,7 +9,7 @@ on:
         required: true
         default: false
       external_player_fixture:
-        description: Test the unchanged public phone42 remote external-player flow on a fresh supported API36 emulator
+        description: Test the exact public phone59 external-player flow with its exact released web UI and server source on a fresh supported API36 emulator
         type: boolean
         required: true
         default: false
@@ -473,16 +473,21 @@ jobs:
 
   external-player-fixture:
     if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true && inputs.touch_player_fixture != true
-    name: Public phone42 remote external player on fresh API36
+    name: Exact public phone59 external player on fresh API36
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       EVIDENCE: android-external-player-evidence
-      PRODUCT_APK: public-phone42.apk
-      PRODUCT_SHA256: 3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c
-      PRODUCT_SOURCE: ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5
-      PRODUCT_VERSION: 2.3.42
-      PRODUCT_VERSION_CODE: "2003042"
+      PRODUCT_APK: public-phone59.apk
+      PRODUCT_SHA256: 5fe550e66658f3c9ae172c087c656d69e126af2892df05ca15e7e021594dae47
+      PRODUCT_SIZE: "88644481"
+      PRODUCT_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40
+      HOSTED_UI_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40
+      SERVER_RUNTIME_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40
+      PRODUCT_VERSION: 2.3.59
+      PRODUCT_VERSION_CODE: "2003059"
+      PRODUCT_SIGNER_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a
+      PRODUCT_RELEASE_TAG: android-v2.3.59
       VLC_APK: VLC-Android-3.7.1-x86_64.apk
       VLC_URL: https://download.videolan.org/pub/videolan/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk
       VLC_CHECKSUM_URL: https://download.videolan.org/pub/videolan/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk.sha256
@@ -496,7 +501,7 @@ jobs:
       VLC_PLAYBACK_ACTIVITY: org.videolan.vlc.gui.video.VideoPlayerActivity
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       EMULATOR_SERIAL: emulator-5554
-      AVD_NAME: yawf-external-phone42-api36
+      AVD_NAME: yawf-external-phone59-api36
     steps:
       - name: Checkout runtime fixture and driver
         uses: actions/checkout@v4
@@ -514,12 +519,16 @@ jobs:
           set -euo pipefail
           umask 077
           mkdir -p "$EVIDENCE"
+          driver_source="$(git rev-parse HEAD)"
           test "$(git -C public-phone-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
+          test "$HOSTED_UI_SOURCE" = "$PRODUCT_SOURCE"
+          test "$SERVER_RUNTIME_SOURCE" = "$PRODUCT_SOURCE"
+          test -z "$(git -C public-phone-source status --porcelain --untracked-files=no)"
           curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 \
-            'https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.42/YAWF.Stream_Android_2.3.42.apk' \
+            "https://github.com/Tgk-30/YAWF-Stream/releases/download/$PRODUCT_RELEASE_TAG/YAWF.Stream_Android_$PRODUCT_VERSION.apk" \
             --output "$PRODUCT_APK"
           printf '%s  %s\n' "$PRODUCT_SHA256" "$PRODUCT_APK" | sha256sum --check -
-          test "$(wc -c < "$PRODUCT_APK" | tr -d ' ')" = 88583041
+          test "$(wc -c < "$PRODUCT_APK" | tr -d ' ')" = "$PRODUCT_SIZE"
           curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 \
             "$VLC_URL" --output "$VLC_APK"
           curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 30 \
@@ -528,11 +537,18 @@ jobs:
           printf '%s  %s\n' "$VLC_SHA256" "$VLC_APK" | sha256sum --check -
           test "$(wc -c < "$VLC_APK" | tr -d ' ')" = "$VLC_SIZE"
           {
-            echo "driverSource=$(git rev-parse HEAD)"
+            echo "driverSource=$driver_source"
+            echo "fixtureHarnessSource=$driver_source"
+            echo "fixtureHarnessRole=test-only-separate-from-app"
             echo "publicApkSource=$PRODUCT_SOURCE"
             echo "publicApkSha256=$PRODUCT_SHA256"
             echo "publicApkVersion=$PRODUCT_VERSION"
-            echo "interoperability=original-signed-phone42-with-current-fixture-server-and-compiled-web"
+            echo "publicApkVersionCode=$PRODUCT_VERSION_CODE"
+            echo "publicApkSignerSha256=$PRODUCT_SIGNER_SHA256"
+            echo "publicReleaseTag=$PRODUCT_RELEASE_TAG"
+            echo "hostedUiSource=$HOSTED_UI_SOURCE"
+            echo "serverRuntimeSource=$SERVER_RUNTIME_SOURCE"
+            echo "interoperability=exact-public-phone59-with-exact-ac885-hosted-ui-and-server-runtime"
             echo "productionServerOrProviderProof=false"
             echo "publicOtaProof=false"
             echo "arm16KiBProof=false"
@@ -590,6 +606,13 @@ jobs:
           test "$(apkanalyzer manifest application-id "$PRODUCT_APK")" = com.tgk30.debridstreamer
           test "$(apkanalyzer manifest version-name "$PRODUCT_APK")" = "$PRODUCT_VERSION"
           test "$(apkanalyzer manifest version-code "$PRODUCT_APK")" = "$PRODUCT_VERSION_CODE"
+          source_pin="$(tr -d '[:space:]' < public-phone-source/web/src-tauri/SIGNING_CERT_SHA256)"
+          test "$source_pin" = "$PRODUCT_SIGNER_SHA256"
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          "$sdk/build-tools/36.0.0/apksigner" verify --print-certs "$PRODUCT_APK" \
+            > "$EVIDENCE/product-signer.txt" 2>&1
+          actual_signer="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/product-signer.txt")"
+          test "$actual_signer" = "$PRODUCT_SIGNER_SHA256"
           python3 public-phone-source/scripts/verify_android_apk.py \
             --apk "$PRODUCT_APK" --version "$PRODUCT_VERSION" \
             --certificate-pin public-phone-source/web/src-tauri/SIGNING_CERT_SHA256 \
@@ -638,12 +661,87 @@ jobs:
             "$VLC_SHA256" "$VLC_SIZE" "$VLC_SIGNER_SHA256" "$VLC_PACKAGE" "$VLC_VERSION" \
             "$VLC_VERSION_CODE" "$VLC_INTENT_ACTIVITY" "$VLC_PLAYBACK_ACTIVITY" \
             > "$EVIDENCE/vlc-admission.txt"
-      - name: Build current fixture web and isolated driver
+      - name: Build exact released web UI and isolated driver
         shell: bash
         run: |
           set -euo pipefail
-          (cd web && npm ci && npm run build)
-          (cd server && npm ci)
+          umask 077
+          test "$(git -C public-phone-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
+          (cd public-phone-source/web && npm ci && npm run build)
+          (cd public-phone-source/server && npm ci)
+          test "$(git -C public-phone-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
+          test -z "$(git -C public-phone-source status --porcelain --untracked-files=no)"
+          python3 - <<'PYSOURCE'
+          import hashlib,json,os,stat,subprocess
+          from pathlib import Path
+          root=Path('public-phone-source').resolve()
+          evidence=Path(os.environ['EVIDENCE'])
+          def sha256(path):
+              digest=hashlib.sha256()
+              with path.open('rb') as source:
+                  for chunk in iter(lambda:source.read(1024*1024),b''):
+                      digest.update(chunk)
+              return digest.hexdigest()
+          def inventory(relative,max_files,max_bytes):
+              base=root/relative
+              files=[]; total=0
+              for path in sorted(base.rglob('*')):
+                  mode=path.lstat().st_mode
+                  assert not stat.S_ISLNK(mode), 'Exact source inventory refuses symlinks'
+                  if path.is_dir(): continue
+                  assert path.is_file(), 'Exact source inventory accepts only regular files'
+                  size=path.stat().st_size
+                  total+=size
+                  assert len(files)<max_files and total<=max_bytes, 'Exact source inventory exceeded its fixed bound'
+                  files.append({'path':path.relative_to(base).as_posix(),'bytes':size,'sha256':sha256(path)})
+              assert files, 'Exact source inventory is empty'
+              return {'files':files,'fileCount':len(files),'totalBytes':total}
+          web=inventory(Path('web/dist'),512,64*1024*1024)
+          server=inventory(Path('server/src'),2048,32*1024*1024)
+          index=next(item for item in web['files'] if item['path']=='index.html')
+          fixture=Path('scripts/android_external_player_server_fixture.mts').resolve()
+          driver_source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          release_source=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
+          assert release_source==os.environ['PRODUCT_SOURCE']==os.environ['HOSTED_UI_SOURCE']==os.environ['SERVER_RUNTIME_SOURCE']
+          receipt={
+              'schemaVersion':1,
+              'nativeApp':{
+                  'sourceRevision':release_source,
+                  'version':os.environ['PRODUCT_VERSION'],
+                  'versionCode':os.environ['PRODUCT_VERSION_CODE'],
+                  'apkSha256':os.environ['PRODUCT_SHA256'],
+                  'apkBytes':int(os.environ['PRODUCT_SIZE']),
+                  'signerSha256':os.environ['PRODUCT_SIGNER_SHA256'],
+                  'releaseTag':os.environ['PRODUCT_RELEASE_TAG'],
+              },
+              'hostedUi':{
+                  'sourceRevision':release_source,
+                  'webDist':{'indexSha256':index['sha256'],**web},
+              },
+              'serverRuntime':{
+                  'sourceRevision':release_source,
+                  'packageJsonSha256':sha256(root/'server/package.json'),
+                  'packageLockSha256':sha256(root/'server/package-lock.json'),
+                  'source':server,
+              },
+              'fixtureHarness':{
+                  'sourceRevision':driver_source,
+                  'path':'scripts/android_external_player_server_fixture.mts',
+                  'sha256':sha256(fixture),
+                  'role':'test-only-separate-from-app',
+              },
+              'boundaries':{
+                  'productionServerOrProviderProof':False,
+                  'physicalDeviceProof':False,
+                  'decodedPlaybackProofRequiresRuntimeReview':True,
+              },
+          }
+          target=evidence/'source-runtime-admission.json'
+          with target.open('x',encoding='utf-8') as output:
+              json.dump(receipt,output,indent=2,sort_keys=True)
+              output.write('\n')
+          target.chmod(0o600)
+          PYSOURCE
           gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
             :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
           app=scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk
@@ -754,8 +852,8 @@ jobs:
           ffmpeg -hide_banner -filters > "$EVIDENCE/ffmpeg-filters.txt" 2>&1
           grep -E '\bdrawtext\b' "$EVIDENCE/ffmpeg-filters.txt"
           test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
-          node server/node_modules/tsx/dist/cli.mjs scripts/android_external_player_server_fixture.mts \
-            --repo "$GITHUB_WORKSPACE" --output "$fixture_output" > "$EVIDENCE/fixture.log" 2>&1 &
+          node public-phone-source/server/node_modules/tsx/dist/cli.mjs scripts/android_external_player_server_fixture.mts \
+            --repo "$GITHUB_WORKSPACE/public-phone-source" --output "$fixture_output" > "$EVIDENCE/fixture.log" 2>&1 &
           fixture_pid=$!
           deadline=$((SECONDS + 180))
           until grep -Fq '[fixture] READY server-mode-ui loopback' "$EVIDENCE/fixture.log"; do
@@ -958,6 +1056,7 @@ jobs:
           wait "$activity_monitor_pid"
           activity_monitor_pid=""
           export INSTRUMENTATION_STATUS="$instrumentation_status"
+          cp "$fixture_output/smoke-result.json" "$EVIDENCE/smoke-result.json"
           cp "$fixture_output/external-capability-runtime.json" "$EVIDENCE/external-capability-runtime.json"
           cp "$fixture_output/media-probe.json" "$EVIDENCE/media-probe.json"
           python3 - <<'PY'
@@ -984,6 +1083,13 @@ jobs:
           host=json.loads((Path(os.environ['EVIDENCE'])/'vlc-handler-query-admission.json').read_text())
           activity=json.loads((Path(os.environ['EVIDENCE'])/'vlc-activity-observation.json').read_text())
           live=json.loads((Path(os.environ['EVIDENCE'])/'external-capability-runtime.json').read_text())
+          source=json.loads((Path(os.environ['EVIDENCE'])/'source-runtime-admission.json').read_text())
+          smoke=json.loads((Path(os.environ['EVIDENCE'])/'smoke-result.json').read_text())
+          assert source['nativeApp']['sourceRevision']==os.environ['PRODUCT_SOURCE']
+          assert source['hostedUi']['sourceRevision']==os.environ['HOSTED_UI_SOURCE']
+          assert source['serverRuntime']['sourceRevision']==os.environ['SERVER_RUNTIME_SOURCE']
+          assert smoke['servedWebDist']==source['hostedUi']['webDist']['files']
+          assert smoke['webIndexSha256']==source['hostedUi']['webDist']['indexSha256']
           checks=r['checks']
           assert r['outcome']=='passed' and checks['openPlayerClicks']==1
           # BEGIN EXTERNAL_DESTINATION_RECEIPT_POLICY
@@ -1028,7 +1134,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-phone42-external-player-runtime-evidence
+          name: android-phone59-external-player-runtime-evidence
           path: ${{ env.EVIDENCE }}
           if-no-files-found: error
           retention-days: 14

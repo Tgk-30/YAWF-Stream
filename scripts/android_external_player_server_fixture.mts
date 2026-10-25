@@ -92,6 +92,51 @@ for (const required of [
 }
 const WEB_DIST = join(REPO, "web", "dist");
 const MEDIA_DIR = join(ARTIFACT_DIR, "media");
+const MAX_WEB_DIST_FILES = 512;
+const MAX_WEB_DIST_BYTES = 64 * 1024 * 1024;
+
+type AdmittedWebDistEntry = {
+  path: string;
+  bytes: number;
+  sha256: string;
+};
+
+function admittedWebDist(): AdmittedWebDistEntry[] {
+  const files: AdmittedWebDistEntry[] = [];
+  let totalBytes = 0;
+  const visit = (directory: string): void => {
+    const entries = readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolute = join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error("Compiled web assets must not contain symlinks.");
+      if (entry.isDirectory()) {
+        visit(absolute);
+        continue;
+      }
+      if (!entry.isFile()) throw new Error("Compiled web assets must contain only regular files and directories.");
+      const path = relative(WEB_DIST, absolute).split(sep).join("/");
+      if (path.length === 0 || path.startsWith("../") || isAbsolute(path)) {
+        throw new Error("Compiled web asset escaped the exact admitted dist directory.");
+      }
+      const body = readFileSync(absolute);
+      totalBytes += body.length;
+      if (files.length >= MAX_WEB_DIST_FILES || totalBytes > MAX_WEB_DIST_BYTES) {
+        throw new Error("Compiled web asset inventory exceeded its fixed file or byte bound.");
+      }
+      files.push({
+        path,
+        bytes: body.length,
+        sha256: createHash("sha256").update(body).digest("hex"),
+      });
+    }
+  };
+  visit(WEB_DIST);
+  if (files.length === 0 || !files.some((entry) => entry.path === "index.html")) {
+    throw new Error("Compiled web asset inventory lacks index.html.");
+  }
+  return files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+}
 
 const HOST = "127.0.0.1";
 const APP_PORT = boundedPort(process.env.FIXTURE_APP_PORT, 43120);
@@ -919,10 +964,22 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
     throw new Error("External capability range response did not preserve byte identity or boundaries.");
   }
 
-  const root = await inject(app, client, { method: "GET", url: "/" });
-  expectStatus(root, 200, "compiled web root");
-  if (!String(root.headers["content-type"] ?? "").includes("text/html")) {
-    throw new Error("Compiled web root did not return HTML.");
+  const servedWebDist: AdmittedWebDistEntry[] = [];
+  for (const entry of admittedWebDist()) {
+    const url = entry.path === "index.html"
+      ? "/"
+      : `/${entry.path.split("/").map((part) => encodeURIComponent(part)).join("/")}`;
+    const response = await inject(app, client, { method: "GET", url });
+    expectStatus(response, 200, `compiled web asset ${entry.path}`);
+    if (entry.path === "index.html" && !String(response.headers["content-type"] ?? "").includes("text/html")) {
+      throw new Error("Compiled web root did not return HTML.");
+    }
+    const served = Buffer.from(response.rawPayload as Buffer);
+    const servedSha256 = createHash("sha256").update(served).digest("hex");
+    if (served.length !== entry.bytes || servedSha256 !== entry.sha256) {
+      throw new Error("Compiled web asset response differs from its exact admitted source bytes.");
+    }
+    servedWebDist.push({ path: entry.path, bytes: served.length, sha256: servedSha256 });
   }
 
   return {
@@ -945,11 +1002,12 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
       "external-capability-full-body-sha256",
       "external-capability-playable-response-headers",
       "external-capability-range-byte-identity",
-      "compiled-web-root",
+      "compiled-web-dist-byte-identity",
     ],
     mediaBytes: expected.length,
     mediaSha256: createHash("sha256").update(expected).digest("hex"),
-    webIndexSha256: createHash("sha256").update(readFileSync(`${WEB_DIST}/index.html`)).digest("hex"),
+    webIndexSha256: servedWebDist.find((entry) => entry.path === "index.html")?.sha256,
+    servedWebDist,
     unexpectedOutboundAllowed: false,
   };
 }

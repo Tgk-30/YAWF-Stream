@@ -51,21 +51,26 @@ function marker(source, begin, end, indent = 10) {
 
 function workflowContract(w, j) {
   assert.match(w, /permissions:\n  contents: read\n  actions: read/);
-  assert.match(w, /description: Test the unchanged public phone42 remote external-player flow on a fresh supported API36 emulator/);
+  assert.match(w, /description: Test the exact public phone59 external-player flow with its exact released web UI and server source on a fresh supported API36 emulator/);
   assert.match(j, /if: github\.ref_type == 'branch' && inputs\.external_player_fixture == true && inputs\.permission_fixture != true/);
   assert.match(j, /SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64/);
-  assert.match(j, /name: Public phone42 remote external player on fresh API36/);
-  assert.match(j, /PRODUCT_APK: public-phone42\.apk/);
-  assert.match(j, /PRODUCT_SHA256: 3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c/);
-  assert.match(j, /PRODUCT_SOURCE: ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5/);
-  assert.match(j, /PRODUCT_VERSION: 2\.3\.42/);
-  assert.match(j, /PRODUCT_VERSION_CODE: "2003042"/);
-  assert.match(j, /AVD_NAME: yawf-external-phone42-api36/);
-  assert.match(j, /releases\/download\/android-v2\.3\.42\/YAWF\.Stream_Android_2\.3\.42\.apk/);
-  assert.match(j, /test "\$\(wc -c < "\$PRODUCT_APK" \| tr -d ' '\)" = 88583041/);
-  assert.match(j, /interoperability=original-signed-phone42-with-current-fixture-server-and-compiled-web/);
-  assert.match(j, /name: android-phone42-external-player-runtime-evidence/);
-  assert.doesNotMatch(j, /phone27|2\.3\.27|2003027|f3e983929d|9fc94a237d/);
+  assert.match(j, /name: Exact public phone59 external player on fresh API36/);
+  assert.match(j, /PRODUCT_APK: public-phone59\.apk/);
+  assert.match(j, /PRODUCT_SHA256: 5fe550e66658f3c9ae172c087c656d69e126af2892df05ca15e7e021594dae47/);
+  assert.match(j, /PRODUCT_SIZE: "88644481"/);
+  assert.match(j, /PRODUCT_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
+  assert.match(j, /HOSTED_UI_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
+  assert.match(j, /SERVER_RUNTIME_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
+  assert.match(j, /PRODUCT_VERSION: 2\.3\.59/);
+  assert.match(j, /PRODUCT_VERSION_CODE: "2003059"/);
+  assert.match(j, /PRODUCT_SIGNER_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a/);
+  assert.match(j, /PRODUCT_RELEASE_TAG: android-v2\.3\.59/);
+  assert.match(j, /AVD_NAME: yawf-external-phone59-api36/);
+  assert.match(j, /releases\/download\/\$PRODUCT_RELEASE_TAG\/YAWF\.Stream_Android_\$PRODUCT_VERSION\.apk/);
+  assert.match(j, /test "\$\(wc -c < "\$PRODUCT_APK" \| tr -d ' '\)" = "\$PRODUCT_SIZE"/);
+  assert.match(j, /interoperability=exact-public-phone59-with-exact-ac885-hosted-ui-and-server-runtime/);
+  assert.match(j, /name: android-phone59-external-player-runtime-evidence/);
+  assert.doesNotMatch(j, /phone27|phone42|2\.3\.27|2\.3\.42|2003027|2003042|f3e983929d|9fc94a237d|3e1f72c2/);
   assert.match(j, /VLC_URL: https:\/\/download\.videolan\.org\/pub\/videolan\/vlc-android\/3\.7\.1\/VLC-Android-3\.7\.1-x86_64\.apk/);
   assert.match(j, /VLC_CHECKSUM_URL: https:\/\/download\.videolan\.org\/pub\/videolan\/vlc-android\/3\.7\.1\/VLC-Android-3\.7\.1-x86_64\.apk\.sha256/);
   assert.match(j, /VLC_SHA256: 4646633ede40c4784c5584087cffc5c60cc45b16966ae0b36cedd784d7c4a11e/);
@@ -88,6 +93,8 @@ function workflowContract(w, j) {
   assert.match(j, /validate_webview_provider\(provider,minimum_major=90,expected_package='com\.google\.android\.webview',expected_version=None\)/);
   assert.ok(j.indexOf('major=validate_webview_provider') < j.indexOf('adb -s "$EMULATOR_SERIAL" install "$PRODUCT_APK"'));
   assert.match(j, /--certificate-pin public-phone-source\/web\/src-tauri\/SIGNING_CERT_SHA256/);
+  assert.match(j, /test "\$source_pin" = "\$PRODUCT_SIGNER_SHA256"/);
+  assert.match(j, /test "\$actual_signer" = "\$PRODUCT_SIGNER_SHA256"/);
   assert.match(j, /test "\$installed_sha" = "\$PRODUCT_SHA256"/);
   assert.match(j, /test "\$vlc_installed_sha" = "\$VLC_SHA256"/);
   assert.ok(j.indexOf('stock-video-handlers.txt') < j.indexOf('install "$VLC_APK"'));
@@ -143,6 +150,17 @@ function workflowContract(w, j) {
   assert.match(j, /event\['lifecycle'\]\['finishObserved'\] is True/);
   assert.match(j, /event\['lifecycle'\]\['prematureCloseObserved'\] is False/);
   assert.match(j, /decodedPlaybackClaimed'\] is False/);
+
+  assert.match(j, /\(cd public-phone-source\/web && npm ci && npm run build\)/);
+  assert.match(j, /\(cd public-phone-source\/server && npm ci\)/);
+  assert.match(j, /public-phone-source\/server\/node_modules\/tsx\/dist\/cli\.mjs scripts\/android_external_player_server_fixture\.mts/);
+  assert.match(j, /--repo "\$GITHUB_WORKSPACE\/public-phone-source"/);
+  assert.match(j, /source-runtime-admission\.json/);
+  assert.match(j, /fixtureHarnessSource/);
+  assert.match(j, /hostedUiSource/);
+  assert.match(j, /serverRuntimeSource/);
+  assert.match(j, /servedWebDist/);
+  assert.match(j, /assert smoke\['servedWebDist'\]==source\['hostedUi'\]\['webDist'\]\['files'\]/);
 }
 
 function fixtureContract(f) {
@@ -174,8 +192,43 @@ function fixtureContract(f) {
   assert.match(f, /externalFull\.headers\["content-type"\] !== "video\/mp4"/);
   assert.match(f, /externalFull\.headers\["accept-ranges"\] !== "bytes"/);
   assert.match(f, /externalFull\.headers\["content-disposition"\] != null/);
+  assert.match(f, /MAX_WEB_DIST_FILES = 512/);
+  assert.match(f, /MAX_WEB_DIST_BYTES = 64 \* 1024 \* 1024/);
+  assert.match(f, /function admittedWebDist\(\)/);
+  assert.match(f, /Compiled web asset response differs from its exact admitted source bytes/);
+  assert.match(f, /servedSha256 !== entry\.sha256/);
+  assert.match(f, /servedWebDist/);
   assert.doesNotMatch(f, /externalReceiptEvents\.push\([^)]*(?:rawUrl|externalPath|capability)/s);
   assert.doesNotMatch(f, /\/Volumes\/Work\/|\/private\/tmp\/ds-/);
+}
+
+function public59PinsContract(j) {
+  assert.match(j, /PRODUCT_SHA256: 5fe550e66658f3c9ae172c087c656d69e126af2892df05ca15e7e021594dae47/);
+  assert.match(j, /PRODUCT_SIZE: "88644481"/);
+  assert.match(j, /PRODUCT_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
+  assert.match(j, /PRODUCT_VERSION_CODE: "2003059"/);
+  assert.match(j, /PRODUCT_SIGNER_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a/);
+}
+
+function exactReleasedSourceContract(j) {
+  assert.match(j, /HOSTED_UI_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
+  assert.match(j, /SERVER_RUNTIME_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
+  assert.match(j, /\(cd public-phone-source\/web && npm ci && npm run build\)/);
+  assert.match(j, /public-phone-source\/server\/node_modules\/tsx\/dist\/cli\.mjs scripts\/android_external_player_server_fixture\.mts/);
+  assert.match(j, /--repo "\$GITHUB_WORKSPACE\/public-phone-source"/);
+  assert.match(j, /assert release_source==os\.environ\['PRODUCT_SOURCE'\]==os\.environ\['HOSTED_UI_SOURCE'\]==os\.environ\['SERVER_RUNTIME_SOURCE'\]/);
+  assert.match(j, /web=inventory\(Path\('web\/dist'\),512,64\*1024\*1024\)/);
+  assert.match(j, /server=inventory\(Path\('server\/src'\),2048,32\*1024\*1024\)/);
+  assert.match(j, /'packageLockSha256':sha256\(root\/'server\/package-lock\.json'\)/);
+  assert.match(j, /'role':'test-only-separate-from-app'/);
+  assert.match(j, /assert smoke\['servedWebDist'\]==source\['hostedUi'\]\['webDist'\]\['files'\]/);
+}
+
+function servedWebDistContract(f) {
+  assert.match(f, /MAX_WEB_DIST_FILES = 512/);
+  assert.match(f, /MAX_WEB_DIST_BYTES = 64 \* 1024 \* 1024/);
+  assert.match(f, /servedSha256 !== entry\.sha256/);
+  assert.match(f, /servedWebDist/);
 }
 
 function playbackSettingsObservation(d, transactionSource, legalSource) {
@@ -382,6 +435,9 @@ function driverContract(
   assert.doesNotMatch(d, /evaluateJavascript|executeShellCommand|grantRuntimePermission|shared_prefs/);
 }
 
+test('workflow pins exact public phone59 APK identity', () => public59PinsContract(job));
+test('workflow builds and serves exact released ac885 source', () => exactReleasedSourceContract(job));
+test('fixture verifies every bounded compiled web asset as served', () => servedWebDistContract(fixture));
 test('workflow pins and admits only the exact official VLC fixture handler', () => workflowContract(workflow, job));
 test('external workflow contract is bounded before the following distinct job', () => {
   assert.doesNotMatch(job, /^  touch-player-fixture:/m);
@@ -422,12 +478,19 @@ test('fixture emits bounded token-free media and HTTP diagnostics', () => fixtur
 test('driver preserves the strict product, chooser, VLC, seek, and Back flow', () => driverContract(driver));
 
 for (const [name, original, mutate, contract] of [
-  ['product APK hash', job, s => s.replace('PRODUCT_SHA256: 3e1f72', 'PRODUCT_SHA256: ae1f72'), s => workflowContract(workflow, s)],
-  ['product source', job, s => s.replace('PRODUCT_SOURCE: ae9b35', 'PRODUCT_SOURCE: be9b35'), s => workflowContract(workflow, s)],
-  ['product version', job, s => s.replace('PRODUCT_VERSION: 2.3.42', 'PRODUCT_VERSION: 2.3.41'), s => workflowContract(workflow, s)],
-  ['product version code', job, s => s.replace('PRODUCT_VERSION_CODE: "2003042"', 'PRODUCT_VERSION_CODE: "2003041"'), s => workflowContract(workflow, s)],
-  ['product release URL', job, s => s.replace('android-v2.3.42/YAWF.Stream_Android_2.3.42.apk', 'android-v2.3.41/YAWF.Stream_Android_2.3.41.apk'), s => workflowContract(workflow, s)],
-  ['product APK size', job, s => s.replace('= 88583041', '= 1'), s => workflowContract(workflow, s)],
+  ['product APK hash', job, s => s.replace('PRODUCT_SHA256: 5fe550', 'PRODUCT_SHA256: afe550'), s => workflowContract(workflow, s)],
+  ['product source', job, s => s.replace('PRODUCT_SOURCE: ac885b', 'PRODUCT_SOURCE: bc885b'), s => workflowContract(workflow, s)],
+  ['hosted UI source', job, s => s.replace('HOSTED_UI_SOURCE: ac885b', 'HOSTED_UI_SOURCE: bc885b'), s => workflowContract(workflow, s)],
+  ['server runtime source', job, s => s.replace('SERVER_RUNTIME_SOURCE: ac885b', 'SERVER_RUNTIME_SOURCE: bc885b'), s => workflowContract(workflow, s)],
+  ['product version', job, s => s.replace('PRODUCT_VERSION: 2.3.59', 'PRODUCT_VERSION: 2.3.58'), s => workflowContract(workflow, s)],
+  ['product version code', job, s => s.replace('PRODUCT_VERSION_CODE: "2003059"', 'PRODUCT_VERSION_CODE: "2003058"'), s => workflowContract(workflow, s)],
+  ['product signer', job, s => s.replace('PRODUCT_SIGNER_SHA256: 233ff9', 'PRODUCT_SIGNER_SHA256: a33ff9'), s => workflowContract(workflow, s)],
+  ['product release tag', job, s => s.replace('PRODUCT_RELEASE_TAG: android-v2.3.59', 'PRODUCT_RELEASE_TAG: android-v2.3.58'), s => workflowContract(workflow, s)],
+  ['product APK size', job, s => s.replace('PRODUCT_SIZE: "88644481"', 'PRODUCT_SIZE: "1"'), s => workflowContract(workflow, s)],
+  ['wrong hosted UI build root', job, s => s.replace('(cd public-phone-source/web && npm ci && npm run build)', '(cd web && npm ci && npm run build)'), s => workflowContract(workflow, s)],
+  ['wrong server dependency root', job, s => s.replace('(cd public-phone-source/server && npm ci)', '(cd server && npm ci)'), s => workflowContract(workflow, s)],
+  ['wrong fixture module loader', job, s => s.replace('public-phone-source/server/node_modules/tsx/dist/cli.mjs', 'server/node_modules/tsx/dist/cli.mjs'), s => workflowContract(workflow, s)],
+  ['wrong fixture served source', job, s => s.replace('--repo "$GITHUB_WORKSPACE/public-phone-source"', '--repo "$GITHUB_WORKSPACE"'), s => workflowContract(workflow, s)],
   ['VLC APK hash', job, s => s.replace('VLC_SHA256: 4646633e', 'VLC_SHA256: a646633e'), s => workflowContract(workflow, s)],
   ['VLC signer', job, s => s.replace('VLC_SIGNER_SHA256: c8768d2c', 'VLC_SIGNER_SHA256: a8768d2c'), s => workflowContract(workflow, s)],
   ['VLC size', job, s => s.replace('VLC_SIZE: "49444910"', 'VLC_SIZE: "1"'), s => workflowContract(workflow, s)],
@@ -513,6 +576,7 @@ for (const [name, original, mutate, contract] of [
   ['raw method type', fixture, s => s.replace('const method: "GET" | "HEAD" = methodValue', 'const method = methodValue'), fixtureContract],
   ['missing ffprobe', fixture, s => s.replace('spawnSync("ffprobe"', 'spawnSync("true"'), fixtureContract],
   ['missing exact MP4 content type', fixture, s => s.replace('externalFull.headers["content-type"] !== "video/mp4"', 'false'), fixtureContract],
+  ['served source byte mismatch admitted', fixture, s => s.replace('servedSha256 !== entry.sha256', 'false'), fixtureContract],
   ['descending byte range admitted', fixture, s => s.replace('    (start != null && end != null && end < start)', '    false'), fixtureContract],
 ]) {
   test(`independently rejects ${name} mutant`, () => {
