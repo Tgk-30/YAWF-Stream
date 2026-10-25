@@ -418,7 +418,9 @@ public final class RuntimeTouchPlayerFlowTest {
         waitForExactNestedPlayerDialog("Playback settings", SHORT_WAIT_MS);
         checks.put("playbackSettingsOpened", true);
 
-        UiObject2 external = findPlayerLabeledClickable("Open in external player");
+        UiObject2 external = findPlayerLabeledClickableAny(
+                "Open in external player",
+                "Open in external player Choose VLC or another installed video app");
         int verticalPans = 0;
         while (external == null && verticalPans < 4) {
             UiObject2 settingsScroller = findScrollableInsideExactDialog("Playback settings");
@@ -427,7 +429,9 @@ public final class RuntimeTouchPlayerFlowTest {
             settingsScroller.scroll(Direction.DOWN, 0.70f);
             verticalPans++;
             SystemClock.sleep(350);
-            external = findPlayerLabeledClickable("Open in external player");
+            external = findPlayerLabeledClickableAny(
+                    "Open in external player",
+                    "Open in external player Choose VLC or another installed video app");
         }
         assertNotNull("Open in external player was not visibly reachable in Playback settings",
                 external);
@@ -1345,6 +1349,21 @@ public final class RuntimeTouchPlayerFlowTest {
             candidates.add(candidate);
         }
         if (candidates.size() > 1) fail("Ambiguous active-player controls for exact label: " + label);
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private UiObject2 findPlayerLabeledClickableAny(String... labels) {
+        List<UiObject2> candidates = new ArrayList<>();
+        for (String label : labels) {
+            UiObject2 candidate = findPlayerLabeledClickable(label);
+            if (candidate == null) continue;
+            boolean duplicate = false;
+            for (UiObject2 existing : candidates) {
+                if (existing.getVisibleBounds().equals(candidate.getVisibleBounds())) duplicate = true;
+            }
+            if (!duplicate) candidates.add(candidate);
+        }
+        if (candidates.size() > 1) fail("Ambiguous active-player controls for accepted labels");
         return candidates.isEmpty() ? null : candidates.get(0);
     }
 

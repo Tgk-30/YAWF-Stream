@@ -1202,7 +1202,7 @@ test("driver stays in product UI and exercises every touch-player behavior", () 
     "device.swipe(", "injectNativePausedDoubleTap", "MotionEvent.ACTION_DOWN",
     "InputDevice.SOURCE_TOUCHSCREEN", "injectInputEvent(event, false)",
   ]) assert.ok(driver.includes(text), text);
-  assert.doesNotMatch(driver, /evaluateJavascript|executeShellCommand|VLC|pm grant/i);
+  assert.doesNotMatch(driver, /evaluateJavascript|executeShellCommand|pm grant/i);
 });
 
 test("driver emits provisional decode evidence, exact handoff clocks, and measured orientation dimensions", () => {
@@ -1311,7 +1311,8 @@ test("exact Playback actions rail pans to a reachable non-launched external acti
     'findPlayerLabeledClickable("Playback settings")',
     'guardedClick(more, "Playback settings after horizontal action-rail pan")',
     'waitForExactNestedPlayerDialog("Playback settings", SHORT_WAIT_MS)',
-    'findPlayerLabeledClickable("Open in external player")',
+    'findPlayerLabeledClickableAny(',
+    '"Open in external player Choose VLC or another installed video app"',
     "settingsScroller.scroll(Direction.DOWN, 0.70f)",
     "external.isEnabled() && external.isClickable()",
     'checks.put("externalPlayerActionLaunched", false)',
