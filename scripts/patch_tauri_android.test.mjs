@@ -153,6 +153,37 @@ function withFixture(run) {
   }
 }
 
+function assertSafeAreaWebViewCreateContract(activity) {
+  const createStart = activity.indexOf("  override fun onWebViewCreate");
+  const createEnd = activity.indexOf("  override fun onResume");
+  assert.ok(createStart >= 0, "onWebViewCreate must exist");
+  assert.ok(createEnd > createStart, "onWebViewCreate must end before resume handling");
+  const createBody = activity.slice(createStart, createEnd);
+  const unsupportedGuardIndex = createBody.indexOf("if (!webViewCompatibility.supported)");
+  const firstSuperIndex = createBody.indexOf("super.onWebViewCreate(webView)");
+  const unsupportedReturnIndex = createBody.indexOf("      return", firstSuperIndex);
+  const detachPreviousIndex = createBody.indexOf("detachSafeAreaBridge()");
+  const attachNewIndex = createBody.indexOf("safeAreaWebView = webView");
+  const attachBridgeIndex = createBody.indexOf(
+    "webView.addJavascriptInterface(safeAreaBridge, SAFE_AREA_BRIDGE_NAME)",
+  );
+  const supportedSuperIndex = createBody.lastIndexOf("super.onWebViewCreate(webView)");
+
+  assert.ok(unsupportedGuardIndex >= 0, "unsupported WebView guard must exist");
+  assert.ok(firstSuperIndex > unsupportedGuardIndex, "unsupported path must invoke the base hook");
+  assert.ok(
+    unsupportedReturnIndex > firstSuperIndex && unsupportedReturnIndex < detachPreviousIndex,
+    "unsupported path must return before any safe-area attachment",
+  );
+  assert.ok(detachPreviousIndex >= 0, "replacement must detach the prior bridge");
+  assert.ok(attachNewIndex >= 0, "replacement must retain the new WebView identity");
+  assert.ok(attachBridgeIndex > attachNewIndex, "supported path must attach the safe-area bridge");
+  assert.ok(
+    supportedSuperIndex > attachBridgeIndex && supportedSuperIndex !== firstSuperIndex,
+    "supported path must attach the safe-area bridge before its base hook",
+  );
+}
+
 test("patches the origin-attested Server Mode player bridge idempotently", () => {
   withFixture(({ root, app, mainActivity }) => {
     const initial = patchTauriAndroidProject({ root });
@@ -251,9 +282,29 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
     assert.doesNotMatch(bridgeClass, /WebView|Activity|Context|Intent/);
     assert.match(activity, /private val safeAreaSnapshot = AtomicReference\(EMPTY_SAFE_AREA\)/);
     assert.match(activity, /webView\.addJavascriptInterface\(safeAreaBridge, SAFE_AREA_BRIDGE_NAME\)/);
-    assert.ok(
-      activity.indexOf("webView.addJavascriptInterface") <
-        activity.indexOf("super.onWebViewCreate(webView)"),
+    assertSafeAreaWebViewCreateContract(activity);
+    const reorderedSupportedSuper = activity
+      .replace(
+        "    safeAreaWebView = webView\n    webView.addJavascriptInterface(safeAreaBridge, SAFE_AREA_BRIDGE_NAME)",
+        "    safeAreaWebView = webView\n    super.onWebViewCreate(webView)\n    webView.addJavascriptInterface(safeAreaBridge, SAFE_AREA_BRIDGE_NAME)",
+      )
+      .replace(
+        "    CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)\n    super.onWebViewCreate(webView)",
+        "    CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)",
+      );
+    assert.notEqual(reorderedSupportedSuper, activity);
+    assert.throws(
+      () => assertSafeAreaWebViewCreateContract(reorderedSupportedSuper),
+      /supported path must attach the safe-area bridge before its base hook/,
+    );
+    const missingUnsupportedReturn = activity.replace(
+      "      super.onWebViewCreate(webView)\n      return\n    }\n    detachSafeAreaBridge()",
+      "      super.onWebViewCreate(webView)\n    }\n    detachSafeAreaBridge()",
+    );
+    assert.notEqual(missingUnsupportedReturn, activity);
+    assert.throws(
+      () => assertSafeAreaWebViewCreateContract(missingUnsupportedReturn),
+      /unsupported path must return before any safe-area attachment/,
     );
     assert.match(activity, /val windowInsets = webView\.rootWindowInsets \?: return/);
     for (const side of ["Top", "Right", "Bottom", "Left"]) {
@@ -286,9 +337,7 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
       "detach must reset the cached snapshot before its nullable WebView guard",
     );
     const createStart = activity.indexOf("  override fun onWebViewCreate");
-    const createEnd = activity.indexOf("  override fun onConfigurationChanged");
-    assert.ok(createStart >= 0, "onWebViewCreate must exist");
-    assert.ok(createEnd > createStart, "onWebViewCreate must end before configuration handling");
+    const createEnd = activity.indexOf("  override fun onResume");
     const createBody = activity.slice(createStart, createEnd);
     const detachPreviousIndex = createBody.indexOf("detachSafeAreaBridge()");
     const attachNewIndex = createBody.indexOf("safeAreaWebView = webView");

@@ -1,0 +1,5 @@
+/app/src/main/java/com/yawf/permissionreturnfixture/YawfAndroidUpdater.kt
+/app/build/
+/success-fixture/build/
+/success-driver/build/
+/.gradle/

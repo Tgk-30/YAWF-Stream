@@ -18,6 +18,7 @@ import type { StreamRow } from "../data/streams";
 import type { UpcomingEpisode } from "./metadata";
 import type { MovieRelease } from "../services/metadata/TMDBService";
 import type { PortableProfileBundle } from "../data/portableBackup";
+import { EPISODE_GUIDE_VERSION } from "../data/episodeSource";
 import { configuredServerURL } from "./serverMode";
 import { notifyUnauthorized, readCsrfToken } from "./serverSession";
 
@@ -34,6 +35,7 @@ async function serverRequest<T>(
   path: string,
   body?: unknown,
   extraHeaders?: Readonly<Record<string, string>>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const headers: Record<string, string> = { ...(extraHeaders ?? {}) };
   const unsafe = method !== "GET" && method !== "HEAD";
@@ -48,6 +50,7 @@ async function serverRequest<T>(
     credentials: "include",
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
 
   const text = await response.text();
@@ -291,6 +294,7 @@ export async function fetchServerStreams(input: {
     sourceErrors: response.sourceErrors ?? response.indexerErrors ?? [],
   });
   const params = new URLSearchParams({ type: input.type });
+  if (input.type === "series") params.set("episodeGuide", EPISODE_GUIDE_VERSION);
   if (input.season != null) params.set("season", String(input.season));
   if (input.episode != null) params.set("episode", String(input.episode));
   if (input.title != null && input.title.trim().length > 0) {
@@ -512,6 +516,53 @@ export interface ServerOptimizedSource {
   audioTrack?: number;
 }
 
+/** A retention target must come from the actual trusted master, never a
+ * guessed current generation or a provider's similarly named path. */
+export function serverHlsLeaseTarget(manifestURL: string, manifest: string): string | null {
+  try {
+    const source = new URL(manifestURL);
+    const configured = configuredServerURL();
+    const base = new URL(configured ?? window.location.origin);
+    const prefix = base.pathname.replace(/\/+$/, "");
+    if (source.origin !== base.origin || source.username || source.password ||
+      !source.pathname.startsWith(`${prefix}/api/stream/`) ||
+      !/^([^/]+)\/index\.m3u8$/.test(source.pathname.slice(`${prefix}/api/stream/`.length)) ||
+      !manifest.startsWith("#EXTM3U") || manifest.length > 65_536) return null;
+    const children = manifest.split(/\r?\n/).filter((line) => line.length > 0 && !line.startsWith("#"));
+    if (children.length === 0) return null;
+    let target: string | null = null;
+    let generation: string | null = null;
+    for (const line of children) {
+      const match = /^(?:1080p|720p|480p|360p)\.m3u8\?generation=(transcode-[A-Za-z0-9_-]{1,100})$/.exec(line);
+      if (match == null || (generation != null && generation !== match[1])) return null;
+      generation = match[1]!;
+      target ??= new URL(line, source).href;
+    }
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+/** HEAD is compatible with older servers' authenticated asset GET handler.
+ * The caller owns cancellation, cadence and any current-owner error handling.
+ * Never follow a redirect carrying the application cookie jar elsewhere. */
+export async function renewServerHlsLease(target: string, signal: AbortSignal): Promise<number> {
+  const parsed = new URL(target);
+  const master = new URL("index.m3u8", parsed).href;
+  if (serverHlsLeaseTarget(master, `#EXTM3U\n${parsed.pathname.split("/").at(-1)}${parsed.search}\n`) !== target) {
+    throw new Error("Untrusted stream retention target.");
+  }
+  const response = await fetch(target, {
+    method: "HEAD",
+    credentials: "include",
+    cache: "no-store",
+    redirect: "error",
+    signal,
+  });
+  return response.status;
+}
+
 export interface ServerAudioTrack {
   index: number;
   language: string | null;
@@ -524,13 +575,31 @@ export interface ServerStreamSourceInfo {
   durationSeconds: number | null;
 }
 
+export interface ServerAudioInventoryLoadOptions {
+  retryFailed?: boolean;
+  signal?: AbortSignal;
+  /** The audio menu uses the same explicit response to adopt source duration.
+   * This callback never causes a second metadata request. */
+  onSourceInfo?: (sourceInfo: ServerStreamSourceInfo) => void;
+}
+
+const SERVER_SOURCE_INFO_RETRY_TIMEOUT_MS = 18_000;
+
+function boundedTranscodeStartSeconds(value: number | undefined): number {
+  return value != null && Number.isFinite(value) && value > 0
+    ? Math.min(86_400, value)
+    : 0;
+}
+
 export function serverOptimizedSource(
   stream: StreamInfo,
   options: Omit<ServerTranscodeOptions, "profile"> & {
     quality: ServerTranscodeQuality;
   },
 ): ServerOptimizedSource {
+  const requestedStartSeconds = boundedTranscodeStartSeconds(options.startSeconds);
   const optimized = asServerTranscodeStream(stream, options);
+  const timelineOffsetSeconds = optimized.timelineOffsetSeconds ?? 0;
   const audioTrack =
     options.audioTrack != null &&
     Number.isInteger(options.audioTrack) &&
@@ -540,8 +609,8 @@ export function serverOptimizedSource(
       : undefined;
   return {
     url: optimized.streamURL,
-    timelineOffsetSeconds: optimized.timelineOffsetSeconds ?? 0,
-    startPositionSeconds: 0,
+    timelineOffsetSeconds,
+    startPositionSeconds: Math.max(0, requestedStartSeconds - timelineOffsetSeconds),
     quality: options.quality,
     ...(audioTrack == null ? {} : { audioTrack }),
   };
@@ -563,12 +632,7 @@ export function asServerTranscodeStream(
   );
   if (options.profile != null) params.set("profile", options.profile);
   if (options.quality != null) params.set("quality", options.quality);
-  const startSeconds =
-    options.startSeconds != null &&
-    Number.isFinite(options.startSeconds) &&
-    options.startSeconds > 0
-      ? Math.min(86_400, Math.floor(options.startSeconds))
-      : 0;
+  const startSeconds = Math.floor(boundedTranscodeStartSeconds(options.startSeconds));
   if (startSeconds > 0) params.set("start", String(startSeconds));
   else params.delete("start");
   if (options.hdrPolicy != null) params.set("hdr", options.hdrPolicy);
@@ -618,13 +682,34 @@ function serverStreamSessionId(stream: StreamInfo): string | null {
 
 export async function serverStreamSourceInfo(
   stream: StreamInfo,
+  options: ServerAudioInventoryLoadOptions = {},
 ): Promise<ServerStreamSourceInfo> {
   const sessionId = serverStreamSessionId(stream);
   if (sessionId == null) throw new Error("This stream does not belong to the configured server.");
-  const response = await serverRequest<{ tracks?: unknown; durationSeconds?: unknown }>(
-    "GET",
-    `/api/stream/${encodeURIComponent(sessionId)}/audio-tracks`,
-  );
+  const query = options.retryFailed === true ? "?retry=1" : "";
+  const retryController = options.retryFailed === true
+    ? new AbortController()
+    : null;
+  const abortRetry = () => retryController?.abort();
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  if (retryController != null) {
+    options.signal?.addEventListener("abort", abortRetry, { once: true });
+    if (options.signal?.aborted === true) abortRetry();
+    retryTimer = setTimeout(abortRetry, SERVER_SOURCE_INFO_RETRY_TIMEOUT_MS);
+  }
+  let response: { tracks?: unknown; durationSeconds?: unknown };
+  try {
+    response = await serverRequest<{ tracks?: unknown; durationSeconds?: unknown }>(
+      "GET",
+      `/api/stream/${encodeURIComponent(sessionId)}/audio-tracks${query}`,
+      undefined,
+      undefined,
+      retryController?.signal ?? options.signal,
+    );
+  } finally {
+    if (retryTimer != null) clearTimeout(retryTimer);
+    options.signal?.removeEventListener("abort", abortRetry);
+  }
   const tracks = Array.isArray(response.tracks)
     ? response.tracks.filter((track): track is ServerAudioTrack => {
         if (track == null || typeof track !== "object") return false;
@@ -647,8 +732,11 @@ export async function serverStreamSourceInfo(
 
 export async function serverStreamAudioTracks(
   stream: StreamInfo,
+  options: ServerAudioInventoryLoadOptions = {},
 ): Promise<ServerAudioTrack[]> {
-  return (await serverStreamSourceInfo(stream)).tracks;
+  const sourceInfo = await serverStreamSourceInfo(stream, options);
+  options.onSourceInfo?.(sourceInfo);
+  return sourceInfo.tracks;
 }
 
 /** Build the capability URL consumed by native players launched from a hosted
@@ -918,6 +1006,7 @@ export async function switchAccountProfile(
     role: "owner" | "admin" | "member" | "restricted";
     username: string;
     simpleMode: boolean;
+    isKid?: boolean;
   } | null;
   profiles: AccountProfileState | null;
 }> {
@@ -1041,21 +1130,33 @@ export async function fetchServerDetail(input: {
 /** Fetch a series' seasons via the server metadata proxy (the TMDB key lives
  *  on the server). Callers treat any failure as "no episode guide". */
 export async function fetchServerSeasons(input: {
-  tmdbId: number;
-}): Promise<{ seasons: Season[] }> {
-  const params = new URLSearchParams({ tmdbId: String(input.tmdbId) });
+  tmdbId: number | null;
+  imdbId?: string | null;
+}): Promise<{
+  seasons: Season[];
+  numbering: "cinemeta" | "tmdb";
+  guideVersion?: string;
+}> {
+  const params = new URLSearchParams();
+  if (input.tmdbId != null) params.set("tmdbId", String(input.tmdbId));
+  if (input.imdbId != null) params.set("imdbId", input.imdbId);
   return serverRequest("GET", `/api/media/seasons?${params.toString()}`);
 }
 
 /** Fetch one season's episode list via the server metadata proxy. */
 export async function fetchServerEpisodes(input: {
-  tmdbId: number;
+  tmdbId: number | null;
+  imdbId?: string | null;
   season: number;
-}): Promise<{ episodes: Episode[] }> {
-  const params = new URLSearchParams({
-    tmdbId: String(input.tmdbId),
-    season: String(input.season),
-  });
+}): Promise<{
+  episodes: Episode[];
+  numbering: "cinemeta" | "tmdb";
+  guideVersion?: string;
+}> {
+  const params = new URLSearchParams();
+  if (input.tmdbId != null) params.set("tmdbId", String(input.tmdbId));
+  if (input.imdbId != null) params.set("imdbId", input.imdbId);
+  params.set("season", String(input.season));
   return serverRequest("GET", `/api/media/episodes?${params.toString()}`);
 }
 

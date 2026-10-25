@@ -2,7 +2,7 @@
 
 .global-search {
   position: absolute;
-  top: var(--sp-md);
+  top: calc(max(var(--sp-md), var(--safe-area-top)) - var(--app-content-safe-top-consumed, 0rem));
   /* Leave room on the right for the floating profile avatar (44px + gap). */
   right: calc(var(--sp-lg) + 44px + var(--sp-md));
   z-index: 5;
@@ -40,9 +40,17 @@
   color: var(--text-primary);
 }
 
+@media (pointer: coarse) {
+  .global-search-clear {
+    width: 44px;
+    height: 44px;
+  }
+}
+
 @media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {
   .global-search {
     position: sticky;
+    /* The mobile scrollport already pads content below the native top inset. */
     top: var(--sp-sm);
     right: auto;
     z-index: 8;

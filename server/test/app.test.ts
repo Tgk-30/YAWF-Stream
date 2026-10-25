@@ -4,15 +4,16 @@ import { Readable } from "node:stream";
 import { createHmac, randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { buildApp } from "../src/app.js";
 import { AppDatabase } from "../src/db.js";
-import type { Transcoder } from "../src/transcode.js";
+import { TranscodeRegistry } from "../src/transcodeSession.js";
+import type { Transcoder, TranscoderStreamProbeOptions } from "../src/transcode.js";
 import type { DirectTorrentAdapter } from "../src/directTorrent.js";
 
 // A fake ffmpeg surface so transcode tests run without a real binary: detect()
@@ -30,7 +31,28 @@ const FAKE_MANIFEST = [
   "",
 ].join("\n");
 
-function makeFakeTranscoder(opts: { detect?: boolean; writeOutput?: boolean } = {}): Transcoder {
+function fakeMpegTsPacket(streamId: number, timestamp: number, pid: number): Buffer {
+  const packet = Buffer.alloc(188, 0xff);
+  packet.set([0x47, 0x40 | ((pid >>> 8) & 0x1f), pid & 0xff, 0x10], 0);
+  packet.set([
+    0, 0, 1, streamId, 0, 0, 0x80, 0x80, 5,
+    0x20 | ((Math.floor(timestamp / 2 ** 30) & 0x07) << 1) | 1,
+    Math.floor(timestamp / 2 ** 22) & 0xff,
+    ((Math.floor(timestamp / 2 ** 15) & 0x7f) << 1) | 1,
+    Math.floor(timestamp / 2 ** 7) & 0xff,
+    ((timestamp & 0x7f) << 1) | 1,
+  ], 4);
+  return packet;
+}
+
+function fakeMpegTsSegment(videoTimestamp: number): Buffer {
+  return Buffer.concat([
+    fakeMpegTsPacket(0xe0, videoTimestamp, 0x100),
+    fakeMpegTsPacket(0xc0, (videoTimestamp - 1920 + 2 ** 33) % 2 ** 33, 0x101),
+  ]);
+}
+
+function makeFakeTranscoder(opts: { detect?: boolean; writeOutput?: boolean; sourceVideoOrigin?: number } = {}): Transcoder {
   return {
     async detect() {
       return opts.detect ?? true;
@@ -38,19 +60,18 @@ function makeFakeTranscoder(opts: { detect?: boolean; writeOutput?: boolean } = 
     spawnHls(args: string[]) {
       const outputPath = args[args.length - 1] as string;
       const dir = dirname(outputPath);
+      const seekIndex = args.indexOf("-ss");
+      const sourceStart = (opts.sourceVideoOrigin ?? 0) +
+        (seekIndex >= 0 ? Number(args[seekIndex + 1]) : 0);
       // writeOutput:false simulates an ffmpeg that never produces a manifest (so
       // ensureJob's start-timeout → 504 can be exercised).
       if (opts.writeOutput !== false) {
-        if (args.includes("webvtt")) {
-          writeFileSync(
-            join(dir, "subtitles.vtt"),
-            "WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n",
-          );
-        }
         const streamMap = args[args.indexOf("-var_stream_map") + 1] ?? "";
+        const includesSubtitle = streamMap.includes("s:0");
         const renditions = [...streamMap.matchAll(/name:(1080p|720p|480p|360p)/g)]
           .map((match) => match[1]!);
         if (renditions.length > 0) {
+          const subtitlePlaylist = `${renditions[0]}_subtitles.m3u8`;
           const metadata: Record<string, [number, string]> = {
             "1080p": [8000000, "1920x1080"],
             "720p": [4500000, "1280x720"],
@@ -59,21 +80,58 @@ function makeFakeTranscoder(opts: { detect?: boolean; writeOutput?: boolean } = 
           };
           writeFileSync(
             join(dir, "stream.m3u8"),
-            ["#EXTM3U", ...renditions.flatMap((rendition) => [
-              `#EXT-X-STREAM-INF:BANDWIDTH=${metadata[rendition]![0]},RESOLUTION=${metadata[rendition]![1]}`,
-              `${rendition}.m3u8`,
-            ]), ""].join("\n"),
+            [
+              "#EXTM3U",
+              ...(includesSubtitle
+                ? [`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Embedded",DEFAULT=YES,URI="${subtitlePlaylist}"`]
+                : []),
+              ...renditions.flatMap((rendition) => [
+                `#EXT-X-STREAM-INF:BANDWIDTH=${metadata[rendition]![0]},RESOLUTION=${metadata[rendition]![1]}${includesSubtitle ? ',SUBTITLES="subs"' : ""}`,
+                `${rendition}.m3u8`,
+              ]),
+              "",
+            ].join("\n"),
           );
           for (const rendition of renditions) {
             writeFileSync(
               join(dir, `${rendition}.m3u8`),
               FAKE_MANIFEST.replaceAll("seg_00000.ts", `${rendition}_seg_00000.ts`),
             );
-            writeFileSync(join(dir, `${rendition}_seg_00000.ts`), Buffer.from([0, 0, 0, 0]));
+            writeFileSync(join(dir, `${rendition}_seg_00000.ts`), fakeMpegTsSegment(sourceStart * 90_000));
+          }
+          if (includesSubtitle) {
+            const firstRendition = renditions[0]!;
+            const sourceCueStart = sourceStart + 1;
+            const vttTime = (seconds: number) => {
+              const hours = Math.floor(seconds / 3600);
+              const minutes = Math.floor((seconds % 3600) / 60);
+              const remainder = seconds % 60;
+              const minuteSecond =
+                `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}.000`;
+              return hours > 0
+                ? `${String(hours).padStart(2, "0")}:${minuteSecond}`
+                : minuteSecond;
+            };
+            writeFileSync(
+              join(dir, subtitlePlaylist),
+              [
+                "#EXTM3U",
+                "#EXT-X-VERSION:3",
+                "#EXT-X-TARGETDURATION:6",
+                "#EXT-X-MEDIA-SEQUENCE:0",
+                "#EXTINF:6.000000,",
+                `${firstRendition}0.vtt`,
+                "",
+              ].join("\n"),
+            );
+            writeFileSync(
+              join(dir, `${firstRendition}0.vtt`),
+              `WEBVTT\n\n${vttTime(sourceCueStart)} --> ${vttTime(sourceCueStart + 1)}\nHello\n`,
+            );
           }
         } else {
           writeFileSync(join(dir, "stream.m3u8"), FAKE_MANIFEST);
-          writeFileSync(join(dir, "seg_00000.ts"), Buffer.from([0, 0, 0, 0]));
+          writeFileSync(join(dir, "seg_00000.ts"), fakeMpegTsSegment(sourceStart * 90_000));
         }
       }
       const child = new EventEmitter() as EventEmitter & {
@@ -688,6 +746,63 @@ describe("DebridStreamer server", () => {
       expect.objectContaining({ phase: "sources", rows: [] }),
       expect.objectContaining({ phase: "ready", rows: [] }),
     ]);
+  });
+
+  it("requires the current episode guide marker only for ambiguous Bleach searches", async () => {
+    const owner = await setupOwner(app);
+    await request(owner, {
+      method: "PUT",
+      url: "/api/settings/profile",
+      csrf: true,
+      payload: {
+        key: "server_indexer_configs",
+        value: JSON.stringify([{
+          id: "stremio",
+          type: "stremio_addon",
+          baseURL: "https://stremio.test",
+          isActive: true,
+        }]),
+      },
+    });
+    const originalFetch = globalThis.fetch;
+    const stremioURLs: string[] = [];
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.startsWith("https://stremio.test/stream/")) {
+        stremioURLs.push(url);
+        return new Response(JSON.stringify({ streams: [] }), { status: 200 });
+      }
+      return originalFetch(input);
+    }) as typeof fetch;
+    try {
+      const stale = await request(owner, {
+        method: "GET",
+        url: "/api/streams/tt0434665?type=series&season=2&episode=7",
+      });
+      expect(stale.statusCode).toBe(409);
+      expect(json<{ error: string }>(stale).error).toContain("Reload");
+      expect(stremioURLs).toEqual([]);
+
+      const current = await request(owner, {
+        method: "GET",
+        url: "/api/streams/tt0434665?type=series&episodeGuide=2&season=17&episode=1&title=Bleach",
+      });
+      expect(current.statusCode).toBe(200);
+      expect(stremioURLs).toContain(
+        "https://stremio.test/stream/series/tt14986406%3A1%3A1.json",
+      );
+
+      const ordinary = await request(owner, {
+        method: "GET",
+        url: "/api/streams/tt0903747?type=series&season=2&episode=7",
+      });
+      expect(ordinary.statusCode).toBe(200);
+      expect(stremioURLs).toContain(
+        "https://stremio.test/stream/series/tt0903747%3A2%3A7.json",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("creates the first owner, starts a session, and rejects unsafe writes without CSRF", async () => {
@@ -1407,6 +1522,98 @@ describe("DebridStreamer server", () => {
     ]);
   });
 
+  it.each([
+    ["an explicit null duration", { durationSeconds: null }, "durationnull"],
+    ["an omitted duration", {}, "durationomitted"],
+  ])("preserves a known duration when a progress write has %s", async (
+    _label,
+    unknownDuration,
+    profileName,
+  ) => {
+    const owner = await setupOwner(app);
+    await createProfile(owner, profileName, "viewer-password");
+    const other = await login(app, profileName, "viewer-password");
+    const save = async (
+      client: TestClient,
+      id: string,
+      payload: Record<string, unknown>,
+    ) => {
+      const response = await request(client, {
+        method: "PUT",
+        url: `/api/history/${id}`,
+        csrf: true,
+        payload: { ...payload, preview: { id } },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+    };
+    const read = async (client: TestClient, id: string, episodeId?: string) =>
+      json<{
+        item: {
+          progressSeconds: number;
+          durationSeconds: number | null;
+        } | null;
+      }>(await request(client, {
+        method: "GET",
+        url: `/api/history/${id}${episodeId == null ? "" : `?episodeId=${episodeId}`}`,
+      })).item;
+
+    const unknownId = `unknown-start-${profileName}`;
+    await save(owner, unknownId, { progressSeconds: 1, ...unknownDuration });
+    expect(await read(owner, unknownId)).toMatchObject({ durationSeconds: null });
+
+    const replacementId = `duration-replacement-${profileName}`;
+    await save(owner, replacementId, { progressSeconds: 10, durationSeconds: 100 });
+    await save(owner, replacementId, { progressSeconds: 30, durationSeconds: 300 });
+    expect(await read(owner, replacementId)).toMatchObject({ durationSeconds: 300 });
+
+    const zero = await request(owner, {
+      method: "PUT",
+      url: `/api/history/invalid-zero-${profileName}`,
+      csrf: true,
+      payload: {
+        progressSeconds: 1,
+        durationSeconds: 0,
+        preview: { id: `invalid-zero-${profileName}` },
+      },
+    });
+    expect(zero.statusCode).toBe(400);
+
+    const scopedId = `episode-scope-${profileName}`;
+    await save(owner, scopedId, {
+      episodeId: "s1e1",
+      progressSeconds: 10,
+      durationSeconds: 222,
+    });
+    await save(owner, scopedId, {
+      episodeId: "s1e2",
+      progressSeconds: 2,
+      ...unknownDuration,
+    });
+    expect(await read(owner, scopedId, "s1e1")).toMatchObject({ durationSeconds: 222 });
+    expect(await read(owner, scopedId, "s1e2")).toMatchObject({ durationSeconds: null });
+
+    const isolatedId = `profile-isolated-${profileName}`;
+    await save(owner, isolatedId, { progressSeconds: 10, durationSeconds: 111 });
+    await save(other, isolatedId, { progressSeconds: 2, ...unknownDuration });
+    expect(await read(owner, isolatedId)).toMatchObject({ durationSeconds: 111 });
+    expect(await read(other, isolatedId)).toMatchObject({ durationSeconds: null });
+
+    const retainedId = `duration-retained-${profileName}`;
+    await save(owner, retainedId, { progressSeconds: 10, durationSeconds: 200 });
+    await save(owner, retainedId, { progressSeconds: 20, ...unknownDuration });
+    expect(await read(owner, retainedId)).toMatchObject({
+      progressSeconds: 20,
+      durationSeconds: 200,
+    });
+    const continueRows = json<{ items: Array<{ mediaId: string }> }>(
+      await request(owner, {
+        method: "GET",
+        url: "/api/history?view=continue-watching&limit=20",
+      }),
+    );
+    expect(continueRows.items.some((item) => item.mediaId === retainedId)).toBe(true);
+  });
+
   it("returns the newest 20 continue-watching rows at the strict resume boundaries", async () => {
     const owner = await setupOwner(app);
     const saveHistory = async (
@@ -2052,6 +2259,143 @@ describe("DebridStreamer server", () => {
       expect(second.statusCode).toBe(200);
       expect(tmdbCalls).toBe(6);
       expect(json<{ hero: { title: string } | null }>(second).hero?.title).toBe("Cached Movie");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails closed instead of using merged TMDB numbering when Bleach's canonical guide is unavailable", async () => {
+    const owner = await setupOwner(app);
+    await request(owner, {
+      method: "PUT",
+      url: "/api/admin/credentials",
+      csrf: true,
+      payload: { provider: "tmdb", value: "tmdb-key", label: "TMDB" },
+    });
+    const originalFetch = globalThis.fetch;
+    let tmdbGuideCalls = 0;
+    globalThis.fetch = (async (url, init) => {
+      const value = String(url);
+      if (value === "https://v3-cinemeta.strem.io/meta/series/tt0434665.json") {
+        throw new Error("Cinemeta unavailable");
+      }
+      if (value.includes("api.themoviedb.org/3/tv/30984")) {
+        tmdbGuideCalls += 1;
+        return new Response(JSON.stringify({ seasons: [{ season_number: 2 }] }));
+      }
+      return originalFetch(url, init);
+    }) as typeof fetch;
+
+    try {
+      const response = await request(owner, {
+        method: "GET",
+        url: "/api/media/seasons?tmdbId=30984&imdbId=tt0434665",
+      });
+      expect(response.statusCode).toBe(503);
+      expect(tmdbGuideCalls).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("server episode guides derive IMDb identity for legacy TMDB-only callers", async () => {
+    const owner = await setupOwner(app);
+    await request(owner, {
+      method: "PUT",
+      url: "/api/admin/credentials",
+      csrf: true,
+      payload: { provider: "tmdb", value: "tmdb-key", label: "TMDB" },
+    });
+    const videos = [20, 21, ...Array.from({ length: 14 }, () => 1)].flatMap((count, seasonIndex) =>
+      Array.from({ length: count }, (_, episodeIndex) => {
+        const season = seasonIndex + 1;
+        const number = episodeIndex + 1;
+        return {
+          id: `tt0434665:${season}:${number}`,
+          season,
+          number,
+          episode: number,
+          name: season === 2 && number === 7 ? "Release the Death Blow!" : `S${season}E${number}`,
+        };
+      }),
+    );
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url, init) => {
+      const value = String(url);
+      if (value.includes("api.themoviedb.org/3/tv/30984/external_ids")) {
+        return new Response(JSON.stringify({ imdb_id: "tt0434665", tvdb_id: 74796 }));
+      }
+      if (value === "https://v3-cinemeta.strem.io/meta/series/tt0434665.json") {
+        return new Response(JSON.stringify({
+          meta: { id: "tt0434665", type: "series", videos },
+        }));
+      }
+      if (value === "https://v3-cinemeta.strem.io/meta/series/tt14986406.json") {
+        const childVideos = [13, 13, 14, 10].flatMap((count, seasonIndex) =>
+          Array.from({ length: count }, (_, episodeIndex) => {
+            const season = seasonIndex + 1;
+            const number = episodeIndex + 1;
+            return {
+              id: `tt14986406:${season}:${number}`,
+              season,
+              number,
+              episode: number,
+              name: `TYBW S${season}E${number}`,
+            };
+          }),
+        );
+        return new Response(JSON.stringify({
+          meta: { id: "tt14986406", type: "series", videos: childVideos },
+        }));
+      }
+      return originalFetch(url, init);
+    }) as typeof fetch;
+
+    try {
+      const seasonsResponse = await request(owner, {
+        method: "GET",
+        url: "/api/media/seasons?tmdbId=30984",
+      });
+      expect(seasonsResponse.statusCode).toBe(200);
+      const seasonsBody = json<{
+        numbering: string;
+        seasons: Array<{ seasonNumber: number; episodeCount: number }>;
+      }>(seasonsResponse);
+      expect(seasonsBody.numbering).toBe("cinemeta");
+      expect(seasonsBody.seasons.map((season) => season.seasonNumber)).toEqual(
+        Array.from({ length: 20 }, (_, index) => index + 1),
+      );
+      expect(seasonsBody.seasons.slice(-4).map((season) => season.episodeCount))
+        .toEqual([13, 13, 14, 10]);
+
+      const episodeResponse = await request(owner, {
+        method: "GET",
+        url: "/api/media/episodes?imdbId=tt0434665&season=2",
+      });
+      expect(episodeResponse.statusCode).toBe(200);
+      const episodeBody = json<{
+        numbering: string;
+        episodes: Array<{ id: string; title: string }>;
+      }>(episodeResponse);
+      expect(episodeBody.numbering).toBe("cinemeta");
+      expect(episodeBody.episodes.find((episode) => episode.id === "tt0434665:2:7"))
+        .toMatchObject({ title: "Release the Death Blow!" });
+
+      const continuationResponse = await request(owner, {
+        method: "GET",
+        url: "/api/media/episodes?imdbId=tt0434665&season=17",
+      });
+      expect(continuationResponse.statusCode).toBe(200);
+      const continuationBody = json<{
+        guideVersion: string;
+        episodes: Array<{ id: string; mediaId: string; seasonNumber: number }>;
+      }>(continuationResponse);
+      expect(continuationBody.guideVersion).toBe("2");
+      expect(continuationBody.episodes[0]).toMatchObject({
+          id: "tt14986406:1:1",
+          mediaId: "tt14986406",
+          seasonNumber: 17,
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -3422,6 +3766,72 @@ describe("DebridStreamer server", () => {
     }>(created).session;
   }
 
+  it("transcode HEAD retention uses authenticated empty current-only fast path without asset body work", async () => {
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({}, fake);
+    let legacy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const master = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=480p` });
+      const child = master.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      legacy = vi.spyOn(TranscodeRegistry.prototype, "dirForAsset").mockImplementation(() => { throw new Error("Unexpected body-serving path"); });
+      const head = await request(owner, { method: "HEAD", url: `/api/stream/${session.id}/${child}` });
+      expect(head.statusCode).toBe(200);
+      expect(head.body).toBe("");
+      expect(head.headers["cache-control"]).toBe("private, no-store");
+      expect(legacy).not.toHaveBeenCalled();
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally { legacy?.mockRestore(); await on.close(); }
+  });
+
+  it("transcode HEAD retention refuses retired generations while normal GET grace remains", async () => {
+    const on = await buildTranscodeApp();
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const first = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=480p` });
+      const child = first.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const next = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p` });
+      const replacement = next.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      expect((await request(owner, { method: "HEAD", url: `/api/stream/${session.id}/${child}` })).statusCode).toBe(404);
+      expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/${child}` })).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: `/api/stream/${session.id}/${replacement}` })).statusCode).toBe(200);
+    } finally { await on.close(); }
+  });
+
+  it("transcode HEAD retention enforces existing owner and revocation authorization", async () => {
+    const on = await buildTranscodeApp();
+    try {
+      const owner = await setupOwner(on);
+      await createProfile(owner, "lease-other", "lease-password");
+      const other = await login(on, "lease-other", "lease-password");
+      const session = await createRawSession(owner);
+      const master = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=480p` });
+      const child = master.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const url = `/api/stream/${session.id}/${child}`;
+      expect((await request({ app: on, cookies: new Map() }, { method: "HEAD", url })).statusCode).toBe(401);
+      expect((await request(other, { method: "HEAD", url })).statusCode).toBe(404);
+      expect((await request({ app: on, cookies: new Map() }, { method: "HEAD", url, headers: { authorization: session.playbackAuthorization } })).statusCode).toBe(200);
+      await request(owner, { method: "POST", url: `/api/admin/streams/${session.id}/revoke`, csrf: true });
+      expect((await request(owner, { method: "HEAD", url })).statusCode).toBe(404);
+    } finally { await on.close(); }
+  });
+
+  it("transcode HEAD retention bounds request rate without restarting work", async () => {
+    const fake = makeFakeTranscoder(); const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({}, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const master = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=480p` });
+      const child = master.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      for (let i = 0; i < 12; i += 1) expect((await request(owner, { method: "HEAD", url: `/api/stream/${session.id}/${child}` })).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: `/api/stream/${session.id}/${child}` })).statusCode).toBe(429);
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally { await on.close(); }
+  });
+
   it("transcode OFF: routes 404, capability false, and the proxy is unchanged", async () => {
     const off = await buildTranscodeApp({ enableTranscode: false });
     upstream = createServer((_req, res) => {
@@ -3591,8 +4001,37 @@ describe("DebridStreamer server", () => {
     }
   });
 
-  it("transcode: applies the client profile and start offset, and exposes a subtitle sidecar", async () => {
-    const on = await buildTranscodeApp({ enableTranscode: true });
+  it("transcode: serves a generation-bound WebVTT playlist only for a probed embedded track", async () => {
+    const base = makeFakeTranscoder();
+    const spawned: string[][] = [];
+    const subtitleTranscoder: Transcoder = {
+      ...base,
+      async capabilities() {
+        return {
+          toneMapping: false,
+          videoEncoders: ["libx264"],
+          subtitleSidecar: true,
+          audioTrackSelection: true,
+        };
+      },
+      async probeStreams() {
+        return {
+          audio: true,
+          subtitle: true,
+          audioTracks: [
+            { index: 0, language: "eng", label: "English", default: true },
+          ],
+        };
+      },
+      spawnHls(args) {
+        spawned.push(args);
+        return base.spawnHls(args);
+      },
+    };
+    const on = await buildTranscodeApp(
+      { enableTranscode: true },
+      subtitleTranscoder,
+    );
     try {
       const owner = await setupOwner(on);
       const session = await createRawSession(owner);
@@ -3604,13 +4043,174 @@ describe("DebridStreamer server", () => {
       expect(manifest.headers["x-yawf-playback-decision"]).toBe("transcode");
       expect(manifest.headers["x-yawf-transcode-profile"]).toBe("data-saver");
       expect(manifest.headers["x-yawf-transcode-start"]).toBe("120");
+      expect(manifest.body).toContain('TYPE=SUBTITLES,GROUP-ID="subs"');
+      expect(manifest.body).toContain('SUBTITLES="subs"');
+      const subtitleUri = manifest.body.match(/URI="([^"]+)"/)?.[1];
+      expect(subtitleUri).toMatch(
+        /^480p_subtitles\.m3u8\?generation=transcode-[A-Za-z0-9_-]+$/,
+      );
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0]).toContain("0:s:0");
+      expect(spawned[0]).not.toContain("subtitles.vtt");
+      const video = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/480p_seg_00000.ts?${subtitleUri!.split("?")[1]}`,
+      });
+      expect(video.statusCode).toBe(200);
+      expect(video.rawPayload).toEqual(fakeMpegTsSegment(120 * 90_000));
+
+      const subtitlePlaylist = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/${subtitleUri}`,
+      });
+      expect(subtitlePlaylist.statusCode).toBe(200);
+      expect(String(subtitlePlaylist.headers["content-type"])).toContain(
+        "application/vnd.apple.mpegurl",
+      );
+      expect(subtitlePlaylist.body).toContain("#EXT-X-PLAYLIST-TYPE:EVENT");
+      const subtitleSegment = subtitlePlaylist.body.match(
+        /^(480p\d{1,5}\.vtt\?generation=[^\r\n]+)$/m,
+      )?.[1];
+      expect(subtitleSegment).toBeDefined();
       const subtitles = await request(owner, {
         method: "GET",
-        url: `/api/stream/${session.id}/subtitles.vtt`,
+        url: `/api/stream/${session.id}/${subtitleSegment}`,
       });
       expect(subtitles.statusCode).toBe(200);
       expect(String(subtitles.headers["content-type"])).toContain("text/vtt");
       expect(subtitles.body).toContain("WEBVTT");
+      expect(subtitles.body).toContain(
+        "X-TIMESTAMP-MAP=LOCAL:00:00.000,MPEGTS:0",
+      );
+      expect(subtitles.body).toContain(
+        "02:01.000 --> 02:02.000\nHello",
+      );
+
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/subtitles.vtt`,
+      })).statusCode).toBe(404);
+      expect((await request({ app: on, cookies: new Map() }, {
+        method: "GET",
+        url: `/api/stream/${session.id}/${subtitleUri}`,
+      })).statusCode).toBe(401);
+      const replacement = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p&subtitles=preserve`,
+      });
+      expect(replacement.statusCode).toBe(200);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/${subtitleSegment}`,
+      })).body).toBe(subtitles.body);
+    } finally {
+      await on.close();
+    }
+  });
+
+  it.each([
+    [0, 0, true],
+    [0, 5, false],
+    [5, 0, false],
+    [5, 5, true],
+  ] as const)("transcode: preserves output-domain cue bytes for source origin %i seek %i audio %s", async (sourceVideoOrigin, startSeconds, audio) => {
+    const base = makeFakeTranscoder({ sourceVideoOrigin });
+    let cuePath = "";
+    const raw = [
+      "WEBVTT", "", "identifier",
+      `00:${String(sourceVideoOrigin + 1).padStart(2, "0")}.000 --> 00:${String(sourceVideoOrigin + 4).padStart(2, "0")}.000 align:start`,
+      "Payload --> unchanged", "",
+      `00:${String(sourceVideoOrigin + 7).padStart(2, "0")}.000 --> 00:${String(sourceVideoOrigin + 10).padStart(2, "0")}.000`,
+      "Later cue", "",
+    ].join("\r\n");
+    const on = await buildTranscodeApp({ enableTranscode: true }, {
+      ...base,
+      async capabilities() {
+        return { toneMapping: false, videoEncoders: ["libx264"], subtitleSidecar: true, audioTrackSelection: true };
+      },
+      async probeStreams() {
+        // No qualified source-origin metadata is required for this clock path.
+        return { audio, subtitle: true, audioTracks: [], durationSeconds: null };
+      },
+      spawnHls(args) {
+        const child = base.spawnHls(args);
+        cuePath = join(dirname(args.at(-1)!), "480p0.vtt");
+        writeFileSync(cuePath, raw);
+        return child;
+      },
+    });
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const manifest = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p&start=${startSeconds}&subtitles=preserve`,
+      });
+      expect(manifest.statusCode).toBe(200);
+      const uri = manifest.body.match(/URI="([^"]+)"/)?.[1];
+      expect(uri).toBeDefined();
+      const playlist = await request(owner, { method: "GET", url: `/api/stream/${session.id}/${uri}` });
+      expect(playlist.statusCode).toBe(200);
+      const segment = playlist.body.match(/^(480p0\.vtt\?generation=[^\r\n]+)$/m)?.[1];
+      expect(segment).toBeDefined();
+      const response = await request(owner, { method: "GET", url: `/api/stream/${session.id}/${segment}` });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toBe(raw.replace("WEBVTT\r\n", "WEBVTT\r\nX-TIMESTAMP-MAP=LOCAL:00:00.000,MPEGTS:0\r\n"));
+      expect(readFileSync(cuePath, "utf8")).toBe(raw);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/480p0.vtt?generation=transcode-unknown`,
+      })).statusCode).toBe(404);
+    } finally {
+      await on.close();
+    }
+  });
+
+  it.each([
+    ["unknown", null],
+    ["absent", { audio: true, subtitle: false, audioTracks: [] }],
+  ])("transcode: keeps video playable when subtitle inventory is %s", async (_label, probeResult) => {
+    const base = makeFakeTranscoder();
+    const spawned: string[][] = [];
+    const subtitleTranscoder: Transcoder = {
+      ...base,
+      async capabilities() {
+        return {
+          toneMapping: false,
+          videoEncoders: ["libx264"],
+          subtitleSidecar: true,
+          audioTrackSelection: true,
+        };
+      },
+      async probeStreams() {
+        return probeResult;
+      },
+      spawnHls(args) {
+        spawned.push(args);
+        return base.spawnHls(args);
+      },
+    };
+    const on = await buildTranscodeApp(
+      { enableTranscode: true },
+      subtitleTranscoder,
+    );
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const manifest = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p&subtitles=preserve`,
+      });
+      expect(manifest.statusCode).toBe(200);
+      expect(manifest.body).toContain("480p.m3u8");
+      expect(manifest.body).not.toContain("EXT-X-MEDIA:TYPE=SUBTITLES");
+      expect(manifest.body).not.toContain('SUBTITLES="subs"');
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0]).not.toContain("0:s:0");
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/480p_subtitles.m3u8`,
+      })).statusCode).toBe(404);
     } finally {
       await on.close();
     }
@@ -3781,6 +4381,173 @@ describe("DebridStreamer server", () => {
         method: "GET",
         url: `/api/stream/${session.id}/index.m3u8?audio=../../etc/passwd`,
       })).statusCode).toBe(400);
+    } finally {
+      await on.close();
+    }
+  });
+
+  it("transcode: retries failed audio inventory only for an exact authorized gesture", async () => {
+    const base = makeFakeTranscoder();
+    let probes = 0;
+    const probeOptions: Array<TranscoderStreamProbeOptions | undefined> = [];
+    let releaseReplacement: ((value: {
+      audio: boolean;
+      subtitle: boolean;
+      audioTracks: Array<{
+        index: number;
+        language: string;
+        label: string;
+        default: boolean;
+      }>;
+      durationSeconds: number;
+    }) => void) | null = null;
+    let replacementStarted: (() => void) | null = null;
+    const replacementPending = new Promise<void>((resolve) => {
+      replacementStarted = resolve;
+    });
+    const retryTranscoder: Transcoder = {
+      ...base,
+      async capabilities() {
+        return {
+          toneMapping: false,
+          videoEncoders: ["libx264"],
+          subtitleSidecar: false,
+          audioTrackSelection: true,
+        };
+      },
+      probeStreams(_upstreamUrl, options) {
+        probes += 1;
+        probeOptions.push(options);
+        if (probes === 1) return Promise.resolve(null);
+        replacementStarted!();
+        return new Promise((resolve) => {
+          releaseReplacement = resolve;
+        });
+      },
+    };
+    const on = await buildTranscodeApp({ enableTranscode: true }, retryTranscoder);
+    let nowSpy: ReturnType<typeof vi.spyOn> | null = null;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const external = { app: on, cookies: new Map<string, string>() };
+
+      expect((await request(external, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks?retry=1`,
+        headers: { authorization: `Bearer ${"Z".repeat(43)}` },
+      })).statusCode).toBe(404);
+      expect(probes).toBe(0);
+
+      for (const query of ["retry=0", "retry=true", "retry=1&retry=1", "retry=1&extra=1"]) {
+        expect((await request(owner, {
+          method: "GET",
+          url: `/api/stream/${session.id}/audio-tracks?${query}`,
+        })).statusCode).toBe(400);
+      }
+      expect(probes).toBe(0);
+
+      let now = Date.now();
+      nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      })).statusCode).toBe(409);
+      expect(probes).toBe(1);
+      expect(probeOptions[0]?.timeoutMs).toBe(5_000);
+      expect(probeOptions[0]?.signal).toBeInstanceOf(AbortSignal);
+      expect(probeOptions[0]?.signal?.aborted).toBe(false);
+
+      now += 5_001;
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks`,
+      })).statusCode).toBe(409);
+      expect(probes).toBe(1);
+
+      const firstRetry = request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks?retry=1`,
+      });
+      const sharedRetry = request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks?retry=1`,
+      });
+      await vi.waitFor(() => expect(probes).toBe(2));
+      await replacementPending;
+      expect(probeOptions[1]?.timeoutMs).toBe(15_000);
+      expect(probeOptions[1]?.signal).toBeInstanceOf(AbortSignal);
+      expect(probeOptions[1]?.signal?.aborted).toBe(false);
+      releaseReplacement!({
+        audio: true,
+        subtitle: false,
+        audioTracks: [
+          { index: 0, language: "eng", label: "English", default: true },
+        ],
+        durationSeconds: 600,
+      });
+      const responses = await Promise.all([firstRetry, sharedRetry]);
+      expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
+      expect(responses.map((response) => json<{ tracks: unknown[] }>(response).tracks)).toEqual([
+        [{ index: 0, language: "eng", label: "English", default: true }],
+        [{ index: 0, language: "eng", label: "English", default: true }],
+      ]);
+      expect(responses.map((response) =>
+        json<{ durationSeconds: number }>(response).durationSeconds
+      )).toEqual([600, 600]);
+      expect(probeOptions[1]?.signal?.aborted).toBe(false);
+
+      now += 60_000;
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks?retry=1`,
+      })).statusCode).toBe(200);
+      expect(probes).toBe(2);
+    } finally {
+      nowSpy?.mockRestore();
+      await on.close();
+    }
+  });
+
+  it("transcode: disconnect during upstream validation cannot start an audio probe", async () => {
+    const base = makeFakeTranscoder();
+    const probeStreams = vi.fn(async () => ({
+      audio: true,
+      subtitle: false,
+      audioTracks: [
+        { index: 0, language: "eng", label: "English", default: true },
+      ],
+      durationSeconds: 120,
+    }));
+    const disconnectTranscoder: Transcoder = {
+      ...base,
+      async capabilities() {
+        return {
+          toneMapping: false,
+          videoEncoders: ["libx264"],
+          subtitleSidecar: false,
+          audioTrackSelection: true,
+        };
+      },
+      probeStreams,
+    };
+    const on = await buildTranscodeApp({ enableTranscode: true }, disconnectTranscoder);
+    on.addHook("preHandler", (request, _reply, done) => {
+      if (/^\/api\/stream\/[^/]+\/audio-tracks(?:\?|$)/.test(request.url)) {
+        queueMicrotask(() => request.raw.emit("aborted"));
+      }
+      done();
+    });
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+
+      const response = await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/audio-tracks?retry=1`,
+      });
+      expect(response.statusCode).toBe(409);
+      expect(probeStreams).not.toHaveBeenCalled();
     } finally {
       await on.close();
     }

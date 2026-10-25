@@ -64,6 +64,7 @@ import {
   type ServerUsage,
 } from "./settings/ServerStatusPanels";
 import { AppearanceSettings } from "./settings/AppearanceSettings";
+import { ServerProviderStatus } from "./settings/ServerProviderStatus";
 import { BUG_REPORT_URL } from "../lib/projectLinks";
 import { Field, SegmentedControl } from "./settings/SettingsControls";
 import type {
@@ -136,6 +137,12 @@ import {
 } from "../lib/tauri";
 import { getDownloadsBridge } from "../lib/downloadsBridge";
 import { getAppVersion } from "../lib/appVersion";
+import { usePlayerMounted } from "../lib/attention";
+import {
+  assertBrowserAppRefreshAllowed,
+  prepareBrowserAppRefresh,
+  reloadBrowserAppPage,
+} from "../lib/browserAppRefresh";
 import {
   buildDiagnosticsReport,
   downloadDiagnosticsReport,
@@ -290,7 +297,7 @@ const TAB_DESCRIPTIONS: Record<Tab, string> = {
   language: "Interface language, metadata language, and regional release context.",
   playback: "Player behavior, captions, quality, and handoff preferences.",
   privacy: "Network access, local storage, and data controls for this device.",
-  install: "Install YAWF Stream and finish setup on this device.",
+  install: "Manage installation and finish setup on this device.",
   profiles: "Names, avatars, colors, and sign-in protection for this device.",
   updates: "Troubleshooting, diagnostics, version checks, and release status.",
   server: "Hosting, remote access, and shared server settings.",
@@ -418,6 +425,86 @@ async function serverRequest<T>(
   return parsed as T;
 }
 
+const loadSavedProviderStatus = () =>
+  serverRequest<unknown>("GET", "/api/credentials/effective");
+
+type PhysicalOrientation = "portrait" | "landscape";
+type PhysicalOrientationSource = "legacyAngle" | "screenType" | "screenShape";
+type PhysicalOrientationSignals = Record<PhysicalOrientationSource, PhysicalOrientation | null>;
+type PhysicalOrientationChange = {
+  source: PhysicalOrientationSource;
+  orientation: PhysicalOrientation;
+  awayFromBaseline: boolean;
+};
+
+const CATEGORY_FOCUS_ROTATION_GRACE_MS = 800;
+const PHYSICAL_ORIENTATION_SOURCES: readonly PhysicalOrientationSource[] = [
+  "legacyAngle",
+  "screenType",
+  "screenShape",
+];
+
+function physicalOrientationSignals(): PhysicalOrientationSignals {
+  const orientationType = window.screen.orientation?.type;
+  const screenType = orientationType?.startsWith("portrait")
+    ? "portrait"
+    : orientationType?.startsWith("landscape")
+      ? "landscape"
+      : null;
+
+  const legacyAngle = (window as Window & { orientation?: number }).orientation;
+  const legacyOrientation = typeof legacyAngle === "number"
+    ? Math.abs(legacyAngle) % 180 === 90
+      ? "landscape"
+      : "portrait"
+    : null;
+
+  const screenShape = window.screen.width > 0 && window.screen.height > 0
+    ? window.screen.width === window.screen.height
+      ? null
+      : window.screen.width > window.screen.height
+        ? "landscape"
+        : "portrait"
+    : null;
+
+  return {
+    legacyAngle: legacyOrientation,
+    screenType,
+    screenShape,
+  };
+}
+
+function coherentPhysicalOrientation(
+  signals: PhysicalOrientationSignals,
+): PhysicalOrientation | null {
+  const orientations = new Set(
+    PHYSICAL_ORIENTATION_SOURCES
+      .map((source) => signals[source])
+      .filter((orientation): orientation is PhysicalOrientation => orientation != null),
+  );
+  return orientations.size === 1 ? [...orientations][0] : null;
+}
+
+function freshPhysicalOrientationChange(
+  baseline: PhysicalOrientationSignals,
+  previous: PhysicalOrientationSignals,
+  current: PhysicalOrientationSignals,
+): PhysicalOrientationChange | null {
+  const coherentBaseline = coherentPhysicalOrientation(baseline);
+  for (const source of PHYSICAL_ORIENTATION_SOURCES) {
+    const orientation = current[source];
+    if (orientation == null || orientation === previous[source]) continue;
+    const sourceBaseline = baseline[source] ?? coherentBaseline;
+    if (sourceBaseline == null) continue;
+    return {
+      source,
+      orientation,
+      awayFromBaseline: orientation !== sourceBaseline,
+    };
+  }
+  return null;
+}
+
 export function Settings() {
   const {
     settings,
@@ -433,6 +520,14 @@ export function Settings() {
   } = useAppStore();
   const serverSession = useServerSession();
   const setServerSession = useSetServerSession();
+  const playerMounted = usePlayerMounted();
+  const serverMode = isServerMode();
+  // Server Mode keeps its selected identity in the authenticated session, not
+  // the Local Mode profile registry. Prefix the mode so equal local/server ids
+  // cannot make one draft masquerade as the other during a mode change.
+  const settingsProfileId = serverMode
+    ? `server:${serverSession?.profileId ?? "none"}`
+    : `local:${activeProfile?.id ?? "none"}`;
   // Land where the user's next step is: an unconfigured profile (no debrid
   // token yet) opens on Install & setup - the critical path - instead of the
   // Appearance dial-park. Configured profiles keep the familiar default.
@@ -445,13 +540,27 @@ export function Settings() {
   // Edit a local draft; "Save" commits it through the store.
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saved, setSaved] = useState(false);
+  const [providerStatusRevision, setProviderStatusRevision] = useState(0);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const settingsScreenRef = useRef<HTMLDivElement>(null);
+  const categorySelectRef = useRef<HTMLSelectElement>(null);
 
   useEffect(() => {
-    if (pendingSettingsSection != null) clearPendingSettingsSection();
-  }, [clearPendingSettingsSection, pendingSettingsSection]);
+    if (pendingSettingsSection == null) return;
+
+    // A Settings screen can remain mounted while another screen requests a
+    // category (for example, Detail -> provider setup). Apply the request to
+    // the live tab state, not only to the mount-time initializer. Hidden tabs
+    // follow the existing visible-tab fallback instead of rendering blank.
+    const requestedTab = visibleTabs({ serverMode, simpleMode }).some(
+      (candidate) => candidate.id === pendingSettingsSection,
+    )
+      ? pendingSettingsSection
+      : "appearance";
+    setTab(requestedTab);
+    clearPendingSettingsSection();
+  }, [clearPendingSettingsSection, pendingSettingsSection, serverMode, simpleMode]);
 
   // Every category is its own page-sized task. A long category must not hand
   // its scroll position to the next one, otherwise the next category opens in
@@ -461,19 +570,201 @@ export function Settings() {
     if (scroller instanceof HTMLElement) scroller.scrollTop = 0;
   }, [tab]);
 
+  // iPad standalone WebKit can retain the native select's focus pan after an
+  // orientation change even though the document itself still fits the visual
+  // viewport. Reconcile only that exact native-select lifecycle. Unrelated
+  // editing, browser tabs, non-iOS devices, and user zoom remain untouched.
+  useEffect(() => {
+    let focusContext: {
+      baseline: PhysicalOrientationSignals;
+      last: PhysicalOrientationSignals;
+      pendingTransition: PhysicalOrientationChange | null;
+    } | null = null;
+    let ownershipExpiryTimer: number | null = null;
+    let reconciliationFrame: number | null = null;
+
+    const cancelOwnershipExpiry = () => {
+      if (ownershipExpiryTimer == null) return;
+      window.clearTimeout(ownershipExpiryTimer);
+      ownershipExpiryTimer = null;
+    };
+    const cancelReconciliation = () => {
+      if (reconciliationFrame == null) return;
+      window.cancelAnimationFrame(reconciliationFrame);
+      reconciliationFrame = null;
+    };
+    const clearFocusContext = () => {
+      cancelOwnershipExpiry();
+      cancelReconciliation();
+      focusContext = null;
+    };
+    const eligibleFocusContext = () => {
+      const categorySelect = categorySelectRef.current;
+      if (
+        deviceKind() !== "ios" ||
+        !isStandaloneDisplay() ||
+        window.matchMedia?.("(pointer: coarse)").matches !== true ||
+        categorySelect == null
+      ) {
+        return false;
+      }
+      const visualScale = window.visualViewport?.scale;
+      return visualScale == null || visualScale === 1;
+    };
+    const ownCategoryFocus = () => {
+      clearFocusContext();
+      if (!eligibleFocusContext()) return;
+      const baseline = physicalOrientationSignals();
+      focusContext = {
+        baseline,
+        last: baseline,
+        pendingTransition: null,
+      };
+    };
+    const releaseCategoryFocus = () => {
+      if (focusContext == null || focusContext.pendingTransition != null) return;
+      cancelOwnershipExpiry();
+      // The observed resize-to-orientation event gap was 388 ms. Keep the
+      // select's focus context for a bounded two-times margin after blur.
+      ownershipExpiryTimer = window.setTimeout(() => {
+        ownershipExpiryTimer = null;
+        clearFocusContext();
+      }, CATEGORY_FOCUS_ROTATION_GRACE_MS);
+    };
+    const handleDocumentFocus = (event: FocusEvent) => {
+      if (
+        event.target === categorySelectRef.current ||
+        event.target === document.body ||
+        event.target === document.documentElement
+      ) {
+        return;
+      }
+      clearFocusContext();
+    };
+    const reconcileCategoryFocus = () => {
+      const context = focusContext;
+      if (context == null) return;
+
+      const categorySelect = categorySelectRef.current;
+      if (!eligibleFocusContext() || categorySelect == null) {
+        clearFocusContext();
+        return;
+      }
+
+      const currentSignals = physicalOrientationSignals();
+      const freshChange = freshPhysicalOrientationChange(
+        context.baseline,
+        context.last,
+        currentSignals,
+      );
+      context.last = currentSignals;
+
+      if (context.pendingTransition != null) {
+        if (freshChange != null) {
+          if (!freshChange.awayFromBaseline) {
+            clearFocusContext();
+            return;
+          }
+          context.pendingTransition = freshChange;
+        } else if (
+          currentSignals[context.pendingTransition.source] !==
+          context.pendingTransition.orientation
+        ) {
+          clearFocusContext();
+        }
+        return;
+      }
+      if (freshChange == null || !freshChange.awayFromBaseline) return;
+
+      const scroller = settingsScreenRef.current?.closest(".app-content");
+      if (!(scroller instanceof HTMLElement)) {
+        clearFocusContext();
+        return;
+      }
+      const scrollTop = scroller.scrollTop;
+      const categoryStillFocused = document.activeElement === categorySelect;
+      context.pendingTransition = freshChange;
+      cancelOwnershipExpiry();
+      reconciliationFrame = window.requestAnimationFrame(() => {
+        reconciliationFrame = null;
+        if (focusContext !== context || context.pendingTransition == null) return;
+
+        const frameSignals = physicalOrientationSignals();
+        const frameChange = freshPhysicalOrientationChange(
+          context.baseline,
+          context.last,
+          frameSignals,
+        );
+        context.last = frameSignals;
+        if (frameChange != null) {
+          if (!frameChange.awayFromBaseline) {
+            clearFocusContext();
+            return;
+          }
+          context.pendingTransition = frameChange;
+        }
+        const transition = context.pendingTransition;
+        const activeElement = document.activeElement;
+        if (
+          !eligibleFocusContext() ||
+          !scroller.isConnected ||
+          settingsScreenRef.current == null ||
+          frameSignals[transition.source] !== transition.orientation ||
+          (
+            activeElement != null &&
+            activeElement !== document.body &&
+            activeElement !== document.documentElement &&
+            activeElement !== categorySelect
+          )
+        ) {
+          clearFocusContext();
+          return;
+        }
+        clearFocusContext();
+        scroller.focus({ preventScroll: true });
+        scroller.scrollTop = scrollTop;
+      });
+      if (categoryStillFocused) categorySelect.blur();
+    };
+    const handleVisualViewportResize = () => {
+      if (focusContext != null && !eligibleFocusContext()) clearFocusContext();
+    };
+
+    const categorySelect = categorySelectRef.current;
+    const visualViewport = window.visualViewport;
+    categorySelect?.addEventListener("focus", ownCategoryFocus);
+    categorySelect?.addEventListener("blur", releaseCategoryFocus);
+    document.addEventListener("focusin", handleDocumentFocus);
+    window.addEventListener("resize", reconcileCategoryFocus);
+    window.addEventListener("orientationchange", reconcileCategoryFocus);
+    visualViewport?.addEventListener("resize", handleVisualViewportResize);
+    return () => {
+      categorySelect?.removeEventListener("focus", ownCategoryFocus);
+      categorySelect?.removeEventListener("blur", releaseCategoryFocus);
+      document.removeEventListener("focusin", handleDocumentFocus);
+      window.removeEventListener("resize", reconcileCategoryFocus);
+      window.removeEventListener("orientationchange", reconcileCategoryFocus);
+      visualViewport?.removeEventListener("resize", handleVisualViewportResize);
+      clearFocusContext();
+    };
+  }, []);
+
   // Switching profiles swaps the settings under us. The draft was seeded once at
   // mount, so without this it would still hold the PREVIOUS profile's values and
   // Save would write them into the profile just switched to. Keyed on the
-  // profile id (not `settings`) so ordinary edits are never clobbered.
-  const draftProfileId = useRef<string | null>(activeProfile?.id ?? null);
-  useEffect(() => {
-    const id = activeProfile?.id ?? null;
-    if (draftProfileId.current === id) return;
-    draftProfileId.current = id;
+  // mode-qualified profile id (not `settings`) so ordinary settings rerenders
+  // never clobber live edits. Layout timing keeps the prior profile's draft out
+  // of the first paint after a Server Mode session switch.
+  const draftProfileId = useRef(settingsProfileId);
+  const draftProfileGeneration = useRef(0);
+  useLayoutEffect(() => {
+    if (draftProfileId.current === settingsProfileId) return;
+    draftProfileId.current = settingsProfileId;
+    draftProfileGeneration.current += 1;
     setDraft(settings);
     setSaved(false);
     setSaveError(null);
-  }, [activeProfile?.id, settings]);
+  }, [settingsProfileId, settings]);
 
   useEffect(() => {
     let mounted = true;
@@ -491,11 +782,22 @@ export function Settings() {
   }
 
   async function save() {
+    const saveGeneration = draftProfileGeneration.current;
     setSaveError(null);
-    const result = await updateSettings(draft);
-    if (result.ok) {
-      setSaved(true);
-      return;
+    try {
+      const result = await updateSettings(draft);
+      // A profile switch can complete while its prior save is in flight. Its
+      // result belongs to the previous draft and must not change the new
+      // profile's status or surface its write failure. Generation avoids an
+      // A -> B -> A switch accepting the first A's late result.
+      if (draftProfileGeneration.current !== saveGeneration) return;
+      if (result.ok) {
+        setSaved(true);
+        setProviderStatusRevision((revision) => revision + 1);
+        return;
+      }
+    } catch {
+      if (draftProfileGeneration.current !== saveGeneration) return;
     }
     // Don't claim a save that didn't happen (e.g. a keychain write failing
     // closed on desktop). The in-memory value still applies for this session.
@@ -516,7 +818,6 @@ export function Settings() {
     setSaved(true);
   }, [settings, updateSettings]);
 
-  const serverMode = isServerMode();
   const tabs = visibleTabs({ serverMode, simpleMode });
 
   // Redirect off a now-hidden tab (e.g. after flipping to Simple while on
@@ -621,7 +922,11 @@ export function Settings() {
 
       <label className="settings-tab-select">
         <span className="settings-label">Settings category</span>
-        <select value={tab} onChange={(event) => setTab(event.target.value as Tab)}>
+        <select
+          ref={categorySelectRef}
+          value={tab}
+          onChange={(event) => setTab(event.target.value as Tab)}
+        >
           {tabs.map((t) => (
             <option key={t.id} value={t.id}>
               {t.label}
@@ -663,13 +968,20 @@ export function Settings() {
             patch={patch}
             debrid={services?.debrid ?? null}
             appVersion={appVersion ?? __APP_VERSION__}
+            hasUnsavedChanges={hasUnsavedChanges}
+            playerMounted={playerMounted}
+            refreshOwnerKey={
+              serverSession?.profileId != null
+                ? `server:${serverSession.profileId}`
+                : `local:${activeProfile?.id ?? "none"}`
+            }
           />
         )}
         {tab === "server" && (
           <ServerTab key={serverSession?.profileId ?? "no-profile"} />
         )}
         {tab === "keys" && <KeysTab draft={draft} patch={patch} />}
-        {tab === "debrid" && <DebridTab draft={draft} patch={patch} />}
+        {tab === "debrid" && <DebridTab draft={draft} patch={patch} providerStatusRevision={providerStatusRevision} profileId={serverMode ? serverSession?.profileId ?? null : activeProfile?.id ?? null} />}
         {tab === "sources" && <SourcesTab draft={draft} patch={patch} />}
         {tab === "profiles" && !serverMode && (
           <ProfilesTab
@@ -1137,13 +1449,115 @@ function UpdatesTab({
   patch,
   debrid,
   appVersion,
-}: TabProps & { debrid: DebridManager | null; appVersion: string }) {
+  hasUnsavedChanges,
+  playerMounted,
+  refreshOwnerKey,
+}: TabProps & {
+  debrid: DebridManager | null;
+  appVersion: string;
+  hasUnsavedChanges: boolean;
+  playerMounted: boolean;
+  refreshOwnerKey: string;
+}) {
   const [smokeResults, setSmokeResults] = useState<ProviderSmokeResult[] | null>(null);
   const [smokeRunning, setSmokeRunning] = useState(false);
   const [diagnosticsStatus, setDiagnosticsStatus] = useState<string | null>(null);
   const desktop = isDesktopTauri();
   const androidUpdater = hasLocalAndroidUpdater();
+  const browserRefresh = !isTauri() && !androidUpdater;
   const [androidUpdateStatus, setAndroidUpdateStatus] = useState<string | null>(null);
+  const [browserRefreshRunning, setBrowserRefreshRunning] = useState(false);
+  const [browserRefreshStatus, setBrowserRefreshStatus] = useState<string | null>(null);
+  const browserRefreshRequest = useRef(0);
+  const browserRefreshRunningRef = useRef(false);
+  const browserRefreshMountedRef = useRef(false);
+  const browserRefreshOwnerRef = useRef(refreshOwnerKey);
+  const browserRefreshGuardsRef = useRef({
+    hasUnsavedChanges,
+    playerMounted,
+    refreshOwnerKey,
+  });
+
+  useLayoutEffect(() => {
+    browserRefreshGuardsRef.current = {
+      hasUnsavedChanges,
+      playerMounted,
+      refreshOwnerKey,
+    };
+  }, [hasUnsavedChanges, playerMounted, refreshOwnerKey]);
+
+  useLayoutEffect(() => {
+    if (browserRefreshOwnerRef.current === refreshOwnerKey) return;
+    browserRefreshOwnerRef.current = refreshOwnerKey;
+    browserRefreshRequest.current += 1;
+    browserRefreshRunningRef.current = false;
+    setBrowserRefreshRunning(false);
+    setBrowserRefreshStatus(null);
+  }, [refreshOwnerKey]);
+
+  useEffect(() => {
+    browserRefreshMountedRef.current = true;
+    return () => {
+      browserRefreshMountedRef.current = false;
+      browserRefreshRequest.current += 1;
+      browserRefreshRunningRef.current = false;
+    };
+  }, []);
+
+  function browserRefreshIsCurrent(request: number, owner: string): boolean {
+    return (
+      browserRefreshMountedRef.current &&
+      browserRefreshRequest.current === request &&
+      browserRefreshGuardsRef.current.refreshOwnerKey === owner
+    );
+  }
+
+  async function refreshBrowserApp(): Promise<void> {
+    if (!browserRefresh || browserRefreshRunningRef.current) return;
+    const startingGuards = browserRefreshGuardsRef.current;
+    if (startingGuards.hasUnsavedChanges || startingGuards.playerMounted) return;
+
+    browserRefreshRunningRef.current = true;
+    setBrowserRefreshRunning(true);
+    setBrowserRefreshStatus("Checking the current app files before reloading...");
+    const request = browserRefreshRequest.current + 1;
+    browserRefreshRequest.current = request;
+    const owner = startingGuards.refreshOwnerKey;
+
+    try {
+      await prepareBrowserAppRefresh();
+      if (!browserRefreshIsCurrent(request, owner)) return;
+      const latestGuards = browserRefreshGuardsRef.current;
+      if (latestGuards.hasUnsavedChanges) {
+        setBrowserRefreshStatus(
+          "Reload cancelled because settings changed. Save them, then try again.",
+        );
+        return;
+      }
+      if (latestGuards.playerMounted) {
+        setBrowserRefreshStatus(
+          "Reload cancelled because a player opened. Close it, then try again.",
+        );
+        return;
+      }
+      assertBrowserAppRefreshAllowed();
+      if (!browserRefreshIsCurrent(request, owner)) return;
+      setBrowserRefreshStatus("Reloading this page...");
+      reloadBrowserAppPage();
+    } catch (error) {
+      if (!browserRefreshIsCurrent(request, owner)) return;
+      setBrowserRefreshStatus(
+        error instanceof Error && error.name === "BrowserAppRefreshTimeoutError"
+          ? error.message
+          : "Could not reload the app. Check your connection or privacy mode, then try again.",
+      );
+    } finally {
+      if (browserRefreshIsCurrent(request, owner)) {
+        browserRefreshRunningRef.current = false;
+        setBrowserRefreshRunning(false);
+      }
+    }
+  }
 
   async function runProviderChecks() {
     if (debrid == null || smokeRunning) return;
@@ -1217,10 +1631,43 @@ function UpdatesTab({
             Check for Android updates
           </button>
         </section>
+      ) : browserRefresh ? (
+        <section
+          className="settings-section settings-install-card glass-rest"
+          aria-labelledby="browser-app-refresh-title"
+        >
+          <div>
+            <h2 id="browser-app-refresh-title">Refresh browser app</h2>
+            <p className="settings-hint">
+              Browser and installed PWA screens are delivered by your configured
+              web server. Reloading asks an existing service worker to check first,
+              then reloads this same page. It does not install or confirm a newer build.
+            </p>
+            <p className="settings-hint">
+              {hasUnsavedChanges
+                ? "Save your settings changes before reloading."
+                : playerMounted
+                  ? "Close the active player before reloading."
+                  : "Your profiles, login, storage, and offline files are left intact."}
+            </p>
+            {browserRefreshStatus && (
+              <p className="settings-status" role="status">
+                {browserRefreshStatus}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => void refreshBrowserApp()}
+            disabled={hasUnsavedChanges || playerMounted || browserRefreshRunning}
+          >
+            {browserRefreshRunning ? "Preparing reload..." : "Reload app"}
+          </button>
+        </section>
       ) : (
         <SettingsInfo label="About desktop updates">
-          Desktop builds use signed release metadata from GitHub Releases. Browser
-          and PWA installs update through the web server instead.
+          Desktop builds use signed release metadata from GitHub Releases.
         </SettingsInfo>
       )}
 
@@ -1240,7 +1687,7 @@ function UpdatesTab({
         </p>
       </section>
 
-      {!androidUpdater && <><label className="settings-toggle-row">
+      {desktop && <><label className="settings-toggle-row">
         <input
           type="checkbox"
           checked={draft.autoUpdateChecks}
@@ -2376,7 +2823,7 @@ function InstallTab({ onOpenUpdates }: { onOpenUpdates: () => void }) {
                   {nativeAndroidApp
                     ? "YAWF Stream is installed. Open Help & updates to check for signed Android updates."
                     : installed
-                    ? "This server is already running as an installed app."
+                    ? "This web app is already installed on this device."
                     : primary.body}
                 </p>
               </div>
@@ -4817,7 +5264,13 @@ const DEBRID_SIGNUP_ID: Record<string, string> = {
   torbox: "torbox",
 };
 
-function DebridTab({ draft, patch }: TabProps) {
+function DebridTab({ draft, patch, providerStatusRevision, profileId }: TabProps & {
+  providerStatusRevision: number;
+  profileId: string | null;
+}) {
+  const serverMode = isServerMode();
+  const serverSession = useServerSession();
+  const kidProfile = serverSession?.isKid === true;
   const serviceOptions = DebridServiceType.allCases();
   const [selectedService, setSelectedService] = useState<
     AppSettings["debridTokens"][number]["service"]
@@ -4825,10 +5278,15 @@ function DebridTab({ draft, patch }: TabProps) {
   const [connectionState, setConnectionState] = useState<
     "idle" | "testing" | "valid" | "failed"
   >("idle");
+  const connectionRequest = useRef(0);
 
-  useEffect(() => {
+  // Invalidate before paint when the visible candidate or profile changes.
+  // A late result must not describe another token or survive a completed save.
+  useLayoutEffect(() => {
+    connectionRequest.current += 1;
     setConnectionState("idle");
-  }, [selectedService, draft.debridTokens]);
+    return () => { connectionRequest.current += 1; };
+  }, [selectedService, draft.debridTokens, profileId, providerStatusRevision]);
 
   function tokenFor(service: AppSettings["debridTokens"][number]["service"]) {
     return draft.debridTokens.find((t) => t.service === service)?.apiToken ?? "";
@@ -4858,6 +5316,7 @@ function DebridTab({ draft, patch }: TabProps) {
   async function testConnection() {
     const apiToken = tokenFor(selectedService).trim();
     if (apiToken.length === 0 || connectionState === "testing") return;
+    const request = ++connectionRequest.current;
     setConnectionState("testing");
     // In server mode the token check must run ON the server: debrid hosts
     // (TorBox in particular) send no CORS headers, so a webview/browser-side
@@ -4870,7 +5329,9 @@ function DebridTab({ draft, patch }: TabProps) {
     } catch {
       valid = false;
     }
-    setConnectionState(valid ? "valid" : "failed");
+    if (request === connectionRequest.current) {
+      setConnectionState(valid ? "valid" : "failed");
+    }
   }
 
   return (
@@ -4878,13 +5339,16 @@ function DebridTab({ draft, patch }: TabProps) {
       <SettingsInfo label={`About ${CONCEPTS.debrid.term}`}>
         <strong>{CONCEPTS.debrid.term}:</strong> {CONCEPTS.debrid.blurb} Choose
         one provider at a time. Saved providers are tried in priority order; the
-        first that has a cached result wins. Tokens stay in this profile, with
-        secure device storage in desktop builds when available. Use only
+        first that has a cached result wins.{" "}
+        {serverMode
+          ? "Server-stored credentials are kept on the server and are not sent back to this device."
+          : "Tokens stay in this profile, with secure device storage in desktop builds when available."}{" "}
+        Use only
         provider accounts and content you are authorized to access. Provider
         terms can restrict credential sharing, automation, or household use.
       </SettingsInfo>
 
-      <Field label="Provider" hint="Real-Debrid is selected first by default.">
+      <Field label="Provider" hint="Choose a provider to view or configure.">
         <select
           aria-label="Debrid provider"
           value={selectedService}
@@ -4902,57 +5366,73 @@ function DebridTab({ draft, patch }: TabProps) {
         </select>
       </Field>
 
-      <Field
-        label={`${DebridServiceType.displayName(selectedService)} token`}
-        hint="Paste the API token for this provider."
-        helpUrl={signupUrl(DEBRID_SIGNUP_ID[selectedService]) ?? undefined}
-        helpLabel={`Find your ${DebridServiceType.displayName(selectedService)} token`}
+      <ServerProviderStatus
+        enabled={serverMode}
+        service={selectedService}
+        profileId={serverSession?.profileId ?? null}
+        role={serverSession?.role ?? null}
+        isKid={kidProfile}
+        loadStatus={loadSavedProviderStatus}
+        refreshVersion={providerStatusRevision}
       >
-        <SecretInput
-          value={tokenFor(selectedService)}
-          onChange={(e) => setToken(selectedService, e.target.value)}
-          placeholder="API token"
-        />
-      </Field>
-
-      <div className="settings-provider-check" aria-live="polite">
-        <button
-          type="button"
-          className="btn"
-          onClick={() => void testConnection()}
-          disabled={
-            tokenFor(selectedService).trim().length === 0 ||
-            connectionState === "testing"
-          }
+        <Field
+          label={`${DebridServiceType.displayName(selectedService)} token`}
+          hint={serverMode
+            ? "Stored tokens are never sent to this device. Leave this blank to keep the saved credential. Saving a new token creates or replaces this profile's override."
+            : "Paste the API token for this provider."}
+          helpUrl={signupUrl(DEBRID_SIGNUP_ID[selectedService]) ?? undefined}
+          helpLabel={`Find your ${DebridServiceType.displayName(selectedService)} token`}
         >
-          {connectionState === "testing" ? "Checking…" : "Test connection"}
-        </button>
-        {connectionState === "valid" && (
-          <span className="settings-provider-result is-valid">
-            <Icon name="check" size={14} /> Connected
-          </span>
-        )}
-        {connectionState === "failed" && (
-          <span className="settings-provider-result is-error">
-            Connection failed. Refresh the token or try again.
-          </span>
-        )}
-      </div>
+          <SecretInput
+            value={tokenFor(selectedService)}
+            onChange={(e) => setToken(selectedService, e.target.value)}
+            placeholder="API token"
+          />
+        </Field>
 
-      {draft.debridTokens.length > 0 && (
-        <div className="settings-url-list">
-          {draft.debridTokens.map((token, index) => (
-            <button
-              key={token.service}
-              type="button"
-              className="chip"
-              onClick={() => setSelectedService(token.service)}
-            >
-              {index + 1}. {DebridServiceType.displayName(token.service)}
-            </button>
-          ))}
+        <div className="settings-provider-check" aria-live="polite">
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void testConnection()}
+            disabled={
+              tokenFor(selectedService).trim().length === 0 ||
+              connectionState === "testing"
+            }
+          >
+            {connectionState === "testing" ? "Checking…" : serverMode ? "Test new token" : "Test connection"}
+          </button>
+          {connectionState === "valid" && (
+            <span className="settings-provider-result is-valid">
+              <Icon name="check" size={14} /> {serverMode
+                ? "The provider accepted this new token. Save changes to use it for this profile."
+                : "Connected"}
+            </span>
+          )}
+          {connectionState === "failed" && (
+            <span className="settings-provider-result is-error">
+              {serverMode
+                ? "This new token could not be verified. The saved credential was not tested or changed."
+                : "Connection failed. Refresh the token or try again."}
+            </span>
+          )}
         </div>
-      )}
+
+        {draft.debridTokens.length > 0 && (
+          <div className="settings-url-list">
+            {draft.debridTokens.map((token, index) => (
+              <button
+                key={token.service}
+                type="button"
+                className="chip"
+                onClick={() => setSelectedService(token.service)}
+              >
+                {index + 1}. {DebridServiceType.displayName(token.service)}
+              </button>
+            ))}
+          </div>
+        )}
+      </ServerProviderStatus>
     </div>
   );
 }

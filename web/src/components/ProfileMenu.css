@@ -2,7 +2,7 @@
 
 .profile-menu {
   position: absolute;
-  top: max(var(--sp-md), var(--safe-area-top));
+  top: calc(max(var(--sp-md), var(--safe-area-top)) - var(--app-content-safe-top-consumed, 0rem));
   right: max(var(--sp-lg), var(--safe-area-right));
   z-index: 6;
 }

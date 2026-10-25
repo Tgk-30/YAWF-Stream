@@ -1,0 +1,205 @@
+name: promote-server-latest
+
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+      && format('Promote qualified server {0} to latest', inputs.version)
+      || 'Validate server latest promotion workflow' }}
+
+on:
+  # A reviewed preparation-branch push registers and validates this new workflow.
+  # It never receives package-write permission and never enters the promotion job.
+  push:
+    paths:
+      - ".github/workflows/promote-server-latest.yml"
+      - "scripts/promote_server_latest.mjs"
+      - "scripts/promote_server_latest.test.mjs"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact public stable server version to promote, without a v prefix"
+        required: true
+        type: string
+      expected_source_revision:
+        description: "Optional exact 40-character source revision guard"
+        required: false
+        type: string
+      expected_image_digest:
+        description: "Optional exact sha256 image index digest guard"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'promotion' || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate promotion admission
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact workflow source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run promotion admission tests
+        run: node --test scripts/promote_server_latest.test.mjs
+
+  promote:
+    name: Promote qualified immutable index
+    needs: validate
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'Tgk-30/YAWF-Stream' && github.actor == github.repository_owner }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/tgk-30/yawf-stream
+    steps:
+      - name: Check out exact workflow source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Qualify the public release and verification record
+        id: release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_source_revision }}
+          EXPECTED_IMAGE_DIGEST: ${{ inputs.expected_image_digest }}
+        run: |
+          set -euo pipefail
+          node scripts/promote_server_latest.mjs prepare \
+            --version "$VERSION" \
+            --expected-source-revision "$EXPECTED_SOURCE_REVISION" \
+            --expected-image-digest "$EXPECTED_IMAGE_DIGEST" \
+            --output "$RUNNER_TEMP/server-release-evidence.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to canonical GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inspect immutable candidate and current latest
+        id: current-index
+        shell: bash
+        env:
+          CANDIDATE_REFERENCE: ${{ steps.release.outputs.candidate_reference }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --format '{{json .Manifest}}' "$CANDIDATE_REFERENCE" \
+            > "$RUNNER_TEMP/candidate-index.json"
+          docker buildx imagetools inspect --format '{{json (index .Image "linux/amd64")}}' "$CANDIDATE_REFERENCE" \
+            > "$RUNNER_TEMP/candidate-amd64.json"
+          docker buildx imagetools inspect --format '{{json (index .Image "linux/arm64")}}' "$CANDIDATE_REFERENCE" \
+            > "$RUNNER_TEMP/candidate-arm64.json"
+          docker buildx imagetools inspect --format '{{json .Manifest}}' "$IMAGE:latest" \
+            > "$RUNNER_TEMP/current-index.json"
+          node scripts/promote_server_latest.mjs index-digest \
+            --input "$RUNNER_TEMP/current-index.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Inspect current latest children by immutable index
+        shell: bash
+        env:
+          CURRENT_DIGEST: ${{ steps.current-index.outputs.index_digest }}
+        run: |
+          set -euo pipefail
+          current_reference="$IMAGE@$CURRENT_DIGEST"
+          docker buildx imagetools inspect --format '{{json (index .Image "linux/amd64")}}' "$current_reference" \
+            > "$RUNNER_TEMP/current-amd64.json"
+          docker buildx imagetools inspect --format '{{json (index .Image "linux/arm64")}}' "$current_reference" \
+            > "$RUNNER_TEMP/current-arm64.json"
+
+      - name: Admit candidate against current latest
+        id: admission
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/promote_server_latest.mjs admit \
+            --evidence "$RUNNER_TEMP/server-release-evidence.json" \
+            --candidate-index "$RUNNER_TEMP/candidate-index.json" \
+            --candidate-amd64 "$RUNNER_TEMP/candidate-amd64.json" \
+            --candidate-arm64 "$RUNNER_TEMP/candidate-arm64.json" \
+            --current-index "$RUNNER_TEMP/current-index.json" \
+            --current-amd64 "$RUNNER_TEMP/current-amd64.json" \
+            --current-arm64 "$RUNNER_TEMP/current-arm64.json" \
+            --output "$RUNNER_TEMP/server-latest-admission.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Recheck latest and copy the one admitted index
+        id: promotion
+        shell: bash
+        env:
+          ALREADY_CURRENT: ${{ steps.admission.outputs.already_current }}
+          CANDIDATE_DIGEST: ${{ steps.admission.outputs.candidate_digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --format '{{json .Manifest}}' "$IMAGE:latest" \
+            > "$RUNNER_TEMP/pre-promotion-index.json"
+          node scripts/promote_server_latest.mjs confirm-current \
+            --admission "$RUNNER_TEMP/server-latest-admission.json" \
+            --current-index "$RUNNER_TEMP/pre-promotion-index.json"
+          if [ "$ALREADY_CURRENT" = "true" ]; then
+            promotion_performed=false
+          else
+            test "$ALREADY_CURRENT" = "false"
+            docker buildx imagetools create \
+              --tag "$IMAGE:latest" \
+              "$IMAGE@$CANDIDATE_DIGEST"
+            promotion_performed=true
+          fi
+          echo "promotion_performed=$promotion_performed" >> "$GITHUB_OUTPUT"
+
+      - name: Verify unchanged promoted index and write receipt
+        shell: bash
+        env:
+          PROMOTION_PERFORMED: ${{ steps.promotion.outputs.promotion_performed }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --format '{{json .Manifest}}' "$IMAGE:latest" \
+            > "$RUNNER_TEMP/post-promotion-index.json"
+          node scripts/promote_server_latest.mjs finalize \
+            --admission "$RUNNER_TEMP/server-latest-admission.json" \
+            --after-index "$RUNNER_TEMP/post-promotion-index.json" \
+            --promotion-performed "$PROMOTION_PERFORMED" \
+            --workflow-run-id "$WORKFLOW_RUN_ID" \
+            --workflow-run-attempt "$WORKFLOW_RUN_ATTEMPT" \
+            --receipt "$RUNNER_TEMP/server-latest-promotion-receipt.json"
+
+      - name: Retain secret-free promotion receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-latest-promotion-${{ github.run_id }}
+          path: ${{ runner.temp }}/server-latest-promotion-receipt.json
+          if-no-files-found: error
+          retention-days: 30

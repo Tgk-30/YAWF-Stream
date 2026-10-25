@@ -3,8 +3,8 @@
 // Unlike the sibling firstRun.test.ts (which exercises the real DexieStore via
 // fake-indexeddb), this suite mocks the `../storage` and `./serverMode` modules
 // so we can drive every branch in isolation - including the DEV qa-skip bypass,
-// the configured-server-URL short-circuit, and the store-read/-write error
-// paths that swallow exceptions.
+// the configured-server-URL short-circuit, and the store read/write error
+// contracts.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -155,9 +155,9 @@ describe("markOnboardingComplete", () => {
     expect(setSetting).toHaveBeenCalledWith(ONBOARDING_KEY, "true");
   });
 
-  it("swallows store-write errors (non-fatal)", async () => {
+  it("rejects when the completion marker cannot be persisted", async () => {
     setSetting.mockRejectedValue(new Error("disk full"));
-    await expect(markOnboardingComplete()).resolves.toBeUndefined();
+    await expect(markOnboardingComplete()).rejects.toThrow("disk full");
   });
 
   it("resolves to undefined on success", async () => {
@@ -178,5 +178,22 @@ describe("round-trip via mocked store", () => {
     await markOnboardingComplete();
     expect(stored).toBe("true");
     expect(await isFirstRun()).toBe(false);
+  });
+
+  it("keeps the next launch in first-run until a failed completion write is retried", async () => {
+    let stored: string | null = null;
+    setSetting
+      .mockRejectedValueOnce(new Error("quota exceeded"))
+      .mockImplementation(async (_key, value) => {
+        stored = value;
+      });
+    getSetting.mockImplementation(async () => stored);
+
+    await expect(markOnboardingComplete()).rejects.toThrow("quota exceeded");
+    await expect(isFirstRun()).resolves.toBe(true);
+
+    await markOnboardingComplete();
+    await expect(isFirstRun()).resolves.toBe(false);
+    expect(setSetting).toHaveBeenCalledTimes(2);
   });
 });

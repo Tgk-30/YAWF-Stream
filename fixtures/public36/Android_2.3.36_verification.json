@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-10-23T07:55:43.417811+00:00",
+  "sourceRevision": "b9f51773232fa546ed3a95ec3e9169780f7df244",
+  "packageName": "com.tgk30.debridstreamer",
+  "version": "2.3.36",
+  "versionCode": 2003036,
+  "apk": {
+    "name": "YAWF.Stream_Android_2.3.36.apk",
+    "sha256": "b6109604b1bc0bb7db87ed79402da7356011caab48833ac2d07eb4cede4dfe11",
+    "size": 88578945
+  },
+  "signerSha256": "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a",
+  "producerRun": 39917780677,
+  "exactSourceCiRun": 39917164434,
+  "offlineSignatureManifestAbiPayloadAndAlignment": "passed verify_android_apk.py",
+  "nativeRuntime": {
+    "passed": true,
+    "api": 36,
+    "abi": "arm64-v8a",
+    "webviewMajor": 133,
+    "freshOwnedEmulator": true,
+    "completeSetupAndNativeManualUpdater": "pass",
+    "exactInstalledApkHash": "pass",
+    "physicalDeviceProof": false,
+    "automaticOtaTransactionProven": false
+  },
+  "episodeVerification": {
+    "canonicalGuideAndSourceRegressionTests": "passed exact source CI",
+    "productionServer36Tybw17E1FileDecode": "The Blood Warfare,524decodedframes,0dropped",
+    "standaloneConfiguredGuideRuntime": "not run without metadata credential in account-free emulator",
+    "allPlatformVerificationComplete": false
+  },
+  "scope": "Emergency canonical episode-guide and continuation-identity fix. Separate from pending player stabilization37."
+}

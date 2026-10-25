@@ -274,7 +274,7 @@ describe("fetchServerStreams", () => {
     });
     const { url } = lastCall();
     expect(url).toBe(
-      "https://server.example/api/streams/tt%20123?type=series&season=2&episode=5",
+      "https://server.example/api/streams/tt%20123?type=series&episodeGuide=2&season=2&episode=5",
     );
     expect(res).toEqual({
       rows: [{ id: "r1" }],
@@ -476,10 +476,38 @@ describe("resolveServerStream", () => {
     })).toEqual({
       url: "https://server.example/api/stream/session-1/index.m3u8?quality=360p&start=731",
       timelineOffsetSeconds: 731,
-      startPositionSeconds: 0,
+      startPositionSeconds: expect.closeTo(0.8, 10),
       quality: "360p",
     });
   });
+
+  it.each([
+    ["missing", undefined, 0, 0, false],
+    ["negative", -1.25, 0, 0, false],
+    ["not finite", Number.NaN, 0, 0, false],
+    ["positive infinity", Number.POSITIVE_INFINITY, 0, 0, false],
+    ["subsecond", 0.75, 0, 0.75, false],
+    ["below maximum", 86_399.75, 86_399, 0.75, true],
+    ["at maximum", 86_400, 86_400, 0, true],
+    ["above maximum", 86_400.75, 86_400, 0, true],
+  ] as const)(
+    "normalizes %s optimized resume coordinates",
+    (_name, requested, expectedOffset, expectedLocalStart, hasStartQuery) => {
+      const direct = {
+        streamURL: "https://server.example/api/stream/session-1",
+        fileName: "movie.mkv",
+      } as never;
+      const optimized = api.serverOptimizedSource(direct, {
+        quality: "480p",
+        ...(requested == null ? {} : { startSeconds: requested }),
+      });
+
+      expect(optimized.timelineOffsetSeconds).toBe(expectedOffset);
+      expect(optimized.startPositionSeconds).toBeCloseTo(expectedLocalStart, 10);
+      const start = new URL(optimized.url).searchParams.get("start");
+      expect(start).toBe(hasStartQuery ? String(expectedOffset) : null);
+    },
+  );
 
   it("distinguishes the source default from an explicit zero audio track", () => {
     const direct = {
@@ -537,6 +565,14 @@ describe("resolveServerStream", () => {
     expect(lastCall().url).toBe(
       "https://server.example/api/stream/session-1/audio-tracks",
     );
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ tracks: [] }) as never);
+    await expect(api.serverStreamAudioTracks(direct, {
+      retryFailed: true,
+    })).resolves.toEqual([]);
+    expect(lastCall().url).toBe(
+      "https://server.example/api/stream/session-1/audio-tracks?retry=1",
+    );
   });
 
   it("returns validated source tracks and original duration from the existing endpoint", async () => {
@@ -560,6 +596,117 @@ describe("resolveServerStream", () => {
     expect(lastCall().url).toBe(
       "https://server.example/api/stream/session-1/audio-tracks",
     );
+  });
+
+  it("uses one explicit-retry response for tracks and duration with caller cancellation", async () => {
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    const owner = new AbortController();
+    const onSourceInfo = vi.fn();
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      tracks: [{ index: 0, language: "eng", label: "English", default: true }],
+      durationSeconds: 596.457379,
+    }) as never);
+
+    await expect(api.serverStreamAudioTracks(direct, {
+      retryFailed: true,
+      signal: owner.signal,
+      onSourceInfo,
+    })).resolves.toEqual([
+      { index: 0, language: "eng", label: "English", default: true },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const { url, init } = lastCall();
+    expect(url).toBe(
+      "https://server.example/api/stream/session-1/audio-tracks?retry=1",
+    );
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal).not.toBe(owner.signal);
+    expect((init.signal as AbortSignal).aborted).toBe(false);
+    expect(onSourceInfo).toHaveBeenCalledTimes(1);
+    expect(onSourceInfo).toHaveBeenCalledWith({
+      tracks: [{ index: 0, language: "eng", label: "English", default: true }],
+      durationSeconds: 596.457379,
+    });
+  });
+
+  it("aborts the bounded explicit retry at eighteen seconds", async () => {
+    vi.useFakeTimers();
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    let requestSignal: AbortSignal | null = null;
+    fetchMock.mockImplementationOnce(((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        requestSignal = init?.signal as AbortSignal;
+        requestSignal.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        }, { once: true });
+      })) as typeof fetch);
+    try {
+      const pending = api.serverStreamSourceInfo(direct, { retryFailed: true });
+      const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      await vi.advanceTimersByTimeAsync(17_999);
+      expect((requestSignal as AbortSignal | null)?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect((requestSignal as AbortSignal | null)?.aborted).toBe(true);
+      await rejected;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("forwards owner cancellation through an explicit retry without another request", async () => {
+    vi.useFakeTimers();
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    const owner = new AbortController();
+    let requestSignal: AbortSignal | null = null;
+    fetchMock.mockImplementationOnce(((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        requestSignal = init?.signal as AbortSignal;
+        requestSignal.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        }, { once: true });
+      })) as typeof fetch);
+
+    try {
+      const pending = api.serverStreamSourceInfo(direct, {
+        retryFailed: true,
+        signal: owner.signal,
+      });
+      const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect((requestSignal as AbortSignal | null)?.aborted).toBe(false);
+      owner.abort();
+      expect((requestSignal as AbortSignal | null)?.aborted).toBe(true);
+      await rejected;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await vi.advanceTimersByTimeAsync(18_000);
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an ordinary source-info request on its caller signal and fast URL", async () => {
+    const direct = {
+      streamURL: "https://server.example/api/stream/session-1",
+      fileName: "movie.mkv",
+    } as never;
+    const owner = new AbortController();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ tracks: [], durationSeconds: null }) as never);
+
+    await expect(api.serverStreamSourceInfo(direct, {
+      signal: owner.signal,
+    })).resolves.toEqual({ tracks: [], durationSeconds: null });
+    const { url, init } = lastCall();
+    expect(url).toBe("https://server.example/api/stream/session-1/audio-tracks");
+    expect(init.signal).toBe(owner.signal);
   });
 
   it.each([
@@ -604,7 +751,7 @@ describe("resolveServerStream", () => {
   it("refuses to probe audio tracks on an unconfigured stream origin", async () => {
     await expect(api.serverStreamAudioTracks({
       streamURL: "https://provider.example/api/stream/session-1",
-    } as never)).rejects.toThrow("does not belong");
+    } as never, { retryFailed: true })).rejects.toThrow("does not belong");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -1183,4 +1330,63 @@ describe("server setup helpers", () => {
     expect(lastCall().url).toBe("https://server.example/api/admin/health");
     expect(res.counts.credentials).toBe(2);
   });
+});
+
+
+describe("server HLS generation retention", () => {
+  const master = "https://server.example/yawf/api/stream/one/index.m3u8?start=46#t=0.001";
+  const manifest = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000\n480p.m3u8?generation=transcode-actual\n";
+  it("binds the actual child generation under the configured mount without requested clock parameters", () => {
+    configuredServerURL.mockReturnValue("https://server.example/yawf");
+    expect(api.serverHlsLeaseTarget(master, manifest)).toBe("https://server.example/yawf/api/stream/one/480p.m3u8?generation=transcode-actual");
+  });
+  it.each([
+    ["oversized master", master, manifest + "#".repeat(65_536)],
+    ["foreign origin", master.replace("server.example", "provider.example"), manifest],
+    ["foreign mount", master.replace("/yawf/", "/elsewhere/"), manifest],
+    ["URL credentials", master.replace("https://", "https://user:password@"), manifest],
+    ["missing generation", master, manifest.replace("?generation=transcode-actual", "")],
+    ["foreign child", master, manifest.replace("480p.m3u8", "https://provider.example/480p.m3u8")],
+    ["mixed generations", master, manifest + "720p.m3u8?generation=transcode-other\n"],
+  ])("does not bind %s", (_label, source, text) => {
+    configuredServerURL.mockReturnValue("https://server.example/yawf");
+    expect(api.serverHlsLeaseTarget(source, text)).toBeNull();
+  });
+  it("uses cookie-authenticated no-store HEAD without reading a body or following redirects on older servers", async () => {
+    configuredServerURL.mockReturnValue("https://server.example/yawf");
+    const target = api.serverHlsLeaseTarget(master, manifest)!;
+    const text = vi.fn(() => Promise.reject(new Error("HEAD has no body")));
+    fetchMock.mockResolvedValueOnce({ status: 200, text } as never);
+    const controller = new AbortController();
+    await expect(api.renewServerHlsLease(target, controller.signal)).resolves.toBe(200);
+    expect(lastCall()).toEqual({ url: target, init: {
+      method: "HEAD", credentials: "include", cache: "no-store", redirect: "error", signal: controller.signal,
+    } });
+    expect(text).not.toHaveBeenCalled();
+    expect(readCsrfToken).not.toHaveBeenCalled();
+  });
+  it("returns terminal status for the owning component rather than notifying a stale owner", async () => {
+    configuredServerURL.mockReturnValue("https://server.example/yawf");
+    fetchMock.mockResolvedValueOnce({ status: 401 } as never);
+    await expect(api.renewServerHlsLease(api.serverHlsLeaseTarget(master, manifest)!, new AbortController().signal)).resolves.toBe(401);
+    expect(notifyUnauthorized).not.toHaveBeenCalled();
+  });
+  it("rejects a substituted lease target before credentialed fetch", async () => {
+    await expect(api.renewServerHlsLease("https://provider.example/api/stream/one/480p.m3u8?generation=transcode-actual", new AbortController().signal)).rejects.toThrow("Untrusted");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("retains browser-origin cookie authorization when no explicit API origin is configured", async () => {
+    configuredServerURL.mockReturnValue(null);
+    vi.stubGlobal("window", { location: { origin: "https://browser.example" } });
+    const source = "https://browser.example/api/stream/one/index.m3u8";
+    const target = api.serverHlsLeaseTarget(source, manifest)!;
+    expect(target).toBe("https://browser.example/api/stream/one/480p.m3u8?generation=transcode-actual");
+    fetchMock.mockResolvedValueOnce({ status: 200 } as never);
+    await expect(api.renewServerHlsLease(target, new AbortController().signal)).resolves.toBe(200);
+    expect(lastCall().init.credentials).toBe("include");
+    expect(lastCall().init.method).toBe("HEAD");
+    expect(lastCall().init.headers).toBeUndefined();
+    expect(notifyUnauthorized).not.toHaveBeenCalled();
+  });
+
 });

@@ -196,6 +196,106 @@ describe("EmbeddedPlayer control geometry", () => {
   });
 });
 
+describe("EmbeddedPlayer precise native seeking", () => {
+  async function renderReadyPlayer(): Promise<void> {
+    render(
+      <EmbeddedPlayer
+        url="https://example.test/movie.mkv"
+        title="Movie"
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    await waitFor(() =>
+      expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("pause", false),
+    );
+  }
+
+  it("uses the paused fractional position for an exact absolute skip", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 25.3);
+    emitProperty("pause", true);
+    renderPlayerMock.command.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("seek", [15.3, "absolute"]);
+    expect(renderPlayerMock.command).not.toHaveBeenCalledWith(
+      "seek",
+      expect.arrayContaining(["relative"]),
+    );
+  });
+
+  it("accumulates repeated rapid skips from the optimistic position", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 25.3);
+    renderPlayerMock.command.mockClear();
+    const forward = screen.getByRole("button", { name: "Forward 10 seconds" });
+
+    fireEvent.click(forward);
+    fireEvent.click(forward);
+
+    expect(renderPlayerMock.command).toHaveBeenNthCalledWith(1, "seek", [35.3, "absolute"]);
+    expect(renderPlayerMock.command).toHaveBeenNthCalledWith(2, "seek", [45.3, "absolute"]);
+  });
+
+  it("clamps a backward skip at the lower boundary", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 3.25);
+    renderPlayerMock.command.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("seek", [0, "absolute"]);
+  });
+
+  it("clamps repeated forward skips at a known duration", async () => {
+    await renderReadyPlayer();
+    emitProperty("duration", 30);
+    emitProperty("time-pos", 25.3);
+    renderPlayerMock.command.mockClear();
+    const forward = screen.getByRole("button", { name: "Forward 10 seconds" });
+
+    fireEvent.click(forward);
+    fireEvent.click(forward);
+
+    expect(renderPlayerMock.command).toHaveBeenNthCalledWith(1, "seek", [30, "absolute"]);
+    expect(renderPlayerMock.command).toHaveBeenNthCalledWith(2, "seek", [30, "absolute"]);
+  });
+
+  it("keeps forward seeking available while duration is unknown", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 25.3);
+    renderPlayerMock.command.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Forward 10 seconds" }));
+
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("seek", [35.3, "absolute"]);
+  });
+
+  it("uses the absolute path for a modified keyboard skip", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 100.25);
+    renderPlayerMock.command.mockClear();
+
+    fireEvent.keyDown(window, { key: "ArrowLeft", shiftKey: true });
+
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("seek", [40.25, "absolute"]);
+  });
+
+  it("does not implicitly resume paused playback while skipping", async () => {
+    await renderReadyPlayer();
+    emitProperty("time-pos", 25.3);
+    emitProperty("pause", true);
+    renderPlayerMock.setProperty.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Forward 10 seconds" }));
+
+    expect(renderPlayerMock.setProperty).not.toHaveBeenCalledWith("pause", false);
+    expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+  });
+});
+
 describe("EmbeddedPlayer playback controls", () => {
   it("pauses native playback before using the owned external-player handoff", async () => {
     const onOpenExternalPlayer = vi.fn(async () => {});
@@ -475,6 +575,103 @@ describe("EmbeddedPlayer playback controls", () => {
       <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
     );
     expect(screen.getByRole("button", { name: "Audio" })).toBeInTheDocument();
+  });
+
+  it("expands native audio codes while retaining titles and subtitle labels", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 7, type: "audio", lang: "eng", title: "eng", codec: "aac", selected: true },
+      {
+        id: 9,
+        type: "audio",
+        lang: "eng",
+        title: "English commentary 5.1",
+        codec: "eac3",
+      },
+      { id: 11, type: "sub", lang: "eng", title: "eng" },
+    ]);
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 3);
+
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "English · aac" })).toBeInTheDocument();
+    const commentary = screen.getByRole("menuitemradio", {
+      name: "English commentary 5.1 · English · eac3",
+    });
+    fireEvent.click(commentary);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("aid", "9");
+
+    fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+    expect(screen.getByRole("menuitemradio", { name: "eng · ENG" })).toBeInTheDocument();
+  });
+
+  it("preserves the predecessor casing for unknown native language labels", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 12, type: "audio", lang: "xyz", title: "", codec: "eac3", selected: true },
+    ]);
+    render(<EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 1);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "xyz · eac3" })).toBeInTheDocument();
+  });
+
+  it("uses numbered fallbacks for blank native original and undetermined languages", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 4, type: "audio", lang: "und", title: "", codec: "aac", selected: true },
+      { id: 5, type: "audio", lang: "original", title: "", codec: "eac3" },
+    ]);
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 2);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "Track 1 · aac" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "Track 2 · eac3" })).toBeInTheDocument();
+  });
+
+  it("keeps an explicit Original native title when the language is original", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 4, type: "audio", lang: "original", title: "Original", codec: "aac", selected: true },
+    ]);
+    render(<EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 1);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "Original · aac" })).toBeInTheDocument();
+  });
+
+  it("suppresses undetermined language beside an explicit Original native title", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 4, type: "audio", lang: "und", title: "Original", codec: "aac", selected: true },
+    ]);
+    render(<EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 1);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "Original · aac" })).toBeInTheDocument();
+  });
+
+  it("keeps meaningful titles and explicit unknown title casing in native labels", async () => {
+    renderPlayerMock.getProperty.mockResolvedValue([
+      { id: 4, type: "audio", lang: "xyz", title: "Director channel", codec: "eac3", selected: true },
+      { id: 5, type: "audio", lang: "xyz", title: "xYz", codec: "aac" },
+    ]);
+    render(<EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.callback).not.toBeNull());
+    emitProperty("track-list/count", 2);
+    await waitFor(() => expect(renderPlayerMock.getProperty).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    expect(screen.getByRole("menuitemradio", { name: "Director channel · XYZ · eac3" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "xYz · aac" })).toBeInTheDocument();
   });
 
   it("refreshes tracks from the native track-list count event and matches a title when lang is und", async () => {
@@ -1177,6 +1374,48 @@ describe("EmbeddedPlayer popover material", () => {
 
     fireEvent.keyDown(menu, { key: "Home" });
     expect(document.activeElement).toBe(items[0]);
+  });
+
+  it("returns focus to the exact popover trigger after item selection", async () => {
+    const user = userEvent.setup();
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    const trigger = screen.getByRole("button", { name: "Speed" });
+
+    await user.click(trigger);
+    await user.click(screen.getByRole("menuitemradio", { name: "1.25×" }));
+
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(trigger).toHaveFocus();
+  });
+
+  it("returns focus to the exact popover trigger after Escape", async () => {
+    const user = userEvent.setup();
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    const trigger = screen.getByRole("button", { name: "Speed" });
+
+    await user.click(trigger);
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(trigger).toHaveFocus();
+  });
+
+  it("returns focus to the exact popover trigger after scrim dismissal", async () => {
+    const user = userEvent.setup();
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    const trigger = screen.getByRole("button", { name: "Speed" });
+
+    await user.click(trigger);
+    await user.click(screen.getByRole("button", { name: "Close menu" }));
+
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(trigger).toHaveFocus();
   });
 
   it("updates subtitle delay settings from the slider component", async () => {

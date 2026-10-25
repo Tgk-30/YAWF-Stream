@@ -45,6 +45,27 @@ test("manifest schema is exact and pins every privileged artifact", () => {
   ]) assert.throws(() => parseUpdateManifest(mutation, releaseVersion));
 });
 
+test("installer and wrapper use an isolated validated Node runtime without replacing the system executable", () => {
+  const installer = readFileSync(new URL("../deploy/updater/install.sh", import.meta.url), "utf8");
+  const wrapper = readFileSync(new URL("../deploy/updater/yawf-server-update", import.meta.url), "utf8");
+  assert.match(installer, /private_node="?\$runtime_directory\/node"?/);
+  assert.match(installer, /assert_secure_node_file "\$node_runtime" true/);
+  assert.match(installer, /probe_node_24 "\$runtime_source"/);
+  assert.match(installer, /source_hash_before/);
+  assert.match(installer, /source_hash_after/);
+  assert.match(installer, /destination_hash/);
+  assert.match(installer, /mv -fT/);
+  assert.match(installer, /Private Node runtime reused/);
+  assert.match(installer, /install_private=false/);
+  assert.match(installer, /elif \[\[ "\$install_private" == true \]\]/);
+  assert.match(installer, /System Node runtime validated: \/usr\/bin\/node/);
+  assert.doesNotMatch(installer, /(?:install|mv|ln)[^\n]*\/usr\/bin\/node/);
+  assert.match(wrapper, /if \[ -e "\$private_node" \] \|\| \[ -L "\$private_node" \]/);
+  assert.match(wrapper, /validate_private_node "\$private_node"/);
+  assert.match(wrapper, /node=\/usr\/bin\/node/);
+  assert.match(wrapper, /exec "\$node" \/usr\/lib\/yawf-server-updater\/yawf-server-update\.mjs/);
+});
+
 test("only published strict releases with all exact assets are updater candidates", () => {
   const make = (tag, extra = {}) => ({
     tag_name: tag, draft: false, prerelease: false, published_at: "2026-10-12T00:00:00Z",

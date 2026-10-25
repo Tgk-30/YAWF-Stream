@@ -45,7 +45,15 @@ const TRANSLATE_TARGETS = [
   "Korean",
 ];
 
+export interface EmbeddedCaptions {
+  tracks: Array<{ id: string; label: string }>;
+  activeTrackId: string | null;
+  setActiveTrack: (id: string | null) => void;
+}
+
 interface CaptionsMenuProps {
+  /** Optional so the native player retains its existing downloaded-track API. */
+  embedded?: EmbeddedCaptions;
   subs: UseSubtitleTracks;
   /** Auto-seed for the search box. */
   seedTitle: string;
@@ -57,6 +65,7 @@ interface CaptionsMenuProps {
 
 export function CaptionsMenu({
   subs,
+  embedded,
   seedTitle,
   seedImdbId,
   seedSeason,
@@ -73,6 +82,7 @@ export function CaptionsMenu({
 
   const activeTrack = subs.tracks.find((t) => t.id === subs.activeTrackId) ?? null;
   const menuRef = useModalA11y<HTMLDivElement>(onClose);
+  const captionsOff = subs.activeTrackId == null && embedded?.activeTrackId == null;
 
   function runSearch() {
     const params: SubtitleSearchParams = {
@@ -111,13 +121,28 @@ export function CaptionsMenu({
       <div className="captions-section">
         <button
           type="button"
-          className={`captions-track${subs.activeTrackId == null ? " is-active" : ""}`}
-          aria-pressed={subs.activeTrackId == null}
-          onClick={() => subs.setActiveTrack(null)}
+          className={`captions-track${captionsOff ? " is-active" : ""}`}
+          aria-pressed={captionsOff}
+          onClick={() => {
+            embedded?.setActiveTrack(null);
+            subs.setActiveTrack(null);
+          }}
         >
-          <Icon name={subs.activeTrackId == null ? "check" : "xmark"} size={13} />
+          <Icon name={captionsOff ? "check" : "xmark"} size={13} />
           Off
         </button>
+        {embedded?.tracks.map((track) => (
+          <button
+            key={track.id}
+            type="button"
+            className={`captions-track${track.id === embedded.activeTrackId ? " is-active" : ""}`}
+            aria-pressed={track.id === embedded.activeTrackId}
+            onClick={() => embedded.setActiveTrack(track.id)}
+          >
+            {track.id === embedded.activeTrackId && <Icon name="check" size={13} />}
+            <span className="captions-track-label">{track.label}</span>
+          </button>
+        ))}
         {subs.tracks.map((t) => (
           <button
             key={t.id}

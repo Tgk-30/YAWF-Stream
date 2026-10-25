@@ -295,6 +295,14 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
 
+      - name: Checkout pinned stapler verification tools
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: verification-tools
+          sparse-checkout: scripts
+          persist-credentials: false
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -335,7 +343,8 @@ jobs:
 
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=4 "$app"
-          xcrun stapler validate "$dmg"
+          STAPLER_RETRY_RECEIPT="$RUNNER_TEMP/yawf-stapler-clean-install-validate.jsonl" \
+            /bin/bash verification-tools/scripts/macos_stapler_retry.sh validate "$dmg"
           test "$(uname -m)" = "${{ matrix.arch }}"
           test -x "$exe"
           test -n "$(find "$app/Contents/Frameworks" -name 'libmpv*.dylib' -print -quit)"
@@ -361,6 +370,15 @@ jobs:
           kill "$pid"
           wait "$pid" 2>/dev/null || true
           echo "ok   Signed DMG installed and launched with a clean profile"
+
+      - name: Preserve clean-install stapler evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-stapler-clean-install-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/yawf-stapler-clean-install-validate.jsonl
+          if-no-files-found: warn
+          retention-days: 14
 
   windows:
     name: Windows ${{ matrix.label }} clean install

@@ -773,6 +773,13 @@
   transform: translateY(-1px);
 }
 
+@media (pointer: coarse) {
+  .nav-rail-collapse {
+    width: 44px;
+    height: 44px;
+  }
+}
+
 @media (min-width: 951px), (min-width: 700px) and (min-height: 501px) {
   :root[data-nav-collapsed="true"] .nav-rail-group-label,
   :root[data-nav-collapsed="true"] .nav-rail-label {

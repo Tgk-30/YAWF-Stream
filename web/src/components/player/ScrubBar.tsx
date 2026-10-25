@@ -10,7 +10,7 @@
 // renders this). Performance: the preview generation is throttled + cached in
 // the hook; this component only does cheap pointer math.
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import type { ScrubPreview } from "./useScrubThumbnails";
 
 /** Format seconds as M:SS or H:MM:SS. */
@@ -31,10 +31,14 @@ interface ScrubBarProps {
   onHover: (timeSeconds: number) => void;
   onLeave: () => void;
   onSeek: (timeSeconds: number) => void;
+  /** Optional cheap pointer preview. Expensive seeks commit only on release. */
+  onSeekPreview?: (timeSeconds: number) => void;
   /** Lets a parent suppress transient overlays while a pointer seek is active. */
   onScrubbingChange?: (scrubbing: boolean) => void;
   /** Hidden player chrome leaves the bar out of pointer and keyboard navigation. */
   disabled?: boolean;
+  /** Touch chrome keeps a numeric bubble, a persistent thumb, and time labels. */
+  touchPresentation?: boolean;
 }
 
 export function ScrubBar({
@@ -44,12 +48,41 @@ export function ScrubBar({
   onHover,
   onLeave,
   onSeek,
+  onSeekPreview,
   onScrubbingChange,
   disabled = false,
+  touchPresentation = false,
 }: ScrubBarProps) {
   const barRef = useRef<HTMLDivElement | null>(null);
   const activePointerRef = useRef<number | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
+  const [hoverTime, setHoverTime] = useState<number | null>(null);
+  const [pointerPreview, setPointerPreview] = useState<number | null>(null);
+  const scrubbingChangeRef = useRef(onScrubbingChange);
+  useLayoutEffect(() => { scrubbingChangeRef.current = onScrubbingChange; }, [onScrubbingChange]);
+
+  const finishScrubbing = useCallback((pointerId: number) => {
+    if (activePointerRef.current !== pointerId) return;
+    activePointerRef.current = null;
+    const bar = barRef.current;
+    if (bar?.hasPointerCapture?.(pointerId)) bar.releasePointerCapture(pointerId);
+    setPointerPreview(null);
+    scrubbingChangeRef.current?.(false);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (disabled && activePointerRef.current != null) finishScrubbing(activePointerRef.current);
+  }, [disabled, finishScrubbing]);
+  useLayoutEffect(() => {
+    const bar = barRef.current;
+    return () => {
+      const pointerId = activePointerRef.current;
+      activePointerRef.current = null;
+      if (pointerId == null) return;
+      if (bar?.hasPointerCapture?.(pointerId)) bar.releasePointerCapture(pointerId);
+      scrubbingChangeRef.current?.(false);
+    };
+  }, []);
 
   const timeAtX = useCallback(
     (clientX: number): { time: number; ratio: number } | null => {
@@ -70,10 +103,14 @@ export function ScrubBar({
       if (at == null) return;
       const rect = barRef.current!.getBoundingClientRect();
       setHoverX(e.clientX - rect.left);
+      setHoverTime(at.time);
       onHover(at.time);
-      if (activePointerRef.current === e.pointerId) onSeek(at.time);
+      if (activePointerRef.current === e.pointerId) {
+        if (onSeekPreview != null) setPointerPreview(at.time);
+        (onSeekPreview ?? onSeek)(at.time);
+      }
     },
-    [disabled, onHover, onSeek, timeAtX],
+    [disabled, onHover, onSeek, onSeekPreview, timeAtX],
   );
 
   const handleLeave = useCallback(() => {
@@ -83,6 +120,7 @@ export function ScrubBar({
     // pixel on compact mobile controls.
     if (activePointerRef.current != null) return;
     setHoverX(null);
+    setHoverTime(null);
     onLeave();
   }, [disabled, onLeave]);
 
@@ -94,16 +132,6 @@ export function ScrubBar({
     },
     [disabled, timeAtX, onSeek],
   );
-
-  const finishScrubbing = useCallback((pointerId: number) => {
-    if (activePointerRef.current !== pointerId) return;
-    activePointerRef.current = null;
-    const bar = barRef.current;
-    if (bar?.hasPointerCapture?.(pointerId)) {
-      bar.releasePointerCapture(pointerId);
-    }
-    onScrubbingChange?.(false);
-  }, [onScrubbingChange]);
 
   // Keyboard seeking - a role="slider" must respond to arrows/Home/End (WCAG
   // 2.1). Arrows nudge ±5s, PageUp/Down ±60s, Home/End jump to the ends.
@@ -144,31 +172,34 @@ export function ScrubBar({
     [currentTime, disabled, duration, onSeek],
   );
 
+  const displayedTime = pointerPreview ?? currentTime;
+  const knownDuration = Number.isFinite(duration) && duration > 0;
   const progress =
-    Number.isFinite(duration) && duration > 0
-      ? Math.max(0, Math.min(1, currentTime / duration))
+    knownDuration
+      ? Math.max(0, Math.min(1, displayedTime / duration))
       : 0;
 
-  const showTooltip = hoverX != null && preview != null;
+  const showTooltip = hoverX != null && (preview != null || touchPresentation);
+  const tooltipTime = pointerPreview ?? preview?.time ?? hoverTime ?? displayedTime;
 
   return (
-    <div className="scrubbar-wrap">
+    <div className={`scrubbar-wrap${touchPresentation ? " is-touch" : ""}`}>
       {showTooltip && (
         <div
-          className="scrub-tooltip glass-raised glass-lit"
+          className={`scrub-tooltip glass-raised glass-lit${preview == null ? " is-numeric-only" : ""}`}
           style={{ left: `${hoverX}px` }}
         >
-          {preview.image ? (
+          {preview?.image ? (
             <img
               className="scrub-thumb"
               src={preview.image}
               alt=""
               draggable={false}
             />
-          ) : (
+          ) : preview != null ? (
             <div className="scrub-thumb scrub-thumb-empty" />
-          )}
-          <span className="scrub-time">{formatTime(preview.time)}</span>
+          ) : null}
+          <span className="scrub-time">{formatTime(tooltipTime)}</span>
         </div>
       )}
       <div
@@ -177,14 +208,20 @@ export function ScrubBar({
         onPointerMove={updatePointerPosition}
         onPointerLeave={handleLeave}
         onPointerDown={(event) => {
-          if (disabled) return;
+          if (disabled || (activePointerRef.current != null && activePointerRef.current !== event.pointerId)) return;
+          const at = timeAtX(event.clientX);
+          if (at == null) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          setHoverX(event.clientX - rect.left);
+          setHoverTime(at.time);
           activePointerRef.current = event.pointerId;
           event.currentTarget.setPointerCapture?.(event.pointerId);
-          onScrubbingChange?.(true);
-          handleClick(event);
+          scrubbingChangeRef.current?.(true);
+          if (onSeekPreview != null) setPointerPreview(at.time);
+          (onSeekPreview ?? onSeek)(at.time);
         }}
         onPointerUp={(event) => {
-          if (disabled) return;
+          if (disabled || activePointerRef.current !== event.pointerId) return;
           handleClick(event);
           finishScrubbing(event.pointerId);
         }}
@@ -197,8 +234,12 @@ export function ScrubBar({
         aria-label="Seek"
         aria-valuemin={0}
         aria-valuemax={Number.isFinite(duration) ? Math.floor(duration) : 0}
-        aria-valuenow={Math.floor(currentTime)}
-        aria-valuetext={formatTime(currentTime)}
+        aria-valuenow={Math.floor(displayedTime)}
+        aria-valuetext={
+          knownDuration
+            ? `${formatTime(displayedTime)} of ${formatTime(duration)}`
+            : formatTime(displayedTime)
+        }
         tabIndex={disabled ? -1 : 0}
       >
         <div className="scrubbar-track">
@@ -206,11 +247,22 @@ export function ScrubBar({
             className="scrubbar-fill"
             style={{ transform: `scaleX(${progress})` }}
           />
+          <div
+            className="scrubbar-progress-thumb"
+            style={{ left: `${progress * 100}%` }}
+            aria-hidden="true"
+          />
           {hoverX != null && (
             <div className="scrubbar-hover" style={{ left: `${hoverX}px` }} />
           )}
         </div>
       </div>
+      {touchPresentation && (
+        <div className="scrubbar-time-row" aria-hidden="true">
+          <span>{formatTime(displayedTime)}</span>
+          <span>{knownDuration ? formatTime(duration) : "--:--"}</span>
+        </div>
+      )}
     </div>
   );
 }

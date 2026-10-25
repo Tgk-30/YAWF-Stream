@@ -430,8 +430,9 @@ describe("StreamPicker", () => {
     expect(screen.getByText("-")).toBeInTheDocument();
   });
 
-  it("does not label a failed provider check as Will cache", () => {
+  it("routes Check provider separately from generic settings after a failed cache check", () => {
     const onOpenSettings = vi.fn();
+    const onCheckProvider = vi.fn();
     const rows = [
       makeRow({
         hash: "UNKNOWN",
@@ -445,6 +446,7 @@ describe("StreamPicker", () => {
         resolveStream={neverResolve}
         onPlay={noop}
         onOpenSettings={onOpenSettings}
+        onCheckProvider={onCheckProvider}
       />,
     );
 
@@ -453,7 +455,50 @@ describe("StreamPicker", () => {
     expect(screen.getByText(/provider did not return cache status/i)).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: /Cached only/ })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Check provider" }));
+    expect(onCheckProvider).toHaveBeenCalledTimes(1);
+    expect(onOpenSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not substitute generic settings for an absent provider callback", () => {
+    const onOpenSettings = vi.fn();
+    render(
+      <StreamPicker
+        state={baseState({ rows: [makeRow({
+          hash: "UNKNOWN",
+          title: "Provider status unavailable",
+          cacheStatus: "unavailable",
+        })] })}
+        resolveStream={neverResolve}
+        onPlay={noop}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+
+    expect(screen.getByText(/provider did not return cache status/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Check provider" })).toBeNull();
+    expect(onOpenSettings).not.toHaveBeenCalled();
+  });
+
+  it.each<{ label: string; state: Partial<StreamsState> }>([
+    { label: "no sources", state: { hasIndexers: false } },
+    { label: "missing searchable id", state: { missingImdbId: true } },
+    { label: "failed sources empty state", state: { sourceErrors: [{ indexer: "Test", error: "timed out" }] } },
+  ])("preserves generic Open settings for $label", ({ state }) => {
+    const onOpenSettings = vi.fn();
+    const onCheckProvider = vi.fn();
+    render(
+      <StreamPicker
+        state={baseState({ ...state })}
+        resolveStream={neverResolve}
+        onPlay={noop}
+        onOpenSettings={onOpenSettings}
+        onCheckProvider={onCheckProvider}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onCheckProvider).not.toHaveBeenCalled();
   });
 
   it("uses whole-number formatting when values are large enough", () => {

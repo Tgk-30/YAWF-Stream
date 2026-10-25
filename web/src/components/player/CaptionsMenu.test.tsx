@@ -440,3 +440,23 @@ describe("close button", () => {
     expect(onClose).toHaveBeenCalled();
   });
 });
+
+
+describe("embedded caption choices", () => {
+  it("does not claim Off while embedded captions are selected and routes their controls", () => {
+    const select = vi.fn();
+    const subs = makeSubs();
+    render(<CaptionsMenu subs={subs} embedded={{
+      tracks: [{ id: "hls:0", label: "Embedded subtitles" }],
+      activeTrackId: "hls:0", setActiveTrack: select,
+    }} seedTitle="T" seedImdbId={null} seedSeason={null} seedEpisode={null} onClose={() => {}} />);
+    expect(screen.getByRole("button", { name: "Off" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Embedded subtitles" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Embedded subtitles" }));
+    expect(select).toHaveBeenLastCalledWith("hls:0");
+    fireEvent.click(screen.getByRole("button", { name: "Off" }));
+    expect(select).toHaveBeenLastCalledWith(null);
+    expect(subs.setActiveTrack).toHaveBeenLastCalledWith(null);
+    expect(screen.queryByRole("button", { name: "Subtitles earlier" })).not.toBeInTheDocument();
+  });
+});

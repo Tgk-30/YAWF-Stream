@@ -10,15 +10,49 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - name: macOS disk-image retry policy tests
+        run: /bin/bash scripts/macos_hdiutil_retry.test.sh
       - uses: actions/setup-node@v4
         with:
           node-version: "22.23.3"
+      - name: macOS stapler transient retry tests
+        run: node --test scripts/macos_stapler_retry.test.mjs
       - run: npm ci
         working-directory: web
       - run: npm ci
         working-directory: server
       - run: npm test && npm run build
         working-directory: server
+
+  windows-node24-server-compatibility:
+    name: Windows Node24 server compatibility
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Test, typecheck, and build server
+        working-directory: server
+        run: |
+          npm test
+          npm run typecheck
+          npm run build
 
   rust:
     name: Rust format, lint, test, and audit
@@ -199,8 +233,32 @@ jobs:
       - name: macOS media notices and artifact transport tests
         run: node --test scripts/prepare_macos_media_notices.test.mjs scripts/macos_media_workflow.test.mjs
 
+      - name: macOS disk-image workflow tests
+        run: node --test scripts/macos_hdiutil_workflow.test.mjs
+
+      - name: macOS stapler workflow tests
+        run: node --test scripts/macos_stapler_workflow.test.mjs
+
+      - name: Set up JDK17 for native runtime harness contracts
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Generated Android project patch tests
         run: node --test scripts/patch_tauri_android.test.mjs
+
+      - name: Android external-player runtime harness contracts
+        run: node --test scripts/android_external_player_workflow.test.mjs scripts/runtime_external_settings_transaction.test.mjs
+
+      - name: Android TV native observation and candidate contracts
+        run: node --test scripts/android_tv_runtime_check.test.mjs scripts/runtime_tv_native_observation.test.mjs scripts/android_tv_candidate_runtime_workflow.test.mjs
+
+      - name: Public automatic Android updater host and driver contracts
+        run: |
+          node --test scripts/android_public_automatic_ota_driver.test.mjs scripts/android_public_automatic_ota_workflow.test.mjs
+          python3 scripts/android_public_ota_runtime_check.py --self-test
+          python3 scripts/android_public_automatic_ota_host.test.py
 
       - name: Android artifact compatibility checker tests
         run: node --test scripts/check_android_elf_alignment.test.mjs scripts/check_android_webview_compat.test.mjs
@@ -310,6 +368,11 @@ jobs:
           workspaces: "web/src-tauri -> target"
           key: android
 
+      - name: Set up Node 24 for Android checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Install web dependencies
         working-directory: web
         run: npm ci
@@ -360,6 +423,9 @@ jobs:
       # this Linux runner would need the GTK development headers the Tauri Linux
       # backend links against, which are not installed here and are not what this
       # job is for.
+
+      - name: Native Android updater consent and ownership contracts
+        run: node --test scripts/android_updater.test.mjs scripts/android-consent-focus-fixture/source_contract.test.mjs
 
   android-tv:
     name: Android TV unit tests, lint, and APK

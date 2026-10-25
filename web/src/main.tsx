@@ -16,6 +16,11 @@ import {
   isTVMode,
 } from "./lib/tvMode";
 import { PhoneRemote } from "./components/PhoneRemote";
+import { installStaleAssetFailureCapture } from "./lib/staleAssetRecovery";
+
+// Vite reports missing hashed CSS or code before the lazy import rejects.
+// Tag that exact failure for the nearest ErrorBoundary without suppressing it.
+installStaleAssetFailureCapture();
 
 // A first-run "Connect to a server" hands the whole window to the server
 // origin. Follow that choice across launches: when the app boots back on its

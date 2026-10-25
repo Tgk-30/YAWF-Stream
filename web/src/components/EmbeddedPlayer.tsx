@@ -39,6 +39,11 @@ import {
   normalizeLanguagePreference,
 } from "../lib/languagePreference";
 import {
+  audioTrackLabel,
+  readableAudioLanguageLabel,
+  isUndeterminedLanguage,
+} from "../lib/audioTrackLabel";
+import {
   PlaybackStallWatchdog,
   type PlaybackStallState,
 } from "../lib/playbackStall";
@@ -310,6 +315,20 @@ function findPreferredTrack(
 
 /** A human label for a track: its title, else language, else "Track N". */
 function trackLabel(t: Track, index: number): string {
+  if (t.type === "audio") {
+    const title = audioTrackLabel(t.title, t.lang, "");
+    const rawLanguage = t.lang?.trim() ?? "";
+    const language = readableAudioLanguageLabel(rawLanguage) ??
+      (isUndeterminedLanguage(rawLanguage) ? "" : rawLanguage.toUpperCase());
+    const bits = [title, language].filter(
+      (value, position, values) =>
+        value.length > 0 &&
+        values.findIndex((candidate) => candidate.toLowerCase() === value.toLowerCase()) === position,
+    );
+    if (bits.length === 0) bits.push(`Track ${index + 1}`);
+    const suffix = t.codec ? ` · ${t.codec}` : "";
+    return bits.join(" · ") + suffix;
+  }
   const bits: string[] = [];
   if (t.title) bits.push(t.title);
   if (t.lang) bits.push(t.lang.toUpperCase());
@@ -588,6 +607,7 @@ export function EmbeddedPlayer({
   const [fullscreen, setFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [menu, setMenu] = useState<MenuId>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [activeAid, setActiveAid] = useState<string>("auto");
@@ -1531,7 +1551,11 @@ export function EmbeddedPlayer({
   }, [paused, ended, nudgeControls]);
 
   const seekTo = useCallback((to: number) => {
-    const next = Math.max(0, to);
+    const duration = durRef.current;
+    const upperBound = Number.isFinite(duration) && duration > 0
+      ? duration
+      : Number.POSITIVE_INFINITY;
+    const next = Math.min(upperBound, Math.max(0, to));
     posRef.current = next;
     scrubberRef.current?.updatePlayback({ pos: next }, true);
     const nextChapterIndex = chapterIndexAt(next, chaptersRef.current);
@@ -1546,12 +1570,10 @@ export function EmbeddedPlayer({
 
   const relSeek = useCallback(
     (delta: number) => {
-      setEnded(false);
-      endedRef.current = false;
-      void command("seek", [delta, "relative"]);
+      seekTo(posRef.current + delta);
       nudgeControls();
     },
-    [nudgeControls],
+    [seekTo, nudgeControls],
   );
 
   const changeVolume = useCallback((v: number) => {
@@ -1905,7 +1927,8 @@ export function EmbeddedPlayer({
   }, [syncFullscreen]);
 
   const openMenu = useCallback(
-    (id: Exclude<MenuId, null>) => {
+    (id: Exclude<MenuId, null>, trigger: HTMLButtonElement) => {
+      menuTriggerRef.current = trigger;
       setMenu((cur) => (cur === id ? null : id));
       if (id === "audio" || id === "sub") void refreshTracks();
       if (id === "chapters") void refreshChapters();
@@ -2374,7 +2397,7 @@ export function EmbeddedPlayer({
               <MenuButton
                 label="Speed"
                 active={menu === "speed"}
-                onClick={() => openMenu("speed")}
+                onClick={(trigger) => openMenu("speed", trigger)}
                 badge={speed !== 1 ? `${speed}×` : undefined}
               >
                 <Icon name="speed" size={18} />
@@ -2382,14 +2405,14 @@ export function EmbeddedPlayer({
               <MenuButton
                 label="Audio"
                 active={menu === "audio"}
-                onClick={() => openMenu("audio")}
+                onClick={(trigger) => openMenu("audio", trigger)}
               >
                 <Icon name="audio" size={18} />
               </MenuButton>
               <MenuButton
                 label="Subtitles"
                 active={menu === "sub"}
-                onClick={() => openMenu("sub")}
+                onClick={(trigger) => openMenu("sub", trigger)}
                 badge={activeSid !== "no" && subTracks.length > 0 ? "CC" : undefined}
               >
                 <Icon name="captions" size={18} />
@@ -2398,7 +2421,7 @@ export function EmbeddedPlayer({
                 <MenuButton
                   label="Chapters"
                   active={menu === "chapters"}
-                  onClick={() => openMenu("chapters")}
+                  onClick={(trigger) => openMenu("chapters", trigger)}
                 >
                   <Icon name="library" size={18} />
                 </MenuButton>
@@ -2406,7 +2429,7 @@ export function EmbeddedPlayer({
               <MenuButton
                 label="Settings"
                 active={menu === "settings"}
-                onClick={() => openMenu("settings")}
+                onClick={(trigger) => openMenu("settings", trigger)}
               >
                 <Icon name="sliders" size={18} />
               </MenuButton>
@@ -2425,7 +2448,11 @@ export function EmbeddedPlayer({
 
         {/* Popover menus */}
         {menu === "speed" && (
-          <Popover onClose={() => setMenu(null)} className="embed-menu-speed">
+          <Popover
+            onClose={() => setMenu(null)}
+            returnFocusTarget={menuTriggerRef.current}
+            className="embed-menu-speed"
+          >
             <div className="embed-menu-title">Playback speed</div>
             {SPEEDS.map((s) => (
               <button
@@ -2447,7 +2474,10 @@ export function EmbeddedPlayer({
         )}
 
         {menu === "audio" && (
-          <Popover onClose={() => setMenu(null)}>
+          <Popover
+            onClose={() => setMenu(null)}
+            returnFocusTarget={menuTriggerRef.current}
+          >
             <div className="embed-menu-title">Audio</div>
             {audioTracks.length === 0 && (
               <div className="embed-menu-empty">No audio tracks</div>
@@ -2475,7 +2505,10 @@ export function EmbeddedPlayer({
         )}
 
         {menu === "sub" && (
-          <Popover onClose={() => setMenu(null)}>
+          <Popover
+            onClose={() => setMenu(null)}
+            returnFocusTarget={menuTriggerRef.current}
+          >
             <div className="embed-menu-title">Subtitles</div>
             <button
               type="button"
@@ -2530,7 +2563,11 @@ export function EmbeddedPlayer({
         )}
 
         {menu === "chapters" && (
-          <Popover onClose={() => setMenu(null)} className="embed-menu-chapters">
+          <Popover
+            onClose={() => setMenu(null)}
+            returnFocusTarget={menuTriggerRef.current}
+            className="embed-menu-chapters"
+          >
             <div className="embed-menu-title">Chapters</div>
             {chapters.map((c, i) => (
               <button
@@ -2551,7 +2588,11 @@ export function EmbeddedPlayer({
         )}
 
         {menu === "settings" && (
-          <Popover onClose={() => setMenu(null)} className="embed-menu-settings">
+          <Popover
+            onClose={() => setMenu(null)}
+            returnFocusTarget={menuTriggerRef.current}
+            className="embed-menu-settings"
+          >
             <div className="embed-menu-title">Playback settings</div>
             {onOpenExternalPlayer != null && (
               <div className="embed-setting">
@@ -2804,7 +2845,7 @@ function MenuButton({
 }: {
   label: string;
   active: boolean;
-  onClick: () => void;
+  onClick: (trigger: HTMLButtonElement) => void;
   badge?: string;
   children: React.ReactNode;
 }) {
@@ -2812,7 +2853,7 @@ function MenuButton({
     <button
       type="button"
       className={"embed-icon-btn embed-menu-btn" + (active ? " is-active" : "")}
-      onClick={onClick}
+      onClick={(event) => onClick(event.currentTarget)}
       aria-label={label}
       aria-pressed={active}
       title={label}
@@ -2827,20 +2868,26 @@ function MenuButton({
 function Popover({
   children,
   onClose,
+  returnFocusTarget,
   className,
 }: {
   children: React.ReactNode;
   onClose: () => void;
+  returnFocusTarget: HTMLElement | null;
   className?: string;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const trigger = returnFocusTarget?.isConnected === true ? returnFocusTarget : null;
     const firstItem = menuRef.current?.querySelector<HTMLElement>(
       ".embed-menu-item.is-active, .embed-menu-item",
     );
     firstItem?.focus();
-  }, []);
+    return () => {
+      if (trigger?.isConnected === true) trigger.focus({ preventScroll: true });
+    };
+  }, [returnFocusTarget]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;

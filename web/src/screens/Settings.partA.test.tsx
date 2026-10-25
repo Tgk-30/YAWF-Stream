@@ -14,7 +14,7 @@
 // debrid/ai model modules drive the provider/option lists (no mock needed).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { defaultSettings, type AppSettings } from "../data/settings";
 import type { SettingsSection } from "../lib/settingsNavigation";
@@ -43,6 +43,10 @@ const readModelCache = vi.hoisted(() =>
   vi.fn<typeof import("../services/ai/ModelCache").readModelCache>(async () => null),
 );
 const writeModelCache = vi.hoisted(() => vi.fn(async () => undefined));
+const platformState = vi.hoisted(() => ({
+  device: "desktop" as "ios" | "android" | "mac" | "windows" | "linux" | "desktop" | "unknown",
+  standalone: false,
+}));
 let smartPreloadOn = false;
 
 vi.mock("../store/AppStore", () => ({
@@ -112,6 +116,15 @@ vi.mock("../services/ai/ModelCatalog", () => ({ fetchAvailableModels }));
 
 vi.mock("../lib/onboardingValidation", () => ({ testDebridToken }));
 
+vi.mock("../lib/platform", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/platform")>();
+  return {
+    ...actual,
+    deviceKind: () => platformState.device,
+    isStandaloneDisplay: () => platformState.standalone,
+  };
+});
+
 vi.mock("../data/traktConnection", () => ({
   isTraktConnected,
   loadTraktConnection,
@@ -151,10 +164,95 @@ function renderAt(tab?: string, seed?: Partial<AppSettings>) {
   return utils;
 }
 
+function installOrientationFrame({
+  coarse = true,
+  scale = 1,
+  orientation = "portrait",
+  screenOrientation = orientation,
+}: {
+  coarse?: boolean;
+  scale?: number;
+  orientation?: "portrait" | "landscape";
+  screenOrientation?: "portrait" | "landscape";
+} = {}) {
+  let nextFrameId = 47;
+  let visualScale = scale;
+  let visualHeight = orientation === "portrait" ? 1024 : 768;
+  const pendingFrames = new Map<number, FrameRequestCallback>();
+  const visualViewport = new EventTarget();
+  const screenState = {
+    orientation: { type: `${screenOrientation}-primary` },
+    width: orientation === "portrait" ? 768 : 1024,
+    height: orientation === "portrait" ? 1024 : 768,
+  };
+  Object.defineProperty(visualViewport, "scale", {
+    configurable: true,
+    get: () => visualScale,
+  });
+  Object.defineProperty(visualViewport, "height", {
+    configurable: true,
+    get: () => visualHeight,
+  });
+  const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+    const id = nextFrameId++;
+    pendingFrames.set(id, callback);
+    return id;
+  });
+  const cancelFrame = vi.fn((id: number) => {
+    pendingFrames.delete(id);
+  });
+  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+    matches: coarse && query === "(pointer: coarse)",
+  })));
+  vi.stubGlobal("visualViewport", visualViewport);
+  vi.stubGlobal("screen", screenState);
+  vi.stubGlobal("orientation", orientation === "portrait" ? 0 : 90);
+  vi.stubGlobal("requestAnimationFrame", requestFrame);
+  vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+  return {
+    requestFrame,
+    cancelFrame,
+    setLegacyOrientation(next: "portrait" | "landscape") {
+      Object.defineProperty(window, "orientation", {
+        configurable: true,
+        value: next === "portrait" ? 0 : 90,
+        writable: true,
+      });
+    },
+    setScreenOrientation(next: "portrait" | "landscape") {
+      screenState.orientation.type = `${next}-primary`;
+    },
+    setScreenShape(next: "portrait" | "landscape") {
+      screenState.width = next === "portrait" ? 768 : 1024;
+      screenState.height = next === "portrait" ? 1024 : 768;
+    },
+    setOrientation(next: "portrait" | "landscape") {
+      this.setLegacyOrientation(next);
+      this.setScreenOrientation(next);
+      this.setScreenShape(next);
+    },
+    setScale(next: number) {
+      visualScale = next;
+      visualViewport.dispatchEvent(new Event("resize"));
+    },
+    setVisualHeight(next: number) {
+      visualHeight = next;
+      visualViewport.dispatchEvent(new Event("resize"));
+    },
+    flush() {
+      const frames = [...pendingFrames.entries()];
+      pendingFrames.clear();
+      for (const [, callback] of frames) callback(0);
+    },
+  };
+}
+
 beforeEach(() => {
   mockSettings = defaultSettings();
   mockSimpleMode = false;
   mockPendingSettingsSection = null;
+  platformState.device = "desktop";
+  platformState.standalone = false;
   smartPreloadOn = false;
   updateSettings.mockClear();
   clearPendingSettingsSection.mockClear();
@@ -179,6 +277,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -212,6 +313,365 @@ describe("Settings shell", () => {
 
     fireEvent.click(container.querySelector('button[data-tab="appearance"]')!);
     expect(scroller.scrollTop).toBe(0);
+  });
+
+  it("reconciles only the active iPad PWA category select and preserves vertical scroll", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    scroller.scrollTop = 431;
+    category.focus();
+    frame.setOrientation("landscape");
+
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(category).not.toHaveFocus();
+    expect(frame.requestFrame).toHaveBeenCalledTimes(1);
+    expect(scroller.scrollTop).toBe(431);
+    act(() => frame.flush());
+    expect(scroller).toHaveFocus();
+    expect(scroller.scrollTop).toBe(431);
+  });
+
+  it("reconciles a category select blurred by the landscape breakpoint before resize", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    scroller.scrollTop = 587;
+    category.focus();
+
+    frame.setOrientation("landscape");
+    category.blur();
+    window.dispatchEvent(new Event("resize"));
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(frame.requestFrame).toHaveBeenCalledTimes(1);
+    expect(scroller.scrollTop).toBe(587);
+    act(() => frame.flush());
+    expect(focusScroller).toHaveBeenCalledTimes(1);
+    expect(scroller).toHaveFocus();
+    expect(scroller.scrollTop).toBe(587);
+  });
+
+  it("retains category focus ownership until a late physical orientation signature arrives", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    scroller.scrollTop = 733;
+    category.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    category.blur();
+    document.body.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    act(() => frame.flush());
+    window.dispatchEvent(new Event("resize"));
+    act(() => frame.flush());
+    act(() => vi.advanceTimersByTime(388));
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(focusScroller).toHaveBeenCalledTimes(1);
+    expect(scroller).toHaveFocus();
+    expect(scroller.scrollTop).toBe(733);
+  });
+
+  it("observes a new legacy angle even while Screen Orientation remains stale", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    category.focus();
+
+    frame.setLegacyOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(scroller).toHaveFocus();
+    expect(frame.requestFrame).toHaveBeenCalledTimes(1);
+  });
+
+  it("expires a same-orientation blur without resetting focus or vertical scroll", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    scroller.scrollTop = 619;
+    category.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+
+    category.blur();
+    act(() => frame.setVisualHeight(497));
+    window.dispatchEvent(new Event("resize"));
+    act(() => frame.flush());
+    const retentionCall = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 800);
+    expect(retentionCall).toBeGreaterThanOrEqual(0);
+    act(() => vi.advanceTimersByTime(799));
+    expect(focusScroller).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(619);
+    act(() => vi.advanceTimersByTime(1));
+
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(focusScroller).not.toHaveBeenCalled();
+    expect(scroller).not.toHaveFocus();
+    expect(scroller.scrollTop).toBe(619);
+    expect(frame.requestFrame).not.toHaveBeenCalled();
+
+    category.focus();
+    frame.setOrientation("portrait");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(focusScroller).toHaveBeenCalledTimes(1);
+    expect(scroller).toHaveFocus();
+  });
+
+  it("cancels same-orientation blur ownership when another editor gains focus", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    const search = screen.getByRole("textbox", { name: "Search settings" });
+    category.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+
+    category.blur();
+    window.dispatchEvent(new Event("resize"));
+    const retentionCall = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 800);
+    expect(retentionCall).toBeGreaterThanOrEqual(0);
+    const retentionTimer = setTimeoutSpy.mock.results[retentionCall]?.value;
+    search.focus();
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(retentionTimer);
+
+    act(() => vi.advanceTimersByTime(800));
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(search).toHaveFocus();
+    expect(focusScroller).not.toHaveBeenCalled();
+  });
+
+  it("cancels retained category ownership as soon as user zoom becomes ineligible", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    category.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+
+    category.blur();
+    const retentionCall = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 800);
+    expect(retentionCall).toBeGreaterThanOrEqual(0);
+    const retentionTimer = setTimeoutSpy.mock.results[retentionCall]?.value;
+    act(() => frame.setScale(1.25));
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(retentionTimer);
+
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(focusScroller).not.toHaveBeenCalled();
+    expect(scroller).not.toHaveFocus();
+  });
+
+  it("clears retained category ownership when Settings unmounts", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    installOrientationFrame();
+    const { unmount } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    category.focus();
+    category.blur();
+    const retentionCall = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 800);
+    expect(retentionCall).toBeGreaterThanOrEqual(0);
+    const retentionTimer = setTimeoutSpy.mock.results[retentionCall]?.value;
+
+    unmount();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(retentionTimer);
+  });
+
+  it("does not steal focus selected after an orientation reconciliation is queued", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    const search = screen.getByRole("textbox", { name: "Search settings" });
+    category.focus();
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+
+    search.focus();
+    act(() => frame.flush());
+
+    expect(frame.cancelFrame).toHaveBeenCalledWith(47);
+    expect(search).toHaveFocus();
+    expect(scroller).not.toHaveFocus();
+  });
+
+  it("discards a queued reconciliation when orientation reverses before the frame", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    category.focus();
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+
+    frame.setOrientation("portrait");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(scroller).not.toHaveFocus();
+  });
+
+  it("leaves unrelated Settings editing focused during iPad PWA rotation", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const search = screen.getByRole("textbox", { name: "Search settings" });
+    scroller.scrollTop = 219;
+    search.focus();
+    frame.setOrientation("landscape");
+
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(search).toHaveFocus();
+    expect(frame.requestFrame).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(219);
+  });
+
+  it.each([
+    ["windowed iOS", "ios", false, true, 1],
+    ["standalone Android", "android", true, true, 1],
+    ["fine pointer iOS", "ios", true, false, 1],
+    ["zoomed iOS", "ios", true, true, 1.5],
+  ] as const)("does not reconcile the category select for %s", (
+    _label,
+    device,
+    standalone,
+    coarse,
+    scale,
+  ) => {
+    platformState.device = device;
+    platformState.standalone = standalone;
+    const frame = installOrientationFrame({ coarse, scale });
+    render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    category.focus();
+    frame.setOrientation("landscape");
+
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(category).toHaveFocus();
+    expect(frame.requestFrame).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending orientation reconciliation when Settings unmounts", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { unmount } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    screen.getByRole("combobox", { name: "Settings category" }).focus();
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    expect(frame.requestFrame).toHaveBeenCalledTimes(1);
+
+    unmount();
+
+    expect(frame.cancelFrame).toHaveBeenCalledWith(47);
   });
 
   it("gives playback selects stable accessible names", () => {
@@ -256,6 +716,9 @@ describe("Settings shell", () => {
     expect(
       document.querySelector('button[data-tab="install"]')?.className ?? "",
     ).toContain("is-active");
+    expect(
+      screen.getByText("Manage installation and finish setup on this device."),
+    ).toBeInTheDocument();
   });
 
   it("opens a one-time section requested by another screen", () => {
@@ -267,6 +730,61 @@ describe("Settings shell", () => {
       document.querySelector('button[data-tab="keys"]')?.className ?? "",
     ).toContain("is-active");
     expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies a later visible request without remounting or losing drafts", async () => {
+    mockSettings = {
+      ...defaultSettings(),
+      debridTokens: [{ service: "real_debrid", apiToken: "tok" }],
+    };
+    const { rerender } = render(<Settings />);
+    fireEvent.click(document.querySelector('button[data-tab="keys"]')!);
+    const key = screen.getByPlaceholderText("v3 API key");
+    fireEvent.change(key, { target: { value: "draft-key" } });
+
+    mockPendingSettingsSection = "debrid";
+    rerender(<Settings />);
+
+    await waitFor(() => expect(document.querySelector('button[data-tab="debrid"]')).toHaveClass("is-active"));
+    fireEvent.click(document.querySelector('button[data-tab="keys"]')!);
+    expect(screen.getByPlaceholderText("v3 API key")).toHaveValue("draft-key");
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back safely when a later request targets a hidden section from another tab", async () => {
+    mockSimpleMode = true;
+    const { rerender } = render(<Settings />);
+    fireEvent.click(document.querySelector('button[data-tab="keys"]')!);
+    expect(document.querySelector('button[data-tab="keys"]')).toHaveClass("is-active");
+
+    // Issue the hidden request on the same mounted screen while Keys is active.
+    mockPendingSettingsSection = "sources";
+    rerender(<Settings />);
+
+    await waitFor(() => expect(document.querySelector('button[data-tab="appearance"]')).toHaveClass("is-active"));
+    expect(document.querySelector('button[data-tab="sources"]')).toBeNull();
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens pending Providers in Simple mode once without saving settings", () => {
+    mockSimpleMode = true;
+    mockPendingSettingsSection = "debrid";
+    const { rerender, unmount } = renderAt();
+
+    expect(document.querySelector('button[data-tab="debrid"]')).toHaveClass("is-active");
+    expect(screen.getByPlaceholderText("API token")).toBeInTheDocument();
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+    expect(mockPendingSettingsSection).toBeNull();
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    rerender(<Settings />);
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('button[data-tab="debrid"]')).toHaveClass("is-active");
+    unmount();
+    renderAt();
+    expect(document.querySelector('button[data-tab="install"]')).toHaveClass("is-active");
+    expect(clearPendingSettingsSection).toHaveBeenCalledTimes(1);
+    expect(updateSettings).not.toHaveBeenCalled();
   });
 
   it("keeps Help and diagnostics visible in Simple mode while hiding Sources", () => {

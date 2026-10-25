@@ -30,9 +30,11 @@ export const WEBVIEW_STARTUP_TIMEOUT_MS = 20_000;
 export const SERVER_HLS_STARTUP_TIMEOUT_MS = 45_000;
 export const WEBVIEW_FALLBACK_TIMEOUT_MS = 8_000;
 const SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS = 8_000;
+const SERVER_SOURCE_INFO_RETRY_DELAY_MS = 5_000;
 const MAX_SOURCE_DURATION_SECONDS = 86_400;
 const SERVER_OPTIMIZED_RETRY_BASE_MS = 500;
 const SERVER_OPTIMIZED_RETRY_MAX_MS = 4_000;
+const TOUCH_DOUBLE_TAP_MS = 320;
 import { Icon } from "./Icon";
 import {
   isTauri,
@@ -63,7 +65,7 @@ import { useScrubThumbnails } from "./player/useScrubThumbnails";
 import { useWakeLock } from "./player/useWakeLock";
 import { useTVRemotePlayback } from "./player/useTVRemotePlayback";
 import { ScrubBar } from "./player/ScrubBar";
-import { CaptionsMenu } from "./player/CaptionsMenu";
+import { CaptionsMenu, type EmbeddedCaptions } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { CastControls } from "./CastControls";
 import { predictEpisodeEnd } from "../lib/endPredictor";
@@ -82,6 +84,8 @@ import { registerPlayerMount } from "../lib/attention";
 import { recordDiagnostic } from "../lib/diagnostics";
 import { mediaErrorMessage, nextHlsRecovery } from "../lib/playerReliability";
 import { findPreferredLanguageMatch } from "../lib/languagePreference";
+import { audioTrackLabel } from "../lib/audioTrackLabel";
+import { captionLayout, type CaptionRect } from "../lib/captionLayout";
 import { configuredServerURL } from "../lib/serverMode";
 import {
   PlaybackStallWatchdog,
@@ -101,9 +105,13 @@ import {
   stopAndroidTVPlayback,
   type AndroidTVPlaybackProgress,
 } from "../lib/androidTV";
+import { renewServerHlsLease, serverHlsLeaseTarget } from "../lib/serverApi";
+import { notifyUnauthorized } from "../lib/serverSession";
 import type {
+  ServerAudioInventoryLoadOptions,
   ServerAudioTrack,
   ServerOptimizedSource,
+  ServerStreamSourceInfo,
   ServerTranscodeQuality,
 } from "../lib/serverApi";
 import "./VideoPlayer.css";
@@ -130,6 +138,8 @@ export interface PlaybackHandoffState {
   muted: boolean;
   playbackRate: number;
 }
+
+type ServerOptimizedPositionIntent = "follow-current" | "fixed";
 
 function applyMediaPlaybackRate(video: HTMLMediaElement, playbackRate: number): void {
   // The media load algorithm can reset playbackRate to defaultPlaybackRate.
@@ -233,8 +243,13 @@ interface VideoPlayerProps {
    * original-device player without rendering unavailable controls. */
   serverOptimized?: {
     qualities: readonly ServerTranscodeQuality[];
-    loadAudioTracks?: () => Promise<ServerAudioTrack[]>;
-    loadSourceInfo?: () => Promise<{
+    loadAudioTracks?: (
+      options?: ServerAudioInventoryLoadOptions,
+    ) => Promise<ServerAudioTrack[]>;
+    loadSourceInfo?: (options?: Pick<
+      ServerAudioInventoryLoadOptions,
+      "retryFailed" | "signal"
+    >) => Promise<{
       durationSeconds: number | null;
       tracks?: ServerAudioTrack[];
     }>;
@@ -315,6 +330,30 @@ function shouldUseNativeHls(video: HTMLVideoElement): boolean {
     kind === "ios" &&
     video.canPlayType("application/vnd.apple.mpegurl") !== ""
   );
+}
+
+const WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS = 0.001;
+
+function nativeHlsSourceWithExactStart(
+  url: string,
+  startPositionSeconds: number | null | undefined,
+): string {
+  const target = Number.isFinite(startPositionSeconds)
+    ? Math.max(0, startPositionSeconds as number)
+    : 0;
+  // WebKit applies a temporal media fragment after HAVE_CURRENT_DATA, but its
+  // media element implementation ignores a fragment whose start is exactly 0.
+  // Clamp sub-millisecond targets to a decimal NPT value that WebKit accepts;
+  // one millisecond remains within the exact handoff tolerance.
+  const fragmentTarget = target < WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS
+    ? WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS
+    : target;
+  const hashIndex = url.indexOf("#");
+  if (hashIndex < 0) return `${url}#t=${fragmentTarget}`;
+  const separator = hashIndex === url.length - 1 || url.endsWith("&") ? "" : "&";
+  // Keep existing non-time fragment parameters. Media fragment processing
+  // uses the last valid temporal parameter, so this exact target wins.
+  return `${url}${separator}t=${fragmentTarget}`;
 }
 
 interface WebKitPlaybackTargetAvailabilityEvent extends Event {
@@ -410,6 +449,8 @@ function shouldIgnoreShortcut(
     role === "menuitem" ||
     role === "checkbox" ||
     role === "switch" ||
+    // The custom scrub slider owns its arrows and Home/End, like native ranges.
+    role === "slider" ||
     role === "tab"
   );
 }
@@ -522,6 +563,12 @@ function normalizedServerAudioTracks(
     seen.add(track.index);
     return true;
   }).slice(0, 32);
+}
+
+function sourceInfoHttpStatus(error: unknown): number | null {
+  if (error == null || typeof error !== "object") return null;
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" && Number.isInteger(status) ? status : null;
 }
 
 function webviewStartupTimeout(engine: PlaybackEngine, sourceUrl: string): number {
@@ -756,6 +803,7 @@ export function VideoPlayer({
     originOwner: string;
     audioPreference?: AudioPreference;
     partialTimeline: boolean;
+    leaseTarget: string | null;
   };
   type ScopedPosition = {
     originOwner: string;
@@ -784,6 +832,7 @@ export function VideoPlayer({
   const [serverOptimizationPending, setServerOptimizationPending] = useState(false);
   const latestAbsolutePositionRef = useRef(0);
   const autoOptimizationAttemptedRef = useRef<string | null>(null);
+  const [verifiedPlaybackProgressOwner, setVerifiedPlaybackProgressOwner] = useState<string | null>(null);
   const playbackOwner = `${requestedEngine}\u0000${sourceRevision}\u0000${url}`;
   // The original URL, engine, and caller-issued revision define media identity.
   // Internal optimized/fallback URLs never change this owner, while a fresh
@@ -802,14 +851,22 @@ export function VideoPlayer({
     optimizedSource?.originOwner === playbackOwner
       ? optimizedSource
       : null;
-  const initialServerOptimizedTimeline =
-    activeOptimized == null &&
+  const originalSourceIsServerOptimized =
     serverOptimized != null &&
     requestedEngine === "webview-hls-transcode" &&
     isTrustedServerHlsManifestURL(url);
+  const initialServerOptimizedTimeline =
+    activeOptimized == null &&
+    originalSourceIsServerOptimized;
   const initialServerOptimizedQuality = initialServerOptimizedTimeline
     ? serverOptimizedQualityFromURL(url, serverOptimized?.qualities ?? [])
     : null;
+  const reportVerifiedPlaybackProgress = useCallback(() => {
+    if (!originalSourceIsServerOptimized) return;
+    setVerifiedPlaybackProgressOwner((current) =>
+      current === playbackOwner ? current : playbackOwner,
+    );
+  }, [originalSourceIsServerOptimized, playbackOwner]);
   const explicitInitialServerAudioTrack = initialServerOptimizedTimeline
     ? serverOptimizedAudioFromURL(url)
     : null;
@@ -935,10 +992,12 @@ export function VideoPlayer({
     );
   }, [externalTarget, playbackOwner]);
   const [playbackAttempt, setPlaybackAttempt] = useState(0);
+  const [serverLeaseExpired, setServerLeaseExpired] = useState(false);
+  const activeWebSourceRef = useRef(effectiveUrl);
   const [activeSubtitleUrl, setActiveSubtitleUrl] = useState<string | null>(null);
   const [androidTVError, setAndroidTVError] = useState<string | null>(null);
+  const [webScrubbing, setWebScrubbing] = useState(false);
   const playbackOwnerRef = useRef(playbackOwner);
-  playbackOwnerRef.current = playbackOwner;
   const playerMountedRef = useRef(false);
   const recoveryRequestSequenceRef = useRef(0);
   const recoveryPendingRef = useRef<{ owner: string; request: number } | null>(null);
@@ -949,6 +1008,27 @@ export function VideoPlayer({
     controller: AbortController;
   } | null>(null);
   const sourceInfoLoadOwnerRef = useRef<string | null>(null);
+  const sourceInfoGenerationRef = useRef(0);
+  const sourceInfoRetryRef = useRef<{
+    owner: string;
+    generation: number;
+    timer: number | null;
+    controller: AbortController | null;
+    retryStarted: boolean;
+  } | null>(null);
+  const cancelSourceInfoRetry = useCallback((owner?: string) => {
+    const pending = sourceInfoRetryRef.current;
+    if (pending == null || (owner != null && pending.owner !== owner)) return;
+    if (pending.timer != null) window.clearTimeout(pending.timer);
+    pending.controller?.abort();
+    sourceInfoRetryRef.current = null;
+  }, []);
+  // Async ownership follows the committed player, not a replacement render
+  // that React can suspend or abandon while the old owner remains mounted.
+  useLayoutEffect(() => {
+    activeWebSourceRef.current = effectiveUrl;
+    playbackOwnerRef.current = playbackOwner;
+  }, [effectiveUrl, playbackOwner]);
   useLayoutEffect(() => {
     playerMountedRef.current = true;
     return () => {
@@ -958,22 +1038,33 @@ export function VideoPlayer({
       optimizationRequestSequenceRef.current += 1;
       optimizationPendingRef.current?.controller.abort();
       optimizationPendingRef.current = null;
+      sourceInfoGenerationRef.current += 1;
+      sourceInfoLoadOwnerRef.current = null;
+      cancelSourceInfoRetry();
     };
-  }, []);
+  }, [cancelSourceInfoRetry]);
   useLayoutEffect(() => {
     recoveryRequestSequenceRef.current += 1;
     recoveryPendingRef.current = null;
     optimizationRequestSequenceRef.current += 1;
     optimizationPendingRef.current?.controller.abort();
     optimizationPendingRef.current = null;
+    sourceInfoGenerationRef.current += 1;
+    cancelSourceInfoRetry();
     setServerOptimizationPending(false);
     setServerOptimizationError(null);
     autoOptimizationAttemptedRef.current = null;
     setWebRecoveryPending(false);
     setExternalActionStatus(null);
     setExternalError(null);
-  }, [playbackOwner]);
+    setServerLeaseExpired(false);
+    setManualRecoveryPending(false);
+  }, [cancelSourceInfoRetry, playbackOwner]);
   const androidTVNative = hasAndroidTVBridge();
+  const sharedTouchPlayer =
+    mode === "webview" &&
+    !androidTVNative &&
+    ((dk === "ios" && !underTauri) || androidAppUi);
   const androidOnCloseRef = useRef(onClose);
   const androidOnProgressRef = useRef(onProgress);
   androidOnCloseRef.current = onClose;
@@ -983,13 +1074,13 @@ export function VideoPlayer({
   const chromeHideTimer = useRef<number | undefined>(undefined);
   const lastChromeNudgeAt = useRef(Number.NEGATIVE_INFINITY);
   const chromePinned =
-    webviewPaused || captionsOpen || webMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
+    webviewPaused || webScrubbing || captionsOpen || webMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
   const chromePinnedRef = useRef(chromePinned);
   chromePinnedRef.current = chromePinned;
   const playerDialogRef = useModalA11y<HTMLDivElement>(
     onClose,
     !useEmbedded,
-    captionsOpen || detailsSection != null,
+    captionsOpen || webMenuOpen || detailsSection != null,
   );
 
   const reportAbsolutePosition = useCallback((next: number) => {
@@ -1111,23 +1202,46 @@ export function VideoPlayer({
   const retryFreshStream = useCallback(async (): Promise<void> => {
     const context = lastStallContextRef.current;
     if (refreshCurrentSource == null || context == null || manualRecoveryPending) return;
+    const owner = playbackOwnerRef.current;
+    const source = activeWebSourceRef.current;
+    const ownsLeaseRecovery = () => !serverLeaseExpired || (playerMountedRef.current &&
+      playbackOwnerRef.current === owner && activeWebSourceRef.current === source);
     setManualRecoveryPending(true);
     recordDiagnostic("player", "stall.manual_retry_started");
     try {
       await withFreshStreamResolutionTimeout(
         refreshCurrentSource(context.position, context.handoff),
       );
-      setExternalError(null);
+      if (!ownsLeaseRecovery()) return;
+      // A successful resolver must publish a new source owner. Until then an
+      // expired generation cannot be remounted under its old URL.
+      if (!serverLeaseExpired) setExternalError(null);
       recordDiagnostic("player", "stall.manual_retry_ready");
     } catch {
+      if (!ownsLeaseRecovery()) return;
       setExternalError(
         "A fresh stream could not be prepared. Retry, or choose another source.",
       );
       recordDiagnostic("player", "stall.manual_retry_failed", "error");
     } finally {
-      setManualRecoveryPending(false);
+      if (ownsLeaseRecovery()) setManualRecoveryPending(false);
     }
-  }, [manualRecoveryPending, refreshCurrentSource]);
+  }, [manualRecoveryPending, refreshCurrentSource, serverLeaseExpired]);
+
+  const expireServerGeneration = useCallback((
+    source: string,
+    position: number,
+    handoff: PlaybackHandoffState,
+  ) => {
+    if (!playerMountedRef.current || playbackOwnerRef.current !== playbackOwner ||
+      activeWebSourceRef.current !== source || optimizationPendingRef.current != null) return;
+    lastStallContextRef.current = { position, handoff };
+    setServerLeaseExpired(true);
+    setExternalError(refreshCurrentSource == null
+      ? "This stream has expired. Choose another source or close the player."
+      : "This stream has expired. Retry to request a fresh stream, or choose another source.");
+    recordDiagnostic("player", "server_generation.expired", "warning");
+  }, [playbackOwner, refreshCurrentSource]);
 
   // State is scoped below for render-time safety. Reset it too, so a completed
   // previous source cannot leave stale errors or an automatic-mode latch on the
@@ -1146,6 +1260,61 @@ export function VideoPlayer({
     setKnownAbsoluteDuration(null);
   }, [durationOwner]);
 
+  const rememberServerSourceInfo = useCallback((
+    owner: string,
+    sourceInfo: {
+      durationSeconds: number | null;
+      tracks?: ServerAudioTrack[];
+    },
+    generation?: number,
+  ) => {
+    if (
+      !playerMountedRef.current ||
+      playbackOwnerRef.current !== owner ||
+      (generation != null && sourceInfoGenerationRef.current !== generation)
+    ) {
+      return;
+    }
+    const pendingRetry = sourceInfoRetryRef.current;
+    if (
+      pendingRetry?.owner === owner &&
+      (generation == null || pendingRetry.generation === generation)
+    ) {
+      if (pendingRetry.timer != null) window.clearTimeout(pendingRetry.timer);
+      pendingRetry.controller?.abort();
+      sourceInfoRetryRef.current = null;
+    }
+    const durationSeconds = sourceInfo.durationSeconds;
+    if (
+      typeof durationSeconds === "number" &&
+      Number.isFinite(durationSeconds) &&
+      durationSeconds > 0 &&
+      durationSeconds <= MAX_SOURCE_DURATION_SECONDS
+    ) {
+      setKnownAbsoluteDuration((current) =>
+        current?.originOwner === owner
+          ? current
+          : { originOwner: owner, duration: durationSeconds },
+      );
+    }
+    if (Array.isArray(sourceInfo.tracks)) {
+      const tracks = normalizedServerAudioTracks(sourceInfo.tracks);
+      const defaults = tracks.filter((track) => track.default);
+      setKnownSourceAudio({
+        originOwner: owner,
+        tracks,
+        defaultTrack: defaults.length === 1 ? defaults[0]!.index : null,
+      });
+    }
+  }, []);
+  const rememberCurrentServerSourceInfo = useCallback(
+    (sourceInfo: ServerStreamSourceInfo) => {
+      const generation = sourceInfoGenerationRef.current;
+      rememberServerSourceInfo(playbackOwner, sourceInfo, generation);
+    },
+    [playbackOwner, rememberServerSourceInfo],
+  );
+
   useEffect(() => {
     const loadSourceInfo = serverOptimized?.loadSourceInfo;
     if (
@@ -1156,40 +1325,63 @@ export function VideoPlayer({
       return;
     }
     const owner = playbackOwner;
+    const generation = sourceInfoGenerationRef.current;
     sourceInfoLoadOwnerRef.current = owner;
+    const retry = {
+      owner,
+      generation,
+      timer: null as number | null,
+      controller: null as AbortController | null,
+      retryStarted: false,
+    };
+    sourceInfoRetryRef.current = retry;
     void promiseWithinTimeout(
-      Promise.resolve().then(loadSourceInfo),
+      Promise.resolve().then(() => loadSourceInfo()),
       SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS,
       "Source information timed out.",
     ).then((sourceInfo) => {
-      if (!playerMountedRef.current || playbackOwnerRef.current !== owner) return;
-      const durationSeconds = sourceInfo.durationSeconds;
-      if (
-        typeof durationSeconds === "number" &&
-        Number.isFinite(durationSeconds) &&
-        durationSeconds > 0 &&
-        durationSeconds <= MAX_SOURCE_DURATION_SECONDS
-      ) {
-        setKnownAbsoluteDuration((current) =>
-          current?.originOwner === owner
-            ? current
-            : { originOwner: owner, duration: durationSeconds },
-        );
-      }
-      const tracks = normalizedServerAudioTracks(sourceInfo.tracks);
-      if (tracks.length > 0) {
-        const defaults = tracks.filter((track) => track.default);
-        setKnownSourceAudio({
-          originOwner: owner,
-          tracks,
-          defaultTrack: defaults.length === 1 ? defaults[0].index : null,
-        });
-      }
-    }).catch(() => {
+      rememberServerSourceInfo(owner, sourceInfo, generation);
+    }).catch((error: unknown) => {
       // Source metadata is an optional enhancement. Playback remains usable
       // with an unknown total when probing is unavailable or times out.
+      if (
+        sourceInfoHttpStatus(error) !== 409 ||
+        sourceInfoRetryRef.current !== retry ||
+        !playerMountedRef.current ||
+        playbackOwnerRef.current !== owner ||
+        sourceInfoGenerationRef.current !== generation
+      ) {
+        if (sourceInfoRetryRef.current === retry) sourceInfoRetryRef.current = null;
+        return;
+      }
+      retry.timer = window.setTimeout(() => {
+        retry.timer = null;
+        if (
+          sourceInfoRetryRef.current !== retry ||
+          retry.retryStarted ||
+          !playerMountedRef.current ||
+          playbackOwnerRef.current !== owner ||
+          sourceInfoGenerationRef.current !== generation
+        ) {
+          return;
+        }
+        retry.retryStarted = true;
+        const controller = new AbortController();
+        retry.controller = controller;
+        // Do not wrap the server's extended retry lane in the ordinary eight
+        // second metadata budget. The server owns its 15-second retry probe.
+        void Promise.resolve().then(() => loadSourceInfo({
+          retryFailed: true,
+          signal: controller.signal,
+        })).then((sourceInfo) => {
+          rememberServerSourceInfo(owner, sourceInfo, generation);
+        }).catch(() => {
+          // A failed retry is terminal for this playback owner.
+          if (sourceInfoRetryRef.current === retry) sourceInfoRetryRef.current = null;
+        });
+      }, SERVER_SOURCE_INFO_RETRY_DELAY_MS);
     });
-  }, [mode, playbackOwner, serverOptimized?.loadSourceInfo]);
+  }, [mode, playbackOwner, rememberServerSourceInfo, serverOptimized?.loadSourceInfo]);
 
   const clearChromeTimer = useCallback(() => {
     window.clearTimeout(chromeHideTimer.current);
@@ -1271,6 +1463,7 @@ export function VideoPlayer({
     setSourceSize(null);
     setWebTechnicalStats([]);
     setDetailsSection(null);
+    setManualRecoveryPending(false);
   }, [effectiveUrl]);
 
   useEffect(() => {
@@ -1368,6 +1561,7 @@ export function VideoPlayer({
       handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
       audioTrack?: number,
       audioPreference?: AudioPreference,
+      positionIntent: ServerOptimizedPositionIntent = "follow-current",
     ) => {
       const owner = playbackOwner;
       if (
@@ -1378,6 +1572,9 @@ export function VideoPlayer({
       ) {
         return;
       }
+      const position = Number.isFinite(absolutePositionSeconds)
+        ? Math.max(0, absolutePositionSeconds)
+        : 0;
       const request = ++optimizationRequestSequenceRef.current;
       const controller = new AbortController();
       optimizationPendingRef.current?.controller.abort();
@@ -1390,9 +1587,6 @@ export function VideoPlayer({
       setServerOptimizationPending(true);
       setServerOptimizationError(null);
       try {
-        const position = Number.isFinite(absolutePositionSeconds)
-          ? Math.max(0, absolutePositionSeconds)
-          : 0;
         latestAbsolutePositionRef.current = position;
         // Resolve the job URL quickly, then give the trusted server manifest
         // the same cold-start budget as hls.js. Device Original remains active
@@ -1469,12 +1663,16 @@ export function VideoPlayer({
           throw new Error("The server did not return a playable HLS manifest.");
         }
         if (!ownsRequest()) return;
-        // Playback can advance while the manifest is warming. Keep the one
-        // server job and seek within its timeline at activation, rather than
-        // replacing it with a second transcode request.
+        // Ordinary quality switches follow playback while the manifest warms.
+        // An explicit out-of-window seek instead owns its requested position;
+        // a late clock event from the old media must not undo that user action.
+        const activationPosition = positionIntent === "fixed"
+          ? position
+          : latestAbsolutePositionRef.current;
+        latestAbsolutePositionRef.current = activationPosition;
         const activationStart = Math.max(
           0,
-          latestAbsolutePositionRef.current - next.timelineOffsetSeconds,
+          activationPosition - next.timelineOffsetSeconds,
         );
         const requestedHandoffState = typeof handoffState === "function"
           ? handoffState()
@@ -1484,13 +1682,14 @@ export function VideoPlayer({
         setFallbackSource(null);
         setSourceSwitchPosition({
           originOwner: owner,
-          position: latestAbsolutePositionRef.current,
+          position: activationPosition,
         });
         setSourceSwitchState(activationHandoffState);
         setOptimizedSource({
           ...next,
           audioTrack: preparedAudioTrack,
           audioPreference,
+          leaseTarget: serverHlsLeaseTarget(next.url, manifest),
           partialTimeline: /(?:^|\n)#EXT-X-PLAYLIST-TYPE:EVENT(?:\r?$|\s)/m.test(manifest),
           startPositionSeconds: activationStart,
           originOwner: owner,
@@ -1529,11 +1728,66 @@ export function VideoPlayer({
     recordDiagnostic("player", "server_optimized.disabled");
   }, [playbackOwner]);
 
+  // The deferred default is a startup policy, not a command. Only a current
+  // owner's explicit quality or mode control consumes it. Automatic seek,
+  // audio, and error-recovery switches continue through the raw callbacks.
+  const claimExplicitServerOptimizationChoice = useCallback(() => {
+    if (
+      !playerMountedRef.current ||
+      playbackOwnerRef.current !== playbackOwner
+    ) {
+      return false;
+    }
+    autoOptimizationAttemptedRef.current = playbackOwner;
+    return true;
+  }, [playbackOwner]);
+
+  const selectServerOptimized = useCallback((
+    quality: ServerTranscodeQuality,
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+    audioTrack?: number,
+    audioPreference?: AudioPreference,
+    positionIntent: ServerOptimizedPositionIntent = "follow-current",
+  ): Promise<void> => {
+    if (!claimExplicitServerOptimizationChoice()) return Promise.resolve();
+    return switchToServerOptimized(
+      quality,
+      absolutePositionSeconds,
+      handoffState,
+      audioTrack,
+      audioPreference,
+      positionIntent,
+    );
+  }, [claimExplicitServerOptimizationChoice, switchToServerOptimized]);
+
+  const selectDeviceOriginal = useCallback((
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState,
+  ) => {
+    if (!claimExplicitServerOptimizationChoice()) return;
+    switchToDeviceOriginal(absolutePositionSeconds, handoffState);
+  }, [claimExplicitServerOptimizationChoice, switchToDeviceOriginal]);
+
+  const updatePendingHandoffPaused = useCallback((paused: boolean) => {
+    if (
+      playbackOwnerRef.current !== playbackOwner ||
+      sourceSwitchPosition?.originOwner !== playbackOwner
+    ) return;
+    setSourceSwitchState((current) => {
+      if (current == null || current.paused === paused) return current;
+      return { ...current, paused };
+    });
+  }, [playbackOwner, sourceSwitchPosition?.originOwner]);
+
   useEffect(() => {
     const identity = playbackOwner;
     const quality = serverOptimized?.defaultQuality ?? null;
     if (
       quality == null ||
+      (originalSourceIsServerOptimized &&
+        (verifiedPlaybackProgressOwner !== playbackOwner ||
+          initialServerOptimizedQuality === quality)) ||
       activeOptimized != null ||
       serverOptimizationPending ||
       autoOptimizationAttemptedRef.current === identity
@@ -1544,10 +1798,13 @@ export function VideoPlayer({
     void switchToServerOptimized(quality, latestAbsolutePositionRef.current);
   }, [
     activeOptimized,
+    originalSourceIsServerOptimized,
+    initialServerOptimizedQuality,
     playbackOwner,
     serverOptimizationPending,
     serverOptimized?.defaultQuality,
     switchToServerOptimized,
+    verifiedPlaybackProgressOwner,
   ]);
 
   const handleWebviewPlaybackError = useCallback(
@@ -1565,15 +1822,20 @@ export function VideoPlayer({
               // Preserve pre-handoff play/pause intent only while that internal
               // pause is still active. After synchronization, the element's
               // latest pause state is user-owned like volume, mute, and speed.
-              paused: exactHandoffPending
+              // Cast suspension is another internal pause, so keep the owned
+              // intent until local playback is allowed to apply it.
+              paused: exactHandoffPending || castSuspended
                 ? activeSourceSwitchState?.paused ?? latestElementState.paused
                 : latestElementState.paused,
             };
         switchToDeviceOriginal(latestAbsolutePositionRef.current, restoredState);
+        const restoredCopy = originalSourceIsServerOptimized
+          ? "The previous stream was restored."
+          : "Device Original was restored.";
         setServerOptimizationError(
           exactHandoffPending
-            ? "Server Optimized could not synchronize. Device Original was restored."
-            : "Server Optimized failed after synchronization. Device Original was restored.",
+            ? `Server Optimized could not synchronize. ${restoredCopy}`
+            : `Server Optimized failed after synchronization. ${restoredCopy}`,
         );
         recordDiagnostic(
           "player",
@@ -1618,8 +1880,10 @@ export function VideoPlayer({
       activeFallback,
       activeOptimized,
       activeSourceSwitchState,
+      castSuspended,
       currentWebviewHandoffState,
       effectiveEngine,
+      originalSourceIsServerOptimized,
       playbackOwner,
       resolveWebviewFallbackForRequest,
       requestWebviewFallback,
@@ -2069,8 +2333,8 @@ export function VideoPlayer({
         activeServerOptimizedQuality={activeOptimized?.quality ?? null}
         serverOptimizationPending={serverOptimizationPending}
         serverOptimizationError={serverOptimizationError}
-        onSwitchServerOptimized={switchToServerOptimized}
-        onSwitchDeviceOriginal={switchToDeviceOriginal}
+        onSwitchServerOptimized={selectServerOptimized}
+        onSwitchDeviceOriginal={selectDeviceOriginal}
         onAbsolutePositionChange={reportAbsolutePosition}
         onOpenExternalPlayer={externalPlaybackAvailable ? openExternalPlayback : undefined}
         externalActionStatus={externalPlaybackAvailable ? externalActionStatus : null}
@@ -2095,7 +2359,7 @@ export function VideoPlayer({
     <div className="player-backdrop" onClick={onClose}>
       <div
         ref={playerDialogRef}
-        className="player"
+        className={`player${sharedTouchPlayer ? " is-touch-player" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={`Playing ${title}`}
@@ -2151,6 +2415,7 @@ export function VideoPlayer({
               tabIndex={hiddenWebChrome ? -1 : undefined}
             >
               <Icon name="info" size={17} />
+              <span className="player-bar-action-label">Details</span>
             </button>
             <button
               type="button"
@@ -2160,6 +2425,7 @@ export function VideoPlayer({
               tabIndex={hiddenWebChrome ? -1 : undefined}
             >
               <Icon name="xmark" size={18} />
+              <span className="player-bar-action-label">Close</span>
             </button>
           </div>
         </div>
@@ -2188,6 +2454,7 @@ export function VideoPlayer({
             subtitle={subtitle}
             nowPlaying={nowPlaying}
             detailsOpen={detailsSection != null}
+            touchPlayer={sharedTouchPlayer}
             chromeVisible={webChromeShown}
             onChromeEnter={holdChrome}
             onChromeLeave={releaseChrome}
@@ -2195,8 +2462,11 @@ export function VideoPlayer({
             onChromeBlur={blurChrome}
             onActivity={nudgeChrome}
             onPausedChange={setWebviewPaused}
+            onPendingHandoffPausedChange={updatePendingHandoffPaused}
+            onVerifiedPlaybackProgress={reportVerifiedPlaybackProgress}
             onCaptionsOpenChange={setCaptionsOpen}
             onMenuOpenChange={setWebMenuOpen}
+            onScrubbingChange={setWebScrubbing}
             onCastLocalPlaybackChange={setCastSuspended}
             suspended={castSuspended}
             onActiveSubtitleUrlChange={setActiveSubtitleUrl}
@@ -2215,11 +2485,14 @@ export function VideoPlayer({
               !initialServerOptimizedTimeline
               ? rememberAbsoluteDuration
               : undefined}
+            onServerSourceInfoKnown={rememberCurrentServerSourceInfo}
             sourceSwitchState={activeSourceSwitchState}
             exactHandoff={activeOptimized != null}
             optimizedTimelineIsPartial={activeOptimized?.partialTimeline ?? initialServerOptimizedTimeline}
             externalHandoffVideoRef={externalHandoffVideoRef}
             serverOptimized={serverOptimized}
+            preparedLeaseTarget={activeOptimized?.leaseTarget}
+            onServerLeaseExpired={expireServerGeneration}
             serverAudioOwner={playbackOwner}
             initialServerAudioTracks={activeKnownSourceAudio?.tracks}
             activeServerOptimizedQuality={activeOptimized?.quality ?? initialServerOptimizedQuality}
@@ -2231,7 +2504,8 @@ export function VideoPlayer({
             serverOptimizationPending={serverOptimizationPending}
             serverOptimizationError={serverOptimizationError}
             onSwitchServerOptimized={switchToServerOptimized}
-            onSwitchDeviceOriginal={switchToDeviceOriginal}
+            onSelectServerOptimized={selectServerOptimized}
+            onSelectDeviceOriginal={selectDeviceOriginal}
             onAbsolutePositionChange={reportAbsolutePosition}
             onPlaybackError={(message, exactHandoffPending) =>
               void handleWebviewPlaybackError(message, exactHandoffPending)
@@ -2276,7 +2550,9 @@ export function VideoPlayer({
             onTryNextSource={onTryNextSource}
             onRetry={
               mode === "webview" && externalError != null
-                ? lastStallContextRef.current != null && refreshCurrentSource != null
+                ? serverLeaseExpired && refreshCurrentSource == null
+                  ? undefined
+                  : lastStallContextRef.current != null && refreshCurrentSource != null
                   ? retryFreshStream
                   : () => {
                       recordDiagnostic("player", "webview.retry_requested");
@@ -2285,6 +2561,7 @@ export function VideoPlayer({
                     }
                 : undefined
             }
+            freshResolutionRequired={serverLeaseExpired}
             retryPending={manualRecoveryPending}
           />
         )}
@@ -2310,6 +2587,7 @@ function WebviewPlayer({
   subtitle,
   nowPlaying,
   detailsOpen,
+  touchPlayer,
   chromeVisible,
   onChromeEnter,
   onChromeLeave,
@@ -2317,8 +2595,11 @@ function WebviewPlayer({
   onChromeBlur,
   onActivity,
   onPausedChange,
+  onPendingHandoffPausedChange,
+  onVerifiedPlaybackProgress,
   onCaptionsOpenChange,
   onMenuOpenChange,
+  onScrubbingChange,
   onCastLocalPlaybackChange,
   suspended,
   onActiveSubtitleUrlChange,
@@ -2333,6 +2614,7 @@ function WebviewPlayer({
   timelineOffsetSeconds,
   knownAbsoluteDurationSeconds,
   onSourceDurationKnown,
+  onServerSourceInfoKnown,
   sourceSwitchState,
   exactHandoff,
   optimizedTimelineIsPartial,
@@ -2359,6 +2641,8 @@ function WebviewPlayer({
   autoCountdown = true,
   serverOptimized,
   serverAudioOwner,
+  preparedLeaseTarget,
+  onServerLeaseExpired,
   initialServerAudioTracks,
   activeServerOptimizedQuality,
   activeServerAudioTrack,
@@ -2367,7 +2651,8 @@ function WebviewPlayer({
   serverOptimizationPending,
   serverOptimizationError,
   onSwitchServerOptimized,
-  onSwitchDeviceOriginal,
+  onSelectServerOptimized,
+  onSelectDeviceOriginal,
   onAbsolutePositionChange,
 }: {
   url: string;
@@ -2376,6 +2661,7 @@ function WebviewPlayer({
   subtitle?: string | null;
   nowPlaying?: NowPlayingMetadata | null;
   detailsOpen: boolean;
+  touchPlayer: boolean;
   chromeVisible: boolean;
   onChromeEnter: () => void;
   onChromeLeave: () => void;
@@ -2383,8 +2669,11 @@ function WebviewPlayer({
   onChromeBlur: (event: React.FocusEvent<HTMLElement>) => void;
   onActivity: () => void;
   onPausedChange: (paused: boolean) => void;
+  onPendingHandoffPausedChange: (paused: boolean) => void;
+  onVerifiedPlaybackProgress: () => void;
   onCaptionsOpenChange: (open: boolean) => void;
   onMenuOpenChange: (open: boolean) => void;
+  onScrubbingChange: (scrubbing: boolean) => void;
   onCastLocalPlaybackChange: (suspended: boolean) => void;
   suspended: boolean;
   onActiveSubtitleUrlChange: (url: string | null) => void;
@@ -2409,6 +2698,7 @@ function WebviewPlayer({
   timelineOffsetSeconds: number;
   knownAbsoluteDurationSeconds: number | null;
   onSourceDurationKnown?: (durationSeconds: number) => void;
+  onServerSourceInfoKnown: (sourceInfo: ServerStreamSourceInfo) => void;
   sourceSwitchState: PlaybackHandoffState | null;
   exactHandoff: boolean;
   optimizedTimelineIsPartial: boolean;
@@ -2438,6 +2728,8 @@ function WebviewPlayer({
   autoCountdown?: boolean;
   serverOptimized?: VideoPlayerProps["serverOptimized"];
   serverAudioOwner: string;
+  preparedLeaseTarget?: string | null;
+  onServerLeaseExpired: (source: string, position: number, handoff: PlaybackHandoffState) => void;
   initialServerAudioTracks?: readonly ServerAudioTrack[];
   activeServerOptimizedQuality: ServerTranscodeQuality | null;
   activeServerAudioTrack: number | null;
@@ -2451,14 +2743,25 @@ function WebviewPlayer({
     handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
     audioTrack?: number,
     audioPreference?: AudioPreference,
+    positionIntent?: ServerOptimizedPositionIntent,
   ) => Promise<void>;
-  onSwitchDeviceOriginal: (
+  onSelectServerOptimized: (
+    quality: ServerTranscodeQuality,
+    absolutePositionSeconds: number,
+    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+    audioTrack?: number,
+    audioPreference?: AudioPreference,
+    positionIntent?: ServerOptimizedPositionIntent,
+  ) => Promise<void>;
+  onSelectDeviceOriginal: (
     absolutePositionSeconds: number,
     handoffState?: PlaybackHandoffState,
   ) => void;
   onAbsolutePositionChange: (absolutePositionSeconds: number) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const captionViewportRef = useRef<HTMLDivElement | null>(null);
+  const captionControlsRef = useRef<HTMLDivElement | null>(null);
   const setVideoElement = useCallback((element: HTMLVideoElement | null) => {
     videoRef.current = element;
     externalHandoffVideoRef.current = element;
@@ -2469,6 +2772,7 @@ function WebviewPlayer({
   playerPreferencesRef.current = playerPreferences;
   const appliedHlsAudioPreferenceRef = useRef(false);
   const appliedBrowserAudioPreferenceRef = useRef(false);
+  const reconcilingBrowserAudioSelectionRef = useRef(false);
   const audioPreferenceRef = useRef<AudioPreference>({ id: null, language: null });
   const serverAudioModeRef = useRef(serverOptimized?.loadAudioTracks != null);
   serverAudioModeRef.current = serverOptimized?.loadAudioTracks != null;
@@ -2504,6 +2808,17 @@ function WebviewPlayer({
   const previousPositionRef = useRef(0);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const optionsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const audioShortcutRef = useRef<HTMLButtonElement | null>(null);
+  const optionsOriginRef = useRef<"settings" | "audio" | null>(null);
+  const optionsWasOpenRef = useRef(false);
+  const optionsDialogRef = useModalA11y<HTMLDivElement>(
+    () => setOptionsOpen(false),
+    optionsOpen,
+  );
+  const nestedDialogOpen = optionsOpen || captionsOpen || detailsOpen;
+  const audioOptionsRequestedRef = useRef(false);
+  const audioHeadingRef = useRef<HTMLSpanElement | null>(null);
   const [videoFit, setVideoFit] = useState<"contain" | "cover" | "fill">("contain");
   const [videoZoom, setVideoZoom] = useState(1);
   const [videoPanX, setVideoPanX] = useState(0);
@@ -2535,6 +2850,12 @@ function WebviewPlayer({
   const requiresExactHandoffRef = useRef(requiresExactHandoff);
   requiresExactHandoffRef.current = requiresExactHandoff;
   const exactHandoffPendingRef = useRef(requiresExactHandoff);
+  const sourceSwitchStateRef = useRef(sourceSwitchState);
+  sourceSwitchStateRef.current = sourceSwitchState;
+  const pendingHandoffPlaybackIntentRef = useRef<"play" | "pause" | null>(null);
+  const verifiedPlaybackProgressReportedRef = useRef(false);
+  const verifiedPlaybackPlayingRef = useRef(false);
+  const lastObservedMediaTimeRef = useRef(0);
   const [playbackStatus, setPlaybackStatus] = useState<"starting" | "buffering" | "seeking" | null>(
     requiresExactHandoff ? "seeking" : "starting",
   );
@@ -2550,6 +2871,11 @@ function WebviewPlayer({
       : 1;
   });
   const [scrubbing, setScrubbing] = useState(false);
+  const updateScrubbing = useCallback((next: boolean) => {
+    setScrubbing(next);
+    onScrubbingChange(next);
+  }, [onScrubbingChange]);
+  useEffect(() => () => onScrubbingChange(false), [onScrubbingChange]);
   const rendererSeekingRef = useRef(false);
   const scrubbingRef = useRef(false);
   // Set when the video reaches its natural end - drives the Up-next card.
@@ -2604,6 +2930,8 @@ function WebviewPlayer({
     "idle" | "loading" | "ready" | "unavailable"
   >("idle");
   const serverAudioLoadSequenceRef = useRef(0);
+  const serverAudioLoadPendingRef = useRef(false);
+  const serverAudioLoadControllerRef = useRef<AbortController | null>(null);
   const serverAudioLoaderRef = useRef(serverOptimized?.loadAudioTracks);
   serverAudioLoaderRef.current = serverOptimized?.loadAudioTracks;
   const serverAudioLoaderAvailable = serverOptimized?.loadAudioTracks != null;
@@ -2612,22 +2940,182 @@ function WebviewPlayer({
     defaultServerAudioTracks.length === 1 ? defaultServerAudioTracks[0].index : null
   );
   const touchLikePointerRef = useRef(false);
+  const touchTapRef = useRef<{
+    zone: "back" | "forward";
+    at: number;
+    timer: number;
+  } | null>(null);
+  const touchFeedbackTimerRef = useRef<number | null>(null);
+  const [touchSeekFeedback, setTouchSeekFeedback] = useState<"back" | "forward" | null>(null);
   const volumeIsSilent = muted || volume === 0;
   const underTauri = isTauri();
   const mediaArtist = nowPlaying?.episodeLabel ?? subtitle ?? "";
   const mediaArtworkUrl = nowPlaying?.posterUrl ?? "";
 
+  const clearPendingTouchTap = useCallback(() => {
+    if (touchTapRef.current != null) {
+      window.clearTimeout(touchTapRef.current.timer);
+      touchTapRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
+    if (nestedDialogOpen || !touchPlayer) clearPendingTouchTap();
+  }, [clearPendingTouchTap, nestedDialogOpen, touchPlayer]);
+
+  useEffect(() => {
+    clearPendingTouchTap();
+  }, [clearPendingTouchTap, engine, serverAudioOwner, timelineOffsetSeconds, url]);
+
+  useEffect(() => () => {
+    clearPendingTouchTap();
+    if (touchFeedbackTimerRef.current != null) window.clearTimeout(touchFeedbackTimerRef.current);
+  }, [clearPendingTouchTap]);
+
+  const requestPlaybackState = useCallback((shouldPlay: boolean) => {
+    const video = videoRef.current;
+    if (video == null) return;
+    if (
+      exactHandoffPendingRef.current ||
+      (suspendedRef.current && pendingHandoffPlaybackIntentRef.current != null)
+    ) {
+      pendingHandoffPlaybackIntentRef.current = shouldPlay ? "play" : "pause";
+      onPendingHandoffPausedChange(!shouldPlay);
+      setPaused(!shouldPlay);
+      setPlaying(shouldPlay);
+      onPausedChange(!shouldPlay);
+      if (!shouldPlay && !video.paused) video.pause();
+      return;
+    }
+    if (shouldPlay) {
+      try {
+        void video.play().catch(() => {});
+      } catch {
+        // Older WebKit versions can throw synchronously instead of rejecting.
+      }
+    } else {
+      video.pause();
+    }
+  }, [onPausedChange, onPendingHandoffPausedChange]);
+
+  const applyDeferredHandoffPlayback = useCallback((
+    video: HTMLVideoElement,
+    shouldPlay: boolean,
+  ) => {
+    autoplayAttemptedRef.current = true;
+    setPaused(!shouldPlay);
+    setPlaying(shouldPlay);
+    onPausedChange(!shouldPlay);
+    if (shouldPlay && video.paused) {
+      try {
+        void video.play().catch(() => {});
+      } catch {
+        // Older WebKit versions can throw synchronously instead of rejecting.
+      }
+    } else if (!shouldPlay && !video.paused) {
+      video.pause();
+    }
+  }, [onPausedChange]);
+
+  const togglePlaybackState = useCallback(() => {
+    const video = videoRef.current;
+    if (video == null) return;
+    const pendingIntent = pendingHandoffPlaybackIntentRef.current;
+    const hasDeferredHandoffIntent = exactHandoffPendingRef.current ||
+      (suspendedRef.current && pendingIntent != null);
+    const wantsPlayback = hasDeferredHandoffIntent
+      ? pendingIntent === "play" ||
+        (pendingIntent == null && sourceSwitchStateRef.current?.paused !== true)
+      : !video.paused;
+    requestPlaybackState(!wantsPlayback);
+  }, [requestPlaybackState]);
+
+  const startServerAudioInventoryLoad = useCallback((retryFailed: boolean) => {
+    const load = serverAudioLoaderRef.current;
+    if (load == null || serverAudioLoadPendingRef.current) return;
+    const request = ++serverAudioLoadSequenceRef.current;
+    serverAudioLoadPendingRef.current = true;
+    setServerAudioInventoryStatus("loading");
+    const controller = retryFailed ? new AbortController() : null;
+    serverAudioLoadControllerRef.current?.abort();
+    serverAudioLoadControllerRef.current = controller;
+    let loading: Promise<ServerAudioTrack[]>;
+    try {
+      loading = retryFailed
+        ? load({
+            retryFailed: true,
+            signal: controller!.signal,
+            onSourceInfo: (sourceInfo) => {
+              if (serverAudioLoadSequenceRef.current === request) {
+                onServerSourceInfoKnown(sourceInfo);
+              }
+            },
+          })
+        : load();
+    } catch {
+      if (serverAudioLoadControllerRef.current === controller) {
+        serverAudioLoadControllerRef.current = null;
+      }
+      serverAudioLoadPendingRef.current = false;
+      if (serverAudioLoadSequenceRef.current === request) {
+        setServerAudioInventoryStatus("unavailable");
+      }
+      return;
+    }
+    void loading.then(
+      (tracks) => {
+        if (serverAudioLoadControllerRef.current === controller) {
+          serverAudioLoadControllerRef.current = null;
+        }
+        if (serverAudioLoadSequenceRef.current !== request) return;
+        serverAudioLoadPendingRef.current = false;
+        const choices = normalizedServerAudioTracks(tracks)
+          .map((track) => ({
+            index: track.index,
+            id: String(track.index),
+            label: audioTrackLabel(
+              track.label,
+              track.language,
+              `Audio ${track.index + 1}`,
+            ),
+            language: track.language?.trim() || null,
+            isDefault: track.default,
+          }));
+        setServerAudioTracks(choices);
+        setServerAudioInventoryStatus("ready");
+      },
+      () => {
+        if (serverAudioLoadControllerRef.current === controller) {
+          serverAudioLoadControllerRef.current = null;
+        }
+        if (serverAudioLoadSequenceRef.current === request) {
+          serverAudioLoadPendingRef.current = false;
+          setServerAudioInventoryStatus("unavailable");
+        }
+      },
+    );
+  }, [onServerSourceInfoKnown]);
+
+  useEffect(() => {
+    serverAudioLoadControllerRef.current?.abort();
+    serverAudioLoadControllerRef.current = null;
     serverAudioLoadSequenceRef.current += 1;
+    serverAudioLoadPendingRef.current = false;
     const choices = normalizedServerAudioTracks(initialServerAudioTracks).map((track) => ({
       index: track.index,
       id: String(track.index),
-      label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
+      label: audioTrackLabel(
+        track.label,
+        track.language,
+        `Audio ${track.index + 1}`,
+      ),
       language: track.language?.trim() || null,
       isDefault: track.default,
     }));
     setServerAudioTracks(choices);
-    setServerAudioInventoryStatus(choices.length > 0 ? "ready" : "idle");
+    setServerAudioInventoryStatus(
+      initialServerAudioTracks != null ? "ready" : "idle",
+    );
     // A successful optimized switch carries the audio preference that produced
     // this exact URL. Treat it like an explicit URL audio selection on remount,
     // otherwise stale saved preferences can immediately switch the new stream
@@ -2641,32 +3129,22 @@ function WebviewPlayer({
     serverAudioOwner,
   ]);
 
+  useEffect(() => () => {
+    serverAudioLoadSequenceRef.current += 1;
+    serverAudioLoadControllerRef.current?.abort();
+    serverAudioLoadControllerRef.current = null;
+  }, []);
+
   useEffect(() => {
-    const load = serverAudioLoaderRef.current;
-    if (!optionsOpen || load == null || serverAudioInventoryStatus !== "idle") return;
-    const request = ++serverAudioLoadSequenceRef.current;
-    setServerAudioInventoryStatus("loading");
-    void load().then(
-      (tracks) => {
-        if (serverAudioLoadSequenceRef.current !== request) return;
-        const choices = normalizedServerAudioTracks(tracks)
-          .map((track) => ({
-            index: track.index,
-            id: String(track.index),
-            label: track.label?.trim() || track.language?.trim() || `Audio ${track.index + 1}`,
-            language: track.language?.trim() || null,
-            isDefault: track.default,
-          }));
-        setServerAudioTracks(choices);
-        setServerAudioInventoryStatus("ready");
-      },
-      () => {
-        if (serverAudioLoadSequenceRef.current === request) {
-          setServerAudioInventoryStatus("unavailable");
-        }
-      },
-    );
-  }, [optionsOpen, serverAudioInventoryStatus, serverAudioLoaderAvailable, serverAudioOwner]);
+    if (!optionsOpen || !serverAudioLoaderAvailable || serverAudioInventoryStatus !== "idle") return;
+    startServerAudioInventoryLoad(false);
+  }, [
+    optionsOpen,
+    serverAudioInventoryStatus,
+    serverAudioLoaderAvailable,
+    serverAudioOwner,
+    startServerAudioInventoryLoad,
+  ]);
 
   if (serverOptimized != null && resolvedServerAudioTrack != null) {
     const selected = serverAudioTracks.find(
@@ -2764,34 +3242,389 @@ function WebviewPlayer({
     onCaptionsOpenChange(captionsOpen);
   }, [captionsOpen, onCaptionsOpenChange]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onMenuOpenChange(optionsOpen);
   }, [onMenuOpenChange, optionsOpen]);
 
   const subs = useSubtitleTracks(subtitleClient, translator);
+  const subsRef = useRef(subs);
+  subsRef.current = subs;
+  const [embeddedCaptionState, setEmbeddedCaptionState] = useState<
+    Omit<EmbeddedCaptions, "setActiveTrack">
+  >({ tracks: [], activeTrackId: null });
+  const captionControllerRef = useRef<{
+    refresh: () => void;
+    selectEmbedded: (id: string | null) => void;
+    selectDownloaded: (id: string | null) => void;
+    updateDownloaded: (id: string | null) => void;
+  } | null>(null);
+  const selectDownloadedCaption = useCallback((id: string | null) => {
+    captionControllerRef.current?.selectDownloaded(id);
+  }, []);
+  const selectEmbeddedCaption = useCallback((id: string | null) => {
+    captionControllerRef.current?.selectEmbedded(id);
+  }, []);
+
+  // Observe the media owner's actual subtitle inventory, including late HLS
+  // renditions and Safari TextTrackList changes. Downloaded tracks are owned by
+  // their <track> identity, never by a potentially colliding display label.
   useEffect(() => {
     const video = videoRef.current;
     if (video == null) return;
-    const apply = () => {
-      for (const track of Array.from(video.textTracks)) {
-        if (track.mode !== "showing" || track.cues == null) continue;
-        for (const cue of Array.from(track.cues)) {
-          const positioned = cue as TextTrackCue & {
-            line?: number | "auto";
-            snapToLines?: boolean;
-          };
-          positioned.snapToLines = false;
-          positioned.line = subtitlePosition;
-        }
+    const list = video.textTracks;
+    let active = true;
+    let updating = false;
+    let nextId = 0;
+    const identities = new WeakMap<object, string>();
+    const identity = (track: object, prefix: string) => {
+      let id = identities.get(track);
+      if (id == null) {
+        id = `${prefix}:${nextId++}`;
+        identities.set(track, id);
+      }
+      return id;
+    };
+    type Choice = {
+      id: string;
+      label: string;
+      language: string;
+      hlsIndex?: number;
+      textTrack?: TextTrack;
+      name: string;
+    };
+    let downloadedId = subsRef.current.activeTrackId;
+    let mode: "auto" | "off" | "embedded" | "downloaded" = "auto";
+    let preferencePending = true;
+    const ownedTrack = (track: TextTrack) =>
+      Array.from(video.querySelectorAll("track")).find(
+        (element) => element.track === track,
+      )?.dataset.subtitleTrackId ?? null;
+    const textTracks = () => Array.from(list).filter(
+      (track) => track.kind === "subtitles" || track.kind === "captions",
+    );
+    const label = (name: string, language: string) => {
+      const friendly = name.trim();
+      return /^subtitle[_ -]?\d+$/i.test(friendly)
+        ? "Embedded subtitles"
+        : friendly || language.trim() || "Embedded subtitles";
+    };
+    const inventory = (): Choice[] => {
+      const hlsChoices = (hlsRef.current?.subtitleTracks ?? []).map((track, index) => ({
+        id: identity(track, "hls"),
+        label: label(track.name ?? "", track.lang ?? ""),
+        name: track.name ?? "",
+        language: track.lang ?? "",
+        hlsIndex: index,
+      }));
+      const nativeChoices = textTracks().filter((track) =>
+        ownedTrack(track) == null && !hlsChoices.some((choice) =>
+          choice.name === track.label && choice.language === track.language,
+        ),
+      ).map((track) => ({
+        id: identity(track, "native"),
+        label: label(track.label, track.language),
+        name: track.label,
+        language: track.language,
+        textTrack: track,
+      }));
+      return [...hlsChoices, ...nativeChoices];
+    };
+    const setMode = (track: TextTrack, next: TextTrackMode) => {
+      if (track.mode !== next) track.mode = next;
+    };
+    const disableHls = () => {
+      const hls = hlsRef.current;
+      if (hls == null) return;
+      if (hls.subtitleDisplay) hls.subtitleDisplay = false;
+      if (hls.subtitleTrack !== -1) hls.subtitleTrack = -1;
+    };
+    const show = (choice: Choice) => {
+      const hls = hlsRef.current;
+      if (choice.hlsIndex != null && hls != null) {
+        hls.subtitleDisplay = true;
+        hls.subtitleTrack = choice.hlsIndex;
+      } else {
+        disableHls();
+      }
+      for (const track of textTracks()) {
+        const selected = ownedTrack(track) == null && (
+          track === choice.textTrack || (choice.hlsIndex != null &&
+            track.label === choice.name && track.language === choice.language)
+        );
+        setMode(track, selected ? "showing" : "disabled");
       }
     };
-    const tracks = Array.from(video.textTracks);
-    for (const track of tracks) track.addEventListener("cuechange", apply);
+    const refresh = () => {
+      if (!active || videoRef.current !== video || updating) return;
+      updating = true;
+      try {
+        const choices = inventory();
+        if (preferencePending && downloadedId == null) {
+          const preferences = playerPreferencesRef.current;
+          const remembered = preferences?.rememberPerTitleTrackChoices === false
+            ? null : savedPrefs?.preferredSubId;
+          const matchLanguage = (language: unknown) =>
+            findPreferredLanguageMatch(language, choices, (choice) => choice.language) ??
+            findPreferredLanguageMatch(language, choices, (choice) => choice.name);
+          const rememberedMatch = remembered === "no" ? null : matchLanguage(remembered);
+          const preferredMatch = preferences?.defaultSubtitleBehavior === "preferred"
+            ? matchLanguage(preferences.defaultSubtitleLanguage) : null;
+          const preferred = rememberedMatch ?? preferredMatch;
+          if (remembered === "no") {
+            mode = "off";
+            preferencePending = false;
+          } else if (preferred != null) {
+            mode = "embedded";
+            preferencePending = false;
+            show(preferred);
+          } else if (preferences?.defaultSubtitleBehavior === "off" ||
+            preferences?.defaultSubtitleBehavior === "preferred") {
+            // Do not substitute a manifest's unknown/default language when the
+            // requested language has not appeared. Keep listening for it.
+            mode = "off";
+          }
+        }
+        if (mode === "off" || mode === "downloaded") {
+          disableHls();
+          for (const track of textTracks()) {
+            const owner = ownedTrack(track);
+            setMode(track, owner != null && owner === downloadedId ? "showing" : "disabled");
+          }
+        }
+        const showing = textTracks().find((track) =>
+          ownedTrack(track) == null && track.mode === "showing",
+        );
+        const hls = hlsRef.current;
+        const selected = showing != null
+          ? choices.find((choice) => choice.textTrack === showing || (
+            choice.hlsIndex != null && choice.name === showing.label &&
+            choice.language === showing.language
+          ))
+          : choices.find((choice) => choice.hlsIndex != null &&
+            choice.hlsIndex === hls?.subtitleTrack && hls.subtitleDisplay &&
+            !textTracks().some((track) => ownedTrack(track) == null &&
+              track.label === choice.name && track.language === choice.language),
+          );
+        const next = {
+          tracks: choices.map(({ id, label }) => ({ id, label })),
+          activeTrackId: selected?.id ?? null,
+        };
+        setEmbeddedCaptionState((previous) =>
+          JSON.stringify(previous) === JSON.stringify(next) ? previous : next,
+        );
+      } finally {
+        updating = false;
+      }
+    };
+    const controller = {
+      refresh,
+      selectEmbedded: (id: string | null) => {
+        if (!active || videoRef.current !== video) return;
+        const choice = id == null ? null : inventory().find((track) => track.id === id);
+        if (id != null && choice == null) return;
+        preferencePending = false;
+        downloadedId = null;
+        mode = choice == null ? "off" : "embedded";
+        updating = true;
+        try {
+          subsRef.current.setActiveTrack(null);
+          if (choice != null) show(choice);
+        } finally {
+          updating = false;
+        }
+        refresh();
+      },
+      selectDownloaded: (id: string | null) => {
+        if (!active || videoRef.current !== video) return;
+        preferencePending = false;
+        downloadedId = id;
+        mode = id == null ? "off" : "downloaded";
+        subsRef.current.setActiveTrack(id);
+        refresh();
+      },
+      updateDownloaded: (id: string | null) => {
+        if (!active) return;
+        if (id != null) {
+          preferencePending = false;
+          mode = "downloaded";
+        } else if (downloadedId != null) {
+          mode = "off";
+        }
+        downloadedId = id;
+        refresh();
+      },
+    };
+    captionControllerRef.current = controller;
+    for (const event of ["addtrack", "removetrack", "change"]) {
+      list.addEventListener?.(event, refresh);
+    }
+    video.addEventListener("loadedmetadata", refresh);
+    refresh();
+    return () => {
+      active = false;
+      for (const event of ["addtrack", "removetrack", "change"]) {
+        list.removeEventListener?.(event, refresh);
+      }
+      video.removeEventListener("loadedmetadata", refresh);
+      if (captionControllerRef.current === controller) captionControllerRef.current = null;
+    };
+  }, [engine, url]);
+  useEffect(() => {
+    captionControllerRef.current?.updateDownloaded(subs.activeTrackId);
+  }, [subs.activeTrackId, subs.tracks]);
+
+  const captionLayoutOptionsRef = useRef({ chromeVisible, videoFit, videoZoom, subtitlePosition });
+  captionLayoutOptionsRef.current = { chromeVisible, videoFit, videoZoom, subtitlePosition };
+  const refreshCaptionLayoutRef = useRef<(() => void) | null>(null);
+  useLayoutEffect(() => {
+    const video = videoRef.current;
+    const viewport = captionViewportRef.current;
+    const controls = captionControlsRef.current;
+    if (video == null || viewport == null) return;
+    let active = true;
+    let nativeFullscreen = false;
+    type PositionedCue = TextTrackCue & Pick<VTTCue,
+      "line" | "snapToLines" | "lineAlign" | "position" | "positionAlign" | "size" | "vertical" | "region" | "text">;
+    type Geometry = Pick<PositionedCue, "line" | "snapToLines" | "lineAlign" | "position" | "positionAlign" | "size">;
+    const originals = new Map<PositionedCue, { track: TextTrack; geometry: Geometry }>();
+    const trackListeners = new Map<TextTrack, () => void>();
+    const oldFont = video.style.getPropertyValue("--player-caption-font-size");
+    const restore = (cue: PositionedCue, geometry: Geometry) => {
+      try { Object.assign(cue, geometry); } catch { /* A browser may have disposed an expired native cue. */ }
+    };
+    const apply = () => {
+      if (!active || videoRef.current !== video || !video.isConnected) return;
+      const tracks = new Set(Array.from(video.textTracks));
+      for (const [track, listener] of trackListeners) {
+        if (tracks.has(track)) continue;
+        track.removeEventListener("cuechange", listener);
+        trackListeners.delete(track);
+      }
+      for (const track of tracks) {
+        if (!trackListeners.has(track)) {
+          track.addEventListener("cuechange", apply);
+          trackListeners.set(track, apply);
+        }
+      }
+      const currentCues = new Set<PositionedCue>();
+      for (const track of tracks) {
+        if (track.mode !== "showing" || !["subtitles", "captions"].includes(track.kind)) continue;
+        for (const cue of Array.from(track.cues ?? [])) {
+          if (!("line" in cue) || !("snapToLines" in cue)) continue;
+          const positioned = cue as PositionedCue;
+          currentCues.add(positioned);
+          if (!originals.has(positioned)) {
+            originals.set(positioned, { track, geometry: {
+              line: positioned.line, snapToLines: positioned.snapToLines,
+              lineAlign: positioned.lineAlign, position: positioned.position,
+              positionAlign: positioned.positionAlign, size: positioned.size,
+            } });
+          }
+        }
+      }
+      for (const [cue, original] of originals) {
+        if (currentCues.has(cue)) continue;
+        restore(cue, original.geometry);
+        originals.delete(cue);
+      }
+      const nativeMode = (video as WebKitVideoElement).webkitPresentationMode;
+      if (nativeFullscreen || document.pictureInPictureElement === video ||
+          (nativeMode != null && nativeMode !== "inline")) {
+        // Browser-owned presentation has no measurable inline cue viewport.
+        for (const [cue, original] of originals) restore(cue, original.geometry);
+        if (oldFont) video.style.setProperty("--player-caption-font-size", oldFont);
+        else video.style.removeProperty("--player-caption-font-size");
+        return;
+      }
+      const options = captionLayoutOptionsRef.current;
+      const rootStyle = getComputedStyle(document.documentElement);
+      const fontScale = Number.parseFloat(rootStyle.getPropertyValue("--sub-font-scale"));
+      const fullscreen = document.fullscreenElement ?? (document as WebKitDocument).webkitFullscreenElement;
+      const box = (fullscreen?.contains(video) ? fullscreen : viewport).getBoundingClientRect();
+      const controlsVisible = options.chromeVisible &&
+        (fullscreen == null || (controls != null && fullscreen.contains(controls)));
+      const visual = window.visualViewport;
+      let visible: CaptionRect = box;
+      if (visual != null && visual.width > 0 && visual.height > 0) {
+        const left = Math.max(box.left, visual.offsetLeft);
+        const top = Math.max(box.top, visual.offsetTop);
+        visible = { left, top,
+          width: Math.min(box.right, visual.offsetLeft + visual.width) - left,
+          height: Math.min(box.bottom, visual.offsetTop + visual.height) - top,
+        };
+      }
+      const bounds = {
+        video: video.getBoundingClientRect(), viewport: visible,
+        controls: controlsVisible ? controls?.getBoundingClientRect() : null,
+        mediaWidth: video.videoWidth, mediaHeight: video.videoHeight,
+        fit: options.videoFit, position: options.subtitlePosition,
+        fontScale, zoom: options.videoZoom,
+      };
+      for (const [cue, original] of originals) {
+        // Safari (and hls.js on Safari) can expose automatic defaults as -1/50.
+        // A literal authored -1/50 is indistinguishable from those defaults.
+        // Other authored line/vertical/region/position layouts remain authored.
+        const geometry = original.geometry;
+        const automaticLine = geometry.line === "auto" ||
+          (geometry.line === -1 && geometry.snapToLines && geometry.lineAlign === "start");
+        if (!automaticLine || cue.vertical || cue.region != null ||
+            (geometry.position !== "auto" && geometry.position !== 50) || geometry.size !== 100) continue;
+        const layout = captionLayout({ ...bounds, text: cue.text });
+        if (layout == null) { restore(cue, geometry); continue; }
+        video.style.setProperty("--player-caption-font-size", `${layout.fontSize}px`);
+        cue.snapToLines = false;
+        cue.line = layout.line;
+        cue.lineAlign = layout.lineAlign;
+        cue.position = layout.position;
+        cue.positionAlign = "center";
+        cue.size = layout.size;
+      }
+    };
+    const beginNativeFullscreen = () => { nativeFullscreen = true; apply(); };
+    const endNativeFullscreen = () => { nativeFullscreen = false; apply(); };
+    refreshCaptionLayoutRef.current = apply;
+    const list = video.textTracks;
+    for (const event of ["addtrack", "removetrack", "change"]) list.addEventListener?.(event, apply);
+    for (const event of ["loadedmetadata", "resize", "enterpictureinpicture", "leavepictureinpicture", "webkitpresentationmodechanged"]) video.addEventListener(event, apply);
+    video.addEventListener("webkitbeginfullscreen", beginNativeFullscreen);
+    video.addEventListener("webkitendfullscreen", endNativeFullscreen);
+    for (const event of ["resize", "orientationchange"]) window.addEventListener(event, apply);
+    document.addEventListener("fullscreenchange", apply);
+    document.addEventListener("webkitfullscreenchange", apply);
+    const visual = window.visualViewport;
+    visual?.addEventListener("resize", apply);
+    visual?.addEventListener("scroll", apply);
+    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(apply);
+    resize?.observe(viewport);
+    resize?.observe(video);
+    if (controls != null) resize?.observe(controls);
+    const appearance = new MutationObserver(apply);
+    appearance.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "class"] });
     apply();
     return () => {
-      for (const track of tracks) track.removeEventListener("cuechange", apply);
+      active = false;
+      if (refreshCaptionLayoutRef.current === apply) refreshCaptionLayoutRef.current = null;
+      for (const event of ["addtrack", "removetrack", "change"]) list.removeEventListener?.(event, apply);
+      for (const event of ["loadedmetadata", "resize", "enterpictureinpicture", "leavepictureinpicture", "webkitpresentationmodechanged"]) video.removeEventListener(event, apply);
+      video.removeEventListener("webkitbeginfullscreen", beginNativeFullscreen);
+      video.removeEventListener("webkitendfullscreen", endNativeFullscreen);
+      for (const event of ["resize", "orientationchange"]) window.removeEventListener(event, apply);
+      document.removeEventListener("fullscreenchange", apply);
+      document.removeEventListener("webkitfullscreenchange", apply);
+      visual?.removeEventListener("resize", apply);
+      visual?.removeEventListener("scroll", apply);
+      resize?.disconnect();
+      appearance.disconnect();
+      for (const [track, listener] of trackListeners) track.removeEventListener("cuechange", listener);
+      for (const [cue, original] of originals) restore(cue, original.geometry);
+      if (oldFont) video.style.setProperty("--player-caption-font-size", oldFont);
+      else video.style.removeProperty("--player-caption-font-size");
     };
-  }, [subtitlePosition, subs.activeTrackId]);
+  }, [engine, url]);
+  useLayoutEffect(() => {
+    refreshCaptionLayoutRef.current?.();
+  }, [chromeVisible, videoFit, videoZoom, videoPanX, videoPanY, subtitlePosition,
+    subs.activeTrackId, subs.tracks, embeddedCaptionState]);
   useEffect(() => {
     const activeTrack = subs.tracks.find(
       (track) => track.id === subs.activeTrackId,
@@ -2812,11 +3645,18 @@ function WebviewPlayer({
       video.pause();
       return;
     }
+    const deferredIntent = pendingHandoffPlaybackIntentRef.current;
+    if (!exactHandoffPendingRef.current && deferredIntent != null) {
+      pendingHandoffPlaybackIntentRef.current = null;
+      pausedForCastRef.current = false;
+      applyDeferredHandoffPlayback(video, deferredIntent === "play");
+      return;
+    }
     if (pausedForCastRef.current) {
       pausedForCastRef.current = false;
       void video.play().catch(() => {});
     }
-  }, [suspended]);
+  }, [applyDeferredHandoffPlayback, suspended]);
   // Thumbnails only work on a progressive source the browser can re-open and
   // seek (MP4/WebM). For HLS the manifest URL can't drive a second <video>
   // reliably, so gate them to non-HLS in-webview sources.
@@ -2839,6 +3679,7 @@ function WebviewPlayer({
     setBrowserAudioTracks([]);
     setBrowserAudioTrack(-1);
     setBrowserAudioApiAvailable(listEventsAvailable);
+    reconcilingBrowserAudioSelectionRef.current = false;
     if (list == null || !listEventsAvailable) return;
 
     const trackAt = (index: number): BrowserAudioTrack | null =>
@@ -2851,31 +3692,56 @@ function WebviewPlayer({
         next.push({
           index,
           id: track.id?.trim() || String(index),
-          label:
-            track.label?.trim() ||
-            track.language?.trim() ||
+          label: audioTrackLabel(
+            track.label,
+            track.language,
             `Audio ${index + 1}`,
+          ),
           language: track.language?.trim() || null,
         });
       }
       return next;
     };
     const selectTrack = (index: number, available: HlsAudioChoice[]) => {
-      for (let candidate = 0; candidate < list.length; candidate += 1) {
-        const track = trackAt(candidate);
-        if (track != null) track.enabled = candidate === index;
-      }
       const selected = available.find((track) => track.index === index) ?? null;
       setBrowserAudioTrack(selected?.index ?? -1);
       audioPreferenceRef.current = {
         id: selected?.id ?? null,
         language: selected?.language ?? null,
       };
+      reconcilingBrowserAudioSelectionRef.current = true;
+      try {
+        for (let candidate = 0; candidate < list.length; candidate += 1) {
+          const track = trackAt(candidate);
+          const shouldEnable = candidate === index;
+          if (track != null && track.enabled !== shouldEnable) {
+            track.enabled = shouldEnable;
+          }
+        }
+      } finally {
+        reconcilingBrowserAudioSelectionRef.current = false;
+      }
     };
     const sync = () => {
+      if (reconcilingBrowserAudioSelectionRef.current) return;
       const available = choices();
       setBrowserAudioTracks(available);
-      let selected = available.find((choice) => trackAt(choice.index)?.enabled) ?? null;
+      const enabled = available.filter((choice) => trackAt(choice.index)?.enabled);
+      let selected = enabled[0] ?? null;
+      if (enabled.length > 1 && appliedBrowserAudioPreferenceRef.current) {
+        const preference = audioPreferenceRef.current;
+        const previous =
+          available.find((track) => track.id === preference.id) ??
+          findPreferredLanguageMatch(
+            preference.language,
+            available,
+            (track) => track.language,
+          );
+        if (previous != null) {
+          selectTrack(previous.index, available);
+          return;
+        }
+      }
       if (!appliedBrowserAudioPreferenceRef.current && available.length > 0) {
         const preferences = playerPreferencesRef.current;
         const perTitlePrefs = preferences?.rememberPerTitleTrackChoices === false
@@ -2901,7 +3767,7 @@ function WebviewPlayer({
         if (match != null) {
           appliedBrowserAudioPreferenceRef.current = true;
           selectTrack(match.index, available);
-          selected = match;
+          return;
         }
       }
       setBrowserAudioTrack(selected?.index ?? -1);
@@ -2917,6 +3783,7 @@ function WebviewPlayer({
     list.addEventListener("change", sync);
     video.addEventListener("loadedmetadata", sync);
     return () => {
+      reconcilingBrowserAudioSelectionRef.current = false;
       list.removeEventListener("addtrack", sync);
       list.removeEventListener("removetrack", sync);
       list.removeEventListener("change", sync);
@@ -2991,7 +3858,9 @@ function WebviewPlayer({
       absoluteSeekRef.current(time);
     };
     const currentAbsolutePosition = () => video.currentTime + (
-      knownAbsoluteDurationRef.current == null ? 0 : timelineOffsetRef.current
+      knownAbsoluteDurationRef.current != null || optimizedTimelineIsPartial
+        ? timelineOffsetRef.current
+        : 0
     );
     const setActionHandler = (
       action: MediaSessionAction,
@@ -3010,16 +3879,16 @@ function WebviewPlayer({
     setPlaybackState();
     setPositionState(true);
     setActionHandler("play", () => {
-      void video.play().catch(() => {});
+      requestPlaybackState(true);
     });
-    setActionHandler("pause", () => video.pause());
+    setActionHandler("pause", () => requestPlaybackState(false));
     setActionHandler("seekbackward", () => seek(currentAbsolutePosition() - 10));
     setActionHandler("seekforward", () => seek(currentAbsolutePosition() + 10));
     setActionHandler("seekto", (details) => {
       if (details.seekTime != null) seek(details.seekTime);
     });
     setActionHandler("stop", () => {
-      video.pause();
+      requestPlaybackState(false);
       seek(0);
     });
 
@@ -3049,7 +3918,14 @@ function WebviewPlayer({
         // The session can already be invalidated during a browser teardown.
       }
     };
-  }, [mediaArtist, mediaArtworkUrl, optimizedTimelineIsPartial, title, url]);
+  }, [
+    mediaArtist,
+    mediaArtworkUrl,
+    optimizedTimelineIsPartial,
+    requestPlaybackState,
+    title,
+    url,
+  ]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -3093,7 +3969,9 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     const webkitVideo = video as WebKitVideoElement;
-    const supportsStandardPiP = document.pictureInPictureEnabled === true;
+    const supportsStandardPiP =
+      document.pictureInPictureEnabled === true &&
+      typeof video.requestPictureInPicture === "function";
     const supportsWebKitPiP = typeof webkitVideo.webkitSetPresentationMode === "function";
     setPictureInPictureSupported(supportsStandardPiP || supportsWebKitPiP);
 
@@ -3192,8 +4070,7 @@ function WebviewPlayer({
   // once, when metadata first loads, without re-subscribing the effect.
   const startPositionRef = useRef(startPositionSeconds);
   startPositionRef.current = startPositionSeconds;
-  const sourceSwitchStateRef = useRef(sourceSwitchState);
-  sourceSwitchStateRef.current = sourceSwitchState;
+  const nativeExactHlsFragmentRef = useRef(false);
   const timelineOffsetRef = useRef(
     Number.isFinite(timelineOffsetSeconds)
       ? Math.max(0, timelineOffsetSeconds)
@@ -3202,6 +4079,8 @@ function WebviewPlayer({
   timelineOffsetRef.current = Number.isFinite(timelineOffsetSeconds)
     ? Math.max(0, timelineOffsetSeconds)
     : 0;
+  const optimizedTimelineIsPartialRef = useRef(optimizedTimelineIsPartial);
+  optimizedTimelineIsPartialRef.current = optimizedTimelineIsPartial;
   const knownAbsoluteDurationRef = useRef<number | null>(null);
   knownAbsoluteDurationRef.current = knownAbsoluteDurationSeconds != null &&
     Number.isFinite(knownAbsoluteDurationSeconds) &&
@@ -3328,6 +4207,12 @@ function WebviewPlayer({
     if (video == null) return;
     didSeekRef.current = false;
     exactHandoffPendingRef.current = requiresExactHandoffRef.current;
+    pendingHandoffPlaybackIntentRef.current = null;
+    verifiedPlaybackProgressReportedRef.current = false;
+    verifiedPlaybackPlayingRef.current = false;
+    lastObservedMediaTimeRef.current = Number.isFinite(video.currentTime)
+      ? video.currentTime
+      : 0;
     onSourceSizeRef.current(null);
 
     const report = () => {
@@ -3370,19 +4255,28 @@ function WebviewPlayer({
       startupReadyRef.current = true;
       setPlaybackStatus(null);
       const handoff = sourceSwitchStateRef.current;
-      if (!suspendedRef.current && handoff?.paused !== true && video.paused) {
-        autoplayAttemptedRef.current = true;
-        try {
-          void video.play().catch(() => {});
-        } catch {
-          // Older WebKit versions can throw synchronously instead of rejecting.
-        }
+      const pendingIntent = pendingHandoffPlaybackIntentRef.current;
+      const shouldPlay = pendingIntent === "play" ||
+        (pendingIntent == null && handoff?.paused !== true);
+      if (suspendedRef.current) {
+        setPaused(!shouldPlay);
+        setPlaying(shouldPlay);
+        onPausedChange(!shouldPlay);
+        pendingHandoffPlaybackIntentRef.current = shouldPlay ? "play" : "pause";
+        return;
       }
+      pendingHandoffPlaybackIntentRef.current = null;
+      applyDeferredHandoffPlayback(video, shouldPlay);
     };
     const confirmExactHandoff = () => {
       if (!exactHandoffPendingRef.current) return true;
       const target = exactTarget();
-      if (!targetIsAvailable(target) || !targetWasReached(target)) return false;
+      if (
+        video.seeking ||
+        video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+        !targetIsAvailable(target) ||
+        !targetWasReached(target)
+      ) return false;
       finishExactHandoff();
       return true;
     };
@@ -3398,6 +4292,17 @@ function WebviewPlayer({
         startupReadyRef.current = true;
       }
       onAbsolutePositionChange(video.currentTime + timelineOffsetRef.current);
+      const previousMediaTime = lastObservedMediaTimeRef.current;
+      lastObservedMediaTimeRef.current = video.currentTime;
+      if (
+        !verifiedPlaybackProgressReportedRef.current &&
+        verifiedPlaybackPlayingRef.current &&
+        !video.paused &&
+        video.currentTime > previousMediaTime + 0.01
+      ) {
+        verifiedPlaybackProgressReportedRef.current = true;
+        onVerifiedPlaybackProgress();
+      }
       scrubberRef.current?.setCurrentTime(
         knownAbsoluteDurationRef.current == null
           ? video.currentTime
@@ -3442,6 +4347,11 @@ function WebviewPlayer({
         if (confirmExactHandoff()) return;
         setPlaybackStatus("seeking");
         video.pause();
+        // Native WebKit HLS gets its exact initial position through a temporal
+        // media fragment. Let WebKit apply that fragment once current data is
+        // available instead of issuing an earlier seek that HLS startup can
+        // overwrite with the live edge.
+        if (nativeExactHlsFragmentRef.current) return;
         if (!targetIsAvailable(start)) return;
         try {
           video.currentTime = start;
@@ -3557,17 +4467,35 @@ function WebviewPlayer({
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
     const onPause = () => {
+      verifiedPlaybackPlayingRef.current = false;
+      if (exactHandoffPendingRef.current) {
+        const pendingIntent = pendingHandoffPlaybackIntentRef.current;
+        const shouldPlay = pendingIntent === "play" ||
+          (pendingIntent == null && sourceSwitchStateRef.current?.paused !== true);
+        setPaused(!shouldPlay);
+        setPlaying(shouldPlay);
+        onPausedChange(!shouldPlay);
+        return;
+      }
       setPaused(true);
       setPlaying(false);
       onPausedChange(true);
-      if (!exactHandoffPendingRef.current && !video.ended && scrobbleContext != null) {
+      if (!video.ended && scrobbleContext != null) {
         scrobblePlaybackPause(scrobbleContext, progressPct());
       }
     };
     const onPlay = () => {
       if (suspendedRef.current || exactHandoffPendingRef.current) {
         video.pause();
-        if (exactHandoffPendingRef.current) setPlaybackStatus("seeking");
+        if (exactHandoffPendingRef.current) {
+          const pendingIntent = pendingHandoffPlaybackIntentRef.current;
+          const shouldPlay = pendingIntent === "play" ||
+            (pendingIntent == null && sourceSwitchStateRef.current?.paused !== true);
+          setPaused(!shouldPlay);
+          setPlaying(shouldPlay);
+          onPausedChange(!shouldPlay);
+          setPlaybackStatus("seeking");
+        }
         return;
       }
       setPaused(false);
@@ -3595,6 +4523,10 @@ function WebviewPlayer({
         setPlaybackStatus("seeking");
         return;
       }
+      verifiedPlaybackPlayingRef.current = true;
+      lastObservedMediaTimeRef.current = Number.isFinite(video.currentTime)
+        ? video.currentTime
+        : 0;
       startupReadyRef.current = true;
       setPlaybackStatus(null);
     };
@@ -3665,6 +4597,7 @@ function WebviewPlayer({
     onPausedChange(handoff?.paused ?? false);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("loadedmetadata", onLoadedMeta);
+    video.addEventListener("loadeddata", applyResume);
     video.addEventListener("durationchange", onDurationChange);
     video.addEventListener("seeked", onSeekedForResume);
     video.addEventListener("progress", onProgressForResume);
@@ -3680,8 +4613,10 @@ function WebviewPlayer({
     video.addEventListener("volumechange", onVolumeChange);
     video.addEventListener("ratechange", onRateChange);
     return () => {
+      pendingHandoffPlaybackIntentRef.current = null;
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("loadedmetadata", onLoadedMeta);
+      video.removeEventListener("loadeddata", applyResume);
       video.removeEventListener("durationchange", onDurationChange);
       video.removeEventListener("seeked", onSeekedForResume);
       video.removeEventListener("progress", onProgressForResume);
@@ -3703,7 +4638,14 @@ function WebviewPlayer({
       ) report();
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
-  }, [onAbsolutePositionChange, onPausedChange, scrobbleContext, url]);
+  }, [
+    applyDeferredHandoffPlayback,
+    onAbsolutePositionChange,
+    onPausedChange,
+    onVerifiedPlaybackProgress,
+    scrobbleContext,
+    url,
+  ]);
 
   useEffect(() => {
     startupReadyRef.current = false;
@@ -3727,10 +4669,124 @@ function WebviewPlayer({
     };
   }, [engine, suspended, url]);
 
+  const needsServerPreparation = isHls && serverOptimized != null && isTrustedServerHlsManifestURL(url);
+  const [initialLeasePreparation, setInitialLeasePreparation] = useState<{ source: string; target: string | null } | null>(null);
+  const leasePreparationReady = !needsServerPreparation || preparedLeaseTarget !== undefined || initialLeasePreparation?.source === url;
+  const leaseTarget = preparedLeaseTarget !== undefined
+    ? preparedLeaseTarget
+    : initialLeasePreparation?.source === url ? initialLeasePreparation.target : null;
+  const leaseExpiredCallbackRef = useRef(onServerLeaseExpired);
+  useLayoutEffect(() => {
+    leaseExpiredCallbackRef.current = onServerLeaseExpired;
+  }, [onServerLeaseExpired]);
+  const stopLeaseRef = useRef<() => void>(() => {});
+  const leaseLastAttemptRef = useRef<{ target: string; at: number } | null>(null);
+
+  useEffect(() => {
+    if (!needsServerPreparation || preparedLeaseTarget !== undefined) return;
+    const video = videoRef.current;
+    const controller = new AbortController();
+    let active = true;
+    const owns = () => active && !controller.signal.aborted && videoRef.current === video;
+    const deadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
+    void (async () => {
+      let delay = SERVER_OPTIMIZED_RETRY_BASE_MS;
+      while (owns()) {
+        const response = await promiseWithinTimeout(fetch(url, {
+          credentials: "include", cache: "no-store", redirect: "error",
+          headers: { accept: "application/vnd.apple.mpegurl" }, signal: controller.signal,
+        }), Math.max(1, deadline - Date.now()), "Server optimized playback timed out.", () => controller.abort());
+        if (!owns()) return;
+        if ((response.status === 503 || response.status === 504) && Date.now() < deadline) {
+          await abortableDelay(Math.min(delay, Math.max(1, deadline - Date.now())), controller.signal);
+          delay = Math.min(delay * 2, SERVER_OPTIMIZED_RETRY_MAX_MS);
+          if (Date.now() >= deadline) throw new Error("Server optimized playback timed out.");
+          continue;
+        }
+        if (!response.ok) throw new Error(`The server could not prepare playback (${response.status}).`);
+        const manifest = await promiseWithinTimeout(response.text(), Math.max(1, deadline - Date.now()),
+          "Server optimized playback timed out.", () => controller.abort());
+        if (!owns()) return;
+        if (!manifest.startsWith("#EXTM3U")) throw new Error("The server did not return a playable HLS manifest.");
+        setInitialLeasePreparation({ source: url, target: serverHlsLeaseTarget(url, manifest) });
+        return;
+      }
+    })().catch((error: unknown) => {
+      if (active && videoRef.current === video) {
+        onPlaybackErrorRef.current(error instanceof Error ? error.message : "Server playback preparation failed.", exactHandoffPendingRef.current);
+      }
+    });
+    return () => { active = false; controller.abort(); };
+  }, [needsServerPreparation, preparedLeaseTarget, url]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video == null || !leasePreparationReady || leaseTarget == null || suspended || ended || serverOptimizationPending) return;
+    let active = true;
+    let dormant = false;
+    let terminal = false;
+    let timer: number | undefined;
+    let controller: AbortController | null = null;
+    let lastAttempt = leaseLastAttemptRef.current?.target === leaseTarget
+      ? leaseLastAttemptRef.current.at : -Infinity;
+    const owns = () => active && videoRef.current === video;
+    const stop = () => {
+      terminal = true;
+      window.clearTimeout(timer);
+      controller?.abort();
+    };
+    stopLeaseRef.current = stop;
+    const expired = () => {
+      stop();
+      leaseExpiredCallbackRef.current(url, Math.max(0, video.currentTime + timelineOffsetRef.current), {
+        paused: video.paused, volume: video.volume, muted: video.muted, playbackRate: video.playbackRate,
+      });
+    };
+    const renew = async () => {
+      if (!owns() || dormant || terminal || controller != null) return;
+      window.clearTimeout(timer);
+      const remaining = 30_000 - (Date.now() - lastAttempt);
+      if (remaining > 0) { timer = window.setTimeout(() => void renew(), remaining); return; }
+      lastAttempt = Date.now();
+      leaseLastAttemptRef.current = { target: leaseTarget, at: lastAttempt };
+      const request = new AbortController();
+      controller = request;
+      try {
+        const status = await promiseWithinTimeout(renewServerHlsLease(leaseTarget, request.signal),
+          5_000, "Stream retention timed out.", () => request.abort());
+        if (!owns() || dormant || terminal || request.signal.aborted) return;
+        if (status === 401) { stop(); notifyUnauthorized(); }
+        else if (status === 404 || status === 403) expired();
+        else if (status === 405) stop(); // Older reverse proxies can omit HEAD support.
+      } catch {
+        // A transient failure never polls the master, reloads media or bypasses the cadence.
+      } finally {
+        if (controller === request) controller = null;
+        if (owns() && !dormant && !terminal) timer = window.setTimeout(() => void renew(), Math.max(0, 30_000 - (Date.now() - lastAttempt)));
+      }
+    };
+    const onPageHide = () => { dormant = true; window.clearTimeout(timer); controller?.abort(); };
+    const onPageShow = () => { dormant = false; void renew(); };
+    const onVisibility = () => { if (document.visibilityState === "visible") void renew(); };
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("visibilitychange", onVisibility);
+    void renew();
+    return () => {
+      active = false;
+      stop();
+      if (stopLeaseRef.current === stop) stopLeaseRef.current = () => {};
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [ended, leasePreparationReady, leaseTarget, serverOptimizationPending, suspended, url]);
+
   // Wire hls.js for HLS streams when the browser can't play them natively.
   useEffect(() => {
     const video = videoRef.current;
-    if (video == null) return;
+    if (video == null || !leasePreparationReady) return;
+    nativeExactHlsFragmentRef.current = false;
 
     if (!isHls) {
       setNativeHlsPlayback(false);
@@ -3748,7 +4804,11 @@ function WebviewPlayer({
       } else {
         video.removeAttribute("crossorigin");
       }
-      if (video.src !== url) video.src = url;
+      const sourceUrl = requiresExactHandoffRef.current
+        ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
+        : url;
+      nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
+      if (video.src !== sourceUrl) video.src = sourceUrl;
       return;
     }
 
@@ -3758,6 +4818,7 @@ function WebviewPlayer({
     // that return above and never touch it. Fetch it on demand instead.
     let cancelled = false;
     let instance: HlsInstance | null = null;
+    let removeCaptionListeners = () => {};
     setNativeHlsPlayback(false);
     appliedHlsAudioPreferenceRef.current = false;
     setHlsAudioInventoryKnown(false);
@@ -3808,7 +4869,11 @@ function WebviewPlayer({
           } else {
             element.removeAttribute("crossorigin");
           }
-          if (element.src !== url) element.src = url;
+          const sourceUrl = requiresExactHandoffRef.current
+            ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
+            : url;
+          nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
+          if (element.src !== sourceUrl) element.src = sourceUrl;
           return;
         }
         onPlaybackErrorRef.current(
@@ -3822,7 +4887,18 @@ function WebviewPlayer({
       // WebContent process. 60s behind + 30s (up to 120s) ahead keeps seeks snappy
       // without the balloon.
       const manifestTimeoutMs = webviewStartupTimeout(engine, url);
+      const configuredStartPosition = startPositionRef.current;
+      // hls.js uses -1 as live-edge startup for EVENT playlists. An exact
+      // handoff instead owns its local target, including a target of zero.
+      const exactHlsStartPosition = requiresExactHandoffRef.current
+        ? Number.isFinite(configuredStartPosition)
+          ? Math.max(0, configuredStartPosition as number)
+          : 0
+        : null;
       instance = new Hls({
+        ...(exactHlsStartPosition == null
+          ? {}
+          : { startPosition: exactHlsStartPosition }),
         backBufferLength: 60,
         maxBufferLength: 30,
         maxMaxBufferLength: 120,
@@ -3842,6 +4918,17 @@ function WebviewPlayer({
         },
       });
       hlsRef.current = instance;
+      const refreshCaptions = () => {
+        if (!cancelled && hlsRef.current === instance) captionControllerRef.current?.refresh();
+      };
+      instance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, refreshCaptions);
+      instance.on(Hls.Events.SUBTITLE_TRACK_SWITCH, refreshCaptions);
+      const captionInstance = instance;
+      removeCaptionListeners = () => {
+        captionInstance.off(Hls.Events.SUBTITLE_TRACKS_UPDATED, refreshCaptions);
+        captionInstance.off(Hls.Events.SUBTITLE_TRACK_SWITCH, refreshCaptions);
+      };
+      refreshCaptions();
       instance.on(Hls.Events.ERROR, (_event, data) => {
         if (cancelled || !data.fatal || instance == null) return;
         const action = nextHlsRecovery(data.type, recovery);
@@ -3873,6 +4960,7 @@ function WebviewPlayer({
           instance.recoverMediaError();
           return;
         }
+        stopLeaseRef.current();
         recordDiagnostic("player", "hls.fatal", "error", data.type);
         onPlaybackErrorRef.current(
           data.type === Hls.ErrorTypes.NETWORK_ERROR
@@ -3882,6 +4970,7 @@ function WebviewPlayer({
         );
       });
       instance.on(Hls.Events.MANIFEST_PARSED, () => {
+        refreshCaptions();
         setHlsLevels(
           instance?.levels.map((level, index) => ({
             index,
@@ -3895,7 +4984,7 @@ function WebviewPlayer({
         const audioChoices = instance?.audioTracks.map((track, index) => ({
           index,
           id: String(index),
-          label: track.name || track.lang || `Audio ${index + 1}`,
+          label: audioTrackLabel(track.name, track.lang, `Audio ${index + 1}`),
           language: track.lang ?? null,
         })) ?? [];
         setHlsAudioInventoryKnown(true);
@@ -3923,7 +5012,7 @@ function WebviewPlayer({
         const audioChoices = instance?.audioTracks.map((track, index) => ({
           index,
           id: String(index),
-          label: track.name || track.lang || `Audio ${index + 1}`,
+          label: audioTrackLabel(track.name, track.lang, `Audio ${index + 1}`),
           language: track.lang ?? null,
         })) ?? [];
         setHlsAudioInventoryKnown(true);
@@ -3953,37 +5042,20 @@ function WebviewPlayer({
     return () => {
       cancelled = true;
       window.clearTimeout(retryTimer);
+      removeCaptionListeners();
       instance?.destroy();
       if (hlsRef.current === instance) hlsRef.current = null;
       setHlsLevels([]);
       setHlsAudioTracks([]);
       setHlsAudioInventoryKnown(false);
     };
-  }, [engine, url, isHls]);
+  }, [engine, url, isHls, leasePreparationReady]);
 
-  // Reflect the active subtitle track onto the <video>'s text tracks: show only
-  // the active one, hide the rest. Match by label (our <track> elements carry
-  // label={t.label}) rather than by index, because hls.js can inject its own
-  // in-band subtitle tracks that desync a positional pairing. Tracks that don't
-  // correspond to one of ours (e.g. hls.js-injected) are left untouched.
-  useEffect(() => {
-    const video = videoRef.current;
-    if (video == null) return;
-    const list = video.textTracks;
-    for (let i = 0; i < list.length; i += 1) {
-      const tt = list[i];
-      if (tt.kind !== "subtitles") continue;
-      const match = subs.tracks.find((t) => t.label === tt.label);
-      if (match == null) continue; // not one of ours (hls.js-injected) - leave it
-      tt.mode = match.id === subs.activeTrackId ? "showing" : "hidden";
-    }
-  }, [subs.tracks, subs.activeTrackId]);
-
-  const seek = (t: number) => {
+  const seekAbsolute = (t: number, allowPreparation = true) => {
     const video = videoRef.current;
     if (video == null || !Number.isFinite(t)) return;
     const knownDuration = knownAbsoluteDurationRef.current;
-    if (knownDuration == null) {
+    if (knownDuration == null && !optimizedTimelineIsPartial) {
       const localDuration = Number.isFinite(video.duration) && video.duration > 0
         ? video.duration
         : Number.POSITIVE_INFINITY;
@@ -3992,19 +5064,50 @@ function WebviewPlayer({
       scrubberRef.current?.setCurrentTime(localTarget);
       return;
     }
-    const absoluteTarget = Math.min(Math.max(t, 0), knownDuration);
+    const absoluteTarget = knownDuration == null
+      ? Math.max(t, 0)
+      : Math.min(Math.max(t, 0), knownDuration);
     const windowStart = timelineOffsetRef.current;
+    const localTarget = absoluteTarget - windowStart;
     const windowDuration = Number.isFinite(video.duration) && video.duration > 0
       ? video.duration
-      : 0;
-    const windowEnd = windowStart + windowDuration;
-    if (absoluteTarget >= windowStart && absoluteTarget <= windowEnd) {
-      const localTarget = absoluteTarget - windowStart;
+      : null;
+    let hasSeekableRanges = false;
+    let withinSeekableRange = false;
+    if (localTarget >= 0) {
+      try {
+        hasSeekableRanges = video.seekable.length > 0;
+        for (let index = 0; index < video.seekable.length; index += 1) {
+          if (
+            localTarget >= video.seekable.start(index) &&
+            localTarget <= video.seekable.end(index)
+          ) {
+            withinSeekableRange = true;
+            break;
+          }
+        }
+      } catch {
+        // A source swap can invalidate TimeRanges between length and access.
+      }
+    }
+    if (
+      localTarget >= 0 &&
+      (
+        (!hasSeekableRanges && localTarget === 0) ||
+        (hasSeekableRanges
+          ? withinSeekableRange
+          : windowDuration != null && localTarget <= windowDuration)
+      )
+    ) {
       video.currentTime = localTarget;
-      scrubberRef.current?.setCurrentTime(absoluteTarget);
+      scrubberRef.current?.setCurrentTime(
+        knownDuration == null ? localTarget : absoluteTarget,
+      );
       return;
     }
-    if (serverOptimized == null || activeServerOptimizedQuality == null) return;
+    // Pointer movement previews the local window without starting a server job.
+    // Only the final release may replace it with a new optimized generation.
+    if (!allowPreparation || serverOptimized == null || activeServerOptimizedQuality == null) return;
     const selected = serverAudioTracks.find(
       (track) => track.index === resolvedServerAudioTrack,
     );
@@ -4022,24 +5125,45 @@ function WebviewPlayer({
         id: selected.id,
         language: selected.language,
       }),
+      "fixed",
     );
   };
-  absoluteSeekRef.current = seek;
 
-  const relativeSeek = (delta: number) => {
+  const seek = (t: number, allowPreparation = true) => {
+    const video = videoRef.current;
+    if (video == null || !Number.isFinite(t)) return;
+    if (knownAbsoluteDurationRef.current != null) {
+      seekAbsolute(t, allowPreparation);
+      return;
+    }
+    const localDuration = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration
+      : Number.POSITIVE_INFINITY;
+    const localTarget = Math.min(Math.max(t, 0), localDuration);
+    video.currentTime = localTarget;
+    scrubberRef.current?.setCurrentTime(localTarget);
+  };
+  absoluteSeekRef.current = seekAbsolute;
+
+  const relativeSeek = useCallback((delta: number) => {
     const video = videoRef.current;
     if (video == null) return;
     const knownDuration = knownAbsoluteDurationRef.current;
-    const current = video.currentTime + (knownDuration == null ? 0 : timelineOffsetRef.current);
-    const limit = knownDuration ?? (
-      Number.isFinite(video.duration) && video.duration > 0
-        ? video.duration
-        : Number.POSITIVE_INFINITY
+    const current = video.currentTime + (
+      knownDuration != null || optimizedTimelineIsPartialRef.current
+        ? timelineOffsetRef.current
+        : 0
     );
-    seek(Math.min(limit, Math.max(0, current + delta)));
-  };
+    const target = Math.max(0, current + delta);
+    absoluteSeekRef.current(
+      knownDuration == null ? target : Math.min(knownDuration, target),
+    );
+  }, []);
 
   const toggleOptions = () => {
+    optionsTriggerRef.current?.focus({ preventScroll: true });
+    if (!optionsOpen) optionsOriginRef.current = "settings";
+    audioOptionsRequestedRef.current = false;
     setCaptionsOpen(false);
     setOptionsOpen((open) => !open);
   };
@@ -4133,6 +5257,9 @@ function WebviewPlayer({
       if (video == null) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (suspendedRef.current) return;
+      // Nested dialogs own all keyboard input, including Escape through their
+      // modal hooks. Do not let a focused dialog container drive playback.
+      if (nestedDialogOpen) return;
       onActivity();
       if (shouldIgnoreShortcut(e.target, video)) return;
       const knownDuration = knownAbsoluteDurationRef.current;
@@ -4146,7 +5273,9 @@ function WebviewPlayer({
       };
       const seekBy = (delta: number) => {
         const current = video.currentTime + (
-          knownDuration == null ? 0 : timelineOffsetRef.current
+          knownDuration != null || optimizedTimelineIsPartial
+            ? timelineOffsetRef.current
+            : 0
         );
         seekTo(current + delta);
       };
@@ -4155,8 +5284,7 @@ function WebviewPlayer({
         case "k":
         case "K":
           e.preventDefault();
-          if (video.paused) void video.play();
-          else video.pause();
+          togglePlaybackState();
           break;
         case "ArrowLeft":
           e.preventDefault();
@@ -4192,9 +5320,15 @@ function WebviewPlayer({
         case "c":
         case "C": {
           e.preventDefault();
-          const ids = [null, ...subs.tracks.map((track) => track.id)];
-          const current = ids.indexOf(subs.activeTrackId);
-          subs.setActiveTrack(ids[(current + 1) % ids.length] ?? null);
+          const ids = [null, ...embeddedCaptionState.tracks.map((track) => track.id),
+            ...subs.tracks.map((track) => track.id)];
+          const current = ids.indexOf(embeddedCaptionState.activeTrackId ?? subs.activeTrackId);
+          const next = ids[(current + 1) % ids.length] ?? null;
+          if (next != null && embeddedCaptionState.tracks.some((track) => track.id === next)) {
+            selectEmbeddedCaption(next);
+          } else {
+            selectDownloadedCaption(next);
+          }
           break;
         }
         case "<":
@@ -4246,21 +5380,20 @@ function WebviewPlayer({
     onPlayNext,
     optimizedTimelineIsPartial,
     subs.activeTrackId,
-    subs.setActiveTrack,
+    selectDownloadedCaption,
+    selectEmbeddedCaption,
+    embeddedCaptionState,
+    nestedDialogOpen,
     subs.tracks,
+    togglePlaybackState,
   ]);
 
   const resumePlayback = useCallback(() => {
     setPaused(false);
-    void videoRef.current?.play();
-  }, []);
+    requestPlaybackState(true);
+  }, [requestPlaybackState]);
 
-  const togglePlayback = useCallback(() => {
-    const video = videoRef.current;
-    if (video == null) return;
-    if (video.paused) void video.play();
-    else video.pause();
-  }, []);
+  const togglePlayback = togglePlaybackState;
 
   const handleVideoPointerDown = useCallback((event: React.PointerEvent<HTMLVideoElement>) => {
     touchLikePointerRef.current =
@@ -4269,17 +5402,62 @@ function WebviewPlayer({
       window.matchMedia?.("(pointer: coarse)").matches === true;
   }, []);
 
-  const handleVideoClick = useCallback(() => {
+  const showTouchSeekFeedback = useCallback((zone: "back" | "forward") => {
+    if (touchFeedbackTimerRef.current != null) {
+      window.clearTimeout(touchFeedbackTimerRef.current);
+    }
+    setTouchSeekFeedback(zone);
+    touchFeedbackTimerRef.current = window.setTimeout(() => {
+      touchFeedbackTimerRef.current = null;
+      setTouchSeekFeedback(null);
+    }, 700);
+  }, []);
+
+  const handleVideoClick = useCallback((event: React.MouseEvent<HTMLVideoElement>) => {
     const touchLike =
       touchLikePointerRef.current ||
       window.matchMedia?.("(pointer: coarse)").matches === true;
     touchLikePointerRef.current = false;
+    if (nestedDialogOpen) return;
     if (touchLike && !chromeVisible) {
       onActivity();
       return;
     }
+    if (touchPlayer && touchLike) {
+      const rect = event.currentTarget.getBoundingClientRect();
+      const ratio = rect.width > 0
+        ? (event.clientX - rect.left) / rect.width
+        : 0.5;
+      const zone = ratio < 0.38 ? "back" : ratio > 0.62 ? "forward" : null;
+      if (zone != null) {
+        const now = performance.now();
+        const pending = touchTapRef.current;
+        if (pending != null && pending.zone === zone && now - pending.at <= TOUCH_DOUBLE_TAP_MS) {
+          clearPendingTouchTap();
+          relativeSeek(zone === "back" ? -10 : 10);
+          showTouchSeekFeedback(zone);
+          onActivity();
+          return;
+        }
+        if (pending != null) clearPendingTouchTap();
+        const timer = window.setTimeout(() => {
+          if (touchTapRef.current?.timer !== timer) return;
+          touchTapRef.current = null;
+          togglePlayback();
+        }, TOUCH_DOUBLE_TAP_MS);
+        touchTapRef.current = { zone, at: now, timer };
+        return;
+      }
+      clearPendingTouchTap();
+    }
     togglePlayback();
-  }, [chromeVisible, onActivity, togglePlayback]);
+  }, [chromeVisible, clearPendingTouchTap, nestedDialogOpen, onActivity, relativeSeek, showTouchSeekFeedback, togglePlayback, touchPlayer]);
+
+  const handleVideoDoubleClick = useCallback(() => {
+    if (nestedDialogOpen) return;
+    if (touchPlayer) return;
+    togglePlayerFullscreen();
+  }, [nestedDialogOpen, togglePlayerFullscreen, touchPlayer]);
 
   const absolutePlaybackPosition = useCallback(() => {
     const current = videoRef.current?.currentTime ?? 0;
@@ -4300,7 +5478,7 @@ function WebviewPlayer({
     const selected = serverAudioTracks.find(
       (track) => track.index === resolvedServerAudioTrack,
     );
-    void onSwitchServerOptimized(
+    void onSelectServerOptimized(
       quality,
       absolutePlaybackPosition(),
       playbackHandoffState,
@@ -4314,14 +5492,14 @@ function WebviewPlayer({
     absolutePlaybackPosition,
     activeServerAudioPreference,
     resolvedServerAudioTrack,
-    onSwitchServerOptimized,
+    onSelectServerOptimized,
     playbackHandoffState,
     serverAudioTracks,
   ]);
 
   const selectDeviceOriginal = useCallback(() => {
-    onSwitchDeviceOriginal(absolutePlaybackPosition(), playbackHandoffState());
-  }, [absolutePlaybackPosition, onSwitchDeviceOriginal, playbackHandoffState]);
+    onSelectDeviceOriginal(absolutePlaybackPosition(), playbackHandoffState());
+  }, [absolutePlaybackPosition, onSelectDeviceOriginal, playbackHandoffState]);
 
   const toggleMuted = useCallback(() => {
     const video = videoRef.current;
@@ -4385,16 +5563,25 @@ function WebviewPlayer({
     const video = videoRef.current as BrowserAudioVideoElement | null;
     const list = video?.audioTracks;
     if (list == null) return;
-    for (let index = 0; index < list.length; index += 1) {
-      const track = list[index] ?? list.item?.(index) ?? null;
-      if (track != null) track.enabled = index === next;
-    }
     const selected = browserAudioTracks.find((track) => track.index === next) ?? null;
+    appliedBrowserAudioPreferenceRef.current = true;
     setBrowserAudioTrack(selected?.index ?? -1);
     audioPreferenceRef.current = {
       id: selected?.id ?? null,
       language: selected?.language ?? null,
     };
+    reconcilingBrowserAudioSelectionRef.current = true;
+    try {
+      for (let index = 0; index < list.length; index += 1) {
+        const track = list[index] ?? list.item?.(index) ?? null;
+        const shouldEnable = index === next;
+        if (track != null && track.enabled !== shouldEnable) {
+          track.enabled = shouldEnable;
+        }
+      }
+    } finally {
+      reconcilingBrowserAudioSelectionRef.current = false;
+    }
   };
 
   const changeServerAudioTrack = (next: number) => {
@@ -4480,15 +5667,68 @@ function WebviewPlayer({
   const audioSelectionUnavailable =
     serverAudioInventoryStatus === "unavailable" ||
     (!serverAudioInventoryKnown && !hlsAudioInventoryKnown && !browserAudioApiAvailable);
+  const touchUnavailableAudioShortcut =
+    touchPlayer &&
+    audioChoices.length === 0 &&
+    audioSelectionUnavailable &&
+    !serverAudioLoaderAvailable;
+  const touchServerAudioRetryShortcut =
+    touchPlayer &&
+    serverAudioLoaderAvailable &&
+    serverAudioInventoryStatus === "unavailable";
+  const audioShortcutAvailable = touchUnavailableAudioShortcut ||
+    touchServerAudioRetryShortcut ||
+    audioChoices.length > 1 || (
+      serverAudioLoaderAvailable && (
+        (serverAudioInventoryStatus === "idle" && initialServerAudioTracks == null) ||
+        serverAudioInventoryStatus === "loading" ||
+        (optionsOpen && optionsOriginRef.current === "audio")
+      )
+    );
+  const activeAudioChoice = audioChoices.find((track) => track.index === activeAudioTrack) ?? null;
+  const audioShortcutLabel = activeAudioChoice == null
+    ? "Audio tracks"
+    : `Audio track, ${activeAudioChoice.label}`;
+
+  useEffect(() => {
+    if (!optionsOpen || !audioOptionsRequestedRef.current) return;
+    audioOptionsRequestedRef.current = false;
+    audioHeadingRef.current?.focus();
+    audioHeadingRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [optionsOpen]);
+
+  const openAudioOptions = () => {
+    audioShortcutRef.current?.focus({ preventScroll: true });
+    optionsOriginRef.current = "audio";
+    audioOptionsRequestedRef.current = true;
+    setCaptionsOpen(false);
+    setOptionsOpen(true);
+  };
+
+  useLayoutEffect(() => {
+    const wasOpen = optionsWasOpenRef.current;
+    optionsWasOpenRef.current = optionsOpen;
+    if (!wasOpen || optionsOpen) return;
+    const origin = optionsOriginRef.current;
+    optionsOriginRef.current = null;
+    if (origin === "audio" && !audioShortcutAvailable) {
+      optionsTriggerRef.current?.focus({ preventScroll: true });
+    }
+  }, [audioShortcutAvailable, optionsOpen]);
+  const touchAudioSheet = touchPlayer && optionsOriginRef.current === "audio";
+  const touchAudioFallbackSheet = touchAudioSheet && touchUnavailableAudioShortcut;
 
   return (
     <div
-      className={`webview-player${suspended ? " is-casting" : ""}`}
+      className={`webview-player${touchPlayer ? " is-touch-player" : ""}${suspended ? " is-casting" : ""}`}
+      ref={captionViewportRef}
       onPointerMove={onActivity}
     >
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         Playback speed {playbackRate} times. Subtitles{" "}
-        {activeSubtitle == null ? "off" : activeSubtitle.label}.
+        {activeSubtitle?.label ?? embeddedCaptionState.tracks.find(
+          (track) => track.id === embeddedCaptionState.activeTrackId,
+        )?.label ?? "off"}.
         {activeSubtitle != null
           ? ` Subtitle delay ${(activeSubtitle.delayMs / 1000).toFixed(1)} seconds.`
           : ""}
@@ -4507,7 +5747,7 @@ function WebviewPlayer({
           x-webkit-airplay="allow"
           onPointerDown={handleVideoPointerDown}
           onClick={handleVideoClick}
-          onDoubleClick={togglePlayerFullscreen}
+          onDoubleClick={handleVideoDoubleClick}
           onError={(event) => {
             // hls.js owns its media errors and bounded recovery. Native HLS and
             // direct files still surface the media element's error here.
@@ -4520,6 +5760,7 @@ function WebviewPlayer({
             // MediaError on the playable video. Treat only a real MediaError as
             // a playback failure; later readiness/progress remains authoritative.
             if (mediaError == null) return;
+            stopLeaseRef.current();
             onPlaybackErrorRef.current(
               mediaErrorMessage(mediaError),
               exactHandoffPendingRef.current,
@@ -4530,6 +5771,7 @@ function WebviewPlayer({
             <track
               key={t.id}
               kind="subtitles"
+              data-subtitle-track-id={t.id}
               src={t.vttUrl}
               srcLang={t.language}
               label={t.label}
@@ -4557,7 +5799,8 @@ function WebviewPlayer({
         </div>
       )}
 
-      {paused && !ended && !captionsOpen && !optionsOpen && !detailsOpen && !scrubbing && (
+      {!touchPlayer && paused && !ended && subs.activeTrackId == null && embeddedCaptionState.activeTrackId == null &&
+        !captionsOpen && !optionsOpen && !detailsOpen && !scrubbing && (
         <PlayerPauseOverlay
           title={title}
           nowPlaying={nowPlaying}
@@ -4565,8 +5808,17 @@ function WebviewPlayer({
         />
       )}
 
+      {touchSeekFeedback != null && (
+        <div className={`player-touch-seek-feedback is-${touchSeekFeedback}`} role="status" aria-live="polite">
+          <Icon name={touchSeekFeedback === "back" ? "rewind" : "forward"} size={24} />
+          <span>{touchSeekFeedback === "back" ? "Back 10 seconds" : "Forward 10 seconds"}</span>
+        </div>
+      )}
+
+      {!touchPlayer ? (
       <div
         className={`player-osd${chromeVisible ? " is-visible" : ""}`}
+        ref={captionControlsRef}
         aria-hidden={!chromeVisible || undefined}
         onPointerEnter={onChromeEnter}
         onPointerLeave={onChromeLeave}
@@ -4574,7 +5826,7 @@ function WebviewPlayer({
         onBlurCapture={onChromeBlur}
       >
         <WebviewScrubber
-          key={url}
+          key={`${url}:${engine}`}
           ref={scrubberRef}
           active={chromeVisible}
           duration={displayedDuration ?? 0}
@@ -4582,7 +5834,8 @@ function WebviewPlayer({
           onHover={thumbs.onHover}
           onLeave={thumbs.onLeave}
           onSeek={seek}
-          onScrubbingChange={setScrubbing}
+          onSeekPreview={(time) => seek(time, false)}
+          onScrubbingChange={updateScrubbing}
           disabled={!chromeVisible}
         />
         <div className="player-osd-row">
@@ -4612,6 +5865,22 @@ function WebviewPlayer({
             <span ref={clockRef} className="player-time" aria-label="Playback time">
               0:00 / {durationClockLabel(displayedDuration)}
             </span>
+            {audioShortcutAvailable && (
+              <button
+                ref={audioShortcutRef}
+                type="button"
+                className={`chip player-audio-shortcut${optionsOpen ? " is-active" : ""}`}
+                onClick={openAudioOptions}
+                aria-label={audioShortcutLabel}
+                aria-haspopup="dialog"
+                aria-expanded={optionsOpen}
+                title={audioShortcutLabel}
+                tabIndex={chromeVisible ? undefined : -1}
+              >
+                <Icon name="audio" size={17} />
+                <span className="player-audio-shortcut-label">Audio</span>
+              </button>
+            )}
           </div>
 
           <div className="player-osd-group player-osd-transport">
@@ -4679,7 +5948,7 @@ function WebviewPlayer({
             </label>
             <button
               type="button"
-              className={`chip player-osd-icon-button${captionsOpen || subs.activeTrackId != null ? " is-active" : ""}`}
+              className={`chip player-osd-icon-button${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
               onClick={() => {
                 setOptionsOpen(false);
                 setCaptionsOpen((open) => !open);
@@ -4691,7 +5960,7 @@ function WebviewPlayer({
               tabIndex={chromeVisible ? undefined : -1}
             >
               <Icon name="captions" size={17} />
-              {subs.activeTrackId != null && <span className="captions-active-dot" />}
+              {(subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null) && <span className="captions-active-dot" />}
             </button>
             {underTauri ? (
               <CastControls
@@ -4725,6 +5994,7 @@ function WebviewPlayer({
               </button>
             )}
             <button
+              ref={optionsTriggerRef}
               type="button"
               className={`chip player-osd-icon-button${optionsOpen ? " is-active" : ""}`}
               onClick={toggleOptions}
@@ -4752,21 +6022,370 @@ function WebviewPlayer({
           </div>
         </div>
       </div>
+      ) : (
+        <div className="player-touch-controls">
+          <div
+            className={`player-touch-transport${chromeVisible ? " is-visible" : ""}`}
+            aria-hidden={!chromeVisible || undefined}
+            onPointerEnter={onChromeEnter}
+            onPointerLeave={onChromeLeave}
+            onFocusCapture={onChromeFocus}
+            onBlurCapture={onChromeBlur}
+          >
+            <button
+              type="button"
+              className="chip player-touch-skip"
+              onClick={() => relativeSeek(-10)}
+              aria-label="Back 10 seconds"
+              tabIndex={chromeVisible ? undefined : -1}
+            >
+              <Icon name="rewind" size={23} />
+              <span>Back 10</span>
+            </button>
+            <button
+              type="button"
+              className="chip player-touch-play"
+              onClick={togglePlayback}
+              aria-label={playing ? "Pause" : "Play"}
+              aria-pressed={playing}
+              tabIndex={chromeVisible ? undefined : -1}
+            >
+              <Icon name={playing ? "pause" : "play"} size={30} />
+            </button>
+            <button
+              type="button"
+              className="chip player-touch-skip"
+              onClick={() => relativeSeek(10)}
+              aria-label="Forward 10 seconds"
+              tabIndex={chromeVisible ? undefined : -1}
+            >
+              <Icon name="forward" size={23} />
+              <span>Forward 10</span>
+            </button>
+          </div>
+
+          <div
+            className={`player-osd player-touch-osd${chromeVisible ? " is-visible" : ""}`}
+            ref={captionControlsRef}
+            aria-hidden={!chromeVisible || undefined}
+            onPointerEnter={onChromeEnter}
+            onPointerLeave={onChromeLeave}
+            onFocusCapture={onChromeFocus}
+            onBlurCapture={onChromeBlur}
+          >
+            <WebviewScrubber
+              key={`${url}:${engine}`}
+              ref={scrubberRef}
+              active={chromeVisible}
+              duration={displayedDuration ?? 0}
+              preview={thumbs.available ? thumbs.preview : null}
+              onHover={thumbs.onHover}
+              onLeave={thumbs.onLeave}
+              onSeek={seek}
+              onSeekPreview={(time) => seek(time, false)}
+              onScrubbingChange={updateScrubbing}
+              disabled={!chromeVisible}
+              touchPresentation
+            />
+            <div className="player-touch-actions" role="toolbar" aria-label="Playback actions">
+              {audioShortcutAvailable && (
+                <button
+                  ref={audioShortcutRef}
+                  type="button"
+                  className={`chip player-touch-action${optionsOpen && optionsOriginRef.current === "audio" ? " is-active" : ""}`}
+                  onClick={openAudioOptions}
+                  aria-label={audioShortcutLabel}
+                  aria-haspopup="dialog"
+                  aria-expanded={optionsOpen && optionsOriginRef.current === "audio"}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name="audio" size={18} />
+                  <span className="player-touch-action-label">Audio</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className={`chip player-touch-action${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
+                onClick={() => {
+                  setOptionsOpen(false);
+                  setCaptionsOpen((open) => !open);
+                }}
+                aria-label="Subtitles"
+                aria-haspopup="dialog"
+                aria-expanded={captionsOpen}
+                tabIndex={chromeVisible ? undefined : -1}
+              >
+                <Icon name="captions" size={18} />
+                <span className="player-touch-action-label">CC</span>
+              </button>
+              <label className="chip player-touch-action player-touch-speed">
+                <span className="player-touch-action-label">Speed</span>
+                <select
+                  aria-label="Playback speed"
+                  value={playbackRate}
+                  onChange={(event) => changePlaybackRate(Number(event.target.value))}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                    <option value={speed} key={speed}>{speed}×</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="chip player-touch-action"
+                onClick={() => setVideoFit((fit) => fit === "contain" ? "cover" : fit === "cover" ? "fill" : "contain")}
+                aria-label={`Video fit, ${videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}`}
+                tabIndex={chromeVisible ? undefined : -1}
+              >
+                <Icon name="sliders" size={18} />
+                <span className="player-touch-action-label">Screen</span>
+                <span className="player-touch-action-value">{videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}</span>
+              </button>
+              {underTauri ? (
+                <CastControls
+                  media={{ url, title, subtitleUrl: castSubtitleUrl }}
+                  buttonClassName="chip player-touch-action player-mobile-optional player-touch-cast"
+                  onLocalPlaybackChange={onCastLocalPlaybackChange}
+                />
+              ) : browserCastAvailable ? (
+                <button
+                  type="button"
+                  className="chip player-touch-action player-mobile-optional"
+                  onClick={showBrowserCastPicker}
+                  aria-label={airPlayAvailable ? "AirPlay" : "Cast to a device"}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name="cast" size={18} />
+                  <span className="player-touch-action-label">{airPlayAvailable ? "AirPlay" : "Cast"}</span>
+                </button>
+              ) : null}
+              {pictureInPictureSupported && (
+                <button
+                  type="button"
+                  className={`chip player-touch-action player-mobile-optional${isPictureInPicture ? " is-active" : ""}`}
+                  onClick={togglePictureInPicture}
+                  aria-label={isPictureInPicture ? "Exit picture in picture" : "Picture in picture"}
+                  aria-pressed={isPictureInPicture}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name="picture-in-picture" size={18} />
+                  <span className="player-touch-action-label">PiP</span>
+                </button>
+              )}
+              {fullscreenSupported && (
+                <button
+                  type="button"
+                  className={`chip player-touch-action${isFullscreen ? " is-active" : ""}`}
+                  onClick={togglePlayerFullscreen}
+                  aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                  aria-pressed={isFullscreen}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name={isFullscreen ? "fullscreen-exit" : "fullscreen"} size={18} />
+                  <span className="player-touch-action-label">Fullscreen</span>
+                </button>
+              )}
+              {onPlayNext != null && (
+                <button
+                  type="button"
+                  className="chip player-touch-action"
+                  onClick={onPlayNext}
+                  aria-label="Next episode"
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name="skip-next" size={18} />
+                  <span className="player-touch-action-label">Next</span>
+                </button>
+              )}
+              <button
+                ref={optionsTriggerRef}
+                type="button"
+                className={`chip player-touch-action${optionsOpen && optionsOriginRef.current === "settings" ? " is-active" : ""}`}
+                onClick={toggleOptions}
+                aria-label="Playback settings"
+                aria-haspopup="dialog"
+                aria-expanded={optionsOpen && optionsOriginRef.current === "settings"}
+                tabIndex={chromeVisible ? undefined : -1}
+              >
+                <Icon name="sliders" size={18} />
+                <span className="player-touch-action-label">More</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {optionsOpen && (
-        <div className="player-options-menu glass-lit" role="dialog" aria-label="Playback settings">
+        <div
+          ref={optionsDialogRef}
+          className={`player-options-menu glass-lit${touchAudioSheet ? " is-touch-audio-sheet" : touchPlayer ? " is-touch-settings" : ""}${touchAudioFallbackSheet ? " has-audio-fallback" : ""}`}
+          role="dialog"
+          aria-modal="true"
+          aria-label={touchAudioSheet ? "Audio tracks" : "Playback settings"}
+          tabIndex={-1}
+        >
           <div className="player-options-head">
-            <strong>Playback settings</strong>
+            <strong>{touchAudioSheet ? "Audio tracks" : "Playback settings"}</strong>
             <button
               type="button"
               className="player-close"
               onClick={() => setOptionsOpen(false)}
-              aria-label="Close playback settings"
+              aria-label={touchAudioSheet ? "Close audio tracks" : "Close playback settings"}
             >
               <Icon name="xmark" size={15} />
             </button>
           </div>
-          <div className="player-options-section">
+          <div className="player-options-section player-audio-options-section" aria-labelledby="player-audio-track-heading">
+            <span
+              ref={audioHeadingRef}
+              className="t-secondary"
+              id="player-audio-track-heading"
+              role="heading"
+              aria-level={2}
+              tabIndex={-1}
+            >
+              Audio track
+            </span>
+            {audioChoices.length > 0 && (
+              <div className="player-options-choice-row">
+                {audioChoices.map((track) => (
+                  <button
+                    type="button"
+                    className={`chip${activeAudioTrack === track.index ? " is-active" : ""}`}
+                    aria-pressed={activeAudioTrack === track.index}
+                    onClick={() => {
+                      if (serverAudioInventoryKnown) changeServerAudioTrack(track.index);
+                      else if (hlsAudioInventoryKnown) changeHlsAudioTrack(track.index);
+                      else changeBrowserAudioTrack(track.index);
+                    }}
+                    key={track.id}
+                  >
+                    {track.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {audioInventoryPending ? (
+              <p className="player-options-status" role="status">
+                Loading audio tracks…
+              </p>
+            ) : serverAudioInventoryStatus === "unavailable" && serverAudioLoaderAvailable ? (
+              <>
+                <p className="player-options-status" role="status">
+                  Audio track inventory is temporarily unavailable.
+                </p>
+                <button
+                  type="button"
+                  className="player-options-action"
+                  onClick={() => startServerAudioInventoryLoad(true)}
+                >
+                  Retry audio tracks
+                </button>
+              </>
+            ) : audioChoices.length === 1 ? (
+              <p className="player-options-status" role="status">
+                This stream reports one audio track.
+              </p>
+            ) : audioChoices.length === 0 && audioSelectionUnavailable ? (
+              <p className="player-options-status" role="status">
+                This browser does not expose alternate audio tracks. If this source contains more than one, use an external player.
+              </p>
+            ) : audioChoices.length === 0 ? (
+              <p className="player-options-status" role="status">
+                This stream does not report selectable audio tracks.
+              </p>
+            ) : null}
+          </div>
+          <div
+            className="player-options-section player-options-external"
+            aria-labelledby="player-external-heading"
+          >
+            <span
+              className="t-secondary"
+              id="player-external-heading"
+              role="heading"
+              aria-level={2}
+            >
+              External player
+            </span>
+            {browserExternalLinks.map((link) => (
+              <a
+                className="player-options-action"
+                href={link.href}
+                key={link.id}
+                onClick={() => recordDiagnostic("player", "external.intent_requested")}
+              >
+                <Icon name="play" size={17} />
+                <span>
+                  <strong>{link.label}</strong>
+                  <small>{link.description}</small>
+                </span>
+              </a>
+            ))}
+            {externalPlaybackAvailable ? (
+              <button
+                type="button"
+                className="player-options-action"
+                onClick={onOpenExternalPlayer}
+              >
+                <Icon name="play" size={17} />
+                <span>
+                  <strong>
+                    {browserExternalGuidance != null
+                      ? "Download player playlist (.m3u)"
+                      : nativeExternalChooser || manualExternalUrl == null
+                      ? "Open in external player"
+                      : "Copy stream link"}
+                  </strong>
+                  <small>
+                    {browserExternalGuidance != null
+                      ? "Save a playlist to open with an installed desktop or mobile player"
+                      : nativeExternalChooser
+                      ? "Choose VLC or another installed video app"
+                      : manualExternalUrl == null
+                      ? "VLC, IINA, mpv, or your device player"
+                      : "Paste into VLC or another player"}
+                  </small>
+                </span>
+              </button>
+            ) : (
+              <p className="player-options-status" role="status">
+                External playback is not available for this protected stream. Retry playback or choose another source.
+              </p>
+            )}
+            {browserExternalGuidance != null && (
+              <p className="player-options-status">{browserExternalGuidance}</p>
+            )}
+            {externalPlaybackAvailable && onCopyExternalLink != null &&
+              (nativeExternalChooser || browserExternalGuidance != null) && (
+              <button
+                type="button"
+                className="player-options-action"
+                onClick={onCopyExternalLink}
+              >
+                <Icon name="copy" size={17} />
+                <span>
+                  <strong>Copy stream link</strong>
+                  <small>Paste it into an installed player</small>
+                </span>
+              </button>
+            )}
+            {externalActionStatus && (
+              <p className="player-options-status" role="status">{externalActionStatus}</p>
+            )}
+            {manualExternalUrl != null && (
+              <a
+                className="player-options-manual-link"
+                href={manualExternalUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+              >
+                Selectable stream link
+              </a>
+            )}
+          </div>
+          <div className="player-options-section player-fit-options-section">
             <span className="t-secondary">Video fit</span>
             <div className="player-options-choice-row">
               {(["contain", "cover", "fill"] as const).map((fit) => (
@@ -4900,107 +6519,6 @@ function WebviewPlayer({
               </div>
             </div>
           )}
-          <div className="player-options-section" aria-labelledby="player-audio-track-heading">
-            <span className="t-secondary" id="player-audio-track-heading">Audio track</span>
-            {audioChoices.length > 0 && (
-              <div className="player-options-choice-row">
-                {audioChoices.map((track) => (
-                  <button
-                    type="button"
-                    className={`chip${activeAudioTrack === track.index ? " is-active" : ""}`}
-                    aria-pressed={activeAudioTrack === track.index}
-                    onClick={() => {
-                      if (serverAudioInventoryKnown) changeServerAudioTrack(track.index);
-                      else if (hlsAudioInventoryKnown) changeHlsAudioTrack(track.index);
-                      else changeBrowserAudioTrack(track.index);
-                    }}
-                    key={track.id}
-                  >
-                    {track.label}
-                  </button>
-                ))}
-              </div>
-            )}
-            {audioInventoryPending ? (
-              <p className="player-options-status" role="status">
-                Loading audio tracks…
-              </p>
-            ) : audioChoices.length === 1 ? (
-              <p className="player-options-status" role="status">
-                This stream reports one audio track.
-              </p>
-            ) : audioChoices.length === 0 && audioSelectionUnavailable ? (
-              <p className="player-options-status" role="status">
-                This browser does not expose alternate audio tracks. If this source contains more than one, use an external player.
-              </p>
-            ) : audioChoices.length === 0 ? (
-              <p className="player-options-status" role="status">
-                This stream does not report selectable audio tracks.
-              </p>
-            ) : null}
-          </div>
-          {browserExternalLinks.map((link) => (
-            <a
-              className="player-options-action"
-              href={link.href}
-              key={link.id}
-              onClick={() => recordDiagnostic("player", "external.intent_requested")}
-            >
-              <Icon name="play" size={17} />
-              <span>
-                <strong>{link.label}</strong>
-                <small>{link.description}</small>
-              </span>
-            </a>
-          ))}
-          {externalPlaybackAvailable ? (
-            <button
-              type="button"
-              className="player-options-action"
-              onClick={onOpenExternalPlayer}
-            >
-              <Icon name="play" size={17} />
-              <span>
-                <strong>
-                  {browserExternalGuidance != null
-                    ? "Download player playlist (.m3u)"
-                    : nativeExternalChooser || manualExternalUrl == null
-                    ? "Open in external player"
-                    : "Copy stream link"}
-                </strong>
-                <small>
-                  {browserExternalGuidance != null
-                    ? "Save a playlist to open with an installed desktop or mobile player"
-                    : nativeExternalChooser
-                    ? "Choose VLC or another installed video app"
-                    : manualExternalUrl == null
-                    ? "VLC, IINA, mpv, or your device player"
-                    : "Paste into VLC or another player"}
-                </small>
-              </span>
-            </button>
-          ) : (
-            <p className="player-options-status" role="status">
-              External playback is not available for this protected stream. Retry playback or choose another source.
-            </p>
-          )}
-          {browserExternalGuidance != null && (
-            <p className="player-options-status">{browserExternalGuidance}</p>
-          )}
-          {externalPlaybackAvailable && onCopyExternalLink != null &&
-            (nativeExternalChooser || browserExternalGuidance != null) && (
-            <button
-              type="button"
-              className="player-options-action"
-              onClick={onCopyExternalLink}
-            >
-              <Icon name="copy" size={17} />
-              <span>
-                <strong>Copy stream link</strong>
-                <small>Paste it into an installed player</small>
-              </span>
-            </button>
-          )}
           <button
             type="button"
             className="player-options-action"
@@ -5015,19 +6533,6 @@ function WebviewPlayer({
               <small>Transport, seeking, volume, and fullscreen</small>
             </span>
           </button>
-          {externalActionStatus && (
-            <p className="player-options-status" role="status">{externalActionStatus}</p>
-          )}
-          {manualExternalUrl != null && (
-            <a
-              className="player-options-manual-link"
-              href={manualExternalUrl}
-              target="_blank"
-              rel="noreferrer noopener"
-            >
-              Selectable stream link
-            </a>
-          )}
         </div>
       )}
 
@@ -5047,7 +6552,8 @@ function WebviewPlayer({
 
       {captionsOpen && (
         <CaptionsMenu
-          subs={subs}
+          subs={{ ...subs, setActiveTrack: selectDownloadedCaption }}
+          embedded={{ ...embeddedCaptionState, setActiveTrack: selectEmbeddedCaption }}
           seedTitle={title}
           seedImdbId={imdbId}
           seedSeason={season}
@@ -5167,6 +6673,7 @@ function ExternalPanel({
   onTryNextSource,
   onRetry,
   retryPending = false,
+  freshResolutionRequired = false,
 }: {
   underTauri: boolean;
   externalPlaybackAvailable: boolean;
@@ -5182,11 +6689,12 @@ function ExternalPanel({
   onTryNextSource?: () => Promise<void>;
   onRetry?: () => void | Promise<void>;
   retryPending?: boolean;
+  freshResolutionRequired?: boolean;
 }) {
   const [tryNextState, setTryNextState] = useState<
     { kind: "idle" } | { kind: "loading" } | { kind: "error"; message: string }
   >({ kind: "idle" });
-  if (onRetry != null) {
+  if (onRetry != null || freshResolutionRequired) {
     return (
       <div className="player-external">
         <Icon name="info" size={36} className="t-warning" />
@@ -5218,14 +6726,16 @@ function ExternalPanel({
                 : "Try next source"}
             </button>
           )}
-          <button
-            type="button"
-            className="btn btn-prominent"
-            disabled={retryPending}
-            onClick={() => void onRetry()}
-          >
-            {retryPending ? "Preparing fresh stream" : "Retry playback"}
-          </button>
+          {onRetry != null && (
+            <button
+              type="button"
+              className="btn btn-prominent"
+              disabled={retryPending}
+              onClick={() => void onRetry()}
+            >
+              {retryPending ? "Preparing fresh stream" : "Retry playback"}
+            </button>
+          )}
           {browserExternalLinks.map((link) => (
             <a
               className="btn"

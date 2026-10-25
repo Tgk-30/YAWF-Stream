@@ -66,11 +66,8 @@ export async function isFirstRun(): Promise<boolean> {
   }
 }
 
-/** Persist that onboarding is finished so the wizard never reappears. */
+/** Persist that onboarding is finished so the wizard never reappears.
+ *  A caller must keep setup open and offer a retry when this rejects. */
 export async function markOnboardingComplete(): Promise<void> {
-  try {
-    await getStore().setSetting(ONBOARDING_KEY, "true");
-  } catch {
-    // Non-fatal - worst case the wizard shows again next launch.
-  }
+  await getStore().setSetting(ONBOARDING_KEY, "true");
 }

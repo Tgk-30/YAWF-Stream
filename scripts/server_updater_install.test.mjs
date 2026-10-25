@@ -24,8 +24,21 @@ const containerRunner = `#!/usr/bin/env bash
 set -euo pipefail
 
 export PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-ln -sf "$(command -v node)" /usr/bin/node
 mkdir -p /usr/local/bin /test
+real_node="$(readlink -f "$(command -v node)")"
+mkdir -p /opt/yawf-node24
+install -o root -g root -m 0755 "$real_node" /opt/yawf-node24/node
+node24_candidate=/opt/yawf-node24/node
+rm -f /usr/bin/node
+cat > /usr/bin/node <<'NODE22'
+#!/bin/sh
+if [ "\${1:-}" = -p ]; then printf '%s\n' 22; exit 0; fi
+echo 'synthetic global Node.js 22 must not execute updater code' >&2
+exit 22
+NODE22
+chmod 0755 /usr/bin/node
+global_node_hash="$(sha256sum /usr/bin/node | awk '{print $1}')"
+cp /usr/bin/node /test/system-node22
 
 cat > /usr/local/bin/docker <<'DOCKER'
 #!/bin/sh
@@ -110,13 +123,13 @@ ENV
 }
 
 run_noninteractive() {
-  bash /bundle/install.sh "$@" < /dev/null > /test/output.log 2>&1
+  bash /bundle/install.sh --node-runtime "$node24_candidate" "$@" < /dev/null > /test/output.log 2>&1
 }
 
 run_interactive() {
   local input="$1"
   local status
-  if printf '%b' "$input" | script -q -e -c "bash /bundle/install.sh" /dev/null > /test/output.log 2>&1; then
+  if printf '%b' "$input" | script -q -e -c "bash /bundle/install.sh --node-runtime $node24_candidate" /dev/null > /test/output.log 2>&1; then
     status=\${PIPESTATUS[1]}
   else
     status=\${PIPESTATUS[1]}
@@ -155,7 +168,7 @@ case_decline_default_eof_and_non_tty() {
   done
   reset_case
   set +e
-  script -q -e -c "bash /bundle/install.sh" /dev/null < /dev/null > /test/output.log 2>&1
+  script -q -e -c "bash /bundle/install.sh --node-runtime $node24_candidate" /dev/null < /dev/null > /test/output.log 2>&1
   status=$?
   set -e
   test "$status" -eq 0
@@ -254,6 +267,95 @@ case_registration_and_enable_failures() {
   grep -q 'Automatic updates are confirmed disabled' /test/output.log
 }
 
+
+case_private_runtime_preserves_global_node_and_detaches_source() {
+  reset_case
+  run_noninteractive --unattended
+  test "$(sha256sum /usr/bin/node | awk '{print $1}')" = "$global_node_hash"
+  test "$(/usr/bin/node -p ignored)" = 22
+  test ! -L /usr/lib/yawf-server-updater/runtime/node
+  test "$(stat -c '%u:%g:%a' /usr/lib/yawf-server-updater/runtime/node)" = 0:0:755
+  test "$(sha256sum "$node24_candidate" | awk '{print $1}')" = "$(sha256sum /usr/lib/yawf-server-updater/runtime/node | awk '{print $1}')"
+  cp "$node24_candidate" /opt/yawf-node24/replacement-node
+  printf '\\n' >> /opt/yawf-node24/replacement-node
+  chmod 0755 /opt/yawf-node24/replacement-node
+  original_private_hash="$(sha256sum /usr/lib/yawf-server-updater/runtime/node | awk '{print $1}')"
+  bash /bundle/install.sh --node-runtime /opt/yawf-node24/replacement-node --unattended < /dev/null > /test/output.log 2>&1
+  test "$original_private_hash" != "$(sha256sum /usr/lib/yawf-server-updater/runtime/node | awk '{print $1}')"
+  test "$(sha256sum /opt/yawf-node24/replacement-node | awk '{print $1}')" = "$(sha256sum /usr/lib/yawf-server-updater/runtime/node | awk '{print $1}')"
+  rm -f "$node24_candidate"
+  rm -f /opt/yawf-node24/replacement-node
+  expect_no_registration
+  create_compose /srv/yawf/docker-compose.ghcr.yml
+  # The status probe needs a disabled registration, not installer opt-in.
+  /usr/local/sbin/yawf-server-update register "$path"
+  node -e 'const f=require("fs"); if (JSON.parse(f.readFileSync("/etc/yawf-server-updater/config.json")).enabled !== false) process.exit(1)'
+  mkdir -p /var/lib/yawf-server-updater/public
+  chmod 0755 /var/lib/yawf-server-updater /var/lib/yawf-server-updater/public
+  printf '%s\\n' '{"ok":true,"runtime":"private"}' > /var/lib/yawf-server-updater/public/status.json
+  /usr/local/sbin/yawf-server-update status | grep -q '"runtime":"private"'
+  cp /usr/lib/yawf-server-updater/runtime/node /opt/yawf-node24/saved-node
+  rm -f /usr/lib/yawf-server-updater/runtime/node
+  ln -s /usr/bin/node /usr/lib/yawf-server-updater/runtime/node
+  set +e
+  /usr/local/sbin/yawf-server-update status > /test/unsafe-private.log 2>&1
+  status=$?
+  set -e
+  test "$status" -ne 0
+  grep -q 'unsafe private Node runtime' /test/unsafe-private.log
+  rm -f /usr/lib/yawf-server-updater/runtime/node
+  install -o root -g root -m 0755 /opt/yawf-node24/saved-node /usr/lib/yawf-server-updater/runtime/node
+  chmod 0775 /usr/lib/yawf-server-updater/runtime/node
+  set +e
+  /usr/local/sbin/yawf-server-update status > /test/unsafe-private.log 2>&1
+  status=$?
+  set -e
+  test "$status" -ne 0
+  chmod 0755 /usr/lib/yawf-server-updater/runtime/node
+  bash /bundle/install.sh --unattended < /dev/null > /test/output.log 2>&1
+  grep -q 'Private Node runtime reused' /test/output.log
+  test "$(sha256sum /usr/bin/node | awk '{print $1}')" = "$global_node_hash"
+  install -o root -g root -m 0755 "$real_node" "$node24_candidate"
+}
+
+case_runtime_rejections_precede_installed_asset_changes() {
+  for kind in relative symlink writable old; do
+    reset_case
+    printf '%s\\n' original-helper > /usr/local/sbin/yawf-server-update
+    chmod 0755 /usr/local/sbin/yawf-server-update
+    candidate=/opt/yawf-node24/node
+    case "$kind" in
+      relative) candidate=relative-node ;;
+      symlink) ln -sf "$real_node" /opt/yawf-node24/bad-link; candidate=/opt/yawf-node24/bad-link ;;
+      writable) cp "$real_node" /opt/yawf-node24/bad-writable; chmod 0775 /opt/yawf-node24/bad-writable; candidate=/opt/yawf-node24/bad-writable ;;
+      old) candidate=/usr/bin/node ;;
+    esac
+    set +e
+    bash /bundle/install.sh --node-runtime "$candidate" --unattended > /test/output.log 2>&1
+    status=$?
+    set -e
+    test "$status" -ne 0
+    test "$(cat /usr/local/sbin/yawf-server-update)" = original-helper
+    test ! -e /etc/systemd/system/yawf-server-update.service
+    test ! -e /etc/systemd/system/yawf-server-update.timer
+    test ! -e /etc/yawf-server-updater/config.json
+    ! grep -q daemon-reload /test/commands.log
+    rm -f /usr/local/sbin/yawf-server-update /opt/yawf-node24/bad-link /opt/yawf-node24/bad-writable
+  done
+}
+
+case_default_system_node24_does_not_create_private_runtime() {
+  reset_case
+  install -o root -g root -m 0755 "$real_node" /usr/bin/node
+  system24_hash="$(sha256sum /usr/bin/node | awk '{print $1}')"
+  bash /bundle/install.sh --unattended < /dev/null > /test/output.log 2>&1
+  grep -q 'System Node runtime validated: /usr/bin/node' /test/output.log
+  test "$system24_hash" = "$(sha256sum /usr/bin/node | awk '{print $1}')"
+  test ! -e /usr/lib/yawf-server-updater/runtime
+  install -o root -g root -m 0755 /test/system-node22 /usr/bin/node
+  test "$global_node_hash" = "$(sha256sum /usr/bin/node | awk '{print $1}')"
+}
+
 current_case=initialization
 report_synthetic_failure() {
   exit_status=$?
@@ -286,7 +388,13 @@ current_case=case_reinstall_and_unsafe_existing_policy
 case_reinstall_and_unsafe_existing_policy
 current_case=case_registration_and_enable_failures
 case_registration_and_enable_failures
-printf '%s\\n' 'installer runtime cases passed: 11'
+current_case=case_private_runtime_preserves_global_node_and_detaches_source
+case_private_runtime_preserves_global_node_and_detaches_source
+current_case=case_runtime_rejections_precede_installed_asset_changes
+case_runtime_rejections_precede_installed_asset_changes
+current_case=case_default_system_node24_does_not_create_private_runtime
+case_default_system_node24_does_not_create_private_runtime
+printf '%s\\n' 'installer runtime cases passed: 21'
 `;
 
 function runContainerBundle(bundleDirectory) {
@@ -341,7 +449,7 @@ test("generated run_interactive preserves caller errexit and returns the script 
   const generatedRunner = evaluateContainerRunner();
   const interactive = generatedRunner.match(/run_interactive\(\) \{\n[\s\S]*?\n}\n\n(?=expect_no_registration\(\) \{)/)?.[0] ?? "";
   assert.match(interactive, /^run_interactive\(\) \{/);
-  assert.match(interactive, /if printf '%b' "\$input" \| script -q -e -c "bash \/bundle\/install\.sh" \/dev\/null > \/test\/output\.log 2>&1; then/);
+  assert.match(interactive, /if printf '%b' "\$input" \| script -q -e -c "bash \/bundle\/install\.sh --node-runtime \$node24_candidate" \/dev\/null > \/test\/output\.log 2>&1; then/);
   assert.equal((interactive.match(/\/test\/output\.log/g) ?? []).length, 1, "the checked-in function must have one fixed synthetic output path");
   assert.doesNotMatch(interactive, /set [+-]e/);
 
@@ -351,6 +459,7 @@ test("generated run_interactive preserves caller errexit and returns the script 
   try {
     writeFileSync(probe, `#!/usr/bin/env bash
 set -euo pipefail
+node24_candidate=/test/node24
 ${executableInteractive}
 script() {
   cat >/dev/null
@@ -425,7 +534,7 @@ esac
 test("exact installer bytes handle opt-in, decline, EOF, non-TTY, replacement, reinstall, and failure paths in an isolated Linux container", { skip: !dockerAvailable }, () => {
   const { result, output } = runContainerBundle(updaterDirectory);
   assert.equal(result.status, 0, output);
-  assert.match(output, /installer runtime cases passed: 11/);
+  assert.match(output, /installer runtime cases passed: 21/);
 });
 
 test("a copied installer mutation cannot silently bypass fresh opt-in enablement", { skip: !dockerAvailable }, () => {

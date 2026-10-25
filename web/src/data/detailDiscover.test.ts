@@ -7,7 +7,8 @@
 // and drive the hooks with renderHook + waitFor.
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { Suspense, createElement, startTransition, useState } from "react";
+import { act, render, renderHook, waitFor } from "@testing-library/react";
 import type { CastMember, MediaItem, MediaPreview } from "../models/media";
 import type { TMDBService } from "../services/metadata/TMDBService";
 import { NetworkBlockedError, setNetworkMode } from "../lib/networkPolicy";
@@ -61,7 +62,12 @@ vi.mock("./fixtures", () => ({
   loadDiscoverFixtures: () => loadDiscoverFixtures(),
 }));
 
-import { loadDetailWithOfflineFallback, loadLive, useDetail } from "./detail";
+import {
+  loadDetailWithOfflineFallback,
+  loadLive,
+  useDetail,
+  type DetailState,
+} from "./detail";
 import {
   useDiscover,
   loadLiveDiscover,
@@ -145,6 +151,290 @@ beforeEach(() => {
 // detail.ts - useDetail
 // ════════════════════════════════════════════════════════════════════════════
 describe("useDetail", () => {
+  it("keeps the mounted owner live when a suspended navigation is abandoned", async () => {
+    isServerMode.mockReturnValue(true);
+    const parentDetail = deferred<{
+      item: MediaItem;
+      cast: CastMember[];
+      related: MediaPreview[];
+      imdbId: string;
+    }>();
+    fetchServerDetail.mockImplementation(({ id }: { id: string }) => {
+      if (id !== "tt0434665") throw new Error(`Unexpected committed request for ${id}`);
+      return parentDetail.promise;
+    });
+    const parent = preview({
+      id: "tt0434665",
+      type: "series",
+      title: "Bleach",
+      tmdbId: 30984,
+    });
+    const child = preview({
+      id: "tt14986406",
+      type: "series",
+      title: "Bleach: Thousand-Year Blood War",
+      tmdbId: 215105,
+    });
+    const suspended = new Promise<never>(() => {});
+    const observed: DetailState[] = [];
+    let navigate!: (selected: MediaPreview) => void;
+
+    function Probe({ selected }: { selected: MediaPreview }) {
+      const state = useDetail(selected, null);
+      observed.push(state);
+      if (selected.id === child.id) throw suspended;
+      return createElement(
+        "div",
+        { "data-testid": "detail-state" },
+        state.data.item?.overview ?? "loading",
+      );
+    }
+
+    function Harness() {
+      const [selected, setSelected] = useState(parent);
+      navigate = setSelected;
+      return createElement(
+        Suspense,
+        { fallback: createElement("div", null, "Suspended") },
+        createElement(Probe, { selected }),
+      );
+    }
+
+    const view = render(createElement(Harness));
+    await waitFor(() => expect(fetchServerDetail).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      startTransition(() => navigate(child));
+    });
+    expect(observed.some((state) => state.data.item?.id === child.id)).toBe(true);
+
+    await act(async () => {
+      parentDetail.resolve({
+        item: mediaItem({
+          id: "tt0434665",
+          type: "series",
+          title: "Bleach",
+          tmdbId: 30984,
+          overview: "Parent detail completed.",
+        }),
+        cast: [],
+        related: [],
+        imdbId: "tt0434665",
+      });
+    });
+    act(() => navigate(parent));
+
+    await waitFor(() => {
+      expect(view.getByTestId("detail-state").textContent).toBe("Parent detail completed.");
+    });
+    expect(fetchServerDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences the very first render when a settled server title changes", async () => {
+    isServerMode.mockReturnValue(true);
+    const childDetail = deferred<{
+      item: MediaItem;
+      cast: CastMember[];
+      related: MediaPreview[];
+      imdbId: string;
+    }>();
+    fetchServerDetail.mockImplementation(({ id }: { id: string }) => {
+      if (id === "tt0434665") {
+        return Promise.resolve({
+          item: mediaItem({
+            id: "tt0434665",
+            type: "series",
+            title: "Bleach",
+            tmdbId: 30984,
+          }),
+          cast: [],
+          related: [],
+          imdbId: "tt0434665",
+        });
+      }
+      return childDetail.promise;
+    });
+    const parent = preview({
+      id: "tt0434665",
+      type: "series",
+      title: "Bleach",
+      tmdbId: 30984,
+    });
+    const child = preview({
+      id: "tt14986406",
+      type: "series",
+      title: "Bleach: Thousand-Year Blood War",
+      tmdbId: 215105,
+    });
+    const renders: DetailState[] = [];
+    const hook = renderHook(
+      ({ selected }: { selected: MediaPreview | null }) => {
+        const state = useDetail(selected, null);
+        renders.push(state);
+        return state;
+      },
+      { initialProps: { selected: parent as MediaPreview | null } },
+    );
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+
+    renders.length = 0;
+    hook.rerender({ selected: child });
+    expect(renders[0]).toMatchObject({
+      loading: true,
+      error: null,
+      source: "fixtures",
+      data: {
+        imdbId: "tt14986406",
+        item: { id: "tt14986406", tmdbId: 215105 },
+      },
+    });
+    expect(renders[0]?.data.imdbId).not.toBe("tt0434665");
+
+    await act(async () => {
+      childDetail.resolve({
+        item: mediaItem({
+          id: "tt14986406",
+          type: "series",
+          title: "Bleach: Thousand-Year Blood War",
+          tmdbId: 215105,
+        }),
+        cast: [],
+        related: [],
+        imdbId: "tt14986406",
+      });
+    });
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    expect(hook.result.current.data.imdbId).toBe("tt14986406");
+  });
+
+  it("rejects late local IMDb and final commits on a child to parent transition", async () => {
+    const childExternal = deferred<{ imdbId: string | null; tvdbId: number | null }>();
+    const childItem = deferred<MediaItem>();
+    const parentExternal = deferred<{ imdbId: string | null; tvdbId: number | null }>();
+    const parentItem = deferred<MediaItem>();
+    const svc = fakeTMDB({
+      getExternalIds: vi.fn((tmdbId: number) =>
+        tmdbId === 215105 ? childExternal.promise : parentExternal.promise),
+      getDetail: vi.fn((id: string) =>
+        id === "tmdb-215105" ? childItem.promise : parentItem.promise),
+      getCast: vi.fn(async () => []),
+      getRecommendations: vi.fn(async () => []),
+    });
+    const child = preview({
+      id: "tmdb-215105",
+      type: "series",
+      title: "Bleach: Thousand-Year Blood War",
+      tmdbId: 215105,
+    });
+    const parent = preview({
+      id: "tmdb-30984",
+      type: "series",
+      title: "Bleach",
+      tmdbId: 30984,
+    });
+    const renders: DetailState[] = [];
+    const hook = renderHook(
+      ({ selected }: { selected: MediaPreview }) => {
+        const state = useDetail(selected, svc);
+        renders.push(state);
+        return state;
+      },
+      { initialProps: { selected: child } },
+    );
+
+    renders.length = 0;
+    hook.rerender({ selected: parent });
+    expect(renders[0]).toMatchObject({
+      loading: true,
+      data: { imdbId: null, item: { id: "tmdb-30984", tmdbId: 30984 } },
+    });
+
+    await act(async () => {
+      childExternal.resolve({ imdbId: "tt14986406", tvdbId: null });
+      childItem.resolve(mediaItem({
+        id: "tt14986406",
+        type: "series",
+        title: "Bleach: Thousand-Year Blood War",
+        tmdbId: 215105,
+      }));
+      parentExternal.resolve({ imdbId: "tt0434665", tvdbId: null });
+    });
+    await waitFor(() => expect(hook.result.current.data.imdbId).toBe("tt0434665"));
+    expect(hook.result.current.data.item?.id).toBe("tmdb-30984");
+
+    await act(async () => {
+      parentItem.resolve(mediaItem({
+        id: "tt0434665",
+        type: "series",
+        title: "Bleach",
+        tmdbId: 30984,
+      }));
+    });
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    expect(hook.result.current.data).toMatchObject({
+      imdbId: "tt0434665",
+      item: { id: "tt0434665", tmdbId: 30984 },
+    });
+  });
+
+  it("keys ownership by service identity and preview TMDB identity", async () => {
+    const first = fakeTMDB({
+      getDetail: vi.fn(async () => mediaItem({ id: "tt-first", tmdbId: 1 })),
+    });
+    const secondDetail = deferred<MediaItem>();
+    const second = fakeTMDB({ getDetail: vi.fn(() => secondDetail.promise) });
+    const renders: DetailState[] = [];
+    const hook = renderHook(
+      ({ selected, service }: { selected: MediaPreview; service: TMDBService }) => {
+        const state = useDetail(selected, service);
+        renders.push(state);
+        return state;
+      },
+      { initialProps: { selected: preview({ id: "catalog", tmdbId: 1 }), service: first } },
+    );
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+
+    renders.length = 0;
+    hook.rerender({
+      selected: preview({ id: "catalog", tmdbId: 1 }),
+      service: second,
+    });
+    expect(renders[0]).toMatchObject({
+      loading: true,
+      data: { imdbId: null, item: { id: "catalog", tmdbId: 1 } },
+    });
+
+    renders.length = 0;
+    hook.rerender({
+      selected: preview({ id: "catalog", tmdbId: 2 }),
+      service: second,
+    });
+    expect(renders[0]).toMatchObject({
+      loading: true,
+      data: { imdbId: null, item: { id: "catalog", tmdbId: 2 } },
+    });
+  });
+
+  it("does not expose the previous title when preview becomes null", async () => {
+    const selected = preview({ id: "tt0084787" });
+    const renders: DetailState[] = [];
+    const nullHook = renderHook(
+      ({ value }: { value: MediaPreview | null }) => {
+        const state = useDetail(value, null);
+        renders.push(state);
+        return state;
+      },
+      { initialProps: { value: selected as MediaPreview | null } },
+    );
+    await waitFor(() => expect(nullHook.result.current.loading).toBe(false));
+    renders.length = 0;
+    nullHook.rerender({ value: null });
+    expect(renders[0]).toMatchObject({
+      loading: true,
+      data: { item: null, imdbId: null, cast: [], related: [] },
+    });
+  });
+
   it("falls back to a cached item when Offline blocks metadata", async () => {
     const cached = mediaItem({ id: "tt0084787" });
     mediaCache.set(cached.id, cached);

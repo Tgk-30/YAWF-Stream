@@ -8,7 +8,13 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode, Suspense, startTransition, useState } from "react";
 import { readFileSync } from "node:fs";
+import type {
+  ServerAudioInventoryLoadOptions,
+  ServerAudioTrack,
+  ServerTranscodeQuality,
+} from "../lib/serverApi";
 
 // ---- Mocks for heavy / environment-bound deps -----------------------------
 
@@ -18,6 +24,7 @@ import { readFileSync } from "node:fs";
 const { hlsInstances, hlsIsSupported } = vi.hoisted(() => ({
   hlsInstances: [] as Array<{
     config: {
+      startPosition?: number;
       xhrSetup?: (xhr: XMLHttpRequest, url?: string) => void;
       manifestLoadPolicy?: {
         default: {
@@ -30,6 +37,11 @@ const { hlsInstances, hlsIsSupported } = vi.hoisted(() => ({
     audioTracks: Array<{ name?: string; lang?: string }>;
     currentLevel: number;
     audioTrack: number;
+    subtitleTracks: Array<{ name: string; lang?: string }>;
+    subtitleTrack: number;
+    subtitleDisplay: boolean;
+    off: ReturnType<typeof vi.fn>;
+    emit: (event: string, data?: unknown) => void;
     loadSource: ReturnType<typeof vi.fn>;
     attachMedia: ReturnType<typeof vi.fn>;
     destroy: ReturnType<typeof vi.fn>;
@@ -69,10 +81,14 @@ vi.mock("../data/traktScrobble", () => ({
   scrobblePlaybackStop: (...args: unknown[]) => scrobbleStopMock(...args),
 }));
 vi.mock("./CastControls", () => ({
-  CastControls: ({ onLocalPlaybackChange }: {
+  CastControls: ({ onLocalPlaybackChange, buttonClassName }: {
     onLocalPlaybackChange: (suspended: boolean) => void;
+    buttonClassName: string;
   }) => (
     <>
+      <button type="button" className={buttonClassName} aria-label="Cast to a device">
+        <span>Cast</span>
+      </button>
       <button type="button" onClick={() => onLocalPlaybackChange(true)}>
         test suspend playback
       </button>
@@ -91,6 +107,8 @@ vi.mock("hls.js", () => {
       LEVEL_SWITCHED: "levelSwitched",
       AUDIO_TRACKS_UPDATED: "audioTracksUpdated",
       AUDIO_TRACK_SWITCHED: "audioTrackSwitched",
+      SUBTITLE_TRACKS_UPDATED: "subtitleTracksUpdated",
+      SUBTITLE_TRACK_SWITCH: "subtitleTrackSwitch",
     };
     static ErrorTypes = { NETWORK_ERROR: "networkError" };
     static ErrorDetails = {
@@ -98,6 +116,7 @@ vi.mock("hls.js", () => {
       MANIFEST_LOAD_TIMEOUT: "manifestLoadTimeOut",
     };
     config: {
+      startPosition?: number;
       xhrSetup?: (xhr: XMLHttpRequest, url?: string) => void;
       manifestLoadPolicy?: {
         default: {
@@ -110,14 +129,50 @@ vi.mock("hls.js", () => {
     audioTracks: Array<{ name?: string; lang?: string }> = [];
     currentLevel = -1;
     audioTrack = 0;
+    subtitleTracks: Array<{ name: string; lang?: string }> = [];
+    private selectedSubtitle = -1;
+    private displaySubtitles = true;
+    private media: HTMLMediaElement | null = null;
+    get subtitleTrack() { return this.selectedSubtitle; }
+    set subtitleTrack(id: number) {
+      this.selectedSubtitle = id;
+      this.reflectSubtitleModes();
+      this.emit("subtitleTrackSwitch", { id });
+    }
+    get subtitleDisplay() { return this.displaySubtitles; }
+    set subtitleDisplay(display: boolean) {
+      this.displaySubtitles = display;
+      this.reflectSubtitleModes();
+    }
+    private reflectSubtitleModes() {
+      const selected = this.subtitleTracks[this.selectedSubtitle];
+      for (const track of Array.from(this.media?.textTracks ?? [])) {
+        if (track.kind !== "subtitles") continue;
+        const matches = selected != null && track.label === selected.name &&
+          track.language === (selected.lang ?? "");
+        track.mode = matches ? this.displaySubtitles ? "showing" : "hidden" : "disabled";
+      }
+    }
+    private listeners = new Map<string, Set<(event: string, data: unknown) => void>>();
+    emit = (event: string, data: unknown = {}) => {
+      for (const listener of this.listeners.get(event) ?? []) listener(event, data);
+    };
     loadSource = vi.fn();
     attachMedia = vi.fn((media: HTMLMediaElement) => {
+      this.media = media;
       // Real media attachment runs the media load algorithm, which resets the
       // current speed to defaultPlaybackRate on affected Android WebViews.
       media.playbackRate = media.defaultPlaybackRate;
     });
     destroy = vi.fn();
-    on = vi.fn();
+    on = vi.fn((event: string, callback: (event: string, data: unknown) => void) => {
+      const callbacks = this.listeners.get(event) ?? new Set();
+      callbacks.add(callback);
+      this.listeners.set(event, callbacks);
+    });
+    off = vi.fn((event: string, callback: (event: string, data: unknown) => void) => {
+      this.listeners.get(event)?.delete(callback);
+    });
     startLoad = vi.fn();
     recoverMediaError = vi.fn();
     constructor(config: FakeHls["config"]) {
@@ -208,7 +263,7 @@ vi.mock("../lib/platform", async (orig) => ({
 // AppStore - VideoPlayer doesn't read it directly, but its captions menu does;
 // stub it so nothing transitively touches a real store.
 vi.mock("../store/AppStore", () => ({
-  useAppStore: () => ({}),
+  useAppStore: () => ({ settings: { subtitleFontScale: 1, subtitleTextColor: "#ffffff", subtitleBgOpacity: 0.55 }, updateSettings: vi.fn() }),
 }));
 
 // Subtitle hook - return a controllable shape; default = no tracks.
@@ -221,11 +276,14 @@ const subsState: {
   }>;
   activeTrackId: string | null;
 } = { tracks: [], activeTrackId: null };
-vi.mock("./player/useSubtitleTracks", () => ({
-  useSubtitleTracks: () => ({
+vi.mock("./player/useSubtitleTracks", async () => {
+  const { useReducer } = await import("react");
+  return { useSubtitleTracks: () => {
+    const [, render] = useReducer((value: number) => value + 1, 0);
+    return ({
     tracks: subsState.tracks,
     activeTrackId: subsState.activeTrackId,
-    setActiveTrack: vi.fn(),
+    setActiveTrack: (id: string | null) => { subsState.activeTrackId = id; render(); },
     results: [],
     searching: false,
     searchError: null,
@@ -238,8 +296,9 @@ vi.mock("./player/useSubtitleTracks", () => ({
     translatingTrackId: null,
     translateProgress: null,
     translateTrack: vi.fn(),
-  }),
-}));
+    });
+  } };
+});
 
 // Scrub thumbnails - no hidden capture video.
 vi.mock("./player/useScrubThumbnails", () => ({
@@ -252,18 +311,24 @@ vi.mock("./player/useScrubThumbnails", () => ({
 }));
 
 // Child components we don't drive directly - render identifiable stubs.
-vi.mock("./player/ScrubBar", () => ({
-  ScrubBar: scrubBarMock,
-}));
-vi.mock("./player/CaptionsMenu", () => ({
-  CaptionsMenu: (props: { onClose: () => void }) => (
-    <div data-testid="captions-menu">
-      <button type="button" onClick={props.onClose}>
-        close-captions
-      </button>
-    </div>
-  ),
-}));
+const scrubBarMode = vi.hoisted(() => ({ actual: false }));
+vi.mock("./player/ScrubBar", async (original) => {
+  const actual = await original<typeof import("./player/ScrubBar")>();
+  return {
+    ScrubBar: (props: Parameters<typeof actual.ScrubBar>[0]) => scrubBarMode.actual
+      ? <actual.ScrubBar {...props} />
+      : scrubBarMock(props),
+  };
+});
+const captionMenuMode = vi.hoisted(() => ({ actual: false }));
+vi.mock("./player/CaptionsMenu", async (original) => {
+  const actual = await original<typeof import("./player/CaptionsMenu")>();
+  return {
+    CaptionsMenu: (props: Parameters<typeof actual.CaptionsMenu>[0]) => captionMenuMode.actual
+      ? <actual.CaptionsMenu {...props} />
+      : <div data-testid="captions-menu"><button type="button" onClick={props.onClose}>close-captions</button></div>,
+  };
+});
 vi.mock("./Icon", () => ({
   Icon: iconMock,
 }));
@@ -354,9 +419,21 @@ function fireMediaError(video: HTMLMediaElement, code = 3): void {
   fireEvent.error(video);
 }
 
+// jsdom does not advance readyState when a synthetic media event is fired.
+// Handoff tests set the minimum state only when they model current frame data.
+function markCurrentMediaDataReady(video: HTMLMediaElement): void {
+  Object.defineProperty(video, "readyState", {
+    configurable: true,
+    value: HTMLMediaElement.HAVE_CURRENT_DATA,
+  });
+}
+
 // jsdom's <video> has no play/pause/load/canPlayType implementations.
 beforeEach(() => {
   vi.stubGlobal("location", new URL("tauri://localhost/"));
+  // Initial server HLS owners now prepare their master before media attach.
+  // Keep all HTTP synthetic; individual transport tests supply real fixture URIs.
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n")));
   recordDiagnosticMock.mockClear();
   scrobbleStartMock.mockClear();
   scrobblePauseMock.mockClear();
@@ -377,6 +454,8 @@ beforeEach(() => {
     },
   );
   isAndroidExternalPlayerEligibleOverride.mockReturnValue(undefined);
+  captionMenuMode.actual = false;
+  scrubBarMode.actual = false;
   subsState.tracks = [];
   subsState.activeTrackId = null;
   scrubBarMock.mockClear();
@@ -419,6 +498,489 @@ afterEach(() => {
 // ---- Top-level shell + branch selection -----------------------------------
 
 describe("VideoPlayer shell", () => {
+  it("uses the shared touch player only for iOS browsers and marked Android app documents", () => {
+    deviceKindMock.mockReturnValue("ios");
+    const ios = render(
+      <VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />,
+    );
+    expect(document.querySelector(".player")).toHaveClass("is-touch-player");
+    expect(screen.getByRole("button", { name: "Back 10 seconds" })).toHaveTextContent("Back 10");
+    expect(screen.getByRole("button", { name: "Forward 10 seconds" })).toHaveTextContent("Forward 10");
+    expect(screen.getByRole("button", { name: "Video fit, Fit" })).toBeInTheDocument();
+    expect(screen.getByText("Speed", { selector: ".player-touch-action-label" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Volume")).toBeNull();
+    ios.unmount();
+
+    deviceKindMock.mockReturnValue("mac");
+    Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+      configurable: true,
+      value: { getInsets: vi.fn() },
+    });
+    const androidApp = render(
+      <VideoPlayer url="https://x/movie.mp4" title="Android app" onClose={() => {}} />,
+    );
+    expect(document.querySelector(".player")).toHaveClass("is-touch-player");
+    androidApp.unmount();
+
+    delete (window as unknown as Record<string, unknown>).__YAWF_NATIVE_SAFE_AREA__;
+    deviceKindMock.mockReturnValue("android");
+    render(<VideoPlayer url="https://x/movie.mp4" title="Browser" onClose={() => {}} />);
+    expect(document.querySelector(".player")).not.toHaveClass("is-touch-player");
+    expect(document.querySelector(".player-touch-controls")).toBeNull();
+    expect(screen.getByLabelText("Volume")).toBeInTheDocument();
+  });
+
+  it("omits decorative pause artwork only from the shared touch webview", () => {
+    deviceKindMock.mockReturnValue("ios");
+    const touch = render(
+      <VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />,
+    );
+    fireEvent.pause(document.querySelector("video.player-video")!);
+    expect(document.querySelector(".player-pause-screen")).toBeNull();
+    expect(document.querySelector(".player-title")).toHaveTextContent("Touch film");
+    expect(screen.getByRole("button", { name: "Player details and shortcuts" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+    touch.unmount();
+
+    deviceKindMock.mockReturnValue("mac");
+    render(<VideoPlayer url="https://x/movie.mp4" title="Desktop film" onClose={() => {}} />);
+    fireEvent.pause(document.querySelector("video.player-video")!);
+    expect(document.querySelector(".player-pause-screen")).not.toBeNull();
+  });
+
+  it("labels the touch fit category separately from its current value", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+
+    const fit = screen.getByRole("button", { name: "Video fit, Fit" });
+    expect(within(fit).getByText("Screen")).toHaveClass("player-touch-action-label");
+    expect(within(fit).getByText("Fit")).toHaveClass("player-touch-action-value");
+    await userEvent.click(fit);
+    const fill = screen.getByRole("button", { name: "Video fit, Fill" });
+    expect(within(fill).getByText("Screen")).toBeInTheDocument();
+    expect(within(fill).getByText("Fill")).toHaveClass("player-touch-action-value");
+  });
+
+  it("routes touch transport, speed, fit, captions, settings, and next through existing handlers", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    const onPlayNext = vi.fn();
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="Touch film"
+        onPlayNext={onPlayNext}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, value: 50, writable: true },
+      duration: { configurable: true, value: 100 },
+      playbackRate: { configurable: true, value: 1, writable: true },
+      defaultPlaybackRate: { configurable: true, value: 1, writable: true },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+    expect(video.currentTime).toBe(40);
+    await userEvent.click(screen.getByRole("button", { name: "Forward 10 seconds" }));
+    expect(video.currentTime).toBe(50);
+
+    await userEvent.selectOptions(screen.getByLabelText("Playback speed"), "1.5");
+    expect(video.playbackRate).toBe(1.5);
+    await userEvent.click(screen.getByRole("button", { name: "Video fit, Fit" }));
+    expect(screen.getByRole("button", { name: "Video fit, Fill" })).toBeInTheDocument();
+    expect(video).toHaveStyle({ objectFit: "cover" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+    expect(screen.getByTestId("captions-menu")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("close-captions"));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("dialog", { name: "Playback settings" })).toHaveClass("is-touch-settings");
+    await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Next episode" }));
+    expect(onPlayNext).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a focused, scrollable touch audio sheet instead of the advanced settings flow", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, label: "English", language: "eng", default: true },
+      { index: 1, label: "French", language: "fra", default: false },
+    ] satisfies ServerAudioTrack[]);
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="Touch film"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadAudioTracks,
+          request: vi.fn(async () => ({
+            url: "https://x/optimized.m3u8",
+            timelineOffsetSeconds: 0,
+            startPositionSeconds: 0,
+            quality: "480p" as const,
+          })),
+        }}
+        onClose={() => {}}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Audio tracks" });
+    await userEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Audio tracks" });
+    expect(dialog).toHaveClass("is-touch-audio-sheet");
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await waitFor(() => expect(loadAudioTracks).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Close audio tracks" }));
+    expect(trigger).toHaveFocus();
+  });
+
+  it("offers the existing Android chooser from the honest unavailable-audio sheet", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    Object.defineProperty(window, "__YAWF_TAURI_ANDROID__", {
+      configurable: true,
+      value: true,
+    });
+    openAndroidExternalPlayerMock
+      .mockRejectedValueOnce(new Error("chooser unavailable"))
+      .mockResolvedValueOnce("Player chooser opened. Select a video app to continue.");
+    render(
+      <VideoPlayer
+        url="https://x/progressive.mp4"
+        title="Android progressive"
+        onClose={() => {}}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Audio tracks" });
+    await userEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Audio tracks" });
+    expect(dialog).toHaveClass("is-touch-audio-sheet", "has-audio-fallback");
+    expect(within(dialog).getByText(
+      "This browser does not expose alternate audio tracks. If this source contains more than one, use an external player.",
+    )).toBeInTheDocument();
+
+    const chooser = within(dialog).getByRole("button", { name: /Open in external player/ });
+    expect(chooser).toBeVisible();
+    await userEvent.click(chooser);
+    expect(await within(dialog).findByText(
+      "The Android player chooser could not be opened. Copy the stream link or use the selectable link below.",
+    )).toBeInTheDocument();
+    await userEvent.click(chooser);
+    expect(await within(dialog).findByText(
+      "Player chooser opened. Select a video app to continue.",
+    )).toBeInTheDocument();
+    expect(openAndroidExternalPlayerMock).toHaveBeenCalledTimes(2);
+    expect(openAndroidExternalPlayerMock.mock.calls[0]?.[0]).toBe("https://x/progressive.mp4");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close audio tracks" }));
+    expect(screen.queryByRole("dialog", { name: "Audio tracks" })).toBeNull();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("keeps an unavailable protected Android stream honest without a fake chooser", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    Object.defineProperty(window, "__YAWF_TAURI_ANDROID__", {
+      configurable: true,
+      value: true,
+    });
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/protected"
+        externalPlaybackUrl={null}
+        title="Protected Android stream"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    const dialog = screen.getByRole("dialog", { name: "Audio tracks" });
+    expect(within(dialog).getByText(
+      "This browser does not expose alternate audio tracks. If this source contains more than one, use an external player.",
+    )).toBeInTheDocument();
+    expect(within(dialog).getByText(
+      "External playback is not available for this protected stream. Retry playback or choose another source.",
+    )).toBeVisible();
+    expect(within(dialog).queryByRole("button", { name: /external player/i })).toBeNull();
+    expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps failed server audio inventory retry reachable in the focused touch sheet", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    Object.defineProperty(window, "__YAWF_TAURI_ANDROID__", {
+      configurable: true,
+      value: true,
+    });
+    const loadAudioTracks = vi.fn()
+      .mockRejectedValueOnce(new Error("inventory unavailable"))
+      .mockResolvedValueOnce([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        externalPlaybackUrl={null}
+        title="Protected server audio"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByText(
+      "Audio track inventory is temporarily unavailable.",
+    )).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry audio tracks" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /external player/i })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Close audio tracks" }));
+
+    const audio = screen.getByRole("button", { name: "Audio tracks" });
+    expect(audio).toHaveFocus();
+    await userEvent.click(audio);
+    await userEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Audio track, English" })).toBeInTheDocument();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+    expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
+  });
+
+  it("shows touch PiP and fullscreen only when their browser APIs are implemented", () => {
+    deviceKindMock.mockReturnValue("ios");
+    const first = render(
+      <VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />,
+    );
+    expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Enter fullscreen" })).toBeNull();
+    first.unmount();
+
+    const restoreFullscreen = replaceProperty(
+      HTMLElement.prototype,
+      "requestFullscreen",
+      vi.fn().mockResolvedValue(undefined),
+    );
+    const restorePipEnabled = replaceProperty(document, "pictureInPictureEnabled", true);
+    const restoreRequestPip = replaceProperty(
+      HTMLVideoElement.prototype,
+      "requestPictureInPicture",
+      vi.fn().mockResolvedValue(undefined),
+    );
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      expect(screen.getByRole("button", { name: "Picture in picture" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+    } finally {
+      restoreRequestPip();
+      restorePipEnabled();
+      restoreFullscreen();
+    }
+  });
+
+  it("performs one side-zone double-tap seek without play or fullscreen side effects", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    const restoreRequestFullscreen = replaceProperty(
+      HTMLElement.prototype,
+      "requestFullscreen",
+      vi.fn().mockResolvedValue(undefined),
+    );
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        currentTime: { configurable: true, value: 40, writable: true },
+        duration: { configurable: true, value: 120 },
+      });
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      const pause = vi.mocked(video.pause);
+      play.mockClear();
+      pause.mockClear();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(120));
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(400));
+
+      expect(video.currentTime).toBe(50);
+      expect(play).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+      expect(HTMLElement.prototype.requestFullscreen).not.toHaveBeenCalled();
+      expect(document.querySelector(".player-touch-seek-feedback")).toHaveTextContent("Forward 10 seconds");
+    } finally {
+      restoreRequestFullscreen();
+      vi.useRealTimers();
+    }
+  });
+
+  it("recognizes a late double tap across the complete declared window", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        currentTime: { configurable: true, value: 40, writable: true },
+        duration: { configurable: true, value: 120 },
+      });
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      const pause = vi.mocked(video.pause);
+      play.mockClear();
+      pause.mockClear();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(300));
+      expect(play).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(400));
+
+      expect(video.currentTime).toBe(50);
+      expect(play).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("commits one side-zone single tap only after the double-tap window expires", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      play.mockClear();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(319));
+      expect(play).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(play).toHaveBeenCalledTimes(1);
+      act(() => vi.advanceTimersByTime(400));
+      expect(play).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending side-zone single tap when a player modal opens", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      play.mockClear();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("dialog", { name: "Playback settings" })).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(500));
+      expect(play).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses current server request, audio, and timeline state for a same-key double tap", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    const sourceInfo = deferred<{ durationSeconds: number | null; tracks?: ServerAudioTrack[] }>();
+    const loadSourceInfo = vi.fn(() => sourceInfo.promise);
+    const loadAudioTracks = vi.fn(async () => [] as ServerAudioTrack[]);
+    const oldRequest = vi.fn(() => new Promise<never>(() => {}));
+    const currentRequest = vi.fn(() => new Promise<never>(() => {}));
+    const url = "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=100";
+    const base = {
+      url,
+      engine: "webview-hls-transcode" as const,
+      title: "Current seek owner",
+      onClose: () => {},
+    };
+    const view = render(
+      <VideoPlayer
+        {...base}
+        timelineOffsetSeconds={100}
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, loadAudioTracks, request: oldRequest }}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, value: 5, writable: true },
+      duration: { configurable: true, value: 12 },
+      paused: { configurable: true, value: true },
+    });
+    video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    fireEvent.loadedMetadata(video);
+
+    view.rerender(
+      <VideoPlayer
+        {...base}
+        timelineOffsetSeconds={500}
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, loadAudioTracks, request: currentRequest }}
+      />,
+    );
+    await act(async () => {
+      sourceInfo.resolve({
+        durationSeconds: 1_000,
+        tracks: [
+          { index: 0, label: "English", language: "eng", default: false },
+          { index: 1, label: "French", language: "fra", default: true },
+        ],
+      });
+      await sourceInfo.promise;
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Audio track, French" })).toBeInTheDocument());
+    expect(document.querySelector("video.player-video")).toBe(video);
+
+    fireEvent.pointerDown(video, { pointerType: "touch" });
+    fireEvent.click(video, { clientX: 90 });
+    fireEvent.pointerDown(video, { pointerType: "touch" });
+    fireEvent.click(video, { clientX: 90 });
+
+    await waitFor(() => expect(currentRequest).toHaveBeenCalledWith("480p", 515, 1));
+    expect(oldRequest).not.toHaveBeenCalled();
+  });
+
+  it("pins touch chrome for the complete scrub gesture", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const osd = document.querySelector(".player-osd") as HTMLElement;
+      const scrubber = screen.getByTestId("scrub-bar");
+      fireEvent.pointerDown(scrubber);
+      act(() => vi.advanceTimersByTime(7_000));
+      expect(osd).toHaveClass("is-visible");
+      fireEvent.pointerUp(scrubber);
+      act(() => vi.advanceTimersByTime(3_200));
+      expect(osd).not.toHaveClass("is-visible");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("never invokes desktop players for a stale native engine on Android", () => {
     isTauriMock.mockReturnValue(true);
     deviceKindMock.mockReturnValue("android");
@@ -472,6 +1034,7 @@ describe("VideoPlayer shell", () => {
     expect(
       screen.getByText("Playing in the native Android TV player."),
     ).toBeInTheDocument();
+    expect(document.querySelector(".player-touch-controls")).toBeNull();
 
     act(() => {
       window.dispatchEvent(
@@ -658,6 +1221,29 @@ describe("VideoPlayer shell", () => {
     );
     expect(css).toMatch(
       /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{(?:(?!@media)[\s\S])*?\.scrubbar\s*\{[^}]*min-height:\s*44px;/,
+    );
+  });
+
+  it("keeps only the focused touch Audio sheet content-height and safe-area bounded", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    expect(css).toMatch(
+      /\.player\.is-touch-player \.player-options-menu\.is-touch-audio-sheet\s*\{[^}]*bottom:\s*auto;[^}]*height:\s*auto;[^}]*max-height:\s*calc\([^}]*100%[^}]*var\(--safe-area-top\)[^}]*var\(--safe-area-bottom\)[^}]*\);[^}]*overflow-y:\s*auto;/s,
+    );
+    expect(css).toMatch(
+      /\.player\.is-touch-player \.player-options-menu,\s*\.player\.is-touch-player \.captions-menu\s*\{[^}]*bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\);[^}]*max-height:\s*none;/s,
+    );
+  });
+
+  it("keeps the labelled Audio shortcut compact below tablet width", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    expect(css).toMatch(
+      /\.player-audio-shortcut\s*\{[^}]*min-height:\s*34px;[^}]*padding-inline:/s,
+    );
+    expect(css).toMatch(
+      /@media \(max-width: 767px\)\s*\{[\s\S]*?\.player-audio-shortcut-label\s*\{[^}]*display:\s*none;/,
+    );
+    expect(css).toMatch(
+      /@media \(pointer: coarse\)\s*\{[\s\S]*?\.player-osd \.chip,[\s\S]*?min-height:\s*44px;/,
     );
   });
 
@@ -1164,6 +1750,267 @@ describe("WebviewPlayer", () => {
       "player",
       "external.started",
     );
+  });
+
+  it("places direct iOS players immediately after Audio and before playlist fallbacks", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const target = `https://server.example/api/external-stream/session-1/${"E".repeat(43)}`;
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1"
+        externalPlaybackUrl={target}
+        sourceFileName="Film.mp4"
+        title="Film"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Playback settings" });
+    const audio = within(dialog).getByRole("heading", { name: "Audio track" })
+      .closest<HTMLElement>(".player-options-section");
+    const external = within(dialog).getByText("External player")
+      .closest<HTMLElement>(".player-options-section");
+    const fit = within(dialog).getByText("Video fit")
+      .closest<HTMLElement>(".player-options-section");
+    const vlc = within(dialog).getByRole("link", { name: /Open in VLC/ });
+    const playlist = within(dialog).getByRole("button", { name: /Download player playlist/ });
+
+    expect(audio).not.toBeNull();
+    expect(external).not.toBeNull();
+    expect(fit).not.toBeNull();
+    expect(audio!.compareDocumentPosition(external!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(external!.compareDocumentPosition(fit!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(vlc.compareDocumentPosition(playlist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(vlc).toHaveAttribute(
+      "href",
+      `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(target)}`,
+    );
+  });
+
+  it("keeps Playback settings as the active modal and restores its exact trigger", async () => {
+    const onClose = vi.fn();
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="Focus test"
+        onClose={onClose}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Playback settings" });
+    trigger.blur();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Playback settings" });
+    await waitFor(() => expect(dialog).toHaveFocus());
+
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(screen.getByRole("button", { name: /Keyboard shortcuts/ })).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Playing Focus test" })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("opens eligible multitrack Audio directly and announces the selected track", async () => {
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "fra", label: "French", default: false },
+    ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Audio test"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Audio tracks" });
+    expect(trigger).toHaveTextContent("Audio");
+    fireEvent.click(trigger);
+
+    const heading = await screen.findByRole("heading", { name: "Audio track" });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Audio track, English" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("expands code-only labels from the initial server inventory without changing track indices", async () => {
+    const loadSourceInfo = vi.fn(async () => ({
+      durationSeconds: 600,
+      tracks: [
+        { index: 0, language: "eng", label: "eng", default: true },
+        { index: 1, language: "fre", label: "fre", default: false },
+      ],
+    }));
+    const request = vi.fn(async (_quality: string, _position: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&audio=${audioTrack}`,
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+      audioTrack,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p"
+        title="Initial audio labels"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    const trigger = await screen.findByRole("button", { name: "Audio track, English" });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "French" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "French" }));
+
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0, 1));
+  });
+
+  it("expands asynchronously loaded server codes while preserving a custom title", async () => {
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, language: "eng", label: "eng", default: true },
+      { index: 1, language: "eng", label: "English commentary 5.1", default: false },
+      { index: 2, language: "jpn", label: "", default: false },
+    ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Loaded audio labels"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByRole("button", { name: "English" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "English commentary 5.1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Japanese" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Audio track, English" })).toBeInTheDocument();
+  });
+
+  it("removes the Audio shortcut after a single-track inventory and restores Settings focus", async () => {
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, language: "eng", label: "English", default: true },
+    ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Single audio test"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByText("This stream reports one audio track.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Audio track, English" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    expect(screen.queryByRole("button", { name: "Audio track, English" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Playback settings" })).toHaveFocus();
+  });
+
+  it("removes an unavailable Audio shortcut while retaining retry in Settings", async () => {
+    const loadAudioTracks = vi.fn(async () => {
+      throw new Error("inventory unavailable");
+    });
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Unavailable audio test"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByText("Audio track inventory is temporarily unavailable.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    expect(screen.queryByRole("button", { name: "Audio tracks" })).toBeNull();
+    const settings = screen.getByRole("button", { name: "Playback settings" });
+    expect(settings).toHaveFocus();
+    fireEvent.click(settings);
+    expect(screen.getByRole("button", { name: "Retry audio tracks" })).toBeInTheDocument();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the multitrack Audio shortcut after a successful Settings retry", async () => {
+    const loadAudioTracks = vi.fn()
+      .mockRejectedValueOnce(new Error("inventory unavailable"))
+      .mockResolvedValueOnce([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="Recovered audio test"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByText("Audio track inventory is temporarily unavailable.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+    expect(screen.queryByRole("button", { name: "Audio tracks" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    const audio = screen.getByRole("button", { name: "Audio track, English" });
+    fireEvent.click(audio);
+    await waitFor(() => expect(
+      screen.getByRole("heading", { name: "Audio track" }),
+    ).toHaveFocus());
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(audio).toHaveFocus();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
   });
 
   it("offers the exact Mac IINA settings anchor without claiming the app opened", async () => {
@@ -2058,6 +2905,423 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it("pins an exact zero HLS handoff so EVENT startup cannot choose the live edge", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=9",
+      timelineOffsetSeconds: 9,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 9));
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      expect(hlsInstances[0].config.startPosition).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("pins a nonzero exact HLS handoff at its local target", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=4",
+      timelineOffsetSeconds: 4,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 9));
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      expect(hlsInstances[0].config.startPosition).toBe(5);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("pins an exact zero native HLS handoff with a WebKit media fragment", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=9",
+      timelineOffsetSeconds: 9,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native zero movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 9));
+      const player = screen.getByRole("dialog", { name: "Playing Native zero movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe(
+        "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=9#t=0.001",
+      ));
+      expect(hlsInstances).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("pins a nonzero exact native HLS handoff with a WebKit media fragment", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=4",
+      timelineOffsetSeconds: 4,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native nonzero movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 9));
+      const player = screen.getByRole("dialog", { name: "Playing Native nonzero movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe(
+        "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=4#t=5",
+      ));
+      expect(hlsInstances).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses the decimal zero anchor for a sub-millisecond exact native HLS target", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0.0000001",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native near-zero movie"
+          startPositionSeconds={0.0000001}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0.0000001));
+      const player = screen.getByRole("dialog", { name: "Playing Native near-zero movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe(
+        "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0.0000001#t=0.001",
+      ));
+      expect(hlsInstances).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves native HLS query and fragment bytes before the exact target", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const optimizedUrl =
+      "https://server.example/api/stream/session-1/index.m3u8?quality=480p&capability=A%2BB%2F%3D#track=audio&t=7";
+    const request = vi.fn(async () => ({
+      url: optimizedUrl,
+      timelineOffsetSeconds: 9,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const fetchMock = vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native fragment preservation movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      const player = screen.getByRole("dialog", {
+        name: "Playing Native fragment preservation movie",
+      });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe(`${optimizedUrl}&t=0.001`));
+      expect(fetchMock).toHaveBeenCalledWith(
+        optimizedUrl,
+        expect.objectContaining({ credentials: "include" }),
+      );
+      expect(hlsInstances).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("waits for the native WebKit fragment seek without assigning currentTime", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=9",
+      timelineOffsetSeconds: 9,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native gate movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      const player = screen.getByRole("dialog", { name: "Playing Native gate movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toContain("/index.m3u8?quality=480p&start=9"));
+
+      const video = player.querySelector("video.player-video") as HTMLVideoElement;
+      const assignedTimes: number[] = [];
+      let currentTime = 0;
+      let readyState: number = HTMLMediaElement.HAVE_METADATA;
+      let seeking = true;
+      Object.defineProperties(video, {
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (value: number) => { assignedTimes.push(value); },
+        },
+        duration: { configurable: true, value: Number.POSITIVE_INFINITY },
+        paused: { configurable: true, value: true },
+        readyState: { configurable: true, get: () => readyState },
+        seeking: { configurable: true, get: () => seeking },
+        seekable: {
+          configurable: true,
+          value: {
+            length: 1,
+            start: () => 0,
+            end: () => Number.POSITIVE_INFINITY,
+          },
+        },
+      });
+      vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+
+      fireEvent.loadedMetadata(video);
+      expect(assignedTimes).toEqual([]);
+      expect(within(player).getByRole("status").textContent).toContain("Synchronizing playback");
+
+      currentTime = 9;
+      readyState = HTMLMediaElement.HAVE_CURRENT_DATA;
+      seeking = false;
+      fireEvent.loadedData(video);
+      expect(assignedTimes).toEqual([]);
+      expect(within(player).getByRole("status").textContent).toContain("Synchronizing playback");
+
+      currentTime = 0.001;
+      seeking = true;
+      fireEvent.seeking(video);
+      fireEvent.loadedData(video);
+      expect(within(player).getByRole("status").textContent).toContain("Synchronizing playback");
+
+      seeking = false;
+      fireEvent.seeked(video);
+      expect(within(player).queryByText("Synchronizing playback…")).toBeNull();
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("restores Device Original when an exact native HLS handoff fails", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=9",
+      timelineOffsetSeconds: 9,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Native fallback movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      const player = screen.getByRole("dialog", { name: "Playing Native fallback movie" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toContain("#t=0.001"));
+
+      fireMediaError(player.querySelector("video.player-video") as HTMLVideoElement);
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toBe("https://server.example/api/stream/session-1"));
+      expect(recordDiagnosticMock).toHaveBeenCalledWith(
+        "player",
+        "server_optimized.handoff_failed",
+        "warning",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not complete exact handoff before current data or while a seek is active", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=4",
+      timelineOffsetSeconds: 4,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          startPositionSeconds={9}
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let currentTime = 0;
+      let readyState: number = HTMLMediaElement.HAVE_METADATA;
+      let seeking = false;
+      Object.defineProperties(video, {
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (value: number) => { currentTime = value; },
+        },
+        duration: { configurable: true, value: 12 },
+        paused: { configurable: true, value: true },
+        readyState: { configurable: true, get: () => readyState },
+        seeking: { configurable: true, get: () => seeking },
+      });
+
+      fireEvent.loadedMetadata(video);
+      expect(currentTime).toBe(5);
+      fireEvent.progress(video);
+      expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+
+      readyState = HTMLMediaElement.HAVE_CURRENT_DATA;
+      seeking = true;
+      fireEvent.seeking(video);
+      fireEvent.loadedData(video);
+      fireEvent.timeUpdate(video);
+      expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+
+      seeking = false;
+      fireEvent.loadedData(video);
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("loads server audio inventory and restarts the owned optimized stream at the current position", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const loadAudioTracks = vi.fn(async () => [
@@ -2098,6 +3362,7 @@ describe("WebviewPlayer", () => {
       const switchedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
       Object.defineProperty(switchedVideo, "currentTime", { configurable: true, value: 0 });
       Object.defineProperty(switchedVideo, "duration", { configurable: true, value: 100 });
+      markCurrentMediaDataReady(switchedVideo);
       fireEvent.durationChange(switchedVideo);
       fireEvent.canPlay(switchedVideo);
       fireEvent.timeUpdate(switchedVideo);
@@ -2163,6 +3428,400 @@ describe("WebviewPlayer", () => {
     expect(screen.queryByText("Loading audio tracks…")).toBeNull();
   });
 
+  it("places the functional Audio track section before Video fit and Zoom", async () => {
+    const loadAudioTracks = vi.fn()
+      .mockRejectedValueOnce(new Error("probe unavailable"))
+      .mockResolvedValueOnce([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await screen.findByText("Audio track inventory is temporarily unavailable.");
+    const dialog = screen.getByRole("dialog", { name: "Playback settings" });
+    const audio = within(dialog).getByText("Audio track").closest<HTMLElement>(".player-options-section");
+    const fit = within(dialog).getByText("Video fit").closest<HTMLElement>(".player-options-section");
+    const zoom = within(dialog).getByText("Zoom").closest<HTMLElement>(".player-options-section");
+    expect(audio).not.toBeNull();
+    expect(fit).not.toBeNull();
+    expect(zoom).not.toBeNull();
+    expect(
+      audio!.compareDocumentPosition(fit!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      audio!.compareDocumentPosition(zoom!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await userEvent.click(within(audio!).getByRole("button", { name: "Retry audio tracks" }));
+    expect(await within(audio!).findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries failed server audio inventory only after one explicit gesture", async () => {
+    const replacement = deferred<Array<{
+      index: number;
+      language: string;
+      label: string;
+      default: boolean;
+    }>>();
+    const loadAudioTracks = vi.fn()
+      .mockRejectedValueOnce(new Error("probe unavailable"))
+      .mockImplementationOnce(() => replacement.promise);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(await screen.findByText("Audio track inventory is temporarily unavailable.")).toBeInTheDocument();
+    expect(loadAudioTracks.mock.calls).toEqual([[]]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(loadAudioTracks).toHaveBeenCalledTimes(1);
+
+    const retry = screen.getByRole("button", { name: "Retry audio tracks" });
+    act(() => {
+      retry.click();
+      retry.click();
+    });
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+    expect(loadAudioTracks.mock.calls[0]).toEqual([]);
+    expect(loadAudioTracks.mock.calls[1]?.[0]).toMatchObject({
+      retryFailed: true,
+      signal: expect.any(AbortSignal),
+      onSourceInfo: expect.any(Function),
+    });
+    expect(screen.getByText("Loading audio tracks…")).toBeInTheDocument();
+
+    await act(async () => {
+      replacement.resolve([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+      await replacement.promise;
+    });
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry audio tracks" })).toBeNull();
+  });
+
+  it("adopts duration and tracks from the current owner's single explicit retry response", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const replacement = deferred<ServerAudioTrack[]>();
+    let retryOptions: ServerAudioInventoryLoadOptions | undefined;
+    const loadAudioTracks = vi.fn((options?: ServerAudioInventoryLoadOptions) => {
+      if (loadAudioTracks.mock.calls.length === 1) {
+        return Promise.reject(new Error("probe unavailable"));
+      }
+      retryOptions = options;
+      return replacement.promise;
+    });
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        engine="webview-hls-transcode"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", {
+      configurable: true,
+      value: Number.POSITIVE_INFINITY,
+    });
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 3 });
+    fireEvent.loadedMetadata(video);
+    fireEvent.timeUpdate(video);
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:03 / --:--");
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await screen.findByText("Audio track inventory is temporarily unavailable.");
+    await userEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    expect(retryOptions).toMatchObject({
+      retryFailed: true,
+      signal: expect.any(AbortSignal),
+      onSourceInfo: expect.any(Function),
+    });
+    expect(retryOptions?.signal?.aborted).toBe(false);
+
+    const tracks: ServerAudioTrack[] = [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "fra", label: "French", default: false },
+    ];
+    await act(async () => {
+      retryOptions?.onSourceInfo?.({
+        tracks,
+        durationSeconds: 596.457379,
+      });
+      replacement.resolve(tracks);
+      await replacement.promise;
+    });
+
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:03 / 9:56");
+    expect(screen.getByTestId("scrub-bar").getAttribute("data-duration")).toBe("596.457379");
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("aborts a retry owner that changes and ignores its late metadata", async () => {
+    const stale = deferred<ServerAudioTrack[]>();
+    let staleOptions: ServerAudioInventoryLoadOptions | undefined;
+    const firstLoad = vi.fn((options?: ServerAudioInventoryLoadOptions) => {
+      if (firstLoad.mock.calls.length === 1) {
+        return Promise.reject(new Error("probe unavailable"));
+      }
+      staleOptions = options;
+      return stale.promise;
+    });
+    const currentLoad = vi.fn(async () => [] as ServerAudioTrack[]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-a/index.m3u8"
+        sourceRevision={1}
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks: firstLoad, request }}
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await screen.findByText("Audio track inventory is temporarily unavailable.");
+    await userEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    expect(staleOptions?.signal?.aborted).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-b/index.m3u8"
+        sourceRevision={2}
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks: currentLoad, request }}
+        onClose={() => {}}
+      />,
+    );
+    expect(staleOptions?.signal?.aborted).toBe(true);
+    await act(async () => {
+      staleOptions?.onSourceInfo?.({
+        tracks: [{ index: 0, language: "old", label: "Old owner", default: true }],
+        durationSeconds: 600,
+      });
+      stale.resolve([{ index: 0, language: "old", label: "Old owner", default: true }]);
+      await stale.promise;
+    });
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / --:--");
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.queryByRole("button", { name: "Old owner" })).toBeNull();
+  });
+
+  it("keeps known duration when an explicit retry reports null with a successful empty inventory", async () => {
+    let retryOptions: ServerAudioInventoryLoadOptions | undefined;
+    let loadAttempts = 0;
+    const loadAudioTracks = vi.fn((options?: ServerAudioInventoryLoadOptions) => {
+      loadAttempts += 1;
+      if (loadAttempts === 1) {
+        return Promise.reject(new Error("probe unavailable"));
+      }
+      retryOptions = options;
+      options?.onSourceInfo?.({ tracks: [], durationSeconds: null });
+      return Promise.resolve([]);
+    });
+    const loadSourceInfo = vi.fn(async () => ({ durationSeconds: 600 }));
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadAudioTracks,
+          loadSourceInfo,
+          request,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(document.querySelector(".player-time")).toHaveTextContent(
+      "0:00 / 10:00",
+    ));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await screen.findByText("Audio track inventory is temporarily unavailable.");
+    await userEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    await waitFor(() => expect(retryOptions?.retryFailed).toBe(true));
+    expect(await screen.findByText(
+      "This stream does not report selectable audio tracks.",
+    )).toBeInTheDocument();
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / 10:00");
+    expect(screen.queryByRole("button", { name: "Retry audio tracks" })).toBeNull();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a failed explicit audio retry terminal without starting a loop", async () => {
+    const loadAudioTracks = vi.fn(async () => {
+      throw new Error("probe unavailable");
+    });
+    const loadSourceInfo = vi.fn(async () => ({ durationSeconds: 600 }));
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadAudioTracks,
+          loadSourceInfo,
+          request,
+        }}
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(document.querySelector(".player-time")).toHaveTextContent(
+      "0:00 / 10:00",
+    ));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await screen.findByText("Audio track inventory is temporarily unavailable.");
+    await userEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    await waitFor(() => expect(loadAudioTracks).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Audio track inventory is temporarily unavailable.")).toBeInTheDocument();
+    await act(async () => Promise.resolve());
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / 10:00");
+
+    await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a successful empty server inventory as known instead of retryable", async () => {
+    const loadAudioTracks = vi.fn(async () => []);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(await screen.findByText("This stream does not report selectable audio tracks.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry audio tracks" })).toBeNull();
+    expect(loadAudioTracks.mock.calls).toEqual([[]]);
+  });
+
+  it("ignores stale audio inventory when the playback owner changes", async () => {
+    const first = deferred<Array<{
+      index: number;
+      language: string;
+      label: string;
+      default: boolean;
+    }>>();
+    const second = deferred<Array<{
+      index: number;
+      language: string;
+      label: string;
+      default: boolean;
+    }>>();
+    const firstLoad = vi.fn(() => first.promise);
+    const secondLoad = vi.fn(() => second.promise);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        engine="webview-direct"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks: firstLoad, request }}
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(firstLoad).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        engine="webview-hls-transcode"
+        title="T"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks: secondLoad, request }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(secondLoad).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      first.resolve([
+        { index: 0, language: "eng", label: "Old owner", default: true },
+      ]);
+      await first.promise;
+    });
+    expect(screen.queryByRole("button", { name: "Old owner" })).toBeNull();
+
+    await act(async () => {
+      second.resolve([
+        { index: 0, language: "fra", label: "Current owner", default: true },
+      ]);
+      await second.promise;
+    });
+    expect(await screen.findByRole("button", { name: "Current owner" })).toBeInTheDocument();
+  });
+
   it("uses the server-reported non-first default audio after optimized activation", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const request = vi.fn(async () => ({
@@ -2201,6 +3860,7 @@ describe("WebviewPlayer", () => {
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
     Object.defineProperty(video, "duration", { configurable: true, value: 100 });
     Object.defineProperty(video, "currentTime", { configurable: true, value: 0 });
+    markCurrentMediaDataReady(video);
     fireEvent.durationChange(video);
     fireEvent.canPlay(video);
     fireEvent.timeUpdate(video);
@@ -2330,9 +3990,319 @@ describe("WebviewPlayer", () => {
       fireEvent.progress(optimizedVideo);
       expect(optimizedTime).toBe(25);
       expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+      markCurrentMediaDataReady(optimizedVideo);
       fireEvent.seeked(optimizedVideo);
       expect(screen.queryByText("Synchronizing playback…")).toBeNull();
       expect(play).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("defers an explicit Play during exact handoff and resumes once the target is ready", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Deferred play movie"
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let currentTime = 0;
+      Object.defineProperties(video, {
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (value: number) => { currentTime = value; },
+        },
+        duration: { configurable: true, value: 120 },
+        paused: { configurable: true, value: true },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 120 },
+        },
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+
+      await userEvent.click(screen.getByRole("button", { name: "Play" }));
+      expect(play).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+      fireEvent.play(video);
+      fireEvent.pause(video);
+      expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+
+      markCurrentMediaDataReady(video);
+      fireEvent.loadedData(video);
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+      expect(play).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the latest explicit Pause during a pending exact handoff", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Deferred pause movie"
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        currentTime: { configurable: true, value: 0, writable: true },
+        duration: { configurable: true, value: 120 },
+        paused: { configurable: true, value: true },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 120 },
+        },
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+
+      await userEvent.click(screen.getByRole("button", { name: "Play" }));
+      await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+      markCurrentMediaDataReady(video);
+      fireEvent.loadedData(video);
+
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+      expect(play).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not carry pending exact-handoff Play intent into a superseding source", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      const { rerender } = render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          sourceRevision={1}
+          title="Superseded handoff movie"
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      const staleVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(staleVideo, {
+        currentTime: { configurable: true, value: 0, writable: true },
+        duration: { configurable: true, value: 120 },
+        paused: { configurable: true, value: true },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 120 },
+        },
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+      await userEvent.click(screen.getByRole("button", { name: "Play" }));
+      expect(play).not.toHaveBeenCalled();
+
+      rerender(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-2"
+          sourceRevision={2}
+          title="Superseded handoff movie"
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const currentVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(currentVideo).not.toBe(staleVideo);
+      markCurrentMediaDataReady(staleVideo);
+      fireEvent.loadedData(staleVideo);
+
+      expect(play).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("applies pending exact-handoff Play after cast suspension releases", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Cast handoff movie"
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        currentTime: { configurable: true, value: 0, writable: true },
+        duration: { configurable: true, value: 120 },
+        paused: { configurable: true, value: true },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 120 },
+        },
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+
+      await userEvent.click(screen.getByRole("button", { name: "Play" }));
+      fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+      markCurrentMediaDataReady(video);
+      fireEvent.loadedData(video);
+      expect(play).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "test resume playback" }));
+      expect(play).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lets a later explicit Pause override deferred cast handoff Play", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Cast pause movie"
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        currentTime: { configurable: true, value: 0, writable: true },
+        duration: { configurable: true, value: 120 },
+        paused: { configurable: true, value: true },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 120 },
+        },
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+
+      await userEvent.click(screen.getByRole("button", { name: "Play" }));
+      fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+      markCurrentMediaDataReady(video);
+      fireEvent.loadedData(video);
+      await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "test resume playback" }));
+      expect(play).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("clears cast-deferred exact Play when a source is superseded", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      const { rerender } = render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          sourceRevision={1}
+          title="Cast supersession movie"
+          serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }}
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      const staleVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(staleVideo, {
+        currentTime: { configurable: true, value: 0, writable: true },
+        duration: { configurable: true, value: 120 },
+        paused: { configurable: true, value: true },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 120 },
+        },
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+
+      await userEvent.click(screen.getByRole("button", { name: "Play" }));
+      fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+      markCurrentMediaDataReady(staleVideo);
+      fireEvent.loadedData(staleVideo);
+      expect(play).not.toHaveBeenCalled();
+
+      rerender(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-2"
+          sourceRevision={2}
+          title="Cast supersession movie"
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      expect(document.querySelector("video.player-video")).not.toBe(staleVideo);
+      fireEvent.click(screen.getByRole("button", { name: "test resume playback" }));
+
+      expect(play).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2469,6 +4439,7 @@ describe("WebviewPlayer", () => {
       play.mockClear();
       fireEvent.loadedMetadata(restoredVideo);
       expect(restoredVideo.currentTime).toBe(25);
+      markCurrentMediaDataReady(restoredVideo);
       fireEvent.seeked(restoredVideo);
       expect(play).toHaveBeenCalledTimes(1);
       fireEvent.pointerMove(restoredVideo);
@@ -2480,6 +4451,80 @@ describe("WebviewPlayer", () => {
       expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute(
         "aria-pressed",
         "true",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves pause when an unreachable optimized handoff falls back after 45 seconds", async () => {
+    vi.useFakeTimers();
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const originalVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(originalVideo, "duration", { configurable: true, value: 3_600 });
+      Object.defineProperty(originalVideo, "paused", { configurable: true, value: true });
+      originalVideo.currentTime = 25;
+      fireEvent.canPlay(originalVideo);
+      fireEvent.timeUpdate(originalVideo);
+
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "480p" }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const optimizedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(optimizedVideo).not.toBe(originalVideo);
+      Object.defineProperty(optimizedVideo, "duration", { configurable: true, value: 6 });
+      Object.defineProperty(optimizedVideo, "paused", { configurable: true, value: true });
+      Object.defineProperty(optimizedVideo, "currentTime", {
+        configurable: true,
+        get: () => 0,
+        set: () => {},
+      });
+      fireEvent.loadedMetadata(optimizedVideo);
+      fireEvent.canPlay(optimizedVideo);
+      expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+
+      await act(async () => {
+        vi.advanceTimersByTime(45_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const restoredVideo = document.querySelector<HTMLVideoElement>("video.player-video");
+      expect(restoredVideo).not.toBeNull();
+      if (restoredVideo == null) throw new Error("Device Original was not restored");
+      expect(restoredVideo.src).toBe("https://server.example/api/stream/session-1");
+      Object.defineProperty(restoredVideo, "duration", { configurable: true, value: 3_600 });
+      Object.defineProperty(restoredVideo, "paused", { configurable: true, value: true });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+      fireEvent.loadedMetadata(restoredVideo);
+
+      expect(restoredVideo.currentTime).toBe(25);
+      expect(play).not.toHaveBeenCalled();
+      fireEvent.pointerMove(restoredVideo);
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Server Optimized could not synchronize. Device Original was restored.",
       );
     } finally {
       vi.unstubAllGlobals();
@@ -2532,6 +4577,7 @@ describe("WebviewPlayer", () => {
       Object.defineProperty(optimizedVideo, "duration", { configurable: true, value: 120 });
       optimizedVideo.currentTime = 0;
       fireEvent.loadedMetadata(optimizedVideo);
+      markCurrentMediaDataReady(optimizedVideo);
       fireEvent.canPlay(optimizedVideo);
       fireEvent.seeked(optimizedVideo);
       expect(screen.queryByText("Synchronizing playback…")).toBeNull();
@@ -2564,6 +4610,7 @@ describe("WebviewPlayer", () => {
       Object.defineProperty(restoredVideo, "duration", { configurable: true, value: 533 });
       fireEvent.durationChange(restoredVideo);
       expect(restoredVideo.currentTime).toBe(407);
+      markCurrentMediaDataReady(restoredVideo);
       fireEvent.seeked(restoredVideo);
       fireEvent.canPlay(restoredVideo);
       expect(play).not.toHaveBeenCalled();
@@ -2581,6 +4628,70 @@ describe("WebviewPlayer", () => {
       );
       expect(screen.getByRole("alert")).not.toHaveTextContent("could not synchronize");
       expect(screen.queryByText("Playback interrupted")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("describes fallback to an already optimized outer source as restoring the previous stream", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const outerUrl =
+      "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=20";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=360p&start=25",
+      timelineOffsetSeconds: 25,
+      startPositionSeconds: 0,
+      quality: "360p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url={outerUrl}
+          engine="webview-hls-transcode"
+          title="Already optimized movie"
+          timelineOffsetSeconds={20}
+          serverOptimized={{ qualities: ["480p", "360p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const originalVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(originalVideo, "currentTime", { configurable: true, value: 5 });
+      Object.defineProperty(originalVideo, "paused", { configurable: true, value: true });
+      fireEvent.timeUpdate(originalVideo);
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "360p" }));
+      await waitFor(() => expect(request).toHaveBeenCalledWith("360p", 25));
+      const replacement = await waitFor(() => {
+        const current = document.querySelector("video.player-video") as HTMLVideoElement;
+        expect(current).not.toBe(originalVideo);
+        return current;
+      });
+
+      const errorRegistration = hlsInstances.at(-1)?.on.mock.calls.find(
+        ([event]) => event === "hlsError",
+      );
+      if (errorRegistration == null) throw new Error("HLS error handler missing");
+      const handleHlsError = errorRegistration[1] as (
+        event: string,
+        data: { fatal: boolean; type: string },
+      ) => void;
+      act(() => handleHlsError("hlsError", { fatal: true, type: "mediaError" }));
+      act(() => handleHlsError("hlsError", { fatal: true, type: "mediaError" }));
+      const restored = await waitFor(() => {
+        const current = document.querySelector("video.player-video") as HTMLVideoElement;
+        expect(current).not.toBe(replacement);
+        return current;
+      });
+      fireEvent.pointerMove(restored);
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Server Optimized could not synchronize. The previous stream was restored.",
+      );
+      expect(screen.getByRole("alert")).not.toHaveTextContent("Device Original");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2636,6 +4747,7 @@ describe("WebviewPlayer", () => {
       });
       Object.defineProperty(optimizedVideo, "paused", { configurable: true, value: true });
       fireEvent.loadedMetadata(optimizedVideo);
+      markCurrentMediaDataReady(optimizedVideo);
       fireEvent.canPlay(optimizedVideo);
       fireEvent.seeked(optimizedVideo);
 
@@ -2702,6 +4814,7 @@ describe("WebviewPlayer", () => {
       });
       Object.defineProperty(firstWindow, "paused", { configurable: true, value: true });
       fireEvent.loadedMetadata(firstWindow);
+      markCurrentMediaDataReady(firstWindow);
       fireEvent.canPlay(firstWindow);
       fireEvent.seeked(firstWindow);
       firstWindowTime = 7;
@@ -2725,6 +4838,7 @@ describe("WebviewPlayer", () => {
       Object.defineProperty(secondWindow, "paused", { configurable: true, value: true });
       secondWindow.currentTime = 0;
       fireEvent.loadedMetadata(secondWindow);
+      markCurrentMediaDataReady(secondWindow);
       fireEvent.canPlay(secondWindow);
       fireEvent.seeked(secondWindow);
       fireEvent.timeUpdate(secondWindow);
@@ -2736,6 +4850,580 @@ describe("WebviewPlayer", () => {
       if (secondScrub == null) throw new Error("Replacement scrub bar props were not captured");
       act(() => secondScrub.onSeek(800));
       await waitFor(() => expect(request).toHaveBeenNthCalledWith(3, "480p", 800));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  async function prepareRealTouchScrub() {
+    scrubBarMode.actual = true;
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const prepared = (position: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    });
+    let releasePreparation!: (value: ReturnType<typeof prepared>) => void;
+    let requestCount = 0;
+    const request = vi.fn((_quality: string, position: number) => ++requestCount === 1
+      ? Promise.resolve(prepared(position))
+      : new Promise<ReturnType<typeof prepared>>((resolve) => { releasePreparation = resolve; }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n")));
+    const view = render(<VideoPlayer
+      url="https://server.example/api/stream/session-1"
+      title="Touch seek"
+      serverOptimized={{ qualities: ["480p"], request }}
+      onClose={() => {}}
+    />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(original, "duration", { configurable: true, value: 1_000 });
+    Object.defineProperty(original, "paused", { configurable: true, value: true });
+    original.currentTime = 395;
+    fireEvent.loadedMetadata(original);
+    fireEvent.timeUpdate(original);
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "480p" }));
+    await waitFor(() => expect(document.querySelector("video.player-video")).not.toBe(original));
+    const current = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(current, "duration", { configurable: true, value: 12 });
+    Object.defineProperty(current, "paused", { configurable: true, value: true });
+    fireEvent.loadedMetadata(current);
+    markCurrentMediaDataReady(current);
+    fireEvent.canPlay(current);
+    fireEvent.seeked(current);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    slider.setPointerCapture = vi.fn();
+    slider.hasPointerCapture = vi.fn(() => true);
+    slider.releasePointerCapture = vi.fn();
+    return { slider, current, request, view, prepared, release: (position: number) => releasePreparation(prepared(position)) };
+  }
+
+  it.each(["hls.js", "native Safari"])(
+    "commits the real touch scrub release target with deferred %s preparation",
+    async (renderer) => {
+      if (renderer === "native Safari") {
+        deviceKindMock.mockReturnValue("ios");
+        vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+      }
+      const { slider, current, request, release } = await prepareRealTouchScrub();
+      fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 50 });
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 75 });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(slider).toHaveAttribute("aria-valuenow", "750");
+      current.currentTime = 5;
+      fireEvent.timeUpdate(current);
+      expect(slider).toHaveAttribute("aria-valuenow", "750");
+      fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(2, "480p", 800));
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(document.querySelector("video.player-video")).toBe(current);
+      await act(async () => release(800));
+      await waitFor(() => expect(document.querySelector("video.player-video")).not.toBe(current));
+      const replacement = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(replacement, "duration", { configurable: true, value: 12 });
+      fireEvent.loadedMetadata(replacement);
+      markCurrentMediaDataReady(replacement);
+      fireEvent.canPlay(replacement);
+      fireEvent.seeked(replacement);
+      fireEvent.timeUpdate(replacement);
+      expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuenow", "800");
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(["pointerCancel", "lostPointerCapture"] as const)(
+    "cancels real touch preparation on %s without a late release commit",
+    async (eventName) => {
+      const { slider, current, request } = await prepareRealTouchScrub();
+      fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+      fireEvent[eventName](slider, { pointerId: 7 });
+      fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+      await act(async () => { await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(document.querySelector("video.player-video")).toBe(current);
+    },
+  );
+
+  it.each(["source replacement", "unmount"])(
+    "disposes a real touch gesture on %s before any remote preparation",
+    async (action) => {
+      const { slider, request, view } = await prepareRealTouchScrub();
+      fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+      if (action === "unmount") view.unmount();
+      else view.rerender(<VideoPlayer url="https://x/replacement.mp4" title="New owner" onClose={() => {}} />);
+      fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+      await act(async () => { await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(slider.releasePointerCapture).toHaveBeenCalledWith(7);
+    },
+  );
+
+  it("disposes a real touch gesture on a committed same-URL engine replacement", async () => {
+    scrubBarMode.actual = true;
+    const props = { url: "https://x/movie.m3u8", title: "Engine owner", onClose: () => {} };
+    const { rerender } = render(<VideoPlayer {...props} engine="webview-direct" />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 1_000 });
+    fireEvent.loadedMetadata(video);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    slider.setPointerCapture = vi.fn();
+    slider.hasPointerCapture = vi.fn(() => true);
+    slider.releasePointerCapture = vi.fn();
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    rerender(<VideoPlayer {...props} engine="webview-hls-transcode" />);
+    expect(screen.getByRole("slider", { name: "Seek" })).not.toBe(slider);
+    expect(slider.releasePointerCapture).toHaveBeenCalledWith(7);
+    const positionBeforeLateRelease = video.currentTime;
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+    expect(video.currentTime).toBe(positionBeforeLateRelease);
+    await waitFor(() => expect(hlsInstances).toHaveLength(2));
+  });
+
+  it("keeps real local touch previews and keyboard seeks immediate", () => {
+    scrubBarMode.actual = true;
+    render(<VideoPlayer url="https://x/movie.mp4" title="Local touch" onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 1_000 });
+    fireEvent.loadedMetadata(video);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    expect(video.currentTime).toBe(200);
+    fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+    expect(video.currentTime).toBe(800);
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 85 });
+    expect(video.currentTime).toBe(850);
+    fireEvent.timeUpdate(video);
+    const seekWrites: number[] = [];
+    let currentTime = video.currentTime;
+    Object.defineProperty(video, "currentTime", {
+      configurable: true,
+      get: () => currentTime,
+      set: (value: number) => { currentTime = value; seekWrites.push(value); },
+    });
+    fireEvent.keyDown(slider, { key: "ArrowLeft" });
+    expect(seekWrites).toEqual([845]);
+    expect(video.currentTime).toBe(845);
+  });
+
+  it("keeps global seeking outside the real scrub slider and yields to editable controls", () => {
+    scrubBarMode.actual = true;
+    render(<>
+      <VideoPlayer url="https://x/movie.mp4" title="Keyboard" onClose={() => {}} />
+      <input aria-label="Editable input" />
+      <textarea aria-label="Editable text area" />
+      <select aria-label="Editable select"><option>One</option></select>
+    </>);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: 1_000 });
+    video.currentTime = 500;
+    fireEvent.loadedMetadata(video);
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(video.currentTime).toBe(505);
+    for (const label of ["Editable input", "Editable text area", "Editable select"]) {
+      fireEvent.keyDown(screen.getByLabelText(label), { key: "ArrowLeft" });
+      expect(video.currentTime).toBe(505);
+    }
+  });
+
+  it("pins a deferred paused Back 10 seek against late progress from the old window", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const replacement = deferred<{
+      url: string;
+      timelineOffsetSeconds: number;
+      startPositionSeconds: number;
+      quality: "480p";
+    }>();
+    let requestCount = 0;
+    const request = vi.fn((_quality: string, _position: number) => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return Promise.resolve({
+          url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=395",
+          timelineOffsetSeconds: 395,
+          startPositionSeconds: 0,
+          quality: "480p" as const,
+        });
+      }
+      return replacement.promise;
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const originalVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperty(originalVideo, "duration", { configurable: true, value: 1_000 });
+      Object.defineProperty(originalVideo, "paused", { configurable: true, value: true });
+      originalVideo.currentTime = 395;
+      fireEvent.loadedMetadata(originalVideo);
+      fireEvent.timeUpdate(originalVideo);
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "480p" }));
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(1, "480p", 395));
+
+      const firstWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+      let firstWindowTime = 0;
+      Object.defineProperty(firstWindow, "duration", { configurable: true, value: 12 });
+      Object.defineProperty(firstWindow, "currentTime", {
+        configurable: true,
+        get: () => firstWindowTime,
+        set: (value: number) => { firstWindowTime = value; },
+      });
+      Object.defineProperty(firstWindow, "paused", { configurable: true, value: true });
+      fireEvent.loadedMetadata(firstWindow);
+      fireEvent.canPlay(firstWindow);
+      firstWindowTime = 7;
+      fireEvent.timeUpdate(firstWindow);
+
+      fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(2, "480p", 392));
+
+      // The old media can report one final clock event while the replacement
+      // manifest warms. It must not replace the explicit seek target.
+      firstWindowTime = 8;
+      fireEvent.timeUpdate(firstWindow);
+      await act(async () => {
+        replacement.resolve({
+          url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=392",
+          timelineOffsetSeconds: 392,
+          startPositionSeconds: 0,
+          quality: "480p",
+        });
+        await replacement.promise;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const secondWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(secondWindow).not.toBe(firstWindow);
+      let secondWindowTime = 0;
+      Object.defineProperty(secondWindow, "duration", { configurable: true, value: 12 });
+      Object.defineProperty(secondWindow, "currentTime", {
+        configurable: true,
+        get: () => secondWindowTime,
+        set: (value: number) => { secondWindowTime = value; },
+      });
+      Object.defineProperty(secondWindow, "paused", { configurable: true, value: true });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+      fireEvent.loadedMetadata(secondWindow);
+
+      expect(secondWindowTime).toBe(0);
+      markCurrentMediaDataReady(secondWindow);
+      fireEvent.loadedData(secondWindow);
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+      expect(play).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses the absolute unknown-total EVENT clock for paused Back 10 and pins the replacement", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const replacement = deferred<{
+      url: string;
+      timelineOffsetSeconds: number;
+      startPositionSeconds: number;
+      quality: "480p";
+    }>();
+    const secondReplacement = deferred<{
+      url: string;
+      timelineOffsetSeconds: number;
+      startPositionSeconds: number;
+      quality: "480p";
+    }>();
+    let requestCount = 0;
+    const request = vi.fn((_quality: string, _position: number) => {
+      requestCount += 1;
+      return requestCount === 1 ? replacement.promise : secondReplacement.promise;
+    });
+    const loadSourceInfo = vi.fn(async () => ({ durationSeconds: null }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=531"
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          timelineOffsetSeconds={531}
+          serverOptimized={{ qualities: ["480p"], loadSourceInfo, request }}
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() => expect(loadSourceInfo).toHaveBeenCalledTimes(1));
+      const firstWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+      let firstWindowTime = 3;
+      Object.defineProperties(firstWindow, {
+        duration: { configurable: true, value: 12 },
+        currentTime: {
+          configurable: true,
+          get: () => firstWindowTime,
+          set: (value: number) => { firstWindowTime = value; },
+        },
+        paused: { configurable: true, value: true },
+      });
+      fireEvent.loadedMetadata(firstWindow);
+      fireEvent.timeUpdate(firstWindow);
+      fireEvent.pause(firstWindow);
+      expect(document.querySelector(".player-time")).toHaveTextContent("8:54 / --:--");
+
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(1, "480p", 524));
+
+      firstWindowTime = 4;
+      fireEvent.timeUpdate(firstWindow);
+      await act(async () => {
+        replacement.resolve({
+          url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=524",
+          timelineOffsetSeconds: 524,
+          startPositionSeconds: 0,
+          quality: "480p",
+        });
+        await replacement.promise;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const secondWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(secondWindow).not.toBe(firstWindow);
+      let secondWindowTime = 0;
+      Object.defineProperties(secondWindow, {
+        duration: { configurable: true, value: 12 },
+        currentTime: {
+          configurable: true,
+          get: () => secondWindowTime,
+          set: (value: number) => { secondWindowTime = value; },
+        },
+        paused: { configurable: true, value: true },
+      });
+      fireEvent.loadedMetadata(secondWindow);
+      expect(secondWindowTime).toBe(0);
+      markCurrentMediaDataReady(secondWindow);
+      fireEvent.loadedData(secondWindow);
+      fireEvent.timeUpdate(secondWindow);
+
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+      expect(document.querySelector(".player-time")).toHaveTextContent("8:44 / --:--");
+      expect(play).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+      await waitFor(() => expect(request).toHaveBeenNthCalledWith(2, "480p", 514));
+      await act(async () => {
+        secondReplacement.resolve({
+          url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=514",
+          timelineOffsetSeconds: 514,
+          startPositionSeconds: 0,
+          quality: "480p",
+        });
+        await secondReplacement.promise;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps unknown-total EVENT seeks local in-window and restarts Forward 10 only across the window", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const replacement = deferred<{
+      url: string;
+      timelineOffsetSeconds: number;
+      startPositionSeconds: number;
+      quality: "480p";
+    }>();
+    const request = vi.fn((_quality: string, _position: number) => replacement.promise);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    const { unmount } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=531"
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        timelineOffsetSeconds={531}
+        serverOptimized={{ qualities: ["480p"], request }}
+        onClose={() => {}}
+      />,
+    );
+    const firstWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+    let firstWindowTime = 1;
+    Object.defineProperties(firstWindow, {
+      duration: { configurable: true, value: Number.POSITIVE_INFINITY },
+      currentTime: {
+        configurable: true,
+        get: () => firstWindowTime,
+        set: (value: number) => { firstWindowTime = value; },
+      },
+      paused: { configurable: true, value: true },
+      seekable: {
+        configurable: true,
+        value: {
+          length: 2,
+          start: (index: number) => [1, 6][index],
+          end: (index: number) => [4, 12][index],
+        },
+      },
+    });
+    fireEvent.loadedMetadata(firstWindow);
+    fireEvent.timeUpdate(firstWindow);
+
+    fireEvent.click(screen.getByRole("button", { name: "Forward 10 seconds" }));
+    expect(firstWindowTime).toBe(11);
+    expect(request).not.toHaveBeenCalled();
+    expect(screen.getByTestId("scrub-bar")).toHaveAttribute("data-current-time", "11");
+
+    const scrub = scrubBarMock.mock.calls.at(-1)?.[0];
+    if (scrub == null) throw new Error("Scrub bar props were not captured");
+    act(() => scrub.onSeek(2));
+    expect(firstWindowTime).toBe(2);
+    expect(screen.getByTestId("scrub-bar")).toHaveAttribute("data-current-time", "2");
+    expect(request).not.toHaveBeenCalled();
+
+    firstWindowTime = 11;
+    fireEvent.timeUpdate(firstWindow);
+    fireEvent.click(screen.getByRole("button", { name: "Forward 10 seconds" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 552));
+    await act(async () => {
+      replacement.resolve({
+        url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=552",
+        timelineOffsetSeconds: 552,
+        startPositionSeconds: 0,
+        quality: "480p",
+      });
+      await replacement.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    unmount();
+
+    const zeroOffsetRequest = vi.fn(async (_quality: string, position: number) => ({
+      url: `https://server.example/api/stream/session-2/index.m3u8?quality=480p&start=${position}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-2/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Example Movie"
+        serverOptimized={{ qualities: ["480p"], request: zeroOffsetRequest }}
+        onClose={() => {}}
+      />,
+    );
+    const zeroWindow = document.querySelector("video.player-video") as HTMLVideoElement;
+    let zeroWindowTime = 3;
+    Object.defineProperties(zeroWindow, {
+      duration: { configurable: true, value: Number.POSITIVE_INFINITY },
+      currentTime: {
+        configurable: true,
+        get: () => zeroWindowTime,
+        set: (value: number) => { zeroWindowTime = value; },
+      },
+      paused: { configurable: true, value: true },
+    });
+    fireEvent.loadedMetadata(zeroWindow);
+    fireEvent.timeUpdate(zeroWindow);
+    fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+    expect(zeroWindowTime).toBe(0);
+    expect(zeroOffsetRequest).not.toHaveBeenCalled();
+
+    const zeroScrub = scrubBarMock.mock.calls.at(-1)?.[0];
+    if (zeroScrub == null) throw new Error("Zero-offset scrub bar props were not captured");
+    act(() => zeroScrub.onSeek(2));
+    expect(zeroWindowTime).toBe(2);
+    expect(zeroOffsetRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an excluded lower boundary", 10, [[2, 10]], "back", 531],
+    ["a seekable gap", 0, [[0, 4], [6, 10]], "right", 536],
+  ] as const)("restarts an unknown-total Infinity EVENT seek across %s", async (
+    _label,
+    initialTime,
+    ranges,
+    action,
+    expectedPosition,
+  ) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (_quality: string, position: number) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${position}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=531"
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          timelineOffsetSeconds={531}
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let currentTime: number = initialTime;
+      Object.defineProperties(video, {
+        duration: { configurable: true, value: Number.POSITIVE_INFINITY },
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (value: number) => { currentTime = value; },
+        },
+        paused: { configurable: true, value: true },
+        seekable: {
+          configurable: true,
+          value: {
+            length: ranges.length,
+            start: (index: number) => ranges[index]?.[0] ?? 0,
+            end: (index: number) => ranges[index]?.[1] ?? 0,
+          },
+        },
+      });
+      fireEvent.loadedMetadata(video);
+      fireEvent.timeUpdate(video);
+
+      if (action === "back") {
+        fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+      } else {
+        act(() => {
+          window.dispatchEvent(new KeyboardEvent("keydown", {
+            key: "ArrowRight",
+            bubbles: true,
+            cancelable: true,
+          }));
+        });
+      }
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", expectedPosition));
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2777,6 +5465,7 @@ describe("WebviewPlayer", () => {
         set: (value: number) => { optimizedTime = value; },
       });
       fireEvent.loadedMetadata(optimizedVideo);
+      markCurrentMediaDataReady(optimizedVideo);
       fireEvent.canPlay(optimizedVideo);
       fireEvent.seeked(optimizedVideo);
       optimizedTime = 5;
@@ -2799,42 +5488,221 @@ describe("WebviewPlayer", () => {
     }
   });
 
-  it("treats an initial trusted Server Optimized HLS URL as partial without requesting a switch", () => {
+  it("defers the preferred quality for an initial trusted HLS until real playback progresses", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const request = vi.fn(async () => ({
-      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
-      timelineOffsetSeconds: 0,
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=auto&start=1.25",
+      timelineOffsetSeconds: 1.25,
       startPositionSeconds: 0,
-      quality: "480p" as const,
+      quality: "auto" as const,
     }));
-    const onProgress = vi.fn();
-    const onEnded = vi.fn();
-    render(
-      <VideoPlayer
-        url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0"
-        engine="webview-hls-transcode"
-        title="Example Movie"
-        serverOptimized={{ qualities: ["480p"], request }}
-        onProgress={onProgress}
-        onEnded={onEnded}
-        onClose={() => {}}
-      />,
-    );
-    const video = document.querySelector("video.player-video") as HTMLVideoElement;
-    Object.defineProperty(video, "duration", { configurable: true, value: 12 });
-    video.currentTime = 5;
-    fireEvent.loadedMetadata(video);
-    fireEvent.timeUpdate(video);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0"
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          serverOptimized={{ qualities: ["auto", "480p"], defaultQuality: "auto", request }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let currentTime = 0;
+      let paused = true;
+      Object.defineProperties(video, {
+        duration: { configurable: true, value: 12 },
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (value: number) => { currentTime = value; },
+        },
+        paused: { configurable: true, get: () => paused },
+      });
+      fireEvent.loadedMetadata(video);
+      await act(async () => { await Promise.resolve(); });
+      expect(request).not.toHaveBeenCalled();
 
-    expect(request).not.toHaveBeenCalled();
-    expect(onProgress).toHaveBeenLastCalledWith(
-      5,
-      null,
-      expect.objectContaining({ playbackSpeed: 1 }),
-    );
-    expect(document.querySelector(".player-time")).toHaveTextContent("0:05 / --:--");
-    fireEvent.ended(video);
-    expect(onEnded).not.toHaveBeenCalled();
+      currentTime = 1;
+      fireEvent.pause(video);
+      fireEvent.timeUpdate(video);
+      expect(request).not.toHaveBeenCalled();
+
+      paused = false;
+      currentTime = 1.1;
+      fireEvent.timeUpdate(video);
+      expect(request).not.toHaveBeenCalled();
+
+      fireEvent.playing(video);
+      fireEvent.timeUpdate(video);
+      expect(request).not.toHaveBeenCalled();
+
+      currentTime = 1.25;
+      fireEvent.timeUpdate(video);
+      await waitFor(() => expect(request).toHaveBeenCalledWith("auto", 1.25));
+      await waitFor(() => expect(hlsInstances).toHaveLength(2));
+
+      const optimizedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      let optimizedTime = 0;
+      let optimizedPaused = true;
+      Object.defineProperties(optimizedVideo, {
+        currentTime: {
+          configurable: true,
+          get: () => optimizedTime,
+          set: (value: number) => { optimizedTime = value; },
+        },
+        duration: { configurable: true, value: 120 },
+        paused: { configurable: true, get: () => optimizedPaused },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 120 },
+        },
+      });
+      markCurrentMediaDataReady(optimizedVideo);
+      fireEvent.loadedData(optimizedVideo);
+      optimizedPaused = false;
+      fireEvent.playing(optimizedVideo);
+      optimizedTime = 0.25;
+      fireEvent.timeUpdate(optimizedVideo);
+      await act(async () => { await Promise.resolve(); });
+
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a manual quality selected before deferred initial-HLS optimization", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (
+      quality: ServerTranscodeQuality,
+      position: number,
+    ) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=${quality}&start=${position}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0"
+          engine="webview-hls-transcode"
+          title="Manual quality movie"
+          serverOptimized={{
+            qualities: ["auto", "480p", "360p"],
+            defaultQuality: "auto",
+            request,
+          }}
+          onClose={() => {}}
+        />,
+      );
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "360p" }));
+      await waitFor(() => expect(request).toHaveBeenCalledWith("360p", 0));
+      await waitFor(() => expect(hlsInstances).toHaveLength(2));
+
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let currentTime = 0;
+      let paused = true;
+      Object.defineProperties(video, {
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (value: number) => { currentTime = value; },
+        },
+        duration: { configurable: true, value: 120 },
+        paused: { configurable: true, get: () => paused },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 120 },
+        },
+      });
+      markCurrentMediaDataReady(video);
+      fireEvent.loadedData(video);
+      paused = false;
+      currentTime = 0.25;
+      fireEvent.timeUpdate(video);
+      await act(async () => { await Promise.resolve(); });
+
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request).not.toHaveBeenCalledWith("auto", expect.any(Number));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps Device Original after a manual quality toggle cancels deferred initial-HLS optimization", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const initialUrl =
+      "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0";
+    const request = vi.fn(async (
+      quality: ServerTranscodeQuality,
+      position: number,
+    ) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=${quality}&start=${position}`,
+      timelineOffsetSeconds: position,
+      startPositionSeconds: 0,
+      quality,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    try {
+      render(
+        <VideoPlayer
+          url={initialUrl}
+          engine="webview-hls-transcode"
+          title="Manual mode movie"
+          serverOptimized={{
+            qualities: ["auto", "480p", "360p"],
+            defaultQuality: "auto",
+            request,
+          }}
+          onClose={() => {}}
+        />,
+      );
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "360p" }));
+      await waitFor(() => expect(request).toHaveBeenCalledWith("360p", 0));
+      await waitFor(() => expect(hlsInstances).toHaveLength(2));
+
+      const optimizedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      let currentTime = 0;
+      let paused = true;
+      Object.defineProperties(optimizedVideo, {
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (value: number) => { currentTime = value; },
+        },
+        duration: { configurable: true, value: 120 },
+        paused: { configurable: true, get: () => paused },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 120 },
+        },
+      });
+      markCurrentMediaDataReady(optimizedVideo);
+      fireEvent.loadedData(optimizedVideo);
+      paused = false;
+      fireEvent.playing(optimizedVideo);
+      currentTime = 0.25;
+      fireEvent.timeUpdate(optimizedVideo);
+      await act(async () => { await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(1);
+
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "Device Original" }));
+      await waitFor(() => expect(hlsInstances[2]?.loadSource).toHaveBeenCalledWith(initialUrl));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(request.mock.calls).toEqual([["360p", 0]]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("loads source duration once for initial partial HLS and seeks outside its local window", async () => {
@@ -3186,6 +6054,361 @@ describe("WebviewPlayer", () => {
     expect(loadSourceInfo).toHaveBeenCalledTimes(1);
     expect(document.querySelector(".player-time")?.textContent).toContain("0:00 / --:--");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("waits five seconds, then retries source metadata once with the extended server lane across handler rerenders", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const firstHandler = vi.fn(async (options?: { retryFailed?: boolean; signal?: AbortSignal }) => {
+      if (options?.retryFailed) {
+        return {
+          durationSeconds: 596,
+          tracks: [{ index: 0, language: "eng", label: "English", default: true }],
+        };
+      }
+      throw conflict();
+    });
+    const replacementHandler = vi.fn(async () => ({ durationSeconds: 1 }));
+    const request = vi.fn();
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-409/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Retry source metadata"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: firstHandler, request }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(firstHandler).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-409/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Retry source metadata"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: replacementHandler, request }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+    expect(firstHandler).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(firstHandler).toHaveBeenCalledTimes(2);
+    expect(firstHandler.mock.calls[1]?.[0]).toMatchObject({
+      retryFailed: true,
+      signal: expect.any(AbortSignal),
+    });
+    expect(replacementHandler).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["401", 401],
+    ["403", 403],
+    ["404", 404],
+    ["410", 410],
+    ["network", undefined],
+  ])("does not retry source metadata after a %s or unknown failure", async (_label, status) => {
+    vi.useFakeTimers();
+    const loadSourceInfo = vi.fn(async () => {
+      const error = new Error("not retryable") as Error & { status?: number };
+      if (status != null) error.status = status;
+      throw error;
+    });
+    render(
+      <VideoPlayer
+        url={`https://server.example/api/stream/no-retry-${String(status)}/index.m3u8?quality=480p`}
+        engine="webview-hls-transcode"
+        title="No metadata retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(loadSourceInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels the delayed source-info retry on unmount and owner replacement", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const firstOwner = vi.fn(async () => { throw conflict(); });
+    const secondOwner = vi.fn(async () => { throw conflict(); });
+    const { unmount } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/unmount/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Unmount metadata retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: firstOwner, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(firstOwner).toHaveBeenCalledTimes(1);
+
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-a/index.m3u8?quality=480p"
+        sourceRevision={1}
+        engine="webview-hls-transcode"
+        title="Owner replacement"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: firstOwner, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-b/index.m3u8?quality=480p"
+        sourceRevision={2}
+        engine="webview-hls-transcode"
+        title="Owner replacement"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo: secondOwner, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(firstOwner).toHaveBeenCalledTimes(2);
+    // The replacement owner gets its own first retry; the canceled A owner
+    // never gets one after it is replaced.
+    expect(secondOwner).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a delayed A-to-B-to-A retry result from the stale owner generation", async () => {
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const initial = deferred<{ durationSeconds: number }>();
+    const retry = deferred<{ durationSeconds: number }>();
+    const loadSourceInfo = vi.fn((options?: { retryFailed?: boolean }) =>
+      options?.retryFailed ? retry.promise : initial.promise,
+    );
+    const { rerender } = render(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-a/index.m3u8?quality=480p"
+        sourceRevision={1}
+        engine="webview-hls-transcode"
+        title="Stale retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    await waitFor(() => expect(loadSourceInfo).toHaveBeenCalledTimes(1));
+    vi.useFakeTimers();
+    await act(async () => {
+      initial.reject(conflict());
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(loadSourceInfo).toHaveBeenCalledTimes(2);
+    expect(loadSourceInfo.mock.calls[1]?.[0]).toMatchObject({
+      retryFailed: true,
+      signal: expect.any(AbortSignal),
+    });
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-b/index.m3u8?quality=480p"
+        sourceRevision={2}
+        engine="webview-hls-transcode"
+        title="Stale retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    vi.useRealTimers();
+    await waitFor(() => expect(hlsInstances).toHaveLength(2));
+    rerender(
+      <VideoPlayer
+        url="https://server.example/api/stream/owner-a/index.m3u8?quality=480p"
+        sourceRevision={1}
+        engine="webview-hls-transcode"
+        title="Stale retry"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(hlsInstances).toHaveLength(3));
+    await act(async () => {
+      retry.resolve({ durationSeconds: 596 });
+      await retry.promise;
+    });
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / --:--");
+  });
+
+  it("adopts retried duration and audio without remounting or replacing playback", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const request = vi.fn();
+    const loadSourceInfo = vi.fn(async (options?: { retryFailed?: boolean }) => {
+      if (!options?.retryFailed) throw conflict();
+      return {
+        durationSeconds: 596,
+        tracks: [
+          { index: 0, language: "eng", label: "English", default: true },
+          { index: 1, language: "fra", label: "French", default: false },
+        ],
+      };
+    });
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/adopt/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Adopt metadata"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request }}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: Number.POSITIVE_INFINITY });
+    Object.defineProperty(video, "currentTime", { configurable: true, value: 3 });
+    fireEvent.loadedMetadata(video);
+    fireEvent.timeUpdate(video);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:03 / 9:56");
+    expect(screen.getByTestId("scrub-bar").getAttribute("data-duration")).toBe("596");
+    const settingsButton = document.querySelector(
+      'button[aria-label="Playback settings"]',
+    ) as HTMLButtonElement;
+    fireEvent.click(settingsButton);
+    expect(screen.getByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("lets successful manual source recovery supersede the delayed automatic retry", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const loadSourceInfo = vi.fn(async () => { throw conflict(); });
+    const loadAudioTracks = vi.fn((options?: ServerAudioInventoryLoadOptions) => {
+      if (!options?.retryFailed) return Promise.reject(new Error("inventory unavailable"));
+      options?.onSourceInfo?.({
+        durationSeconds: 596,
+        tracks: [
+          { index: 0, language: "eng", label: "English", default: true },
+          { index: 1, language: "fra", label: "French", default: false },
+        ],
+      });
+      return Promise.resolve([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+    });
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/manual-recovery/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Manual metadata recovery"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, loadAudioTracks, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(loadSourceInfo).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "French" })).toBeInTheDocument();
+  });
+
+  it("stops after one failed automatic source-info retry", async () => {
+    vi.useFakeTimers();
+    const conflict = () => Object.assign(new Error("metadata is still warming"), { status: 409 });
+    const loadSourceInfo = vi.fn(async () => { throw conflict(); });
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/retry-once/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Retry once"
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+        onClose={() => {}}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(65_000); });
+    expect(loadSourceInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the initial source-info result through StrictMode effect replay", async () => {
+    const sourceInfo = deferred<{
+      durationSeconds: number;
+      tracks: ServerAudioTrack[];
+    }>();
+    const loadSourceInfo = vi.fn(() => sourceInfo.promise);
+    render(
+      <StrictMode>
+        <VideoPlayer
+          url="https://server.example/api/stream/strict-source/video.mp4"
+          engine="webview-direct"
+          title="Strict source info"
+          serverOptimized={{ qualities: ["480p"], loadSourceInfo, request: vi.fn() }}
+          onClose={() => {}}
+        />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(loadSourceInfo).toHaveBeenCalled());
+    await act(async () => {
+      sourceInfo.resolve({
+        durationSeconds: 596,
+        tracks: [{ index: 0, language: "eng", label: "English", default: true }],
+      });
+      await sourceInfo.promise;
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / 9:56");
+  });
+
+  it("rejects old manual A metadata after A-to-B-to-A owner reuse", async () => {
+    const oldRetry = deferred<ServerAudioTrack[]>();
+    let oldOptions: ServerAudioInventoryLoadOptions | undefined;
+    let retryCalls = 0;
+    const loadAudioTracks = vi.fn((options?: ServerAudioInventoryLoadOptions) => {
+      if (!options?.retryFailed) return Promise.reject(new Error("inventory unavailable"));
+      retryCalls += 1;
+      if (retryCalls === 1) {
+        oldOptions = options;
+        return oldRetry.promise;
+      }
+      return Promise.reject(new Error("later retry unavailable"));
+    });
+    const player = (owner: "a" | "b", revision: number) => (
+      <VideoPlayer
+        url={`https://server.example/api/stream/manual-${owner}/index.m3u8?quality=480p`}
+        sourceRevision={revision}
+        engine="webview-hls-transcode"
+        title="Manual generation fence"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request: vi.fn() }}
+        onClose={() => {}}
+      />
+    );
+    const { rerender } = render(player("a", 1));
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(oldOptions?.onSourceInfo).toBeTypeOf("function");
+
+    rerender(player("b", 2));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    rerender(player("a", 1));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    await act(async () => {
+      oldOptions!.onSourceInfo!({
+        durationSeconds: 596,
+        tracks: [{ index: 0, language: "eng", label: "English", default: true }],
+      });
+      oldRetry.resolve([{ index: 0, language: "eng", label: "English", default: true }]);
+      await oldRetry.promise;
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".player-time")).toHaveTextContent("0:00 / --:--");
   });
 
   it("prefers an original video duration over later source metadata", async () => {
@@ -3771,6 +6994,72 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it("uses the unknown-total EVENT offset for Media Session relative seeks", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
+    const setPositionState = vi.fn();
+    const mediaSession = {
+      metadata: null,
+      playbackState: "none",
+      setActionHandler: vi.fn((
+        action: MediaSessionAction,
+        handler: MediaSessionActionHandler | null,
+      ) => handlers.set(action, handler)),
+      setPositionState,
+    } as unknown as MediaSession;
+    const restoreMediaSession = replaceProperty(navigator, "mediaSession", mediaSession);
+    const replacement = deferred<{
+      url: string;
+      timelineOffsetSeconds: number;
+      startPositionSeconds: number;
+      quality: "480p";
+    }>();
+    const request = vi.fn((_quality: string, _position: number) => replacement.promise);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+      { status: 200 },
+    )));
+    try {
+      const { unmount } = render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=531"
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          timelineOffsetSeconds={531}
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        duration: { configurable: true, value: 12 },
+        currentTime: { configurable: true, value: 3, writable: true },
+        paused: { configurable: true, value: true },
+      });
+      fireEvent.loadedMetadata(video);
+      fireEvent.timeUpdate(video);
+      expect(setPositionState).not.toHaveBeenCalled();
+
+      act(() => handlers.get("seekbackward")?.({ action: "seekbackward" }));
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 524));
+      await act(async () => {
+        replacement.resolve({
+          url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=524",
+          timelineOffsetSeconds: 524,
+          startPositionSeconds: 0,
+          quality: "480p",
+        });
+        await replacement.promise;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      unmount();
+    } finally {
+      restoreMediaSession();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not publish a partial local window as the Media Session total", () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const setPositionState = vi.fn();
@@ -4093,6 +7382,31 @@ describe("WebviewPlayer", () => {
 
       fireEvent.pointerDown(video, { pointerType: "touch" });
       fireEvent.click(video);
+      expect(play).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps reveal-before-play semantics in the shared touch presentation", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      play.mockClear();
+      act(() => vi.advanceTimersByTime(3200));
+      expect(document.querySelector(".player-osd")).not.toHaveClass("is-visible");
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 50 });
+      expect(document.querySelector(".player-osd")).toHaveClass("is-visible");
+      expect(play).not.toHaveBeenCalled();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 50 });
       expect(play).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
@@ -4492,6 +7806,53 @@ describe("WebviewPlayer", () => {
       expect(currentTime).toBe(11);
     });
 
+    it("uses the unknown-total EVENT offset for keyboard relative seeks", async () => {
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      const replacement = deferred<{
+        url: string;
+        timelineOffsetSeconds: number;
+        startPositionSeconds: number;
+        quality: "480p";
+      }>();
+      const request = vi.fn((_quality: string, _position: number) => replacement.promise);
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(
+        "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+        { status: 200 },
+      )));
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=531"
+          engine="webview-hls-transcode"
+          title="Example Movie"
+          timelineOffsetSeconds={531}
+          serverOptimized={{ qualities: ["480p"], request }}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        duration: { configurable: true, value: 12 },
+        currentTime: { configurable: true, value: 3, writable: true },
+        paused: { configurable: true, value: true },
+      });
+      fireEvent.loadedMetadata(video);
+      fireEvent.timeUpdate(video);
+
+      press("j");
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 524));
+      await act(async () => {
+        replacement.resolve({
+          url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=524",
+          timelineOffsetSeconds: 524,
+          startPositionSeconds: 0,
+          quality: "480p",
+        });
+        await replacement.promise;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    });
+
     it("ignores shortcuts while a text field is focused", () => {
       setup(true);
       const input = document.createElement("input");
@@ -4508,6 +7869,67 @@ describe("WebviewPlayer", () => {
       press(" ", button);
       expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
       button.remove();
+    });
+
+    it("isolates Playback settings from shortcuts and exposed video clicks", () => {
+      const requestFullscreen = vi.fn().mockResolvedValue(undefined);
+      const restoreRequestFullscreen = replaceProperty(
+        HTMLElement.prototype,
+        "requestFullscreen",
+        requestFullscreen,
+      );
+      try {
+        const { video } = setup(true);
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+        const dialog = screen.getByRole("dialog", { name: "Playback settings" });
+        const play = vi.mocked(HTMLMediaElement.prototype.play);
+        const pause = vi.mocked(HTMLMediaElement.prototype.pause);
+        play.mockClear();
+        pause.mockClear();
+
+        fireEvent.keyDown(dialog, { key: " " });
+        fireEvent.click(video);
+        fireEvent.doubleClick(video);
+
+        expect(play).not.toHaveBeenCalled();
+        expect(pause).not.toHaveBeenCalled();
+        expect(requestFullscreen).not.toHaveBeenCalled();
+        expect(dialog).toBeInTheDocument();
+      } finally {
+        restoreRequestFullscreen();
+      }
+    });
+
+    it("isolates the captions dialog from player shortcuts and stage clicks", () => {
+      const { video } = setup(true);
+      fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+      const dialog = screen.getByTestId("captions-menu");
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+
+      fireEvent.keyDown(dialog, { key: " " });
+      fireEvent.click(video);
+
+      expect(play).not.toHaveBeenCalled();
+      expect(dialog).toBeInTheDocument();
+    });
+
+    it("isolates Player details from player shortcuts and stage clicks", () => {
+      const { video } = setup(true);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Player details and shortcuts" }),
+      );
+      const dialog = screen.getByRole("dialog", {
+        name: "Player details and shortcuts",
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+
+      fireEvent.keyDown(dialog, { key: " " });
+      fireEvent.click(video);
+
+      expect(play).not.toHaveBeenCalled();
+      expect(dialog).toBeInTheDocument();
     });
 
     it("ignores shortcuts when a modifier is held (so ⌘K still works)", () => {
@@ -4797,6 +8219,20 @@ describe("captions toggle", () => {
 describe("HLS source attach", () => {
   // hls.js (~151 KB gz) is now fetched on demand, only once an .m3u8 the browser
   // cannot play natively is reached - so the attach is async and these await it.
+  it("leaves ordinary nonexact HLS startup on the hls.js default", async () => {
+    render(
+      <VideoPlayer
+        url="https://x/stream.m3u8"
+        title="T"
+        startPositionSeconds={120}
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    expect(hlsInstances[0].config).not.toHaveProperty("startPosition");
+  });
+
   it("credentials only the configured server's mounted HLS session requests", async () => {
     (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
       () => "",
@@ -4874,6 +8310,50 @@ describe("HLS source attach", () => {
     expect(screen.getByRole("button", { name: "English" })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("expands HLS code-only labels in the menu and Audio shortcut", async () => {
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "",
+    );
+    render(<VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    hlsInstances[0].audioTracks = [
+      { name: "eng", lang: "eng" },
+      { name: "fre", lang: "fre" },
+    ];
+    hlsInstances[0].audioTrack = 0;
+    const manifestHandler = hlsInstances[0].on.mock.calls.find(
+      ([event]) => event === "manifestParsed",
+    )?.[1] as (() => void) | undefined;
+    if (manifestHandler == null) throw new Error("manifest handler missing");
+    act(manifestHandler);
+
+    const trigger = screen.getByRole("button", { name: "Audio track, English" });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "English" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "French" }));
+    expect(hlsInstances[0].audioTrack).toBe(1);
+  });
+
+  it("labels an unnamed HLS undetermined audio track as Audio 3 in the product menu", async () => {
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(() => "");
+    render(<VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    hlsInstances[0].audioTracks = [
+      { name: "eng", lang: "eng" },
+      { name: "", lang: "und" },
+      { name: "", lang: "und" },
+    ];
+    hlsInstances[0].audioTrack = 0;
+    const handler = hlsInstances[0].on.mock.calls.find(([event]) => event === "manifestParsed")?.[1] as (() => void) | undefined;
+    if (handler == null) throw new Error("manifest handler missing");
+    act(handler);
+    fireEvent.click(screen.getByRole("button", { name: "Audio track, English" }));
+    expect(screen.getByRole("button", { name: "Audio 3" })).toBeInTheDocument();
+  });
+
   it("selects browser-native audio tracks when AudioTrackList is exposed", async () => {
     const tracks = Object.assign(new EventTarget(), {
       0: { id: "en", label: "English", language: "eng", enabled: true },
@@ -4898,6 +8378,156 @@ describe("HLS source attach", () => {
     expect(screen.getByRole("button", { name: "French" })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("reconciles a duplicate native selection to the prior preference without trapping later native choices", async () => {
+    type MutableAudioTrack = {
+      id: string;
+      label: string;
+      language: string;
+      enabled: boolean;
+      readonly writes: number;
+      setNativeEnabled(value: boolean): void;
+    };
+    const nativeList = () => {
+      const events = new EventTarget();
+      const makeTrack = (
+        id: string,
+        label: string,
+        language: string,
+        initialEnabled: boolean,
+      ): MutableAudioTrack => {
+        let enabled = initialEnabled;
+        let writes = 0;
+        return {
+          id,
+          label,
+          language,
+          get enabled() { return enabled; },
+          set enabled(value: boolean) {
+            writes += 1;
+            if (writes > 8) throw new Error("native audio reconciliation looped");
+            enabled = value;
+            events.dispatchEvent(new Event("change"));
+          },
+          get writes() { return writes; },
+          setNativeEnabled(value: boolean) { enabled = value; },
+        };
+      };
+      const english = makeTrack("en", "English", "eng", true);
+      const french = makeTrack("fr", "French", "fra", false);
+      const tracks = Object.assign(events, {
+        0: english,
+        1: french,
+        length: 2,
+        item(index: number) {
+          return this[index as 0 | 1] ?? null;
+        },
+      });
+      return { tracks, english, french };
+    };
+
+    const preferred = nativeList();
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", {
+      configurable: true,
+      get: () => preferred.tracks,
+    });
+    const onProgress = vi.fn();
+    const mounted = render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="T"
+        playerPreferences={{ defaultAudioLanguage: "French" }}
+        onProgress={onProgress}
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "French" }),
+    ).toHaveAttribute("aria-pressed", "true"));
+    expect(preferred.english.enabled).toBe(false);
+    expect(preferred.french.enabled).toBe(true);
+
+    act(() => { preferred.english.enabled = true; });
+    expect(preferred.english.enabled).toBe(false);
+    expect(preferred.french.enabled).toBe(true);
+    expect(screen.getByRole("button", { name: "French" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(preferred.english.writes + preferred.french.writes).toBeLessThanOrEqual(4);
+
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, value: 12 },
+      duration: { configurable: true, value: 120 },
+    });
+    fireEvent.timeUpdate(video);
+    expect(onProgress).toHaveBeenLastCalledWith(
+      12,
+      120,
+      expect.objectContaining({ preferredAudioId: "fr", preferredAudioLang: "fra" }),
+    );
+
+    act(() => {
+      preferred.english.setNativeEnabled(true);
+      preferred.french.setNativeEnabled(false);
+      preferred.tracks.dispatchEvent(new Event("change"));
+    });
+    expect(preferred.english.enabled).toBe(true);
+    expect(preferred.french.enabled).toBe(false);
+    expect(screen.getByRole("button", { name: "English" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    mounted.unmount();
+
+    const unresolved = nativeList();
+    unresolved.french.setNativeEnabled(true);
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", {
+      configurable: true,
+      get: () => unresolved.tracks,
+    });
+    render(
+      <VideoPlayer
+        url="https://x/other.mp4"
+        title="Other"
+        savedPrefs={{ preferredAudioId: "missing", preferredAudioLang: "zzz" }}
+        onClose={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(unresolved.english.enabled).toBe(true);
+    expect(unresolved.french.enabled).toBe(true);
+    expect(unresolved.english.writes + unresolved.french.writes).toBe(0);
+  });
+
+  it("expands browser-native code-only labels without changing browser track IDs", async () => {
+    const tracks = Object.assign(new EventTarget(), {
+      0: { id: "audio-en", label: "eng", language: "eng", enabled: true },
+      1: { id: "audio-fr", label: "fre", language: "fre", enabled: false },
+      length: 2,
+      item(index: number) {
+        return this[index as 0 | 1] ?? null;
+      },
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", {
+      configurable: true,
+      get: () => tracks,
+    });
+
+    render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
+    const trigger = await screen.findByRole("button", { name: "Audio track, English" });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "French" }));
+
+    expect(tracks[0].enabled).toBe(false);
+    expect(tracks[1].enabled).toBe(true);
+    expect(screen.getByRole("button", { name: "French" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
   it("explains honestly when the browser does not expose alternate audio", async () => {
     render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
     await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
@@ -4914,7 +8544,7 @@ describe("HLS source attach", () => {
       render(<VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />);
       await act(async () => Promise.resolve());
       expect(hlsInstances).toHaveLength(1);
-      const handler = hlsInstances[0].on.mock.calls[0]?.[1] as (
+      const handler = hlsInstances[0].on.mock.calls.find(([event]) => event === "hlsError")?.[1] as (
         event: string,
         data: { fatal: boolean; type: string },
       ) => void;
@@ -4940,7 +8570,7 @@ describe("HLS source attach", () => {
     try {
       render(<VideoPlayer url="https://x/manifest.m3u8" title="T" onClose={() => {}} />);
       await act(async () => Promise.resolve());
-      const handler = hlsInstances[0].on.mock.calls[0]?.[1] as (
+      const handler = hlsInstances[0].on.mock.calls.find(([event]) => event === "hlsError")?.[1] as (
         event: string,
         data: { fatal: boolean; type: string; details: string },
       ) => void;
@@ -4983,7 +8613,7 @@ describe("HLS source attach", () => {
         <VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />,
       );
       await act(async () => Promise.resolve());
-      const handler = hlsInstances[0].on.mock.calls[0]?.[1] as (
+      const handler = hlsInstances[0].on.mock.calls.find(([event]) => event === "hlsError")?.[1] as (
         event: string,
         data: { fatal: boolean; type: string },
       ) => void;
@@ -5002,7 +8632,7 @@ describe("HLS source attach", () => {
     );
     render(<VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />);
     await waitFor(() => expect(hlsInstances).toHaveLength(1));
-    const handler = hlsInstances[0].on.mock.calls[0]?.[1] as (
+    const handler = hlsInstances[0].on.mock.calls.find(([event]) => event === "hlsError")?.[1] as (
       event: string,
       data: { fatal: boolean; type: string },
     ) => void;
@@ -5061,7 +8691,7 @@ describe("HLS source attach", () => {
     );
   });
 
-  it("keeps native HLS in the iOS app", () => {
+  it("leaves ordinary nonexact native HLS startup unchanged in the iOS app", () => {
     deviceKindMock.mockReturnValue("ios");
     Object.defineProperty(window, "__YAWF_TAURI_MOBILE__", {
       configurable: true,
@@ -5072,12 +8702,18 @@ describe("HLS source attach", () => {
     );
 
     render(
-      <VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />,
+      <VideoPlayer
+        url="https://x/stream.m3u8?quality=auto"
+        title="Ordinary native HLS"
+        startPositionSeconds={120}
+        onClose={() => {}}
+      />,
     );
 
     expect(hlsInstances).toHaveLength(0);
-    const video = document.querySelector("video.player-video") as HTMLVideoElement;
-    expect(video.src).toBe("https://x/stream.m3u8");
+    const player = screen.getByRole("dialog", { name: "Playing Ordinary native HLS" });
+    const video = player.querySelector("video.player-video") as HTMLVideoElement;
+    expect(video.src).toBe("https://x/stream.m3u8?quality=auto");
   });
 
   it("destroys the hls.js instance on unmount", async () => {
@@ -5774,4 +9410,1071 @@ describe("VideoPlayer predictive episode transitions", () => {
     fireEvent(video, new Event("ended"));
     expect(calls).toEqual(["ended"]);
   });
+});
+
+// Evented browser subtitle lists, with per-object identities and real mode
+// changes. These tests use the actual CaptionsMenu, not the lightweight stub.
+function eventedCaptionList() {
+  const target = new EventTarget();
+  const list = Object.assign([] as TextTrack[], {
+    addEventListener: vi.fn(target.addEventListener.bind(target)),
+    removeEventListener: vi.fn(target.removeEventListener.bind(target)),
+    dispatchEvent: target.dispatchEvent.bind(target),
+    add(label: string, language = "", initial: TextTrackMode = "disabled", kind = "subtitles") {
+      let mode = initial;
+      const track = Object.assign(new EventTarget(), {
+        label, language, kind, cues: [],
+      });
+      Object.defineProperty(track, "mode", {
+        get: () => mode,
+        set: (value: TextTrackMode) => {
+          if (mode === value) return;
+          mode = value;
+          target.dispatchEvent(new Event("change"));
+        },
+      });
+      list.push(track as unknown as TextTrack);
+      target.dispatchEvent(new Event("addtrack"));
+      return track as unknown as TextTrack;
+    },
+  });
+  return list;
+}
+
+describe("embedded caption controls", () => {
+  let lists: WeakMap<HTMLMediaElement, ReturnType<typeof eventedCaptionList>>;
+  beforeEach(() => {
+    captionMenuMode.actual = true;
+    lists = new WeakMap();
+    vi.spyOn(HTMLMediaElement.prototype, "textTracks", "get").mockImplementation(function (this: HTMLMediaElement) {
+      let list = lists.get(this);
+      if (list == null) { list = eventedCaptionList(); lists.set(this, list); }
+      return list as unknown as TextTrackList;
+    });
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+  const video = () => document.querySelector("video.player-video") as HTMLVideoElement;
+  const open = () => fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+  const button = (name: string) => within(screen.getByRole("dialog", { name: "Subtitles" })).getByRole("button", { name });
+
+  it("exposes real HLS inventory and selection events, with a friendly unknown-language label", async () => {
+    render(<VideoPlayer url="https://x/captions.m3u8" title="T" onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const hls = hlsInstances[0]!;
+    act(() => {
+      hls.subtitleTracks = [{ name: "subtitle_0" }, { name: "French", lang: "fr" }];
+      hls.subtitleTrack = 0;
+      hls.emit("subtitleTracksUpdated");
+    });
+    open();
+    expect(button("Embedded subtitles")).toHaveAttribute("aria-pressed", "true");
+    expect(button("Off")).toHaveAttribute("aria-pressed", "false");
+    expect(document.querySelector(".captions-active-dot")).not.toBeNull();
+    act(() => { hls.subtitleTracks.push({ name: "Spanish", lang: "es" }); hls.emit("subtitleTracksUpdated"); });
+    expect(button("Spanish")).toHaveAttribute("aria-pressed", "false");
+    act(() => { hls.subtitleTrack = 1; hls.emit("subtitleTrackSwitch", { id: 1 }); });
+    expect(button("French")).toHaveAttribute("aria-pressed", "true");
+    expect(button("Embedded subtitles")).toHaveAttribute("aria-pressed", "false");
+    act(() => { hls.subtitleTracks = []; hls.subtitleTrack = -1; hls.emit("subtitleTracksUpdated"); });
+    expect(within(screen.getByRole("dialog", { name: "Subtitles" })).queryByRole("button", { name: "French" })).toBeNull();
+    expect(button("Off")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("makes HLS Off, embedded, and downloaded choices mutually exclusive, including late default tracks", async () => {
+    subsState.tracks = [{ id: "download", label: "Downloaded English", language: "en", vttUrl: "blob:captions" }];
+    render(<VideoPlayer url="https://x/captions.m3u8" title="T" onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const hls = hlsInstances[0]!;
+    const list = lists.get(video())!;
+    let embedded!: TextTrack;
+    let downloaded!: TextTrack;
+    act(() => {
+      hls.subtitleTracks = [{ name: "subtitle_0" }];
+      hls.subtitleTrack = 0;
+      hls.emit("subtitleTracksUpdated");
+      embedded = list.add("subtitle_0", "", "showing");
+      downloaded = list.add("Downloaded English", "en");
+      Object.defineProperty(document.querySelector("track")!, "track", { value: downloaded });
+      list.dispatchEvent(new Event("change"));
+    });
+    open();
+    // HLS-owned native TextTracks must not appear as duplicate choices.
+    expect(within(screen.getByRole("dialog", { name: "Subtitles" })).getAllByRole("button", { name: "Embedded subtitles" })).toHaveLength(1);
+    fireEvent.click(button("Off"));
+    expect(hls.subtitleTrack).toBe(-1);
+    expect(hls.subtitleDisplay).toBe(false);
+    expect(embedded.mode).toBe("disabled");
+    expect(button("Off")).toHaveAttribute("aria-pressed", "true");
+    act(() => { hls.subtitleTrack = 0; hls.subtitleDisplay = true; hls.emit("subtitleTrackSwitch", { id: 0 }); });
+    expect(hls.subtitleTrack).toBe(-1);
+    expect(hls.subtitleDisplay).toBe(false);
+    fireEvent.click(button("Embedded subtitles"));
+    expect(hls.subtitleTrack).toBe(0);
+    expect(hls.subtitleDisplay).toBe(true);
+    expect(embedded.mode).toBe("showing");
+    expect(downloaded.mode).toBe("disabled");
+    fireEvent.click(button("Downloaded English"));
+    expect(subsState.activeTrackId).toBe("download");
+    expect(hls.subtitleTrack).toBe(-1);
+    expect(embedded.mode).toBe("disabled");
+    expect(downloaded.mode).toBe("showing");
+    fireEvent.click(button("Embedded subtitles"));
+    expect(subsState.activeTrackId).toBeNull();
+    expect(downloaded.mode).toBe("disabled");
+    expect(embedded.mode).toBe("showing");
+    fireEvent.click(button("Off"));
+    expect(embedded.mode).toBe("disabled");
+    expect(downloaded.mode).toBe("disabled");
+  });
+
+  it("observes native Safari track additions, changes, and removal without stealing same-label downloads", () => {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("maybe");
+    subsState.tracks = [{ id: "download", label: "English", language: "en", vttUrl: "blob:captions" }];
+    render(<VideoPlayer url="https://x/native.m3u8" title="T" onClose={() => {}} />);
+    const list = lists.get(video())!;
+    let embedded!: TextTrack;
+    let downloaded!: TextTrack;
+    act(() => {
+      embedded = list.add("English", "en", "showing");
+      downloaded = list.add("English", "en");
+      Object.defineProperty(document.querySelector("track")!, "track", { value: downloaded });
+      list.dispatchEvent(new Event("change"));
+    });
+    open();
+    const choices = within(screen.getByRole("dialog", { name: "Subtitles" })).getAllByRole("button", { name: "English" });
+    expect(choices).toHaveLength(2);
+    expect(choices[0]).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(choices[1]!);
+    expect(embedded.mode).toBe("disabled");
+    expect(downloaded.mode).toBe("showing");
+    fireEvent.click(choices[0]!);
+    expect(subsState.activeTrackId).toBeNull();
+    expect(embedded.mode).toBe("showing");
+    expect(downloaded.mode).toBe("disabled");
+    act(() => { embedded.mode = "disabled"; });
+    expect(button("Off")).toHaveAttribute("aria-pressed", "true");
+    act(() => { embedded.mode = "showing"; });
+    expect(button("Off")).toHaveAttribute("aria-pressed", "false");
+    act(() => { list.splice(list.indexOf(embedded), 1); list.dispatchEvent(new Event("removetrack")); });
+    expect(button("Off")).toHaveAttribute("aria-pressed", "true");
+    expect(within(screen.getByRole("dialog", { name: "Subtitles" })).getAllByRole("button", { name: "English" })).toHaveLength(1);
+    expect(hlsInstances).toHaveLength(0);
+  });
+
+  it("honors initial Off for native captions and disables newly added caption tracks", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" playerPreferences={{ defaultSubtitleBehavior: "off" }} onClose={() => {}} />);
+    const list = lists.get(video())!;
+    let track!: TextTrack;
+    act(() => { track = list.add("subtitle_0", "", "showing", "captions"); });
+    expect(track.mode).toBe("disabled");
+    open();
+    expect(button("Off")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(button("Embedded subtitles"));
+    expect(track.mode).toBe("showing");
+    fireEvent.click(button("Off"));
+    expect(track.mode).toBe("disabled");
+    let late!: TextTrack;
+    act(() => { late = list.add("French", "fr", "showing"); });
+    expect(late.mode).toBe("disabled");
+  });
+
+  it("waits for a matching preferred language instead of enabling an unknown or wrong default", async () => {
+    render(<VideoPlayer url="https://x/captions.m3u8" title="T" playerPreferences={{ defaultSubtitleBehavior: "preferred", defaultSubtitleLanguage: "fra" }} onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const hls = hlsInstances[0]!;
+    act(() => {
+      hls.subtitleTracks = [{ name: "subtitle_0" }, { name: "English", lang: "en" }];
+      hls.subtitleTrack = 0;
+      hls.emit("subtitleTracksUpdated");
+    });
+    expect(hls.subtitleTrack).toBe(-1);
+    act(() => { hls.subtitleTracks.push({ name: "French", lang: "fr" }); hls.emit("subtitleTracksUpdated"); });
+    expect(hls.subtitleTrack).toBe(2);
+    expect(hls.subtitleDisplay).toBe(true);
+    open();
+    expect(button("French")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(button("Off"));
+    act(() => { hls.emit("subtitleTracksUpdated"); });
+    expect(hls.subtitleTrack).toBe(-1);
+  });
+
+  it("applies the native preferred language only when it arrives and preserves manual Off", () => {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("maybe");
+    render(<VideoPlayer url="https://x/native.m3u8" title="T" playerPreferences={{ defaultSubtitleBehavior: "preferred", defaultSubtitleLanguage: "fr" }} onClose={() => {}} />);
+    const list = lists.get(video())!;
+    let unknown!: TextTrack;
+    let french!: TextTrack;
+    act(() => { unknown = list.add("subtitle_0", "", "showing"); });
+    expect(unknown.mode).toBe("disabled");
+    act(() => { french = list.add("French", "fra"); });
+    expect(french.mode).toBe("showing");
+    open();
+    expect(button("French")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(button("Off"));
+    act(() => { list.dispatchEvent(new Event("change")); });
+    expect(french.mode).toBe("disabled");
+    expect(button("Off")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps remembered Off ahead of the preferred language on HLS default-selection events", async () => {
+    render(<VideoPlayer url="https://x/captions.m3u8" title="T" savedPrefs={{ preferredSubId: "no" }} playerPreferences={{ defaultSubtitleBehavior: "preferred", defaultSubtitleLanguage: "fr" }} onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const hls = hlsInstances[0]!;
+    act(() => { hls.subtitleTracks = [{ name: "French", lang: "fr" }]; hls.emit("subtitleTracksUpdated"); hls.subtitleTrack = 0; });
+    expect(hls.subtitleTrack).toBe(-1);
+    expect(hls.subtitleDisplay).toBe(false);
+    open();
+    expect(button("Off")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(button("French"));
+    expect(hls.subtitleTrack).toBe(0);
+    expect(button("French")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("disables embedded captions when a completed subtitle download activates a track", async () => {
+    const props = { url: "https://x/captions.m3u8", title: "T", onClose: () => {} };
+    const { rerender } = render(<VideoPlayer {...props} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const hls = hlsInstances[0]!;
+    act(() => { hls.subtitleTracks = [{ name: "English", lang: "en" }]; hls.subtitleTrack = 0; hls.emit("subtitleTracksUpdated"); });
+    subsState.tracks = [{ id: "download", label: "Downloaded English", language: "en", vttUrl: "blob:captions" }];
+    subsState.activeTrackId = "download";
+    rerender(<VideoPlayer {...props} />);
+    expect(hls.subtitleTrack).toBe(-1);
+    expect(hls.subtitleDisplay).toBe(false);
+    open();
+    expect(button("Downloaded English")).toHaveAttribute("aria-pressed", "true");
+    expect(button("English")).toHaveAttribute("aria-pressed", "false");
+    expect(button("Off")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("cycles the keyboard shortcut through embedded, downloaded, and Off without overlapping modes", async () => {
+    subsState.tracks = [{ id: "download", label: "Downloaded English", language: "en", vttUrl: "blob:captions" }];
+    render(<VideoPlayer url="https://x/captions.m3u8" title="T" playerPreferences={{ defaultSubtitleBehavior: "off" }} onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const hls = hlsInstances[0]!;
+    act(() => { hls.subtitleTracks = [{ name: "French", lang: "fr" }]; hls.emit("subtitleTracksUpdated"); });
+    fireEvent.keyDown(window, { key: "c" });
+    expect(hls.subtitleTrack).toBe(0);
+    expect(subsState.activeTrackId).toBeNull();
+    fireEvent.keyDown(window, { key: "c" });
+    expect(hls.subtitleTrack).toBe(-1);
+    expect(subsState.activeTrackId).toBe("download");
+    fireEvent.keyDown(window, { key: "c" });
+    expect(subsState.activeTrackId).toBeNull();
+    expect(hls.subtitleTrack).toBe(-1);
+    expect(hls.subtitleDisplay).toBe(false);
+  });
+
+  it("cleans up each source owner and fences stale HLS and native callbacks across same-URL revisions", async () => {
+    const { rerender, unmount } = render(<VideoPlayer url="https://x/captions.m3u8" sourceRevision={0} title="T" playerPreferences={{ defaultSubtitleBehavior: "off" }} onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const old = hlsInstances[0]!;
+    const oldList = lists.get(video())!;
+    const oldRefresh = old.on.mock.calls.find(([event]) => event === "subtitleTracksUpdated")![1] as () => void;
+    const nativeRefresh = oldList.addEventListener.mock.calls.find(([event]) => event === "addtrack")![1] as () => void;
+    rerender(<VideoPlayer url="https://x/captions.m3u8" sourceRevision={1} title="T" onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(2));
+    const current = hlsInstances[1]!;
+    act(() => { current.subtitleTracks = [{ name: "Current", lang: "en" }]; current.subtitleTrack = 0; current.emit("subtitleTracksUpdated"); });
+    open();
+    expect(button("Current")).toHaveAttribute("aria-pressed", "true");
+    expect(old.off).toHaveBeenCalledWith("subtitleTracksUpdated", oldRefresh);
+    expect(oldList.removeEventListener).toHaveBeenCalledWith("addtrack", nativeRefresh);
+    let staleNative!: TextTrack;
+    act(() => { old.subtitleTracks = [{ name: "Stale" }]; old.subtitleTrack = 0; oldRefresh(); staleNative = oldList.add("Stale native", "", "showing"); nativeRefresh(); });
+    expect(staleNative.mode).toBe("showing");
+    expect(button("Current")).toHaveAttribute("aria-pressed", "true");
+    expect(current.subtitleTrack).toBe(0);
+    expect(within(screen.getByRole("dialog", { name: "Subtitles" })).queryByRole("button", { name: /Stale/ })).toBeNull();
+    const currentList = lists.get(video())!;
+    unmount();
+    expect(current.off).toHaveBeenCalledWith("subtitleTrackSwitch", expect.any(Function));
+    expect(currentList.removeEventListener).toHaveBeenCalledWith("change", expect.any(Function));
+  });
+});
+
+
+// Geometry/event tests below assert requested native cue layout, not WebKit's
+// private rendered cue boxes. Native readability still requires runtime proof.
+describe("webview caption layout", () => {
+  let list: ReturnType<typeof eventedCaptionList>;
+  let stage = { left: 0, top: 0, width: 400, height: 800 };
+  let osdTop = 650;
+  let intrinsicWidth = 1920;
+  let resizeObservers: Array<{ callback: () => void; disconnect: ReturnType<typeof vi.fn> }>;
+  let restoreVisual: () => void;
+  let visual: VisualViewport & { width: number; height: number; offsetTop: number; offsetLeft: number };
+  const rect = (box: { left: number; top: number; width: number; height: number }) => ({
+    ...box, right: box.left + box.width, bottom: box.top + box.height,
+    x: box.left, y: box.top, toJSON: () => ({}),
+  });
+  const cue = (text = "A readable caption") => ({
+    text, startTime: 1, endTime: 5, line: "auto" as number | "auto",
+    snapToLines: true, lineAlign: "start", position: "auto" as number | "auto",
+    positionAlign: "auto", size: 100, vertical: "", region: null,
+  });
+  beforeEach(() => {
+    captionMenuMode.actual = true;
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("maybe");
+    list = eventedCaptionList();
+    stage = { left: 0, top: 0, width: 400, height: 800 };
+    osdTop = 650;
+    intrinsicWidth = 1920;
+    resizeObservers = [];
+    vi.stubGlobal("ResizeObserver", class {
+      disconnect = vi.fn();
+      observe = vi.fn();
+      unobserve = vi.fn();
+      callback: () => void;
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = () => callback([], this as unknown as ResizeObserver);
+        resizeObservers.push(this);
+      }
+    });
+    visual = Object.assign(new EventTarget(), {
+      width: 400, height: 800, offsetLeft: 0, offsetTop: 0,
+    }) as typeof visual;
+    restoreVisual = replaceProperty(window, "visualViewport", visual);
+    const lists = new WeakMap<HTMLMediaElement, ReturnType<typeof eventedCaptionList>>();
+    vi.spyOn(HTMLMediaElement.prototype, "textTracks", "get").mockImplementation(function (this: HTMLMediaElement) {
+      let current = lists.get(this);
+      if (current == null) { current = eventedCaptionList(); lists.set(this, current); }
+      list = current;
+      return current as unknown as TextTrackList;
+    });
+    vi.spyOn(HTMLVideoElement.prototype, "videoWidth", "get").mockImplementation(() => intrinsicWidth);
+    vi.spyOn(HTMLVideoElement.prototype, "videoHeight", "get").mockReturnValue(1080);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("player-osd")) {
+        return rect({ left: stage.left, top: osdTop, width: stage.width, height: stage.top + stage.height - osdTop });
+      }
+      if (this.classList.contains("player-video")) {
+        const match = this.style.transform.match(/translate\(([-.\d]+)%, ([-.\d]+)%\) scale\(([-.\d]+)\)/);
+        const zoom = Number(match?.[3] ?? 1);
+        return rect({
+          left: stage.left + (1 - zoom) * stage.width / 2 + Number(match?.[1] ?? 0) / 100 * stage.width,
+          top: stage.top + (1 - zoom) * stage.height / 2 + Number(match?.[2] ?? 0) / 100 * stage.height,
+          width: stage.width * zoom, height: stage.height * zoom,
+        });
+      }
+      return rect(stage);
+    });
+  });
+  afterEach(() => {
+    restoreVisual();
+    document.documentElement.style.removeProperty("--sub-font-scale");
+    vi.restoreAllMocks();
+  });
+  function addCaption(currentCue = cue()) {
+    let track!: TextTrack;
+    act(() => {
+      track = list.add("subtitle_0", "", "showing");
+      (track.cues as unknown as unknown[]).push(currentCue);
+      track.dispatchEvent(new Event("cuechange"));
+    });
+    return { track, currentCue };
+  }
+
+  it("anchors default native captions to the visible letterboxed picture, not the portrait transport", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { currentCue } = addCaption();
+    expect(currentCue.line).toBeGreaterThan(50);
+    expect(currentCue.line).toBeLessThan(65);
+    expect(currentCue.lineAlign).toBe("end");
+    expect(currentCue.startTime).toBe(1);
+    expect(currentCue.endTime).toBe(5);
+  });
+
+  it("keeps the touch paused frame free of decorative artwork while retaining caption transport", () => {
+    subsState.tracks = [{ id: "download", label: "Downloaded", language: "en", vttUrl: "blob:cc" }];
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const video = document.querySelector("video")!;
+    fireEvent.pause(video);
+    expect(document.querySelector(".player-pause-screen")).toBeNull();
+    addCaption();
+    expect(document.querySelector(".player-pause-screen")).toBeNull();
+    expect(screen.getByRole("button", { name: "Play" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+    const menu = screen.getByRole("dialog", { name: "Subtitles" });
+    fireEvent.click(within(menu).getByRole("button", { name: "Downloaded" }));
+    fireEvent.click(within(menu).getByRole("button", { name: "Close subtitles menu" }));
+    expect(document.querySelector(".player-pause-screen")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Off" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close subtitles menu" }));
+    expect(document.querySelector(".player-pause-screen")).toBeNull();
+  });
+
+  it("repositions late cuechange arrivals without needing a new track inventory event", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { track } = addCaption();
+    const late = cue("Late subtitle\nA second line");
+    act(() => {
+      (track.cues as unknown as unknown[]).push(late);
+      track.dispatchEvent(new Event("cuechange"));
+    });
+    expect(late.line).not.toBe("auto");
+    expect(late.line).toBeLessThan(65);
+    expect(late.lineAlign).toBe("end");
+    expect(late.text).toBe("Late subtitle\nA second line");
+  });
+
+  it("recomputes on actual resize, orientation, visual viewport and control-bound changes", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { currentCue } = addCaption();
+    const original = currentCue.line;
+    expect(resizeObservers[0]).toBeDefined();
+    osdTop = 450;
+    act(() => { resizeObservers[0]!.callback(); });
+    expect(currentCue.line).toBeCloseTo(55.25);
+    osdTop = 430;
+    fireEvent(window, new Event("resize"));
+    expect(currentCue.line).toBeCloseTo(52.75);
+    osdTop = 410;
+    fireEvent(window, new Event("orientationchange"));
+    expect(currentCue.line).toBeCloseTo(50.25);
+    stage = { left: 0, top: 0, width: 800, height: 400 };
+    visual.width = 800;
+    visual.height = 400;
+    osdTop = 300;
+    fireEvent(window, new Event("resize"));
+    expect(currentCue.line).toBeCloseTo(73);
+    stage = { left: 0, top: 0, width: 400, height: 800 };
+    visual.width = 400;
+    osdTop = 650;
+    visual.height = 450;
+    act(() => { visual.dispatchEvent(new Event("resize")); });
+    expect(currentCue.line).toBeCloseTo(54.21875);
+    expect(currentCue.line).toBeLessThan(original as number);
+    visual.offsetTop = 400;
+    visual.height = 200;
+    act(() => { visual.dispatchEvent(new Event("scroll")); });
+    expect(currentCue.line).toBeCloseTo(62.65625);
+  });
+
+  it("uses visible chrome bounds but returns to picture preference when chrome hides", async () => {
+    vi.useFakeTimers();
+    osdTop = 450;
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { currentCue } = addCaption();
+    expect(currentCue.line).toBeCloseTo(55.25);
+    fireEvent.play(document.querySelector("video")!);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3300); });
+    expect(document.querySelector(".player-osd")).not.toHaveClass("is-visible");
+    expect(currentCue.line).toBeGreaterThan(60);
+    fireEvent.pointerMove(document.querySelector(".webview-player")!);
+    expect(currentCue.line).toBeCloseTo(55.25);
+  });
+
+  it("honors saved and edited subtitle position and recomputes fit, zoom and pan", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" savedPrefs={{ subtitlePosition: 20 }} onClose={() => {}} />);
+    const { currentCue } = addCaption();
+    expect(currentCue.line).toBeCloseTo(41.5625);
+    expect(currentCue.lineAlign).toBe("start");
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    fireEvent.change(screen.getByRole("slider", { name: /Subtitle position/ }), { target: { value: "90" } });
+    expect(currentCue.line).toBeCloseTo(61.25);
+    fireEvent.click(screen.getByRole("button", { name: "Fill screen" }));
+    expect(currentCue.line).toBeCloseTo(80.25);
+    fireEvent.click(screen.getByRole("button", { name: "Stretch" }));
+    expect(currentCue.line).toBeCloseTo(80.25);
+    fireEvent.click(screen.getByRole("button", { name: "Fit" }));
+    fireEvent.change(screen.getByRole("slider", { name: /^Zoom/ }), { target: { value: "2" } });
+    expect(currentCue.size).toBeCloseTo(48);
+    expect(document.querySelector("video")!.style.getPropertyValue("--player-caption-font-size")).toBe("12.375px");
+    fireEvent.change(screen.getByRole("slider", { name: /Pan vertically/ }), { target: { value: "25" } });
+    expect(currentCue.line).toBeLessThan(60);
+    fireEvent.change(screen.getByRole("slider", { name: /Pan horizontally/ }), { target: { value: "50" } });
+    expect(currentCue.position).toBeLessThan(50);
+    expect(currentCue.size).toBeLessThan(50);
+  });
+
+  it("reserves multiline height at large appearance sizes without changing text or time", async () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { track, currentCue } = addCaption();
+    act(() => {
+      currentCue.text = "One\nTwo\nThree\nFour\nFive\nSix";
+      track.dispatchEvent(new Event("cuechange"));
+    });
+    expect(currentCue.line).toBeCloseTo(61.25);
+    await act(async () => { document.documentElement.style.setProperty("--sub-font-scale", "1.8"); });
+    expect(currentCue.line).toBeCloseTo(63.0625);
+    expect(document.querySelector("video")!.style.getPropertyValue("--player-caption-font-size")).toBe("16px");
+    expect(currentCue.startTime).toBe(1);
+    expect(currentCue.endTime).toBe(5);
+  });
+
+  it("preserves authored line, vertical, region and horizontal cue layouts", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { track } = addCaption();
+    const authored = [
+      { ...cue(), line: 2 }, { ...cue(), vertical: "rl" },
+      { ...cue(), region: {} }, { ...cue(), position: 25 }, { ...cue(), size: 40 },
+    ];
+    const before = authored.map(value => ({ ...value }));
+    act(() => {
+      (track.cues as unknown as unknown[]).push(...authored);
+      track.dispatchEvent(new Event("cuechange"));
+    });
+    expect(authored).toEqual(before);
+  });
+
+  it("waits for real intrinsic metadata before positioning a native cue", () => {
+    intrinsicWidth = 0;
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { currentCue } = addCaption();
+    expect(currentCue.line).toBe("auto");
+    intrinsicWidth = 1920;
+    fireEvent.loadedMetadata(document.querySelector("video")!);
+    expect(currentCue.line).toBeCloseTo(61.25);
+  });
+
+  it("restores cue geometry on Off and downloaded mutual exclusion without resurrecting selection", () => {
+    subsState.tracks = [{ id: "download", label: "Downloaded", language: "en", vttUrl: "blob:cc" }];
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { track, currentCue } = addCaption();
+    const downloaded = cue("Downloaded cue");
+    let downloadedTrack!: TextTrack;
+    act(() => {
+      downloadedTrack = list.add("Downloaded", "en");
+      (downloadedTrack.cues as unknown as unknown[]).push(downloaded);
+      Object.defineProperty(document.querySelector("track")!, "track", { value: downloadedTrack });
+      list.dispatchEvent(new Event("change"));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Downloaded" }));
+    expect(track.mode).toBe("disabled");
+    expect(currentCue.line).toBe("auto");
+    expect(downloadedTrack.mode).toBe("showing");
+    expect(downloaded.line).toBeLessThan(65);
+    fireEvent.click(screen.getByRole("button", { name: "Off" }));
+    expect(downloadedTrack.mode).toBe("disabled");
+    expect(downloaded.line).toBe("auto");
+    fireEvent(window, new Event("resize"));
+    expect(screen.getByRole("button", { name: "Off" })).toHaveAttribute("aria-pressed", "true");
+    expect(downloadedTrack.mode).toBe("disabled");
+  });
+
+  it("disposes observers and stale callbacks, restoring the old owner's native cue geometry", () => {
+    const props = { url: "https://x/native.mp4", title: "T", onClose: () => {} };
+    const { rerender, unmount } = render(<VideoPlayer {...props} sourceRevision={0} />);
+    const { track, currentCue } = addCaption();
+    const remove = vi.spyOn(track, "removeEventListener");
+    const oldResize = resizeObservers[0]!;
+    expect(oldResize).toBeDefined();
+    const staleLayoutRefresh = list.addEventListener.mock.calls.find(([event]) => event === "change")![1] as () => void;
+    rerender(<VideoPlayer {...props} sourceRevision={1} />);
+    expect(oldResize.disconnect).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledWith("cuechange", expect.any(Function));
+    expect(currentCue.line).toBe("auto");
+    expect(currentCue.snapToLines).toBe(true);
+    const current = addCaption().currentCue;
+    currentCue.line = 17;
+    osdTop = 400;
+    act(() => { oldResize.callback(); staleLayoutRefresh(); track.dispatchEvent(new Event("cuechange")); });
+    expect(currentCue.line).toBe(17);
+    expect(current.line).toBeCloseTo(61.25);
+    unmount();
+    expect(current.line).toBe("auto");
+    expect(resizeObservers.at(-1)!.disconnect).toHaveBeenCalledOnce();
+  });
+
+
+  it("handles Safari and hls.js numeric automatic cue defaults without treating them as authored lines", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { currentCue } = addCaption({ ...cue(), line: -1, position: 50 });
+    expect(currentCue.line).toBeCloseTo(61.25);
+    expect(currentCue.lineAlign).toBe("end");
+    expect(currentCue.snapToLines).toBe(false);
+  });
+
+
+  it("binds measured native cue font size to the existing appearance scale and colors", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    expect(css).toContain("font-size: calc(var(--player-caption-font-size, 1em) * var(--sub-font-scale, 1));");
+    expect(css).toContain("color: var(--sub-color, #ffffff);");
+    expect(css).toContain("background-color: rgba(0, 0, 0, var(--sub-bg, 0.55));");
+  });
+
+
+  it("restores native presentation geometry for Safari fullscreen and PiP and resumes inline layout", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const video = document.querySelector("video")!;
+    const { track, currentCue } = addCaption();
+    fireEvent(video, new Event("webkitbeginfullscreen"));
+    expect(currentCue.line).toBe("auto");
+    expect(currentCue.snapToLines).toBe(true);
+    expect(track.mode).toBe("showing");
+    fireEvent(video, new Event("webkitendfullscreen"));
+    expect(currentCue.line).toBeCloseTo(61.25);
+    const restorePip = replaceProperty(document, "pictureInPictureElement", video);
+    try {
+      fireEvent(video, new Event("enterpictureinpicture"));
+      expect(currentCue.line).toBe("auto");
+    } finally { restorePip(); }
+    fireEvent(video, new Event("leavepictureinpicture"));
+    expect(currentCue.line).toBeCloseTo(61.25);
+    const restoreMode = replaceProperty(video, "webkitPresentationMode", "picture-in-picture");
+    try {
+      fireEvent(video, new Event("webkitpresentationmodechanged"));
+      expect(currentCue.line).toBe("auto");
+    } finally { restoreMode(); }
+    fireEvent(video, new Event("webkitpresentationmodechanged"));
+    expect(currentCue.line).toBeCloseTo(61.25);
+  });
+
+  it("does not reserve custom controls excluded by document fullscreen", () => {
+    osdTop = 450;
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { currentCue } = addCaption();
+    expect(currentCue.line).toBeCloseTo(55.25);
+    const restoreFullscreen = replaceProperty(document, "fullscreenElement", document.querySelector(".player-stage"));
+    try {
+      fireEvent(document, new Event("fullscreenchange"));
+      expect(currentCue.line).toBeCloseTo(61.25);
+    } finally { restoreFullscreen(); }
+    fireEvent(document, new Event("fullscreenchange"));
+    expect(currentCue.line).toBeCloseTo(55.25);
+  });
+
+});
+
+
+describe("server generation HEAD retention", () => {
+  const master = "https://server.example/api/stream/lease/index.m3u8?quality=480p";
+  const child = "https://server.example/api/stream/lease/480p.m3u8?generation=transcode-owned";
+  const manifest = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000\n480p.m3u8?generation=transcode-owned\n";
+  const optimized = { qualities: ["480p"] as const, request: vi.fn() };
+  async function flushLease() {
+    await act(async () => { for (let i = 0; i < 12; i += 1) await Promise.resolve(); });
+  }
+  it("prepares once before native attach and retains the paused exact generation every 30 seconds", async () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>).mockReturnValue("probably");
+    const prepared = deferred<Response>();
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? Promise.resolve(new Response(null)) : prepared.promise);
+    vi.stubGlobal("fetch", fetcher);
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(video.getAttribute("src")).toBeNull();
+    prepared.resolve(new Response(manifest));
+    await flushLease();
+    expect(video.src).toBe(master);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+    expect(fetcher).toHaveBeenCalledWith(child, expect.objectContaining({ method: "HEAD", credentials: "include", cache: "no-store", redirect: "error" }));
+    fireEvent.canPlay(video);
+    fireEvent.pause(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(5);
+    view.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(fetcher).toHaveBeenCalledTimes(6);
+  });
+  function setupNative() {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>).mockReturnValue("probably");
+  }
+  it("expires into manual fresh resolution preserving paused source position instead of restoring an old URL", async () => {
+    setupNative();
+    let heads = 0;
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null, { status: ++heads === 1 ? 200 : 404 }) : new Response(manifest));
+    vi.stubGlobal("fetch", fetcher);
+    const refresh = vi.fn(async () => {});
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" timelineOffsetSeconds={46} title="Lease" serverOptimized={optimized} refreshCurrentSource={refresh} onClose={() => {}} />);
+    await flushLease();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    act(() => { video.currentTime = 7.25; video.volume = 0.4; video.muted = true; video.playbackRate = 1.25; });
+    Object.defineProperty(video, "paused", { configurable: true, value: true });
+    fireEvent.canPlay(video);
+    fireEvent.pause(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(refresh).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
+    await flushLease();
+    expect(refresh).toHaveBeenCalledWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25 });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+  it("does not offer old-URL Retry when an expired owner has no fresh resolver", async () => {
+    setupNative();
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null, { status: 404 }) : new Response(manifest)));
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await flushLease();
+    expect(screen.getByRole("alert")).toHaveTextContent("expired");
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+  });
+  it("ignores a stale preparation after source replacement and aborts its request", async () => {
+    setupNative();
+    const old = deferred<Response>();
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? Promise.resolve(new Response(null)) : old.promise);
+    vi.stubGlobal("fetch", fetcher);
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    const signal = fetcher.mock.calls[0]![1]!.signal!;
+    view.rerender(<VideoPlayer url="https://x/new.mp4" title="New" onClose={() => {}} />);
+    expect(signal.aborted).toBe(true);
+    old.resolve(new Response(manifest)); await flushLease();
+    expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toBe("https://x/new.mp4");
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(0);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+  it.each(["URL", "revision"])("ignores an aborted old HEAD failure after %s replacement", async (replacement) => {
+    setupNative();
+    const old = deferred<Response>();
+    let heads = 0;
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? ++heads === 1 ? old.promise : Promise.resolve(new Response(null)) : Promise.resolve(new Response(manifest)));
+    vi.stubGlobal("fetch", fetcher);
+    const view = render(<VideoPlayer url={master} sourceRevision={1} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await flushLease();
+    const signal = fetcher.mock.calls.find(([, init]) => init?.method === "HEAD")![1]!.signal!;
+    const nextUrl = replacement === "URL" ? "https://x/new.mp4" : master;
+    view.rerender(<VideoPlayer url={nextUrl} sourceRevision={2} title="New" serverOptimized={optimized} onClose={() => {}} />);
+    expect(signal.aborted).toBe(true);
+    old.resolve(new Response(null, { status: 404 })); await flushLease();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toBe(nextUrl);
+  });
+  it("aborts one stalled HEAD at five seconds and coalesces foreground checks onto the 30 second cadence", async () => {
+    setupNative();
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Promise<Response>(() => {}) : Promise.resolve(new Response(manifest)));
+    vi.stubGlobal("fetch", fetcher);
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await flushLease();
+    const heads = () => fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD");
+    fireEvent.canPlay(document.querySelector("video.player-video") as HTMLVideoElement);
+    const signal = heads()[0]![1]!.signal!;
+    act(() => { window.dispatchEvent(new Event("pageshow")); document.dispatchEvent(new Event("visibilitychange")); });
+    expect(heads()).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+    expect(signal.aborted).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(signal.aborted).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(24_999); });
+    expect(heads()).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(heads()).toHaveLength(2);
+    act(() => { window.dispatchEvent(new Event("pagehide")); });
+    expect(heads()[1]![1]!.signal!.aborted).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(heads()).toHaveLength(2);
+    act(() => { window.dispatchEvent(new Event("pageshow")); });
+    await flushLease(); expect(heads()).toHaveLength(3);
+    view.unmount(); expect(heads()[2]![1]!.signal!.aborted).toBe(true);
+  });
+  it.each(["ended", "error", "cast"])("stops renewal for %s without a master reload", async (reason) => {
+    setupNative();
+    if (reason === "cast") isTauriMock.mockReturnValue(true);
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null) : new Response(manifest));
+    vi.stubGlobal("fetch", fetcher);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={{ ...optimized, loadSourceInfo: async () => ({ durationSeconds: 10 }) }} onClose={() => {}} />);
+    await flushLease();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    if (reason === "cast") fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+    else if (reason === "ended") {
+      Object.defineProperty(video, "duration", { configurable: true, value: 10 });
+      video.currentTime = 10;
+      fireEvent.ended(video);
+      expect(screen.queryByRole("alert")).toBeNull();
+    }
+    else fireMediaError(video, 3);
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(1);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+  it("reuses the prepared actual target across an optimized handoff and rejects old in-flight failure", async () => {
+    setupNative();
+    const old = deferred<Response>();
+    const next = deferred<{ url: string; timelineOffsetSeconds: number; startPositionSeconds: number; quality: "720p" }>();
+    const nextMaster = master.replace("480p", "720p");
+    const nextChild = child.replace("480p", "720p").replace("transcode-owned", "transcode-next");
+    const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "HEAD") return String(input) === child ? old.promise : Promise.resolve(new Response(null));
+      return Promise.resolve(new Response(String(input) === master ? manifest : manifest.replaceAll("480p", "720p").replaceAll("transcode-owned", "transcode-next")));
+    });
+    vi.stubGlobal("fetch", fetcher);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={{ qualities: ["480p", "720p"], request: () => next.promise }} onClose={() => {}} />);
+    await flushLease();
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "720p" }));
+    await flushLease();
+    expect(fetcher.mock.calls.find(([, init]) => init?.method === "HEAD")![1]!.signal!.aborted).toBe(true);
+    old.resolve(new Response(null, { status: 404 })); await flushLease();
+    expect(screen.queryByRole("alert")).toBeNull();
+    next.resolve({ url: nextMaster, timelineOffsetSeconds: 0, startPositionSeconds: 0, quality: "720p" });
+    await flushLease();
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(2);
+    expect(fetcher).toHaveBeenCalledWith(nextChild, expect.objectContaining({ method: "HEAD" }));
+    expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toContain(nextMaster);
+  });
+  it("bounds initial preparation retries at the fixed startup deadline", async () => {
+    setupNative();
+    const fetcher = vi.fn(async () => new Response(null, { status: 503 }));
+    vi.stubGlobal("fetch", fetcher);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await flushLease();
+    await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+    expect(screen.getByRole("alert")).toHaveTextContent("timed out");
+    const calls = fetcher.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(fetcher).toHaveBeenCalledTimes(calls);
+    expect(calls).toBeLessThan(18);
+  });
+
+  it("binds hls.js initial attachment to the actual prepared child without forcing native capabilities", async () => {
+    vi.useFakeTimers();
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null) : new Response(manifest));
+    vi.stubGlobal("fetch", fetcher);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await flushLease();
+    expect(hlsInstances).toHaveLength(1);
+    expect(hlsInstances[0]!.loadSource).toHaveBeenCalledWith(master);
+    expect(fetcher).toHaveBeenCalledWith(child, expect.objectContaining({ method: "HEAD" }));
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireEvent.canPlay(video); fireEvent.pause(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(2);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+
+  it("attaches legacy masters without guessing a generation or polling their startup URL", async () => {
+    setupNative();
+    const fetcher = vi.fn(async () => new Response("#EXTM3U\n480p.m3u8\n"));
+    vi.stubGlobal("fetch", fetcher);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await flushLease();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(video.src).toBe(master);
+    fireEvent.canPlay(video); fireEvent.pause(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores an expired fresh-resolution rejection after the source owner changes", async () => {
+    setupNative();
+    const refresh = deferred<void>();
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null, { status: 404 }) : new Response(manifest)));
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} refreshCurrentSource={() => refresh.promise} onClose={() => {}} />);
+    await flushLease();
+    fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
+    await flushLease();
+    view.rerender(<VideoPlayer url="https://x/new.mp4" sourceRevision={2} title="New" onClose={() => {}} />);
+    await act(async () => { refresh.reject(new Error("late resolution failure")); await Promise.resolve(); });
+    await flushLease();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toBe("https://x/new.mp4");
+  });
+
+  it("coalesces rapid cast release onto the same owner retention cadence", async () => {
+    setupNative(); isTauriMock.mockReturnValue(true);
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null) : new Response(manifest));
+    vi.stubGlobal("fetch", fetcher);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await flushLease();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireEvent.canPlay(video); fireEvent.pause(video);
+    for (let i = 0; i < 2; i += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+      fireEvent.click(screen.getByRole("button", { name: "test resume playback" }));
+      await flushLease();
+    }
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(2);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+
+  function suspendedReplacement(refresh: () => Promise<void>, engineOnly = false, suspendReplacement = true) {
+    let choose: (pending: boolean) => void = () => { throw new Error("Scenario not mounted"); };
+    let speculativeRenders = 0;
+    const pendingRender = new Promise<void>(() => {});
+    function Gate({ pending }: { pending: boolean }) {
+      if (pending && suspendReplacement) { speculativeRenders += 1; throw pendingRender; }
+      return null;
+    }
+    function Scenario() {
+      const [pending, setPending] = useState(false);
+      choose = setPending;
+      return <Suspense fallback={<div>Speculative fallback</div>}>
+        <VideoPlayer url={pending && !engineOnly ? "https://x/speculative.mp4" : master}
+          engine={pending ? "webview-direct" : "webview-hls-transcode"}
+          title="Lease" serverOptimized={optimized} refreshCurrentSource={refresh} onClose={() => {}} />
+        <Gate pending={pending} />
+      </Suspense>;
+    }
+    return { Scenario, choose: (pending: boolean) => choose(pending), speculativeRenders: () => speculativeRenders };
+  }
+  it("keeps a committed lease owner through a suspended replacement until HEAD404 reaches fresh Retry", async () => {
+    setupNative();
+    const head = deferred<Response>();
+    const refresh = vi.fn(async () => {});
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? head.promise : Promise.resolve(new Response(manifest)));
+    vi.stubGlobal("fetch", fetcher);
+    const scenario = suspendedReplacement(refresh);
+    render(<scenario.Scenario />);
+    await flushLease();
+    const committed = document.querySelector("video.player-video") as HTMLVideoElement;
+    committed.currentTime = 6.25;
+    Object.defineProperty(committed, "paused", { configurable: true, value: true });
+    fireEvent.canPlay(committed); fireEvent.pause(committed);
+    act(() => { startTransition(() => scenario.choose(true)); });
+    await flushLease();
+    expect(scenario.speculativeRenders()).toBeGreaterThan(0);
+    expect(document.querySelector("video.player-video")).toBe(committed);
+    expect(committed.isConnected).toBe(true);
+    expect(fetcher.mock.calls.find(([, init]) => init?.method === "HEAD")![1]!.signal!.aborted).toBe(false);
+    head.resolve(new Response(null, { status: 404 })); await flushLease();
+    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    act(() => scenario.choose(false)); // Abort the never-committed replacement.
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    await flushLease();
+    expect(refresh).toHaveBeenCalledWith(6.25, expect.objectContaining({ paused: true }));
+    expect(document.querySelector("video.player-video")).toBeNull();
+  });
+  it("settles the committed expired Retry while a speculative replacement is suspended and aborted", async () => {
+    setupNative();
+    const refresh = deferred<void>();
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null, { status: 404 }) : new Response(manifest)));
+    const scenario = suspendedReplacement(() => refresh.promise);
+    render(<scenario.Scenario />);
+    await flushLease();
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    await flushLease();
+    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    act(() => { startTransition(() => scenario.choose(true)); });
+    await flushLease();
+    expect(scenario.speculativeRenders()).toBeGreaterThan(0);
+    await act(async () => { refresh.reject(new Error("Current committed resolution failed")); await Promise.resolve(); });
+    await flushLease();
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
+    act(() => scenario.choose(false));
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    expect(document.querySelector("video.player-video")).toBeNull();
+  });
+
+  it("keeps native retention alive after an ignored null-MediaError poster event", async () => {
+    setupNative();
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null) : new Response(manifest));
+    vi.stubGlobal("fetch", fetcher);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await flushLease();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "error", { configurable: true, value: null });
+    expect(video.error).toBeNull();
+    fireEvent.canPlay(video); fireEvent.pause(video); fireEvent.error(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(3);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+  it.each(["media", "network"])("keeps retention alive through hls.js %s recovery despite a raw media error", async (kind) => {
+    vi.useFakeTimers();
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null) : new Response(manifest));
+    vi.stubGlobal("fetch", fetcher);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); }); await flushLease();
+    const hls = hlsInstances[0]!;
+    expect(hls).toBeDefined();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireEvent.canPlay(video); fireEvent.pause(video); fireMediaError(video, 3);
+    act(() => { hls.emit("hlsError", { fatal: true, type: kind === "media" ? "mediaError" : "networkError", details: "fragLoadError" }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(kind === "media" ? hls.recoverMediaError : hls.startLoad).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(2);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+    expect(hls.loadSource).toHaveBeenCalledTimes(1);
+  });
+  it("aborts retention when hls.js exhausts its actual fatal recovery decision", async () => {
+    vi.useFakeTimers();
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const pendingHead = deferred<Response>(); let heads = 0;
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => init?.method === "HEAD"
+      ? ++heads === 1 ? Promise.resolve(new Response(null)) : pendingHead.promise
+      : Promise.resolve(new Response(manifest)));
+    vi.stubGlobal("fetch", fetcher);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); }); await flushLease();
+    const hls = hlsInstances[0]!;
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireEvent.canPlay(video); fireEvent.pause(video);
+    act(() => { hls.emit("hlsError", { fatal: true, type: "mediaError" }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(heads).toBe(2);
+    const signal = fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")[1]![1]!.signal!;
+    expect(signal.aborted).toBe(false);
+    act(() => { hls.emit("hlsError", { fatal: true, type: "mediaError" }); });
+    expect(signal.aborted).toBe(true);
+    expect(screen.getByRole("alert")).toHaveTextContent("could not be decoded");
+    expect(hls.destroy).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(heads).toBe(2);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+  it("keeps the committed expiry callback through an aborted engine-only transition on the reused child", async () => {
+    setupNative();
+    const head = deferred<Response>(); const refresh = vi.fn(async () => {});
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? head.promise : Promise.resolve(new Response(manifest)));
+    vi.stubGlobal("fetch", fetcher);
+    const scenario = suspendedReplacement(refresh, true);
+    render(<scenario.Scenario />); await flushLease();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    video.currentTime = 8.25;
+    Object.defineProperty(video, "paused", { configurable: true, value: true });
+    fireEvent.canPlay(video); fireEvent.pause(video);
+    act(() => { startTransition(() => scenario.choose(true)); }); await flushLease();
+    expect(scenario.speculativeRenders()).toBeGreaterThan(0);
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(video.src).toBe(master);
+    expect(fetcher.mock.calls.find(([, init]) => init?.method === "HEAD")![1]!.signal!.aborted).toBe(false);
+    head.resolve(new Response(null, { status: 404 })); await flushLease();
+    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    act(() => scenario.choose(false));
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flushLease();
+    expect(refresh).toHaveBeenCalledWith(8.25, expect.objectContaining({ paused: true }));
+    expect(document.querySelector("video.player-video")).toBeNull();
+  });
+  it("publishes the expiry callback when an engine-only transition really commits on the reused child", async () => {
+    setupNative();
+    const head = deferred<Response>();
+    vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? head.promise : Promise.resolve(new Response(manifest))));
+    const scenario = suspendedReplacement(async () => {}, true, false);
+    render(<scenario.Scenario />); await flushLease();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireEvent.canPlay(video); fireEvent.pause(video);
+    act(() => scenario.choose(true)); await flushLease();
+    expect(document.querySelector("video.player-video")).toBe(video);
+    head.resolve(new Response(null, { status: 404 })); await flushLease();
+    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
+  });
+
 });

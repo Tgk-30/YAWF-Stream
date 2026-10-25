@@ -5,6 +5,12 @@
 // that offers "Close" so a player crash only dismisses the overlay.
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import {
+  assertBrowserAppRefreshAllowed,
+  prepareBrowserAppRefresh,
+  reloadBrowserAppPage,
+} from "../lib/browserAppRefresh";
+import { isStaleAssetLoadError } from "../lib/staleAssetRecovery";
 import "./ErrorBoundary.css";
 
 interface Props {
@@ -29,13 +35,21 @@ interface Props {
 
 interface State {
   error: Error | null;
+  recoveryPending: boolean;
+  recoveryError: string | null;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null };
+  state: State = {
+    error: null,
+    recoveryPending: false,
+    recoveryError: null,
+  };
+  private recoveryRequest = 0;
+  private recoveryRunning = false;
 
   static getDerivedStateFromError(error: Error): State {
-    return { error };
+    return { error, recoveryPending: false, recoveryError: null };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
@@ -49,12 +63,23 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidUpdate(prev: Props): void {
     if (this.state.error != null && prev.resetKey !== this.props.resetKey) {
-      this.setState({ error: null });
+      this.cancelRecovery();
+      this.setState({ error: null, recoveryPending: false, recoveryError: null });
     }
   }
 
+  componentWillUnmount(): void {
+    this.cancelRecovery();
+  }
+
+  private cancelRecovery = (): void => {
+    this.recoveryRequest += 1;
+    this.recoveryRunning = false;
+  };
+
   private goHome = (): void => {
-    this.setState({ error: null });
+    this.cancelRecovery();
+    this.setState({ error: null, recoveryPending: false, recoveryError: null });
     this.props.onGoHome?.();
   };
 
@@ -62,9 +87,45 @@ export class ErrorBoundary extends Component<Props, State> {
     window.location.reload();
   };
 
+  private recoverStaleAssets = async (): Promise<void> => {
+    const ownedError = this.state.error;
+    if (
+      this.recoveryRunning ||
+      ownedError == null ||
+      !isStaleAssetLoadError(ownedError)
+    ) {
+      return;
+    }
+    this.recoveryRunning = true;
+    const request = this.recoveryRequest + 1;
+    this.recoveryRequest = request;
+    this.setState({ recoveryPending: true, recoveryError: null });
+    const isCurrent = () =>
+      this.recoveryRequest === request && this.state.error === ownedError;
+    try {
+      await prepareBrowserAppRefresh();
+      if (!isCurrent()) return;
+      assertBrowserAppRefreshAllowed();
+      if (!isCurrent()) return;
+      reloadBrowserAppPage();
+    } catch {
+      if (!isCurrent()) return;
+      this.setState({
+        recoveryError:
+          "Could not reload the app. Check your connection or privacy mode, then try again.",
+      });
+    } finally {
+      if (isCurrent()) {
+        this.recoveryRunning = false;
+        this.setState({ recoveryPending: false });
+      }
+    }
+  };
+
   render(): ReactNode {
-    const { error } = this.state;
+    const { error, recoveryPending, recoveryError } = this.state;
     if (error == null) return this.props.children;
+    const staleAssets = isStaleAssetLoadError(error);
     return (
       <div
         className={
@@ -73,10 +134,19 @@ export class ErrorBoundary extends Component<Props, State> {
         role="alert"
       >
         <div className="error-boundary-card glass-raised glass-lit">
-          <h2 className="error-boundary-title">Something went wrong</h2>
+          <h2 className="error-boundary-title">
+            {staleAssets ? "App files could not load" : "Something went wrong"}
+          </h2>
           <p className="error-boundary-msg">
-            {error.message || "An unexpected error occurred."}
+            {staleAssets
+              ? "This can happen after an update or a connection interruption. Reload to try the current app files. Your saved data will not be erased."
+              : error.message || "An unexpected error occurred."}
           </p>
+          {recoveryError != null && (
+            <p className="error-boundary-status" role="status">
+              {recoveryError}
+            </p>
+          )}
           <div className="error-boundary-actions">
             {this.props.onGoHome != null && (
               <button
@@ -92,9 +162,10 @@ export class ErrorBoundary extends Component<Props, State> {
               className={
                 this.props.onGoHome != null ? "btn" : "btn btn-prominent"
               }
-              onClick={this.reload}
+              onClick={staleAssets ? () => void this.recoverStaleAssets() : this.reload}
+              disabled={staleAssets && recoveryPending}
             >
-              Reload app
+              {staleAssets && recoveryPending ? "Preparing reload..." : "Reload app"}
             </button>
           </div>
         </div>

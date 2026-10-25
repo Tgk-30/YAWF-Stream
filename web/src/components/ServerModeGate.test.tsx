@@ -351,6 +351,7 @@ describe("ServerModeGate", () => {
       expect(
         screen.getByRole("button", { name: "Create owner" }),
       ).toBeInTheDocument();
+      expect(screen.getByLabelText("Password")).toHaveAttribute("minLength", "8");
     });
 
     it("requires a setup-token field when the server demands one", async () => {
@@ -497,6 +498,7 @@ describe("ServerModeGate", () => {
       expect(
         screen.getByRole("button", { name: "Create profile" }),
       ).toBeInTheDocument();
+      expect(screen.getByLabelText("Password")).toHaveAttribute("minLength", "8");
     });
 
     it("submits the invite with the URL token and mounts on success", async () => {
@@ -586,6 +588,127 @@ describe("ServerModeGate", () => {
       expect(loginBody.totpCode).toBe("123456");
     });
 
+    async function submitRejectedLogin(error: string): Promise<HTMLElement> {
+      bootstrapLogin();
+      fetchMock.mockResolvedValueOnce(jsonResponse({ error }, false, 400));
+      const user = userEvent.setup();
+      render(<ServerModeGate>{CHILD}</ServerModeGate>);
+      await screen.findByRole("heading", { name: "Sign in" });
+      await user.type(screen.getByLabelText("Username"), "bad-user");
+      await user.type(screen.getByLabelText("Password"), "x");
+      await user.click(screen.getByRole("button", { name: "Sign in" }));
+      return waitFor(() => {
+        const error = document.querySelector(".server-gate-error");
+        expect(error).toBeInTheDocument();
+        return error as HTMLElement;
+      });
+    }
+
+    it("formats the actual Zod username code/path shape without echoing server fields", async () => {
+      const rawError = JSON.stringify([{
+        origin: "string",
+        code: "invalid_format",
+        format: "regex",
+        pattern: "/^[a-zA-Z0-9_.-]+$/",
+        path: ["username"],
+        message: "arbitrary server message",
+        input: "private-user-input",
+        received: "private-received-value",
+        schema: "private-schema-detail",
+      }]);
+      const alert = await submitRejectedLogin(rawError);
+
+      expect(alert).toHaveTextContent("Username must be 3-64 characters using only letters, numbers, dots, hyphens, or underscores.");
+      expect(alert).not.toHaveTextContent(rawError);
+      expect(alert).not.toHaveTextContent("arbitrary server message");
+      expect(alert).not.toHaveTextContent("private-user-input");
+      expect(alert).not.toHaveTextContent("private-received-value");
+      expect(alert).not.toHaveTextContent("private-schema-detail");
+    });
+
+    it("uses a safe fallback for a malformed JSON-looking auth error", async () => {
+      const alert = await submitRejectedLogin('[{"code":"too_small","path":["username"]');
+
+      expect(alert).toHaveTextContent("The request could not be completed. Review the form and try again.");
+      expect(alert).not.toHaveTextContent("too_small");
+    });
+
+    it("uses a safe fallback for unknown auth fields and issue codes", async () => {
+      const rawError = JSON.stringify([
+        { code: "too_small", path: ["apiToken"], message: "private token rule" },
+        { code: "future_zod_code", path: ["username"], message: "future private detail" },
+      ]);
+      const alert = await submitRejectedLogin(rawError);
+
+      expect(alert).toHaveTextContent("The request could not be completed. Review the form and try again.");
+      expect(alert).not.toHaveTextContent("apiToken");
+      expect(alert).not.toHaveTextContent("future_zod_code");
+      expect(alert).not.toHaveTextContent("future private detail");
+    });
+
+    it("bounds oversized structured auth errors and does not render their contents", async () => {
+      const privatePayload = "private-value-".repeat(800);
+      const rawError = JSON.stringify([{
+        code: "too_small",
+        path: ["username"],
+        message: privatePayload,
+      }]);
+      expect(rawError.length).toBeGreaterThan(8_192);
+      const alert = await submitRejectedLogin(rawError);
+
+      expect(alert).toHaveTextContent("The request could not be completed. Review the form and try again.");
+      expect(alert).not.toHaveTextContent("private-value");
+    });
+
+    it("bounds the number of structured auth issues before displaying guidance", async () => {
+      const rawError = JSON.stringify(Array.from({ length: 9 }, () => ({
+        code: "too_small",
+        path: ["username"],
+        message: "arbitrary issue detail",
+      })));
+      const alert = await submitRejectedLogin(rawError);
+
+      expect(alert).toHaveTextContent("The request could not be completed. Review the form and try again.");
+      expect(alert).not.toHaveTextContent("arbitrary issue detail");
+    });
+
+    it("preserves an ordinary auth error and exposes it as an accessible alert", async () => {
+      const alert = await submitRejectedLogin("Incorrect username or password.");
+
+      expect(alert).toHaveTextContent("Incorrect username or password.");
+      expect(alert).toHaveAttribute("role", "alert");
+    });
+
+    it("submits a one-character login password unchanged and captures the session", async () => {
+      bootstrapLogin();
+      fetchMock.mockResolvedValueOnce(jsonResponse({ csrfToken: "csrf-short-login" }));
+      const session = {
+        profileId: "short-password-profile",
+        username: "user1",
+        displayName: "User One",
+        role: "member",
+        simpleMode: false,
+      };
+      fetchMock.mockResolvedValueOnce(jsonResponse({ session }));
+      const user = userEvent.setup();
+      render(<ServerModeGate>{CHILD}</ServerModeGate>);
+
+      await screen.findByRole("heading", { name: "Sign in" });
+      const password = screen.getByLabelText("Password");
+      expect(password).toHaveAttribute("minLength", "1");
+      await user.type(screen.getByLabelText("Username"), "user1");
+      await user.type(password, "x");
+      await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+      expect(await screen.findByTestId("app")).toBeInTheDocument();
+      const loginCall = fetchMock.mock.calls.find(
+        ([url]) => url === "https://srv.test/api/auth/login",
+      );
+      const loginBody = JSON.parse((loginCall![1] as RequestInit).body as string);
+      expect(loginBody).toMatchObject({ username: "user1", password: "x" });
+      expect(JSON.parse(screen.getByTestId("session-provider").dataset.session!)).toEqual(session);
+    });
+
     it("disables the submit button while a login request is in flight", async () => {
       bootstrapLogin();
       // Login POST never resolves -> the button stays in its busy/disabled state,
@@ -650,6 +773,7 @@ describe("ServerModeGate", () => {
       // With an initialSetupToken present, the visible Setup token input is hidden
       // (the token rides along silently) - only Username/Password fields show.
       expect(screen.queryByText("Setup token")).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Password")).toHaveAttribute("minLength", "8");
 
       await user.type(screen.getByLabelText("Username"), "owner");
       await user.type(screen.getByLabelText("Password"), "supersecret");

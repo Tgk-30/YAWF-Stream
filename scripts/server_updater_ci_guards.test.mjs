@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 
 const workflow = readFileSync(new URL("../.github/workflows/deb-release.yml", import.meta.url), "utf8");
 const integration = readFileSync(new URL("./server_updater_compose_integration.mjs", import.meta.url), "utf8");
@@ -13,6 +15,7 @@ const volumeCopy = readFileSync(new URL("../deploy/updater/volume-copy.mjs", imp
 const installerRuntime = readFileSync(new URL("./server_updater_install_runtime.sh", import.meta.url), "utf8");
 const installerContainer = readFileSync(new URL("./server_updater_install.test.mjs", import.meta.url), "utf8");
 const installer = readFileSync(new URL("../deploy/updater/install.sh", import.meta.url), "utf8");
+const updaterWrapper = readFileSync(new URL("../deploy/updater/yawf-server-update", import.meta.url), "utf8");
 const updaterReadme = readFileSync(new URL("../deploy/updater/README.md", import.meta.url), "utf8");
 const composeReadme = readFileSync(new URL("../deploy/compose/README.md", import.meta.url), "utf8");
 const installerStep = workflow.match(/- name: Test updater policy and release guards[\s\S]*?(?=\n\s+- name: Install disabled updater)/)?.[0] ?? "";
@@ -83,6 +86,95 @@ function installerRuntimeSudoEnv(step) {
   assert.ok(command, "installer runtime sudo environment command missing");
   return command[0];
 }
+
+function assertPrivateRuntimeWorkflow(source) {
+  const job = source.slice(source.indexOf("  compose-updater-check:"));
+  assert.ok(job.startsWith("  compose-updater-check:"), "Compose updater job missing");
+  assert.doesNotMatch(job, /(?:ln|install|cp|mv)[^\n]*\/usr\/bin\/node/,
+    "Compose updater checks must not replace the global runtime");
+  for (const line of [
+    "test ! -e /usr/lib/yawf-ci-node24",
+    "test ! -L /usr/lib/yawf-ci-node24",
+    "for ancestor in /usr/lib /usr /; do",
+    'test ! -L "$ancestor"',
+    'test "$(stat -c %u "$ancestor")" = 0',
+    '(( (8#$mode & 8#22) == 0 ))',
+  ]) assert.ok(job.includes(line), `missing protected candidate ancestor guard: ${line}`);
+  assert.match(job, /sudo install -d -o root -g root -m 0755 \/usr\/lib\/yawf-ci-node24/);
+  assert.match(job, /sudo install -o root -g root -m 0755 "\$source_node" \/usr\/lib\/yawf-ci-node24\/node/);
+  assert.match(job, /test "\$source_hash" = "\$\(sha256sum \/usr\/lib\/yawf-ci-node24\/node/);
+  assert.match(job, /\/usr\/lib\/yawf-ci-node24\/node --version \| grep -Eq '\^v24\\\.'/);
+  const step = job.match(/- name: Test updater policy and release guards[\s\S]*?(?=\n\s+- name: Install disabled updater)/)?.[0] ?? "";
+  const env = installerRuntimeSudoEnv(step);
+  assert.equal((env.match(/^[ \t]*YAWF_UPDATER_TEST_NODE=\/usr\/lib\/yawf-ci-node24\/node \\$/gm) ?? []).length, 1);
+  assert.match(step, /assert\.equal\(receipt\.cases, 23\)/);
+  for (const key of ["systemNodePreserved", "privateNode24Installed", "privateNodeReinstallReuseVerified"]) {
+    assert.match(step, new RegExp('"' + key + '"'));
+  }
+  assert.match(job, /sudo bash deploy\/updater\/install\.sh --node-runtime \/usr\/lib\/yawf-ci-node24\/node/);
+  assert.doesNotMatch(job, /sudo \/usr\/bin\/node/);
+  assert.match(job, /sudo \/usr\/lib\/yawf-ci-node24\/node scripts\/server_updater_compose_integration\.mjs/);
+}
+
+test("Compose CI uses a verified private runtime and proves global runtime preservation", () => {
+  assertPrivateRuntimeWorkflow(workflow);
+  const mutations = [
+    ...[
+      "test ! -e /usr/lib/yawf-ci-node24", "test ! -L /usr/lib/yawf-ci-node24",
+      "for ancestor in /usr/lib /usr /; do", 'test ! -L "$ancestor"',
+      'test "$(stat -c %u "$ancestor")" = 0', '(( (8#$mode & 8#22) == 0 ))',
+    ].map((line) => (s) => s.replace(line, "true")),
+    (s) => s.replace('sudo install -d -o root -g root -m 0755 /usr/lib/yawf-ci-node24', 'sudo install -d -m 0777 /usr/lib/yawf-ci-node24'),
+    (s) => s.replace('sudo install -o root -g root -m 0755 "$source_node" /usr/lib/yawf-ci-node24/node', 'sudo ln -sf "$source_node" /usr/bin/node'),
+    (s) => s.replace('test "$source_hash" = "$(sha256sum /usr/lib/yawf-ci-node24/node', 'test "$source_hash" = "$(echo /usr/lib/yawf-ci-node24/node'),
+    (s) => s.replace('YAWF_UPDATER_TEST_NODE=/usr/lib/yawf-ci-node24/node', 'YAWF_UPDATER_TEST_NODE=/usr/bin/node'),
+    (s) => s.replace('assert.equal(receipt.cases, 23)', 'assert.equal(receipt.cases, 13)'),
+    (s) => s.replace('"systemNodePreserved", ', ''),
+    (s) => s.replace('"privateNode24Installed", ', ''),
+    (s) => s.replace('"privateNodeReinstallReuseVerified", ', ''),
+    (s) => s.replace('sudo bash deploy/updater/install.sh --node-runtime /usr/lib/yawf-ci-node24/node', 'sudo bash deploy/updater/install.sh'),
+    (s) => s.replaceAll('sudo /usr/lib/yawf-ci-node24/node', 'sudo /usr/bin/node'),
+  ];
+  for (const mutate of mutations) {
+    const changed = mutate(workflow);
+    assert.notEqual(changed, workflow, "private runtime workflow mutant must change the source");
+    assert.throws(() => assertPrivateRuntimeWorkflow(changed));
+  }
+});
+
+function assertDockerAdmission(source) {
+  const job = source.slice(source.indexOf("  compose-updater-check:"));
+  const step = job.match(/- name: Admit disposable CI Docker runtime[\s\S]*?(?=\n\s+- name: Test updater policy)/)?.[0] ?? "";
+  assert.match(step, /timeout-minutes: 2/);
+  assert.match(step, /test "\$GITHUB_ACTIONS" = true/);
+  assert.match(step, /test "\$RUNNER_ENVIRONMENT" = github-hosted/);
+  assert.match(step, /test "\$RUNNER_OS" = Linux/);
+  assert.match(step, /set -euo pipefail/);
+  assert.match(step, /sudo systemctl start docker\.service/);
+  assert.match(step, /deadline=\$\(\(SECONDS \+ 60\)\)/);
+  assert.match(step, /until timeout 10s docker info --format '\{\{\.ServerVersion\}\}'/);
+  assert.match(step, /test "\$SECONDS" -lt "\$deadline"/);
+  assert.match(step, /docker compose version/);
+  assert.match(step, /\} 2>&1 \| tee "\$docker_log"/);
+  assert.match(job, /\$\{\{ runner\.temp \}\}\/server-updater-docker-admission\.log/);
+  assert.doesNotMatch(step, /chmod|chown|usermod|groupadd|docker.sock|sudo docker|\|\| true/);
+}
+
+test("CI Docker readiness is bounded, disposable-only, unprivileged, and retained on failure", () => {
+  assertDockerAdmission(workflow);
+  for (const [before, after] of [
+    ['test "$RUNNER_ENVIRONMENT" = github-hosted', ':'],
+    ['sudo systemctl start docker.service', ':'],
+    ["until timeout 10s docker info", "until docker info"],
+    ['test "$SECONDS" -lt "$deadline"', ':'],
+    ['} 2>&1 | tee "$docker_log"', '} 2>&1 | cat'],
+    ['${{ runner.temp }}/server-updater-docker-admission.log', '${{ runner.temp }}/other.log'],
+  ]) {
+    const changed = workflow.replace(before, after);
+    assert.notEqual(changed, workflow);
+    assert.throws(() => assertDockerAdmission(changed));
+  }
+});
 
 function assertInstallerRuntimeTempForwarding(step) {
   const forwarded = installerRuntimeSudoEnv(step).match(/^[ \t]*RUNNER_TEMP="\$RUNNER_TEMP" \\$/gm) ?? [];
@@ -248,7 +340,7 @@ test("installer PTY runner bounds hung cases and proves replacement uses a secon
   assert.match(installerRuntime, /replacement_compose="\$fixture_root\/replacement\/docker-compose\.ghcr\.yml"/);
   assert.match(installerRuntime, /--replace-registration --compose-file "\$replacement_compose"/);
   assert.match(installerRuntime, /\[\[ "\$policy_before" != "\$\(sha256sum "\$policy_path"/);
-  assert.match(installerRuntime, /\/usr\/bin\/node - "\$replacement_compose"/);
+  assert.match(installerRuntime, /"\$node_path" - "\$replacement_compose"/);
   assert.match(installer, /"\$helper" register "\$compose_file"/);
   assert.match(installerStep, /timeout-minutes: 10/);
   assert.match(installerContainer, /YAWF_REQUIRE_DOCKER=1 requires a usable Docker daemon/);
@@ -264,13 +356,35 @@ test("installer PTY runner bounds hung cases and proves replacement uses a secon
   assert.match(installerContainer, /--replace-registration --compose-file "\$second"/);
 });
 
+test("private Node admission is fail-closed without weakening updater locking or global Node isolation", () => {
+  assert.match(installer, /--node-runtime requires an absolute executable path/);
+  assert.match(installer, /assert_secure_ancestor_chain\(\)/);
+  assert.match(installer, /Node runtime path must be canonical and contain no symlinks/);
+  assert.match(installer, /source_hash_before=.*sha256sum/);
+  assert.match(installer, /source_hash_after=.*sha256sum/);
+  assert.match(installer, /mv -fT -- "\$runtime_temp" "\$private_node"/);
+  assert.match(installer, /Installed private Node runtime hash mismatch/);
+  assert.doesNotMatch(installer, /(?:ln|mv|install)[^\n]*\/usr\/bin\/node/);
+  assert.match(updaterWrapper, /private_node=\/usr\/lib\/yawf-server-updater\/runtime\/node/);
+  assert.match(updaterWrapper, /unsafe private Node runtime/);
+  assert.match(updaterWrapper, /node=\/usr\/bin\/node/);
+  assert.match(updaterWrapper, /export YAWF_UPDATER_LOCK_FD=9[\s\S]*exec 9>"\$lock_dir\/operation\.lock"[\s\S]*\/usr\/bin\/flock -n 9/);
+  assert.match(installerRuntime, /system_node_hash_before=.*sha256sum \/usr\/bin\/node/);
+  assert.match(installerRuntime, /systemNodePreserved: true/);
+  assert.match(installerRuntime, /cases: 23/);
+  assert.match(installerContainer, /global_node_hash/);
+  assert.match(installerContainer, /installer runtime cases passed: 21/);
+  assert.match(installerContainer, /case_default_system_node24_does_not_create_private_runtime/);
+  assert.match(installerRuntime, /grep -q 'Private Node runtime reused' "\$runtime_root\/reinstall\.log"/);
+});
+
 test("updater transaction pipelines cannot hide a failed Node process behind tee", () => {
   for (const [name, step] of [["synthetic", syntheticStep], ["actual", actualStep]]) {
     assert.match(step, /set -euo pipefail/, `${name} updater step does not enable pipefail`);
     assert.match(step, /2>&1 \| tee "\$raw"/, `${name} updater step does not retain raw failure output`);
     assert.match(step, /test -s "\$receipt"/, `${name} updater step accepts an empty receipt`);
   }
-  assert.match(syntheticStep, /sudo \/usr\/bin\/node scripts\/server_updater_compose_integration\.mjs/,
+  assert.match(syntheticStep, /sudo \/usr\/lib\/yawf-ci-node24\/node scripts\/server_updater_compose_integration\.mjs/,
     "synthetic integration does not run as root for root-owned fixture cleanup");
 });
 
@@ -375,4 +489,217 @@ test("Compose copier proof retains minimal capabilities and protected multi-chun
   assert.match(integration, /protected-payload',Buffer\.alloc\(\(64\*1024\*3\)\+17,0x5a\),\{mode:0o400\}/);
   assert.match(integration, /createHash\('sha256'\)\.update\(f\.readFileSync\(p\)\)\.digest\('hex'\)/);
   assert.match(integration, /protectedFilesPreserved: true/);
+});
+
+test("installer global Node preservation rejects absent-path creation and existing-runtime mutations", () => {
+  const snapshot = uniqueSlice(installerRuntime, "system_node_present_before=false\n", "\ninstaller_node_args=", "global Node snapshot");
+  const hashCheck = '[[ "$system_node_hash_before" == "$(sha256sum /usr/bin/node | awk \'{print $1}\')" ]]';
+  const majorCheck = '[[ "$system_node_major_before" == "$(/usr/bin/node -p \'process.versions.node.split(".")[0]\')" ]]';
+  const identityCheck = '[[ "$system_node_identity_before" == "$(stat -c \'%F:%u:%g:%a:%N\' /usr/bin/node)" ]]';
+  for (const check of [hashCheck, majorCheck, identityCheck]) assert.ok(snapshot.includes(check));
+  assert.match(uniqueShellFunction(installerRuntime, "assert_no_registration").text, /\n  assert_system_node_preserved\n/);
+  const reinstall = uniqueSlice(installerRuntime, '# Reinstall with a registered enabled timer', '\n# An unsafe symlink target', "reinstall global Node checks");
+  assert.match(reinstall, /assert_system_node_preserved\nbash "\$installer" <\/dev\/null/);
+  assert.match(reinstall, /assert_system_node_preserved\nassert_timer enabled/);
+  assert.match(installerRuntime, /\nassert_system_node_preserved\nif grep -q 'DS_SERVER_SECRET_KEY='/);
+
+  const fixture = mkdtempSync(resolve(tmpdir(), "yawf-system-node-preservation-"));
+  try {
+    function probe(name, source = snapshot) {
+      const directory = mkdtempSync(resolve(fixture, `${name}-`));
+      const node = resolve(directory, "node");
+      const candidate = resolve(directory, "candidate");
+      const script = resolve(directory, "probe.sh");
+      writeFileSync(candidate, '#!/bin/sh\nprintf \'%s\\n\' "$NODE_MAJOR"\n', { mode: 0o700 });
+      const statCompatibility = process.platform === "darwin" ? 'stat() { command stat -f "%HT:%u:%g:%Lp:%N:%Y" "$3"; }' : "";
+      writeFileSync(script, `#!/usr/bin/env bash
+set -euo pipefail
+export NODE_MAJOR=22
+${statCompatibility}
+case "$1" in
+  present-*) cp "$NODE_CANDIDATE" "$FIXTURE_NODE"; chmod 0700 "$FIXTURE_NODE" ;;
+esac
+if [[ "$1" == present-target ]]; then
+  mv "$FIXTURE_NODE" "$FIXTURE_NODE.original"
+  cp "$FIXTURE_NODE.original" "$FIXTURE_NODE.other"
+  ln -s "$FIXTURE_NODE.original" "$FIXTURE_NODE"
+fi
+${source.replaceAll("/usr/bin/node", '"$FIXTURE_NODE"')}
+case "$1" in
+  absent-file) cp "$NODE_CANDIDATE" "$FIXTURE_NODE" ;;
+  absent-link) ln -s "$NODE_CANDIDATE" "$FIXTURE_NODE" ;;
+  absent-broken-link) ln -s "$FIXTURE_NODE.missing" "$FIXTURE_NODE" ;;
+  present-remove) rm "$FIXTURE_NODE" ;;
+  present-bytes) printf '\\n# changed\\n' >> "$FIXTURE_NODE" ;;
+  present-major) export NODE_MAJOR=23 ;;
+  present-mode) chmod 0755 "$FIXTURE_NODE" ;;
+  present-target) rm "$FIXTURE_NODE"; ln -s "$FIXTURE_NODE.other" "$FIXTURE_NODE" ;;
+esac
+assert_system_node_preserved
+`);
+      return spawnSync("bash", [script, name], {
+        encoding: "utf8", env: { ...process.env, FIXTURE_NODE: node, NODE_CANDIDATE: candidate },
+      });
+    }
+    for (const name of ["absent-unchanged", "present-unchanged"]) {
+      const result = probe(name);
+      assert.equal(result.status, 0, `${name}: ${result.stdout}\n${result.stderr}`);
+    }
+    for (const name of ["absent-file", "absent-link", "absent-broken-link", "present-remove", "present-bytes", "present-major", "present-mode", "present-target"]) {
+      assert.notEqual(probe(name).status, 0, `${name} must fail preservation`);
+    }
+    for (const [name, from, to] of [
+      ["absent-file", "[[ ! -e /usr/bin/node && ! -L /usr/bin/node ]]", "true"],
+      ["absent-broken-link", "&& ! -L /usr/bin/node", ""],
+      ["present-bytes", hashCheck, "true"],
+      ["present-major", majorCheck, "true"],
+      ["present-mode", identityCheck, "true"],
+    ]) {
+      assert.ok(snapshot.includes(from), `${name} mutation target missing`);
+      assert.equal(probe(name, snapshot.replace(from, to)).status, 0, `${name} control must demonstrate the omitted check`);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("installer receipt records explicit present or absent global Node identity without invented versions", () => {
+  const start = installerRuntime.lastIndexOf("<<'NODE'\nconst fs = require(\"fs\");\nconst [receipt, sourceHash,");
+  assert.notEqual(start, -1, "receipt writer must be present");
+  const end = installerRuntime.indexOf("\nNODE\n", start);
+  assert.notEqual(end, -1);
+  const writer = installerRuntime.slice(start + "<<'NODE'\n".length, end);
+  const fixture = mkdtempSync(resolve(tmpdir(), "yawf-system-node-receipt-"));
+  try {
+    function emit(present, major, hash, identity) {
+      const receipt = resolve(fixture, "receipt.json");
+      const result = spawnSync(process.execPath, ["-", receipt, "a".repeat(64), "true", "true", "true", present, major, hash, identity], {
+        encoding: "utf8", input: writer,
+      });
+      return { result, receipt };
+    }
+    for (const present of [false, true]) {
+      const hash = "b".repeat(64);
+      const identity = "regular file:0:0:755:/usr/bin/node";
+      const { result, receipt } = emit(String(present), present ? "22" : "", present ? hash : "", present ? identity : "");
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      const value = JSON.parse(readFileSync(receipt, "utf8"));
+      assert.equal(value.systemNodePreserved, true);
+      assert.equal(value.systemNodeState, present ? "present" : "absent");
+      assert.equal(value.systemNodeMajor, present ? "22" : null);
+      assert.equal(value.systemNodeSha256, present ? hash : null);
+      assert.equal(value.systemNodeIdentity, present ? identity : null);
+      assert.equal(value.cases, 23);
+    }
+    for (const args of [["false", "22", "", ""], ["true", "", "", ""], ["unknown", "", "", ""]]) {
+      assert.notEqual(emit(...args).result.status, 0, "incoherent global Node identity must fail receipt creation");
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("runtime rejection fixture labels are initialized before dependent local paths", () => {
+  const rejection = uniqueShellFunction(installerRuntime, "expect_runtime_rejection_before_install").text;
+  const end = rejection.indexOf("\n  set +e");
+  assert.notEqual(end, -1);
+  const declarations = rejection.slice(0, end);
+  function probe(source) {
+    return spawnSync("bash", ["-c", `set -euo pipefail
+runtime_root=/unused-fixture
+${source}
+  printf '%s\\n' "$label" "$candidate" "$output"
+}
+expect_runtime_rejection_before_install relative relative-node
+`], { encoding: "utf8" });
+  }
+  const result = probe(declarations);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stdout, "relative\nrelative-node\n/unused-fixture/runtime-reject-relative.log\n");
+  const separate = 'local label="$1" candidate="$2" status\n  local output="$runtime_root/runtime-reject-$label.log"';
+  assert.ok(declarations.includes(separate));
+  const combined = declarations.replace(separate, 'local label="$1" candidate="$2" output="$runtime_root/runtime-reject-$label.log" status');
+  assert.notEqual(probe(combined).status, 0, "same-local expansion must fail the scalar regression");
+});
+
+test("actual Compose transaction dispatch binds the parent Node and preserves every fault argument", () => {
+  const transaction = uniqueSlice(integration, "function productionTransaction(", "\nfunction image(", "production transaction dispatch");
+  function assertParentBinding(source) {
+    assert.match(source, /return run\("\/usr\/bin\/flock", \["-n", "\/run\/yawf-server-updater\/operation\.lock", process\.execPath,/);
+  }
+  assertParentBinding(transaction);
+  for (const replacement of ['"/usr/bin/node"', '"node"']) {
+    assert.throws(() => assertParentBinding(transaction.replace("process.execPath", replacement)));
+  }
+  const fixture = mkdtempSync(resolve(tmpdir(), "yawf-compose-parent-node-"));
+  function globalNodeIdentity() {
+    const path = "/usr/bin/node";
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (!stat) return { state: "absent" };
+    return { state: "present", uid: stat.uid, gid: stat.gid, mode: stat.mode, ino: stat.ino, dev: stat.dev,
+      target: stat.isSymbolicLink() ? readlinkSync(path) : null,
+      sha256: existsSync(path) && !stat.isDirectory() ? createHash("sha256").update(readFileSync(path)).digest("hex") : null };
+  }
+  const globalBefore = globalNodeIdentity();
+  try {
+    mkdirSync(join(fixture, "scripts"));
+    const emptyPath = join(fixture, "no-global-node");
+    mkdirSync(emptyPath);
+    const driver = join(fixture, "scripts/server_updater_transaction_driver.mjs");
+    writeFileSync(driver, 'process.stdout.write(JSON.stringify({ execPath: process.execPath, args: process.argv.slice(2) }));\n');
+    function loadDispatch(source) {
+      return vm.runInNewContext(`${source}\nproductionTransaction`, {
+        join, repo: fixture, process: Object.freeze({ execPath: process.execPath }),
+        run(command, argv) {
+          // Check the real flock boundary without taking a privileged host lock.
+          assert.equal(command, "/usr/bin/flock");
+          const args = Array.from(argv);
+          assert.deepEqual(args.slice(0, 2), ["-n", "/run/yawf-server-updater/operation.lock"]);
+          assert.equal(args[2], process.execPath, "the child must use the actual parent runtime, not PATH lookup");
+          assert.equal(args[3], driver);
+          return execFileSync(args[2], args.slice(3), { encoding: "utf8", env: { ...process.env, PATH: emptyPath } }).trim();
+        },
+      });
+    }
+    const dispatch = loadDispatch(transaction);
+    const digest = `sha256:${"a".repeat(64)}`;
+    const revision = "b".repeat(40);
+    for (const fault of ["none", "after-health", "stop", "snapshot", "interrupt", "recover"]) {
+      const receipt = JSON.parse(dispatch(digest, revision, fault));
+      assert.equal(receipt.execPath, process.execPath);
+      assert.deepEqual(receipt.args, [digest, revision, fault]);
+    }
+    assert.ok(transaction.includes("process.execPath"));
+    for (const replacement of ['"node"']) {
+      const mutated = transaction.replace("process.execPath", replacement);
+      assert.throws(() => loadDispatch(mutated)(digest, revision, "none"), /actual parent runtime/);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+    assert.deepEqual(globalNodeIdentity(), globalBefore, "isolated dispatch must not alter the global Node identity or absence");
+  }
+});
+
+test("actual Compose no-global dispatch rejects the system Node path", { skip: process.execPath === "/usr/bin/node" }, () => {
+  const transaction = uniqueSlice(integration, "function productionTransaction(", "\nfunction image(", "no-global transaction dispatch");
+  const digest = `sha256:${"a".repeat(64)}`;
+  const revision = "b".repeat(40);
+  const repo = "/isolated-compose-dispatch";
+  function loadDispatch(source) {
+    return vm.runInNewContext(`${source}\nproductionTransaction`, {
+      join, repo, process: Object.freeze({ execPath: process.execPath }),
+      run(command, argv) {
+        const args = Array.from(argv);
+        assert.equal(command, "/usr/bin/flock");
+        assert.notEqual(args[2], "/usr/bin/node", "the no-global fixture must never dispatch the system Node path");
+        assert.deepEqual(args, ["-n", "/run/yawf-server-updater/operation.lock", process.execPath,
+          join(repo, "scripts/server_updater_transaction_driver.mjs"), digest, revision, "none"]);
+        return "parent-runtime-dispatched";
+      },
+    });
+  }
+  assert.equal(loadDispatch(transaction)(digest, revision, "none"), "parent-runtime-dispatched");
+  assert.ok(transaction.includes("process.execPath"));
+  const hardcodedGlobal = transaction.replace("process.execPath", '"/usr/bin/node"');
+  assert.throws(() => loadDispatch(hardcodedGlobal)(digest, revision, "none"), /no-global fixture/);
 });

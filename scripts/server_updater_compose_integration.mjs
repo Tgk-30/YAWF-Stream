@@ -35,7 +35,7 @@ function docker(...args) { return run("docker", args); }
 function fileHash(path) { return createHash("sha256").update(readFileSync(path)).digest("hex"); }
 function composeRun(...args) { return docker("compose", "--project-name", project, "--project-directory", root, "--file", compose, "--file", override, ...args); }
 function productionTransaction(digest, revision, fault) {
-  return run("/usr/bin/flock", ["-n", "/run/yawf-server-updater/operation.lock", "/usr/bin/node",
+  return run("/usr/bin/flock", ["-n", "/run/yawf-server-updater/operation.lock", process.execPath,
     join(repo, "scripts/server_updater_transaction_driver.mjs"), digest, revision, fault]);
 }
 function image(name, version, ready = true) {

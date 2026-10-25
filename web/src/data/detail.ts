@@ -6,7 +6,7 @@
 // the Detail screen still renders for a screenshot without a key. Imports the
 // ported TMDBService READ-ONLY.
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CastMember, MediaItem, MediaPreview } from "../models/media";
 import type { TMDBService } from "../services/metadata/TMDBService";
 import { fetchServerDetail } from "../lib/serverApi";
@@ -30,6 +30,27 @@ export interface DetailState {
   source: "live" | "fixtures";
 }
 
+interface DetailOwner {
+  id: string | null;
+  type: MediaPreview["type"] | null;
+  tmdbId: number | null;
+  service: TMDBService | null;
+  requestMode: "server" | "standard" | "fullLocal" | "offline";
+}
+
+interface OwnedDetailState {
+  owner: DetailOwner;
+  value: DetailState;
+}
+
+function sameDetailOwner(left: DetailOwner, right: DetailOwner): boolean {
+  return left.id === right.id &&
+    left.type === right.type &&
+    left.tmdbId === right.tmdbId &&
+    left.service === right.service &&
+    left.requestMode === right.requestMode;
+}
+
 /** Build a usable MediaItem straight from a preview (no network) for the
  * fixtures/no-key path so the hero still renders title/year/rating/poster. */
 function previewToItem(p: MediaPreview): MediaItem {
@@ -48,6 +69,20 @@ function previewToItem(p: MediaPreview): MediaItem {
     status: null,
     tmdbId: p.tmdbId ?? null,
     lastFetched: new Date().toISOString(),
+  };
+}
+
+function initialDetailState(preview: MediaPreview | null): DetailState {
+  return {
+    data: {
+      item: preview == null ? null : previewToItem(preview),
+      cast: [],
+      related: [],
+      imdbId: preview?.id.startsWith("tt") === true ? preview.id : null,
+    },
+    loading: true,
+    error: null,
+    source: "fixtures",
   };
 }
 
@@ -145,47 +180,65 @@ export function useDetail(
   preview: MediaPreview | null,
   service: TMDBService | null,
 ): DetailState {
-  const [state, setState] = useState<DetailState>({
-    data: { item: null, cast: [], related: [], imdbId: null },
-    loading: true,
-    error: null,
-    source: "fixtures",
-  });
+  const serverMode = isServerMode();
+  const networkMode = getNetworkMode();
+  const owner = useMemo<DetailOwner>(() => ({
+    id: preview?.id ?? null,
+    type: preview?.type ?? null,
+    tmdbId: preview?.tmdbId ?? null,
+    service,
+    requestMode: serverMode ? "server" : networkMode,
+  }), [preview?.id, preview?.type, preview?.tmdbId, service, serverMode, networkMode]);
+  const fallback = initialDetailState(preview);
+  const [state, setState] = useState<OwnedDetailState>(() => ({
+    owner,
+    value: fallback,
+  }));
+  const ownerRef = useRef(owner);
+  useLayoutEffect(() => {
+    ownerRef.current = owner;
+  }, [owner]);
 
   useEffect(() => {
-    if (preview == null) return;
+    const commitState = (
+      next: DetailState | ((current: DetailState) => DetailState),
+    ) => {
+      if (!sameDetailOwner(ownerRef.current, owner)) return;
+      setState((current) => {
+        const currentValue = sameDetailOwner(current.owner, owner)
+          ? current.value
+          : initialDetailState(preview);
+        return {
+          owner,
+          value: typeof next === "function" ? next(currentValue) : next,
+        };
+      });
+    };
+
+    if (preview == null) {
+      commitState(initialDetailState(null));
+      return;
+    }
     const currentPreview = preview;
     let cancelled = false;
 
-    setState({
-      data: {
-        item: previewToItem(currentPreview),
-        cast: [],
-        related: [],
-        // IMDb-rooted previews (tt…) can start the stream search immediately,
-        // in parallel with the metadata load.
-        imdbId: currentPreview.id.startsWith("tt") ? currentPreview.id : null,
-      },
-      loading: true,
-      error: null,
-      source: "fixtures",
-    });
+    commitState(initialDetailState(currentPreview));
 
     async function run() {
-      if (isServerMode()) {
+      if (serverMode) {
         try {
           const data = await fetchServerDetail({
             id: currentPreview.id,
             type: currentPreview.type,
           });
           if (!cancelled) {
-            setState({ data, loading: false, error: null, source: "live" });
+            commitState({ data, loading: false, error: null, source: "live" });
           }
           return;
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           if (!cancelled) {
-            setState({
+            commitState({
               data: {
                 item: previewToItem(currentPreview),
                 cast: [],
@@ -205,7 +258,7 @@ export function useDetail(
 
       if (service == null) {
         if (!cancelled) {
-          setState({
+          commitState({
             data: {
               item: previewToItem(currentPreview),
               cast: [],
@@ -223,16 +276,16 @@ export function useDetail(
       try {
         const data = await loadDetailWithOfflineFallback(service, currentPreview, (imdbId) => {
           if (cancelled) return;
-          setState((current) => ({
+          commitState((current) => ({
             ...current,
             data: { ...current.data, imdbId },
             source: "live",
           }));
         });
         if (!cancelled && data != null) {
-          setState({ data, loading: false, error: null, source: "live" });
+          commitState({ data, loading: false, error: null, source: "live" });
         } else if (!cancelled) {
-          setState({
+          commitState({
             data: { item: null, cast: [], related: [], imdbId: null },
             loading: false,
             error: "Not available offline (not cached yet).",
@@ -242,7 +295,7 @@ export function useDetail(
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (!cancelled) {
-          setState({
+          commitState({
             data: {
               item: previewToItem(currentPreview),
               cast: [],
@@ -261,7 +314,7 @@ export function useDetail(
     return () => {
       cancelled = true;
     };
-  }, [preview, service]);
+  }, [preview, service, owner, serverMode]);
 
-  return state;
+  return sameDetailOwner(state.owner, owner) ? state.value : fallback;
 }

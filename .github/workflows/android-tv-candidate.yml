@@ -1,0 +1,118 @@
+name: Android TV private signed candidate
+
+on:
+  workflow_dispatch:
+  # A new workflow cannot be dispatched until it exists on the default branch.
+  # Admit only this owned preparation branch and only changes to this producer.
+  push:
+    branches:
+      - codex/qa-platform-release-2326
+    paths:
+      - .github/workflows/android-tv-candidate.yml
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: github.repository == 'Tgk-30/YAWF-Stream' && github.actor == 'Tgk-30' && github.ref_type == 'branch' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/codex/qa-platform-release-2326'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install exact Android tools
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+
+      - name: Validate signing configuration and restore the existing TV identity
+        shell: bash
+        env:
+          ANDROID_TV_KEYSTORE_BASE64: ${{ secrets.ANDROID_TV_KEYSTORE_BASE64 }}
+          ANDROID_TV_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_TV_KEYSTORE_PASSWORD }}
+          ANDROID_TV_KEY_ALIAS: ${{ secrets.ANDROID_TV_KEY_ALIAS }}
+          ANDROID_TV_KEY_PASSWORD: ${{ secrets.ANDROID_TV_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          for name in ANDROID_TV_KEYSTORE_BASE64 ANDROID_TV_KEYSTORE_PASSWORD ANDROID_TV_KEY_ALIAS ANDROID_TV_KEY_PASSWORD; do
+            test -n "${!name}" || { echo "::error::Missing TV signing configuration: $name"; exit 1; }
+          done
+          test -s android-tv/SIGNING_CERT_SHA256
+          printf '%s' "$ANDROID_TV_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/yawf-android-tv.jks"
+          echo "YAWF_ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/yawf-android-tv.jks" >> "$GITHUB_ENV"
+
+      - name: Test, lint, and build the signed TV candidate
+        working-directory: android-tv
+        env:
+          YAWF_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_TV_KEYSTORE_PASSWORD }}
+          YAWF_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_TV_KEY_ALIAS }}
+          YAWF_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_TV_KEY_PASSWORD }}
+        run: gradle --no-daemon --rerun-tasks :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
+
+      - name: Verify candidate identity and bind exact bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/36.0.0"
+          analyzer="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/cmdline-tools/latest/bin/apkanalyzer"
+          source="android-tv/app/build/outputs/apk/release/app-release.apk"
+          "$tools/apksigner" verify --print-certs "$source" > "$RUNNER_TEMP/tv-signature.txt"
+          expected="$(tr -d '[:space:]:' < android-tv/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')"
+          actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/tv-signature.txt" | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+          test -n "$actual" && test "$actual" = "$expected"
+          test "$(grep -c '^Signer #[0-9]* certificate SHA-256 digest:' "$RUNNER_TEMP/tv-signature.txt")" = 1
+          test "$("$analyzer" manifest application-id "$source")" = com.yawf.stream.tv
+          version="$(sed -n 's/.*versionName "\([0-9.]*\)".*/\1/p' android-tv/app/build.gradle)"
+          code="$(sed -n 's/.*versionCode \([0-9]*\).*/\1/p' android-tv/app/build.gradle)"
+          test "$("$analyzer" manifest version-name "$source")" = "$version"
+          test "$("$analyzer" manifest version-code "$source")" = "$code"
+          mkdir -p "$RUNNER_TEMP/tv-candidate"
+          asset="$RUNNER_TEMP/tv-candidate/YAWF.Stream_Android.TV_${version}.apk"
+          cp "$source" "$asset"
+          ASSET="$asset" VERSION="$version" CODE="$code" SIGNER="$actual" python3 -I -B - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          p = Path(os.environ["ASSET"])
+          receipt = {
+              "classification": "private-signed-tv-candidate",
+              "sourceRevision": os.environ["GITHUB_SHA"],
+              "buildRunId": int(os.environ["GITHUB_RUN_ID"]),
+              "version": os.environ["VERSION"],
+              "versionCode": int(os.environ["CODE"]),
+              "package": "com.yawf.stream.tv",
+              "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+              "size": p.stat().st_size,
+              "signerSha256": os.environ["SIGNER"],
+              "published": False,
+              "runtimeProof": False,
+          }
+          (p.parent / "candidate-binding.json").write_text(json.dumps(receipt) + "\n")
+          PY
+
+      - name: Remove temporary signing material
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/yawf-android-tv.jks"
+
+      - name: Retain only the verified private candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-tv-verification-candidate
+          path: ${{ runner.temp }}/tv-candidate/*
+          if-no-files-found: error
+          retention-days: 3

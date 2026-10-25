@@ -9,7 +9,8 @@ the Docker socket into YAWF Stream.
 Requirements:
 
 - Ubuntu 22.04 or 24.04 with Docker Engine, Docker Compose, and `flock` from util-linux
-- Node.js 24 or newer at `/usr/bin/node`
+- Node.js 24 or newer supplied by `--node-runtime`, already installed in the
+  updater's private runtime, or available at `/usr/bin/node`
 - the published `ghcr.io/tgk-30/yawf-stream` image
 - one named volume mounted read-write at `/data`
 - a canonical absolute Compose file and `.env` in a root-owned directory; none
@@ -26,6 +27,22 @@ tar -xzf yawf-server-updater_X.Y.Z.tar.gz
 cd yawf-server-updater_X.Y.Z
 sudo ./install.sh
 ```
+
+To preserve an older distro-owned `/usr/bin/node`, provide a root-owned,
+non-writable, canonical regular executable instead. The installer verifies
+Node.js 24 or newer, copies hash-matched bytes atomically to
+`/usr/lib/yawf-server-updater/runtime/node`, and re-probes the installed copy:
+
+```sh
+sudo ./install.sh --node-runtime /opt/yawf-node24/bin/node
+```
+
+The candidate and every ancestor must be root-owned, free of symlinks, and not
+writable by group or other. The source may be removed after installation.
+Reinstalling without the flag securely reuses an existing private runtime.
+Supplying the flag again explicitly replaces it. This does not change or
+replace the host's global Node.js. Hash equality detects copy-time changes and
+does not establish the external provenance of the supplied executable.
 
 In an interactive terminal, `install.sh` describes the host-level behavior and
 asks before it registers a Compose file and enables the timer. Answering `N`,

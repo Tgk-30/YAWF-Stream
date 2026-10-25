@@ -181,10 +181,38 @@ final class FlowPolicyAssertions {
     static void channelVersionsArePinned() {
         check(FlowPolicy.isExpectedVersionPair("2.3.26", "2.3.25"),
                 "The exact candidate and public channel versions must pass");
+        check(FlowPolicy.isExpectedVersionPair("2.3.27", "2.3.26"),
+                "The exact current candidate and public channel versions must pass");
+        check(FlowPolicy.isExpectedVersionPair("2.3.31", "2.3.27"),
+                "The independently pinned next candidate and stable versions must pass");
         check(!FlowPolicy.isExpectedVersionPair("2.3.25", "2.3.25"),
                 "A changed candidate version must fail closed");
         check(!FlowPolicy.isExpectedVersionPair("2.3.26", "2.3.21"),
                 "A changed public channel version must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.27", "2.3.25"),
+                "A mixed current and legacy channel must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.28", "2.3.27"),
+                "Unknown future versions must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.29", "2.3.27"),
+                "The replaced next candidate must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.31", "2.3.26"),
+                "The next candidate paired with the prior stable must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.27", "2.3.27"),
+                "Equal current and stable versions must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.31", "2.3.28"),
+                "The unreviewed 28 intermediate stable must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair(null, "2.3.26"),
+                "Null candidate versions must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.27", null),
+                "Null published versions must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair(null, "2.3.27"),
+                "Null next candidate versions must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.31", null),
+                "Null next published versions must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("unknown", "2.3.27"),
+                "Unknown candidate versions must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.31", "unknown"),
+                "Unknown published versions must fail closed");
     }
 
     private static void check(boolean condition, String message) {

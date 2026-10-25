@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 //
 // Component coverage for the Local-Mode persona first-run wizard. Verifies the
-// choose step renders all five personas, each persona routes correctly (device =
+// chooser gates local hosting by native desktop capability, each path routes correctly (device =
 // forced catalog→streaming key steps, advanced = finish + navigate to settings,
 // connect/host = sub steps), skip requires a confirm step, the connect-step
-// validation/direct-navigation flow, and the host-step desktop-vs-web copy.
+// validation/direct-navigation flow, and the supported desktop host handoff.
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // --- mocks for every external dependency the component imports ---------------
@@ -30,23 +30,69 @@ vi.mock("../store/AppStore", () => ({
   useAppStore: () => ({ settings, services: { tmdb: tmdbService }, updateSettings, navigate }),
 }));
 
-const markOnboardingComplete = vi.fn().mockResolvedValue(undefined);
-const markQuickSetupAcknowledged = vi.fn().mockResolvedValue(undefined);
+const markOnboardingComplete = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+const markQuickSetupAcknowledged = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
 vi.mock("../lib/firstRun", () => ({
   markOnboardingComplete: () => markOnboardingComplete(),
   markQuickSetupAcknowledged: () => markQuickSetupAcknowledged(),
 }));
 
-const saveServerURL = vi.fn();
+let followedServerURL: string | null = null;
+const saveServerURL = vi.fn(
+  (url: string | null, options?: { follow?: boolean }) => {
+    if (url == null || options?.follow === false) {
+      followedServerURL = null;
+    } else if (options?.follow === true) {
+      followedServerURL = url;
+    }
+  },
+);
+const followServerURL = vi.fn(() => followedServerURL);
 vi.mock("../lib/serverMode", () => ({
   saveServerURL: (url: string | null, options?: { follow?: boolean }) =>
     saveServerURL(url, options),
+  followServerURL: () => followServerURL(),
 }));
 
-const isTauriMock = vi.fn(() => false);
-vi.mock("../lib/tauri", () => ({
-  isTauri: () => isTauriMock(),
-}));
+// Exercise the actual shared native-desktop capability, not a mocked UA gate.
+const MAC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/26.0 Safari/605.1.15";
+function configureRuntime({
+  native = false,
+  userAgent = MAC_UA,
+  platform = "MacIntel",
+  maxTouchPoints = 0,
+  standalone = false,
+  mobileMarker = false,
+}: {
+  native?: boolean;
+  userAgent?: string;
+  platform?: string;
+  maxTouchPoints?: number;
+  standalone?: boolean;
+  mobileMarker?: boolean;
+} = {}) {
+  vi.stubGlobal("navigator", { userAgent, platform, maxTouchPoints, standalone });
+  const runtime = window as unknown as Record<string, unknown>;
+  delete runtime.__TAURI_INTERNALS__;
+  delete runtime.__TAURI__;
+  delete runtime.__YAWF_TAURI_MOBILE__;
+  if (native) runtime.__TAURI_INTERNALS__ = {};
+  if (mobileMarker) runtime.__YAWF_TAURI_MOBILE__ = true;
+}
+beforeEach(() => {
+  configureRuntime();
+  markOnboardingComplete.mockResolvedValue(undefined);
+  markQuickSetupAcknowledged.mockResolvedValue(undefined);
+  ensureDefaultProfile.mockResolvedValue({ id: "default" });
+  updateSettings.mockResolvedValue(undefined);
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  const runtime = window as unknown as Record<string, unknown>;
+  delete runtime.__TAURI_INTERNALS__;
+  delete runtime.__TAURI__;
+  delete runtime.__YAWF_TAURI_MOBILE__;
+});
 
 vi.mock("../lib/onboardingValidation", () => ({
   testTmdbKey: vi.fn(),
@@ -56,8 +102,9 @@ vi.mock("../lib/onboardingValidation", () => ({
 vi.mock("../lib/passwordHash", () => ({
   hashPassword: () => Promise.resolve("pbkdf2:v1:test"),
 }));
+const ensureDefaultProfile = vi.fn().mockResolvedValue({ id: "default" });
 vi.mock("../storage/ProfileRegistry", () => ({
-  ensureDefaultProfile: () => Promise.resolve({ id: "default" }),
+  ensureDefaultProfile: (input: unknown) => ensureDefaultProfile(input),
   updateProfileRecord: () => Promise.resolve(),
   setMultiUserEnabled: () => Promise.resolve(),
 }));
@@ -88,14 +135,15 @@ async function reachStreamingStep(user: ReturnType<typeof userEvent.setup>) {
 describe("FirstRunWizard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    isTauriMock.mockReturnValue(false);
+    followedServerURL = null;
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];
     tmdbService = null;
   });
 
-  it("renders the choose step with all five personas and a skip button", () => {
+  it("renders all five personas and a skip button on a supported desktop", () => {
+    configureRuntime({ native: true });
     render(<FirstRunWizard onDone={() => {}} />);
     expect(
       screen.getByText("How do you want to use YAWF Stream?"),
@@ -108,6 +156,63 @@ describe("FirstRunWizard", () => {
     expect(screen.getByRole("button", { name: "Skip for now" })).toBeInTheDocument();
     expect(screen.getByText("Just watch on this device").closest("button")).toHaveClass("is-recommended");
     expect(screen.getByText("Quick setup").closest("button")).not.toHaveClass("is-recommended");
+  });
+
+  it.each([
+    { name: "iPad Safari desktop-shaped UA", maxTouchPoints: 5 },
+    { name: "iPad installed PWA", maxTouchPoints: 5, standalone: true },
+    { name: "iPad native desktop-shaped UA", maxTouchPoints: 5, native: true },
+    { name: "Android browser", userAgent: "Mozilla/5.0 (Linux; Android 16)", platform: "Linux armv8l", maxTouchPoints: 5 },
+    { name: "Android native", userAgent: "Mozilla/5.0 (Linux; Android 16)", platform: "Linux armv8l", maxTouchPoints: 5, native: true, mobileMarker: true },
+    { name: "legacy Android native", userAgent: "Mozilla/5.0 (Linux; Android 16)", platform: "Linux armv8l", maxTouchPoints: 5, native: true },
+    { name: "native mobile marker with desktop-shaped UA", native: true, mobileMarker: true },
+    { name: "desktop browser" },
+  ])("offers Connect without on-device hosting on $name", async (runtime) => {
+    configureRuntime(runtime);
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    render(<FirstRunWizard forced onDone={onDone} />);
+    expect(screen.queryByRole("button", { name: /Host for my family/ })).toBeNull();
+    expect(screen.queryByText(/Run the server on this computer/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Connect to a server/ })).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: /Connect to a server/ }));
+    expect(screen.getByRole("heading", { name: "Connect to a server" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Server address")).toBeEnabled();
+    expect(onDone).not.toHaveBeenCalled();
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "macOS native", platform: "MacIntel" },
+    { name: "Windows native", platform: "Win32", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+    { name: "Linux native", platform: "Linux x86_64", userAgent: "Mozilla/5.0 (X11; Linux x86_64)" },
+  ])("preserves the desktop hosting handoff on $name", async (runtime) => {
+    configureRuntime({ ...runtime, native: true });
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    render(<FirstRunWizard onDone={onDone} />);
+    expect(screen.getByRole("button", { name: /Connect to a server/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Host for my family/ })).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: /Host for my family/ }));
+    expect(screen.getByText(/This computer can serve YAWF Stream/)).toBeInTheDocument();
+    expect(onDone).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Open Settings" }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith("settings");
+  });
+
+  it("leaves a stale hosting step when the desktop capability is no longer available", async () => {
+    configureRuntime({ native: true });
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    const { rerender } = render(<FirstRunWizard onDone={onDone} />);
+    await user.click(screen.getByRole("button", { name: /Host for my family/ }));
+    configureRuntime({ maxTouchPoints: 5 });
+    rerender(<FirstRunWizard onDone={onDone} />);
+    expect(screen.queryByRole("heading", { name: "Host for your household" })).toBeNull();
+    expect(screen.getByRole("button", { name: /Connect to a server/ })).toBeInTheDocument();
+    expect(onDone).not.toHaveBeenCalled();
+    expect(updateSettings).not.toHaveBeenCalled();
   });
 
   it("Quick setup requires acknowledgement, performs no validation, and persists the deliberate route", async () => {
@@ -133,6 +238,37 @@ describe("FirstRunWizard", () => {
     }));
     expect(markQuickSetupAcknowledged).toHaveBeenCalledTimes(1);
     expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries only unfinished Quick setup persistence after the completion marker fails", async () => {
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    markOnboardingComplete
+      .mockRejectedValueOnce(new Error("quota exceeded"))
+      .mockResolvedValue(undefined);
+    render(<FirstRunWizard forced onDone={onDone} />);
+    await user.click(screen.getByText("Quick setup"));
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Continue with Quick setup" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /couldn't record that setup is complete/i,
+    );
+    expect(onDone).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(ensureDefaultProfile).toHaveBeenCalledTimes(1);
+    expect(markQuickSetupAcknowledged).toHaveBeenCalledTimes(1);
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Retry saving setup" }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(ensureDefaultProfile).toHaveBeenCalledTimes(1);
+    expect(markQuickSetupAcknowledged).toHaveBeenCalledTimes(1);
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
+    expect(testTmdbKeyMock).not.toHaveBeenCalled();
+    expect(testOmdbKeyMock).not.toHaveBeenCalled();
+    expect(testDebridTokenMock).not.toHaveBeenCalled();
   });
 
   it("Quick setup reports an existing catalog credential truthfully", async () => {
@@ -259,6 +395,43 @@ describe("FirstRunWizard", () => {
       }),
     );
     expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries only the completion marker without repeating saved choices or validation", async () => {
+    const user = userEvent.setup();
+    const onDone = vi.fn();
+    testDebridTokenMock.mockResolvedValue(true);
+    markOnboardingComplete
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockResolvedValue(undefined);
+    render(<FirstRunWizard onDone={onDone} />);
+    await reachStreamingStep(user);
+    await user.type(screen.getByLabelText("API token"), "rd-token-1");
+    await user.click(screen.getByRole("button", { name: "Test token & finish" }));
+    await skipAi(user);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /couldn't record that setup is complete/i,
+    );
+    expect(onDone).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tmdbKey: "tmdb-key-1",
+        debridTokens: [{ service: "real_debrid", apiToken: "rd-token-1" }],
+      }),
+    );
+    expect(ensureDefaultProfile).toHaveBeenCalledTimes(1);
+    expect(testTmdbKeyMock).toHaveBeenCalledTimes(1);
+    expect(testDebridTokenMock).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Retry saving setup" }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(ensureDefaultProfile).toHaveBeenCalledTimes(1);
+    expect(testTmdbKeyMock).toHaveBeenCalledTimes(1);
+    expect(testDebridTokenMock).toHaveBeenCalledTimes(1);
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
   });
 
   it("streaming step replaces an existing token for the same service", async () => {
@@ -450,6 +623,140 @@ describe("FirstRunWizard", () => {
     vi.unstubAllGlobals();
   });
 
+  it("recovers a started Connect navigation after Safari restores the page from bfcache", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "not-a-valid-server");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith("https://not-a-valid-server"),
+    );
+    expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
+
+    const restored = new Event("pageshow");
+    Object.defineProperty(restored, "persisted", { value: true });
+    fireEvent(window, restored);
+
+    expect(screen.getByLabelText("Server address")).toHaveValue(
+      "not-a-valid-server",
+    );
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    expect(saveServerURL).toHaveBeenLastCalledWith(
+      "https://not-a-valid-server",
+      { follow: false },
+    );
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(2));
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("recovers Connect without changing a newer followed server bookmark", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "old.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+
+    followedServerURL = "https://new.example.com";
+    saveServerURL.mockClear();
+    const restored = new Event("pageshow");
+    Object.defineProperty(restored, "persisted", { value: true });
+    fireEvent(window, restored);
+
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    expect(screen.getByLabelText("Server address")).toHaveValue("old.example.com");
+    expect(followedServerURL).toBe("https://new.example.com");
+    expect(saveServerURL).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("ignores an ordinary pageshow until a started Connect navigation is restored", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "stream.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+
+    fireEvent(window, new Event("pageshow"));
+    expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
+    expect(followedServerURL).toBe("https://stream.example.com");
+
+    const restored = new Event("pageshow");
+    Object.defineProperty(restored, "persisted", { value: true });
+    fireEvent(window, restored);
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    vi.unstubAllGlobals();
+  });
+
+  it("does not recover Connect while completion is pending before navigation", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+    let resolveCompletion!: () => void;
+    markOnboardingComplete.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCompletion = resolve;
+        }),
+    );
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "stream.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+
+    const prematureRestore = new Event("pageshow");
+    Object.defineProperty(prematureRestore, "persisted", { value: true });
+    fireEvent(window, prematureRestore);
+    expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
+    expect(saveServerURL).not.toHaveBeenCalled();
+    expect(assign).not.toHaveBeenCalled();
+
+    await act(async () => resolveCompletion());
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
+
+    const restored = new Event("pageshow");
+    Object.defineProperty(restored, "persisted", { value: true });
+    fireEvent(window, restored);
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    vi.unstubAllGlobals();
+  });
+
+  it("removes the Connect bfcache recovery listener on unmount", async () => {
+    const user = userEvent.setup();
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    const removeEventListener = vi.spyOn(window, "removeEventListener");
+    const { unmount } = render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    const pageshowRegistration = addEventListener.mock.calls.find(
+      ([type]) => type === "pageshow",
+    );
+
+    expect(pageshowRegistration).toBeDefined();
+    unmount();
+    expect(removeEventListener).toHaveBeenCalledWith(
+      "pageshow",
+      pageshowRegistration?.[1],
+    );
+  });
+
   it("connect step preserves the full invite path, query, and fragment", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn();
@@ -471,6 +778,79 @@ describe("FirstRunWizard", () => {
     expect(saveServerURL).toHaveBeenCalledWith("https://stream.example.com", {
       follow: true,
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("does not save or navigate to a server until failed completion persistence is retried", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+    markOnboardingComplete
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockResolvedValue(undefined);
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "stream.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /couldn't record that setup is complete/i,
+    );
+    expect(saveServerURL).not.toHaveBeenCalled();
+    expect(assign).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Retry saving setup" }));
+    await waitFor(() =>
+      expect(saveServerURL).toHaveBeenCalledWith("https://stream.example.com", {
+        follow: true,
+      }),
+    );
+    expect(assign).toHaveBeenCalledWith("https://stream.example.com");
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(ensureDefaultProfile).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the Connect address and navigation error after completion retry succeeds", async () => {
+    const user = userEvent.setup();
+    const assign = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error("navigation blocked");
+      })
+      .mockImplementation(() => undefined);
+    vi.stubGlobal("location", { assign });
+    markOnboardingComplete
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockResolvedValue(undefined);
+
+    render(<FirstRunWizard onDone={() => {}} />);
+    await user.click(screen.getByText("Connect to a server"));
+    await user.type(screen.getByLabelText("Server address"), "stream.example.com");
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Retry saving setup" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Couldn't open that server. Check the address and try again.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Server address")).toHaveValue(
+      "stream.example.com",
+    );
+    expect(screen.getByRole("button", { name: "Open server" })).toBeEnabled();
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole("button", { name: "Open server" }));
+    await waitFor(() =>
+      expect(assign).toHaveBeenLastCalledWith("https://stream.example.com"),
+    );
+    expect(assign).toHaveBeenCalledTimes(2);
+    expect(markOnboardingComplete).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
   });
 
@@ -531,22 +911,19 @@ describe("FirstRunWizard", () => {
     vi.unstubAllGlobals();
   });
 
-  it("'host' persona shows the web copy when not running under Tauri", async () => {
+  it("does not offer local hosting in a plain browser and keeps server connection available", async () => {
     const user = userEvent.setup();
-    isTauriMock.mockReturnValue(false);
     render(<FirstRunWizard onDone={() => {}} />);
-    await user.click(screen.getByRole("button", { name: /Host for my family/i }));
-    expect(
-      screen.getByRole("heading", { name: "Host for your household" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/released macOS and Linux desktop apps/),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Host for my family/i })).toBeNull();
+    expect(screen.queryByText(/Run the server on this computer/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Connect to a server/ })).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: /Connect to a server/ }));
+    expect(screen.getByLabelText("Server address")).toBeInTheDocument();
   });
 
   it("'host' persona shows the desktop copy under Tauri", async () => {
     const user = userEvent.setup();
-    isTauriMock.mockReturnValue(true);
+    configureRuntime({ native: true });
     render(<FirstRunWizard onDone={() => {}} />);
     await user.click(screen.getByRole("button", { name: /Host for my family/i }));
     expect(
@@ -555,6 +932,7 @@ describe("FirstRunWizard", () => {
   });
 
   it("'host' persona enters host mode without finishing onboarding", async () => {
+    configureRuntime({ native: true });
     const user = userEvent.setup();
     const onDone = vi.fn();
     render(<FirstRunWizard onDone={onDone} />);
@@ -566,6 +944,7 @@ describe("FirstRunWizard", () => {
   });
 
   it("host step Continue finishes simple + navigates to settings", async () => {
+    configureRuntime({ native: true });
     const user = userEvent.setup();
     const onDone = vi.fn();
     render(<FirstRunWizard onDone={onDone} />);
@@ -579,6 +958,7 @@ describe("FirstRunWizard", () => {
   });
 
   it("host step Back returns to the choose screen", async () => {
+    configureRuntime({ native: true });
     const user = userEvent.setup();
     render(<FirstRunWizard onDone={() => {}} />);
     await user.click(screen.getByRole("button", { name: /Host for my family/i }));
@@ -592,7 +972,6 @@ describe("FirstRunWizard", () => {
 describe("FirstRunWizard - forced key gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    isTauriMock.mockReturnValue(false);
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];
@@ -714,7 +1093,6 @@ describe("FirstRunWizard - forced key gate", () => {
 describe("FirstRunWizard - forced advanced/host route through keys", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    isTauriMock.mockReturnValue(false);
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];
@@ -750,6 +1128,7 @@ describe("FirstRunWizard - forced advanced/host route through keys", () => {
   });
 
   it("forced Host explains hosting, then collects keys before Settings", async () => {
+    configureRuntime({ native: true });
     const user = userEvent.setup();
     const onDone = vi.fn();
     render(<FirstRunWizard forced onDone={onDone} />);
@@ -772,7 +1151,6 @@ describe("FirstRunWizard - forced advanced/host route through keys", () => {
 describe("FirstRunWizard - optional AI step", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    isTauriMock.mockReturnValue(false);
     settings.tmdbKey = "";
     settings.omdbKey = "";
     settings.debridTokens = [];

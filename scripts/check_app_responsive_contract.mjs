@@ -75,12 +75,14 @@ const navCss = read("web/src/components/NavRail.css");
 const heroCss = read("web/src/components/HeroSpotlight.css");
 const globalSearchCss = read("web/src/components/GlobalSearch.css");
 const discoverCss = read("web/src/screens/Discover.css");
+const libraryScreensCss = read("web/src/screens/LibraryScreens.css");
 const themeCss = read("web/src/theme/theme.css");
 const moodCss = read("web/src/components/MoodStrip.css");
 const settingsCss = read("web/src/screens/Settings.css");
 const detailCss = read("web/src/screens/Detail.css");
 const browseCss = read("web/src/screens/Browse.css");
 const playerCss = read("web/src/components/VideoPlayer.css");
+const playerSource = read("web/src/components/VideoPlayer.tsx");
 const playerPauseCss = read("web/src/components/player/PlayerPauseOverlay.css");
 const playerInfoCss = read("web/src/components/player/PlayerInfoPopover.css");
 const setupNudgeCss = read("web/src/components/SetupNudge.css");
@@ -93,6 +95,10 @@ const setupInvite = read("web/src/lib/serverSetupInvite.ts");
 const serverSetupWizard = read("web/src/components/ServerSetupWizard.tsx");
 const ciWorkflow = read(".github/workflows/ci.yml");
 const viteConfig = read("web/vite.config.ts");
+const appShellRule = ruleBlock(appCss, ".app");
+const appContentRule = ruleBlock(appCss, ".app-content");
+const skipLinkRule = ruleBlock(appCss, ".skip-to-content");
+const skipLinkFocusRule = ruleBlock(appCss, ".skip-to-content:focus");
 const intermediatePlayerStart = playerCss.indexOf(
   "@media (min-width: 561px) and (max-width: 950px) {",
 );
@@ -117,6 +123,22 @@ const shortLandscapePlayerStart = playerCss.indexOf(
 const shortLandscapePlayerCss = shortLandscapePlayerStart >= 0
   ? playerCss.slice(shortLandscapePlayerStart)
   : "";
+const touchSheetBaseRule = ruleBlock(
+  playerCss,
+  ".player.is-touch-player .player-options-menu,\n.player.is-touch-player .captions-menu",
+);
+const touchAudioSheetRule = ruleBlock(
+  playerCss,
+  ".player.is-touch-player .player-options-menu.is-touch-audio-sheet",
+);
+const tabletTouchSheetCss = atRuleBlock(
+  playerCss,
+  "@media (min-width: 768px) and (min-height: 501px) {",
+);
+const tabletTouchSheetRule = ruleBlock(
+  tabletTouchSheetCss,
+  ".player.is-touch-player .player-options-menu:is(.is-touch-audio-sheet, .is-touch-settings),\n  .player.is-touch-player .captions-menu",
+);
 const mobileNavStart = navCss.indexOf(
   "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px)",
 );
@@ -127,6 +149,18 @@ const shortLandscapeNavStart = navCss.indexOf(
 );
 const narrowNavStart = navCss.indexOf("@media (max-width: 380px)", shortLandscapeNavStart);
 const trueDesktopNavQuery = "@media (min-width: 951px), (min-width: 700px) and (min-height: 501px)";
+const standaloneCoarseAppCss = atRuleBlock(
+  appCss,
+  "@media (display-mode: standalone) and (pointer: coarse) {",
+);
+const standaloneScrollportRule = ruleBlock(
+  atRuleBlock(standaloneCoarseAppCss, `${trueDesktopNavQuery} {`),
+  ".app-content",
+);
+const standaloneDynamicScrollportRule = ruleBlock(
+  atRuleBlock(standaloneCoarseAppCss, "@supports (height: 100dvh) {"),
+  ".app-content",
+);
 const desktopBottomNavStart = navCss.indexOf(`${trueDesktopNavQuery} {`, narrowNavStart);
 const mobileNavCss = mobileNavStart >= 0 && extraCompactNavStart > mobileNavStart
   ? navCss.slice(mobileNavStart, extraCompactNavStart)
@@ -172,6 +206,19 @@ const phoneSearchCss = atRuleBlock(
   globalSearchCss,
   "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {",
 );
+const globalSearchBaseRule = ruleBlock(globalSearchCss, ".global-search");
+const libraryAbsoluteHeaderRule = ruleBlock(
+  atRuleBlock(libraryScreensCss, `${trueDesktopNavQuery} {`),
+  ".lib-screen",
+);
+const libraryPhoneRule = ruleBlock(
+  atRuleBlock(libraryScreensCss, "@media (max-width: 699px) {"),
+  ".lib-screen",
+);
+const coarseSearchCss = atRuleBlock(globalSearchCss, "@media (pointer: coarse) {");
+const coarseSearchClearRule = ruleBlock(coarseSearchCss, ".global-search-clear");
+const coarseNavCss = atRuleBlock(navCss, "@media (pointer: coarse) {");
+const coarseNavCollapseRule = ruleBlock(coarseNavCss, ".nav-rail-collapse");
 const tabletSearchCss = atRuleBlock(
   globalSearchCss,
   "@media (min-width: 700px) and (max-width: 1199px) and (min-height: 501px) {",
@@ -186,6 +233,19 @@ const shortLandscapeHeroControlsCss = atRuleBlock(
 );
 const phoneSettingsCss = atRuleBlock(settingsCss, "@media (max-width: 699px) {");
 const compactSettingsCss = atRuleBlock(settingsCss, "@media (max-width: 560px) {");
+const tabletCategorySettingsCss = atRuleBlock(
+  settingsCss,
+  "@media (max-width: 1099px) {",
+);
+const tabletCategoryTabsRule = ruleBlock(tabletCategorySettingsCss, ".settings-tabs");
+const tabletCategorySelectRule = ruleBlock(tabletCategorySettingsCss, ".settings-tab-select");
+const tabletCategorySelectInputRule = ruleBlock(
+  tabletCategorySettingsCss,
+  ".settings-tab-select select",
+);
+const desktopSettingsCss = atRuleBlock(settingsCss, "@media (min-width: 1100px) {");
+const desktopSettingsTabsRule = ruleBlock(desktopSettingsCss, ".settings-tabs");
+const desktopSettingsSelectRule = ruleBlock(desktopSettingsCss, ".settings-tab-select");
 const shortLandscapeSettingsCss = atRuleBlock(
   settingsCss,
   "@media (min-width: 700px) and (max-width: 950px) and (max-height: 500px) {",
@@ -199,6 +259,26 @@ check(
     /scroll-padding-bottom:\s*var\(--mobile-nav-reserve\)/.test(appCss) &&
     !/height:\s*calc\(100d?vh\s*-\s*var\(--mobile-nav-reserve\)\)/.test(appCss),
   "web/src/App.css must keep a full viewport scrollport and reserve the floating bottom nav only with padding.",
+);
+
+check(
+  "general app shell tracks the dynamic viewport outside mobile media",
+  /min-height:\s*100vh;\s*min-height:\s*100dvh;/.test(appShellRule) &&
+    /height:\s*100vh;\s*height:\s*100dvh;/.test(appContentRule),
+  "The base app and app-content rules must declare 100vh fallbacks immediately before 100dvh so tablet Safari uses its visible viewport.",
+);
+
+check(
+  "standalone coarse non-phone scrollport consumes the top inset without moving fixed overlays",
+  /--app-content-safe-top-consumed:\s*0px;/.test(appContentRule) &&
+    /--app-content-safe-top-consumed:\s*var\(--safe-area-top\);/.test(standaloneScrollportRule) &&
+    /margin-top:\s*var\(--app-content-safe-top-consumed\);/.test(standaloneScrollportRule) &&
+    /height:\s*calc\(100vh - var\(--app-content-safe-top-consumed\)\);/.test(standaloneScrollportRule) &&
+    !/100dvh/.test(standaloneScrollportRule) &&
+    /height:\s*calc\(100dvh - var\(--app-content-safe-top-consumed\)\);/.test(standaloneDynamicScrollportRule) &&
+    !/(?:transform|filter|perspective|contain|will-change|clip-path|--safe-area-top)\s*:/.test(`${appShellRule}\n${appContentRule}\n${standaloneCoarseAppCss}`) &&
+    !/(?:padding|scroll-padding)-(?:top|bottom)\s*:/.test(standaloneCoarseAppCss),
+  "App.css must physically inset only standalone coarse non-phone scrollports, keep legacy height fallback and fixed viewport coordinates, and leave global insets/nav reserves untouched.",
 );
 
 check(
@@ -220,6 +300,37 @@ check(
   /\.global-search\s*\{[\s\S]{0,420}calc\(max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)\s*\+[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(phoneSearchCss) &&
     /width:\s*min\(520px,\s*calc\(100% - 48px\)\)/.test(tabletSearchCss),
   "GlobalSearch.css must keep the input and profile clearance inside both native side insets on portrait and short-landscape phones.",
+);
+
+check(
+  "tablet search clears the native top inset without double-insetting mobile sticky search",
+  /top:\s*calc\(max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*-\s*var\(--app-content-safe-top-consumed,\s*0rem\)\)/.test(globalSearchBaseRule) &&
+    /position:\s*sticky/.test(ruleBlock(phoneSearchCss, ".global-search")) &&
+    /top:\s*var\(--sp-sm\)/.test(ruleBlock(phoneSearchCss, ".global-search")),
+  "GlobalSearch.css must subtract the consumed inset from its complete max offset while mobile sticky search keeps its local offset.",
+);
+
+check(
+  "coarse search clear control keeps a 44px touch target",
+  /width:\s*44px/.test(coarseSearchClearRule) &&
+    /height:\s*44px/.test(coarseSearchClearRule),
+  "GlobalSearch.css must keep the clear control at least 44px square for coarse pointers.",
+);
+
+check(
+  "library headers reserve the safe floating search row without double-insetting in-flow search",
+  /--lib-floating-row-height:\s*calc\(44px\s*\+\s*var\(--sp-sm\)\s*\+\s*var\(--sp-sm\)\s*\+\s*2px\)/.test(libraryAbsoluteHeaderRule) &&
+    /padding-top:\s*calc\(\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*-\s*var\(--app-content-safe-top-consumed,\s*0rem\)\s*\+\s*var\(--lib-floating-row-height\)\s*\+\s*var\(--sp-md\)\s*\)/.test(libraryAbsoluteHeaderRule) &&
+    /padding-top:\s*calc\(64px\s*\*\s*var\(--density-scale\)\)/.test(ruleBlock(libraryScreensCss, ".lib-screen")) &&
+    /padding-top:\s*var\(--sp-lg\)/.test(libraryPhoneRule),
+  "LibraryScreens.css must reserve the unconsumed safe offset, 44px search/profile control, field padding/border and a gap only in absolute-search layouts; phone and short-landscape in-flow spacing must stay unchanged.",
+);
+
+check(
+  "coarse navigation collapse control keeps a 44px touch target",
+  /width:\s*44px/.test(coarseNavCollapseRule) &&
+    /height:\s*44px/.test(coarseNavCollapseRule),
+  "NavRail.css must keep the collapse control at least 44px square for coarse pointers.",
 );
 
 check(
@@ -268,10 +379,21 @@ check(
 );
 
 check(
+  "tablet and desktop setup reminder stays inside the available app content",
+  /left:\s*calc\(var\(--nav-safe-left\)\s*\+\s*var\(--sp-lg\)\)/.test(setupNudgeBaseRule) &&
+    /right:\s*var\(--sp-lg\)/.test(setupNudgeBaseRule) &&
+    /margin-inline:\s*auto/.test(setupNudgeBaseRule) &&
+    /width:\s*min\(\s*680px,\s*calc\(\s*100%\s*-\s*var\(--nav-safe-left\)\s*-\s*var\(--sp-lg\)\s*-\s*var\(--sp-lg\)\s*\)\s*\)/.test(setupNudgeBaseRule) &&
+    /transform:\s*none/.test(setupNudgeBaseRule) &&
+    !/left:\s*50%/.test(setupNudgeBaseRule),
+  "SetupNudge.css must center the fixed reminder between the current nav-safe left edge and the right content edge without a viewport-centered transform.",
+);
+
+check(
   "mobile setup and install cards stay above navigation without clipping",
-  /@media\s*\(max-width:\s*640px\)[\s\S]*bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(setupNudgeCss) &&
+  /@media\s*\(max-width:\s*640px\)[\s\S]*right:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-right\)\)[\s\S]{0,120}left:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-left\)\)[\s\S]{0,160}bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)[\s\S]{0,260}width:\s*auto[\s\S]{0,180}margin-inline:\s*0[\s\S]{0,100}transform:\s*none[\s\S]{0,800}grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[\s\S]{0,500}min-height:\s*44px/.test(setupNudgeCss) &&
     /@media\s*\(max-width:\s*699px\)[\s\S]*bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)/.test(installPromptCss),
-  "SetupNudge.css and InstallPrompt.css must clear the floating nav and keep phone actions within their cards.",
+  "SetupNudge.css and InstallPrompt.css must clear the floating nav, reset desktop centering inside native phone insets, and keep 44px phone actions within their cards.",
 );
 
 check(
@@ -370,8 +492,16 @@ check(
 
 check(
   "profile control clears native top and right insets",
-  /\.profile-menu\s*\{[\s\S]{0,160}top:\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)[\s\S]{0,100}right:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)/.test(profileMenuCss),
-  "ProfileMenu.css must preserve its normal spacing while keeping the avatar and popover clear of native top and right insets.",
+  /\.profile-menu\s*\{[\s\S]{0,160}top:\s*calc\(max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*-\s*var\(--app-content-safe-top-consumed,\s*0rem\)\)[\s\S]{0,100}right:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)/.test(profileMenuCss),
+  "ProfileMenu.css must subtract the consumed inset from its complete max offset, preserving normal spacing and the native right inset.",
+);
+
+check(
+  "skip link is fully hidden independent of native top inset until focused",
+  /top:\s*0;/.test(skipLinkRule) &&
+    /transform:\s*translateY\(calc\(-100% - 2px\)\)/.test(skipLinkRule) &&
+    /transform:\s*translateY\(max\(10px,\s*var\(--safe-area-top\)\)\)/.test(skipLinkFocusRule),
+  "App.css must park the whole skip link above the viewport and move its focused state below the native top inset.",
 );
 
 check(
@@ -410,6 +540,56 @@ check(
     /\.player-osd \.chip,[\s\S]{0,80}\.player-speed-control select\s*\{[\s\S]{0,80}min-height:\s*44px/.test(shortLandscapePlayerCss) &&
     /\.player-osd \.player-mobile-optional\s*\{[\s\S]{0,80}display:\s*none/.test(shortLandscapePlayerCss),
   "Intermediate widths must reserve independent audio, transport, and action columns; short landscape keeps 44px controls while hiding only optional cast and picture-in-picture actions.",
+);
+
+check(
+  "shared touch player is host-gated and keeps supported actions scroll-reachable",
+  /const sharedTouchPlayer\s*=\s*[\s\S]{0,180}mode === "webview"[\s\S]{0,140}!androidTVNative[\s\S]{0,180}dk === "ios" && !underTauri[\s\S]{0,80}\|\| androidAppUi/.test(playerSource) &&
+    /className="player-touch-actions"[\s\S]{0,120}role="toolbar"/.test(playerSource) &&
+    /\.player-touch-actions\s*\{[\s\S]{0,260}overflow-x:\s*auto[\s\S]{0,180}touch-action:\s*pan-x/.test(playerCss) &&
+    /\.player-touch-actions \.player-mobile-optional\s*\{[\s\S]{0,80}display:\s*inline-flex/.test(playerCss) &&
+    /\.player-touch-actions \.player-touch-action\s*\{[\s\S]{0,180}min-height:\s*46px/.test(playerCss) &&
+    /\.player-touch-skip\s*\{[\s\S]{0,160}min-height:\s*56px/.test(playerCss) &&
+    /\.player-touch-play\s*\{[\s\S]{0,120}clamp\(64px,\s*9vw,\s*72px\)/.test(playerCss),
+  "VideoPlayer must select touch chrome from iOS browser or marked Android app identity after the TV escape, use 44px-plus controls, and scroll rather than hide supported actions.",
+);
+
+check(
+  "shared touch timeline and sheets honor numeric feedback and all safe-area edges",
+  /touchPresentation/.test(playerSource) &&
+    /\.scrubbar-wrap\.is-touch \.scrubbar\s*\{[\s\S]{0,100}min-height:\s*44px/.test(playerCss) &&
+    /\.scrubbar-wrap\.is-touch \.scrubbar-progress-thumb\s*\{[\s\S]{0,180}display:\s*block/.test(playerCss) &&
+    /\.player\.is-touch-player \.player-options-menu,[\s\S]{0,420}var\(--safe-area-top\)[\s\S]{0,180}var\(--safe-area-right\)[\s\S]{0,180}var\(--safe-area-bottom\)[\s\S]{0,180}var\(--safe-area-left\)/.test(playerCss) &&
+    /\.player-options-menu\.is-touch-audio-sheet/.test(playerCss),
+  "Touch scrub feedback must keep a broad hit target and visible thumb, while focused audio, captions, and advanced sheets stay scrollable inside all native insets.",
+);
+
+check(
+  "touch sheets keep full settings, compact audio, and bounded tablet panels",
+  /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(touchSheetBaseRule) &&
+    /left:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-left\)\)/.test(touchSheetBaseRule) &&
+    /width:\s*auto;/.test(touchSheetBaseRule) &&
+    /max-height:\s*none;/.test(touchSheetBaseRule) &&
+    /bottom:\s*auto;/.test(touchAudioSheetRule) &&
+    /height:\s*auto;/.test(touchAudioSheetRule) &&
+    /max-height:\s*calc\([\s\S]*100%[\s\S]*var\(--safe-area-top\)[\s\S]*var\(--safe-area-bottom\)/.test(touchAudioSheetRule) &&
+    /overflow-y:\s*auto;/.test(touchAudioSheetRule) &&
+    /bottom:\s*auto;/.test(tabletTouchSheetRule) &&
+    /left:\s*auto;/.test(tabletTouchSheetRule) &&
+    /width:\s*min\(\s*440px,[\s\S]*var\(--safe-area-left\)[\s\S]*var\(--safe-area-right\)[\s\S]*24px \* var\(--density-scale\)/.test(tabletTouchSheetRule) &&
+    /height:\s*auto;/.test(tabletTouchSheetRule) &&
+    /max-height:\s*calc\([\s\S]*100%[\s\S]*66px \* var\(--density-scale\)[\s\S]*var\(--safe-area-top\)[\s\S]*12px \* var\(--density-scale\)[\s\S]*var\(--safe-area-bottom\)/.test(tabletTouchSheetRule) &&
+    /overflow-y:\s*auto;/.test(tabletTouchSheetRule),
+  "Phone settings and subtitles must keep full safe-edge coverage, focused Audio must use safe-area-bounded content height, and tablet touch layouts must retain the intrinsic 440px right panel.",
+);
+
+check(
+  "shared touch omits decorative pause artwork without changing transport",
+  /\{!touchPlayer && paused && !ended[\s\S]{0,260}<PlayerPauseOverlay/.test(playerSource) &&
+    /\.player-touch-controls\s*\{[\s\S]{0,140}pointer-events:\s*none;/.test(playerCss) &&
+    /\.player-touch-transport\.is-visible > button\s*\{[\s\S]{0,100}pointer-events:\s*auto;/.test(playerCss) &&
+    /className="chip player-touch-play"[\s\S]{0,220}aria-label=\{playing \? "Pause" : "Play"\}/.test(playerSource),
+  "Shared touch must omit the redundant decorative pause hero while retaining its accessible central transport; non-touch webviews keep PlayerPauseOverlay.",
 );
 
 check(
@@ -484,6 +664,18 @@ check(
     /@media\s*\(max-width:\s*560px\)[\s\S]*\.settings-mobile-picker\s*\{[\s\S]*display:\s*flex/.test(settingsCss) &&
     /\.settings-subsection-picker\.is-option-only \.settings-option-strip\s*\{[\s\S]*display:\s*none/.test(settingsCss),
   "Settings mobile layouts must show the selector and hide dense option-card strips.",
+);
+
+check(
+  "tablet Settings replaces clipped category chips with the native selector",
+  /display:\s*none/.test(tabletCategoryTabsRule) &&
+    /display:\s*flex/.test(tabletCategorySelectRule) &&
+    /flex-direction:\s*column/.test(tabletCategorySelectRule) &&
+    /min-height:\s*44px/.test(tabletCategorySelectInputRule) &&
+    !/\.(?:settings-screen|settings-header|settings-panel|settings-footer|settings-mobile-picker)\s*\{/.test(tabletCategorySettingsCss) &&
+    /flex-direction:\s*column/.test(desktopSettingsTabsRule) &&
+    /display:\s*none/.test(desktopSettingsSelectRule),
+  "Settings.css must use the existing category select through 1099px without widening phone-only layout rules or changing the 1100px desktop sidebar.",
 );
 
 check(

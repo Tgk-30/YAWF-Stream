@@ -2,31 +2,42 @@ name: Android current API runtime check
 
 on:
   workflow_dispatch:
+    inputs:
+      permission_fixture:
+        description: Run the isolated updater lifecycle fixtures instead of the production APK admission
+        type: boolean
+        required: true
+        default: false
+      external_player_fixture:
+        description: Test the unchanged public phone42 remote external-player flow on a fresh supported API36 emulator
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: android-current-runtime-check-${{ github.ref }}
+  group: android-current-runtime-check-${{ github.ref }}-${{ inputs.external_player_fixture && 'external' || inputs.permission_fixture && 'fixture' || 'production' }}
   cancel-in-progress: false
 
 jobs:
   api36-current-runtime:
-    if: github.ref_type == 'branch'
+    if: github.ref_type == 'branch' && inputs.permission_fixture != true && inputs.external_player_fixture != true
     name: Signed phone APK on one fresh API 36 KVM emulator
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       # Replace this fixed block together when a later signed candidate is reviewed.
-      CANDIDATE_RUN_ID: "39515566836"
-      CANDIDATE_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164
-      CANDIDATE_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c
-      CANDIDATE_VERSION: 2.3.26
-      CANDIDATE_VERSION_CODE: "2003026"
-      PUBLISHED_ANDROID_VERSION: 2.3.25
+      CANDIDATE_RUN_ID: "39857024891"
+      CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a
+      CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3
+      CANDIDATE_VERSION: 2.3.31
+      CANDIDATE_VERSION_CODE: "2003031"
+      PUBLISHED_ANDROID_VERSION: 2.3.27
       CANDIDATE_ARTIFACT: android-phone-verification-candidate
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.26.apk
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.31.apk
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       AVD_NAME: yawf-phone-api36-current-runtime
       EMULATOR_SERIAL: emulator-5554
@@ -445,6 +456,574 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-current-api36-runtime-evidence
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
+
+  permission-return-fixtures:
+    if: github.ref_type == 'branch' && inputs.permission_fixture == true && inputs.external_player_fixture != true
+    uses: ./.github/workflows/android-permission-return-fixture.yml
+    permissions:
+      contents: read
+
+  external-player-fixture:
+    if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true
+    name: Public phone42 remote external player on fresh API36
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      EVIDENCE: android-external-player-evidence
+      PRODUCT_APK: public-phone42.apk
+      PRODUCT_SHA256: 3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c
+      PRODUCT_SOURCE: ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5
+      PRODUCT_VERSION: 2.3.42
+      PRODUCT_VERSION_CODE: "2003042"
+      VLC_APK: VLC-Android-3.7.1-x86_64.apk
+      VLC_URL: https://download.videolan.org/pub/videolan/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk
+      VLC_CHECKSUM_URL: https://download.videolan.org/pub/videolan/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk.sha256
+      VLC_SHA256: 4646633ede40c4784c5584087cffc5c60cc45b16966ae0b36cedd784d7c4a11e
+      VLC_SIZE: "49444910"
+      VLC_SIGNER_SHA256: c8768d2cea0c4b622e419b4b4715981946821e4ebc035fb41776cad395a7f68e
+      VLC_PACKAGE: org.videolan.vlc
+      VLC_VERSION: 3.7.1
+      VLC_VERSION_CODE: "13070108"
+      VLC_INTENT_ACTIVITY: org.videolan.vlc.StartActivity
+      VLC_PLAYBACK_ACTIVITY: org.videolan.vlc.gui.video.VideoPlayerActivity
+      SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
+      EMULATOR_SERIAL: emulator-5554
+      AVD_NAME: yawf-external-phone42-api36
+    steps:
+      - name: Checkout runtime fixture and driver
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout immutable public APK verification source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SOURCE }}
+          path: public-phone-source
+          persist-credentials: false
+      - name: Bind exact public APK and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$EVIDENCE"
+          test "$(git -C public-phone-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 \
+            'https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.42/YAWF.Stream_Android_2.3.42.apk' \
+            --output "$PRODUCT_APK"
+          printf '%s  %s\n' "$PRODUCT_SHA256" "$PRODUCT_APK" | sha256sum --check -
+          test "$(wc -c < "$PRODUCT_APK" | tr -d ' ')" = 88583041
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 \
+            "$VLC_URL" --output "$VLC_APK"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 30 \
+            "$VLC_CHECKSUM_URL" --output "$VLC_APK.sha256"
+          test "$(cat "$VLC_APK.sha256")" = "$VLC_SHA256 *$VLC_APK"
+          printf '%s  %s\n' "$VLC_SHA256" "$VLC_APK" | sha256sum --check -
+          test "$(wc -c < "$VLC_APK" | tr -d ' ')" = "$VLC_SIZE"
+          {
+            echo "driverSource=$(git rev-parse HEAD)"
+            echo "publicApkSource=$PRODUCT_SOURCE"
+            echo "publicApkSha256=$PRODUCT_SHA256"
+            echo "publicApkVersion=$PRODUCT_VERSION"
+            echo "interoperability=original-signed-phone42-with-current-fixture-server-and-compiled-web"
+            echo "productionServerOrProviderProof=false"
+            echo "publicOtaProof=false"
+            echo "arm16KiBProof=false"
+            echo "physicalDeviceProof=false"
+            echo "realAccountOrCredentialUsed=false"
+            echo "vlcOfficialUrl=$VLC_URL"
+            echo "vlcOfficialChecksumUrl=$VLC_CHECKSUM_URL"
+            echo "vlcSha256=$VLC_SHA256"
+            echo "vlcInstalledOnlyAsIsolatedExternalHandler=true"
+          } > "$EVIDENCE/binding.txt"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Set up JDK17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Verify external driver and diagnostic redaction contracts
+        shell: bash
+        run: node --test scripts/android_external_player_workflow.test.mjs scripts/android_external_logcat_redaction.test.mjs
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Set up isolated driver Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+      - name: Install exact official image and media tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse0 ffmpeg fonts-dejavu-core
+          timeout 180s sdkmanager --list --channel=0 > "$EVIDENCE/sdk-metadata.txt"
+          grep -E '^ *system-images;android-36;google_apis;x86_64 *\|' "$EVIDENCE/sdk-metadata.txt"
+          sdkmanager platform-tools emulator 'platforms;android-36' 'build-tools;36.0.0' "$SYSTEM_IMAGE_PACKAGE"
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          test -x "$sdk/emulator/emulator"
+          image="$sdk/system-images/android-36/google_apis/x86_64"
+          test -f "$image/package.xml"
+          test -f "$image/source.properties"
+          sha256sum "$image/package.xml" "$image/source.properties" > "$EVIDENCE/image-metadata-sha256.txt"
+          {
+            echo "$sdk/build-tools/36.0.0"
+            echo "$sdk/emulator"
+            echo "$sdk/platform-tools"
+          } >> "$GITHUB_PATH"
+      - name: Verify unchanged production-signed APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(apkanalyzer manifest application-id "$PRODUCT_APK")" = com.tgk30.debridstreamer
+          test "$(apkanalyzer manifest version-name "$PRODUCT_APK")" = "$PRODUCT_VERSION"
+          test "$(apkanalyzer manifest version-code "$PRODUCT_APK")" = "$PRODUCT_VERSION_CODE"
+          python3 public-phone-source/scripts/verify_android_apk.py \
+            --apk "$PRODUCT_APK" --version "$PRODUCT_VERSION" \
+            --certificate-pin public-phone-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" | tee "$EVIDENCE/apk-verification.txt"
+      - name: Verify exact official VLC external-handler APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          test "$(apkanalyzer manifest application-id "$VLC_APK")" = "$VLC_PACKAGE"
+          test "$(apkanalyzer manifest version-name "$VLC_APK")" = "$VLC_VERSION"
+          test "$(apkanalyzer manifest version-code "$VLC_APK")" = "$VLC_VERSION_CODE"
+          aapt2 dump badging "$VLC_APK" > "$EVIDENCE/vlc-badging.txt"
+          grep -Fxq "minSdkVersion:'17'" "$EVIDENCE/vlc-badging.txt"
+          grep -Fq "targetSdkVersion:'36'" "$EVIDENCE/vlc-badging.txt"
+          grep -Fq "native-code: 'x86_64'" "$EVIDENCE/vlc-badging.txt"
+          test "$(sed -n "s/^application-label:'\([^']*\)'$/\1/p" "$EVIDENCE/vlc-badging.txt" | head -1)" = VLC
+          "$sdk/build-tools/36.0.0/apksigner" verify --print-certs "$VLC_APK" \
+            > "$EVIDENCE/vlc-signer.txt" 2>&1
+          signer="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/vlc-signer.txt")"
+          test "$signer" = "$VLC_SIGNER_SHA256"
+          apkanalyzer manifest print "$VLC_APK" > "$EVIDENCE/vlc-manifest.xml"
+          python3 - <<'PYVLC'
+          import os,xml.etree.ElementTree as ET
+          from pathlib import Path
+          android='{http://schemas.android.com/apk/res/android}'
+          root=ET.parse(Path(os.environ['EVIDENCE'])/'vlc-manifest.xml').getroot()
+          activities={a.get(android+'name'):a for a in root.findall('.//activity')}
+          start=activities[os.environ['VLC_INTENT_ACTIVITY']]
+          assert start.get(android+'exported')=='true'
+          eligible=False
+          for intent in start.findall('intent-filter'):
+              actions={x.get(android+'name') for x in intent.findall('action')}
+              categories={x.get(android+'name') for x in intent.findall('category')}
+              schemes={x.get(android+'scheme') for x in intent.findall('data') if x.get(android+'scheme')}
+              types={x.get(android+'mimeType') for x in intent.findall('data') if x.get(android+'mimeType')}
+              if ('android.intent.action.VIEW' in actions and
+                  {'android.intent.category.DEFAULT','android.intent.category.BROWSABLE'} <= categories and
+                  'http' in schemes and 'https' in schemes and 'video/*' in types):
+                  eligible=True
+          assert eligible, 'Pinned VLC StartActivity lost HTTP/HTTPS video intent support'
+          playback=activities[os.environ['VLC_PLAYBACK_ACTIVITY']]
+          assert playback.get(android+'exported')=='true'
+          PYVLC
+          printf 'sha256=%s\nsize=%s\nsignerSha256=%s\npackage=%s\nversion=%s\nversionCode=%s\nintentActivity=%s\nplaybackActivity=%s\nruntimePass=false\n' \
+            "$VLC_SHA256" "$VLC_SIZE" "$VLC_SIGNER_SHA256" "$VLC_PACKAGE" "$VLC_VERSION" \
+            "$VLC_VERSION_CODE" "$VLC_INTENT_ACTIVITY" "$VLC_PLAYBACK_ACTIVITY" \
+            > "$EVIDENCE/vlc-admission.txt"
+      - name: Build current fixture web and isolated driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd web && npm ci && npm run build)
+          (cd server && npm ci)
+          gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
+            :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+          app=scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk
+          tests=scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          sha256sum "$app" "$tests" > "$EVIDENCE/driver-apk-sha256.txt"
+          apkanalyzer manifest print "$app" > "$EVIDENCE/driver-app-manifest.xml"
+          apkanalyzer manifest print "$tests" > "$EVIDENCE/driver-test-manifest.xml"
+          if grep -Eqi 'INTERNET|BIND_ACCESSIBILITY_SERVICE|MANAGE_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE|REQUEST_INSTALL_PACKAGES|QUERY_ALL_PACKAGES' \
+            "$EVIDENCE/driver-app-manifest.xml" "$EVIDENCE/driver-test-manifest.xml"; then
+            echo 'Forbidden driver permission' >&2
+            exit 1
+          fi
+          echo "HARNESS_APP_APK=$app" >> "$GITHUB_ENV"
+          echo "HARNESS_TEST_APK=$tests" >> "$GITHUB_ENV"
+      - name: Run normal remote UI and external handoff on one fresh emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          if adb devices | awk 'NR > 1 && NF > 0 { found = 1 } END { exit !found }'; then
+            echo 'Refusing to reuse an existing emulator/device' >&2
+            exit 1
+          fi
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-external-android"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          test ! -e "$ANDROID_USER_HOME"
+          mkdir -p "$ANDROID_AVD_HOME" "$EVIDENCE/ui"
+          fixture_output="$RUNNER_TEMP/yawf-external-fixture"
+          emulator_pid=""
+          fixture_pid=""
+          activity_monitor_pid=""
+          activity_monitor_stop="$RUNNER_TEMP/yawf-vlc-activity-monitor.stop"
+          test ! -e "$activity_monitor_stop"
+          export ACTIVITY_MONITOR_STOP="$activity_monitor_stop"
+          collect_bounded_player_logcat() {
+            if [ -f "$EVIDENCE/player-logcat.txt" ]; then return 0; fi
+            set +e
+            timeout 20s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime -t 12000 2>/dev/null \
+              | python3 -c '
+          import re,sys
+          url=re.compile(r"(?i)https?://[^\s\"\x27<>]+")
+          capability=re.compile(r"(?i)/api/external-stream/[A-Za-z0-9_-]{1,120}/[A-Za-z0-9_-]{32,128}(?:/[A-Za-z0-9_.-]{1,160})?")
+          sensitive=re.compile(r"(?i)\b(?:authorization|proxy-authorization|cookie|set-cookie|bearer|ds_session|ds_csrf)\b")
+          total=0
+          for index,line in enumerate(sys.stdin):
+              if index>=12000: break
+              line=capability.sub("[redacted-capability]",line)
+              line=url.sub("[redacted-url]",line)
+              secret=sensitive.search(line)
+              if secret is not None:
+                  line=line[:secret.start()]+"[redacted-sensitive]\n"
+              encoded=line.encode("utf-8","replace")
+              if total+len(encoded)>8*1024*1024: break
+              sys.stdout.buffer.write(encoded)
+              total+=len(encoded)
+          ' > "$EVIDENCE/player-logcat.txt.part"
+            pipeline_status=("${PIPESTATUS[@]}")
+            logcat_status=${pipeline_status[0]}
+            sanitizer_status=${pipeline_status[1]}
+            if [ "$sanitizer_status" -eq 0 ] && [ -s "$EVIDENCE/player-logcat.txt.part" ]; then
+              mv "$EVIDENCE/player-logcat.txt.part" "$EVIDENCE/player-logcat.txt"
+            else
+              rm -f "$EVIDENCE/player-logcat.txt.part"
+            fi
+            printf 'adbStatus=%s\nsanitizerStatus=%s\nmaxLines=12000\nmaxBytes=8388608\nrawPersisted=false\n' \
+              "$logcat_status" "$sanitizer_status" > "$EVIDENCE/player-logcat-receipt.txt"
+          }
+          cleanup() {
+            status=$?
+            trap - EXIT
+            set +e
+            if [ -n "$activity_monitor_pid" ]; then
+              : > "$activity_monitor_stop"
+              wait "$activity_monitor_pid" 2>/dev/null
+            fi
+            if [ -n "$emulator_pid" ]; then
+              collect_bounded_player_logcat
+              if [ "$status" != 0 ] && [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" emu avd name 2>/dev/null | tr -d '\r' | head -1)" = "$AVD_NAME" ]; then
+                timeout 15s adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$EVIDENCE/workflow-failure.png"
+                timeout 20s adb -s "$EMULATOR_SERIAL" shell uiautomator dump /data/local/tmp/yawf-external-failure.xml > "$EVIDENCE/workflow-failure-dump.txt" 2>&1
+                timeout 10s adb -s "$EMULATOR_SERIAL" exec-out cat /data/local/tmp/yawf-external-failure.xml \
+                  | sed -E 's#https?://[^[:space:]"<>]+#[redacted-url]#g' > "$EVIDENCE/workflow-failure.xml"
+              fi
+              timeout 10s adb -s "$EMULATOR_SERIAL" reverse --remove tcp:43120 >/dev/null 2>&1
+              timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
+              kill "$emulator_pid" 2>/dev/null
+              wait "$emulator_pid" 2>/dev/null
+            fi
+            if [ -n "$fixture_pid" ]; then
+              kill "$fixture_pid" 2>/dev/null
+              wait "$fixture_pid" 2>/dev/null
+            fi
+            for name in smoke-result.json external-capability-runtime.json media-probe.json; do
+              if [ -f "$fixture_output/$name" ]; then
+                cp "$fixture_output/$name" "$EVIDENCE/$name"
+              fi
+            done
+            printf 'workflowExit=%s\nownedEmulatorStopAttempted=true\nownedFixtureStopAttempted=true\n' "$status" > "$EVIDENCE/cleanup.txt"
+            exit "$status"
+          }
+          trap cleanup EXIT
+          ffmpeg -hide_banner -filters > "$EVIDENCE/ffmpeg-filters.txt" 2>&1
+          grep -E '\bdrawtext\b' "$EVIDENCE/ffmpeg-filters.txt"
+          test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+          node server/node_modules/tsx/dist/cli.mjs scripts/android_external_player_server_fixture.mts \
+            --repo "$GITHUB_WORKSPACE" --output "$fixture_output" > "$EVIDENCE/fixture.log" 2>&1 &
+          fixture_pid=$!
+          deadline=$((SECONDS + 180))
+          until grep -Fq '[fixture] READY server-mode-ui loopback' "$EVIDENCE/fixture.log"; do
+            kill -0 "$fixture_pid"
+            test "$SECONDS" -lt "$deadline"
+            sleep 1
+          done
+          printf 'no\n' | avdmanager create avd --name "$AVD_NAME" --package "$SYSTEM_IMAGE_PACKAGE" --device pixel_2
+          emulator -avd "$AVD_NAME" -port 5554 -no-window -no-audio -no-snapshot -no-boot-anim \
+            -gpu swiftshader_indirect -feature -Vulkan -cores 2 -memory 2048 \
+            > "$EVIDENCE/emulator.log" 2>&1 &
+          emulator_pid=$!
+          deadline=$((SECONDS + 300))
+          until [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+            kill -0 "$emulator_pid"
+            test "$SECONDS" -lt "$deadline"
+            sleep 2
+          done
+          test "$(adb -s "$EMULATOR_SERIAL" emu avd name | tr -d '\r' | head -1)" = "$AVD_NAME"
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')" = 36
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" = x86_64
+          test "$(adb -s "$EMULATOR_SERIAL" shell getconf PAGE_SIZE | tr -d '\r')" = 4096
+          adb -s "$EMULATOR_SERIAL" shell dumpsys account | python3 -c \
+            'import sys,re; s=sys.stdin.read(); counts=re.findall(r"Accounts: (\d+)",s); assert counts and all(int(x)==0 for x in counts); print("androidAccountCount=0")' \
+            > "$EVIDENCE/no-real-accounts.txt"
+          adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate > "$EVIDENCE/stock-webview.txt"
+          python3 - <<'PYENGINE'
+          # BEGIN EXTERNAL_STOCK_WEBVIEW_POLICY
+          import json,os,sys
+          from pathlib import Path
+          sys.path.insert(0,str(Path('scripts').resolve()))
+          from android_phone_runtime_check import parse_webview_provider,validate_webview_provider
+          evidence=Path(os.environ['EVIDENCE'])
+          provider=parse_webview_provider((evidence/'stock-webview.txt').read_text())
+          major=validate_webview_provider(provider,minimum_major=90,expected_package='com.google.android.webview',expected_version=None)
+          (evidence/'stock-webview-admission.json').write_text(json.dumps({'package':provider.package_name,'version':provider.version_name,'major':major,'minimumMajor':90,'stockImageProvider':True,'currentSecurityBrowserProof':False},indent=2)+'\n')
+          # END EXTERNAL_STOCK_WEBVIEW_POLICY
+          PYENGINE
+          provider_apk="$(adb -s "$EMULATOR_SERIAL" shell pm path com.google.android.webview | tr -d '\r' | sed -n 's/^package://p' | head -1)"
+          test -n "$provider_apk"
+          adb -s "$EMULATOR_SERIAL" shell sha256sum "$provider_apk" > "$EVIDENCE/stock-webview-apk-sha256.txt"
+          adb -s "$EMULATOR_SERIAL" reverse tcp:43120 tcp:43120
+          adb -s "$EMULATOR_SERIAL" install "$PRODUCT_APK" | tee "$EVIDENCE/product-install.txt"
+          grep -Eq '^Success\r?$' "$EVIDENCE/product-install.txt"
+          installed="$(adb -s "$EMULATOR_SERIAL" shell pm path com.tgk30.debridstreamer | tr -d '\r' | sed -n 's/^package://p')"
+          test -n "$installed"
+          test "$(printf '%s\n' "$installed" | wc -l | tr -d ' ')" = 1
+          installed_sha="$(adb -s "$EMULATOR_SERIAL" shell sha256sum "$installed" | awk '{print $1}')"
+          test "$installed_sha" = "$PRODUCT_SHA256"
+          printf '%s\n' "$installed_sha" > "$EVIDENCE/installed-product-sha256.txt"
+          adb -s "$EMULATOR_SERIAL" install "$HARNESS_APP_APK"
+          adb -s "$EMULATOR_SERIAL" install "$HARNESS_TEST_APK"
+
+          # Preserve the fresh-image Photos failure as stock evidence before adding the exact admitted VLC fixture handler.
+          adb -s "$EMULATOR_SERIAL" shell cmd package query-activities --brief \
+            -a android.intent.action.VIEW -d http://127.0.0.1:43120/synthetic.mp4 -t 'video/*' \
+            > "$EVIDENCE/stock-video-handlers.txt"
+          adb -s "$EMULATOR_SERIAL" install "$VLC_APK" | tee "$EVIDENCE/vlc-install.txt"
+          grep -Eq '^Success\r?$' "$EVIDENCE/vlc-install.txt"
+          vlc_installed="$(adb -s "$EMULATOR_SERIAL" shell pm path "$VLC_PACKAGE" | tr -d '\r' | sed -n 's/^package://p')"
+          test -n "$vlc_installed"
+          test "$(printf '%s\n' "$vlc_installed" | wc -l | tr -d ' ')" = 1
+          vlc_installed_sha="$(adb -s "$EMULATOR_SERIAL" shell sha256sum "$vlc_installed" | awk '{print $1}')"
+          test "$vlc_installed_sha" = "$VLC_SHA256"
+          printf '%s\n' "$vlc_installed_sha" > "$EVIDENCE/installed-vlc-sha256.txt"
+          adb -s "$EMULATOR_SERIAL" shell cmd package query-activities --brief \
+            -a android.intent.action.VIEW -d http://127.0.0.1:43120/synthetic.mp4 -t 'video/*' \
+            > "$EVIDENCE/video-handlers-with-vlc.txt"
+          python3 - <<'PYHANDLERS'
+          # BEGIN EXTERNAL_VLC_HANDLER_POLICY
+          import json,os,re
+          from pathlib import Path
+          evidence=Path(os.environ['EVIDENCE'])
+          java_identifier=r'[A-Za-z_$][A-Za-z0-9_$]*'
+          package_pattern=java_identifier+r'(?:\.'+java_identifier+r')+'
+          relative_activity=r'\.'+java_identifier+r'(?:\.'+java_identifier+r')*'
+          activity_pattern=r'(?:'+relative_activity+r'|'+package_pattern+r')'
+          component_pattern=re.compile(r'^('+package_pattern+r')/('+activity_pattern+r')$')
+          detail_pattern=re.compile(r'^priority=-?[0-9]+ preferredOrder=-?[0-9]+ match=0x[0-9a-fA-F]+ specificIndex=-?[0-9]+ isDefault=(?:true|false)$')
+          def parse(name):
+              lines=[line.strip() for line in (evidence/name).read_text().splitlines() if line.strip()]
+              assert lines and lines!=['No activities found'], 'Missing activity summary'
+              summary=re.fullmatch(r'([0-9]{1,3}) activities found:',lines[0])
+              assert summary, 'Malformed or duplicate activity summary'
+              reported=int(summary.group(1)); cursor=1; components=[]
+              for expected_index in range(reported):
+                  assert cursor<len(lines), 'Truncated activity record'
+                  record=re.fullmatch(r'Activity #([0-9]{1,3}):',lines[cursor])
+                  assert record and int(record.group(1))==expected_index, 'Missing, duplicate, or reordered Activity record'
+                  cursor+=1
+                  assert cursor<len(lines) and detail_pattern.fullmatch(lines[cursor]), 'Missing or unrecognized Activity details'
+                  cursor+=1
+                  assert cursor<len(lines), 'Missing Activity component'
+                  component=component_pattern.fullmatch(lines[cursor])
+                  assert component, 'Malformed or unrecognized Activity component'
+                  package,activity=component.groups()
+                  canonical=package+activity if activity.startswith('.') else activity
+                  components.append({'package':package,'activity':canonical,'compact':lines[cursor]})
+                  cursor+=1
+              assert cursor==len(lines), 'Unexpected trailing, duplicate, or uncounted Activity data'
+              assert len(components)==reported, 'Reported activity count mismatch'
+              assert len({x['compact'] for x in components})==len(components), 'Duplicate Activity component'
+              assert len({(x['package'],x['activity']) for x in components})==len(components), 'Duplicate canonical Activity component'
+              return components
+          photos=('com.google.android.apps.photos','com.google.android.apps.photos.pager.HostPhotoPagerActivity')
+          vlc=(os.environ['VLC_PACKAGE'],os.environ['VLC_INTENT_ACTIVITY'])
+          stock=parse('stock-video-handlers.txt')
+          admitted=parse('video-handlers-with-vlc.txt')
+          assert {(x['package'],x['activity']) for x in stock}=={photos}, 'Fresh image no longer has the exact recorded sole Photos handler'
+          assert {(x['package'],x['activity']) for x in admitted}=={photos,vlc}, 'Installed handler set differs from exact Photos plus admitted VLC'
+          target=[x for x in admitted if (x['package'],x['activity'])==vlc]
+          assert len(target)==1, 'Exact VLC handler is missing or duplicated'
+          receipt={
+              'activityCount':len(admitted),
+              'activities':admitted,
+              'stockActivities':stock,
+              'stockPhotosFailurePreserved':True,
+              'realChooserRequired':True,
+              'targetLabel':'VLC',
+              'targetPackage':vlc[0],
+              'targetActivity':vlc[1],
+              'manifestDeclaredPlaybackActivity':os.environ['VLC_PLAYBACK_ACTIVITY'],
+          }
+          (evidence/'vlc-handler-query-admission.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          # END EXTERNAL_VLC_HANDLER_POLICY
+          PYHANDLERS
+          handler_label=VLC
+          handler_package="$VLC_PACKAGE"
+          handler_activity="$VLC_INTENT_ACTIVITY"
+          handler_playback_activity="$VLC_PLAYBACK_ACTIVITY"
+          handler_activity_count="$(python3 -c 'import json,os; from pathlib import Path; print(json.loads((Path(os.environ["EVIDENCE"])/"vlc-handler-query-admission.json").read_text())["activityCount"])')"
+          test "$handler_activity_count" = 2
+          handler_args=()
+          if [ -n "$handler_package" ]; then
+            handler_args=(
+              -e externalHandlerLabel "$handler_label"
+              -e externalHandlerPackage "$handler_package"
+              -e externalHandlerActivity "$handler_activity"
+              -e externalHandlerPlaybackActivity "$handler_playback_activity"
+              -e externalHandlerActivityCount "$handler_activity_count"
+            )
+          fi
+          adb -s "$EMULATOR_SERIAL" logcat -c
+          python3 - <<'PYACTIVITY' &
+          import json,os,re,subprocess,time
+          from pathlib import Path
+          evidence=Path(os.environ['EVIDENCE'])
+          stop=Path(os.environ['ACTIVITY_MONITOR_STOP'])
+          package=os.environ['VLC_PACKAGE']
+          intent=os.environ['VLC_INTENT_ACTIVITY']
+          playback=os.environ['VLC_PLAYBACK_ACTIVITY']
+          component=re.compile(r'\b('+re.escape(package)+r')/(\.[A-Za-z_$][A-Za-z0-9_$.]*|[A-Za-z_$][A-Za-z0-9_$.]*)\b')
+          observed_package=False
+          observed_intent=False
+          observed_playback=False
+          samples=0
+          deadline=time.monotonic()+490
+          while not stop.exists() and time.monotonic()<deadline:
+              samples+=1
+              try:
+                  result=subprocess.run(
+                      ['adb','-s',os.environ['EMULATOR_SERIAL'],'shell','dumpsys','activity','activities'],
+                      text=True,capture_output=True,timeout=5,check=False)
+              except subprocess.TimeoutExpired:
+                  result=None
+              if result is not None and result.returncode==0:
+                  for line in result.stdout.splitlines():
+                      if 'mResumedActivity' not in line and 'topResumedActivity' not in line:
+                          continue
+                      match=component.search(line)
+                      if not match:
+                          continue
+                      observed_package=True
+                      activity=package+match.group(2) if match.group(2).startswith('.') else match.group(2)
+                      observed_intent=observed_intent or activity==intent
+                      observed_playback=observed_playback or activity==playback
+              receipt={
+                  'schemaVersion':1,
+                  'samples':samples,
+                  'targetPackageObserved':observed_package,
+                  'targetIntentActivityObserved':observed_intent,
+                  'manifestPlaybackActivityObserved':observed_playback,
+                  'rawActivityDumpPersisted':False,
+              }
+              temporary=evidence/'vlc-activity-observation.json.tmp'
+              temporary.write_text(json.dumps(receipt,indent=2)+'\n')
+              temporary.replace(evidence/'vlc-activity-observation.json')
+              time.sleep(0.25)
+          PYACTIVITY
+          activity_monitor_pid=$!
+          set +e
+          timeout 480s adb -s "$EMULATOR_SERIAL" shell am instrument -w -r \
+            -e class com.yawf.runtimeinstrumentation.RuntimeExternalPlayerFlowTest \
+            -e evidenceSubdir persistent-external-player-flow "${handler_args[@]}" \
+            com.yawf.runtimeinstrumentation.test/androidx.test.runner.AndroidJUnitRunner \
+            | sed -E 's#https?://[^[:space:]"<>]+#[redacted-url]#g' | tee "$EVIDENCE/instrumentation.txt"
+          instrumentation_status=${PIPESTATUS[0]}
+          set -e
+          : > "$activity_monitor_stop"
+          wait "$activity_monitor_pid"
+          activity_monitor_pid=""
+          export INSTRUMENTATION_STATUS="$instrumentation_status"
+          cp "$fixture_output/external-capability-runtime.json" "$EVIDENCE/external-capability-runtime.json"
+          cp "$fixture_output/media-probe.json" "$EVIDENCE/media-probe.json"
+          python3 - <<'PY'
+          import json,os,re,subprocess
+          from pathlib import Path
+          a=['adb','-s',os.environ['EMULATOR_SERIAL']]
+          base=['exec-out','run-as','com.yawf.runtimeinstrumentation']
+          folder='files/persistent-external-player-flow'
+          names=subprocess.check_output(a+base+['ls','-1',folder],text=True).splitlines()
+          assert 0<len(names)<=64
+          allowed=re.compile(r'(?:[0-9]{2}-[a-z0-9-]+\.(?:png|xml)|actions\.txt|instrumentation-external-player-receipt\.json)')
+          out=Path(os.environ['EVIDENCE'])/'ui'
+          (out/'collector-observation.json').write_text(json.dumps({'filenames':names},indent=2)+'\n')
+          unexpected=[]
+          for n in names:
+              if not allowed.fullmatch(n):
+                  unexpected.append(n)
+                  continue
+              data=subprocess.check_output(a+base+['cat',folder+'/'+n])
+              assert 0<len(data)<=8*1024*1024, 'Driver evidence size outside bound'
+              (out/n).write_bytes(data)
+          assert not unexpected, 'Unexpected driver evidence filename; known captures retained, see bounded collector observation'
+          r=json.loads((out/'instrumentation-external-player-receipt.json').read_text())
+          host=json.loads((Path(os.environ['EVIDENCE'])/'vlc-handler-query-admission.json').read_text())
+          activity=json.loads((Path(os.environ['EVIDENCE'])/'vlc-activity-observation.json').read_text())
+          live=json.loads((Path(os.environ['EVIDENCE'])/'external-capability-runtime.json').read_text())
+          checks=r['checks']
+          assert r['outcome']=='passed' and checks['openPlayerClicks']==1
+          # BEGIN EXTERNAL_DESTINATION_RECEIPT_POLICY
+          destination=(checks['realAndroidChooserObserved'],checks['soleHandlerDirectLaunchObserved'])
+          assert all(type(value) is bool for value in destination)
+          assert destination == (True,False)
+          # END EXTERNAL_DESTINATION_RECEIPT_POLICY
+          assert host['stockPhotosFailurePreserved'] is True and host['realChooserRequired'] is True
+          assert host['activityCount']==2
+          assert r['externalHandlerActivityCount']==host['activityCount']
+          assert r['expectedHandlerLabel']==host['targetLabel']=='VLC'
+          assert r['expectedHandlerPackage']==host['targetPackage']==os.environ['VLC_PACKAGE']
+          assert r['expectedHandlerActivity']==host['targetActivity']==os.environ['VLC_INTENT_ACTIVITY']
+          assert r['manifestDeclaredPlaybackActivity']==host['manifestDeclaredPlaybackActivity']==os.environ['VLC_PLAYBACK_ACTIVITY']
+          assert activity['targetPackageObserved'] is True
+          assert activity['manifestPlaybackActivityObserved'] is True
+          assert activity['rawActivityDumpPersisted'] is False
+          assert checks['expectedHandlerForegroundObserved'] is True
+          assert checks['vlcPlayerSurfaceObserved'] is True
+          assert checks['permissionGrantUsed'] is False
+          if checks['vlcOnboardingObserved']:
+              assert checks['vlcStorageAccessDenied'] is True
+          assert checks['manualMovingElapsedTimeCapturePair'] is True
+          assert checks['semanticSeekGesturePerformed'] is True
+          assert checks['singleBackReturnedToProduct'] is True
+          live206=[event for event in live['events']
+                   if event['phase']=='live' and (event.get('response') or {}).get('status')==206]
+          assert live206, 'No completed live range response followed the real VLC handoff and seek'
+          assert any(event['request']['range'].get('present') is True and
+                     event['request']['range'].get('valid') is True and
+                     event['response']['contentTypeClass']=='video-mp4' and
+                     event['response']['acceptRangesClass']=='bytes' and
+                     event['lifecycle']['finishObserved'] is True and
+                     event['lifecycle']['prematureCloseObserved'] is False
+                     for event in live206)
+          assert r['decodedPlaybackClaimed'] is False and r['decodeClaimRequiresManualScreenshotAndLiveReceiptReview'] is True
+          assert os.environ['INSTRUMENTATION_STATUS']=='0'
+          print('Native UI flow passed; decoded playback remains pending root screenshot/live-response review')
+          PY
+          grep -Eq '^OK \(1 test\)\r?$' "$EVIDENCE/instrumentation.txt"
+      - name: Retain bounded external-player runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone42-external-player-runtime-evidence
           path: ${{ env.EVIDENCE }}
           if-no-files-found: error
           retention-days: 14

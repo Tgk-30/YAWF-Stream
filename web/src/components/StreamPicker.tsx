@@ -93,6 +93,7 @@ interface StreamPickerProps {
   /** Called with the resolved stream + the torrent (for codec/container info). */
   onPlay: (stream: StreamInfo, source: TorrentResult) => void;
   onOpenSettings?: () => void;
+  onCheckProvider?: () => void;
   /** "S2 E5" when a series episode is selected - shown in the header so the
    *  user can see WHY the list is episode-scoped. Null for movies. */
   episodeLabel?: string | null;
@@ -113,6 +114,7 @@ export function StreamPicker({
   resolveStream,
   onPlay,
   onOpenSettings,
+  onCheckProvider,
   episodeLabel = null,
   episodeContext = null,
   runtimeMinutes = null,
@@ -397,8 +399,8 @@ export function StreamPicker({
             Your provider did not return cache status. The releases are still
             available, but instant availability could not be verified.
           </span>
-          {onOpenSettings && (
-            <button type="button" className="btn" onClick={onOpenSettings}>
+          {onCheckProvider && (
+            <button type="button" className="btn" onClick={onCheckProvider}>
               Check provider
             </button>
           )}

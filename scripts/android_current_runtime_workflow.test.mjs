@@ -11,6 +11,18 @@ const workflowPath = process.env.ANDROID_CURRENT_RUNTIME_WORKFLOW
   ?? join(root, ".github/workflows/android-current-runtime.yml");
 const workflow = readFileSync(workflowPath, "utf8");
 
+function assertExternalPlayerOuterTimeout(source) {
+  const marker = "\n  external-player-fixture:\n";
+  assert.equal(source.split(marker).length, 2);
+  const externalPlayerJob = source.slice(source.indexOf(marker));
+  const externalLimits = [...externalPlayerJob.matchAll(/^    timeout-minutes: (\d+)$/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(externalLimits, ["45"]);
+  const allJobLimits = [...source.matchAll(/^    timeout-minutes: (\d+)$/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(allJobLimits, ["25", "45"]);
+}
+
 function extractSystemImageMetadataPolicy() {
   const lines = workflow.split("\n");
   const start = lines.findIndex((line) =>
@@ -53,12 +65,12 @@ test("is manual branch-only read-only supplementary coverage", () => {
 });
 
 test("pins one exact signed candidate without changing the public channel", () => {
-  assert.match(workflow, /CANDIDATE_RUN_ID: "39515566836"/);
-  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 21c0509300c8284b41f4cf1bffaabd84da999164/);
-  assert.match(workflow, /CANDIDATE_APK_SHA256: 2ad11054cdbb2805a75e06d8d59961e2f43c00c0c2532d02ade3e197ef5e9a3c/);
-  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.26/);
-  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003026"/);
-  assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.25/);
+  assert.match(workflow, /CANDIDATE_RUN_ID: "39857024891"/);
+  assert.match(workflow, /CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a/);
+  assert.match(workflow, /CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3/);
+  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.31/);
+  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003031"/);
+  assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.27/);
   assert.match(workflow, /--certificate-pin candidate-source\/web\/src-tauri\/SIGNING_CERT_SHA256/);
   assert.match(workflow, /python3 candidate-source\/scripts\/verify_android_apk\.py/);
 });
@@ -133,4 +145,19 @@ test("states the proof limits in the durable evidence", () => {
   assert.match(workflow, /latestWebViewSecurityProof=false/);
   assert.match(workflow, /classification=locally-generated-runtime-verification-metadata/);
   assert.match(workflow, /otaPublicationEvidence=false/);
+});
+
+test("external player fixture has a scoped 45-minute outer job budget", () => {
+  assertExternalPlayerOuterTimeout(workflow);
+});
+
+test("external player outer timeout guard rejects the previous 30-minute cutoff", () => {
+  const marker = "\n  external-player-fixture:\n";
+  const [head, externalPlayerJob] = workflow.split(marker);
+  const mutant = head + marker + externalPlayerJob.replace(
+    "    timeout-minutes: 45",
+    "    timeout-minutes: 30",
+  );
+  assert.notEqual(mutant, workflow);
+  assert.throws(() => assertExternalPlayerOuterTimeout(mutant));
 });

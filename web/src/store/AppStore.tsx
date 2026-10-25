@@ -99,7 +99,9 @@ export type NavigationHistoryLayer =
   | "none"
   | "filters"
   | "trailer"
+  | "detail-sources"
   | "detail-player"
+  | "detail-player-sources"
   | "local-player";
 
 export interface NavigationHistoryEntry {
@@ -116,7 +118,9 @@ const NAVIGATION_HISTORY_LAYERS = new Set<NavigationHistoryLayer>([
   "none",
   "filters",
   "trailer",
+  "detail-sources",
   "detail-player",
+  "detail-player-sources",
   "local-player",
 ]);
 
@@ -190,6 +194,9 @@ export interface AppStore {
   detailItem: MediaPreview | null;
   openDetail: (item: MediaPreview) => void;
   closeDetail: () => void;
+  detailSourcesOpen: boolean;
+  openDetailSources: () => void;
+  closeDetailSources: () => void;
 
   // Desktop local-file player. This is separate from Detail's stream player so
   // completed downloads can be played from any screen without fabricating a
@@ -336,6 +343,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   const [browseContext, setBrowseContext] = useState<BrowseContext | null>(null);
   const [browseFiltersOpen, setBrowseFiltersOpen] = useState(false);
   const [trailerOpen, setTrailerOpen] = useState(false);
+  const [detailSourcesOpen, setDetailSourcesOpen] = useState(false);
   const [detailPlayerOpen, setDetailPlayerOpen] = useState(false);
   const [pendingSearch, setPendingSearch] = useState<string | null>(null);
 
@@ -844,6 +852,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setBrowseContext(ctx);
     setBrowseFiltersOpen(false);
     setTrailerOpen(false);
+    setDetailSourcesOpen(false);
     setDetailPlayerOpen(false);
     pushNavigationHistory({
       route,
@@ -922,18 +931,33 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
   const openDetailPlayer = useCallback(() => {
     if (detailItem == null) return;
+    const returnToSources = detailSourcesOpen;
+    setDetailSourcesOpen(false);
     setDetailPlayerOpen(true);
     pushNavigationHistory({
       route,
       browseContext,
       detailItem,
-      layer: "detail-player",
+      layer: returnToSources ? "detail-player-sources" : "detail-player",
       localFilePlayer,
     });
-  }, [browseContext, detailItem, localFilePlayer, pushNavigationHistory, route]);
+  }, [
+    browseContext,
+    detailItem,
+    detailSourcesOpen,
+    localFilePlayer,
+    pushNavigationHistory,
+    route,
+  ]);
 
   const closeDetailPlayer = useCallback(() => {
-    goBackForClose(() => setDetailPlayerOpen(false));
+    const current = browserHistoryAvailable()
+      ? readNavigationHistoryEntry(window.history.state)
+      : null;
+    goBackForClose(() => {
+      setDetailPlayerOpen(false);
+      setDetailSourcesOpen(current?.layer === "detail-player-sources");
+    });
   }, [goBackForClose]);
 
   const refreshCachedResolutions = useCallback(async () => {
@@ -1092,6 +1116,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       setBrowseFiltersOpen(false);
       setDetailItem(null);
       setTrailerOpen(false);
+      setDetailSourcesOpen(false);
       setDetailPlayerOpen(false);
       setLocalFilePlayer(null);
     } finally {
@@ -1125,6 +1150,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         setBrowseFiltersOpen(entry.layer === "filters" && entry.browseContext != null);
         setDetailItem(entry.detailItem);
         setTrailerOpen(entry.layer === "trailer" && entry.detailItem != null);
+        setDetailSourcesOpen(
+          entry.detailItem?.type === "series" &&
+          entry.layer === "detail-sources",
+        );
         // A stream URL and playback session are deliberately not replayed by
         // Forward. The player entry still acts as a one-step close target on Back.
         setDetailPlayerOpen(false);
@@ -1154,6 +1183,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setBrowseFiltersOpen(false);
     setDetailItem(null);
     setTrailerOpen(false);
+    setDetailSourcesOpen(false);
     setDetailPlayerOpen(false);
     setRoute(next);
     pushNavigationHistory({
@@ -1216,6 +1246,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setDetailItem(item);
     setBrowseFiltersOpen(false);
     setTrailerOpen(false);
+    setDetailSourcesOpen(false);
     setDetailPlayerOpen(false);
     pushNavigationHistory({
       route,
@@ -1248,9 +1279,33 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   const closeDetail = useCallback(() => {
     goBackForClose(() => {
       setTrailerOpen(false);
+      setDetailSourcesOpen(false);
       setDetailPlayerOpen(false);
       setDetailItem(null);
     });
+  }, [goBackForClose]);
+
+  const openDetailSources = useCallback(() => {
+    if (detailItem?.type !== "series" || detailSourcesOpen) return;
+    setDetailSourcesOpen(true);
+    pushNavigationHistory({
+      route,
+      browseContext,
+      detailItem,
+      layer: "detail-sources",
+      localFilePlayer,
+    });
+  }, [
+    browseContext,
+    detailItem,
+    detailSourcesOpen,
+    localFilePlayer,
+    pushNavigationHistory,
+    route,
+  ]);
+
+  const closeDetailSources = useCallback(() => {
+    goBackForClose(() => setDetailSourcesOpen(false));
   }, [goBackForClose]);
 
   const playLocalFile = useCallback((path: string, title: string) => {
@@ -1650,6 +1705,9 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       detailItem,
       openDetail,
       closeDetail,
+      detailSourcesOpen,
+      openDetailSources,
+      closeDetailSources,
       localFilePlayer,
       playLocalFile,
       closeLocalFilePlayer,
@@ -1703,6 +1761,9 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       detailItem,
       openDetail,
       closeDetail,
+      detailSourcesOpen,
+      openDetailSources,
+      closeDetailSources,
       localFilePlayer,
       playLocalFile,
       closeLocalFilePlayer,

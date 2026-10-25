@@ -36,6 +36,20 @@ export interface TranscoderStreamProbe {
   durationSeconds?: number | null;
 }
 
+export const STREAM_PROBE_FAST_TIMEOUT_MS = 5_000;
+export const STREAM_PROBE_RETRY_TIMEOUT_MS = 15_000;
+
+export interface TranscoderStreamProbeOptions {
+  /** Only the explicit user retry receives the slow deadline. All other values
+   * fail back to the ordinary five-second lane. */
+  timeoutMs?: typeof STREAM_PROBE_FAST_TIMEOUT_MS | typeof STREAM_PROBE_RETRY_TIMEOUT_MS;
+  /** Registry-owned cancellation. Aborting requests process termination, while
+   * the returned promise remains pending until the child actually closes. */
+  signal?: AbortSignal;
+  /** Lets the registry retain global process admission through actual close. */
+  onSpawn?: (child: ChildProcess) => void;
+}
+
 export interface Transcoder {
   /** Resolves true iff `ffmpeg -version` exits 0 within a short timeout. Run once
    *  at boot and cached - never per request. */
@@ -44,7 +58,10 @@ export interface Transcoder {
   capabilities?(): Promise<TranscoderCapabilities>;
   /** Read only the source stream table. The main FFmpeg process still performs
    * the single full media pass, including optional subtitle extraction. */
-  probeStreams?(upstreamUrl: string): Promise<TranscoderStreamProbe | null>;
+  probeStreams?(
+    upstreamUrl: string,
+    options?: TranscoderStreamProbeOptions,
+  ): Promise<TranscoderStreamProbe | null>;
   /** Spawn an ffmpeg process for the given argv (which encodes the HLS output
    *  paths). Returns the child handle so the registry can manage its lifecycle. */
   spawnHls(args: string[]): ChildProcess;
@@ -167,19 +184,41 @@ export const realTranscoder: Transcoder = {
       audioTrackSelection: ffprobeAvailable,
     };
   },
-  probeStreams(upstreamUrl) {
+  probeStreams(upstreamUrl, options = {}) {
     return new Promise<TranscoderStreamProbe | null>((resolve) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
       let output = "";
+      let failed = false;
+      let terminationRequested = false;
+      let probe: ChildProcess | null = null;
+      const timeoutMs = options.timeoutMs === STREAM_PROBE_RETRY_TIMEOUT_MS
+        ? STREAM_PROBE_RETRY_TIMEOUT_MS
+        : STREAM_PROBE_FAST_TIMEOUT_MS;
+      const signalAborted = () => options.signal?.aborted === true;
       const finish = (result: TranscoderStreamProbe | null) => {
         if (settled) return;
         settled = true;
         if (timer != null) clearTimeout(timer);
+        options.signal?.removeEventListener("abort", terminate);
         resolve(result);
       };
+      const terminate = () => {
+        if (terminationRequested || settled) return;
+        terminationRequested = true;
+        failed = true;
+        try {
+          probe?.kill("SIGKILL");
+        } catch {
+          /* close/error will settle the operation */
+        }
+      };
+      if (signalAborted()) {
+        finish(null);
+        return;
+      }
       try {
-        const probe = spawn(
+        probe = spawn(
           "ffprobe",
           [
             "-v",
@@ -195,9 +234,11 @@ export const realTranscoder: Transcoder = {
         probe.stdout?.on("data", (chunk: Buffer) => {
           if (output.length < 65_536) output += chunk.toString("utf8");
         });
-        probe.once("error", () => finish(null));
+        probe.once("error", () => {
+          failed = true;
+        });
         probe.once("close", (code) => {
-          if (code !== 0) {
+          if (failed || code !== 0) {
             finish(null);
             return;
           }
@@ -245,17 +286,14 @@ export const realTranscoder: Transcoder = {
             finish(null);
           }
         });
-        timer = setTimeout(() => {
-          try {
-            probe.kill("SIGKILL");
-          } catch {
-            /* already stopped */
-          }
-          finish(null);
-        }, 5000);
+        options.onSpawn?.(probe);
+        options.signal?.addEventListener("abort", terminate, { once: true });
+        if (signalAborted()) terminate();
+        timer = setTimeout(terminate, timeoutMs);
         timer.unref?.();
       } catch {
-        finish(null);
+        if (probe == null) finish(null);
+        else terminate();
       }
     });
   },

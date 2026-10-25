@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "version": "2.3.36",
+  "versionCode": 2003036,
+  "packageName": "com.tgk30.debridstreamer",
+  "sourceRevision": "b9f51773232fa546ed3a95ec3e9169780f7df244",
+  "apk": {
+    "name": "YAWF.Stream_Android_2.3.36.apk",
+    "sha256": "b6109604b1bc0bb7db87ed79402da7356011caab48833ac2d07eb4cede4dfe11",
+    "size": 88578945
+  }
+}

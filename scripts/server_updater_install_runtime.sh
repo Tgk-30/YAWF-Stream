@@ -54,9 +54,32 @@ assert_absent_before_test \
 umask 022
 preflight_namespace_absent=true
 
-node_path="$(command -v node)"
-[[ -n "$node_path" ]] || die "Node.js 24 is required for runtime installer test"
-[[ "$(/usr/bin/node -p 'process.versions.node.split(".")[0]')" -ge 24 ]] || die "/usr/bin/node must be Node.js 24 or newer"
+node_path="$(readlink -f -- "${YAWF_UPDATER_TEST_NODE:-$(command -v node)}")"
+[[ -n "$node_path" && "$node_path" = /* && ! -L "$node_path" && -f "$node_path" && -x "$node_path" ]] || die "a canonical Node.js 24 candidate is required"
+[[ "$($node_path -p 'process.versions.node.split(".")[0]')" -ge 24 ]] || die "the private runtime candidate must be Node.js 24 or newer"
+# Hosted runners may have only the setup-node toolcache executable. Preserve
+# the global path's absence just as strictly as an existing runtime's identity.
+system_node_present_before=false
+system_node_hash_before=""
+system_node_major_before=""
+system_node_identity_before=""
+if [[ -e /usr/bin/node || -L /usr/bin/node ]]; then
+  system_node_present_before=true
+  system_node_hash_before="$(sha256sum /usr/bin/node | awk '{print $1}')"
+  system_node_major_before="$(/usr/bin/node -p 'process.versions.node.split(".")[0]')"
+  system_node_identity_before="$(stat -c '%F:%u:%g:%a:%N' /usr/bin/node)"
+fi
+
+assert_system_node_preserved() {
+  if [[ "$system_node_present_before" == false ]]; then
+    [[ ! -e /usr/bin/node && ! -L /usr/bin/node ]]
+    return
+  fi
+  [[ "$system_node_hash_before" == "$(sha256sum /usr/bin/node | awk '{print $1}')" ]] || return 1
+  [[ "$system_node_major_before" == "$(/usr/bin/node -p 'process.versions.node.split(".")[0]')" ]] || return 1
+  [[ "$system_node_identity_before" == "$(stat -c '%F:%u:%g:%a:%N' /usr/bin/node)" ]] || return 1
+}
+installer_node_args=(--node-runtime "$node_path")
 
 runtime_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/yawf-updater-install-runtime.XXXXXX")"
 # The retained raw log and receipt are checked for secret-free bounded content
@@ -107,7 +130,7 @@ policy_is_fixture_owned() {
   [[ ! -L "$policy_path" && -f "$policy_path" ]] || return 1
   [[ ! -L "$policy_directory" && -d "$policy_directory" ]] || return 1
   is_root_owned_mode "$policy_directory" 700 || return 1
-  /usr/bin/node - "$policy_path" "$fixture_root" <<'NODE'
+  "$node_path" - "$policy_path" "$fixture_root" <<'NODE'
 const fs = require("fs");
 const [policyPath, fixtureRoot] = process.argv.slice(2);
 const policy = JSON.parse(fs.readFileSync(policyPath, "utf8"));
@@ -298,7 +321,12 @@ $repo/deploy/updater/volume-copy.mjs	$install_directory/volume-copy.mjs
 $repo/deploy/updater/yawf-server-update	$helper
 $repo/deploy/updater/yawf-server-update.service	$service_unit
 $repo/deploy/updater/yawf-server-update.timer	$timer_unit
+$node_path	$install_directory/runtime/node
 EOF_FILES
+  if [[ -d "$install_directory/runtime" && ! -L "$install_directory/runtime" ]] && ! rmdir "$install_directory/runtime"; then
+    cleanup_error "could not remove fixture updater private runtime directory"
+    result=1
+  fi
   if [[ -e "$install_directory" || -L "$install_directory" ]] && ! rmdir "$install_directory"; then
     cleanup_error "could not remove fixture updater installation directory"
     result=1
@@ -394,7 +422,7 @@ pty_install() {
   local output="$runtime_root/${case_name}.log"
   local result_status
   set +e
-  CASE_INPUT="$input" python3 - "$installer" "$output" <<'PY'
+  CASE_INPUT="$input" NODE_RUNTIME="$node_path" python3 - "$installer" "$output" <<'PY'
 import os
 import pty
 import select
@@ -404,9 +432,10 @@ import time
 
 installer, output = sys.argv[1:]
 input_bytes = os.environ["CASE_INPUT"].encode()
+node_runtime = os.environ["NODE_RUNTIME"]
 pid, master = pty.fork()
 if pid == 0:
-    os.execv("/bin/bash", ["bash", installer])
+    os.execv("/bin/bash", ["bash", installer, "--node-runtime", node_runtime])
 
 chunks = []
 total = 0
@@ -487,6 +516,7 @@ assert_no_registration() {
   [[ ! -e "$policy_path" && ! -L "$policy_path" ]]
   [[ ! -e "$state_root" && ! -L "$state_root" ]]
   assert_timer disabled
+  assert_system_node_preserved
 }
 
 create_protected_compose() {
@@ -560,6 +590,41 @@ assert_no_installer_issued_transaction() {
   fi
 }
 
+expect_runtime_rejection_before_install() {
+  local label="$1" candidate="$2" status
+  local output="$runtime_root/runtime-reject-$label.log"
+  set +e
+  bash "$installer" --node-runtime "$candidate" --unattended >"$output" 2>&1
+  status=$?
+  set -e
+  cat "$output" >>"$raw"
+  [[ "$status" -ne 0 ]]
+  assert_absent_before_test "$policy_directory" "$state_root" "$install_directory" "$helper" "$service_unit" "$timer_unit"
+}
+
+# Candidate admission is complete before any policy, unit, helper, or private
+# runtime write. These are real Linux ownership, mode, path, and version checks.
+install -d -o root -g root -m 0755 "$fixture_root/runtime-candidates"
+ln -s "$node_path" "$fixture_root/runtime-candidates/symlink-node"
+install -o root -g root -m 0775 "$node_path" "$fixture_root/runtime-candidates/writable-node"
+install -o root -g root -m 0644 "$node_path" "$fixture_root/runtime-candidates/nonexec-node"
+install -o 65534 -g 65534 -m 0755 "$node_path" "$fixture_root/runtime-candidates/unowned-node"
+cat >"$fixture_root/runtime-candidates/node22" <<'NODE22'
+#!/bin/sh
+[ "${1:-}" = -p ] && { printf '%s\n' 22; exit 0; }
+exit 22
+NODE22
+chmod 0755 "$fixture_root/runtime-candidates/node22"
+install -d -o root -g root -m 0777 "$fixture_root/unsafe-ancestor"
+install -o root -g root -m 0755 "$node_path" "$fixture_root/unsafe-ancestor/node"
+expect_runtime_rejection_before_install relative relative-node
+expect_runtime_rejection_before_install symlink "$fixture_root/runtime-candidates/symlink-node"
+expect_runtime_rejection_before_install writable "$fixture_root/runtime-candidates/writable-node"
+expect_runtime_rejection_before_install nonexec "$fixture_root/runtime-candidates/nonexec-node"
+expect_runtime_rejection_before_install unowned "$fixture_root/runtime-candidates/unowned-node"
+expect_runtime_rejection_before_install old "$fixture_root/runtime-candidates/node22"
+expect_runtime_rejection_before_install unsafe-ancestor "$fixture_root/unsafe-ancestor/node"
+
 # Fresh default, decline, EOF, and non-TTY behavior use real systemd and no
 # fake Docker calls. They prove that installing the exact script bytes leaves a
 # new host updater off unless the operator opts in.
@@ -571,14 +636,14 @@ assert_no_registration
 pty_install fresh-eof $'\004' 0
 assert_no_registration
 set +e
-bash "$installer" </dev/null > "$runtime_root/non-tty.log" 2>&1
+bash "$installer" "${installer_node_args[@]}" </dev/null > "$runtime_root/non-tty.log" 2>&1
 non_tty_status=$?
 set -e
 [[ "$non_tty_status" -eq 0 ]]
 cat "$runtime_root/non-tty.log" >> "$raw"
 grep -q 'No interactive terminal detected' "$runtime_root/non-tty.log"
 assert_no_registration
-bash "$installer" --unattended </dev/null > "$runtime_root/unattended.log" 2>&1
+bash "$installer" "${installer_node_args[@]}" --unattended </dev/null > "$runtime_root/unattended.log" 2>&1
 cat "$runtime_root/unattended.log" >> "$raw"
 grep -q 'Automatic updates remain off' "$runtime_root/unattended.log"
 assert_no_registration
@@ -613,7 +678,7 @@ begin_registration_attempt
 pty_install fresh-yes $'Y\n'"$safe_compose"$'\nY\n' 0
 registered_policy_owned=true
 timer_touched=true
-/usr/bin/node - "$safe_compose" <<'NODE'
+"$node_path" - "$safe_compose" <<'NODE'
 const fs = require("fs");
 const [path] = process.argv.slice(2);
 const policy = JSON.parse(fs.readFileSync("/etc/yawf-server-updater/config.json", "utf8"));
@@ -627,7 +692,7 @@ assert_timer enabled
 policy_before="$(sha256sum "$policy_path" | awk '{print $1}')"
 begin_registration_attempt
 set +e
-bash "$installer" --unattended --enable --compose-file "$replacement_compose" > "$runtime_root/replacement-scope.log" 2>&1
+bash "$installer" "${installer_node_args[@]}" --unattended --enable --compose-file "$replacement_compose" > "$runtime_root/replacement-scope.log" 2>&1
 scope_status=$?
 set -e
 [[ "$scope_status" -eq 1 ]]
@@ -638,9 +703,9 @@ assert_timer enabled
 # An explicit replacement scope must replace the policy with the separate
 # protected Compose target, change policy bytes, and retain an enabled timer.
 begin_registration_attempt
-bash "$installer" --unattended --enable --replace-registration --compose-file "$replacement_compose" > "$runtime_root/replacement.log" 2>&1
+bash "$installer" "${installer_node_args[@]}" --unattended --enable --replace-registration --compose-file "$replacement_compose" > "$runtime_root/replacement.log" 2>&1
 [[ "$policy_before" != "$(sha256sum "$policy_path" | awk '{print $1}')" ]]
-/usr/bin/node - "$replacement_compose" <<'NODE'
+"$node_path" - "$replacement_compose" <<'NODE'
 const fs = require("fs");
 const [path] = process.argv.slice(2);
 const policy = JSON.parse(fs.readFileSync("/etc/yawf-server-updater/config.json", "utf8"));
@@ -651,9 +716,14 @@ assert_timer enabled
 # Reinstall with a registered enabled timer leaves both policy bytes and timer
 # state unchanged unless the caller supplies explicit replacement scope.
 policy_before="$(sha256sum "$policy_path" | awk '{print $1}')"
+private_node_before="$(sha256sum "$install_directory/runtime/node" | awk '{print $1}')"
+assert_system_node_preserved
 bash "$installer" </dev/null > "$runtime_root/reinstall.log" 2>&1
 grep -q 'Existing updater registration preserved' "$runtime_root/reinstall.log"
+grep -q 'Private Node runtime reused' "$runtime_root/reinstall.log"
 [[ "$policy_before" == "$(sha256sum "$policy_path" | awk '{print $1}')" ]]
+[[ "$private_node_before" == "$(sha256sum "$install_directory/runtime/node" | awk '{print $1}')" ]]
+assert_system_node_preserved
 assert_timer enabled
 remove_owned_registration
 assert_timer disabled
@@ -676,7 +746,7 @@ ln -s "$fixture_root/not-a-policy" "$policy_path"
 unsafe_policy_fixture=true
 begin_registration_attempt
 set +e
-bash "$installer" --unattended --enable --replace-registration --compose-file "$safe_compose" > "$runtime_root/unsafe-policy.log" 2>&1
+bash "$installer" "${installer_node_args[@]}" --unattended --enable --replace-registration --compose-file "$safe_compose" > "$runtime_root/unsafe-policy.log" 2>&1
 unsafe_policy_status=$?
 set -e
 [[ "$unsafe_policy_status" -eq 1 ]]
@@ -693,7 +763,7 @@ install_fake_systemctl
 begin_registration_attempt
 pty_install enable-failure $'Y\n'"$safe_compose"$'\nY\n' 1
 registered_policy_owned=true
-/usr/bin/node - <<'NODE'
+"$node_path" - <<'NODE'
 const fs = require("fs");
 if (JSON.parse(fs.readFileSync("/etc/yawf-server-updater/config.json", "utf8")).enabled !== false) process.exit(1);
 NODE
@@ -737,19 +807,29 @@ assert_absent_before_test \
   "$fake_docker" "$fake_systemctl" "$fixture_root"
 
 [[ "$source_hash" == "$(sha256sum "$installer" | awk '{print $1}')" ]]
+assert_system_node_preserved
 if grep -q 'DS_SERVER_SECRET_KEY=' "$raw"; then
   echo "installer runtime output exposed an environment value" >&2
   exit 1
 fi
-/usr/bin/node - "$receipt" "$source_hash" "$partial_registration_cleanup_observed" "$runtime_lock_cleanup_observed" "$continued_cleanup_after_error_observed" <<'NODE'
+"$node_path" - "$receipt" "$source_hash" "$partial_registration_cleanup_observed" "$runtime_lock_cleanup_observed" "$continued_cleanup_after_error_observed" "$system_node_present_before" "$system_node_major_before" "$system_node_hash_before" "$system_node_identity_before" <<'NODE'
 const fs = require("fs");
-const [receipt, sourceHash, partialRegistrationCleanupObserved, runtimeLockCleanupObserved, continuedCleanupAfterErrorObserved] = process.argv.slice(2);
+const [receipt, sourceHash, partialRegistrationCleanupObserved, runtimeLockCleanupObserved, continuedCleanupAfterErrorObserved, systemNodePresent, systemNodeMajor, systemNodeHash, systemNodeIdentity] = process.argv.slice(2);
+if (!["true", "false"].includes(systemNodePresent)) process.exit(1);
+if (systemNodePresent === "true" ? !/^\d+$/.test(systemNodeMajor) || !/^[a-f0-9]{64}$/.test(systemNodeHash) || !systemNodeIdentity : systemNodeMajor !== "" || systemNodeHash !== "" || systemNodeIdentity !== "") process.exit(1);
 if (partialRegistrationCleanupObserved !== "true" || runtimeLockCleanupObserved !== "true" || continuedCleanupAfterErrorObserved !== "true") process.exit(1);
 fs.writeFileSync(receipt, `${JSON.stringify({
   ok: true,
   mode: "installer-pty-runtime",
   sourceSha256: sourceHash,
-  cases: 13,
+  systemNodePreserved: true,
+  systemNodeState: systemNodePresent === "true" ? "present" : "absent",
+  systemNodeMajor: systemNodePresent === "true" ? systemNodeMajor : null,
+  systemNodeSha256: systemNodePresent === "true" ? systemNodeHash : null,
+  systemNodeIdentity: systemNodePresent === "true" ? systemNodeIdentity : null,
+  privateNode24Installed: true,
+  privateNodeReinstallReuseVerified: true,
+  cases: 23,
   freshDefaultOff: true,
   declinedOff: true,
   eofOff: true,

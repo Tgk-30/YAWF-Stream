@@ -4,6 +4,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
 import { ScrubBar, formatTime } from "./ScrubBar";
 
 function setup(currentTime = 100, duration = 600) {
@@ -58,9 +59,42 @@ describe("ScrubBar keyboard seeking", () => {
     expect(onSeek).toHaveBeenLastCalledWith(0);
   });
 
-  it("exposes a human-readable time via aria-valuetext", () => {
+  it("exposes the elapsed and total time via aria-valuetext when duration is known", () => {
     const { slider } = setup(125, 600);
-    expect(slider).toHaveAttribute("aria-valuetext", "2:05");
+    expect(slider).toHaveAttribute("aria-valuetext", "2:05 of 10:00");
+  });
+
+  it.each([0, Number.NaN, Number.POSITIVE_INFINITY])(
+    "keeps the current-only aria value for an unknown or live duration (%s)",
+    (duration) => {
+      const { slider } = setup(125, duration);
+      expect(slider).toHaveAttribute("aria-valuetext", "2:05");
+    },
+  );
+
+  it("keeps the compact time readout visible across tablet widths", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    const tabletRule = css.match(
+      /@media \(min-width: 561px\) and \(max-width: 900px\) \{([\s\S]*?)\n\}/,
+    );
+    expect(tabletRule).not.toBeNull();
+    expect(tabletRule?.[1]).toContain(".player-volume-control");
+    expect(tabletRule?.[1]).not.toContain(".player-time");
+
+    const narrowTabletQuery =
+      "@media (min-width: 561px) and (max-width: 767px) and (min-height: 501px)";
+    const coarseTabletQuery =
+      "@media (pointer: coarse) and (min-width: 561px) and (min-height: 501px)";
+    const narrowTabletRule = css.match(
+      /@media \(min-width: 561px\) and \(max-width: 767px\) and \(min-height: 501px\) \{([\s\S]*?)\n\}/,
+    );
+    expect(narrowTabletRule).not.toBeNull();
+    expect(narrowTabletRule?.[1]).toContain('"transport transport"');
+    expect(narrowTabletRule?.[1]).toContain('"audio actions"');
+    expect(narrowTabletRule?.[1]).toMatch(/\+\s*92px/);
+    expect(css.indexOf(narrowTabletQuery)).toBeGreaterThan(
+      css.indexOf(coarseTabletQuery),
+    );
   });
 
   it("uses a compositor-friendly scale transform for progress", () => {
@@ -78,6 +112,31 @@ describe("ScrubBar keyboard seeking", () => {
 });
 
 describe("ScrubBar pointer flow", () => {
+  it("shows numeric drag feedback, time labels, and a persistent thumb without thumbnails", () => {
+    render(
+      <ScrubBar
+        currentTime={30}
+        duration={120}
+        preview={null}
+        onHover={() => {}}
+        onLeave={() => {}}
+        onSeek={() => {}}
+        onSeekPreview={() => {}}
+        touchPresentation
+      />,
+    );
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+
+    expect(document.querySelector(".scrubbar-progress-thumb")).toHaveStyle({ left: "25%" });
+    expect(document.querySelector(".scrubbar-time-row")).toHaveTextContent("0:30");
+    expect(document.querySelector(".scrubbar-time-row")).toHaveTextContent("2:00");
+
+    fireEvent.pointerDown(slider, { clientX: 75, pointerId: 7 });
+    expect(document.querySelector(".scrub-tooltip.is-numeric-only")).toHaveTextContent("1:30");
+    expect(slider).toHaveAttribute("aria-valuetext", "1:30 of 2:00");
+  });
+
   it("tracks hover state and calls onHover with clamped timeline", () => {
     const onHover = vi.fn();
     const onLeave = vi.fn();
@@ -206,6 +265,48 @@ describe("ScrubBar pointer flow", () => {
       expect(onScrubbingChange.mock.calls).toEqual([[true], [false]]);
     },
   );
+
+  it("previews a deferred pointer gesture without preparing until its own release", () => {
+    const onSeek = vi.fn();
+    const onSeekPreview = vi.fn();
+    const props = { currentTime: 50, duration: 600, preview: null, onHover: vi.fn(), onLeave: vi.fn(), onSeek, onSeekPreview };
+    const { rerender } = render(<ScrubBar {...props} />);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    fireEvent.pointerDown(slider, { clientX: 20, pointerId: 7 });
+    fireEvent.pointerMove(slider, { clientX: 75, pointerId: 7 });
+    expect(onSeekPreview.mock.calls.map(([time]) => time)).toEqual([120, 450]);
+    expect(onSeek).not.toHaveBeenCalled();
+    rerender(<ScrubBar {...props} currentTime={60} />);
+    expect(slider).toHaveAttribute("aria-valuenow", "450");
+    expect(slider.querySelector(".scrubbar-fill")).toHaveStyle({ transform: "scaleX(0.75)" });
+    fireEvent.pointerDown(slider, { clientX: 90, pointerId: 8 });
+    expect(onSeekPreview).toHaveBeenCalledTimes(2);
+    fireEvent.pointerUp(slider, { clientX: 90, pointerId: 8 });
+    expect(onSeek).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider, { clientX: 80, pointerId: 7 });
+    expect(onSeek.mock.calls).toEqual([[480]]);
+    expect(slider).toHaveAttribute("aria-valuenow", "60");
+    fireEvent.keyDown(slider, { key: "ArrowRight" });
+    expect(onSeek).toHaveBeenLastCalledWith(65);
+    expect(onSeekPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels a disabled deferred gesture even when reenabled before pointer release", () => {
+    const onSeek = vi.fn();
+    const onScrubbingChange = vi.fn();
+    const props = { currentTime: 50, duration: 600, preview: null, onHover: vi.fn(), onLeave: vi.fn(), onSeek, onSeekPreview: vi.fn(), onScrubbingChange };
+    const { rerender } = render(<ScrubBar {...props} />);
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    fireEvent.pointerDown(slider, { clientX: 20, pointerId: 7 });
+    rerender(<ScrubBar {...props} disabled />);
+    expect(onScrubbingChange.mock.calls).toEqual([[true], [false]]);
+    rerender(<ScrubBar {...props} />);
+    fireEvent.pointerUp(slider, { clientX: 80, pointerId: 7 });
+    expect(onSeek).not.toHaveBeenCalled();
+    expect(slider).toHaveAttribute("aria-valuenow", "50");
+  });
 
   it("does not seek from a zero-width layout box", () => {
     const { slider, onSeek } = setup(50, 600);
