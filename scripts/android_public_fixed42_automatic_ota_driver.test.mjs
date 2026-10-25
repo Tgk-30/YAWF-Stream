@@ -1189,3 +1189,379 @@ test("fixed receipt explicitly excludes postinstall inspection from automatic di
     "postinstall inspection was folded into automatic discovery proof",
   ));
 });
+
+function fixed42TwoAxisSeedContract(java) {
+  const fixedSeed = methodBody(java, "seedFixed42MeaningfulLocalState");
+  const legacySeed = methodBody(java, "seedMeaningfulLocalState");
+  const drive = methodBody(java, "clickFixed42SampleThroughDiscoverRails");
+  const scroll = methodBody(java, "performFixed42SeedScroll");
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const click = methodBody(java, "clickFreshFixed42Blade");
+  const freshCandidates = methodBody(java, "fixed42FreshSemanticCandidates");
+
+  need(fixedSeed, "clickFixed42SampleThroughDiscoverRails()",
+    "fixed42 seed lost its scoped two-axis helper");
+  assert.equal(fixedSeed.includes("scrollUntilVisibleProductSemanticOnAnyRoute"), false,
+    "fixed42 restored the ambiguous any-route scroll helper");
+  assert.equal(legacySeed.includes("clickFixed42SampleThroughDiscoverRails"), false,
+    "legacy flow called the fixed42 raw accessibility helper");
+  assert.equal((java.match(/clickFixed42SampleThroughDiscoverRails\s*\(/g) ?? []).length, 2,
+    "fixed42 helper must have one declaration and one fixed-profile call");
+
+  for (const token of [
+    "isFixed42AutomaticMode()",
+    "assertNoBindingTerms();",
+    "observeFixed42SeedSnapshot()",
+    "Fixed42SeedPolicy.didAdvance(",
+    "Fixed42SeedPolicy.mayScroll(",
+    "clickFreshFixed42Blade(ready, startedAt)",
+  ]) need(drive, token, `two-axis driver lost ${token}`);
+  assert.equal((drive.match(/assertNoBindingTerms\(\);/g) ?? []).length, 2,
+    "scroll and click actions do not each have a fresh terms guard");
+  assert.ok(drive.indexOf("assertNoBindingTerms();") < drive.indexOf("observeFixed42SeedSnapshot()"),
+    "scroll snapshot preceded its all-window guard");
+
+  need(java, "private static final int FIXED42_SEED_SCROLL_ACTION_LIMIT = 16;",
+    "shared 16-action cap changed");
+  need(java, "private static final long FIXED42_SEED_SCROLL_BOUND_MS = 45_000L;",
+    "overall seed deadline changed");
+  need(scroll, "isFixed42AutomaticMode()", "raw scroll lost its fixed42 profile gate");
+  need(scroll, "ACTION_SCROLL_FORWARD", "raw scroll lost forward action admission");
+  need(scroll, "ACTION_SCROLL_RIGHT", "raw scroll lost right action admission");
+  need(scroll, "node.performAction(actionId)", "raw scroll lost its public action call");
+  assert.equal((java.match(/ACTION_SCROLL_RIGHT/g) ?? []).length, 3,
+    "right scroll must appear only in selection, fallback test, and admission");
+  assert.equal((java.match(/ACTION_SCROLL_FORWARD/g) ?? []).length, 3,
+    "forward scroll must appear only in vertical selection, fallback, and admission");
+  assert.equal((java.match(/\.performAction\(/g) ?? []).length, 1,
+    "raw accessibility action must have one fixed42 scroll-only call site");
+  assert.equal(java.includes("ACTION_CLICK"), false,
+    "raw accessibility click is never admitted");
+  assert.equal(/\bACTION_(?!SCROLL_FORWARD|SCROLL_RIGHT)\w+/.test(`${drive}\n${scroll}`), false,
+    "fixed42 raw action helper admitted a non-scroll action");
+
+  for (const token of [
+    "instrumentation.getUiAutomation().clearCache()",
+    "getRootInActiveWindow()",
+    'fixed42UniqueResource(nodes, "main-content")',
+    'fixed42UniqueSemantic(nodes, "Discover page", true)',
+    'fixed42UniqueSemantic(nodes, "Primary", true)',
+    'fixed42UniqueSemantic(nodes, "Popular Movies", false)',
+    "fixed42UniqueScrollableDescendant(",
+    "fixed42IsDescendant(nodes, bladeIndex, railIndex)",
+    "section.bounds.contains(rail.bounds)",
+    "discover.bounds.contains(rail.bounds)",
+    "main.bounds.contains(rail.bounds)",
+    'assertNotNull("Fixed42 seed snapshot returned a null child", child)',
+  ]) need(observe, token, `fresh scoped observation lost ${token}`);
+  need(java, "visible = info.isVisibleToUser();", "raw nodes lost public visibility state");
+  need(java, "&& visible", "raw identity no longer rejects invisible nodes");
+
+  for (const token of [
+    "instrumentation.getUiAutomation().clearCache()",
+    "fixed42FreshSemanticCandidates(",
+    '"android.widget.Button"',
+    "proof.bladeBounds, visibleBlade",
+    "proof.railBounds.contains(visibleBlade)",
+    "visibleBlade.bottom <= proof.navigationTop",
+    "ancestor.isScrollable()",
+    "proof.railBounds.equals(ancestor.getVisibleBounds())",
+    '"main-content".equals(ancestor.getResourceName())',
+    '"Discover page"',
+    "1, matchingRailAncestors",
+    'freshSection, "Popular Movies", "android.widget.TextView", false',
+    'null, "Primary", "android.view.View", false',
+    "proof.bladeBounds, blade.getVisibleBounds()",
+    "blade.click()",
+  ]) need(click, token, `fresh ordinary Blade click lost ${token}`);
+  need(freshCandidates, "productTextOrDescriptionSelectors(",
+    "fresh query lost exact text-or-description selectors");
+  assert.equal((click.match(/blade\.click\(\)/g) ?? []).length, 1,
+    "fresh Blade control must be clicked exactly once");
+
+  const scoped = `${drive}\n${scroll}\n${observe}\n${click}`;
+  assert.doesNotMatch(scoped,
+    /device\.(?:click|swipe)|executeShellCommand|startActivity|\.scroll\(|scrollUntilVisibleProductSemanticOnAnyRoute/,
+    "fixed42 seed gained a coordinate, shell, route, or UiObject2 scroll fallback");
+  assert.doesNotMatch(java, /UiObject2\.getAccessibilityNodeInfo/,
+    "driver invented a non-public UiObject2 node accessor");
+}
+
+function fixed42FinalClickDeadlineContract(java) {
+  assert.match(
+    java,
+    /private void clickFreshFixed42Blade\(Fixed42ReadyProof proof, long startedAt\)/,
+    "fresh Blade helper did not receive the original fixed42 start time",
+  );
+  const drive = methodBody(java, "clickFixed42SampleThroughDiscoverRails");
+  const click = methodBody(java, "clickFreshFixed42Blade");
+  need(drive, "clickFreshFixed42Blade(ready, startedAt)",
+    "caller reset or omitted the original fixed42 start time");
+  assert.equal(click.includes("startedAt ="), false,
+    "fresh Blade helper reset the original deadline");
+  need(click, `assertEquals("Fresh Blade Runner bounds changed immediately before click",
+                proof.bladeBounds, blade.getVisibleBounds());
+        assertTrue("Fixed42 seed deadline elapsed during fresh Blade queries",
+                Fixed42SeedPolicy.withinDeadline(
+                        startedAt, SystemClock.uptimeMillis()));
+        blade.click();`,
+  "deadline gate is not immediately after final proof and before the sole click");
+  assert.equal((click.match(/Fixed42SeedPolicy\.withinDeadline\(/g) ?? []).length, 1,
+    "fresh Blade helper must make exactly one final deadline decision");
+  assert.equal((click.match(/blade\.click\(\)/g) ?? []).length, 1,
+    "fresh Blade helper must retain exactly one ordinary click");
+}
+
+function runFixed42TwoAxisSeedPolicyHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42SeedPolicy");
+  const harness = `
+public final class Fixed42SeedPolicyHarness {
+    private static final int FIXED42_SEED_SCROLL_ACTION_LIMIT = 16;
+    private static final long FIXED42_SEED_SCROLL_BOUND_MS = 45_000L;
+    ${policy}
+
+    private static Fixed42SeedPolicy.Observation observation(
+            boolean route, int main, int discover, int heading, int rail, int blade,
+            boolean section, boolean railValid, boolean railReady,
+            boolean bladeInRail, boolean bladeReady, int[] vertical, int[] cards) {
+        return new Fixed42SeedPolicy.Observation(
+                route, main, discover, heading, rail, blade,
+                section, railValid, railReady, bladeInRail, bladeReady,
+                vertical, cards);
+    }
+
+    private static int[] positions(int a, int b, int c, int d) {
+        return new int[] {a, b, c, d};
+    }
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static void reject(Runnable operation, String message) {
+        try {
+            operation.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError(message);
+    }
+
+    public static void main(String[] ignored) {
+        int absent = Fixed42SeedPolicy.ABSENT;
+        Fixed42SeedPolicy.Observation vertical = observation(
+                true, 1, 1, 0, 0, 0, false, false, false, false, false,
+                positions(934, 1386, absent, absent),
+                positions(absent, absent, absent, absent));
+        Fixed42SeedPolicy.Observation verticalMoved = observation(
+                true, 1, 1, 0, 0, 0, false, false, false, false, false,
+                positions(334, 786, absent, absent),
+                positions(absent, absent, absent, absent));
+        Fixed42SeedPolicy.Observation horizontal = observation(
+                true, 1, 1, 1, 1, 0, true, true, true, false, false,
+                positions(absent, absent, absent, 100),
+                positions(28, 300, 572, absent));
+        Fixed42SeedPolicy.Observation horizontalMoved = observation(
+                true, 1, 1, 1, 1, 1, true, true, true, true, false,
+                positions(absent, absent, absent, 100),
+                positions(-244, 28, 300, 572));
+        Fixed42SeedPolicy.Observation ready = observation(
+                true, 1, 1, 1, 1, 1, true, true, true, true, true,
+                positions(absent, absent, absent, 100),
+                positions(-516, -244, 28, 300));
+
+        require(Fixed42SeedPolicy.phase(vertical) == Fixed42SeedPolicy.PHASE_VERTICAL,
+                "outer Discover root must start vertical");
+        require(Fixed42SeedPolicy.didAdvance(
+                        Fixed42SeedPolicy.PHASE_VERTICAL, vertical, verticalMoved),
+                "upward content movement must be observable");
+        require(Fixed42SeedPolicy.didAdvance(
+                        Fixed42SeedPolicy.PHASE_VERTICAL, verticalMoved, horizontal),
+                "Popular Movies viewport must transition vertical to horizontal");
+        require(Fixed42SeedPolicy.phase(horizontal) == Fixed42SeedPolicy.PHASE_HORIZONTAL,
+                "fully visible Popular Movies rail must scroll right");
+        require(Fixed42SeedPolicy.didAdvance(
+                        Fixed42SeedPolicy.PHASE_HORIZONTAL, horizontal, horizontalMoved),
+                "leftward card movement must be observable");
+        require(Fixed42SeedPolicy.didAdvance(
+                        Fixed42SeedPolicy.PHASE_HORIZONTAL, horizontalMoved, ready),
+                "fully visible Blade must finish horizontal progress");
+        require(Fixed42SeedPolicy.phase(ready) == Fixed42SeedPolicy.PHASE_READY,
+                "fresh visible Blade in the exact rail must become ready");
+        require(!Fixed42SeedPolicy.didAdvance(
+                        Fixed42SeedPolicy.PHASE_VERTICAL, vertical, vertical),
+                "no vertical progress must fail");
+        require(!Fixed42SeedPolicy.didAdvance(
+                        Fixed42SeedPolicy.PHASE_HORIZONTAL, horizontal, horizontal),
+                "no horizontal progress must fail");
+        require(!Fixed42SeedPolicy.didAdvance(
+                        Fixed42SeedPolicy.PHASE_HORIZONTAL,
+                        observation(true, 1, 1, 1, 1, 0, true, true, true, false, false,
+                                horizontal.verticalTops,
+                                positions(absent, 300, 572, absent)),
+                        horizontal),
+                "an earlier card merely reappearing must not count as forward progress");
+
+        reject(() -> Fixed42SeedPolicy.phase(observation(
+                false, 1, 1, 0, 0, 0, false, false, false, false, false,
+                vertical.verticalTops, vertical.cardLefts)), "route change must fail");
+        reject(() -> Fixed42SeedPolicy.phase(observation(
+                true, 0, 1, 0, 0, 0, false, false, false, false, false,
+                vertical.verticalTops, vertical.cardLefts)), "inner-only root must fail");
+        reject(() -> Fixed42SeedPolicy.phase(observation(
+                true, 2, 1, 0, 0, 0, false, false, false, false, false,
+                vertical.verticalTops, vertical.cardLefts)), "duplicate outer root must fail");
+        reject(() -> Fixed42SeedPolicy.phase(observation(
+                true, 1, 1, 1, 1, 0, false, true, true, false, false,
+                horizontal.verticalTops, horizontal.cardLefts)), "wrong section must fail");
+        reject(() -> Fixed42SeedPolicy.phase(observation(
+                true, 1, 1, 1, 1, 0, true, false, true, false, false,
+                horizontal.verticalTops, horizontal.cardLefts)), "wrong rail must fail");
+        reject(() -> Fixed42SeedPolicy.phase(observation(
+                true, 1, 1, 1, 0, 0, true, false, false, false, false,
+                horizontal.verticalTops, horizontal.cardLefts)), "missing rail must fail");
+        reject(() -> Fixed42SeedPolicy.phase(observation(
+                true, 1, 1, 2, 1, 0, true, true, true, false, false,
+                horizontal.verticalTops, horizontal.cardLefts)), "duplicate heading must fail");
+        reject(() -> Fixed42SeedPolicy.phase(observation(
+                true, 1, 1, 1, 1, 2, true, true, true, true, true,
+                ready.verticalTops, ready.cardLefts)), "ambiguous Blade must fail");
+        reject(() -> Fixed42SeedPolicy.phase(observation(
+                true, 1, 1, 1, 1, 1, true, true, true, false, false,
+                horizontal.verticalTops, horizontal.cardLefts)), "Blade outside rail must fail");
+        require(Fixed42SeedPolicy.phase(horizontalMoved)
+                        == Fixed42SeedPolicy.PHASE_HORIZONTAL,
+                "partially visible Blade must remain offscreen for click");
+        reject(() -> Fixed42SeedPolicy.didAdvance(
+                Fixed42SeedPolicy.PHASE_HORIZONTAL, horizontal, vertical),
+                "horizontal to vertical route regression must fail");
+        reject(() -> Fixed42SeedPolicy.didAdvance(
+                Fixed42SeedPolicy.PHASE_VERTICAL, vertical,
+                observation(false, 1, 1, 0, 0, 0, false, false, false, false, false,
+                        verticalMoved.verticalTops, verticalMoved.cardLefts)),
+                "post-action route change must fail");
+
+        require(Fixed42SeedPolicy.mayScroll(15, 1_000L, 45_999L),
+                "sixteenth shared action must remain available");
+        require(!Fixed42SeedPolicy.mayScroll(16, 1_000L, 2_000L),
+                "seventeenth action must fail");
+        require(!Fixed42SeedPolicy.mayScroll(0, 1_000L, 46_000L),
+                "overall deadline must fail");
+        require(!Fixed42SeedPolicy.withinDeadline(1_000L, 46_000L),
+                "click cannot occur after deadline");
+        int clicks = 0;
+        if (Fixed42SeedPolicy.withinDeadline(1_000L, 45_999L)) clicks++;
+        if (Fixed42SeedPolicy.withinDeadline(1_000L, 46_000L)) clicks++;
+        require(clicks == 1,
+                "delayed fresh queries must not cross the final-action seam");
+        System.out.println("fixed42-seed-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-seed-policy-"));
+  const sourceFile = path.join(directory, "Fixed42SeedPolicyHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `fixed42 seed policy javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand, ["-cp", directory, "Fixed42SeedPolicyHarness"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, `fixed42 seed policy harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-seed-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("fixed42 Blade seed uses one guarded public-scroll budget and one fresh ordinary click", () => {
+  fixed42TwoAxisSeedContract(source);
+
+  const mutants = [
+    ["profile", source.replace(
+      'assertTrue("Raw accessibility scrolling is restricted to the fixed42 profile",\n                isFixed42AutomaticMode());',
+      'assertTrue("Raw accessibility scrolling is restricted to the fixed42 profile", true);',
+    )],
+    ["right-action", source.replace(
+      "AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT",
+      "AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD",
+    )],
+    ["null-child", source.replace(
+      'assertNotNull("Fixed42 seed snapshot returned a null child", child);',
+      "if (child == null) continue;",
+    )],
+    ["visibility", source.replace("visible = info.isVisibleToUser();", "visible = true;")],
+    ["click", source.replace("blade.click();", "// blade click removed")],
+    ["second-perform", source.replace(
+      "node.performAction(actionId));",
+      "node.performAction(actionId));\n        node.performAction(actionId);",
+    )],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, source, "fixed42 structural mutant anchor was absent");
+    assert.throws(() => fixed42TwoAxisSeedContract(mutant), `${label} mutant survived`);
+  }
+});
+
+test("fixed42 two-axis policy rejects wrong scope, no progress, offscreen Blade, and cap mutants", () => {
+  runFixed42TwoAxisSeedPolicyHarness(source);
+  const policy = nestedClassDeclaration(source, "Fixed42SeedPolicy");
+
+  const mutations = [
+    ["observation.headingCount > 1", "observation.headingCount > 2"],
+    ["|| observation.mainCount != 1", "|| observation.mainCount < 0"],
+    [
+      "return observation.railReady ? PHASE_HORIZONTAL : PHASE_VERTICAL;",
+      "return observation.bladeCount == 1 ? PHASE_READY : (observation.railReady ? PHASE_HORIZONTAL : PHASE_VERTICAL);",
+    ],
+    [
+      "return lastPresent(after) > lastPresent(before);",
+      "return true;",
+    ],
+    [
+      "completedActions < FIXED42_SEED_SCROLL_ACTION_LIMIT",
+      "completedActions <= FIXED42_SEED_SCROLL_ACTION_LIMIT",
+    ],
+  ];
+  for (const [before, after] of mutations) {
+    const mutantPolicy = policy.replace(before, after);
+    assert.notEqual(mutantPolicy, policy, `fixed42 policy mutant anchor was absent: ${before}`);
+    const mutant = source.replace(policy, mutantPolicy);
+    assert.throws(
+      () => runFixed42TwoAxisSeedPolicyHarness(mutant),
+      `fixed42 policy mutant survived: ${before}`,
+    );
+  }
+});
+
+test("fixed42 final Blade click rejects delayed fresh queries at the original deadline", () => {
+  fixed42FinalClickDeadlineContract(source);
+  runFixed42TwoAxisSeedPolicyHarness(source);
+
+  const resetDeadline = source.replace(
+    "clickFreshFixed42Blade(ready, startedAt)",
+    "clickFreshFixed42Blade(ready, SystemClock.uptimeMillis())",
+  );
+  assert.notEqual(resetDeadline, source, "deadline-reset mutant anchor was absent");
+  assert.throws(() => fixed42FinalClickDeadlineContract(resetDeadline));
+
+  const removedFinalGate = source.replace(
+    `        assertTrue("Fixed42 seed deadline elapsed during fresh Blade queries",
+                Fixed42SeedPolicy.withinDeadline(
+                        startedAt, SystemClock.uptimeMillis()));
+`,
+    "",
+  );
+  assert.notEqual(removedFinalGate, source, "removed final gate mutant anchor was absent");
+  assert.throws(() => fixed42FinalClickDeadlineContract(removedFinalGate));
+
+  const lateBoundaryAllowed = source.replace(
+    "now - startedAt < FIXED42_SEED_SCROLL_BOUND_MS",
+    "now - startedAt <= FIXED42_SEED_SCROLL_BOUND_MS",
+  );
+  assert.notEqual(lateBoundaryAllowed, source, "late-boundary mutant anchor was absent");
+  assert.throws(() => runFixed42TwoAxisSeedPolicyHarness(lateBoundaryAllowed));
+});

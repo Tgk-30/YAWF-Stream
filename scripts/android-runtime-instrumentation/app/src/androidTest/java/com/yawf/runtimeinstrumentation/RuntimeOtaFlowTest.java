@@ -16,6 +16,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.view.accessibility.AccessibilityNodeInfo;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -109,6 +110,11 @@ public final class RuntimeOtaFlowTest {
     private static final long AUTOMATIC_CHECK_BOUND_MS = 55_000L;
     private static final int ABSENT_SETTLED_SAMPLES = 3;
     private static final int MAX_INITIAL_ENABLE_QUERY_TIMINGS = 32;
+    private static final int FIXED42_SEED_SCROLL_ACTION_LIMIT = 16;
+    private static final long FIXED42_SEED_SCROLL_BOUND_MS = 45_000L;
+    private static final long FIXED42_SEED_SCROLL_SETTLE_MS = 600L;
+    private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
+    private static final int FIXED42_SEED_AX_CHILD_LIMIT = 128;
     private static final String QUICK_SETUP_ACKNOWLEDGEMENT =
             "I understand the privacy, reliability, catalog, and playback limits and want to use Quick setup.";
 
@@ -123,6 +129,13 @@ public final class RuntimeOtaFlowTest {
             "Move fast",
             "Keep your place",
             "You're all set"
+    };
+    private static final String[] FIXED42_VERTICAL_SEED_ANCHORS = {
+            "Sample catalog", "Top 10 Movies", "Top 10 TV Shows", "Popular Movies"
+    };
+    private static final String[] FIXED42_POPULAR_SEED_CARDS = {
+            "Avengers: Infinity War", "The Avengers", "Mad Max: Fury Road",
+            "Blade Runner 2049"
     };
 
     private Instrumentation instrumentation;
@@ -936,9 +949,7 @@ public final class RuntimeOtaFlowTest {
         navigateProductRoute("Discover");
 
         waitFor(By.text("Sample catalog"), UI_WAIT_MS, "Sample catalog classification");
-        UiObject2 title = scrollUntilVisibleProductSemanticOnAnyRoute(
-                AUTOMATIC_SAMPLE_TITLE, "android.widget.Button", true, Direction.DOWN);
-        title.click();
+        clickFixed42SampleThroughDiscoverRails();
         String detailDialogIdentity = AUTOMATIC_SAMPLE_TITLE + " details";
         waitForUniqueExactProductDialog(detailDialogIdentity, SHORT_WAIT_MS);
         UiObject2 watchlist = waitForFixed42DialogSemantic(
@@ -976,6 +987,521 @@ public final class RuntimeOtaFlowTest {
                 true);
         waitForFixed42FolderSelect(moveLabel, AUTOMATIC_FOLDER_NAME);
         capture("fixed42-local-data-seeded");
+    }
+
+    private void clickFixed42SampleThroughDiscoverRails() {
+        assertTrue("Two-axis sample seeding is restricted to the fixed42 profile",
+                isFixed42AutomaticMode());
+        assertTrue("Two-axis sample seeding requires API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        long startedAt = SystemClock.uptimeMillis();
+        int completedActions = 0;
+        int priorActionPhase = -1;
+        Fixed42SeedPolicy.Observation beforeAction = null;
+
+        while (Fixed42SeedPolicy.withinDeadline(startedAt, SystemClock.uptimeMillis())) {
+            assertNoBindingTerms();
+            Fixed42ReadyProof ready = null;
+            try (Fixed42SeedSnapshot snapshot = observeFixed42SeedSnapshot()) {
+                int phase = Fixed42SeedPolicy.phase(snapshot.observation);
+                if (beforeAction != null) {
+                    assertTrue("Fixed42 seed action made no fresh observable progress",
+                            Fixed42SeedPolicy.didAdvance(
+                                    priorActionPhase, beforeAction, snapshot.observation));
+                    beforeAction = null;
+                    priorActionPhase = -1;
+                }
+                log("Fixed42 seed observation action=" + completedActions
+                        + " phase=" + Fixed42SeedPolicy.phaseName(phase)
+                        + " main=" + fixed42Bounds(snapshot.mainBounds)
+                        + " rail=" + fixed42Bounds(snapshot.railBounds)
+                        + " navTop=" + snapshot.navigationTop);
+                assertTrue("Fixed42 seed deadline elapsed before action",
+                        Fixed42SeedPolicy.withinDeadline(
+                                startedAt, SystemClock.uptimeMillis()));
+
+                if (phase == Fixed42SeedPolicy.PHASE_READY) {
+                    ready = new Fixed42ReadyProof(
+                            snapshot.bladeBounds,
+                            snapshot.railBounds,
+                            snapshot.navigationTop);
+                } else {
+                    assertTrue("Fixed42 seed exceeded its shared action or time bound",
+                            Fixed42SeedPolicy.mayScroll(
+                                    completedActions,
+                                    startedAt,
+                                    SystemClock.uptimeMillis()));
+                    AccessibilityNodeInfo node;
+                    AccessibilityNodeInfo.AccessibilityAction action;
+                    if (phase == Fixed42SeedPolicy.PHASE_VERTICAL) {
+                        node = snapshot.mainContent;
+                        action = AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD;
+                    } else {
+                        assertEquals("Fixed42 horizontal seed action occurred out of order",
+                                Fixed42SeedPolicy.PHASE_HORIZONTAL, phase);
+                        node = snapshot.popularRail;
+                        assertNotNull("Fresh Popular Movies rail was unavailable", node);
+                        action = fixed42SupportsAction(
+                                node,
+                                AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT)
+                                ? AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT
+                                : AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD;
+                    }
+                    performFixed42SeedScroll(node, action);
+                    completedActions++;
+                    priorActionPhase = phase;
+                    beforeAction = snapshot.observation;
+                    log("Performed fixed42 seed scroll action=" + completedActions
+                            + " phase=" + Fixed42SeedPolicy.phaseName(phase));
+                }
+            }
+
+            if (ready != null) {
+                assertNoBindingTerms();
+                assertTrue("Fixed42 seed deadline elapsed before fresh Blade click",
+                        Fixed42SeedPolicy.withinDeadline(
+                                startedAt, SystemClock.uptimeMillis()));
+                clickFreshFixed42Blade(ready, startedAt);
+                return;
+            }
+            device.waitForIdle(FIXED42_SEED_SCROLL_SETTLE_MS);
+        }
+        fail("Timed out within the fixed42 two-axis seed bound");
+    }
+
+    private void performFixed42SeedScroll(
+            AccessibilityNodeInfo node,
+            AccessibilityNodeInfo.AccessibilityAction action) {
+        assertTrue("Raw accessibility scrolling is restricted to the fixed42 profile",
+                isFixed42AutomaticMode());
+        assertNotNull("Fixed42 seed scroll node was unavailable", node);
+        int actionId = action.getId();
+        assertTrue("Fixed42 seed admitted a non-scroll accessibility action",
+                actionId
+                                == AccessibilityNodeInfo.AccessibilityAction
+                                        .ACTION_SCROLL_FORWARD.getId()
+                        || actionId
+                                == AccessibilityNodeInfo.AccessibilityAction
+                                        .ACTION_SCROLL_RIGHT.getId());
+        assertTrue("Fixed42 seed node did not expose the required scroll action",
+                fixed42SupportsAction(node, action));
+        assertTrue("Fixed42 seed public scroll action was rejected",
+                node.performAction(actionId));
+    }
+
+    private Fixed42SeedSnapshot observeFixed42SeedSnapshot() {
+        assertTrue("Fixed42 seed cache refresh requires API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        assertTrue("Fixed42 seed accessibility cache refresh failed",
+                instrumentation.getUiAutomation().clearCache());
+        AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
+        assertNotNull("Fixed42 seed active accessibility root was unavailable", root);
+
+        List<AccessibilityNodeInfo> owned = new ArrayList<>();
+        List<Integer> parents = new ArrayList<>();
+        boolean transferred = false;
+        try {
+            owned.add(root);
+            parents.add(-1);
+            for (int cursor = 0; cursor < owned.size(); cursor++) {
+                AccessibilityNodeInfo node = owned.get(cursor);
+                int childCount = node.getChildCount();
+                assertTrue("Fixed42 seed node exceeded its child bound",
+                        childCount >= 0 && childCount <= FIXED42_SEED_AX_CHILD_LIMIT);
+                for (int childIndex = 0; childIndex < childCount; childIndex++) {
+                    AccessibilityNodeInfo child = node.getChild(childIndex);
+                    assertNotNull("Fixed42 seed snapshot returned a null child", child);
+                    assertTrue("Fixed42 seed traversal exceeded its node bound",
+                            owned.size() < FIXED42_SEED_AX_NODE_LIMIT);
+                    for (AccessibilityNodeInfo existing : owned) {
+                        if (existing.equals(child)) {
+                            child.recycle();
+                            fail("Fixed42 seed snapshot returned a duplicate node");
+                        }
+                    }
+                    owned.add(child);
+                    parents.add(cursor);
+                }
+            }
+
+            List<Fixed42AxNode> nodes = new ArrayList<>();
+            for (int index = 0; index < owned.size(); index++) {
+                nodes.add(new Fixed42AxNode(owned.get(index), parents.get(index)));
+            }
+            int width = device.getDisplayWidth();
+            int height = device.getDisplayHeight();
+            String product = OtaFlowPolicy.PRODUCT_PACKAGE;
+
+            int mainIndex = fixed42UniqueResource(nodes, "main-content");
+            Fixed42AxNode main = nodes.get(mainIndex);
+            assertTrue("Fixed42 main-content identity changed",
+                    main.matches(product, "android.view.View", true, false)
+                            && main.bounds.equals(new Rect(0, 0, width, height)));
+
+            int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);
+            Fixed42AxNode discover = nodes.get(discoverIndex);
+            assertTrue("Fixed42 Discover page identity changed",
+                    discover.matches(product, "android.view.View", false, false)
+                            && fixed42IsDescendant(nodes, discoverIndex, mainIndex));
+
+            int primaryIndex = fixed42UniqueSemantic(nodes, "Primary", true);
+            Fixed42AxNode primary = nodes.get(primaryIndex);
+            assertTrue("Fixed42 Primary navigation identity changed",
+                    primary.matches(product, "android.view.View", false, false)
+                            && fixed42FullBounds(primary.bounds, width, height));
+            int navigationTop = primary.bounds.top;
+
+            int headingIndex = fixed42UniqueSemantic(nodes, "Popular Movies", false);
+            int popularSectionIndex = -1;
+            int railIndex = -1;
+            boolean railReady = false;
+            if (headingIndex >= 0) {
+                Fixed42AxNode heading = nodes.get(headingIndex);
+                assertTrue("Fixed42 Popular Movies heading identity changed",
+                        heading.matches(product, "android.widget.TextView", false, false));
+                popularSectionIndex = heading.parentIndex;
+                assertTrue("Popular Movies heading lacked its section parent",
+                        popularSectionIndex >= 0);
+                Fixed42AxNode section = nodes.get(popularSectionIndex);
+                assertTrue("Popular Movies section identity changed",
+                        section.matches(product, "android.view.View", false, false)
+                                && fixed42IsDescendant(
+                                        nodes, popularSectionIndex, discoverIndex));
+                railIndex = fixed42UniqueScrollableDescendant(
+                        nodes, popularSectionIndex, product);
+                Fixed42AxNode rail = nodes.get(railIndex);
+                assertTrue("Popular Movies rail escaped its visible section viewport",
+                        section.bounds.contains(rail.bounds)
+                                && discover.bounds.contains(rail.bounds)
+                                && main.bounds.contains(rail.bounds));
+                railReady = fixed42VisibleAboveNavigation(
+                        heading.bounds, width, height, navigationTop)
+                        && fixed42VisibleAboveNavigation(
+                                rail.bounds, width, height, navigationTop);
+            }
+
+            int bladeIndex = fixed42UniqueSemantic(nodes, AUTOMATIC_SAMPLE_TITLE, false);
+            boolean bladeInRail = false;
+            boolean bladeReady = false;
+            Rect bladeBounds = null;
+            if (bladeIndex >= 0) {
+                Fixed42AxNode blade = nodes.get(bladeIndex);
+                assertTrue("Fixed42 Blade Runner identity changed",
+                        blade.matches(product, "android.widget.Button", false, true));
+                bladeInRail = railIndex >= 0
+                        && fixed42IsDescendant(nodes, bladeIndex, railIndex);
+                assertTrue("Fixed42 Blade Runner escaped the Popular Movies rail",
+                        bladeInRail);
+                bladeBounds = new Rect(blade.bounds);
+                bladeReady = railReady
+                        && fixed42VisibleAboveNavigation(
+                                blade.bounds, width, height, navigationTop)
+                        && nodes.get(railIndex).bounds.contains(blade.bounds);
+            }
+
+            int[] verticalTops = fixed42SemanticPositions(
+                    nodes, FIXED42_VERTICAL_SEED_ANCHORS, true, -1, product);
+            int[] cardLefts = fixed42SemanticPositions(
+                    nodes, FIXED42_POPULAR_SEED_CARDS, false, railIndex, product);
+            Fixed42SeedPolicy.Observation observation = new Fixed42SeedPolicy.Observation(
+                    true,
+                    1,
+                    1,
+                    headingIndex < 0 ? 0 : 1,
+                    railIndex < 0 ? 0 : 1,
+                    bladeIndex < 0 ? 0 : 1,
+                    headingIndex < 0 || popularSectionIndex >= 0,
+                    railIndex < 0 || nodes.get(railIndex).matches(
+                            product, "android.view.View", true, false),
+                    railReady,
+                    bladeInRail,
+                    bladeReady,
+                    verticalTops,
+                    cardLefts);
+            Fixed42SeedPolicy.phase(observation);
+            Fixed42SeedSnapshot snapshot = new Fixed42SeedSnapshot(
+                    owned,
+                    main.info,
+                    railIndex < 0 ? null : nodes.get(railIndex).info,
+                    main.bounds,
+                    railIndex < 0 ? null : nodes.get(railIndex).bounds,
+                    bladeBounds,
+                    navigationTop,
+                    observation);
+            transferred = true;
+            return snapshot;
+        } finally {
+            if (!transferred) fixed42RecycleNodes(owned);
+        }
+    }
+
+    private void clickFreshFixed42Blade(Fixed42ReadyProof proof, long startedAt) {
+        assertTrue("Fresh fixed42 Blade query requires API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        assertTrue("Fresh fixed42 Blade cache refresh failed",
+                instrumentation.getUiAutomation().clearCache());
+        List<UiObject2> candidates = fixed42FreshSemanticCandidates(
+                null, AUTOMATIC_SAMPLE_TITLE, "android.widget.Button", true);
+        assertEquals("Fresh exact Blade Runner button was absent or ambiguous",
+                1, candidates.size());
+        UiObject2 blade = candidates.get(0);
+        assertTrue("Fresh Blade Runner button identity changed",
+                OtaFlowPolicy.PRODUCT_PACKAGE.equals(blade.getApplicationPackage())
+                        && "android.widget.Button".equals(blade.getClassName())
+                        && fixed42SemanticEquals(
+                                blade.getText(), blade.getContentDescription(),
+                                AUTOMATIC_SAMPLE_TITLE)
+                        && blade.isClickable()
+                        && blade.isEnabled());
+        Rect visibleBlade = blade.getVisibleBounds();
+        assertEquals("Fresh Blade Runner bounds changed after guarded snapshot",
+                proof.bladeBounds, visibleBlade);
+        assertTrue("Fresh Blade Runner was clipped by its rail or navigation",
+                proof.railBounds.contains(visibleBlade)
+                        && visibleBlade.bottom <= proof.navigationTop);
+
+        int matchingMainAncestors = 0;
+        int matchingDiscoverAncestors = 0;
+        int matchingRailAncestors = 0;
+        UiObject2 freshRail = null;
+        UiObject2 ancestor = blade.getParent();
+        for (int depth = 0; ancestor != null && depth < 32; depth++) {
+            if ("main-content".equals(ancestor.getResourceName())
+                    && OtaFlowPolicy.PRODUCT_PACKAGE.equals(
+                            ancestor.getApplicationPackage())
+                    && "android.view.View".equals(ancestor.getClassName())
+                    && ancestor.isScrollable()
+                    && !ancestor.isClickable()
+                    && ancestor.isEnabled()
+                    && ancestor.getVisibleBounds().equals(
+                            new Rect(0, 0, device.getDisplayWidth(), device.getDisplayHeight()))) {
+                matchingMainAncestors++;
+            }
+            if (fixed42SemanticEquals(
+                            ancestor.getText(), ancestor.getContentDescription(),
+                            "Discover page")
+                    && OtaFlowPolicy.PRODUCT_PACKAGE.equals(
+                            ancestor.getApplicationPackage())
+                    && "android.view.View".equals(ancestor.getClassName())
+                    && !ancestor.isScrollable()
+                    && !ancestor.isClickable()
+                    && ancestor.isEnabled()
+                    && fixed42FullBounds(
+                            ancestor.getVisibleBounds(),
+                            device.getDisplayWidth(),
+                            device.getDisplayHeight())) {
+                matchingDiscoverAncestors++;
+            }
+            if (OtaFlowPolicy.PRODUCT_PACKAGE.equals(ancestor.getApplicationPackage())
+                    && "android.view.View".equals(ancestor.getClassName())
+                    && ancestor.isScrollable()
+                    && !ancestor.isClickable()
+                    && ancestor.isEnabled()
+                    && proof.railBounds.equals(ancestor.getVisibleBounds())) {
+                matchingRailAncestors++;
+                freshRail = ancestor;
+            }
+            ancestor = ancestor.getParent();
+        }
+        assertTrue("Fresh Blade Runner ancestry exceeded its bound", ancestor == null);
+        assertEquals("Fresh Blade Runner left the unique main-content root",
+                1, matchingMainAncestors);
+        assertEquals("Fresh Blade Runner left the exact Discover page",
+                1, matchingDiscoverAncestors);
+        assertEquals("Fresh Blade Runner was not in the unique proven Popular Movies rail",
+                1, matchingRailAncestors);
+        assertNotNull("Fresh Popular Movies rail was unavailable", freshRail);
+        UiObject2 freshSection = freshRail.getParent();
+        assertNotNull("Fresh Popular Movies rail lost its section", freshSection);
+        assertTrue("Fresh Popular Movies section identity changed",
+                OtaFlowPolicy.PRODUCT_PACKAGE.equals(freshSection.getApplicationPackage())
+                        && "android.view.View".equals(freshSection.getClassName())
+                        && !freshSection.isScrollable()
+                        && !freshSection.isClickable()
+                        && freshSection.isEnabled()
+                        && fixed42FullBounds(
+                                freshSection.getVisibleBounds(),
+                                device.getDisplayWidth(),
+                                device.getDisplayHeight()));
+        List<UiObject2> headings = fixed42FreshSemanticCandidates(
+                freshSection, "Popular Movies", "android.widget.TextView", false);
+        assertEquals("Fresh Popular Movies heading was absent or ambiguous",
+                1, headings.size());
+        assertTrue("Fresh Popular Movies heading was clipped by navigation",
+                fixed42VisibleAboveNavigation(
+                        headings.get(0).getVisibleBounds(),
+                        device.getDisplayWidth(),
+                        device.getDisplayHeight(),
+                        proof.navigationTop));
+
+        List<UiObject2> primaries = fixed42FreshSemanticCandidates(
+                null, "Primary", "android.view.View", false);
+        assertEquals("Fresh Primary navigation was absent or ambiguous", 1, primaries.size());
+        assertTrue("Fresh Primary navigation bounds were invalid",
+                fixed42FullBounds(
+                        primaries.get(0).getVisibleBounds(),
+                        device.getDisplayWidth(),
+                        device.getDisplayHeight()));
+        assertEquals("Fresh Primary navigation moved after guarded snapshot",
+                proof.navigationTop, primaries.get(0).getVisibleBounds().top);
+        assertEquals("Fresh Blade Runner bounds changed immediately before click",
+                proof.bladeBounds, blade.getVisibleBounds());
+        assertTrue("Fixed42 seed deadline elapsed during fresh Blade queries",
+                Fixed42SeedPolicy.withinDeadline(
+                        startedAt, SystemClock.uptimeMillis()));
+        blade.click();
+        log("Clicked one fresh exact Blade Runner button in Popular Movies");
+    }
+
+    private List<UiObject2> fixed42FreshSemanticCandidates(
+            UiObject2 scope, String exact, String className, boolean clickable) {
+        List<UiObject2> candidates = new ArrayList<>();
+        for (BySelector selector : productTextOrDescriptionSelectors(
+                exact, className, clickable)) {
+            List<UiObject2> matches = scope == null
+                    ? device.findObjects(selector)
+                    : scope.findObjects(selector);
+            for (UiObject2 candidate : matches) {
+                if (!candidates.contains(candidate)) candidates.add(candidate);
+            }
+        }
+        return candidates;
+    }
+
+    private static int fixed42UniqueResource(List<Fixed42AxNode> nodes, String resourceName) {
+        int found = -1;
+        for (int index = 0; index < nodes.size(); index++) {
+            if (!resourceName.equals(nodes.get(index).resourceName)) continue;
+            assertTrue("Fixed42 resource identity was ambiguous", found < 0);
+            found = index;
+        }
+        assertTrue("Fixed42 resource identity was absent", found >= 0);
+        return found;
+    }
+
+    private static int fixed42UniqueSemantic(
+            List<Fixed42AxNode> nodes, String exact, boolean required) {
+        int found = -1;
+        for (int index = 0; index < nodes.size(); index++) {
+            if (!nodes.get(index).semanticEquals(exact)) continue;
+            assertTrue("Fixed42 semantic identity was ambiguous for " + exact, found < 0);
+            found = index;
+        }
+        if (required) assertTrue("Fixed42 semantic identity was absent for " + exact, found >= 0);
+        return found;
+    }
+
+    private static int fixed42UniqueScrollableDescendant(
+            List<Fixed42AxNode> nodes, int ancestorIndex, String productPackage) {
+        int found = -1;
+        for (int index = 0; index < nodes.size(); index++) {
+            Fixed42AxNode node = nodes.get(index);
+            if (!node.scrollable || !fixed42IsDescendant(nodes, index, ancestorIndex)) continue;
+            assertTrue("Popular Movies rail identity changed",
+                    node.matches(productPackage, "android.view.View", true, false));
+            assertTrue("Popular Movies owned ambiguous scrollable rails", found < 0);
+            found = index;
+        }
+        assertTrue("Popular Movies rail was absent", found >= 0);
+        return found;
+    }
+
+    private static int[] fixed42SemanticPositions(
+            List<Fixed42AxNode> nodes,
+            String[] labels,
+            boolean useTop,
+            int requiredAncestor,
+            String productPackage) {
+        int[] positions = new int[labels.length];
+        for (int labelIndex = 0; labelIndex < labels.length; labelIndex++) {
+            positions[labelIndex] = Fixed42SeedPolicy.ABSENT;
+            int matches = 0;
+            for (Fixed42AxNode node : nodes) {
+                if (!node.semanticEquals(labels[labelIndex])) continue;
+                matches++;
+                assertEquals("Fixed42 progress marker package changed",
+                        productPackage, node.packageName);
+                assertTrue("Fixed42 progress marker became hidden or disabled",
+                        node.visible && node.enabled);
+                if (useTop) {
+                    assertEquals("Fixed42 vertical progress marker role changed",
+                            labelIndex == 0 ? "android.view.View" : "android.widget.TextView",
+                            node.className);
+                    assertFalse("Fixed42 vertical progress marker became clickable",
+                            node.clickable);
+                } else {
+                    assertEquals("Fixed42 rail progress marker role changed",
+                            "android.widget.Button", node.className);
+                    assertTrue("Fixed42 rail progress marker became non-clickable",
+                            node.clickable);
+                    assertTrue("Fixed42 rail progress marker escaped Popular Movies",
+                            requiredAncestor >= 0
+                                    && fixed42IsDescendant(
+                                            nodes, nodes.indexOf(node), requiredAncestor));
+                }
+                if (!node.bounds.isEmpty()) {
+                    positions[labelIndex] = useTop ? node.bounds.top : node.bounds.left;
+                }
+            }
+            assertTrue("Fixed42 progress marker was ambiguous", matches <= 1);
+        }
+        return positions;
+    }
+
+    private static boolean fixed42IsDescendant(
+            List<Fixed42AxNode> nodes, int childIndex, int ancestorIndex) {
+        int cursor = childIndex;
+        for (int depth = 0; cursor >= 0 && depth <= nodes.size(); depth++) {
+            if (cursor == ancestorIndex) return true;
+            cursor = nodes.get(cursor).parentIndex;
+        }
+        if (cursor >= 0) throw new AssertionError("Fixed42 seed ancestry was cyclic");
+        return false;
+    }
+
+    private static boolean fixed42SupportsAction(
+            AccessibilityNodeInfo node,
+            AccessibilityNodeInfo.AccessibilityAction expected) {
+        for (AccessibilityNodeInfo.AccessibilityAction action : node.getActionList()) {
+            if (action.getId() == expected.getId()) return true;
+        }
+        return false;
+    }
+
+    private static boolean fixed42FullBounds(Rect bounds, int width, int height) {
+        return bounds.left >= 0
+                && bounds.top >= 0
+                && bounds.right > bounds.left
+                && bounds.bottom > bounds.top
+                && bounds.right <= width
+                && bounds.bottom <= height;
+    }
+
+    private static boolean fixed42VisibleAboveNavigation(
+            Rect bounds, int width, int height, int navigationTop) {
+        return fixed42FullBounds(bounds, width, height) && bounds.bottom <= navigationTop;
+    }
+
+    private static boolean fixed42SemanticEquals(
+            String text, String description, String exact) {
+        return exact.equals(text) || exact.equals(description);
+    }
+
+    private static String fixed42NodeString(CharSequence value) {
+        return value == null ? "" : value.toString();
+    }
+
+    private static String fixed42Bounds(Rect bounds) {
+        if (bounds == null) return "absent";
+        return "[" + bounds.left + "," + bounds.top + ","
+                + bounds.right + "," + bounds.bottom + "]";
+    }
+
+    private static void fixed42RecycleNodes(List<AccessibilityNodeInfo> nodes) {
+        for (int index = nodes.size() - 1; index >= 0; index--) {
+            nodes.get(index).recycle();
+        }
+        nodes.clear();
     }
 
     private void assertFixed42MeaningfulLocalState(String phase, boolean afterUpdate)
@@ -2373,6 +2899,246 @@ public final class RuntimeOtaFlowTest {
 
         static boolean hasUniqueCandidate(int count) {
             return count == 1;
+        }
+    }
+
+    private static final class Fixed42SeedPolicy {
+        static final int ABSENT = Integer.MIN_VALUE;
+        static final int PHASE_VERTICAL = 0;
+        static final int PHASE_HORIZONTAL = 1;
+        static final int PHASE_READY = 2;
+
+        static final class Observation {
+            final boolean routeValid;
+            final int mainCount;
+            final int discoverCount;
+            final int headingCount;
+            final int railCount;
+            final int bladeCount;
+            final boolean sectionValid;
+            final boolean railValid;
+            final boolean railReady;
+            final boolean bladeInRail;
+            final boolean bladeReady;
+            final int[] verticalTops;
+            final int[] cardLefts;
+
+            Observation(
+                    boolean routeValid,
+                    int mainCount,
+                    int discoverCount,
+                    int headingCount,
+                    int railCount,
+                    int bladeCount,
+                    boolean sectionValid,
+                    boolean railValid,
+                    boolean railReady,
+                    boolean bladeInRail,
+                    boolean bladeReady,
+                    int[] verticalTops,
+                    int[] cardLefts) {
+                this.routeValid = routeValid;
+                this.mainCount = mainCount;
+                this.discoverCount = discoverCount;
+                this.headingCount = headingCount;
+                this.railCount = railCount;
+                this.bladeCount = bladeCount;
+                this.sectionValid = sectionValid;
+                this.railValid = railValid;
+                this.railReady = railReady;
+                this.bladeInRail = bladeInRail;
+                this.bladeReady = bladeReady;
+                this.verticalTops = verticalTops.clone();
+                this.cardLefts = cardLefts.clone();
+            }
+        }
+
+        static int phase(Observation observation) {
+            if (!observation.routeValid
+                    || observation.mainCount != 1
+                    || observation.discoverCount != 1) {
+                throw new AssertionError("Fixed42 Discover route identity was not unique");
+            }
+            if (observation.headingCount < 0
+                    || observation.headingCount > 1
+                    || observation.railCount < 0
+                    || observation.railCount > 1
+                    || observation.bladeCount < 0
+                    || observation.bladeCount > 1) {
+                throw new AssertionError("Fixed42 seed identity was ambiguous");
+            }
+            if (observation.headingCount == 0) {
+                if (observation.railCount != 0 || observation.bladeCount != 0) {
+                    throw new AssertionError("Fixed42 seed escaped Popular Movies");
+                }
+                return PHASE_VERTICAL;
+            }
+            if (!observation.sectionValid
+                    || observation.railCount != 1
+                    || !observation.railValid) {
+                throw new AssertionError("Popular Movies section or rail identity changed");
+            }
+            if (observation.bladeCount == 1 && !observation.bladeInRail) {
+                throw new AssertionError("Blade Runner escaped the Popular Movies rail");
+            }
+            if (observation.bladeReady) {
+                if (!observation.railReady || observation.bladeCount != 1) {
+                    throw new AssertionError("Blade Runner readiness was inconsistent");
+                }
+                return PHASE_READY;
+            }
+            return observation.railReady ? PHASE_HORIZONTAL : PHASE_VERTICAL;
+        }
+
+        static boolean didAdvance(int actionPhase, Observation before, Observation after) {
+            int beforePhase = phase(before);
+            int afterPhase = phase(after);
+            if (actionPhase != beforePhase || actionPhase == PHASE_READY) {
+                throw new AssertionError("Fixed42 seed action did not match its observed phase");
+            }
+            if (afterPhase < beforePhase) {
+                throw new AssertionError("Fixed42 seed route regressed after an action");
+            }
+            if (afterPhase > beforePhase) return true;
+            return actionPhase == PHASE_VERTICAL
+                    ? movedTowardStart(before.verticalTops, after.verticalTops)
+                    : movedTowardStart(before.cardLefts, after.cardLefts);
+        }
+
+        static boolean mayScroll(int completedActions, long startedAt, long now) {
+            return completedActions >= 0
+                    && completedActions < FIXED42_SEED_SCROLL_ACTION_LIMIT
+                    && withinDeadline(startedAt, now);
+        }
+
+        static boolean withinDeadline(long startedAt, long now) {
+            return now >= startedAt && now - startedAt < FIXED42_SEED_SCROLL_BOUND_MS;
+        }
+
+        static String phaseName(int phase) {
+            if (phase == PHASE_VERTICAL) return "vertical";
+            if (phase == PHASE_HORIZONTAL) return "horizontal";
+            if (phase == PHASE_READY) return "ready";
+            throw new AssertionError("Unknown fixed42 seed phase");
+        }
+
+        private static boolean movedTowardStart(int[] before, int[] after) {
+            if (before.length != after.length) {
+                throw new AssertionError("Fixed42 seed progress vector shape changed");
+            }
+            for (int index = 0; index < before.length; index++) {
+                if (before[index] != ABSENT
+                        && after[index] != ABSENT
+                        && after[index] < before[index]) {
+                    return true;
+                }
+            }
+            return lastPresent(after) > lastPresent(before);
+        }
+
+        private static int lastPresent(int[] values) {
+            for (int index = values.length - 1; index >= 0; index--) {
+                if (values[index] != ABSENT) return index;
+            }
+            return -1;
+        }
+    }
+
+    private static final class Fixed42AxNode {
+        final AccessibilityNodeInfo info;
+        final int parentIndex;
+        final String text;
+        final String description;
+        final String packageName;
+        final String className;
+        final String resourceName;
+        final boolean visible;
+        final boolean scrollable;
+        final boolean clickable;
+        final boolean enabled;
+        final Rect bounds;
+
+        Fixed42AxNode(AccessibilityNodeInfo info, int parentIndex) {
+            this.info = info;
+            this.parentIndex = parentIndex;
+            text = fixed42NodeString(info.getText());
+            description = fixed42NodeString(info.getContentDescription());
+            packageName = fixed42NodeString(info.getPackageName());
+            className = fixed42NodeString(info.getClassName());
+            resourceName = fixed42NodeString(info.getViewIdResourceName());
+            visible = info.isVisibleToUser();
+            scrollable = info.isScrollable();
+            clickable = info.isClickable();
+            enabled = info.isEnabled();
+            bounds = new Rect();
+            info.getBoundsInScreen(bounds);
+        }
+
+        boolean semanticEquals(String exact) {
+            return fixed42SemanticEquals(text, description, exact);
+        }
+
+        boolean matches(
+                String expectedPackage,
+                String expectedClass,
+                boolean expectedScrollable,
+                boolean expectedClickable) {
+            return expectedPackage.equals(packageName)
+                    && expectedClass.equals(className)
+                    && visible
+                    && scrollable == expectedScrollable
+                    && clickable == expectedClickable
+                    && enabled;
+        }
+    }
+
+    private static final class Fixed42SeedSnapshot implements AutoCloseable {
+        final List<AccessibilityNodeInfo> ownedNodes;
+        final AccessibilityNodeInfo mainContent;
+        final AccessibilityNodeInfo popularRail;
+        final Rect mainBounds;
+        final Rect railBounds;
+        final Rect bladeBounds;
+        final int navigationTop;
+        final Fixed42SeedPolicy.Observation observation;
+
+        Fixed42SeedSnapshot(
+                List<AccessibilityNodeInfo> ownedNodes,
+                AccessibilityNodeInfo mainContent,
+                AccessibilityNodeInfo popularRail,
+                Rect mainBounds,
+                Rect railBounds,
+                Rect bladeBounds,
+                int navigationTop,
+                Fixed42SeedPolicy.Observation observation) {
+            this.ownedNodes = ownedNodes;
+            this.mainContent = mainContent;
+            this.popularRail = popularRail;
+            this.mainBounds = new Rect(mainBounds);
+            this.railBounds = railBounds == null ? null : new Rect(railBounds);
+            this.bladeBounds = bladeBounds == null ? null : new Rect(bladeBounds);
+            this.navigationTop = navigationTop;
+            this.observation = observation;
+        }
+
+        @Override
+        public void close() {
+            fixed42RecycleNodes(ownedNodes);
+        }
+    }
+
+    private static final class Fixed42ReadyProof {
+        final Rect bladeBounds;
+        final Rect railBounds;
+        final int navigationTop;
+
+        Fixed42ReadyProof(Rect bladeBounds, Rect railBounds, int navigationTop) {
+            if (bladeBounds == null || railBounds == null) {
+                throw new AssertionError("Fixed42 ready proof lacked bounds");
+            }
+            this.bladeBounds = new Rect(bladeBounds);
+            this.railBounds = new Rect(railBounds);
+            this.navigationTop = navigationTop;
         }
     }
 
