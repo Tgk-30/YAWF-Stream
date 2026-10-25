@@ -1376,6 +1376,48 @@ describe("EmbeddedPlayer popover material", () => {
     expect(document.activeElement).toBe(items[0]);
   });
 
+  it("returns focus to the exact popover trigger after item selection", async () => {
+    const user = userEvent.setup();
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    const trigger = screen.getByRole("button", { name: "Speed" });
+
+    await user.click(trigger);
+    await user.click(screen.getByRole("menuitemradio", { name: "1.25×" }));
+
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(trigger).toHaveFocus();
+  });
+
+  it("returns focus to the exact popover trigger after Escape", async () => {
+    const user = userEvent.setup();
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    const trigger = screen.getByRole("button", { name: "Speed" });
+
+    await user.click(trigger);
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(trigger).toHaveFocus();
+  });
+
+  it("returns focus to the exact popover trigger after scrim dismissal", async () => {
+    const user = userEvent.setup();
+    render(
+      <EmbeddedPlayer url="https://example.test/movie.mkv" title="Movie" onClose={() => {}} />,
+    );
+    const trigger = screen.getByRole("button", { name: "Speed" });
+
+    await user.click(trigger);
+    await user.click(screen.getByRole("button", { name: "Close menu" }));
+
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(trigger).toHaveFocus();
+  });
+
   it("updates subtitle delay settings from the slider component", async () => {
     renderPlayerMock.setProperty.mockClear();
 

@@ -14,7 +14,7 @@
 // debrid/ai model modules drive the provider/option lists (no mock needed).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { defaultSettings, type AppSettings } from "../data/settings";
 import type { SettingsSection } from "../lib/settingsNavigation";
@@ -43,6 +43,10 @@ const readModelCache = vi.hoisted(() =>
   vi.fn<typeof import("../services/ai/ModelCache").readModelCache>(async () => null),
 );
 const writeModelCache = vi.hoisted(() => vi.fn(async () => undefined));
+const platformState = vi.hoisted(() => ({
+  device: "desktop" as "ios" | "android" | "mac" | "windows" | "linux" | "desktop" | "unknown",
+  standalone: false,
+}));
 let smartPreloadOn = false;
 
 vi.mock("../store/AppStore", () => ({
@@ -112,6 +116,15 @@ vi.mock("../services/ai/ModelCatalog", () => ({ fetchAvailableModels }));
 
 vi.mock("../lib/onboardingValidation", () => ({ testDebridToken }));
 
+vi.mock("../lib/platform", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/platform")>();
+  return {
+    ...actual,
+    deviceKind: () => platformState.device,
+    isStandaloneDisplay: () => platformState.standalone,
+  };
+});
+
 vi.mock("../data/traktConnection", () => ({
   isTraktConnected,
   loadTraktConnection,
@@ -151,10 +164,36 @@ function renderAt(tab?: string, seed?: Partial<AppSettings>) {
   return utils;
 }
 
+function installOrientationFrame({ coarse = true, scale = 1 } = {}) {
+  let pendingFrame: FrameRequestCallback | null = null;
+  const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+    pendingFrame = callback;
+    return 47;
+  });
+  const cancelFrame = vi.fn();
+  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+    matches: coarse && query === "(pointer: coarse)",
+  })));
+  vi.stubGlobal("visualViewport", { scale });
+  vi.stubGlobal("requestAnimationFrame", requestFrame);
+  vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+  return {
+    requestFrame,
+    cancelFrame,
+    flush() {
+      const callback = pendingFrame;
+      pendingFrame = null;
+      callback?.(0);
+    },
+  };
+}
+
 beforeEach(() => {
   mockSettings = defaultSettings();
   mockSimpleMode = false;
   mockPendingSettingsSection = null;
+  platformState.device = "desktop";
+  platformState.standalone = false;
   smartPreloadOn = false;
   updateSettings.mockClear();
   clearPendingSettingsSection.mockClear();
@@ -179,6 +218,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -212,6 +252,98 @@ describe("Settings shell", () => {
 
     fireEvent.click(container.querySelector('button[data-tab="appearance"]')!);
     expect(scroller.scrollTop).toBe(0);
+  });
+
+  it("reconciles only the active iPad PWA category select and preserves vertical scroll", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    scroller.scrollTop = 431;
+    category.focus();
+
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(category).not.toHaveFocus();
+    expect(frame.requestFrame).toHaveBeenCalledTimes(1);
+    expect(scroller.scrollTop).toBe(431);
+    act(() => frame.flush());
+    expect(scroller).toHaveFocus();
+    expect(scroller.scrollTop).toBe(431);
+  });
+
+  it("leaves unrelated Settings editing focused during iPad PWA rotation", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const search = screen.getByRole("textbox", { name: "Search settings" });
+    scroller.scrollTop = 219;
+    search.focus();
+
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(search).toHaveFocus();
+    expect(frame.requestFrame).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(219);
+  });
+
+  it.each([
+    ["windowed iOS", "ios", false, true, 1],
+    ["standalone Android", "android", true, true, 1],
+    ["fine pointer iOS", "ios", true, false, 1],
+    ["zoomed iOS", "ios", true, true, 1.5],
+  ] as const)("does not reconcile the category select for %s", (
+    _label,
+    device,
+    standalone,
+    coarse,
+    scale,
+  ) => {
+    platformState.device = device;
+    platformState.standalone = standalone;
+    const frame = installOrientationFrame({ coarse, scale });
+    render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    category.focus();
+
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(category).toHaveFocus();
+    expect(frame.requestFrame).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending orientation reconciliation when Settings unmounts", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { unmount } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    screen.getByRole("combobox", { name: "Settings category" }).focus();
+    window.dispatchEvent(new Event("orientationchange"));
+    expect(frame.requestFrame).toHaveBeenCalledTimes(1);
+
+    unmount();
+
+    expect(frame.cancelFrame).toHaveBeenCalledWith(47);
   });
 
   it("gives playback selects stable accessible names", () => {

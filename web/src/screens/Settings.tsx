@@ -467,6 +467,7 @@ export function Settings() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const settingsScreenRef = useRef<HTMLDivElement>(null);
+  const categorySelectRef = useRef<HTMLSelectElement>(null);
 
   useEffect(() => {
     if (pendingSettingsSection == null) return;
@@ -491,6 +492,45 @@ export function Settings() {
     const scroller = settingsScreenRef.current?.closest(".app-content");
     if (scroller instanceof HTMLElement) scroller.scrollTop = 0;
   }, [tab]);
+
+  // iPad standalone WebKit can retain the native select's focus pan after an
+  // orientation change even though the document itself still fits the visual
+  // viewport. Reconcile only that exact native-select lifecycle. Unrelated
+  // editing, browser tabs, non-iOS devices, and user zoom remain untouched.
+  useEffect(() => {
+    let frame: number | null = null;
+    const reconcileCategoryFocus = () => {
+      const categorySelect = categorySelectRef.current;
+      if (
+        deviceKind() !== "ios" ||
+        !isStandaloneDisplay() ||
+        window.matchMedia?.("(pointer: coarse)").matches !== true ||
+        categorySelect == null ||
+        document.activeElement !== categorySelect
+      ) {
+        return;
+      }
+      const visualScale = window.visualViewport?.scale;
+      if (visualScale != null && visualScale !== 1) return;
+
+      const scroller = settingsScreenRef.current?.closest(".app-content");
+      if (!(scroller instanceof HTMLElement)) return;
+      const scrollTop = scroller.scrollTop;
+      categorySelect.blur();
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        if (!scroller.isConnected || settingsScreenRef.current == null) return;
+        scroller.focus({ preventScroll: true });
+        scroller.scrollTop = scrollTop;
+      });
+    };
+
+    window.addEventListener("orientationchange", reconcileCategoryFocus);
+    return () => {
+      window.removeEventListener("orientationchange", reconcileCategoryFocus);
+      if (frame != null) window.cancelAnimationFrame(frame);
+    };
+  }, []);
 
   // Switching profiles swaps the settings under us. The draft was seeded once at
   // mount, so without this it would still hold the PREVIOUS profile's values and
@@ -665,7 +705,11 @@ export function Settings() {
 
       <label className="settings-tab-select">
         <span className="settings-label">Settings category</span>
-        <select value={tab} onChange={(event) => setTab(event.target.value as Tab)}>
+        <select
+          ref={categorySelectRef}
+          value={tab}
+          onChange={(event) => setTab(event.target.value as Tab)}
+        >
           {tabs.map((t) => (
             <option key={t.id} value={t.id}>
               {t.label}

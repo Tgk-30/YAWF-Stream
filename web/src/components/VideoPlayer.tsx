@@ -2802,6 +2802,7 @@ function WebviewPlayer({
     () => setOptionsOpen(false),
     optionsOpen,
   );
+  const nestedDialogOpen = optionsOpen || captionsOpen || detailsOpen;
   const audioOptionsRequestedRef = useRef(false);
   const audioHeadingRef = useRef<HTMLSpanElement | null>(null);
   const [videoFit, setVideoFit] = useState<"contain" | "cover" | "fill">("contain");
@@ -5204,6 +5205,9 @@ function WebviewPlayer({
       if (video == null) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (suspendedRef.current) return;
+      // Nested dialogs own all keyboard input, including Escape through their
+      // modal hooks. Do not let a focused dialog container drive playback.
+      if (nestedDialogOpen) return;
       onActivity();
       if (shouldIgnoreShortcut(e.target, video)) return;
       const knownDuration = knownAbsoluteDurationRef.current;
@@ -5327,6 +5331,7 @@ function WebviewPlayer({
     selectDownloadedCaption,
     selectEmbeddedCaption,
     embeddedCaptionState,
+    nestedDialogOpen,
     subs.tracks,
     togglePlaybackState,
   ]);
@@ -5350,12 +5355,18 @@ function WebviewPlayer({
       touchLikePointerRef.current ||
       window.matchMedia?.("(pointer: coarse)").matches === true;
     touchLikePointerRef.current = false;
+    if (nestedDialogOpen) return;
     if (touchLike && !chromeVisible) {
       onActivity();
       return;
     }
     togglePlayback();
-  }, [chromeVisible, onActivity, togglePlayback]);
+  }, [chromeVisible, nestedDialogOpen, onActivity, togglePlayback]);
+
+  const handleVideoDoubleClick = useCallback(() => {
+    if (nestedDialogOpen) return;
+    togglePlayerFullscreen();
+  }, [nestedDialogOpen, togglePlayerFullscreen]);
 
   const absolutePlaybackPosition = useCallback(() => {
     const current = videoRef.current?.currentTime ?? 0;
@@ -5632,7 +5643,7 @@ function WebviewPlayer({
           x-webkit-airplay="allow"
           onPointerDown={handleVideoPointerDown}
           onClick={handleVideoClick}
-          onDoubleClick={togglePlayerFullscreen}
+          onDoubleClick={handleVideoDoubleClick}
           onError={(event) => {
             // hls.js owns its media errors and bounded recovery. Native HLS and
             // direct files still surface the media element's error here.

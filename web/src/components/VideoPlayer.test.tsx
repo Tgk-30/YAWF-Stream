@@ -7348,6 +7348,67 @@ describe("WebviewPlayer", () => {
       button.remove();
     });
 
+    it("isolates Playback settings from shortcuts and exposed video clicks", () => {
+      const requestFullscreen = vi.fn().mockResolvedValue(undefined);
+      const restoreRequestFullscreen = replaceProperty(
+        HTMLElement.prototype,
+        "requestFullscreen",
+        requestFullscreen,
+      );
+      try {
+        const { video } = setup(true);
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+        const dialog = screen.getByRole("dialog", { name: "Playback settings" });
+        const play = vi.mocked(HTMLMediaElement.prototype.play);
+        const pause = vi.mocked(HTMLMediaElement.prototype.pause);
+        play.mockClear();
+        pause.mockClear();
+
+        fireEvent.keyDown(dialog, { key: " " });
+        fireEvent.click(video);
+        fireEvent.doubleClick(video);
+
+        expect(play).not.toHaveBeenCalled();
+        expect(pause).not.toHaveBeenCalled();
+        expect(requestFullscreen).not.toHaveBeenCalled();
+        expect(dialog).toBeInTheDocument();
+      } finally {
+        restoreRequestFullscreen();
+      }
+    });
+
+    it("isolates the captions dialog from player shortcuts and stage clicks", () => {
+      const { video } = setup(true);
+      fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+      const dialog = screen.getByTestId("captions-menu");
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+
+      fireEvent.keyDown(dialog, { key: " " });
+      fireEvent.click(video);
+
+      expect(play).not.toHaveBeenCalled();
+      expect(dialog).toBeInTheDocument();
+    });
+
+    it("isolates Player details from player shortcuts and stage clicks", () => {
+      const { video } = setup(true);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Player details and shortcuts" }),
+      );
+      const dialog = screen.getByRole("dialog", {
+        name: "Player details and shortcuts",
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+
+      fireEvent.keyDown(dialog, { key: " " });
+      fireEvent.click(video);
+
+      expect(play).not.toHaveBeenCalled();
+      expect(dialog).toBeInTheDocument();
+    });
+
     it("ignores shortcuts when a modifier is held (so ⌘K still works)", () => {
       setup(true);
       window.dispatchEvent(

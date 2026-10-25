@@ -11,6 +11,7 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -60,11 +61,13 @@ public final class MainActivity extends ComponentActivity {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final WebStartupGate webStartupGate = new WebStartupGate();
+    private final WebViewSession webViewSession = new WebViewSession();
     private final ExecutorService webStartupExecutor = Executors.newSingleThreadExecutor(
         runnable -> new Thread(runnable, "yawf-webview-startup")
     );
     private FrameLayout root;
     private WebView webView;
+    private long activeWebViewSessionId;
     private PlayerView playerView;
     private ExoPlayer player;
     private String serverBase;
@@ -127,9 +130,12 @@ public final class MainActivity extends ComponentActivity {
     @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
     private void createWebApp() {
         releasePlayer(false);
+        destroyCurrentWebView();
         root.removeAllViews();
         showingConnectionError = false;
         webView = new WebView(this);
+        final long sessionId = webViewSession.open();
+        activeWebViewSessionId = sessionId;
         webView.setBackgroundColor(getColor(R.color.yawf_background));
 
         WebSettings settings = webView.getSettings();
@@ -156,6 +162,7 @@ public final class MainActivity extends ComponentActivity {
                 WebView view,
                 WebResourceRequest request
             ) {
+                if (!acceptsWebViewCallback(view, sessionId)) return true;
                 String target = request.getUrl().toString();
                 if (ServerAddress.sameOrigin(serverBase, target)) return false;
                 if (!ServerAddress.isHttpOrHttps(target)) {
@@ -184,6 +191,7 @@ public final class MainActivity extends ComponentActivity {
                 WebResourceRequest request,
                 WebResourceError error
             ) {
+                if (!acceptsWebViewCallback(view, sessionId)) return;
                 if (
                     !ConnectionFailure.blocksApp(
                         request.isForMainFrame(),
@@ -193,7 +201,11 @@ public final class MainActivity extends ComponentActivity {
                 ) {
                     return;
                 }
-                showConnectionError(getString(R.string.server_unreachable_copy, serverBase));
+                showConnectionError(
+                    view,
+                    sessionId,
+                    getString(R.string.server_unreachable_copy, serverBase)
+                );
             }
 
             @Override
@@ -202,6 +214,7 @@ public final class MainActivity extends ComponentActivity {
                 WebResourceRequest request,
                 WebResourceResponse response
             ) {
+                if (!acceptsWebViewCallback(view, sessionId)) return;
                 if (
                     !ConnectionFailure.blocksApp(
                         request.isForMainFrame(),
@@ -213,6 +226,8 @@ public final class MainActivity extends ComponentActivity {
                     return;
                 }
                 showConnectionError(
+                    view,
+                    sessionId,
                     getString(
                         R.string.server_unreachable_status,
                         serverBase,
@@ -238,16 +253,19 @@ public final class MainActivity extends ComponentActivity {
      * the WebView's own error page, Back exits because the failed load left no
      * history to go back to, and the next launch reloads the same dead address.
      */
-    private void showConnectionError(String message) {
+    private void showConnectionError(
+        WebView failedView,
+        long sessionId,
+        String message
+    ) {
+        if (!acceptsWebViewCallback(failedView, sessionId)) return;
         if (showingConnectionError) return;
         showingConnectionError = true;
         // The WebView is mid-callback here, so tear it down on the next loop.
         mainHandler.post(() -> {
+            if (!acceptsWebViewCallback(failedView, sessionId)) return;
             releasePlayer(false);
-            if (webView != null) {
-                webView.destroy();
-                webView = null;
-            }
+            destroyCurrentWebView();
             root.removeAllViews();
 
             LinearLayout panel = new LinearLayout(this);
@@ -305,10 +323,7 @@ public final class MainActivity extends ComponentActivity {
         webStartupGate.cancelWebApp();
         showingConnectionError = false;
         releasePlayer(false);
-        if (webView != null) {
-            webView.destroy();
-            webView = null;
-        }
+        destroyCurrentWebView();
         root.removeAllViews();
 
         LinearLayout panel = new LinearLayout(this);
@@ -463,6 +478,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void showWebStartupLoading() {
         releasePlayer(false);
+        destroyCurrentWebView();
         root.removeAllViews();
 
         LinearLayout panel = nativeStatusPanel();
@@ -486,6 +502,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void showWebStartupError() {
         releasePlayer(false);
+        destroyCurrentWebView();
         root.removeAllViews();
 
         LinearLayout panel = nativeStatusPanel();
@@ -796,6 +813,34 @@ public final class MainActivity extends ComponentActivity {
         webView.evaluateJavascript(script, null);
     }
 
+    private boolean acceptsWebViewCallback(WebView view, long sessionId) {
+        return view != null &&
+            view == webView &&
+            webViewSession.isActive(sessionId);
+    }
+
+    /**
+     * Invalidates callbacks first, detaches the current WebView from Android's
+     * view hierarchy, and only then destroys it. No caller may retain the old
+     * instance after this method returns.
+     */
+    private void destroyCurrentWebView() {
+        WebView current = webView;
+        long sessionId = activeWebViewSessionId;
+        webView = null;
+        activeWebViewSessionId = 0;
+        webViewSession.close(sessionId);
+        if (current == null) return;
+
+        ViewParent parent = current.getParent();
+        if (parent instanceof ViewGroup) {
+            ((ViewGroup) parent).removeView(current);
+        }
+        current.stopLoading();
+        current.removeJavascriptInterface("YawfAndroidTV");
+        current.destroy();
+    }
+
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
         if (
@@ -830,11 +875,7 @@ public final class MainActivity extends ComponentActivity {
     protected void onDestroy() {
         webStartupGate.closeAndShutdown(webStartupExecutor);
         releasePlayer(false);
-        if (webView != null) {
-            webView.removeJavascriptInterface("YawfAndroidTV");
-            webView.destroy();
-            webView = null;
-        }
+        destroyCurrentWebView();
         super.onDestroy();
     }
 
