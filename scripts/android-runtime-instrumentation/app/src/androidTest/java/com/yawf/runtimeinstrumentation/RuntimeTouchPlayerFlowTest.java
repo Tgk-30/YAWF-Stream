@@ -67,6 +67,7 @@ public final class RuntimeTouchPlayerFlowTest {
     private static final int MAX_ACTION_LINES = 220;
     private static final int MAX_PHASES = 48;
     private static final int MAX_NATIVE_POLL_SNAPSHOTS = 72;
+    private static final int MAX_PLAYER_DIALOG_TITLE_MATCHES = 32;
     private static final int MAX_SURFACE_REVEALS = 1;
     private static final long DOUBLE_TAP_HOLD_MS = 40;
     private static final long DOUBLE_TAP_INTER_GAP_MS = 100;
@@ -120,6 +121,9 @@ public final class RuntimeTouchPlayerFlowTest {
         final List<Rect> actionableBounds = new ArrayList<>();
         boolean pauseFocusActionAttempted;
         boolean pauseFocusActionSucceeded;
+        int playerDialogTitleMatches;
+        int visitedPlayerNodes;
+        long readDurationMs;
 
         int playbackPositionSeconds() {
             return clockPositionSeconds;
@@ -127,6 +131,71 @@ public final class RuntimeTouchPlayerFlowTest {
 
         float[] copyNativeRange() {
             return nativeRange == null ? null : new float[] { nativeRange[0], nativeRange[1] };
+        }
+    }
+
+    private static final class ExactPlayerDialogSelector {
+        private final int maximumTitleMatches;
+        private int observedTitleMatches;
+        private int exactDialogMatches;
+        private int selectedIndex = -1;
+        private String rejection;
+
+        ExactPlayerDialogSelector(int maximumTitleMatches) {
+            if (maximumTitleMatches < 1) {
+                throw new IllegalArgumentException("Invalid player-dialog title-match bound");
+            }
+            this.maximumTitleMatches = maximumTitleMatches;
+        }
+
+        int beginBoundedSelection(int suppliedTitleMatches) {
+            if (suppliedTitleMatches < 0 || observedTitleMatches != 0
+                    || exactDialogMatches != 0 || rejection != null) {
+                throw new IllegalStateException("Invalid player-dialog selection start");
+            }
+            if (suppliedTitleMatches > maximumTitleMatches) {
+                selectedIndex = -1;
+                rejection = "Player-dialog title lookup exceeded the bounded result count";
+                return 0;
+            }
+            return suppliedTitleMatches;
+        }
+
+        void observe(String packageName, String className, String text) {
+            if (rejection != null) return;
+            if (observedTitleMatches >= maximumTitleMatches) {
+                selectedIndex = -1;
+                rejection = "Player-dialog title lookup exceeded the bounded result count";
+                return;
+            }
+            int candidateIndex = observedTitleMatches++;
+            if (PRODUCT_PACKAGE.equals(packageName)
+                    && "android.app.Dialog".equals(className)
+                    && PLAYER_DIALOG_TITLE.equals(text)) {
+                exactDialogMatches++;
+                if (exactDialogMatches > 1) {
+                    selectedIndex = -1;
+                    rejection = "Multiple exact active player dialogs were exposed";
+                } else {
+                    selectedIndex = candidateIndex;
+                }
+            }
+        }
+
+        int selectedIndex() {
+            return rejection == null && exactDialogMatches == 1 ? selectedIndex : -1;
+        }
+
+        int observedTitleMatches() {
+            return observedTitleMatches;
+        }
+
+        int exactDialogMatches() {
+            return exactDialogMatches;
+        }
+
+        String rejection() {
+            return rejection;
         }
     }
 
@@ -763,8 +832,7 @@ public final class RuntimeTouchPlayerFlowTest {
             PlayerAxSnapshot snapshot = readPlayerAxSnapshot(true);
             long now = SystemClock.uptimeMillis();
             if (now >= nextSnapshot) {
-                recordNativePollSnapshot("first-decode", snapshot.activeDialogs,
-                        snapshot.pauseControls, snapshot.playControls, snapshot.seekBars, reveals);
+                recordNativePollSnapshot("first-decode", snapshot, reveals);
                 nextSnapshot = now + 2_000;
             }
             if (snapshot.pauseControls == 1 && hasCompleteCoreSnapshot(snapshot)) {
@@ -790,16 +858,14 @@ public final class RuntimeTouchPlayerFlowTest {
                         focused.focusedPauseControls == 1);
                 assertTrue("Fresh focused playing snapshot omitted a core control",
                         hasCompleteCoreSnapshot(focused));
-                recordNativePollSnapshot("pause-focused", focused.activeDialogs,
-                        focused.pauseControls, focused.playControls, focused.seekBars, reveals);
+                recordNativePollSnapshot("pause-focused", focused, reveals);
                 checks.put("initialSurfaceRevealUsed", reveals == 1);
                 checks.put("initialPlayingControlFocusVerified", true);
                 checks.put("initialPlayingStatePreservedAcrossFocus", true);
                 return focused;
             }
             if (now - started >= 2_000 && snapshot.playControls == 1) {
-                recordNativePollSnapshot("play-observed-before-pause", snapshot.activeDialogs,
-                        0, 1, snapshot.seekBars, reveals);
+                recordNativePollSnapshot("play-observed-before-pause", snapshot, reveals);
                 fail("Player exposed Play before a playing Pause state was observed");
             }
             int updatedReveals = now >= revealEligibleAt
@@ -813,8 +879,7 @@ public final class RuntimeTouchPlayerFlowTest {
             SystemClock.sleep(200);
         }
         PlayerAxSnapshot timeout = readPlayerAxSnapshot(false);
-        recordNativePollSnapshot("pause-timeout", timeout.activeDialogs,
-                timeout.pauseControls, timeout.playControls, timeout.seekBars, reveals);
+        recordNativePollSnapshot("pause-timeout", timeout, reveals);
         fail("Timed out waiting for playing touch-player control after " + reveals + " bounded surface reveals");
         return null;
     }
@@ -852,16 +917,14 @@ public final class RuntimeTouchPlayerFlowTest {
         int updatedReveals = reveals + 1;
         surfaceRevealCount++;
         log("Tapped the active player surface once while waiting for " + waitingFor);
-        recordNativePollSnapshot("surface-reveal", snapshot.activeDialogs,
-                0, 0, snapshot.seekBars, surfaceRevealCount);
+        recordNativePollSnapshot("surface-reveal", snapshot, surfaceRevealCount);
         SystemClock.sleep(250);
         return updatedReveals;
     }
 
     private void recordFailureNativeSnapshot() {
         PlayerAxSnapshot snapshot = readPlayerAxSnapshot(false);
-        recordNativePollSnapshot("failure", snapshot.activeDialogs,
-                snapshot.pauseControls, snapshot.playControls, snapshot.seekBars, surfaceRevealCount);
+        recordNativePollSnapshot("failure", snapshot, surfaceRevealCount);
         recordNativeRangeSnapshot(snapshot);
     }
 
@@ -880,16 +943,19 @@ public final class RuntimeTouchPlayerFlowTest {
                 snapshot.focusedPauseControls));
     }
 
-    private void recordNativePollSnapshot(
-            String stage, int dialogs, int pauses, int plays, int seekBars, int reveals) {
+    private void recordNativePollSnapshot(String stage, PlayerAxSnapshot snapshot, int reveals) {
         if (nativePollDiagnostics.size() >= MAX_NATIVE_POLL_SNAPSHOTS) {
             nativePollDiagnosticsTruncated = true;
             return;
         }
         nativePollDiagnostics.add(String.format(Locale.ROOT,
-                "elapsedMs=%d stage=%s activePlayerDialogs=%d pauseToggles=%d playToggles=%d playerSeekBars=%d reveals=%d display=%dx%d",
-                SystemClock.uptimeMillis() - startedAtMs, safe(stage), dialogs, pauses, plays, seekBars, reveals,
-                device.getDisplayWidth(), device.getDisplayHeight()));
+                "elapsedMs=%d stage=%s activePlayerDialogs=%d pauseToggles=%d playToggles=%d "
+                        + "playerSeekBars=%d reveals=%d titleMatches=%d visitedPlayerNodes=%d "
+                        + "axReadMs=%d display=%dx%d",
+                SystemClock.uptimeMillis() - startedAtMs, safe(stage), snapshot.activeDialogs,
+                snapshot.pauseControls, snapshot.playControls, snapshot.seekBars, reveals,
+                snapshot.playerDialogTitleMatches, snapshot.visitedPlayerNodes,
+                snapshot.readDurationMs, device.getDisplayWidth(), device.getDisplayHeight()));
     }
 
     private int waitForPlaybackPositionAtLeast(int minimum, long timeoutMs) {
@@ -1016,21 +1082,62 @@ public final class RuntimeTouchPlayerFlowTest {
     }
 
     private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus) {
+        long readStarted = SystemClock.uptimeMillis();
         refreshObservation();
-        AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
+        AccessibilityNodeInfo windowRoot = instrumentation.getUiAutomation().getRootInActiveWindow();
         PlayerAxSnapshot snapshot = new PlayerAxSnapshot();
-        if (root == null) return snapshot;
+        if (windowRoot == null) {
+            snapshot.readDurationMs = SystemClock.uptimeMillis() - readStarted;
+            return snapshot;
+        }
+
+        List<AccessibilityNodeInfo> titleMatches = null;
+        AccessibilityNodeInfo playerRoot = null;
+        try {
+            titleMatches = windowRoot.findAccessibilityNodeInfosByText(PLAYER_DIALOG_TITLE);
+            if (titleMatches == null) {
+                fail("Public player-dialog title lookup returned no result list");
+            }
+            snapshot.playerDialogTitleMatches = titleMatches.size();
+            ExactPlayerDialogSelector selector =
+                    new ExactPlayerDialogSelector(MAX_PLAYER_DIALOG_TITLE_MATCHES);
+            int inspectableTitleMatches = selector.beginBoundedSelection(titleMatches.size());
+            for (int index = 0; index < inspectableTitleMatches; index++) {
+                AccessibilityNodeInfo candidate = titleMatches.get(index);
+                selector.observe(
+                        String.valueOf(candidate.getPackageName()),
+                        String.valueOf(candidate.getClassName()),
+                        String.valueOf(candidate.getText()));
+            }
+            if (selector.rejection() != null) fail(selector.rejection());
+            assertEquals("Player-dialog selector did not account for every title result",
+                    titleMatches.size(), selector.observedTitleMatches());
+            snapshot.activeDialogs = selector.exactDialogMatches();
+            int selectedIndex = selector.selectedIndex();
+            if (selectedIndex < 0) {
+                snapshot.readDurationMs = SystemClock.uptimeMillis() - readStarted;
+                return snapshot;
+            }
+            playerRoot = AccessibilityNodeInfo.obtain(titleMatches.get(selectedIndex));
+        } finally {
+            if (titleMatches != null) {
+                for (AccessibilityNodeInfo node : titleMatches) node.recycle();
+            }
+            windowRoot.recycle();
+        }
+        assertNotNull("Exact player-dialog title result could not be retained", playerRoot);
+
         List<AccessibilityNodeInfo> pending = new ArrayList<>();
-        List<Boolean> pendingInsidePlayer = new ArrayList<>();
+        List<Integer> pendingDepths = new ArrayList<>();
         List<AccessibilityNodeInfo> pauseFocusCandidates = new ArrayList<>();
-        pending.add(root);
-        pendingInsidePlayer.add(false);
+        pending.add(playerRoot);
+        pendingDepths.add(0);
         int visited = 0;
         try {
             while (!pending.isEmpty() && visited < 2_048) {
                 int last = pending.size() - 1;
                 AccessibilityNodeInfo node = pending.remove(last);
-                boolean parentInsidePlayer = pendingInsidePlayer.remove(last);
+                int depth = pendingDepths.remove(last);
                 visited++;
                 try {
                     CharSequence packageName = node.getPackageName();
@@ -1038,28 +1145,30 @@ public final class RuntimeTouchPlayerFlowTest {
                     CharSequence text = node.getText();
                     CharSequence description = node.getContentDescription();
                     boolean exactPackage = PRODUCT_PACKAGE.equals(String.valueOf(packageName));
-                    boolean isPlayerDialog = exactPackage
-                            && "android.app.Dialog".equals(String.valueOf(className))
-                            && PLAYER_DIALOG_TITLE.equals(String.valueOf(text));
-                    if (isPlayerDialog) snapshot.activeDialogs++;
-                    boolean insidePlayer = parentInsidePlayer || isPlayerDialog;
-                    if (insidePlayer && !isPlayerDialog && exactPackage
+                    boolean isPlayerDialogRoot = depth == 0;
+                    if (isPlayerDialogRoot) {
+                        assertTrue("Selected player-dialog root changed exact identity",
+                                exactPackage
+                                        && "android.app.Dialog".equals(String.valueOf(className))
+                                        && PLAYER_DIALOG_TITLE.equals(String.valueOf(text)));
+                    }
+                    if (depth > 0 && exactPackage
                             && "android.app.Dialog".equals(String.valueOf(className))) {
                         snapshot.nestedDialogs++;
                     }
                     Rect bounds = new Rect();
                     node.getBoundsInScreen(bounds);
-                    if (isPlayerDialog) snapshot.playerDialogBounds = new Rect(bounds);
+                    if (isPlayerDialogRoot) snapshot.playerDialogBounds = new Rect(bounds);
                     String label = text == null ? "" : text.toString();
                     if (label.isEmpty() && description != null) label = description.toString();
-                    if (insidePlayer && exactPackage
+                    if (exactPackage
                             && isNativeActionableClass(String.valueOf(className))
                             && isBoundedNativeControl(bounds, node.isVisibleToUser(),
                                     node.isEnabled(), node.isClickable(),
                                     device.getDisplayWidth(), device.getDisplayHeight(), 1, 1)) {
                         snapshot.actionableBounds.add(new Rect(bounds));
                     }
-                    boolean boundedButton = insidePlayer && exactPackage
+                    boolean boundedButton = exactPackage
                             && isBoundedNativeControl(bounds, node.isVisibleToUser(),
                                     node.isEnabled(), node.isClickable(),
                                     device.getDisplayWidth(), device.getDisplayHeight(), 44, 44);
@@ -1086,7 +1195,7 @@ public final class RuntimeTouchPlayerFlowTest {
                     } else if (boundedButton && "Close player".equals(label)) {
                         snapshot.closeBounds = uniqueBounds(snapshot.closeBounds, bounds, label);
                     }
-                    if (insidePlayer && exactPackage
+                    if (exactPackage
                             && "android.widget.SeekBar".equals(String.valueOf(className))
                             && isBoundedNativeControl(bounds, node.isVisibleToUser(),
                                     node.isEnabled(), node.isClickable(),
@@ -1120,15 +1229,15 @@ public final class RuntimeTouchPlayerFlowTest {
                         AccessibilityNodeInfo child = node.getChild(index);
                         if (child != null) {
                             pending.add(child);
-                            pendingInsidePlayer.add(insidePlayer);
+                            pendingDepths.add(depth + 1);
                         }
                     }
                 } finally {
-                    if (node != root) node.recycle();
+                    node.recycle();
                 }
             }
-            if (!pending.isEmpty()) fail("Accessibility tree exceeded the bounded native scan");
-            assertTrue("Multiple exact active player dialogs were exposed", snapshot.activeDialogs <= 1);
+            if (!pending.isEmpty()) fail("Player dialog subtree exceeded the bounded native scan");
+            snapshot.visitedPlayerNodes = visited;
             assertTrue("Multiple exact Pause controls were exposed inside the active player",
                     snapshot.pauseControls <= 1);
             assertTrue("Multiple exact Play controls were exposed inside the active player",
@@ -1157,11 +1266,11 @@ public final class RuntimeTouchPlayerFlowTest {
                 snapshot.pauseFocusActionSucceeded = pauseFocusCandidates.get(0)
                         .performAction(AccessibilityNodeInfo.ACTION_FOCUS);
             }
+            snapshot.readDurationMs = SystemClock.uptimeMillis() - readStarted;
             return snapshot;
         } finally {
             for (AccessibilityNodeInfo node : pending) node.recycle();
             for (AccessibilityNodeInfo node : pauseFocusCandidates) node.recycle();
-            root.recycle();
         }
     }
 

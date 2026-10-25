@@ -231,6 +231,7 @@ const javac = configuredJavaHome ? join(configuredJavaHome, "bin", "javac") : "j
 const java = configuredJavaHome ? join(configuredJavaHome, "bin", "java") : "java";
 const strictSeekProbeCache = new Map();
 const stablePausedPositionProbeCache = new Map();
+const exactPlayerDialogSelectorProbeCache = new Map();
 
 function spawnDiagnostics(result) {
   return [result?.error?.stack ?? result?.error?.message, result?.stdout, result?.stderr]
@@ -400,6 +401,145 @@ ${gate}
     }
     const result = { sourceHash, compile, run };
     stablePausedPositionProbeCache.set(sourceHash, result);
+    return result;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function exactPlayerDialogSelectorProbe(source) {
+  const sourceHash = createHash("sha256").update(source).digest("hex");
+  if (exactPlayerDialogSelectorProbeCache.has(sourceHash)) {
+    return exactPlayerDialogSelectorProbeCache.get(sourceHash);
+  }
+  if (configuredJavaHome) {
+    assert.ok(existsSync(javac), `configured JAVA_HOME has no compiler: ${javac}`);
+    assert.ok(existsSync(java), `configured JAVA_HOME has no runtime: ${java}`);
+  }
+  const selector = exactSlice(
+    source,
+    "    private static final class ExactPlayerDialogSelector {",
+    "\n\n    private static final class StablePausedPositionGate {",
+  );
+  const probeSource = `public final class ExactPlayerDialogSelectorProbe {
+    private static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
+    private static final String PLAYER_DIALOG_TITLE = "Playing Synthetic Fixture Movie (2026)";
+${selector}
+    private static final class FakeNode {
+        final String packageName;
+        final String className;
+        final String text;
+        int identityReads;
+
+        FakeNode(String packageName, String className, String text) {
+            this.packageName = packageName;
+            this.className = className;
+            this.text = text;
+        }
+
+        String packageName() {
+            identityReads++;
+            return packageName;
+        }
+
+        String className() {
+            identityReads++;
+            return className;
+        }
+
+        String text() {
+            identityReads++;
+            return text;
+        }
+    }
+
+    private static ExactPlayerDialogSelector select(int maximum, FakeNode... nodes) {
+        ExactPlayerDialogSelector selector = new ExactPlayerDialogSelector(maximum);
+        int inspectable = selector.beginBoundedSelection(nodes.length);
+        for (int index = 0; index < inspectable; index++) {
+            FakeNode node = nodes[index];
+            selector.observe(node.packageName(), node.className(), node.text());
+        }
+        return selector;
+    }
+
+    private static void expect(boolean condition, String message) {
+        if (!condition) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        FakeNode exact = new FakeNode(
+                PRODUCT_PACKAGE, "android.app.Dialog", PLAYER_DIALOG_TITLE);
+        ExactPlayerDialogSelector selected = select(8,
+                new FakeNode(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE),
+                new FakeNode("other.package", "android.app.Dialog", PLAYER_DIALOG_TITLE),
+                new FakeNode(PRODUCT_PACKAGE, "android.app.Dialog", "prefix " + PLAYER_DIALOG_TITLE),
+                exact);
+        expect(selected.rejection() == null, "unique exact dialog rejected");
+        expect(selected.selectedIndex() == 3, "wrong exact dialog index");
+        expect(selected.exactDialogMatches() == 1, "wrong exact dialog count");
+        expect(selected.observedTitleMatches() == 4, "not every title candidate was observed");
+
+        ExactPlayerDialogSelector duplicate = select(8, exact, exact);
+        expect(duplicate.rejection() != null, "duplicate exact dialogs admitted");
+        expect(duplicate.selectedIndex() == -1, "duplicate retained a selected dialog");
+
+        FakeNode overOne = new FakeNode(
+                PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE);
+        FakeNode overTwo = new FakeNode(
+                PRODUCT_PACKAGE, "android.app.Dialog", PLAYER_DIALOG_TITLE);
+        FakeNode overThree = new FakeNode(
+                PRODUCT_PACKAGE, "android.widget.TextView", PLAYER_DIALOG_TITLE);
+        ExactPlayerDialogSelector bounded = select(2, overOne, overTwo, overThree);
+        expect(bounded.rejection() != null, "excess title lookup results admitted");
+        expect(bounded.selectedIndex() == -1, "excess lookup retained a selected dialog");
+        expect(overOne.identityReads + overTwo.identityReads + overThree.identityReads == 0,
+                "over-limit title nodes were inspected");
+
+        ExactPlayerDialogSelector defensiveBound = new ExactPlayerDialogSelector(2);
+        defensiveBound.observe(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE);
+        defensiveBound.observe(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE);
+        defensiveBound.observe(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE);
+        expect(defensiveBound.rejection() != null, "direct observations bypassed selector bound");
+
+        ExactPlayerDialogSelector exactBound = select(2,
+                new FakeNode(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE), exact);
+        expect(exactBound.rejection() == null, "exact result bound rejected");
+        expect(exactBound.selectedIndex() == 1, "exact result bound lost selection");
+
+        ExactPlayerDialogSelector absent = select(8,
+                new FakeNode(PRODUCT_PACKAGE, "android.app.Dialog", PLAYER_DIALOG_TITLE + " ended"));
+        expect(absent.rejection() == null, "nonexact containment result caused rejection");
+        expect(absent.selectedIndex() == -1, "containment result was treated as exact");
+        expect(absent.exactDialogMatches() == 0, "containment result incremented exact count");
+
+        boolean invalidBoundRejected = false;
+        try {
+            new ExactPlayerDialogSelector(0);
+        } catch (IllegalArgumentException expected) {
+            invalidBoundRejected = true;
+        }
+        expect(invalidBoundRejected, "zero lookup bound admitted");
+    }
+}`;
+  const directory = mkdtempSync(join(tmpdir(), "yawf-exact-player-dialog-selector-"));
+  try {
+    const file = join(directory, "ExactPlayerDialogSelectorProbe.java");
+    writeFileSync(file, probeSource);
+    const compile = spawnSync(javac, ["-encoding", "UTF-8", "-d", directory, file], {
+      encoding: "utf8",
+    });
+    assert.equal(compile.error, undefined,
+      `required javac is unavailable (${javac})\n${spawnDiagnostics(compile)}`);
+    const run = compile.status === 0
+      ? spawnSync(java, ["-cp", directory, "ExactPlayerDialogSelectorProbe"], { encoding: "utf8" })
+      : null;
+    if (run != null) {
+      assert.equal(run.error, undefined,
+        `required java runtime is unavailable (${java})\n${spawnDiagnostics(run)}`);
+    }
+    const result = { sourceHash, compile, run };
+    exactPlayerDialogSelectorProbeCache.set(sourceHash, result);
     return result;
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -914,6 +1054,93 @@ test("initial playing choreography reuses one native snapshot and lowers paused 
   assert.doesNotMatch(lower, /evaluateJavascript|executeShellCommand|setText/);
 });
 
+test("exact Java player-dialog selector executes fake-node identity, uniqueness, and lookup bounds", () => {
+  const accepted = exactPlayerDialogSelectorProbe(driver);
+  assert.equal(accepted.compile.status, 0,
+    `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
+  assert.equal(accepted.run.status, 0, `${accepted.run.stdout}\n${accepted.run.stderr}`);
+
+  const mutants = [
+    exactMutation(driver, "PRODUCT_PACKAGE.equals(packageName)", "true"),
+    exactMutation(driver, '"android.app.Dialog".equals(className)', "true"),
+    exactMutation(driver, "PLAYER_DIALOG_TITLE.equals(text)", "text.contains(PLAYER_DIALOG_TITLE)"),
+    exactMutation(driver, "exactDialogMatches > 1", "exactDialogMatches > 2"),
+    exactMutation(
+      driver,
+      "observedTitleMatches >= maximumTitleMatches",
+      "observedTitleMatches > maximumTitleMatches",
+    ),
+    exactMutation(
+      driver,
+      "suppliedTitleMatches > maximumTitleMatches",
+      "suppliedTitleMatches > maximumTitleMatches + 1",
+    ),
+  ];
+  for (const mutant of mutants) {
+    const rejected = exactPlayerDialogSelectorProbe(mutant);
+    assert.equal(rejected.compile.status, 0,
+      `${rejected.compile.stdout}\n${rejected.compile.stderr}`);
+    assert.notEqual(rejected.run.status, 0,
+      "mutated exact Java player-dialog selector unexpectedly satisfied the fake-node oracle");
+  }
+
+  const reader = exactSlice(
+    driver,
+    "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
+    "\n    private Rect uniqueBounds(",
+  );
+  assert.match(reader, /windowRoot\.findAccessibilityNodeInfosByText\(PLAYER_DIALOG_TITLE\)/);
+  assert.match(reader,
+    /new ExactPlayerDialogSelector\(MAX_PLAYER_DIALOG_TITLE_MATCHES\)/);
+  assert.match(reader, /AccessibilityNodeInfo\.obtain\(titleMatches\.get\(selectedIndex\)\)/);
+  assert.match(reader, /pending\.add\(playerRoot\)/);
+  assert.doesNotMatch(reader, /pending\.add\(windowRoot\)|pendingInsidePlayer/);
+  assert.match(reader, /if \(!pending\.isEmpty\(\)\) fail\("Player dialog subtree exceeded the bounded native scan"\)/);
+  assert.match(reader, /for \(AccessibilityNodeInfo node : titleMatches\) node\.recycle\(\)/);
+  assert.match(reader, /windowRoot\.recycle\(\)/);
+  assert.match(reader, /finally \{\s*node\.recycle\(\);\s*\}/);
+  assert.match(reader, /for \(AccessibilityNodeInfo node : pending\) node\.recycle\(\)/);
+  assert.match(reader, /snapshot\.nestedDialogs\+\+/);
+  assert.match(reader, /Multiple exact Pause controls were exposed inside the active player/);
+  assert.match(reader, /Multiple exact Play controls were exposed inside the active player/);
+  assert.match(reader, /Multiple strict semantic SeekBars were exposed inside the active player/);
+  assert.match(reader, /Active player exposed both Play and Pause/);
+  assert.match(reader, /snapshot\.pauseFocusActionSucceeded = pauseFocusCandidates\.get\(0\)\s*\.performAction\(AccessibilityNodeInfo\.ACTION_FOCUS\)/);
+  assert.doesNotMatch(reader, /device\.findObjects|UiObject2|evaluateJavascript|executeShellCommand/);
+
+  assert.equal(javaIntConstant("MAX_PLAYER_DIALOG_TITLE_MATCHES"), 32);
+  assert.match(driver,
+    /titleMatches=%d visitedPlayerNodes=%d "\s*\+ "axReadMs=%d/);
+});
+
+test("bounded exact Java dialog selection inspects zero over-limit node identities", () => {
+  const accepted = exactPlayerDialogSelectorProbe(driver);
+  assert.equal(accepted.compile.status, 0,
+    `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
+  assert.equal(accepted.run.status, 0, `${accepted.run.stdout}\n${accepted.run.stderr}`);
+
+  const selector = exactSlice(
+    driver,
+    "    private static final class ExactPlayerDialogSelector {",
+    "\n\n    private static final class StablePausedPositionGate {",
+  );
+  assert.match(selector,
+    /if \(suppliedTitleMatches > maximumTitleMatches\) \{\s*selectedIndex = -1;\s*rejection = "Player-dialog title lookup exceeded the bounded result count";\s*return 0;/);
+
+  const reader = exactSlice(
+    driver,
+    "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
+    "\n    private Rect uniqueBounds(",
+  );
+  const boundAt = reader.indexOf(
+    "int inspectableTitleMatches = selector.beginBoundedSelection(titleMatches.size())");
+  const propertyReadAt = reader.indexOf("candidate.getPackageName()");
+  assert.ok(boundAt >= 0 && propertyReadAt > boundAt,
+    "the result-count gate must run before any candidate identity property read");
+  assert.match(reader, /for \(int index = 0; index < inspectableTitleMatches; index\+\+\)/);
+  assert.match(reader, /finally \{\s*if \(titleMatches != null\) \{\s*for \(AccessibilityNodeInfo node : titleMatches\) node\.recycle\(\)/);
+});
+
 test("active-player AX selection executes run4 shapes and rejects identity and range mutants", () => {
   assert.ok(driver.includes('private static final String PLAYER_DIALOG_TITLE = "Playing Synthetic Fixture Movie (2026)";'),
     "driver must bind controls to the exact active fixture-player dialog");
@@ -1353,7 +1580,15 @@ test("selected-audio receipt binding follows the product's shared integer-second
 test("driver disables animated idle waits and refreshes public accessibility observations", () => {
   assert.match(driver, /Configurator\.getInstance\(\)\.setWaitForIdleTimeout\(0\)/);
   assert.match(driver, /private void refreshObservation\(\) \{\s*instrumentation\.getUiAutomation\(\)\.clearCache\(\)/);
-  assert.match(driver, /private PlayerAxSnapshot readPlayerAxSnapshot\(boolean requestPlayingPauseFocus\) \{\s*refreshObservation\(\)/);
+  const snapshotReader = exactSlice(
+    driver,
+    "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
+    "\n    private Rect uniqueBounds(",
+  );
+  assert.ok(snapshotReader.indexOf("long readStarted = SystemClock.uptimeMillis()")
+    < snapshotReader.indexOf("refreshObservation()"));
+  assert.ok(snapshotReader.indexOf("refreshObservation()")
+    < snapshotReader.indexOf("getRootInActiveWindow()"));
   assert.match(driver, /private void capture\(String label\) throws IOException \{\s*refreshObservation\(\)/);
   assert.doesNotMatch(driver, /executeShellCommand|java\.lang\.reflect|setAccessible\(/);
 });
