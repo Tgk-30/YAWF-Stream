@@ -278,15 +278,23 @@ test("dispatch is opt-in and mutually excludes every older runtime route", () =>
 });
 
 test("touch job binds the exact immutable host and exact hosted UI without inventing version code", () => {
-  assert.match(job, /PRODUCT_SHA256: 2b458f8bc5584b53ecbeb9fba932593dd51a648d209d49688803fa3e5b014200/);
-  assert.match(job, /PRODUCT_SOURCE: 679534f91359d9e4b12a64cc45bbe3ae580d7f61/);
+  assert.match(job, /PRODUCT_APK: verified-phone-candidate\/YAWF\.Stream_Android_2\.3\.59\.apk/);
+  assert.match(job, /PRODUCT_SHA256: e6ae8fba123ba22b4de89c5d4d198c301b2f3334dfbf065f74e4011b5a4aa41c/);
+  assert.match(job, /PRODUCT_SOURCE: ac6235afd5a7c034184b50300b8dc38bfdac1b4c/);
   assert.match(job, /PRODUCT_SIGNER_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a/);
-  assert.match(job, /TOUCH_UI_SOURCE: a5ec866a6cbc9af3b0865a49845b7ad4cc9c9520/);
-  assert.match(job, /PRODUCT_VERSION: 2\.3\.58/);
+  assert.match(job, /TOUCH_UI_SOURCE: ac6235afd5a7c034184b50300b8dc38bfdac1b4c/);
+  assert.match(job, /PRODUCT_VERSION: 2\.3\.59/);
   assert.match(job, /TOUCH_UI_VERSION: 2\.3\.59/);
   assert.doesNotMatch(job, /PRODUCT_VERSION_CODE:\s*["']?[0-9]/);
   assert.match(job, /actual_version_code="\$\(apkanalyzer manifest version-code/);
   assert.match(job, /versionCodeSource.*apkanalyzer-from-immutable-apk/);
+  assert.match(job, /actions\/download-artifact@v4/);
+  assert.match(job, /artifact-ids: 12588415686/);
+  assert.match(job, /run-id: 40164716441/);
+  assert.match(job, /merge-multiple: true/);
+  assert.match(job, /nativeProducerRunId=40164716441/);
+  assert.match(job, /nativeArtifactId=12588415686/);
+  assert.doesNotMatch(job, /PRODUCT_URL|curl .*YAWF\.Stream/);
 });
 
 test("touch job is one fresh API36 x86_64 KVM AVD with fail-closed preinstall gates", () => {

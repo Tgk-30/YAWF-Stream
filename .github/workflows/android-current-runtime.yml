@@ -14,7 +14,7 @@ on:
         required: true
         default: false
       touch_player_fixture:
-        description: Test the shared touch player with the immutable public phone58 host and exact phone59 web UI fixture
+        description: Test the shared touch player with the immutable signed phone59 candidate and exact phone59 web UI fixture
         type: boolean
         required: true
         default: false
@@ -1035,18 +1035,17 @@ jobs:
 
   touch-player-fixture:
     if: github.ref_type == 'branch' && inputs.touch_player_fixture == true && inputs.permission_fixture != true && inputs.external_player_fixture != true
-    name: Public phone58 host with exact phone59 touch UI on fresh API36
+    name: Signed phone59 candidate with exact phone59 touch UI on fresh API36
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       EVIDENCE: android-touch-player-evidence
-      PRODUCT_APK: YAWF.Stream_Android_2.3.58.apk
-      PRODUCT_URL: https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.58-web/YAWF.Stream_Android_2.3.58.apk
-      PRODUCT_SHA256: 2b458f8bc5584b53ecbeb9fba932593dd51a648d209d49688803fa3e5b014200
-      PRODUCT_SOURCE: 679534f91359d9e4b12a64cc45bbe3ae580d7f61
-      PRODUCT_VERSION: 2.3.58
+      PRODUCT_APK: verified-phone-candidate/YAWF.Stream_Android_2.3.59.apk
+      PRODUCT_SHA256: e6ae8fba123ba22b4de89c5d4d198c301b2f3334dfbf065f74e4011b5a4aa41c
+      PRODUCT_SOURCE: ac6235afd5a7c034184b50300b8dc38bfdac1b4c
+      PRODUCT_VERSION: 2.3.59
       PRODUCT_SIGNER_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a
-      TOUCH_UI_SOURCE: a5ec866a6cbc9af3b0865a49845b7ad4cc9c9520
+      TOUCH_UI_SOURCE: ac6235afd5a7c034184b50300b8dc38bfdac1b4c
       TOUCH_UI_VERSION: 2.3.59
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       EMULATOR_SERIAL: emulator-5554
@@ -1060,11 +1059,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Checkout immutable public host verification source
+      - name: Checkout immutable signed59 native host verification source
         uses: actions/checkout@v4
         with:
           ref: ${{ env.PRODUCT_SOURCE }}
-          path: public-host-source
+          path: native-host-source
           persist-credentials: false
 
       - name: Checkout exact touch UI and server source
@@ -1074,28 +1073,37 @@ jobs:
           path: touch-ui-source
           persist-credentials: false
 
-      - name: Bind sources and download immutable public host
+      - name: Download exact signed59 candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: 12588415686
+          run-id: 40164716441
+          github-token: ${{ github.token }}
+          path: verified-phone-candidate
+          merge-multiple: true
+
+      - name: Bind sources and verify immutable signed59 native host
         shell: bash
         run: |
           set -euo pipefail
           umask 077
           mkdir -p "$EVIDENCE"
-          test "$(git -C public-host-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
+          test "$(git -C native-host-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
           test "$(git -C touch-ui-source rev-parse HEAD)" = "$TOUCH_UI_SOURCE"
           test "$(node -p "require('./touch-ui-source/web/package.json').version")" = "$TOUCH_UI_VERSION"
-          test -z "$(git -C public-host-source status --porcelain)"
+          test -z "$(git -C native-host-source status --porcelain)"
           test -z "$(git -C touch-ui-source status --porcelain)"
-          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 180 \
-            "$PRODUCT_URL" --output "$PRODUCT_APK"
           printf '%s  %s\n' "$PRODUCT_SHA256" "$PRODUCT_APK" | sha256sum --check -
           product_bytes="$(wc -c < "$PRODUCT_APK" | tr -d ' ')"
           test "$product_bytes" -gt 1000000
           test "$product_bytes" -lt 200000000
           {
             echo "harnessRevision=$(git rev-parse HEAD)"
-            echo "publicHostSource=$PRODUCT_SOURCE"
-            echo "publicHostSha256=$PRODUCT_SHA256"
-            echo "publicHostVersion=$PRODUCT_VERSION"
+            echo "nativeHostSource=$PRODUCT_SOURCE"
+            echo "nativeHostSha256=$PRODUCT_SHA256"
+            echo "nativeHostVersion=$PRODUCT_VERSION"
+            echo "nativeProducerRunId=40164716441"
+            echo "nativeArtifactId=12588415686"
             echo "touchUiSource=$TOUCH_UI_SOURCE"
             echo "touchUiVersion=$TOUCH_UI_VERSION"
             echo "twoSourceBoundary=immutable-native-host-plus-exact-hosted-web-ui"
@@ -1157,7 +1165,7 @@ jobs:
             echo "$sdk/platform-tools"
           } >> "$GITHUB_PATH"
 
-      - name: Verify exact APK identity, actual version code, and public signer
+      - name: Verify exact APK identity, actual version code, and signed59 signer
         shell: bash
         run: |
           set -euo pipefail
@@ -1166,14 +1174,14 @@ jobs:
           actual_version_code="$(apkanalyzer manifest version-code "$PRODUCT_APK")"
           test "$actual_version" = "$PRODUCT_VERSION"
           [[ "$actual_version_code" =~ ^[1-9][0-9]{0,9}$ ]]
-          source_pin="$(tr '[:upper:]' '[:lower:]' < public-host-source/web/src-tauri/SIGNING_CERT_SHA256 | tr -d '[:space:]')"
+          source_pin="$(tr '[:upper:]' '[:lower:]' < native-host-source/web/src-tauri/SIGNING_CERT_SHA256 | tr -d '[:space:]')"
           test "$source_pin" = "$PRODUCT_SIGNER_SHA256"
           apksigner verify --print-certs "$PRODUCT_APK" > "$EVIDENCE/apk-signer.txt" 2>&1
           actual_signer="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/apk-signer.txt")"
           test "$actual_signer" = "$PRODUCT_SIGNER_SHA256"
-          python3 public-host-source/scripts/verify_android_apk.py \
+          python3 native-host-source/scripts/verify_android_apk.py \
             --apk "$PRODUCT_APK" --version "$PRODUCT_VERSION" \
-            --certificate-pin public-host-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --certificate-pin native-host-source/web/src-tauri/SIGNING_CERT_SHA256 \
             --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" | tee "$EVIDENCE/apk-verification.txt"
           python3 - "$EVIDENCE/product-admission.json" "$actual_version" "$actual_version_code" "$actual_signer" <<'PY'
           import json,sys
