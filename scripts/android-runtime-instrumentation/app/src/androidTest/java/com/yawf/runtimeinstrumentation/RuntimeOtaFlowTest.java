@@ -897,15 +897,17 @@ public final class RuntimeOtaFlowTest {
 
         openSettingsFromProductNavigation();
         selectFixed42SettingsCategory("Appearance", "Choose a style");
+        captureFixed42Appearance("fixed42-appearance-anchor");
         waitForFixed42AppearanceSummary("Midnight Studio");
-        UiObject2 quiet = scrollUntilVisibleExactProduct(
+        UiObject2 quiet = scrollUntilVisibleExactProductWithFirstScrollObservation(
                 By.desc(AUTOMATIC_APPEARANCE)
                         .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
                         .clazz("android.widget.ToggleButton")
                         .clickable(true)
                         .enabled(true),
                 "exact Quiet focus ToggleButton",
-                Direction.DOWN);
+                Direction.DOWN,
+                "fixed42-appearance-after-first-scroll");
         assertNoBindingTerms();
         quiet.click();
         waitForFixed42AppearanceSummary(FIXED42_APPEARANCE_SUMMARY);
@@ -1835,7 +1837,16 @@ public final class RuntimeOtaFlowTest {
     }
 
     private UiObject2 scrollUntilVisibleExactProduct(
-            BySelector selector, String label, Direction direction) {
+            BySelector selector, String label, Direction direction) throws IOException {
+        return scrollUntilVisibleExactProductWithFirstScrollObservation(
+                selector, label, direction, null);
+    }
+
+    private UiObject2 scrollUntilVisibleExactProductWithFirstScrollObservation(
+            BySelector selector,
+            String label,
+            Direction direction,
+            String firstScrollCaptureLabel) throws IOException {
         for (int attempt = 0; attempt < 12; attempt++) {
             UiObject2 found = device.findObject(selector);
             if (found != null && isVisibleAboveBottomNavigation(found)) {
@@ -1851,6 +1862,9 @@ public final class RuntimeOtaFlowTest {
             log("Performed bounded Settings scroll gesture while seeking exact " + label
                     + "; canStillScroll=" + canStillScroll);
             device.waitForIdle(750);
+            if (attempt == 0 && firstScrollCaptureLabel != null) {
+                captureFixed42Appearance(firstScrollCaptureLabel);
+            }
         }
         fail("Could not place exact " + label + " above bottom navigation");
         return null;
@@ -2520,6 +2534,16 @@ public final class RuntimeOtaFlowTest {
         } finally {
             configurator.setWaitForIdleTimeout(previous);
         }
+    }
+
+    private void captureFixed42Appearance(String label) throws IOException {
+        assertTrue("Appearance observation is restricted to the fixed42 profile",
+                isFixed42AutomaticMode());
+        assertTrue("Fixed42 Appearance cache refresh requires API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        assertTrue("Fixed42 Appearance accessibility cache refresh failed",
+                instrumentation.getUiAutomation().clearCache());
+        capture(label);
     }
 
     private void capture(String label) throws IOException {

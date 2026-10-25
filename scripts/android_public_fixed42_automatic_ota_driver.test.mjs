@@ -137,6 +137,86 @@ function fixedDataContract(java) {
   need(seed, 'waitForFixed42DialogSemantic(\n                detailDialogIdentity, "In watchlist"', "watchlist result identity is absent");
 }
 
+function fixedAppearanceAnchorObservationContract(java) {
+  const seed = methodBody(java, "seedFixed42MeaningfulLocalState");
+  const orderedObservation = /selectFixed42SettingsCategory\("Appearance", "Choose a style"\);\s*captureFixed42Appearance\("fixed42-appearance-anchor"\);\s*waitForFixed42AppearanceSummary\("Midnight Studio"\);/;
+  assert.match(seed, orderedObservation,
+    "fixed42 Appearance must be captured immediately after its admitted content anchor");
+  assert.equal(
+    (java.match(/captureFixed42Appearance\("fixed42-appearance-anchor"\)/g) ?? []).length,
+    1,
+    "fixed42 Appearance anchor observation must be captured exactly once",
+  );
+  const capture = seed.indexOf('captureFixed42Appearance("fixed42-appearance-anchor")');
+  const selectorSearch = seed.indexOf("scrollUntilVisibleExactProductWithFirstScrollObservation(");
+  assert.ok(capture >= 0 && capture < selectorSearch,
+    "fixed42 Appearance anchor observation must precede the unproven widget search");
+}
+
+function fixedAppearanceFirstScrollObservationContract(java) {
+  const seed = methodBody(java, "seedFixed42MeaningfulLocalState");
+  need(seed, "scrollUntilVisibleExactProductWithFirstScrollObservation(",
+    "fixed42 Appearance did not request the bounded first-scroll observation");
+  need(seed, '"fixed42-appearance-after-first-scroll"',
+    "fixed42 Appearance first-scroll observation label is missing");
+  assert.equal(
+    (java.match(/"fixed42-appearance-after-first-scroll"/g) ?? []).length,
+    1,
+    "fixed42 Appearance first-scroll observation may be requested only once",
+  );
+
+  const helper = methodBody(java, "scrollUntilVisibleExactProductWithFirstScrollObservation");
+  need(helper, "for (int attempt = 0; attempt < 12; attempt++)",
+    "bounded exact-product search changed its scroll-attempt cap");
+  assert.equal((helper.match(/scrollable\.scroll\(direction, 0\.75f\)/g) ?? []).length, 1,
+    "observation helper must retain one normal scroll operation per attempt");
+  assert.equal(helper.includes("device.swipe("), false,
+    "observation helper added a non-normal scroll input");
+  assert.equal(helper.includes(".click()"), false,
+    "observation helper added a click");
+  const scroll = helper.indexOf("scrollable.scroll(direction, 0.75f)");
+  const settled = helper.indexOf("device.waitForIdle(750)", scroll);
+  const cap = helper.indexOf("if (attempt == 0 && firstScrollCaptureLabel != null)", settled);
+  const capture = helper.indexOf("captureFixed42Appearance(firstScrollCaptureLabel)", cap);
+  assert.ok(scroll >= 0 && scroll < settled && settled < cap && cap < capture,
+    "first-scroll observation must follow the first normal settled scroll");
+  assert.equal((helper.match(/captureFixed42Appearance\(firstScrollCaptureLabel\)/g) ?? []).length, 1,
+    "first-scroll observation helper has more than one capture site");
+
+  const defaultHelper = methodBody(java, "scrollUntilVisibleExactProduct");
+  need(defaultHelper, "selector, label, direction, null",
+    "ordinary exact-product searches must opt out of the diagnostic observation");
+}
+
+function fixedAppearanceFreshCacheContract(java) {
+  const wrapper = methodBody(java, "captureFixed42Appearance");
+  for (const token of [
+    "isFixed42AutomaticMode()",
+    "Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE",
+    "instrumentation.getUiAutomation().clearCache()",
+    "capture(label)",
+  ]) need(wrapper, token, `fresh fixed42 Appearance capture lost ${token}`);
+  assert.match(
+    wrapper,
+    /assertTrue\("Fixed42 Appearance accessibility cache refresh failed",\s*instrumentation\.getUiAutomation\(\)\.clearCache\(\)\);\s*capture\(label\);/,
+    "successful accessibility cache refresh must immediately precede fixed42 Appearance capture",
+  );
+  assert.equal((wrapper.match(/clearCache\(\)/g) ?? []).length, 1,
+    "fixed42 Appearance wrapper must perform exactly one cache refresh per capture");
+  assert.equal((wrapper.match(/capture\(label\)/g) ?? []).length, 1,
+    "fixed42 Appearance wrapper must delegate exactly one capture");
+  for (const forbidden of [".click()", "device.swipe(", ".scroll(", "device.press", ".setText("]) {
+    assert.equal(wrapper.includes(forbidden), false,
+      `fixed42 Appearance observation wrapper added input ${forbidden}`);
+  }
+  assert.equal(methodBody(java, "capture").includes("clearCache()"), false,
+    "global capture semantics changed instead of using the fixed42-only wrapper");
+  assert.equal((java.match(/captureFixed42Appearance\(/g) ?? []).length, 3,
+    "fixed42 Appearance wrapper must have exactly two call sites and one declaration");
+  assert.equal((java.match(/capture\("fixed42-appearance/g) ?? []).length, 0,
+    "an Appearance observation bypasses the fresh-cache wrapper");
+}
+
 function postInstallContract(body) {
   for (const token of [
     'selectFixed42SettingsCategory("Help & updates", "Android APK updates")',
@@ -211,6 +291,61 @@ test("fixed baseline42 source-derived selector candidates fail closed and remain
   assert.throws(() => fixedDataContract(invalidProfile));
   const receipt = methodBody(source, "writeReceipt");
   need(receipt, 'receipt.put("profileNamePostInstallSetTextActions",', "receipt omits postinstall write count");
+});
+
+test("fixed42 captures the fresh Appearance viewport immediately after its admitted anchor", () => {
+  fixedAppearanceAnchorObservationContract(source);
+  const removed = source.replace('        captureFixed42Appearance("fixed42-appearance-anchor");\n', "");
+  assert.notEqual(removed, source, "Appearance anchor observation mutant anchor was absent");
+  assert.throws(() => fixedAppearanceAnchorObservationContract(removed));
+
+  const moved = source.replace(
+    '        captureFixed42Appearance("fixed42-appearance-anchor");\n        waitForFixed42AppearanceSummary("Midnight Studio");',
+    '        waitForFixed42AppearanceSummary("Midnight Studio");\n        captureFixed42Appearance("fixed42-appearance-anchor");',
+  );
+  assert.notEqual(moved, source, "late Appearance observation mutant anchor was absent");
+  assert.throws(() => fixedAppearanceAnchorObservationContract(moved));
+});
+
+test("fixed42 captures at most one settled observation after the first normal Appearance scroll", () => {
+  fixedAppearanceFirstScrollObservationContract(source);
+  const uncapped = source.replace(
+    "if (attempt == 0 && firstScrollCaptureLabel != null)",
+    "if (attempt >= 0 && firstScrollCaptureLabel != null)",
+  );
+  assert.notEqual(uncapped, source, "uncapped first-scroll observation mutant anchor was absent");
+  assert.throws(() => fixedAppearanceFirstScrollObservationContract(uncapped));
+
+  const extraScroll = source.replace(
+    "device.waitForIdle(750);\n            if (attempt == 0 && firstScrollCaptureLabel != null)",
+    "device.waitForIdle(750);\n            scrollable.scroll(direction, 0.75f);\n            if (attempt == 0 && firstScrollCaptureLabel != null)",
+  );
+  assert.notEqual(extraScroll, source, "extra diagnostic scroll mutant anchor was absent");
+  assert.throws(() => fixedAppearanceFirstScrollObservationContract(extraScroll));
+});
+
+test("fixed42 refreshes the API 34 accessibility cache before each observation without input", () => {
+  fixedAppearanceFreshCacheContract(source);
+  const lateRefresh = source.replace(
+    '        assertTrue("Fixed42 Appearance accessibility cache refresh failed",\n                instrumentation.getUiAutomation().clearCache());\n        capture(label);',
+    '        capture(label);\n        assertTrue("Fixed42 Appearance accessibility cache refresh failed",\n                instrumentation.getUiAutomation().clearCache());',
+  );
+  assert.notEqual(lateRefresh, source, "late cache-refresh mutant anchor was absent");
+  assert.throws(() => fixedAppearanceFreshCacheContract(lateRefresh));
+
+  const unassertedRefresh = source.replace(
+    '        assertTrue("Fixed42 Appearance accessibility cache refresh failed",\n                instrumentation.getUiAutomation().clearCache());',
+    "        instrumentation.getUiAutomation().clearCache();",
+  );
+  assert.notEqual(unassertedRefresh, source, "unasserted cache-refresh mutant anchor was absent");
+  assert.throws(() => fixedAppearanceFreshCacheContract(unassertedRefresh));
+
+  const inputMutant = source.replace(
+    "        capture(label);\n    }\n\n    private void capture(String label)",
+    "        device.pressBack();\n        capture(label);\n    }\n\n    private void capture(String label)",
+  );
+  assert.notEqual(inputMutant, source, "observation input mutant anchor was absent");
+  assert.throws(() => fixedAppearanceFreshCacheContract(inputMutant));
 });
 
 test("automatic offer comes from a distinct launcher return with no pre-offer manual discovery", () => {
