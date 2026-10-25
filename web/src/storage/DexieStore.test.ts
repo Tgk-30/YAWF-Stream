@@ -284,6 +284,51 @@ describe("watch history", () => {
     expect(resume?.playbackSpeed).toBe(1.5);
   });
 
+  it("clears explicit null playback preferences but preserves omitted ones", async () => {
+    await db.recordHistory({
+      mediaId: "tt-clear",
+      preview: preview("tt-clear"),
+      preferredAudioId: "2",
+      preferredAudioLang: "jpn",
+      preferredSubId: "7",
+      playbackSpeed: 1.5,
+      subtitleDelay: -0.4,
+      subtitlePosition: 82,
+    });
+    await db.recordHistory({
+      mediaId: "tt-clear",
+      preview: preview("tt-clear"),
+      progressSeconds: 10,
+    });
+    expect(await db.getResume("tt-clear")).toMatchObject({
+      preferredAudioId: "2",
+      preferredAudioLang: "jpn",
+      preferredSubId: "7",
+      playbackSpeed: 1.5,
+      subtitleDelay: -0.4,
+      subtitlePosition: 82,
+    });
+
+    await db.recordHistory({
+      mediaId: "tt-clear",
+      preview: preview("tt-clear"),
+      preferredAudioId: null,
+      preferredAudioLang: null,
+      preferredSubId: null,
+      playbackSpeed: null,
+      subtitleDelay: null,
+      subtitlePosition: null,
+    });
+    expect(await db.getResume("tt-clear")).toMatchObject({
+      preferredAudioId: null,
+      preferredAudioLang: null,
+      preferredSubId: null,
+      playbackSpeed: null,
+      subtitleDelay: null,
+      subtitlePosition: null,
+    });
+  });
+
   it("getResume returns the (media, episode) row", async () => {
     await db.recordHistory({
       mediaId: "tt1",

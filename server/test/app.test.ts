@@ -1356,6 +1356,324 @@ describe("DebridStreamer server", () => {
     expect(bobHist.items[0]).toMatchObject({ progressSeconds: 90, completed: true });
   });
 
+  it("round-trips six playback preferences per profile, media, and episode", async () => {
+    const owner = await setupOwner(app);
+    await createProfile(owner, "prefs-member", "prefs-password");
+    const member = await login(app, "prefs-member", "prefs-password");
+    const preview = { id: "series-prefs", type: "series", title: "Preferences" };
+    const preferences = {
+      preferredAudioId: "audio-jpn",
+      preferredAudioLang: "jpn",
+      preferredSubId: "sub-eng",
+      playbackSpeed: 1.5,
+      subtitleDelay: -0.4,
+      subtitlePosition: 82,
+    };
+    const save = (client: TestClient, episodeId: string, payload: Record<string, unknown>) =>
+      request(client, {
+        method: "PUT",
+        url: "/api/history/series-prefs",
+        csrf: true,
+        payload: {
+          episodeId,
+          progressSeconds: 30,
+          durationSeconds: 300,
+          completed: false,
+          preview,
+          ...payload,
+        },
+      });
+
+    const initial = await save(owner, "s1e1", preferences);
+    expect(initial.statusCode, initial.body).toBe(200);
+    expect(json<{ item: Record<string, unknown> }>(initial).item).toMatchObject(preferences);
+
+    const progressOnly = await save(owner, "s1e1", { progressSeconds: 60 });
+    expect(json<{ item: Record<string, unknown> }>(progressOnly).item).toMatchObject({
+      ...preferences,
+      progressSeconds: 60,
+    });
+
+    await save(owner, "s1e2", {
+      ...preferences,
+      preferredAudioId: "audio-eng",
+      preferredAudioLang: "eng",
+    });
+    await save(member, "s1e1", {
+      ...preferences,
+      preferredAudioId: "audio-fra",
+      preferredAudioLang: "fra",
+    });
+    const read = async (client: TestClient, episodeId: string) =>
+      json<{ item: Record<string, unknown> | null }>(await request(client, {
+        method: "GET",
+        url: `/api/history/series-prefs?episodeId=${episodeId}`,
+      })).item;
+    expect(await read(owner, "s1e1")).toMatchObject({
+      preferredAudioId: "audio-jpn",
+      preferredAudioLang: "jpn",
+    });
+    expect(await read(owner, "s1e2")).toMatchObject({
+      preferredAudioId: "audio-eng",
+      preferredAudioLang: "eng",
+    });
+    expect(await read(member, "s1e1")).toMatchObject({
+      preferredAudioId: "audio-fra",
+      preferredAudioLang: "fra",
+    });
+    for (const url of [
+      "/api/history?limit=10",
+      "/api/history/series-prefs/entries",
+      "/api/history?view=continue-watching&limit=20",
+    ]) {
+      const listed = json<{ items: Array<Record<string, unknown>> }>(
+        await request(owner, { method: "GET", url }),
+      );
+      expect(listed.items).toContainEqual(expect.objectContaining({
+        mediaId: "series-prefs",
+        episodeId: "s1e1",
+        preferredAudioId: "audio-jpn",
+        preferredAudioLang: "jpn",
+        preferredSubId: "sub-eng",
+        playbackSpeed: 1.5,
+        subtitleDelay: -0.4,
+        subtitlePosition: 82,
+      }));
+    }
+
+    const cleared = await save(owner, "s1e1", {
+      preferredAudioId: null,
+      preferredAudioLang: null,
+      preferredSubId: null,
+      playbackSpeed: null,
+      subtitleDelay: null,
+      subtitlePosition: null,
+    });
+    expect(json<{ item: Record<string, unknown> }>(cleared).item).toMatchObject({
+      preferredAudioId: null,
+      preferredAudioLang: null,
+      preferredSubId: null,
+      playbackSpeed: null,
+      subtitleDelay: null,
+      subtitlePosition: null,
+    });
+  });
+
+  it("round-trips all playback preferences at both native speed boundaries", async () => {
+    const owner = await setupOwner(app);
+    const preview = { id: "native-speed-prefs", type: "series", title: "Native speeds" };
+    const commonPreferences = {
+      preferredAudioId: "audio-jpn",
+      preferredAudioLang: "jpn",
+      preferredSubId: "sub-eng",
+      subtitleDelay: -0.4,
+      subtitlePosition: 82,
+    };
+
+    for (const [episodeId, playbackSpeed] of [["slow", 0.25], ["fast", 3]] as const) {
+      const response = await request(owner, {
+        method: "PUT",
+        url: "/api/history/native-speed-prefs",
+        csrf: true,
+        payload: {
+          episodeId,
+          progressSeconds: 30,
+          durationSeconds: 300,
+          completed: false,
+          preview,
+          ...commonPreferences,
+          playbackSpeed,
+        },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(json<{ item: Record<string, unknown> }>(response).item).toMatchObject({
+        episodeId,
+        ...commonPreferences,
+        playbackSpeed,
+      });
+    }
+  });
+
+  it("bounds history playback preferences before mutating the row", async () => {
+    const owner = await setupOwner(app);
+    const base = {
+      progressSeconds: 10,
+      durationSeconds: 100,
+      completed: false,
+      preview: { id: "bounded-prefs", type: "movie", title: "Bounded" },
+    };
+    expect((await request(owner, {
+      method: "PUT",
+      url: "/api/history/bounded-prefs",
+      csrf: true,
+      payload: { ...base, preferredAudioLang: "jpn" },
+    })).statusCode).toBe(200);
+
+    for (const invalid of [
+      { preferredAudioId: "x".repeat(513) },
+      { preferredAudioId: "" },
+      { preferredAudioLang: "x".repeat(129) },
+      { preferredSubId: "x".repeat(513) },
+      { preferredSubId: "" },
+      { playbackSpeed: 0.249 },
+      { playbackSpeed: 3.001 },
+      { subtitleDelay: -10.01 },
+      { subtitleDelay: 10.01 },
+      { subtitlePosition: -0.01 },
+      { subtitlePosition: 100.01 },
+    ]) {
+      const response = await request(owner, {
+        method: "PUT",
+        url: "/api/history/bounded-prefs",
+        csrf: true,
+        payload: { ...base, progressSeconds: 20, ...invalid },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    const item = json<{ item: Record<string, unknown> }>(await request(owner, {
+      method: "GET",
+      url: "/api/history/bounded-prefs",
+    })).item;
+    expect(item).toMatchObject({ progressSeconds: 10, preferredAudioLang: "jpn" });
+  });
+
+  it("exports and imports playback preferences in the optional v1 profile bundle", async () => {
+    const owner = await setupOwner(app);
+    const saved = await request(owner, {
+      method: "PUT",
+      url: "/api/history/portable-prefs",
+      csrf: true,
+      payload: {
+        progressSeconds: 20,
+        durationSeconds: 100,
+        completed: false,
+        lastWatched: "2026-10-25T10:00:00.000Z",
+        preview: { id: "portable-prefs", type: "movie", title: "Portable" },
+        preferredAudioId: "audio-jpn",
+        preferredAudioLang: "jpn",
+        preferredSubId: null,
+        playbackSpeed: 1.5,
+        subtitleDelay: -0.4,
+        subtitlePosition: 82,
+      },
+    });
+    expect(saved.statusCode, saved.body).toBe(200);
+    const bundle = json<{ bundle: { version: 1; history: Array<Record<string, unknown>> } }>(
+      await request(owner, { method: "GET", url: "/api/portability/export" }),
+    ).bundle;
+    expect(bundle.version).toBe(1);
+    expect(bundle.history).toContainEqual(expect.objectContaining({
+      mediaId: "portable-prefs",
+      preferredAudioId: "audio-jpn",
+      preferredAudioLang: "jpn",
+      preferredSubId: null,
+      playbackSpeed: 1.5,
+      subtitleDelay: -0.4,
+      subtitlePosition: 82,
+    }));
+
+    await createProfile(owner, "portable-prefs-member", "portable-password");
+    const member = await login(app, "portable-prefs-member", "portable-password");
+    const imported = await request(member, {
+      method: "POST",
+      url: "/api/portability/import",
+      csrf: true,
+      payload: { mode: "replace", bundle },
+    });
+    expect(imported.statusCode, imported.body).toBe(200);
+    expect(json<{ item: Record<string, unknown> }>(await request(member, {
+      method: "GET",
+      url: "/api/history/portable-prefs",
+    })).item).toMatchObject({
+      preferredAudioId: "audio-jpn",
+      preferredAudioLang: "jpn",
+      preferredSubId: null,
+      playbackSpeed: 1.5,
+      subtitleDelay: -0.4,
+      subtitlePosition: 82,
+    });
+  });
+
+  it("distinguishes omitted and explicit-null preferences during portable merges", async () => {
+    const owner = await setupOwner(app);
+    const preview = { id: "portable-merge-prefs", type: "movie", title: "Portable merge" };
+    const initialPreferences = {
+      preferredAudioId: "audio-jpn",
+      preferredAudioLang: "jpn",
+      preferredSubId: "sub-eng",
+      playbackSpeed: 1.5,
+      subtitleDelay: -0.4,
+      subtitlePosition: 82,
+    };
+    await request(owner, {
+      method: "PUT",
+      url: "/api/history/portable-merge-prefs",
+      csrf: true,
+      payload: {
+        progressSeconds: 20,
+        durationSeconds: 100,
+        completed: false,
+        lastWatched: "2026-10-25T10:00:00.000Z",
+        preview,
+        ...initialPreferences,
+      },
+    });
+    const exported = json<{ bundle: Record<string, unknown> & { history: Array<Record<string, unknown>> } }>(
+      await request(owner, { method: "GET", url: "/api/portability/export" }),
+    ).bundle;
+    const omitted = structuredClone(exported);
+    const omittedRow = omitted.history.find(
+      (row) => row.mediaId === "portable-merge-prefs",
+    )!;
+    omittedRow.progressSeconds = 40;
+    omittedRow.lastWatched = "2026-10-25T11:00:00.000Z";
+    for (const key of Object.keys(initialPreferences)) delete omittedRow[key];
+    expect((await request(owner, {
+      method: "POST",
+      url: "/api/portability/import",
+      csrf: true,
+      payload: { mode: "merge", bundle: omitted },
+    })).statusCode).toBe(200);
+    const afterOmission = json<{ item: Record<string, unknown> }>(await request(owner, {
+      method: "GET",
+      url: "/api/history/portable-merge-prefs",
+    })).item;
+    expect(afterOmission).toMatchObject({ progressSeconds: 40, ...initialPreferences });
+
+    const cleared = structuredClone(omitted);
+    const clearedRow = cleared.history.find(
+      (row) => row.mediaId === "portable-merge-prefs",
+    )!;
+    clearedRow.progressSeconds = 60;
+    clearedRow.lastWatched = "2026-10-25T12:00:00.000Z";
+    Object.assign(clearedRow, {
+      preferredAudioId: null,
+      preferredAudioLang: null,
+      preferredSubId: null,
+      playbackSpeed: null,
+      subtitleDelay: null,
+      subtitlePosition: null,
+    });
+    expect((await request(owner, {
+      method: "POST",
+      url: "/api/portability/import",
+      csrf: true,
+      payload: { mode: "merge", bundle: cleared },
+    })).statusCode).toBe(200);
+    expect(json<{ item: Record<string, unknown> }>(await request(owner, {
+      method: "GET",
+      url: "/api/history/portable-merge-prefs",
+    })).item).toMatchObject({
+      progressSeconds: 60,
+      preferredAudioId: null,
+      preferredAudioLang: null,
+      preferredSubId: null,
+      playbackSpeed: null,
+      subtitleDelay: null,
+      subtitlePosition: null,
+    });
+  });
+
   it("persists queued next episodes through history, portability, and profile isolation", async () => {
     const owner = await setupOwner(app);
     const preview = { id: "series-queue", type: "series", title: "Queued series" };
@@ -1692,6 +2010,12 @@ describe("DebridStreamer server", () => {
           completed: false,
           lastWatched: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
           preview: { id: mediaId, type: "movie", title: "x".repeat(6_000) },
+          preferredAudioId: "a".repeat(512),
+          preferredAudioLang: "j".repeat(128),
+          preferredSubId: "s".repeat(512),
+          playbackSpeed: 2,
+          subtitleDelay: -10,
+          subtitlePosition: 100,
         },
       });
       expect(response.statusCode).toBe(200);

@@ -182,6 +182,71 @@ describe("RemoteStore", () => {
   });
 
   describe("history writes", () => {
+    it("round-trips bounded playback preferences while keeping omitted fields absent", async () => {
+      const authoritative = histItem({
+        mediaId: "show1",
+        episodeId: "s2e3",
+        preferredAudioId: "audio-jpn",
+        preferredAudioLang: "jpn",
+        preferredSubId: null,
+        playbackSpeed: 1.5,
+        subtitleDelay: -0.4,
+        subtitlePosition: 82,
+      });
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ ok: true, item: authoritative }))
+        .mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+      const saved = await store().recordHistory({
+        mediaId: "show1",
+        episodeId: "s2e3",
+        progressSeconds: 42,
+        durationSeconds: 100,
+        preview: { id: "show1", type: "series", title: "Series" },
+        preferredAudioId: "audio-jpn",
+        preferredAudioLang: "jpn",
+        preferredSubId: null,
+        playbackSpeed: 1.5,
+        subtitleDelay: -0.4,
+        subtitlePosition: 82,
+      });
+
+      expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({
+        preferredAudioId: "audio-jpn",
+        preferredAudioLang: "jpn",
+        preferredSubId: null,
+        playbackSpeed: 1.5,
+        subtitleDelay: -0.4,
+        subtitlePosition: 82,
+      });
+      expect(saved).toMatchObject({
+        preferredAudioId: "audio-jpn",
+        preferredAudioLang: "jpn",
+        preferredSubId: null,
+        playbackSpeed: 1.5,
+        subtitleDelay: -0.4,
+        subtitlePosition: 82,
+      });
+
+      await store().recordHistory({
+        mediaId: "show1",
+        episodeId: "s2e3",
+        progressSeconds: 43,
+        preview: { id: "show1", type: "series", title: "Series" },
+      });
+      const progressOnly = JSON.parse(fetchMock.mock.calls[1]![1].body);
+      for (const key of [
+        "preferredAudioId",
+        "preferredAudioLang",
+        "preferredSubId",
+        "playbackSpeed",
+        "subtitleDelay",
+        "subtitlePosition",
+      ]) {
+        expect(progressOnly).not.toHaveProperty(key);
+      }
+    });
+
     it("recordHistory PUTs the row to /api/history/:mediaId with a CSRF header", async () => {
       vi.stubGlobal("document", { cookie: "ds_csrf=tok123" });
       fetchMock.mockResolvedValue(jsonResponse({ ok: true }));

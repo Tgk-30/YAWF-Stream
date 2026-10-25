@@ -275,6 +275,17 @@ export const MIGRATION_011 = `
 ALTER TABLE stream_sessions ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'http';
 `;
 
+// Per-title playback choices follow the profile's history row so Server Mode
+// can restore them after a process restart or on another signed-in device.
+export const MIGRATION_012 = `
+ALTER TABLE watch_history ADD COLUMN preferred_audio_id TEXT;
+ALTER TABLE watch_history ADD COLUMN preferred_audio_lang TEXT;
+ALTER TABLE watch_history ADD COLUMN preferred_sub_id TEXT;
+ALTER TABLE watch_history ADD COLUMN playback_speed REAL;
+ALTER TABLE watch_history ADD COLUMN subtitle_delay REAL;
+ALTER TABLE watch_history ADD COLUMN subtitle_position REAL;
+`;
+
 /** Ordered, append-only database migrations. Never edit a released migration.
  * Add the next numbered entry so existing databases and fixture snapshots keep
  * a deterministic upgrade path. */
@@ -290,4 +301,5 @@ export const MIGRATIONS: ReadonlyArray<readonly [version: number, sql: string]> 
   [9, MIGRATION_009],
   [10, MIGRATION_010],
   [11, MIGRATION_011],
+  [12, MIGRATION_012],
 ];

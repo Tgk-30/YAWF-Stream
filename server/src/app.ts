@@ -335,6 +335,15 @@ const watchlistBodySchema = z.object({
   preview: boundedPreview,
 });
 
+const playbackPreferenceFields = {
+  preferredAudioId: z.string().min(1).max(512).nullable().optional(),
+  preferredAudioLang: z.string().min(1).max(128).nullable().optional(),
+  preferredSubId: z.string().min(1).max(512).nullable().optional(),
+  playbackSpeed: z.number().finite().min(0.25).max(3).nullable().optional(),
+  subtitleDelay: z.number().finite().min(-10).max(10).nullable().optional(),
+  subtitlePosition: z.number().finite().min(0).max(100).nullable().optional(),
+};
+
 const historyBodySchema = z.object({
   episodeId: z.string().trim().min(1).max(128).nullable().optional(),
   progressSeconds: z.number().nonnegative().default(0),
@@ -344,6 +353,7 @@ const historyBodySchema = z.object({
   streamQuality: z.string().trim().max(80).nullable().optional(),
   preview: boundedPreview,
   lastWatched: z.string().datetime().optional(),
+  ...playbackPreferenceFields,
 });
 
 const requestBodySchema = z.object({
@@ -410,6 +420,7 @@ const portableHistorySchema = z.object({
   lastWatched: z.string().datetime(),
   streamQuality: z.string().trim().max(80).nullable(),
   preview: boundedPreview,
+  ...playbackPreferenceFields,
 });
 
 const portableFolderSchema = z.object({
@@ -1852,6 +1863,12 @@ function mapWatchHistoryRow(row: {
   last_watched: string;
   stream_quality: string | null;
   preview_json: string;
+  preferred_audio_id: string | null;
+  preferred_audio_lang: string | null;
+  preferred_sub_id: string | null;
+  playback_speed: number | null;
+  subtitle_delay: number | null;
+  subtitle_position: number | null;
 }) {
   return {
     mediaId: row.media_id,
@@ -1863,6 +1880,12 @@ function mapWatchHistoryRow(row: {
     lastWatched: row.last_watched,
     streamQuality: row.stream_quality,
     preview: deserializePreview(row.preview_json),
+    preferredAudioId: row.preferred_audio_id,
+    preferredAudioLang: row.preferred_audio_lang,
+    preferredSubId: row.preferred_sub_id,
+    playbackSpeed: row.playback_speed,
+    subtitleDelay: row.subtitle_delay,
+    subtitlePosition: row.subtitle_position,
   };
 }
 
@@ -4229,7 +4252,9 @@ function registerRoutes(
       const rows = db.sqlite
         .prepare(
           `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                  completed, queued_next, last_watched, stream_quality, preview_json
+                  completed, queued_next, last_watched, stream_quality, preview_json,
+                  preferred_audio_id, preferred_audio_lang, preferred_sub_id,
+                  playback_speed, subtitle_delay, subtitle_position
            FROM watch_history
            WHERE profile_id = ?
              AND completed = 0
@@ -4264,7 +4289,9 @@ function registerRoutes(
     const rows = db.sqlite
       .prepare(
         `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                completed, queued_next, last_watched, stream_quality, preview_json
+                completed, queued_next, last_watched, stream_quality, preview_json,
+                preferred_audio_id, preferred_audio_lang, preferred_sub_id,
+                playback_speed, subtitle_delay, subtitle_position
          FROM watch_history
          WHERE profile_id = ?
          ORDER BY last_watched DESC
@@ -4284,7 +4311,9 @@ function registerRoutes(
     const rows = db.sqlite
       .prepare(
         `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                completed, queued_next, last_watched, stream_quality, preview_json
+                completed, queued_next, last_watched, stream_quality, preview_json,
+                preferred_audio_id, preferred_audio_lang, preferred_sub_id,
+                playback_speed, subtitle_delay, subtitle_position
          FROM watch_history
          WHERE profile_id = ? AND media_id = ?
          ORDER BY last_watched DESC`,
@@ -4307,7 +4336,9 @@ function registerRoutes(
     const row = db.sqlite
       .prepare(
         `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                completed, queued_next, last_watched, stream_quality, preview_json
+                completed, queued_next, last_watched, stream_quality, preview_json,
+                preferred_audio_id, preferred_audio_lang, preferred_sub_id,
+                playback_speed, subtitle_delay, subtitle_position
          FROM watch_history
          WHERE profile_id = ? AND media_id = ? AND episode_key = ?`,
       )
@@ -4359,8 +4390,10 @@ function registerRoutes(
         .prepare(
         `INSERT INTO watch_history
          (profile_id, media_id, episode_key, episode_id, progress_seconds,
-          duration_seconds, completed, queued_next, last_watched, stream_quality, preview_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          duration_seconds, completed, queued_next, last_watched, stream_quality, preview_json,
+          preferred_audio_id, preferred_audio_lang, preferred_sub_id,
+          playback_speed, subtitle_delay, subtitle_position)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(profile_id, media_id, episode_key)
          DO UPDATE SET
            episode_id = excluded.episode_id,
@@ -4370,23 +4403,59 @@ function registerRoutes(
            queued_next = excluded.queued_next,
            last_watched = excluded.last_watched,
            stream_quality = excluded.stream_quality,
-           preview_json = excluded.preview_json`,
+           preview_json = excluded.preview_json,
+           preferred_audio_id = CASE WHEN ? = 1
+             THEN excluded.preferred_audio_id ELSE watch_history.preferred_audio_id END,
+           preferred_audio_lang = CASE WHEN ? = 1
+             THEN excluded.preferred_audio_lang ELSE watch_history.preferred_audio_lang END,
+           preferred_sub_id = CASE WHEN ? = 1
+             THEN excluded.preferred_sub_id ELSE watch_history.preferred_sub_id END,
+           playback_speed = CASE WHEN ? = 1
+             THEN excluded.playback_speed ELSE watch_history.playback_speed END,
+           subtitle_delay = CASE WHEN ? = 1
+             THEN excluded.subtitle_delay ELSE watch_history.subtitle_delay END,
+           subtitle_position = CASE WHEN ? = 1
+             THEN excluded.subtitle_position ELSE watch_history.subtitle_position END`,
       )
         .run(
           auth.profileId,
-        mediaId,
-        episodeKey,
-        episodeId,
-        body.progressSeconds,
-        body.durationSeconds ?? null,
-        body.completed ? 1 : 0,
-        body.queuedNext ? 1 : 0,
-        body.lastWatched ?? nowISO(),
-        body.streamQuality ?? null,
-        serializePreview(body.preview),
-      );
+          mediaId,
+          episodeKey,
+          episodeId,
+          body.progressSeconds,
+          body.durationSeconds ?? null,
+          body.completed ? 1 : 0,
+          body.queuedNext ? 1 : 0,
+          body.lastWatched ?? nowISO(),
+          body.streamQuality ?? null,
+          serializePreview(body.preview),
+          body.preferredAudioId ?? null,
+          body.preferredAudioLang ?? null,
+          body.preferredSubId ?? null,
+          body.playbackSpeed ?? null,
+          body.subtitleDelay ?? null,
+          body.subtitlePosition ?? null,
+          body.preferredAudioId === undefined ? 0 : 1,
+          body.preferredAudioLang === undefined ? 0 : 1,
+          body.preferredSubId === undefined ? 0 : 1,
+          body.playbackSpeed === undefined ? 0 : 1,
+          body.subtitleDelay === undefined ? 0 : 1,
+          body.subtitlePosition === undefined ? 0 : 1,
+        );
     });
-    return { ok: true };
+    const saved = db.sqlite
+      .prepare(
+        `SELECT media_id, episode_id, progress_seconds, duration_seconds,
+                completed, queued_next, last_watched, stream_quality, preview_json,
+                preferred_audio_id, preferred_audio_lang, preferred_sub_id,
+                playback_speed, subtitle_delay, subtitle_position
+         FROM watch_history
+         WHERE profile_id = ? AND media_id = ? AND episode_key = ?`,
+      )
+      .get(auth.profileId, mediaId, episodeKey) as
+      | Parameters<typeof mapWatchHistoryRow>[0]
+      | undefined;
+    return { ok: true, item: saved ? mapWatchHistoryRow(saved) : null };
   });
 
   app.delete("/api/history/:mediaId", async (request) => {
@@ -4670,7 +4739,9 @@ function registerRoutes(
       db.sqlite
         .prepare(
           `SELECT media_id, episode_id, progress_seconds, duration_seconds,
-                  completed, queued_next, last_watched, stream_quality, preview_json
+                  completed, queued_next, last_watched, stream_quality, preview_json,
+                  preferred_audio_id, preferred_audio_lang, preferred_sub_id,
+                  playback_speed, subtitle_delay, subtitle_position
            FROM watch_history
            WHERE profile_id = ?
            ORDER BY last_watched DESC`,
@@ -4794,8 +4865,10 @@ function registerRoutes(
         const saveHistory = db.sqlite.prepare(
           `INSERT INTO watch_history
              (profile_id, media_id, episode_key, episode_id, progress_seconds,
-              duration_seconds, completed, queued_next, last_watched, stream_quality, preview_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              duration_seconds, completed, queued_next, last_watched, stream_quality, preview_json,
+              preferred_audio_id, preferred_audio_lang, preferred_sub_id,
+              playback_speed, subtitle_delay, subtitle_position)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(profile_id, media_id, episode_key) DO UPDATE SET
              episode_id = CASE WHEN NOT (
                excluded.queued_next = 1 AND watch_history.completed = 0 AND
@@ -4852,7 +4925,49 @@ function registerRoutes(
                watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
                watch_history.progress_seconds / watch_history.duration_seconds < 0.95
              ) AND excluded.last_watched >= watch_history.last_watched
-               THEN excluded.preview_json ELSE watch_history.preview_json END`,
+               THEN excluded.preview_json ELSE watch_history.preview_json END,
+             preferred_audio_id = CASE WHEN ? = 1 AND NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
+               THEN excluded.preferred_audio_id ELSE watch_history.preferred_audio_id END,
+             preferred_audio_lang = CASE WHEN ? = 1 AND NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
+               THEN excluded.preferred_audio_lang ELSE watch_history.preferred_audio_lang END,
+             preferred_sub_id = CASE WHEN ? = 1 AND NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
+               THEN excluded.preferred_sub_id ELSE watch_history.preferred_sub_id END,
+             playback_speed = CASE WHEN ? = 1 AND NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
+               THEN excluded.playback_speed ELSE watch_history.playback_speed END,
+             subtitle_delay = CASE WHEN ? = 1 AND NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
+               THEN excluded.subtitle_delay ELSE watch_history.subtitle_delay END,
+             subtitle_position = CASE WHEN ? = 1 AND NOT (
+               excluded.queued_next = 1 AND watch_history.completed = 0 AND
+               watch_history.duration_seconds > 0 AND
+               watch_history.progress_seconds / watch_history.duration_seconds > 0.02 AND
+               watch_history.progress_seconds / watch_history.duration_seconds < 0.95
+             ) AND excluded.last_watched >= watch_history.last_watched
+               THEN excluded.subtitle_position ELSE watch_history.subtitle_position END`,
         );
         for (const entry of body.bundle.history) {
           saveHistory.run(
@@ -4867,6 +4982,18 @@ function registerRoutes(
             entry.lastWatched,
             entry.streamQuality,
             serializePreview(entry.preview),
+            entry.preferredAudioId ?? null,
+            entry.preferredAudioLang ?? null,
+            entry.preferredSubId ?? null,
+            entry.playbackSpeed ?? null,
+            entry.subtitleDelay ?? null,
+            entry.subtitlePosition ?? null,
+            entry.preferredAudioId === undefined ? 0 : 1,
+            entry.preferredAudioLang === undefined ? 0 : 1,
+            entry.preferredSubId === undefined ? 0 : 1,
+            entry.playbackSpeed === undefined ? 0 : 1,
+            entry.subtitleDelay === undefined ? 0 : 1,
+            entry.subtitlePosition === undefined ? 0 : 1,
           );
           counts.history += 1;
         }
