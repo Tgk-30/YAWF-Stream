@@ -7,12 +7,26 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
 import { WelcomeGuide } from "./WelcomeGuide";
 
 const TOTAL = 7;
 
 describe("WelcomeGuide", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("backs the translucent card tint with an opaque theme surface", () => {
+    const css = readFileSync("src/components/WelcomeGuide.css", "utf8");
+    const cardRule = css.match(/\.welcome-card\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(cardRule).toContain(
+      "linear-gradient(var(--glass-tint-hero), var(--glass-tint-hero)),",
+    );
+    expect(cardRule).toContain("var(--bg-2, rgb(12, 13, 18))");
+    expect(cardRule).toContain(
+      "backdrop-filter: blur(var(--glass-blur-hero, 36px)) saturate(1.3)",
+    );
+  });
 
   it("renders the first step with Back disabled and the 1 / N counter", () => {
     render(<WelcomeGuide onClose={() => {}} />);
