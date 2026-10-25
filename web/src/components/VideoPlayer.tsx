@@ -5799,7 +5799,7 @@ function WebviewPlayer({
         </div>
       )}
 
-      {paused && !ended && subs.activeTrackId == null && embeddedCaptionState.activeTrackId == null &&
+      {!touchPlayer && paused && !ended && subs.activeTrackId == null && embeddedCaptionState.activeTrackId == null &&
         !captionsOpen && !optionsOpen && !detailsOpen && !scrubbing && (
         <PlayerPauseOverlay
           title={title}
@@ -6139,7 +6139,7 @@ function WebviewPlayer({
                 tabIndex={chromeVisible ? undefined : -1}
               >
                 <Icon name="sliders" size={18} />
-                <span className="player-touch-action-label">Fit</span>
+                <span className="player-touch-action-label">Screen</span>
                 <span className="player-touch-action-value">{videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}</span>
               </button>
               {underTauri ? (

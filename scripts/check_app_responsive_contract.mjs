@@ -127,6 +127,10 @@ const touchSheetBaseRule = ruleBlock(
   playerCss,
   ".player.is-touch-player .player-options-menu,\n.player.is-touch-player .captions-menu",
 );
+const touchAudioSheetRule = ruleBlock(
+  playerCss,
+  ".player.is-touch-player .player-options-menu.is-touch-audio-sheet",
+);
 const tabletTouchSheetCss = atRuleBlock(
   playerCss,
   "@media (min-width: 768px) and (min-height: 501px) {",
@@ -135,11 +139,6 @@ const tabletTouchSheetRule = ruleBlock(
   tabletTouchSheetCss,
   ".player.is-touch-player .player-options-menu:is(.is-touch-audio-sheet, .is-touch-settings),\n  .player.is-touch-player .captions-menu",
 );
-const touchPausePassThroughRule = ruleBlock(
-  playerCss,
-  ".webview-player.is-touch-player .player-pause-screen",
-);
-const pauseScreenBaseRule = ruleBlock(playerPauseCss, ".player-pause-screen");
 const mobileNavStart = navCss.indexOf(
   "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px)",
 );
@@ -566,28 +565,31 @@ check(
 );
 
 check(
-  "touch sheets retain phone edges and use bounded tablet panels",
+  "touch sheets keep full settings, compact audio, and bounded tablet panels",
   /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(touchSheetBaseRule) &&
     /left:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-left\)\)/.test(touchSheetBaseRule) &&
     /width:\s*auto;/.test(touchSheetBaseRule) &&
     /max-height:\s*none;/.test(touchSheetBaseRule) &&
+    /bottom:\s*auto;/.test(touchAudioSheetRule) &&
+    /height:\s*auto;/.test(touchAudioSheetRule) &&
+    /max-height:\s*calc\([\s\S]*100%[\s\S]*var\(--safe-area-top\)[\s\S]*var\(--safe-area-bottom\)/.test(touchAudioSheetRule) &&
+    /overflow-y:\s*auto;/.test(touchAudioSheetRule) &&
     /bottom:\s*auto;/.test(tabletTouchSheetRule) &&
     /left:\s*auto;/.test(tabletTouchSheetRule) &&
     /width:\s*min\(\s*440px,[\s\S]*var\(--safe-area-left\)[\s\S]*var\(--safe-area-right\)[\s\S]*24px \* var\(--density-scale\)/.test(tabletTouchSheetRule) &&
     /height:\s*auto;/.test(tabletTouchSheetRule) &&
     /max-height:\s*calc\([\s\S]*100%[\s\S]*66px \* var\(--density-scale\)[\s\S]*var\(--safe-area-top\)[\s\S]*12px \* var\(--density-scale\)[\s\S]*var\(--safe-area-bottom\)/.test(tabletTouchSheetRule) &&
     /overflow-y:\s*auto;/.test(tabletTouchSheetRule),
-  "Phone touch sheets must keep full safe-edge coverage, while 768px-plus and non-short touch layouts use an intrinsic 440px right panel with safe-area-bounded scrolling.",
+  "Phone settings and subtitles must keep full safe-edge coverage, focused Audio must use safe-area-bounded content height, and tablet touch layouts must retain the intrinsic 440px right panel.",
 );
 
 check(
-  "shared touch pause artwork passes side gestures through to video",
-  /pointer-events:\s*none;/.test(touchPausePassThroughRule) &&
-    !/pointer-events:\s*none;/.test(pauseScreenBaseRule) &&
+  "shared touch omits decorative pause artwork without changing transport",
+  /\{!touchPlayer && paused && !ended[\s\S]{0,260}<PlayerPauseOverlay/.test(playerSource) &&
     /\.player-touch-controls\s*\{[\s\S]{0,140}pointer-events:\s*none;/.test(playerCss) &&
     /\.player-touch-transport\.is-visible > button\s*\{[\s\S]{0,100}pointer-events:\s*auto;/.test(playerCss) &&
     /className="chip player-touch-play"[\s\S]{0,220}aria-label=\{playing \? "Pause" : "Play"\}/.test(playerSource),
-  "Only the shared touch pause artwork may ignore pointers so side double-taps reach the video; generic pause-to-resume and the accessible central transport must remain interactive.",
+  "Shared touch must omit the redundant decorative pause hero while retaining its accessible central transport; non-touch webviews keep PlayerPauseOverlay.",
 );
 
 check(

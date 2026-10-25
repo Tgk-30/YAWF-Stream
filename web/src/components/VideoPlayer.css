@@ -1173,10 +1173,6 @@
   pointer-events: none;
 }
 
-.webview-player.is-touch-player .player-pause-screen {
-  pointer-events: none;
-}
-
 .player-touch-transport {
   position: absolute;
   inset: 50% auto auto 50%;
@@ -1403,6 +1399,17 @@
   max-height: none;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.player.is-touch-player .player-options-menu.is-touch-audio-sheet {
+  bottom: auto;
+  height: auto;
+  max-height: calc(
+    100%
+    - max(calc(66px * var(--density-scale)), var(--safe-area-top))
+    - max(calc(12px * var(--density-scale)), var(--safe-area-bottom))
+  );
+  overflow-y: auto;
 }
 
 @media (min-width: 768px) and (min-height: 501px) {

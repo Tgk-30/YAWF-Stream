@@ -530,6 +530,37 @@ describe("VideoPlayer shell", () => {
     expect(screen.getByLabelText("Volume")).toBeInTheDocument();
   });
 
+  it("omits decorative pause artwork only from the shared touch webview", () => {
+    deviceKindMock.mockReturnValue("ios");
+    const touch = render(
+      <VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />,
+    );
+    fireEvent.pause(document.querySelector("video.player-video")!);
+    expect(document.querySelector(".player-pause-screen")).toBeNull();
+    expect(document.querySelector(".player-title")).toHaveTextContent("Touch film");
+    expect(screen.getByRole("button", { name: "Player details and shortcuts" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+    touch.unmount();
+
+    deviceKindMock.mockReturnValue("mac");
+    render(<VideoPlayer url="https://x/movie.mp4" title="Desktop film" onClose={() => {}} />);
+    fireEvent.pause(document.querySelector("video.player-video")!);
+    expect(document.querySelector(".player-pause-screen")).not.toBeNull();
+  });
+
+  it("labels the touch fit category separately from its current value", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+
+    const fit = screen.getByRole("button", { name: "Video fit, Fit" });
+    expect(within(fit).getByText("Screen")).toHaveClass("player-touch-action-label");
+    expect(within(fit).getByText("Fit")).toHaveClass("player-touch-action-value");
+    await userEvent.click(fit);
+    const fill = screen.getByRole("button", { name: "Video fit, Fill" });
+    expect(within(fill).getByText("Screen")).toBeInTheDocument();
+    expect(within(fill).getByText("Fill")).toHaveClass("player-touch-action-value");
+  });
+
   it("routes touch transport, speed, fit, captions, settings, and next through existing handlers", async () => {
     deviceKindMock.mockReturnValue("ios");
     const onPlayNext = vi.fn();
@@ -1190,6 +1221,16 @@ describe("VideoPlayer shell", () => {
     );
     expect(css).toMatch(
       /@media \(min-width: 561px\) and \(max-width: 950px\) and \(max-height: 500px\)\s*\{(?:(?!@media)[\s\S])*?\.scrubbar\s*\{[^}]*min-height:\s*44px;/,
+    );
+  });
+
+  it("keeps only the focused touch Audio sheet content-height and safe-area bounded", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    expect(css).toMatch(
+      /\.player\.is-touch-player \.player-options-menu\.is-touch-audio-sheet\s*\{[^}]*bottom:\s*auto;[^}]*height:\s*auto;[^}]*max-height:\s*calc\([^}]*100%[^}]*var\(--safe-area-top\)[^}]*var\(--safe-area-bottom\)[^}]*\);[^}]*overflow-y:\s*auto;/s,
+    );
+    expect(css).toMatch(
+      /\.player\.is-touch-player \.player-options-menu,\s*\.player\.is-touch-player \.captions-menu\s*\{[^}]*bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\);[^}]*max-height:\s*none;/s,
     );
   });
 
@@ -9747,12 +9788,12 @@ describe("webview caption layout", () => {
     expect(currentCue.endTime).toBe(5);
   });
 
-  it("keeps the paused frame unobscured for selected embedded or downloaded captions while retaining transport", () => {
+  it("keeps the touch paused frame free of decorative artwork while retaining caption transport", () => {
     subsState.tracks = [{ id: "download", label: "Downloaded", language: "en", vttUrl: "blob:cc" }];
     render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
     const video = document.querySelector("video")!;
     fireEvent.pause(video);
-    expect(document.querySelector(".player-pause-screen")).not.toBeNull();
+    expect(document.querySelector(".player-pause-screen")).toBeNull();
     addCaption();
     expect(document.querySelector(".player-pause-screen")).toBeNull();
     expect(screen.getByRole("button", { name: "Play" })).toBeEnabled();
@@ -9764,7 +9805,7 @@ describe("webview caption layout", () => {
     fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
     fireEvent.click(screen.getByRole("button", { name: "Off" }));
     fireEvent.click(screen.getByRole("button", { name: "Close subtitles menu" }));
-    expect(document.querySelector(".player-pause-screen")).not.toBeNull();
+    expect(document.querySelector(".player-pause-screen")).toBeNull();
   });
 
   it("repositions late cuechange arrivals without needing a new track inventory event", () => {
