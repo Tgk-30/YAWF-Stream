@@ -82,6 +82,7 @@ const settingsCss = read("web/src/screens/Settings.css");
 const detailCss = read("web/src/screens/Detail.css");
 const browseCss = read("web/src/screens/Browse.css");
 const playerCss = read("web/src/components/VideoPlayer.css");
+const playerSource = read("web/src/components/VideoPlayer.tsx");
 const playerPauseCss = read("web/src/components/player/PlayerPauseOverlay.css");
 const playerInfoCss = read("web/src/components/player/PlayerInfoPopover.css");
 const setupNudgeCss = read("web/src/components/SetupNudge.css");
@@ -523,6 +524,28 @@ check(
     /\.player-osd \.chip,[\s\S]{0,80}\.player-speed-control select\s*\{[\s\S]{0,80}min-height:\s*44px/.test(shortLandscapePlayerCss) &&
     /\.player-osd \.player-mobile-optional\s*\{[\s\S]{0,80}display:\s*none/.test(shortLandscapePlayerCss),
   "Intermediate widths must reserve independent audio, transport, and action columns; short landscape keeps 44px controls while hiding only optional cast and picture-in-picture actions.",
+);
+
+check(
+  "shared touch player is host-gated and keeps supported actions scroll-reachable",
+  /const sharedTouchPlayer\s*=\s*[\s\S]{0,180}mode === "webview"[\s\S]{0,140}!androidTVNative[\s\S]{0,180}dk === "ios" && !underTauri[\s\S]{0,80}\|\| androidAppUi/.test(playerSource) &&
+    /className="player-touch-actions"[\s\S]{0,120}role="toolbar"/.test(playerSource) &&
+    /\.player-touch-actions\s*\{[\s\S]{0,260}overflow-x:\s*auto[\s\S]{0,180}touch-action:\s*pan-x/.test(playerCss) &&
+    /\.player-touch-actions \.player-mobile-optional\s*\{[\s\S]{0,80}display:\s*inline-flex/.test(playerCss) &&
+    /\.player-touch-actions \.player-touch-action\s*\{[\s\S]{0,180}min-height:\s*46px/.test(playerCss) &&
+    /\.player-touch-skip\s*\{[\s\S]{0,160}min-height:\s*56px/.test(playerCss) &&
+    /\.player-touch-play\s*\{[\s\S]{0,120}clamp\(64px,\s*9vw,\s*72px\)/.test(playerCss),
+  "VideoPlayer must select touch chrome from iOS browser or marked Android app identity after the TV escape, use 44px-plus controls, and scroll rather than hide supported actions.",
+);
+
+check(
+  "shared touch timeline and sheets honor numeric feedback and all safe-area edges",
+  /touchPresentation/.test(playerSource) &&
+    /\.scrubbar-wrap\.is-touch \.scrubbar\s*\{[\s\S]{0,100}min-height:\s*44px/.test(playerCss) &&
+    /\.scrubbar-wrap\.is-touch \.scrubbar-progress-thumb\s*\{[\s\S]{0,180}display:\s*block/.test(playerCss) &&
+    /\.player\.is-touch-player \.player-options-menu,[\s\S]{0,420}var\(--safe-area-top\)[\s\S]{0,180}var\(--safe-area-right\)[\s\S]{0,180}var\(--safe-area-bottom\)[\s\S]{0,180}var\(--safe-area-left\)/.test(playerCss) &&
+    /\.player-options-menu\.is-touch-audio-sheet/.test(playerCss),
+  "Touch scrub feedback must keep a broad hit target and visible thumb, while focused audio, captions, and advanced sheets stay scrollable inside all native insets.",
 );
 
 check(

@@ -112,6 +112,31 @@ describe("ScrubBar keyboard seeking", () => {
 });
 
 describe("ScrubBar pointer flow", () => {
+  it("shows numeric drag feedback, time labels, and a persistent thumb without thumbnails", () => {
+    render(
+      <ScrubBar
+        currentTime={30}
+        duration={120}
+        preview={null}
+        onHover={() => {}}
+        onLeave={() => {}}
+        onSeek={() => {}}
+        onSeekPreview={() => {}}
+        touchPresentation
+      />,
+    );
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+
+    expect(document.querySelector(".scrubbar-progress-thumb")).toHaveStyle({ left: "25%" });
+    expect(document.querySelector(".scrubbar-time-row")).toHaveTextContent("0:30");
+    expect(document.querySelector(".scrubbar-time-row")).toHaveTextContent("2:00");
+
+    fireEvent.pointerDown(slider, { clientX: 75, pointerId: 7 });
+    expect(document.querySelector(".scrub-tooltip.is-numeric-only")).toHaveTextContent("1:30");
+    expect(slider).toHaveAttribute("aria-valuetext", "1:30 of 2:00");
+  });
+
   it("tracks hover state and calls onHover with clamped timeline", () => {
     const onHover = vi.fn();
     const onLeave = vi.fn();

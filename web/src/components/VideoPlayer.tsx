@@ -34,6 +34,7 @@ const SERVER_SOURCE_INFO_RETRY_DELAY_MS = 5_000;
 const MAX_SOURCE_DURATION_SECONDS = 86_400;
 const SERVER_OPTIMIZED_RETRY_BASE_MS = 500;
 const SERVER_OPTIMIZED_RETRY_MAX_MS = 4_000;
+const TOUCH_DOUBLE_TAP_MS = 320;
 import { Icon } from "./Icon";
 import {
   isTauri,
@@ -995,6 +996,7 @@ export function VideoPlayer({
   const activeWebSourceRef = useRef(effectiveUrl);
   const [activeSubtitleUrl, setActiveSubtitleUrl] = useState<string | null>(null);
   const [androidTVError, setAndroidTVError] = useState<string | null>(null);
+  const [webScrubbing, setWebScrubbing] = useState(false);
   const playbackOwnerRef = useRef(playbackOwner);
   const playerMountedRef = useRef(false);
   const recoveryRequestSequenceRef = useRef(0);
@@ -1059,6 +1061,10 @@ export function VideoPlayer({
     setManualRecoveryPending(false);
   }, [cancelSourceInfoRetry, playbackOwner]);
   const androidTVNative = hasAndroidTVBridge();
+  const sharedTouchPlayer =
+    mode === "webview" &&
+    !androidTVNative &&
+    ((dk === "ios" && !underTauri) || androidAppUi);
   const androidOnCloseRef = useRef(onClose);
   const androidOnProgressRef = useRef(onProgress);
   androidOnCloseRef.current = onClose;
@@ -1068,7 +1074,7 @@ export function VideoPlayer({
   const chromeHideTimer = useRef<number | undefined>(undefined);
   const lastChromeNudgeAt = useRef(Number.NEGATIVE_INFINITY);
   const chromePinned =
-    webviewPaused || captionsOpen || webMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
+    webviewPaused || webScrubbing || captionsOpen || webMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
   const chromePinnedRef = useRef(chromePinned);
   chromePinnedRef.current = chromePinned;
   const playerDialogRef = useModalA11y<HTMLDivElement>(
@@ -2353,7 +2359,7 @@ export function VideoPlayer({
     <div className="player-backdrop" onClick={onClose}>
       <div
         ref={playerDialogRef}
-        className="player"
+        className={`player${sharedTouchPlayer ? " is-touch-player" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={`Playing ${title}`}
@@ -2409,6 +2415,7 @@ export function VideoPlayer({
               tabIndex={hiddenWebChrome ? -1 : undefined}
             >
               <Icon name="info" size={17} />
+              <span className="player-bar-action-label">Details</span>
             </button>
             <button
               type="button"
@@ -2418,6 +2425,7 @@ export function VideoPlayer({
               tabIndex={hiddenWebChrome ? -1 : undefined}
             >
               <Icon name="xmark" size={18} />
+              <span className="player-bar-action-label">Close</span>
             </button>
           </div>
         </div>
@@ -2446,6 +2454,7 @@ export function VideoPlayer({
             subtitle={subtitle}
             nowPlaying={nowPlaying}
             detailsOpen={detailsSection != null}
+            touchPlayer={sharedTouchPlayer}
             chromeVisible={webChromeShown}
             onChromeEnter={holdChrome}
             onChromeLeave={releaseChrome}
@@ -2457,6 +2466,7 @@ export function VideoPlayer({
             onVerifiedPlaybackProgress={reportVerifiedPlaybackProgress}
             onCaptionsOpenChange={setCaptionsOpen}
             onMenuOpenChange={setWebMenuOpen}
+            onScrubbingChange={setWebScrubbing}
             onCastLocalPlaybackChange={setCastSuspended}
             suspended={castSuspended}
             onActiveSubtitleUrlChange={setActiveSubtitleUrl}
@@ -2577,6 +2587,7 @@ function WebviewPlayer({
   subtitle,
   nowPlaying,
   detailsOpen,
+  touchPlayer,
   chromeVisible,
   onChromeEnter,
   onChromeLeave,
@@ -2588,6 +2599,7 @@ function WebviewPlayer({
   onVerifiedPlaybackProgress,
   onCaptionsOpenChange,
   onMenuOpenChange,
+  onScrubbingChange,
   onCastLocalPlaybackChange,
   suspended,
   onActiveSubtitleUrlChange,
@@ -2649,6 +2661,7 @@ function WebviewPlayer({
   subtitle?: string | null;
   nowPlaying?: NowPlayingMetadata | null;
   detailsOpen: boolean;
+  touchPlayer: boolean;
   chromeVisible: boolean;
   onChromeEnter: () => void;
   onChromeLeave: () => void;
@@ -2660,6 +2673,7 @@ function WebviewPlayer({
   onVerifiedPlaybackProgress: () => void;
   onCaptionsOpenChange: (open: boolean) => void;
   onMenuOpenChange: (open: boolean) => void;
+  onScrubbingChange: (scrubbing: boolean) => void;
   onCastLocalPlaybackChange: (suspended: boolean) => void;
   suspended: boolean;
   onActiveSubtitleUrlChange: (url: string | null) => void;
@@ -2857,6 +2871,11 @@ function WebviewPlayer({
       : 1;
   });
   const [scrubbing, setScrubbing] = useState(false);
+  const updateScrubbing = useCallback((next: boolean) => {
+    setScrubbing(next);
+    onScrubbingChange(next);
+  }, [onScrubbingChange]);
+  useEffect(() => () => onScrubbingChange(false), [onScrubbingChange]);
   const rendererSeekingRef = useRef(false);
   const scrubbingRef = useRef(false);
   // Set when the video reaches its natural end - drives the Up-next card.
@@ -2921,10 +2940,37 @@ function WebviewPlayer({
     defaultServerAudioTracks.length === 1 ? defaultServerAudioTracks[0].index : null
   );
   const touchLikePointerRef = useRef(false);
+  const touchTapRef = useRef<{
+    zone: "back" | "forward";
+    at: number;
+    timer: number;
+  } | null>(null);
+  const touchFeedbackTimerRef = useRef<number | null>(null);
+  const [touchSeekFeedback, setTouchSeekFeedback] = useState<"back" | "forward" | null>(null);
   const volumeIsSilent = muted || volume === 0;
   const underTauri = isTauri();
   const mediaArtist = nowPlaying?.episodeLabel ?? subtitle ?? "";
   const mediaArtworkUrl = nowPlaying?.posterUrl ?? "";
+
+  const clearPendingTouchTap = useCallback(() => {
+    if (touchTapRef.current != null) {
+      window.clearTimeout(touchTapRef.current.timer);
+      touchTapRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (nestedDialogOpen || !touchPlayer) clearPendingTouchTap();
+  }, [clearPendingTouchTap, nestedDialogOpen, touchPlayer]);
+
+  useEffect(() => {
+    clearPendingTouchTap();
+  }, [clearPendingTouchTap, engine, serverAudioOwner, timelineOffsetSeconds, url]);
+
+  useEffect(() => () => {
+    clearPendingTouchTap();
+    if (touchFeedbackTimerRef.current != null) window.clearTimeout(touchFeedbackTimerRef.current);
+  }, [clearPendingTouchTap]);
 
   const requestPlaybackState = useCallback((shouldPlay: boolean) => {
     const video = videoRef.current;
@@ -3923,7 +3969,9 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     const webkitVideo = video as WebKitVideoElement;
-    const supportsStandardPiP = document.pictureInPictureEnabled === true;
+    const supportsStandardPiP =
+      document.pictureInPictureEnabled === true &&
+      typeof video.requestPictureInPicture === "function";
     const supportsWebKitPiP = typeof webkitVideo.webkitSetPresentationMode === "function";
     setPictureInPictureSupported(supportsStandardPiP || supportsWebKitPiP);
 
@@ -4031,6 +4079,8 @@ function WebviewPlayer({
   timelineOffsetRef.current = Number.isFinite(timelineOffsetSeconds)
     ? Math.max(0, timelineOffsetSeconds)
     : 0;
+  const optimizedTimelineIsPartialRef = useRef(optimizedTimelineIsPartial);
+  optimizedTimelineIsPartialRef.current = optimizedTimelineIsPartial;
   const knownAbsoluteDurationRef = useRef<number | null>(null);
   knownAbsoluteDurationRef.current = knownAbsoluteDurationSeconds != null &&
     Number.isFinite(knownAbsoluteDurationSeconds) &&
@@ -5095,18 +5145,20 @@ function WebviewPlayer({
   };
   absoluteSeekRef.current = seekAbsolute;
 
-  const relativeSeek = (delta: number) => {
+  const relativeSeek = useCallback((delta: number) => {
     const video = videoRef.current;
     if (video == null) return;
     const knownDuration = knownAbsoluteDurationRef.current;
     const current = video.currentTime + (
-      knownDuration != null || optimizedTimelineIsPartial
+      knownDuration != null || optimizedTimelineIsPartialRef.current
         ? timelineOffsetRef.current
         : 0
     );
     const target = Math.max(0, current + delta);
-    seekAbsolute(knownDuration == null ? target : Math.min(knownDuration, target));
-  };
+    absoluteSeekRef.current(
+      knownDuration == null ? target : Math.min(knownDuration, target),
+    );
+  }, []);
 
   const toggleOptions = () => {
     optionsTriggerRef.current?.focus({ preventScroll: true });
@@ -5350,7 +5402,18 @@ function WebviewPlayer({
       window.matchMedia?.("(pointer: coarse)").matches === true;
   }, []);
 
-  const handleVideoClick = useCallback(() => {
+  const showTouchSeekFeedback = useCallback((zone: "back" | "forward") => {
+    if (touchFeedbackTimerRef.current != null) {
+      window.clearTimeout(touchFeedbackTimerRef.current);
+    }
+    setTouchSeekFeedback(zone);
+    touchFeedbackTimerRef.current = window.setTimeout(() => {
+      touchFeedbackTimerRef.current = null;
+      setTouchSeekFeedback(null);
+    }, 700);
+  }, []);
+
+  const handleVideoClick = useCallback((event: React.MouseEvent<HTMLVideoElement>) => {
     const touchLike =
       touchLikePointerRef.current ||
       window.matchMedia?.("(pointer: coarse)").matches === true;
@@ -5360,13 +5423,41 @@ function WebviewPlayer({
       onActivity();
       return;
     }
+    if (touchPlayer && touchLike) {
+      const rect = event.currentTarget.getBoundingClientRect();
+      const ratio = rect.width > 0
+        ? (event.clientX - rect.left) / rect.width
+        : 0.5;
+      const zone = ratio < 0.38 ? "back" : ratio > 0.62 ? "forward" : null;
+      if (zone != null) {
+        const now = performance.now();
+        const pending = touchTapRef.current;
+        if (pending != null && pending.zone === zone && now - pending.at <= TOUCH_DOUBLE_TAP_MS) {
+          clearPendingTouchTap();
+          relativeSeek(zone === "back" ? -10 : 10);
+          showTouchSeekFeedback(zone);
+          onActivity();
+          return;
+        }
+        if (pending != null) clearPendingTouchTap();
+        const timer = window.setTimeout(() => {
+          if (touchTapRef.current?.timer !== timer) return;
+          touchTapRef.current = null;
+          togglePlayback();
+        }, TOUCH_DOUBLE_TAP_MS);
+        touchTapRef.current = { zone, at: now, timer };
+        return;
+      }
+      clearPendingTouchTap();
+    }
     togglePlayback();
-  }, [chromeVisible, nestedDialogOpen, onActivity, togglePlayback]);
+  }, [chromeVisible, clearPendingTouchTap, nestedDialogOpen, onActivity, relativeSeek, showTouchSeekFeedback, togglePlayback, touchPlayer]);
 
   const handleVideoDoubleClick = useCallback(() => {
     if (nestedDialogOpen) return;
+    if (touchPlayer) return;
     togglePlayerFullscreen();
-  }, [nestedDialogOpen, togglePlayerFullscreen]);
+  }, [nestedDialogOpen, togglePlayerFullscreen, touchPlayer]);
 
   const absolutePlaybackPosition = useCallback(() => {
     const current = videoRef.current?.currentTime ?? 0;
@@ -5613,10 +5704,11 @@ function WebviewPlayer({
       optionsTriggerRef.current?.focus({ preventScroll: true });
     }
   }, [audioShortcutAvailable, optionsOpen]);
+  const touchAudioSheet = touchPlayer && optionsOriginRef.current === "audio";
 
   return (
     <div
-      className={`webview-player${suspended ? " is-casting" : ""}`}
+      className={`webview-player${touchPlayer ? " is-touch-player" : ""}${suspended ? " is-casting" : ""}`}
       ref={captionViewportRef}
       onPointerMove={onActivity}
     >
@@ -5704,6 +5796,14 @@ function WebviewPlayer({
         />
       )}
 
+      {touchSeekFeedback != null && (
+        <div className={`player-touch-seek-feedback is-${touchSeekFeedback}`} role="status" aria-live="polite">
+          <Icon name={touchSeekFeedback === "back" ? "rewind" : "forward"} size={24} />
+          <span>{touchSeekFeedback === "back" ? "Back 10 seconds" : "Forward 10 seconds"}</span>
+        </div>
+      )}
+
+      {!touchPlayer ? (
       <div
         className={`player-osd${chromeVisible ? " is-visible" : ""}`}
         ref={captionControlsRef}
@@ -5723,7 +5823,7 @@ function WebviewPlayer({
           onLeave={thumbs.onLeave}
           onSeek={seek}
           onSeekPreview={(time) => seek(time, false)}
-          onScrubbingChange={setScrubbing}
+          onScrubbingChange={updateScrubbing}
           disabled={!chromeVisible}
         />
         <div className="player-osd-row">
@@ -5910,28 +6010,221 @@ function WebviewPlayer({
           </div>
         </div>
       </div>
+      ) : (
+        <div className="player-touch-controls">
+          <div
+            className={`player-touch-transport${chromeVisible ? " is-visible" : ""}`}
+            aria-hidden={!chromeVisible || undefined}
+            onPointerEnter={onChromeEnter}
+            onPointerLeave={onChromeLeave}
+            onFocusCapture={onChromeFocus}
+            onBlurCapture={onChromeBlur}
+          >
+            <button
+              type="button"
+              className="chip player-touch-skip"
+              onClick={() => relativeSeek(-10)}
+              aria-label="Back 10 seconds"
+              tabIndex={chromeVisible ? undefined : -1}
+            >
+              <Icon name="rewind" size={23} />
+              <span>Back 10</span>
+            </button>
+            <button
+              type="button"
+              className="chip player-touch-play"
+              onClick={togglePlayback}
+              aria-label={playing ? "Pause" : "Play"}
+              aria-pressed={playing}
+              tabIndex={chromeVisible ? undefined : -1}
+            >
+              <Icon name={playing ? "pause" : "play"} size={30} />
+            </button>
+            <button
+              type="button"
+              className="chip player-touch-skip"
+              onClick={() => relativeSeek(10)}
+              aria-label="Forward 10 seconds"
+              tabIndex={chromeVisible ? undefined : -1}
+            >
+              <Icon name="forward" size={23} />
+              <span>Forward 10</span>
+            </button>
+          </div>
+
+          <div
+            className={`player-osd player-touch-osd${chromeVisible ? " is-visible" : ""}`}
+            ref={captionControlsRef}
+            aria-hidden={!chromeVisible || undefined}
+            onPointerEnter={onChromeEnter}
+            onPointerLeave={onChromeLeave}
+            onFocusCapture={onChromeFocus}
+            onBlurCapture={onChromeBlur}
+          >
+            <WebviewScrubber
+              key={`${url}:${engine}`}
+              ref={scrubberRef}
+              active={chromeVisible}
+              duration={displayedDuration ?? 0}
+              preview={thumbs.available ? thumbs.preview : null}
+              onHover={thumbs.onHover}
+              onLeave={thumbs.onLeave}
+              onSeek={seek}
+              onSeekPreview={(time) => seek(time, false)}
+              onScrubbingChange={updateScrubbing}
+              disabled={!chromeVisible}
+              touchPresentation
+            />
+            <div className="player-touch-actions" role="toolbar" aria-label="Playback actions">
+              {audioShortcutAvailable && (
+                <button
+                  ref={audioShortcutRef}
+                  type="button"
+                  className={`chip player-touch-action${optionsOpen && optionsOriginRef.current === "audio" ? " is-active" : ""}`}
+                  onClick={openAudioOptions}
+                  aria-label={audioShortcutLabel}
+                  aria-haspopup="dialog"
+                  aria-expanded={optionsOpen && optionsOriginRef.current === "audio"}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name="audio" size={18} />
+                  <span className="player-touch-action-label">Audio</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className={`chip player-touch-action${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
+                onClick={() => {
+                  setOptionsOpen(false);
+                  setCaptionsOpen((open) => !open);
+                }}
+                aria-label="Subtitles"
+                aria-haspopup="dialog"
+                aria-expanded={captionsOpen}
+                tabIndex={chromeVisible ? undefined : -1}
+              >
+                <Icon name="captions" size={18} />
+                <span className="player-touch-action-label">CC</span>
+              </button>
+              <label className="chip player-touch-action player-touch-speed">
+                <span className="player-touch-action-label">Speed</span>
+                <select
+                  aria-label="Playback speed"
+                  value={playbackRate}
+                  onChange={(event) => changePlaybackRate(Number(event.target.value))}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                    <option value={speed} key={speed}>{speed}×</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="chip player-touch-action"
+                onClick={() => setVideoFit((fit) => fit === "contain" ? "cover" : fit === "cover" ? "fill" : "contain")}
+                aria-label={`Video fit, ${videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}`}
+                tabIndex={chromeVisible ? undefined : -1}
+              >
+                <Icon name="sliders" size={18} />
+                <span className="player-touch-action-label">Fit</span>
+                <span className="player-touch-action-value">{videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}</span>
+              </button>
+              {underTauri ? (
+                <CastControls
+                  media={{ url, title, subtitleUrl: castSubtitleUrl }}
+                  buttonClassName="chip player-touch-action player-mobile-optional player-touch-cast"
+                  onLocalPlaybackChange={onCastLocalPlaybackChange}
+                />
+              ) : browserCastAvailable ? (
+                <button
+                  type="button"
+                  className="chip player-touch-action player-mobile-optional"
+                  onClick={showBrowserCastPicker}
+                  aria-label={airPlayAvailable ? "AirPlay" : "Cast to a device"}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name="cast" size={18} />
+                  <span className="player-touch-action-label">{airPlayAvailable ? "AirPlay" : "Cast"}</span>
+                </button>
+              ) : null}
+              {pictureInPictureSupported && (
+                <button
+                  type="button"
+                  className={`chip player-touch-action player-mobile-optional${isPictureInPicture ? " is-active" : ""}`}
+                  onClick={togglePictureInPicture}
+                  aria-label={isPictureInPicture ? "Exit picture in picture" : "Picture in picture"}
+                  aria-pressed={isPictureInPicture}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name="picture-in-picture" size={18} />
+                  <span className="player-touch-action-label">PiP</span>
+                </button>
+              )}
+              {fullscreenSupported && (
+                <button
+                  type="button"
+                  className={`chip player-touch-action${isFullscreen ? " is-active" : ""}`}
+                  onClick={togglePlayerFullscreen}
+                  aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                  aria-pressed={isFullscreen}
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name={isFullscreen ? "fullscreen-exit" : "fullscreen"} size={18} />
+                  <span className="player-touch-action-label">Fullscreen</span>
+                </button>
+              )}
+              {onPlayNext != null && (
+                <button
+                  type="button"
+                  className="chip player-touch-action"
+                  onClick={onPlayNext}
+                  aria-label="Next episode"
+                  tabIndex={chromeVisible ? undefined : -1}
+                >
+                  <Icon name="skip-next" size={18} />
+                  <span className="player-touch-action-label">Next</span>
+                </button>
+              )}
+              <button
+                ref={optionsTriggerRef}
+                type="button"
+                className={`chip player-touch-action${optionsOpen && optionsOriginRef.current === "settings" ? " is-active" : ""}`}
+                onClick={toggleOptions}
+                aria-label="Playback settings"
+                aria-haspopup="dialog"
+                aria-expanded={optionsOpen && optionsOriginRef.current === "settings"}
+                tabIndex={chromeVisible ? undefined : -1}
+              >
+                <Icon name="sliders" size={18} />
+                <span className="player-touch-action-label">More</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {optionsOpen && (
         <div
           ref={optionsDialogRef}
-          className="player-options-menu glass-lit"
+          className={`player-options-menu glass-lit${touchAudioSheet ? " is-touch-audio-sheet" : touchPlayer ? " is-touch-settings" : ""}`}
           role="dialog"
           aria-modal="true"
-          aria-label="Playback settings"
+          aria-label={touchAudioSheet ? "Audio tracks" : "Playback settings"}
           tabIndex={-1}
         >
           <div className="player-options-head">
-            <strong>Playback settings</strong>
+            <strong>{touchAudioSheet ? "Audio tracks" : "Playback settings"}</strong>
             <button
               type="button"
               className="player-close"
               onClick={() => setOptionsOpen(false)}
-              aria-label="Close playback settings"
+              aria-label={touchAudioSheet ? "Close audio tracks" : "Close playback settings"}
             >
               <Icon name="xmark" size={15} />
             </button>
           </div>
-          <div className="player-options-section" aria-labelledby="player-audio-track-heading">
+          <div className="player-options-section player-audio-options-section" aria-labelledby="player-audio-track-heading">
             <span
               ref={audioHeadingRef}
               className="t-secondary"
@@ -6080,7 +6373,7 @@ function WebviewPlayer({
               </a>
             )}
           </div>
-          <div className="player-options-section">
+          <div className="player-options-section player-fit-options-section">
             <span className="t-secondary">Video fit</span>
             <div className="player-options-choice-row">
               {(["contain", "cover", "fill"] as const).map((fit) => (

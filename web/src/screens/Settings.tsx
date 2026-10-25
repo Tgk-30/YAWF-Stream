@@ -428,6 +428,83 @@ async function serverRequest<T>(
 const loadSavedProviderStatus = () =>
   serverRequest<unknown>("GET", "/api/credentials/effective");
 
+type PhysicalOrientation = "portrait" | "landscape";
+type PhysicalOrientationSource = "legacyAngle" | "screenType" | "screenShape";
+type PhysicalOrientationSignals = Record<PhysicalOrientationSource, PhysicalOrientation | null>;
+type PhysicalOrientationChange = {
+  source: PhysicalOrientationSource;
+  orientation: PhysicalOrientation;
+  awayFromBaseline: boolean;
+};
+
+const CATEGORY_FOCUS_ROTATION_GRACE_MS = 800;
+const PHYSICAL_ORIENTATION_SOURCES: readonly PhysicalOrientationSource[] = [
+  "legacyAngle",
+  "screenType",
+  "screenShape",
+];
+
+function physicalOrientationSignals(): PhysicalOrientationSignals {
+  const orientationType = window.screen.orientation?.type;
+  const screenType = orientationType?.startsWith("portrait")
+    ? "portrait"
+    : orientationType?.startsWith("landscape")
+      ? "landscape"
+      : null;
+
+  const legacyAngle = (window as Window & { orientation?: number }).orientation;
+  const legacyOrientation = typeof legacyAngle === "number"
+    ? Math.abs(legacyAngle) % 180 === 90
+      ? "landscape"
+      : "portrait"
+    : null;
+
+  const screenShape = window.screen.width > 0 && window.screen.height > 0
+    ? window.screen.width === window.screen.height
+      ? null
+      : window.screen.width > window.screen.height
+        ? "landscape"
+        : "portrait"
+    : null;
+
+  return {
+    legacyAngle: legacyOrientation,
+    screenType,
+    screenShape,
+  };
+}
+
+function coherentPhysicalOrientation(
+  signals: PhysicalOrientationSignals,
+): PhysicalOrientation | null {
+  const orientations = new Set(
+    PHYSICAL_ORIENTATION_SOURCES
+      .map((source) => signals[source])
+      .filter((orientation): orientation is PhysicalOrientation => orientation != null),
+  );
+  return orientations.size === 1 ? [...orientations][0] : null;
+}
+
+function freshPhysicalOrientationChange(
+  baseline: PhysicalOrientationSignals,
+  previous: PhysicalOrientationSignals,
+  current: PhysicalOrientationSignals,
+): PhysicalOrientationChange | null {
+  const coherentBaseline = coherentPhysicalOrientation(baseline);
+  for (const source of PHYSICAL_ORIENTATION_SOURCES) {
+    const orientation = current[source];
+    if (orientation == null || orientation === previous[source]) continue;
+    const sourceBaseline = baseline[source] ?? coherentBaseline;
+    if (sourceBaseline == null) continue;
+    return {
+      source,
+      orientation,
+      awayFromBaseline: orientation !== sourceBaseline,
+    };
+  }
+  return null;
+}
+
 export function Settings() {
   const {
     settings,
@@ -498,37 +575,177 @@ export function Settings() {
   // viewport. Reconcile only that exact native-select lifecycle. Unrelated
   // editing, browser tabs, non-iOS devices, and user zoom remain untouched.
   useEffect(() => {
-    let frame: number | null = null;
-    const reconcileCategoryFocus = () => {
+    let focusContext: {
+      baseline: PhysicalOrientationSignals;
+      last: PhysicalOrientationSignals;
+      pendingTransition: PhysicalOrientationChange | null;
+    } | null = null;
+    let ownershipExpiryTimer: number | null = null;
+    let reconciliationFrame: number | null = null;
+
+    const cancelOwnershipExpiry = () => {
+      if (ownershipExpiryTimer == null) return;
+      window.clearTimeout(ownershipExpiryTimer);
+      ownershipExpiryTimer = null;
+    };
+    const cancelReconciliation = () => {
+      if (reconciliationFrame == null) return;
+      window.cancelAnimationFrame(reconciliationFrame);
+      reconciliationFrame = null;
+    };
+    const clearFocusContext = () => {
+      cancelOwnershipExpiry();
+      cancelReconciliation();
+      focusContext = null;
+    };
+    const eligibleFocusContext = () => {
       const categorySelect = categorySelectRef.current;
       if (
         deviceKind() !== "ios" ||
         !isStandaloneDisplay() ||
         window.matchMedia?.("(pointer: coarse)").matches !== true ||
-        categorySelect == null ||
-        document.activeElement !== categorySelect
+        categorySelect == null
+      ) {
+        return false;
+      }
+      const visualScale = window.visualViewport?.scale;
+      return visualScale == null || visualScale === 1;
+    };
+    const ownCategoryFocus = () => {
+      clearFocusContext();
+      if (!eligibleFocusContext()) return;
+      const baseline = physicalOrientationSignals();
+      focusContext = {
+        baseline,
+        last: baseline,
+        pendingTransition: null,
+      };
+    };
+    const releaseCategoryFocus = () => {
+      if (focusContext == null || focusContext.pendingTransition != null) return;
+      cancelOwnershipExpiry();
+      // The observed resize-to-orientation event gap was 388 ms. Keep the
+      // select's focus context for a bounded two-times margin after blur.
+      ownershipExpiryTimer = window.setTimeout(() => {
+        ownershipExpiryTimer = null;
+        clearFocusContext();
+      }, CATEGORY_FOCUS_ROTATION_GRACE_MS);
+    };
+    const handleDocumentFocus = (event: FocusEvent) => {
+      if (
+        event.target === categorySelectRef.current ||
+        event.target === document.body ||
+        event.target === document.documentElement
       ) {
         return;
       }
-      const visualScale = window.visualViewport?.scale;
-      if (visualScale != null && visualScale !== 1) return;
+      clearFocusContext();
+    };
+    const reconcileCategoryFocus = () => {
+      const context = focusContext;
+      if (context == null) return;
+
+      const categorySelect = categorySelectRef.current;
+      if (!eligibleFocusContext() || categorySelect == null) {
+        clearFocusContext();
+        return;
+      }
+
+      const currentSignals = physicalOrientationSignals();
+      const freshChange = freshPhysicalOrientationChange(
+        context.baseline,
+        context.last,
+        currentSignals,
+      );
+      context.last = currentSignals;
+
+      if (context.pendingTransition != null) {
+        if (freshChange != null) {
+          if (!freshChange.awayFromBaseline) {
+            clearFocusContext();
+            return;
+          }
+          context.pendingTransition = freshChange;
+        } else if (
+          currentSignals[context.pendingTransition.source] !==
+          context.pendingTransition.orientation
+        ) {
+          clearFocusContext();
+        }
+        return;
+      }
+      if (freshChange == null || !freshChange.awayFromBaseline) return;
 
       const scroller = settingsScreenRef.current?.closest(".app-content");
-      if (!(scroller instanceof HTMLElement)) return;
+      if (!(scroller instanceof HTMLElement)) {
+        clearFocusContext();
+        return;
+      }
       const scrollTop = scroller.scrollTop;
-      categorySelect.blur();
-      frame = window.requestAnimationFrame(() => {
-        frame = null;
-        if (!scroller.isConnected || settingsScreenRef.current == null) return;
+      const categoryStillFocused = document.activeElement === categorySelect;
+      context.pendingTransition = freshChange;
+      cancelOwnershipExpiry();
+      reconciliationFrame = window.requestAnimationFrame(() => {
+        reconciliationFrame = null;
+        if (focusContext !== context || context.pendingTransition == null) return;
+
+        const frameSignals = physicalOrientationSignals();
+        const frameChange = freshPhysicalOrientationChange(
+          context.baseline,
+          context.last,
+          frameSignals,
+        );
+        context.last = frameSignals;
+        if (frameChange != null) {
+          if (!frameChange.awayFromBaseline) {
+            clearFocusContext();
+            return;
+          }
+          context.pendingTransition = frameChange;
+        }
+        const transition = context.pendingTransition;
+        const activeElement = document.activeElement;
+        if (
+          !eligibleFocusContext() ||
+          !scroller.isConnected ||
+          settingsScreenRef.current == null ||
+          frameSignals[transition.source] !== transition.orientation ||
+          (
+            activeElement != null &&
+            activeElement !== document.body &&
+            activeElement !== document.documentElement &&
+            activeElement !== categorySelect
+          )
+        ) {
+          clearFocusContext();
+          return;
+        }
+        clearFocusContext();
         scroller.focus({ preventScroll: true });
         scroller.scrollTop = scrollTop;
       });
+      if (categoryStillFocused) categorySelect.blur();
+    };
+    const handleVisualViewportResize = () => {
+      if (focusContext != null && !eligibleFocusContext()) clearFocusContext();
     };
 
+    const categorySelect = categorySelectRef.current;
+    const visualViewport = window.visualViewport;
+    categorySelect?.addEventListener("focus", ownCategoryFocus);
+    categorySelect?.addEventListener("blur", releaseCategoryFocus);
+    document.addEventListener("focusin", handleDocumentFocus);
+    window.addEventListener("resize", reconcileCategoryFocus);
     window.addEventListener("orientationchange", reconcileCategoryFocus);
+    visualViewport?.addEventListener("resize", handleVisualViewportResize);
     return () => {
+      categorySelect?.removeEventListener("focus", ownCategoryFocus);
+      categorySelect?.removeEventListener("blur", releaseCategoryFocus);
+      document.removeEventListener("focusin", handleDocumentFocus);
+      window.removeEventListener("resize", reconcileCategoryFocus);
       window.removeEventListener("orientationchange", reconcileCategoryFocus);
-      if (frame != null) window.cancelAnimationFrame(frame);
+      visualViewport?.removeEventListener("resize", handleVisualViewportResize);
+      clearFocusContext();
     };
   }, []);
 

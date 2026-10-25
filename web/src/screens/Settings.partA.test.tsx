@@ -164,26 +164,85 @@ function renderAt(tab?: string, seed?: Partial<AppSettings>) {
   return utils;
 }
 
-function installOrientationFrame({ coarse = true, scale = 1 } = {}) {
-  let pendingFrame: FrameRequestCallback | null = null;
-  const requestFrame = vi.fn((callback: FrameRequestCallback) => {
-    pendingFrame = callback;
-    return 47;
+function installOrientationFrame({
+  coarse = true,
+  scale = 1,
+  orientation = "portrait",
+  screenOrientation = orientation,
+}: {
+  coarse?: boolean;
+  scale?: number;
+  orientation?: "portrait" | "landscape";
+  screenOrientation?: "portrait" | "landscape";
+} = {}) {
+  let nextFrameId = 47;
+  let visualScale = scale;
+  let visualHeight = orientation === "portrait" ? 1024 : 768;
+  const pendingFrames = new Map<number, FrameRequestCallback>();
+  const visualViewport = new EventTarget();
+  const screenState = {
+    orientation: { type: `${screenOrientation}-primary` },
+    width: orientation === "portrait" ? 768 : 1024,
+    height: orientation === "portrait" ? 1024 : 768,
+  };
+  Object.defineProperty(visualViewport, "scale", {
+    configurable: true,
+    get: () => visualScale,
   });
-  const cancelFrame = vi.fn();
+  Object.defineProperty(visualViewport, "height", {
+    configurable: true,
+    get: () => visualHeight,
+  });
+  const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+    const id = nextFrameId++;
+    pendingFrames.set(id, callback);
+    return id;
+  });
+  const cancelFrame = vi.fn((id: number) => {
+    pendingFrames.delete(id);
+  });
   vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
     matches: coarse && query === "(pointer: coarse)",
   })));
-  vi.stubGlobal("visualViewport", { scale });
+  vi.stubGlobal("visualViewport", visualViewport);
+  vi.stubGlobal("screen", screenState);
+  vi.stubGlobal("orientation", orientation === "portrait" ? 0 : 90);
   vi.stubGlobal("requestAnimationFrame", requestFrame);
   vi.stubGlobal("cancelAnimationFrame", cancelFrame);
   return {
     requestFrame,
     cancelFrame,
+    setLegacyOrientation(next: "portrait" | "landscape") {
+      Object.defineProperty(window, "orientation", {
+        configurable: true,
+        value: next === "portrait" ? 0 : 90,
+        writable: true,
+      });
+    },
+    setScreenOrientation(next: "portrait" | "landscape") {
+      screenState.orientation.type = `${next}-primary`;
+    },
+    setScreenShape(next: "portrait" | "landscape") {
+      screenState.width = next === "portrait" ? 768 : 1024;
+      screenState.height = next === "portrait" ? 1024 : 768;
+    },
+    setOrientation(next: "portrait" | "landscape") {
+      this.setLegacyOrientation(next);
+      this.setScreenOrientation(next);
+      this.setScreenShape(next);
+    },
+    setScale(next: number) {
+      visualScale = next;
+      visualViewport.dispatchEvent(new Event("resize"));
+    },
+    setVisualHeight(next: number) {
+      visualHeight = next;
+      visualViewport.dispatchEvent(new Event("resize"));
+    },
     flush() {
-      const callback = pendingFrame;
-      pendingFrame = null;
-      callback?.(0);
+      const frames = [...pendingFrames.entries()];
+      pendingFrames.clear();
+      for (const [, callback] of frames) callback(0);
     },
   };
 }
@@ -218,6 +277,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -267,6 +328,7 @@ describe("Settings shell", () => {
     const category = screen.getByRole("combobox", { name: "Settings category" });
     scroller.scrollTop = 431;
     category.focus();
+    frame.setOrientation("landscape");
 
     window.dispatchEvent(new Event("orientationchange"));
 
@@ -276,6 +338,269 @@ describe("Settings shell", () => {
     act(() => frame.flush());
     expect(scroller).toHaveFocus();
     expect(scroller.scrollTop).toBe(431);
+  });
+
+  it("reconciles a category select blurred by the landscape breakpoint before resize", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    scroller.scrollTop = 587;
+    category.focus();
+
+    frame.setOrientation("landscape");
+    category.blur();
+    window.dispatchEvent(new Event("resize"));
+    window.dispatchEvent(new Event("orientationchange"));
+
+    expect(frame.requestFrame).toHaveBeenCalledTimes(1);
+    expect(scroller.scrollTop).toBe(587);
+    act(() => frame.flush());
+    expect(focusScroller).toHaveBeenCalledTimes(1);
+    expect(scroller).toHaveFocus();
+    expect(scroller.scrollTop).toBe(587);
+  });
+
+  it("retains category focus ownership until a late physical orientation signature arrives", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    scroller.scrollTop = 733;
+    category.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    category.blur();
+    document.body.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    act(() => frame.flush());
+    window.dispatchEvent(new Event("resize"));
+    act(() => frame.flush());
+    act(() => vi.advanceTimersByTime(388));
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(focusScroller).toHaveBeenCalledTimes(1);
+    expect(scroller).toHaveFocus();
+    expect(scroller.scrollTop).toBe(733);
+  });
+
+  it("observes a new legacy angle even while Screen Orientation remains stale", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    category.focus();
+
+    frame.setLegacyOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(scroller).toHaveFocus();
+    expect(frame.requestFrame).toHaveBeenCalledTimes(1);
+  });
+
+  it("expires a same-orientation blur without resetting focus or vertical scroll", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    scroller.scrollTop = 619;
+    category.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+
+    category.blur();
+    act(() => frame.setVisualHeight(497));
+    window.dispatchEvent(new Event("resize"));
+    act(() => frame.flush());
+    const retentionCall = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 800);
+    expect(retentionCall).toBeGreaterThanOrEqual(0);
+    act(() => vi.advanceTimersByTime(799));
+    expect(focusScroller).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(619);
+    act(() => vi.advanceTimersByTime(1));
+
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(focusScroller).not.toHaveBeenCalled();
+    expect(scroller).not.toHaveFocus();
+    expect(scroller.scrollTop).toBe(619);
+    expect(frame.requestFrame).not.toHaveBeenCalled();
+
+    category.focus();
+    frame.setOrientation("portrait");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(focusScroller).toHaveBeenCalledTimes(1);
+    expect(scroller).toHaveFocus();
+  });
+
+  it("cancels same-orientation blur ownership when another editor gains focus", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    const search = screen.getByRole("textbox", { name: "Search settings" });
+    category.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+
+    category.blur();
+    window.dispatchEvent(new Event("resize"));
+    const retentionCall = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 800);
+    expect(retentionCall).toBeGreaterThanOrEqual(0);
+    const retentionTimer = setTimeoutSpy.mock.results[retentionCall]?.value;
+    search.focus();
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(retentionTimer);
+
+    act(() => vi.advanceTimersByTime(800));
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(search).toHaveFocus();
+    expect(focusScroller).not.toHaveBeenCalled();
+  });
+
+  it("cancels retained category ownership as soon as user zoom becomes ineligible", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const focusScroller = vi.spyOn(scroller, "focus");
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    category.focus();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+
+    category.blur();
+    const retentionCall = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 800);
+    expect(retentionCall).toBeGreaterThanOrEqual(0);
+    const retentionTimer = setTimeoutSpy.mock.results[retentionCall]?.value;
+    act(() => frame.setScale(1.25));
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(retentionTimer);
+
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(focusScroller).not.toHaveBeenCalled();
+    expect(scroller).not.toHaveFocus();
+  });
+
+  it("clears retained category ownership when Settings unmounts", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    installOrientationFrame();
+    const { unmount } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    category.focus();
+    category.blur();
+    const retentionCall = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 800);
+    expect(retentionCall).toBeGreaterThanOrEqual(0);
+    const retentionTimer = setTimeoutSpy.mock.results[retentionCall]?.value;
+
+    unmount();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(retentionTimer);
+  });
+
+  it("does not steal focus selected after an orientation reconciliation is queued", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    const search = screen.getByRole("textbox", { name: "Search settings" });
+    category.focus();
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+
+    search.focus();
+    act(() => frame.flush());
+
+    expect(frame.cancelFrame).toHaveBeenCalledWith(47);
+    expect(search).toHaveFocus();
+    expect(scroller).not.toHaveFocus();
+  });
+
+  it("discards a queued reconciliation when orientation reverses before the frame", () => {
+    platformState.device = "ios";
+    platformState.standalone = true;
+    const frame = installOrientationFrame();
+    const { container } = render(
+      <main className="app-content" tabIndex={-1}>
+        <Settings />
+      </main>,
+    );
+    const scroller = container.querySelector<HTMLElement>(".app-content")!;
+    const category = screen.getByRole("combobox", { name: "Settings category" });
+    category.focus();
+    frame.setOrientation("landscape");
+    window.dispatchEvent(new Event("orientationchange"));
+
+    frame.setOrientation("portrait");
+    window.dispatchEvent(new Event("orientationchange"));
+    act(() => frame.flush());
+
+    expect(scroller).not.toHaveFocus();
   });
 
   it("leaves unrelated Settings editing focused during iPad PWA rotation", () => {
@@ -291,6 +616,7 @@ describe("Settings shell", () => {
     const search = screen.getByRole("textbox", { name: "Search settings" });
     scroller.scrollTop = 219;
     search.focus();
+    frame.setOrientation("landscape");
 
     window.dispatchEvent(new Event("orientationchange"));
 
@@ -321,6 +647,7 @@ describe("Settings shell", () => {
     );
     const category = screen.getByRole("combobox", { name: "Settings category" });
     category.focus();
+    frame.setOrientation("landscape");
 
     window.dispatchEvent(new Event("orientationchange"));
 
@@ -338,6 +665,7 @@ describe("Settings shell", () => {
       </main>,
     );
     screen.getByRole("combobox", { name: "Settings category" }).focus();
+    frame.setOrientation("landscape");
     window.dispatchEvent(new Event("orientationchange"));
     expect(frame.requestFrame).toHaveBeenCalledTimes(1);
 

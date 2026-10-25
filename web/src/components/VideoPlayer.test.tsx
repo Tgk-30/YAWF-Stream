@@ -81,10 +81,14 @@ vi.mock("../data/traktScrobble", () => ({
   scrobblePlaybackStop: (...args: unknown[]) => scrobbleStopMock(...args),
 }));
 vi.mock("./CastControls", () => ({
-  CastControls: ({ onLocalPlaybackChange }: {
+  CastControls: ({ onLocalPlaybackChange, buttonClassName }: {
     onLocalPlaybackChange: (suspended: boolean) => void;
+    buttonClassName: string;
   }) => (
     <>
+      <button type="button" className={buttonClassName} aria-label="Cast to a device">
+        <span>Cast</span>
+      </button>
       <button type="button" onClick={() => onLocalPlaybackChange(true)}>
         test suspend playback
       </button>
@@ -494,6 +498,340 @@ afterEach(() => {
 // ---- Top-level shell + branch selection -----------------------------------
 
 describe("VideoPlayer shell", () => {
+  it("uses the shared touch player only for iOS browsers and marked Android app documents", () => {
+    deviceKindMock.mockReturnValue("ios");
+    const ios = render(
+      <VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />,
+    );
+    expect(document.querySelector(".player")).toHaveClass("is-touch-player");
+    expect(screen.getByRole("button", { name: "Back 10 seconds" })).toHaveTextContent("Back 10");
+    expect(screen.getByRole("button", { name: "Forward 10 seconds" })).toHaveTextContent("Forward 10");
+    expect(screen.getByRole("button", { name: "Video fit, Fit" })).toBeInTheDocument();
+    expect(screen.getByText("Speed", { selector: ".player-touch-action-label" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Volume")).toBeNull();
+    ios.unmount();
+
+    deviceKindMock.mockReturnValue("mac");
+    Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+      configurable: true,
+      value: { getInsets: vi.fn() },
+    });
+    const androidApp = render(
+      <VideoPlayer url="https://x/movie.mp4" title="Android app" onClose={() => {}} />,
+    );
+    expect(document.querySelector(".player")).toHaveClass("is-touch-player");
+    androidApp.unmount();
+
+    delete (window as unknown as Record<string, unknown>).__YAWF_NATIVE_SAFE_AREA__;
+    deviceKindMock.mockReturnValue("android");
+    render(<VideoPlayer url="https://x/movie.mp4" title="Browser" onClose={() => {}} />);
+    expect(document.querySelector(".player")).not.toHaveClass("is-touch-player");
+    expect(document.querySelector(".player-touch-controls")).toBeNull();
+    expect(screen.getByLabelText("Volume")).toBeInTheDocument();
+  });
+
+  it("routes touch transport, speed, fit, captions, settings, and next through existing handlers", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    const onPlayNext = vi.fn();
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="Touch film"
+        onPlayNext={onPlayNext}
+        onClose={() => {}}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, value: 50, writable: true },
+      duration: { configurable: true, value: 100 },
+      playbackRate: { configurable: true, value: 1, writable: true },
+      defaultPlaybackRate: { configurable: true, value: 1, writable: true },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+    expect(video.currentTime).toBe(40);
+    await userEvent.click(screen.getByRole("button", { name: "Forward 10 seconds" }));
+    expect(video.currentTime).toBe(50);
+
+    await userEvent.selectOptions(screen.getByLabelText("Playback speed"), "1.5");
+    expect(video.playbackRate).toBe(1.5);
+    await userEvent.click(screen.getByRole("button", { name: "Video fit, Fit" }));
+    expect(screen.getByRole("button", { name: "Video fit, Fill" })).toBeInTheDocument();
+    expect(video).toHaveStyle({ objectFit: "cover" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+    expect(screen.getByTestId("captions-menu")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("close-captions"));
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("dialog", { name: "Playback settings" })).toHaveClass("is-touch-settings");
+    await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Next episode" }));
+    expect(onPlayNext).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a focused, scrollable touch audio sheet instead of the advanced settings flow", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, label: "English", language: "eng", default: true },
+      { index: 1, label: "French", language: "fra", default: false },
+    ] satisfies ServerAudioTrack[]);
+    render(
+      <VideoPlayer
+        url="https://x/movie.mp4"
+        title="Touch film"
+        serverOptimized={{
+          qualities: ["480p"],
+          loadAudioTracks,
+          request: vi.fn(async () => ({
+            url: "https://x/optimized.m3u8",
+            timelineOffsetSeconds: 0,
+            startPositionSeconds: 0,
+            quality: "480p" as const,
+          })),
+        }}
+        onClose={() => {}}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Audio tracks" });
+    await userEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Audio tracks" });
+    expect(dialog).toHaveClass("is-touch-audio-sheet");
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await waitFor(() => expect(loadAudioTracks).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Close audio tracks" }));
+    expect(trigger).toHaveFocus();
+  });
+
+  it("shows touch PiP and fullscreen only when their browser APIs are implemented", () => {
+    deviceKindMock.mockReturnValue("ios");
+    const first = render(
+      <VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />,
+    );
+    expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Enter fullscreen" })).toBeNull();
+    first.unmount();
+
+    const restoreFullscreen = replaceProperty(
+      HTMLElement.prototype,
+      "requestFullscreen",
+      vi.fn().mockResolvedValue(undefined),
+    );
+    const restorePipEnabled = replaceProperty(document, "pictureInPictureEnabled", true);
+    const restoreRequestPip = replaceProperty(
+      HTMLVideoElement.prototype,
+      "requestPictureInPicture",
+      vi.fn().mockResolvedValue(undefined),
+    );
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      expect(screen.getByRole("button", { name: "Picture in picture" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+    } finally {
+      restoreRequestPip();
+      restorePipEnabled();
+      restoreFullscreen();
+    }
+  });
+
+  it("performs one side-zone double-tap seek without play or fullscreen side effects", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    const restoreRequestFullscreen = replaceProperty(
+      HTMLElement.prototype,
+      "requestFullscreen",
+      vi.fn().mockResolvedValue(undefined),
+    );
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        currentTime: { configurable: true, value: 40, writable: true },
+        duration: { configurable: true, value: 120 },
+      });
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      const pause = vi.mocked(video.pause);
+      play.mockClear();
+      pause.mockClear();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(120));
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(400));
+
+      expect(video.currentTime).toBe(50);
+      expect(play).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+      expect(HTMLElement.prototype.requestFullscreen).not.toHaveBeenCalled();
+      expect(document.querySelector(".player-touch-seek-feedback")).toHaveTextContent("Forward 10 seconds");
+    } finally {
+      restoreRequestFullscreen();
+      vi.useRealTimers();
+    }
+  });
+
+  it("recognizes a late double tap across the complete declared window", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        currentTime: { configurable: true, value: 40, writable: true },
+        duration: { configurable: true, value: 120 },
+      });
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      const pause = vi.mocked(video.pause);
+      play.mockClear();
+      pause.mockClear();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(300));
+      expect(play).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(400));
+
+      expect(video.currentTime).toBe(50);
+      expect(play).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("commits one side-zone single tap only after the double-tap window expires", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      play.mockClear();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      act(() => vi.advanceTimersByTime(319));
+      expect(play).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(play).toHaveBeenCalledTimes(1);
+      act(() => vi.advanceTimersByTime(400));
+      expect(play).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending side-zone single tap when a player modal opens", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      play.mockClear();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("dialog", { name: "Playback settings" })).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(500));
+      expect(play).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses current server request, audio, and timeline state for a same-key double tap", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    const sourceInfo = deferred<{ durationSeconds: number | null; tracks?: ServerAudioTrack[] }>();
+    const loadSourceInfo = vi.fn(() => sourceInfo.promise);
+    const loadAudioTracks = vi.fn(async () => [] as ServerAudioTrack[]);
+    const oldRequest = vi.fn(() => new Promise<never>(() => {}));
+    const currentRequest = vi.fn(() => new Promise<never>(() => {}));
+    const url = "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=100";
+    const base = {
+      url,
+      engine: "webview-hls-transcode" as const,
+      title: "Current seek owner",
+      onClose: () => {},
+    };
+    const view = render(
+      <VideoPlayer
+        {...base}
+        timelineOffsetSeconds={100}
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, loadAudioTracks, request: oldRequest }}
+      />,
+    );
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, value: 5, writable: true },
+      duration: { configurable: true, value: 12 },
+      paused: { configurable: true, value: true },
+    });
+    video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    fireEvent.loadedMetadata(video);
+
+    view.rerender(
+      <VideoPlayer
+        {...base}
+        timelineOffsetSeconds={500}
+        serverOptimized={{ qualities: ["480p"], loadSourceInfo, loadAudioTracks, request: currentRequest }}
+      />,
+    );
+    await act(async () => {
+      sourceInfo.resolve({
+        durationSeconds: 1_000,
+        tracks: [
+          { index: 0, label: "English", language: "eng", default: false },
+          { index: 1, label: "French", language: "fra", default: true },
+        ],
+      });
+      await sourceInfo.promise;
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Audio track, French" })).toBeInTheDocument());
+    expect(document.querySelector("video.player-video")).toBe(video);
+
+    fireEvent.pointerDown(video, { pointerType: "touch" });
+    fireEvent.click(video, { clientX: 90 });
+    fireEvent.pointerDown(video, { pointerType: "touch" });
+    fireEvent.click(video, { clientX: 90 });
+
+    await waitFor(() => expect(currentRequest).toHaveBeenCalledWith("480p", 515, 1));
+    expect(oldRequest).not.toHaveBeenCalled();
+  });
+
+  it("pins touch chrome for the complete scrub gesture", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const osd = document.querySelector(".player-osd") as HTMLElement;
+      const scrubber = screen.getByTestId("scrub-bar");
+      fireEvent.pointerDown(scrubber);
+      act(() => vi.advanceTimersByTime(7_000));
+      expect(osd).toHaveClass("is-visible");
+      fireEvent.pointerUp(scrubber);
+      act(() => vi.advanceTimersByTime(3_200));
+      expect(osd).not.toHaveClass("is-visible");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("never invokes desktop players for a stale native engine on Android", () => {
     isTauriMock.mockReturnValue(true);
     deviceKindMock.mockReturnValue("android");
@@ -547,6 +885,7 @@ describe("VideoPlayer shell", () => {
     expect(
       screen.getByText("Playing in the native Android TV player."),
     ).toBeInTheDocument();
+    expect(document.querySelector(".player-touch-controls")).toBeNull();
 
     act(() => {
       window.dispatchEvent(
@@ -6884,6 +7223,31 @@ describe("WebviewPlayer", () => {
 
       fireEvent.pointerDown(video, { pointerType: "touch" });
       fireEvent.click(video);
+      expect(play).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps reveal-before-play semantics in the shared touch presentation", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      play.mockClear();
+      act(() => vi.advanceTimersByTime(3200));
+      expect(document.querySelector(".player-osd")).not.toHaveClass("is-visible");
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 50 });
+      expect(document.querySelector(".player-osd")).toHaveClass("is-visible");
+      expect(play).not.toHaveBeenCalled();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 50 });
       expect(play).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
