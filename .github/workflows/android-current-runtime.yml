@@ -13,18 +13,23 @@ on:
         type: boolean
         required: true
         default: false
+      touch_player_fixture:
+        description: Test the shared touch player with the immutable public phone58 host and exact phone59 web UI fixture
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: android-current-runtime-check-${{ github.ref }}-${{ inputs.external_player_fixture && 'external' || inputs.permission_fixture && 'fixture' || 'production' }}
+  group: android-current-runtime-check-${{ github.ref }}-${{ inputs.touch_player_fixture && 'touch-player' || inputs.external_player_fixture && 'external' || inputs.permission_fixture && 'fixture' || 'production' }}
   cancel-in-progress: false
 
 jobs:
   api36-current-runtime:
-    if: github.ref_type == 'branch' && inputs.permission_fixture != true && inputs.external_player_fixture != true
+    if: github.ref_type == 'branch' && inputs.permission_fixture != true && inputs.external_player_fixture != true && inputs.touch_player_fixture != true
     name: Signed phone APK on one fresh API 36 KVM emulator
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -461,13 +466,13 @@ jobs:
           retention-days: 14
 
   permission-return-fixtures:
-    if: github.ref_type == 'branch' && inputs.permission_fixture == true && inputs.external_player_fixture != true
+    if: github.ref_type == 'branch' && inputs.permission_fixture == true && inputs.external_player_fixture != true && inputs.touch_player_fixture != true
     uses: ./.github/workflows/android-permission-return-fixture.yml
     permissions:
       contents: read
 
   external-player-fixture:
-    if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true
+    if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true && inputs.touch_player_fixture != true
     name: Public phone42 remote external player on fresh API36
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -1024,6 +1029,625 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-phone42-external-player-runtime-evidence
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
+
+  touch-player-fixture:
+    if: github.ref_type == 'branch' && inputs.touch_player_fixture == true && inputs.permission_fixture != true && inputs.external_player_fixture != true
+    name: Public phone58 host with exact phone59 touch UI on fresh API36
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      EVIDENCE: android-touch-player-evidence
+      PRODUCT_APK: YAWF.Stream_Android_2.3.58.apk
+      PRODUCT_URL: https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.58-web/YAWF.Stream_Android_2.3.58.apk
+      PRODUCT_SHA256: 2b458f8bc5584b53ecbeb9fba932593dd51a648d209d49688803fa3e5b014200
+      PRODUCT_SOURCE: 679534f91359d9e4b12a64cc45bbe3ae580d7f61
+      PRODUCT_VERSION: 2.3.58
+      PRODUCT_SIGNER_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a
+      TOUCH_UI_SOURCE: a5ec866a6cbc9af3b0865a49845b7ad4cc9c9520
+      TOUCH_UI_VERSION: 2.3.59
+      SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
+      EMULATOR_SERIAL: emulator-5554
+      AVD_NAME: yawf-touch-player-phone59-api36
+      FIXTURE_APP_PORT: "43120"
+      FIXTURE_MEDIA_PORT: "43121"
+      npm_config_fetch_retries: "0"
+    steps:
+      - name: Checkout touch runtime harness
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout immutable public host verification source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCT_SOURCE }}
+          path: public-host-source
+          persist-credentials: false
+
+      - name: Checkout exact touch UI and server source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TOUCH_UI_SOURCE }}
+          path: touch-ui-source
+          persist-credentials: false
+
+      - name: Bind sources and download immutable public host
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$EVIDENCE"
+          test "$(git -C public-host-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
+          test "$(git -C touch-ui-source rev-parse HEAD)" = "$TOUCH_UI_SOURCE"
+          test "$(node -p "require('./touch-ui-source/web/package.json').version")" = "$TOUCH_UI_VERSION"
+          test -z "$(git -C public-host-source status --porcelain)"
+          test -z "$(git -C touch-ui-source status --porcelain)"
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 180 \
+            "$PRODUCT_URL" --output "$PRODUCT_APK"
+          printf '%s  %s\n' "$PRODUCT_SHA256" "$PRODUCT_APK" | sha256sum --check -
+          product_bytes="$(wc -c < "$PRODUCT_APK" | tr -d ' ')"
+          test "$product_bytes" -gt 1000000
+          test "$product_bytes" -lt 200000000
+          {
+            echo "harnessRevision=$(git rev-parse HEAD)"
+            echo "publicHostSource=$PRODUCT_SOURCE"
+            echo "publicHostSha256=$PRODUCT_SHA256"
+            echo "publicHostVersion=$PRODUCT_VERSION"
+            echo "touchUiSource=$TOUCH_UI_SOURCE"
+            echo "touchUiVersion=$TOUCH_UI_VERSION"
+            echo "twoSourceBoundary=immutable-native-host-plus-exact-hosted-web-ui"
+            echo "acceptanceRuns=1-fresh-avd"
+            echo "emulatorImage=$SYSTEM_IMAGE_PACKAGE"
+            echo "productionServerOrProviderProof=false"
+            echo "publicOtaProof=false"
+            echo "standalone59Proof=false"
+            echo "physicalDeviceProof=false"
+            echo "realAccountOrCredentialUsed=false"
+            echo "apkBytes=$product_bytes"
+          } > "$EVIDENCE/binding.txt"
+
+      - name: Set up Node 24 and JDK 17
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Verify harness contracts before tool or device mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test scripts/android_touch_player_workflow.test.mjs
+          node --check scripts/android-touch-player-fixture/media-contract.mjs
+          node --check scripts/android_touch_player_server_fixture.mts
+
+      - name: Set up Android SDK and isolated driver Gradle
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
+      - name: Install exact official image and required media tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse0 ffmpeg
+          timeout 180s sdkmanager --list --channel=0 > "$EVIDENCE/sdk-metadata.txt"
+          grep -E '^ *system-images;android-36;google_apis;x86_64 *\|' "$EVIDENCE/sdk-metadata.txt"
+          sdkmanager platform-tools emulator 'platforms;android-36' 'build-tools;36.0.0' "$SYSTEM_IMAGE_PACKAGE"
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          test -x "$sdk/emulator/emulator"
+          test -x "$sdk/build-tools/36.0.0/apksigner"
+          test -x "$sdk/build-tools/36.0.0/aapt2"
+          image="$sdk/system-images/android-36/google_apis/x86_64"
+          test -f "$image/package.xml"
+          test -f "$image/source.properties"
+          sha256sum "$image/package.xml" "$image/source.properties" > "$EVIDENCE/image-metadata-sha256.txt"
+          {
+            echo "$sdk/build-tools/36.0.0"
+            echo "$sdk/emulator"
+            echo "$sdk/platform-tools"
+          } >> "$GITHUB_PATH"
+
+      - name: Verify exact APK identity, actual version code, and public signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(apkanalyzer manifest application-id "$PRODUCT_APK")" = com.tgk30.debridstreamer
+          actual_version="$(apkanalyzer manifest version-name "$PRODUCT_APK")"
+          actual_version_code="$(apkanalyzer manifest version-code "$PRODUCT_APK")"
+          test "$actual_version" = "$PRODUCT_VERSION"
+          [[ "$actual_version_code" =~ ^[1-9][0-9]{0,9}$ ]]
+          source_pin="$(tr '[:upper:]' '[:lower:]' < public-host-source/web/src-tauri/SIGNING_CERT_SHA256 | tr -d '[:space:]')"
+          test "$source_pin" = "$PRODUCT_SIGNER_SHA256"
+          apksigner verify --print-certs "$PRODUCT_APK" > "$EVIDENCE/apk-signer.txt" 2>&1
+          actual_signer="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$EVIDENCE/apk-signer.txt")"
+          test "$actual_signer" = "$PRODUCT_SIGNER_SHA256"
+          python3 public-host-source/scripts/verify_android_apk.py \
+            --apk "$PRODUCT_APK" --version "$PRODUCT_VERSION" \
+            --certificate-pin public-host-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" | tee "$EVIDENCE/apk-verification.txt"
+          python3 - "$EVIDENCE/product-admission.json" "$actual_version" "$actual_version_code" "$actual_signer" <<'PY'
+          import json,sys
+          from pathlib import Path
+          path,version,code,signer=sys.argv[1:]
+          Path(path).write_text(json.dumps({
+              "schemaVersion":1,
+              "package":"com.tgk30.debridstreamer",
+              "versionName":version,
+              "versionCode":int(code),
+              "versionCodeSource":"apkanalyzer-from-immutable-apk",
+              "signerSha256":signer,
+          },indent=2)+"\n")
+          PY
+          echo "PRODUCT_VERSION_CODE_ACTUAL=$actual_version_code" >> "$GITHUB_ENV"
+
+      - name: Build exact hosted UI, real server, and isolated driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd touch-ui-source/web && npm ci && npm run build)
+          (cd touch-ui-source/server && npm ci)
+          test "$(git -C touch-ui-source rev-parse HEAD)" = "$TOUCH_UI_SOURCE"
+          gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
+            :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+          app=scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk
+          tests=scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          test -f "$app"
+          test -f "$tests"
+          sha256sum "$app" "$tests" > "$EVIDENCE/driver-apk-sha256.txt"
+          apkanalyzer manifest print "$app" > "$EVIDENCE/driver-app-manifest.xml"
+          apkanalyzer manifest print "$tests" > "$EVIDENCE/driver-test-manifest.xml"
+          if grep -Eqi 'INTERNET|BIND_ACCESSIBILITY_SERVICE|MANAGE_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE|REQUEST_INSTALL_PACKAGES|QUERY_ALL_PACKAGES' \
+            "$EVIDENCE/driver-app-manifest.xml" "$EVIDENCE/driver-test-manifest.xml"; then
+            echo 'Forbidden isolated driver permission' >&2
+            exit 1
+          fi
+          echo "HARNESS_APP_APK=$app" >> "$GITHUB_ENV"
+          echo "HARNESS_TEST_APK=$tests" >> "$GITHUB_ENV"
+
+      - name: Run one fresh native UI touch-player flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          test -r /dev/kvm -a -w /dev/kvm
+          if adb devices | awk 'NR > 1 && NF > 0 { found = 1 } END { exit !found }'; then
+            echo 'Refusing to reuse an existing emulator or device' >&2
+            exit 1
+          fi
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-touch-player-android"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          test ! -e "$ANDROID_USER_HOME"
+          mkdir -p "$ANDROID_AVD_HOME" "$EVIDENCE/ui"
+          fixture_output="$RUNNER_TEMP/yawf-touch-player-fixture"
+          emulator_pid=""
+          fixture_pid=""
+          instrumentation_status=99
+
+          collect_logcat() {
+            if [ -f "$EVIDENCE/player-logcat.txt" ]; then return 0; fi
+            set +e
+            timeout 20s adb -s "$EMULATOR_SERIAL" logcat -d -v threadtime -t 12000 2>/dev/null \
+              | python3 -c '
+          import re,sys
+          url=re.compile(r"(?i)https?://[^\s\"\x27<>]+")
+          capability=re.compile(r"(?i)/api/(?:external-)?stream/[^\s\"\x27<>]+")
+          sensitive=re.compile(r"(?i)\b(?:authorization|proxy-authorization|cookie|set-cookie|bearer|ds_session|ds_csrf)\b")
+          total=0
+          for index,line in enumerate(sys.stdin):
+              if index>=12000: break
+              line=capability.sub("[redacted-capability]",line)
+              line=url.sub("[redacted-url]",line)
+              secret=sensitive.search(line)
+              if secret is not None: line=line[:secret.start()]+"[redacted-sensitive]\n"
+              encoded=line.encode("utf-8","replace")
+              if total+len(encoded)>8*1024*1024: break
+              sys.stdout.buffer.write(encoded); total+=len(encoded)
+          ' > "$EVIDENCE/player-logcat.txt.part"
+            pipeline_status=("${PIPESTATUS[@]}")
+            if [ "${pipeline_status[1]}" -eq 0 ] && [ -s "$EVIDENCE/player-logcat.txt.part" ]; then
+              mv "$EVIDENCE/player-logcat.txt.part" "$EVIDENCE/player-logcat.txt"
+            else
+              rm -f "$EVIDENCE/player-logcat.txt.part"
+            fi
+          }
+          cleanup() {
+            status=$?
+            trap - EXIT
+            set +e
+            if [ -n "$emulator_pid" ]; then
+              collect_logcat
+              if [ "$status" != 0 ] && [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" emu avd name 2>/dev/null | tr -d '\r' | head -1)" = "$AVD_NAME" ]; then
+                timeout 15s adb -s "$EMULATOR_SERIAL" exec-out screencap -p > "$EVIDENCE/workflow-failure.png"
+                timeout 20s adb -s "$EMULATOR_SERIAL" shell uiautomator dump /data/local/tmp/yawf-touch-failure.xml > "$EVIDENCE/workflow-failure-dump.txt" 2>&1
+                timeout 10s adb -s "$EMULATOR_SERIAL" exec-out cat /data/local/tmp/yawf-touch-failure.xml \
+                  | sed -E 's#https?://[^[:space:]"<>]+#[redacted-url]#g' > "$EVIDENCE/workflow-failure.xml"
+              fi
+              timeout 10s adb -s "$EMULATOR_SERIAL" reverse --remove tcp:"$FIXTURE_APP_PORT" >/dev/null 2>&1
+              timeout 10s adb -s "$EMULATOR_SERIAL" emu kill >/dev/null 2>&1
+              kill "$emulator_pid" 2>/dev/null
+              wait "$emulator_pid" 2>/dev/null
+            fi
+            if [ -n "$fixture_pid" ]; then
+              kill "$fixture_pid" 2>/dev/null
+              wait "$fixture_pid" 2>/dev/null
+            fi
+            for name in smoke-result.json media-probe.json touch-player-server-runtime.json; do
+              if [ -f "$fixture_output/$name" ]; then cp "$fixture_output/$name" "$EVIDENCE/$name"; fi
+            done
+            printf 'workflowExit=%s\ninstrumentationExit=%s\nownedEmulatorStopAttempted=true\nownedFixtureStopAttempted=true\n' \
+              "$status" "$instrumentation_status" > "$EVIDENCE/cleanup.txt"
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          FIXTURE_APP_PORT="$FIXTURE_APP_PORT" FIXTURE_MEDIA_PORT="$FIXTURE_MEDIA_PORT" \
+            node touch-ui-source/server/node_modules/tsx/dist/cli.mjs scripts/android_touch_player_server_fixture.mts \
+            --repo "$GITHUB_WORKSPACE/touch-ui-source" --output "$fixture_output" \
+            > "$EVIDENCE/fixture.log" 2>&1 &
+          fixture_pid=$!
+          deadline=$((SECONDS + 180))
+          until grep -Fq '[fixture] READY server-mode-ui loopback' "$EVIDENCE/fixture.log"; do
+            kill -0 "$fixture_pid"
+            test "$SECONDS" -lt "$deadline"
+            sleep 1
+          done
+
+          printf 'no\n' | avdmanager create avd --name "$AVD_NAME" --package "$SYSTEM_IMAGE_PACKAGE" --device pixel_2
+          emulator -avd "$AVD_NAME" -port 5554 -no-window -no-audio -no-snapshot -no-boot-anim \
+            -gpu swiftshader_indirect -feature -Vulkan -cores 2 -memory 2048 \
+            > "$EVIDENCE/emulator.log" 2>&1 &
+          emulator_pid=$!
+          deadline=$((SECONDS + 300))
+          until [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+            kill -0 "$emulator_pid"
+            test "$SECONDS" -lt "$deadline"
+            sleep 2
+          done
+
+          # Fail closed before installing any APK. This proves the owned fresh environment.
+          test "$(adb -s "$EMULATOR_SERIAL" emu avd name | tr -d '\r' | head -1)" = "$AVD_NAME"
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')" = 36
+          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" = x86_64
+          test "$(adb -s "$EMULATOR_SERIAL" shell getconf PAGE_SIZE | tr -d '\r')" = 4096
+          if adb -s "$EMULATOR_SERIAL" shell pm path com.tgk30.debridstreamer | grep -q '^package:'; then
+            echo 'Product package existed before the owned install' >&2
+            exit 1
+          fi
+          if adb -s "$EMULATOR_SERIAL" shell pm path com.yawf.runtimeinstrumentation | grep -q '^package:'; then
+            echo 'Harness package existed before the owned install' >&2
+            exit 1
+          fi
+          adb -s "$EMULATOR_SERIAL" shell dumpsys account | python3 -c \
+            'import sys,re; counts=re.findall(r"Accounts: (\d+)",sys.stdin.read()); assert counts and all(int(x)==0 for x in counts); print("androidAccountCount=0")' \
+            > "$EVIDENCE/no-real-accounts.txt"
+          adb -s "$EMULATOR_SERIAL" shell getprop > "$EVIDENCE/fresh-environment-properties.txt"
+
+          # Admit only a quiet, healthy fresh OS before any APK is installed. These are
+          # bounded read-only snapshots. Nothing is cleared, restarted, retried, or waived.
+          health_dir="$EVIDENCE/preinstall-health"
+          mkdir -p "$health_dir"
+          capture_preinstall_health() {
+            local name="$1"
+            shift
+            set +e
+            timeout 20s "$@" 2>&1 | python3 -c '
+          import re, sys
+          maximum_bytes = 1024 * 1024
+          maximum_lines = 4000
+          url = re.compile(r"(?i)https?://[^\s\"\x27<>]+")
+          sensitive = re.compile(r"(?i)\b(?:authorization|proxy-authorization|cookie|set-cookie|bearer|ds_session|ds_csrf)\b")
+          seen_bytes = 0
+          seen_lines = 0
+          truncated = False
+          for line in sys.stdin:
+              seen_lines += 1
+              cleaned = url.sub("[redacted-url]", line)
+              secret = sensitive.search(cleaned)
+              if secret is not None:
+                  ending = "\n" if cleaned.endswith("\n") else ""
+                  cleaned = cleaned[:secret.start()] + "[redacted-sensitive]" + ending
+              encoded = cleaned.encode("utf-8", "replace")
+              if seen_lines > maximum_lines or seen_bytes + len(encoded) > maximum_bytes:
+                  truncated = True
+                  continue
+              sys.stdout.write(cleaned)
+              seen_bytes += len(encoded)
+          if truncated:
+              raise SystemExit(23)
+          ' > "$health_dir/$name.txt.part"
+            local pipeline_status=("${PIPESTATUS[@]}")
+            local capture_complete=false
+            if [ "${pipeline_status[0]}" -eq 0 ] && [ "${pipeline_status[1]}" -eq 0 ]; then
+              capture_complete=true
+            fi
+            printf '{"schemaVersion":1,"commandExit":%d,"redactorExit":%d,"complete":%s}\n' \
+              "${pipeline_status[0]}" "${pipeline_status[1]}" "$capture_complete" \
+              > "$health_dir/$name.status.json.part"
+            mv "$health_dir/$name.status.json.part" "$health_dir/$name.status.json"
+            set -e
+            if [ "${pipeline_status[0]}" -ne 0 ] || [ "${pipeline_status[1]}" -ne 0 ]; then
+              echo "Preinstall health capture failed or truncated: $name" >&2
+              exit 1
+            fi
+            mv "$health_dir/$name.txt.part" "$health_dir/$name.txt"
+          }
+
+          system_server_pid_before="$(timeout 10s adb -s "$EMULATOR_SERIAL" shell pidof system_server | tr -d '\r')"
+          [[ "$system_server_pid_before" =~ ^[0-9]+$ ]]
+          quiet_started_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          sleep 15
+          for tag in system_server_anr system_app_anr data_app_anr system_server_crash system_app_crash data_app_crash; do
+            capture_preinstall_health "dropbox-$tag" adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print "$tag"
+          done
+          capture_preinstall_health events adb -s "$EMULATOR_SERIAL" logcat -b events -d -v threadtime -t 4001
+          capture_preinstall_health crash adb -s "$EMULATOR_SERIAL" logcat -b crash -d -v threadtime -t 4001
+          system_server_pid_after="$(timeout 10s adb -s "$EMULATOR_SERIAL" shell pidof system_server | tr -d '\r')"
+          [[ "$system_server_pid_after" =~ ^[0-9]+$ ]]
+          test "$system_server_pid_before" = "$system_server_pid_after"
+          quiet_finished_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          HEALTH_DIR="$health_dir" PID_BEFORE="$system_server_pid_before" PID_AFTER="$system_server_pid_after" \
+            QUIET_START="$quiet_started_utc" QUIET_FINISH="$quiet_finished_utc" python3 - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ["HEALTH_DIR"])
+          dropbox_tags = (
+              "system_server_anr", "system_app_anr", "data_app_anr",
+              "system_server_crash", "system_app_crash", "data_app_crash",
+          )
+          expected_names = {f"dropbox-{tag}.txt" for tag in dropbox_tags} | {"events.txt", "crash.txt"}
+          actual_names = {path.name for path in root.glob("*.txt")}
+          expected_status_names = {name.removesuffix(".txt") + ".status.json" for name in expected_names}
+          actual_status_names = {path.name for path in root.glob("*.status.json")}
+          findings = []
+          diagnostic_errors = []
+          stats = {}
+          for name in sorted(expected_names - actual_names):
+              diagnostic_errors.append(f"missing snapshot: {name}")
+          for name in sorted(actual_names - expected_names):
+              diagnostic_errors.append(f"unexpected snapshot: {name}")
+          for name in sorted(expected_status_names - actual_status_names):
+              diagnostic_errors.append(f"missing capture status: {name}")
+          for name in sorted(actual_status_names - expected_status_names):
+              diagnostic_errors.append(f"unexpected capture status: {name}")
+          expected_capture_status = {
+              "schemaVersion": 1, "commandExit": 0, "redactorExit": 0, "complete": True,
+          }
+          for name in sorted(expected_status_names & actual_status_names):
+              try:
+                  status = json.loads((root / name).read_text("utf-8"))
+              except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                  diagnostic_errors.append(f"{name}: unreadable capture status ({type(error).__name__})")
+                  continue
+              if status != expected_capture_status:
+                  diagnostic_errors.append(f"{name}: capture command failed, truncated, or incomplete")
+
+          dropbox_summary = re.compile(r"(?m)^Drop box contents: [0-9]+ entr(?:y|ies)$")
+          dropbox_search = re.compile(r"(?m)^Searching for: ([A-Za-z0-9_.:-]+)$")
+          dropbox_entry = re.compile(
+              r"(?m)^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)? "
+              r"([A-Za-z0-9_.:-]+) \([^\r\n]+\)$"
+          )
+          allowed_dropbox_header = re.compile(
+              r"^(?:Drop box contents: [0-9]+ entr(?:y|ies)|Max entries: [0-9]+|"
+              r"Low priority rate limit period: [0-9]+ ms|Low priority tags: \{[^\r\n]*\}|"
+              r"Searching for: [A-Za-z0-9_.:-]+|No entries found\.)$"
+          )
+          threadtime = re.compile(
+              r"^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3,6}\s+"
+              r"\d+\s+\d+\s+[VDIWEFA]\s+([^:\s]+)\s*:\s?(.*)$"
+          )
+          event_entry = re.compile(r"(?i)^am_(?:anr|crash)$")
+          crash_entry = re.compile(r"(?i)(?:FATAL EXCEPTION|Fatal signal\s+[0-9]+|crash_dump(?:32|64)?|Abort message|\bANR in\b)")
+
+          def parse_dropbox(name, data):
+              tag = name.removeprefix("dropbox-").removesuffix(".txt")
+              summaries = dropbox_summary.findall(data)
+              searches = dropbox_search.findall(data)
+              if len(summaries) != 1:
+                  diagnostic_errors.append(f"{name}: missing or ambiguous DropBox summary")
+              if searches != [tag]:
+                  diagnostic_errors.append(f"{name}: missing or mismatched DropBox filter header")
+              prefix = data.split("========================================", 1)[0]
+              for line in prefix.splitlines():
+                  if line and not allowed_dropbox_header.fullmatch(line):
+                      diagnostic_errors.append(f"{name}: malformed DropBox header")
+                      break
+              entries = dropbox_entry.findall(data)
+              separators = sum(line == "========================================" for line in data.splitlines())
+              if separators != len(entries):
+                  diagnostic_errors.append(f"{name}: malformed retained DropBox entry")
+              if any(entry != tag for entry in entries):
+                  diagnostic_errors.append(f"{name}: retained entry does not match requested tag")
+              if tag in entries:
+                  findings.append(name)
+
+          def parse_logcat(name, data):
+              if name == "crash.txt" and data == "":
+                  return
+              parsed = []
+              malformed = []
+              banners = 0
+              expected_buffer = "events" if name == "events.txt" else "crash"
+              for line in data.splitlines():
+                  if not line:
+                      continue
+                  banner = re.fullmatch(r"--------- beginning of (events|crash)", line)
+                  if banner is not None:
+                      if banner.group(1) == expected_buffer:
+                          banners += 1
+                      else:
+                          malformed.append(line)
+                      continue
+                  match = threadtime.fullmatch(line)
+                  if match is None:
+                      malformed.append(line)
+                  else:
+                      parsed.append(match.groups())
+              if not banners and not parsed:
+                  diagnostic_errors.append(f"{name}: unavailable or empty logcat diagnostic")
+              if malformed:
+                  diagnostic_errors.append(f"{name}: malformed logcat diagnostic")
+              if name == "events.txt":
+                  if any(event_entry.fullmatch(tag) for tag, _message in parsed):
+                      findings.append(name)
+              elif any(crash_entry.search(f"{tag}: {message}") for tag, message in parsed):
+                  findings.append(name)
+
+          for name in sorted(expected_names & actual_names):
+              path = root / name
+              try:
+                  raw = path.read_bytes()
+                  data = raw.decode("utf-8")
+              except (OSError, UnicodeError) as error:
+                  diagnostic_errors.append(f"{name}: unreadable diagnostic ({type(error).__name__})")
+                  continue
+              lines = data.splitlines()
+              stats[name] = {"bytes": len(raw), "lines": len(lines)}
+              if len(lines) > 4000 or len(raw) > 1024 * 1024:
+                  diagnostic_errors.append(f"{name}: snapshot exceeds retained bounds")
+              if name.startswith("dropbox-"):
+                  parse_dropbox(name, data)
+              else:
+                  parse_logcat(name, data)
+
+          pid_before_text = os.environ.get("PID_BEFORE", "")
+          pid_after_text = os.environ.get("PID_AFTER", "")
+          valid_pid_before = re.fullmatch(r"[1-9][0-9]*", pid_before_text) is not None
+          valid_pid_after = re.fullmatch(r"[1-9][0-9]*", pid_after_text) is not None
+          if not valid_pid_before:
+              diagnostic_errors.append("system_server PID before quiet window is unavailable or malformed")
+          if not valid_pid_after:
+              diagnostic_errors.append("system_server PID after quiet window is unavailable or malformed")
+          stable_pid = valid_pid_before and valid_pid_after and pid_before_text == pid_after_text
+          if valid_pid_before and valid_pid_after and not stable_pid:
+              diagnostic_errors.append("system_server PID changed during quiet window")
+
+          receipt = {
+              "schemaVersion": 1,
+              "admitted": not findings and not diagnostic_errors,
+              "quietWindowSeconds": 15,
+              "quietStartedUtc": os.environ["QUIET_START"],
+              "quietFinishedUtc": os.environ["QUIET_FINISH"],
+              "systemServerPidBefore": int(pid_before_text) if valid_pid_before else None,
+              "systemServerPidAfter": int(pid_after_text) if valid_pid_after else None,
+              "stableSystemServerPid": stable_pid,
+              "anrOrCrashFindings": findings,
+              "diagnosticErrors": diagnostic_errors,
+              "snapshots": stats,
+          }
+          (root / "admission.json").write_text(json.dumps(receipt, indent=2) + "\n")
+          if findings: raise SystemExit("Preinstall ANR/crash evidence observed; no waiver is allowed")
+          if diagnostic_errors: raise SystemExit("Preinstall diagnostics unavailable or malformed; no waiver is allowed")
+          PY
+          printf 'freshAvd=true\npreinstallProductAbsent=true\npreinstallHarnessAbsent=true\napi=36\nabi=x86_64\npageSize=4096\npreinstallHealthAdmitted=true\nquietWindowSeconds=15\nstableSystemServerPid=true\n' \
+            > "$EVIDENCE/preinstall-environment-gate.txt"
+
+          adb -s "$EMULATOR_SERIAL" reverse tcp:"$FIXTURE_APP_PORT" tcp:"$FIXTURE_APP_PORT"
+          adb -s "$EMULATOR_SERIAL" install "$PRODUCT_APK" | tee "$EVIDENCE/product-install.txt"
+          grep -Eq '^Success\r?$' "$EVIDENCE/product-install.txt"
+          installed="$(adb -s "$EMULATOR_SERIAL" shell pm path com.tgk30.debridstreamer | tr -d '\r' | sed -n 's/^package://p')"
+          test -n "$installed"
+          test "$(printf '%s\n' "$installed" | wc -l | tr -d ' ')" = 1
+          test "$(adb -s "$EMULATOR_SERIAL" shell sha256sum "$installed" | awk '{print $1}')" = "$PRODUCT_SHA256"
+          dumpsys_package="$(adb -s "$EMULATOR_SERIAL" shell dumpsys package com.tgk30.debridstreamer)"
+          grep -Fq "versionName=$PRODUCT_VERSION" <<< "$dumpsys_package"
+          grep -Fq "versionCode=$PRODUCT_VERSION_CODE_ACTUAL " <<< "$dumpsys_package"
+          adb -s "$EMULATOR_SERIAL" install "$HARNESS_APP_APK" | tee "$EVIDENCE/harness-install.txt"
+          grep -Eq '^Success\r?$' "$EVIDENCE/harness-install.txt"
+          adb -s "$EMULATOR_SERIAL" install "$HARNESS_TEST_APK" | tee "$EVIDENCE/harness-test-install.txt"
+          grep -Eq '^Success\r?$' "$EVIDENCE/harness-test-install.txt"
+
+          set +e
+          timeout 720s adb -s "$EMULATOR_SERIAL" shell am instrument -w -r \
+            -e class com.yawf.runtimeinstrumentation.RuntimeTouchPlayerFlowTest \
+            -e evidenceSubdir touch-player-flow \
+            com.yawf.runtimeinstrumentation.test/androidx.test.runner.AndroidJUnitRunner \
+            | sed -E 's#https?://[^[:space:]"<>]+#[redacted-url]#g' \
+            | tee "$EVIDENCE/instrumentation.txt"
+          instrumentation_status=${PIPESTATUS[0]}
+          set -e
+          cp "$fixture_output/touch-player-server-runtime.json" "$EVIDENCE/touch-player-server-runtime.json"
+          cp "$fixture_output/media-probe.json" "$EVIDENCE/media-probe.json"
+          cp "$fixture_output/smoke-result.json" "$EVIDENCE/smoke-result.json"
+
+          python3 - <<'PY'
+          import json,os,re,subprocess
+          from pathlib import Path
+          evidence=Path(os.environ['EVIDENCE'])
+          adb=['adb','-s',os.environ['EMULATOR_SERIAL']]
+          run_as=['exec-out','run-as','com.yawf.runtimeinstrumentation']
+          folder='files/touch-player-flow'
+          names=subprocess.check_output(adb+run_as+['ls','-1',folder],text=True).splitlines()
+          assert 0 < len(names) <= 64
+          allowed=re.compile(r'(?:[0-9]{2}-[a-z0-9-]+\.(?:png|xml)|actions\.txt|instrumentation-touch-player-receipt\.json)')
+          out=evidence/'ui'
+          unexpected=[]
+          for name in names:
+              if not allowed.fullmatch(name): unexpected.append(name); continue
+              data=subprocess.check_output(adb+run_as+['cat',folder+'/'+name])
+              assert 0 < len(data) <= 8*1024*1024
+              (out/name).write_bytes(data)
+          assert not unexpected, unexpected
+          receipt=json.loads((out/'instrumentation-touch-player-receipt.json').read_text())
+          assert receipt['outcome']=='passed'
+          checks=receipt['checks']
+          for key in ['firstDecodeClockAdvanced','centralPauseResume','pausedBackForward',
+                      'twoRealAudioTracksObserved','japaneseSelectionPersistedAfterHandoff',
+                      'pausedSideDoubleTapSingleSeek','portraitLandscapePortrait',
+                      'audioSelectionPersistedAcrossOrientation']:
+              assert checks[key] is True, key
+          assert checks['touchScrubDeltaSeconds'] >= 3
+          server=json.loads((evidence/'touch-player-server-runtime.json').read_text())
+          assert server['droppedEntries']==0
+          events=server['events']
+          assert any(e['phase']=='live' and e['route']=='proxy' and e['status'] in (200,206) and e['contentType']=='video-mp4' for e in events)
+          assert any(e['phase']=='live' and e['route']=='audio-inventory' and e['status']==200 for e in events)
+          assert any(e['phase']=='live' and e['route']=='hls-manifest' and e['status']==200 and e['audio']==1 and
+                     e['playbackDecision']=='transcode' for e in events)
+          assert any(e['phase']=='live' and e['route']=='hls-asset' and e['status']==200 and e['contentType'] in ('hls','video-mp2t') for e in events)
+          PY
+          node scripts/android_touch_player_receipt.mjs \
+            --ui "$EVIDENCE/ui/instrumentation-touch-player-receipt.json" \
+            --server "$EVIDENCE/touch-player-server-runtime.json" \
+            --output "$EVIDENCE/touch-player-runtime-validation.json"
+          test "$instrumentation_status" = 0
+          grep -Eq '^OK \(1 test\)\r?$' "$EVIDENCE/instrumentation.txt"
+
+          adb -s "$EMULATOR_SERIAL" shell dumpsys activity exit-info com.tgk30.debridstreamer \
+            > "$EVIDENCE/product-exit-info.txt"
+          if grep -Eqi 'REASON_ANR|reason=6|ANR in com\.tgk30\.debridstreamer' "$EVIDENCE/product-exit-info.txt"; then
+            echo 'Product ANR observed; no waiver is allowed' >&2
+            exit 1
+          fi
+          collect_logcat
+          if grep -Eqi 'ANR in com\.tgk30\.debridstreamer|FATAL EXCEPTION.*com\.tgk30\.debridstreamer' "$EVIDENCE/player-logcat.txt"; then
+            echo 'Product fatal or ANR observed; no waiver is allowed' >&2
+            exit 1
+          fi
+
+          trap - EXIT
+          cleanup
+
+      - name: Retain bounded touch-player runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone58-touch-player59-runtime-evidence
           path: ${{ env.EVIDENCE }}
           if-no-files-found: error
           retention-days: 14

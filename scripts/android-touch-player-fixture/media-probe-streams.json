@@ -1,0 +1,89 @@
+{
+    "programs": [
+
+    ],
+    "stream_groups": [
+
+    ],
+    "streams": [
+        {
+            "index": 0,
+            "codec_name": "h264",
+            "codec_type": "video",
+            "codec_tag_string": "avc1",
+            "width": 320,
+            "height": 180,
+            "r_frame_rate": "30/1",
+            "avg_frame_rate": "30/1",
+            "time_base": "1/30000",
+            "start_time": "0.000000",
+            "duration": "30.000000",
+            "nb_frames": "900",
+            "disposition": {
+                "default": 1
+            },
+            "tags": {
+                "language": "und",
+                "handler_name": "VideoHandler"
+            }
+        },
+        {
+            "index": 1,
+            "codec_name": "aac",
+            "codec_type": "audio",
+            "codec_tag_string": "mp4a",
+            "sample_rate": "48000",
+            "channels": 1,
+            "channel_layout": "mono",
+            "r_frame_rate": "0/0",
+            "avg_frame_rate": "0/0",
+            "time_base": "1/48000",
+            "start_time": "0.000000",
+            "duration": "30.000000",
+            "nb_frames": "1408",
+            "disposition": {
+                "default": 1
+            },
+            "tags": {
+                "language": "eng",
+                "handler_name": "SoundHandler",
+                "name": "Synthetic English 440 Hz tone"
+            }
+        },
+        {
+            "index": 2,
+            "codec_name": "aac",
+            "codec_type": "audio",
+            "codec_tag_string": "mp4a",
+            "sample_rate": "48000",
+            "channels": 1,
+            "channel_layout": "mono",
+            "r_frame_rate": "0/0",
+            "avg_frame_rate": "0/0",
+            "time_base": "1/48000",
+            "start_time": "0.000000",
+            "duration": "30.000000",
+            "nb_frames": "1408",
+            "disposition": {
+                "default": 0
+            },
+            "tags": {
+                "language": "jpn",
+                "handler_name": "SoundHandler",
+                "name": "Synthetic Japanese 880 Hz tone"
+            }
+        }
+    ],
+    "format": {
+        "nb_streams": 3,
+        "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        "start_time": "0.000000",
+        "duration": "30.000000",
+        "tags": {
+            "major_brand": "isom",
+            "minor_version": "512",
+            "compatible_brands": "isomiso2avc1mp41",
+            "encoder": "Lavf63.1.102"
+        }
+    }
+}
