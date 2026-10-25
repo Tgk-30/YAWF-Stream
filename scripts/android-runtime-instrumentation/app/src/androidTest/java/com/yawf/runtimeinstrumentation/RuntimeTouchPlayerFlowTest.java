@@ -75,6 +75,7 @@ public final class RuntimeTouchPlayerFlowTest {
     private static final int MAX_AX_ROOTS = 64;
     private static final int MAX_AX_TOTAL_NODES = 2_048;
     private static final int MAX_SURFACE_REVEALS = 1;
+    private static final long MIN_SETTLED_GEOMETRY_GAP_MS = 500;
     private static final long DOUBLE_TAP_HOLD_MS = 40;
     private static final long DOUBLE_TAP_INTER_GAP_MS = 100;
     private static final long DOUBLE_TAP_MAX_UP_TO_UP_MS = 320;
@@ -379,6 +380,113 @@ public final class RuntimeTouchPlayerFlowTest {
                 && focusedPauseControls == 0;
     }
 
+    private static final class CoreGeometryStabilityObservation {
+        final long firstUptimeMs;
+        final long secondUptimeMs;
+        final int firstClockSeconds;
+        final int secondClockSeconds;
+        final int displayWidth;
+        final int displayHeight;
+        final String geometrySignature;
+        final int observedSamples;
+
+        CoreGeometryStabilityObservation(
+                long firstUptimeMs, long secondUptimeMs,
+                int firstClockSeconds, int secondClockSeconds,
+                int displayWidth, int displayHeight, String geometrySignature,
+                int observedSamples) {
+            this.firstUptimeMs = firstUptimeMs;
+            this.secondUptimeMs = secondUptimeMs;
+            this.firstClockSeconds = firstClockSeconds;
+            this.secondClockSeconds = secondClockSeconds;
+            this.displayWidth = displayWidth;
+            this.displayHeight = displayHeight;
+            this.geometrySignature = geometrySignature;
+            this.observedSamples = observedSamples;
+        }
+
+        long sampleGapMs() {
+            return secondUptimeMs - firstUptimeMs;
+        }
+    }
+
+    private static final class CoreGeometryStabilityGate {
+        private final long minimumGapMs;
+        private final int expectedDisplayWidth;
+        private final int expectedDisplayHeight;
+        private final int expectedClockPosition;
+        private long lastElapsedMs = -1;
+        private long firstElapsedMs = -1;
+        private int firstClockSeconds = -1;
+        private String firstGeometrySignature;
+        private int observedSamples;
+        private CoreGeometryStabilityObservation observation;
+
+        CoreGeometryStabilityGate(
+                long minimumGapMs, int expectedDisplayWidth,
+                int expectedDisplayHeight, int expectedClockPosition) {
+            if (minimumGapMs < 1 || expectedDisplayWidth < 1 || expectedDisplayHeight < 1
+                    || expectedClockPosition < 0 || expectedClockPosition > 30) {
+                throw new IllegalArgumentException("Invalid settled core-geometry gate");
+            }
+            this.minimumGapMs = minimumGapMs;
+            this.expectedDisplayWidth = expectedDisplayWidth;
+            this.expectedDisplayHeight = expectedDisplayHeight;
+            this.expectedClockPosition = expectedClockPosition;
+        }
+
+        boolean observe(
+                long elapsedMs, int displayWidth, int displayHeight,
+                boolean exactPausedSnapshot, int clockPosition,
+                boolean japaneseSelectionObserved, String geometrySignature) {
+            if (elapsedMs < 0 || (lastElapsedMs >= 0 && elapsedMs < lastElapsedMs)) {
+                throw new IllegalArgumentException("Settled geometry observations were not monotonic");
+            }
+            if (observation != null) {
+                throw new IllegalStateException("Settled geometry gate was observed after completion");
+            }
+            lastElapsedMs = elapsedMs;
+            observedSamples++;
+            boolean admissible = exactPausedSnapshot
+                    && japaneseSelectionObserved
+                    && displayWidth == expectedDisplayWidth
+                    && displayHeight == expectedDisplayHeight
+                    && Math.abs(clockPosition - expectedClockPosition) <= 1
+                    && geometrySignature != null && !geometrySignature.isEmpty();
+            if (!admissible) {
+                clearCandidate();
+                return false;
+            }
+            if (firstElapsedMs < 0
+                    || !geometrySignature.equals(firstGeometrySignature)
+                    || Math.abs(clockPosition - firstClockSeconds) > 1) {
+                firstElapsedMs = elapsedMs;
+                firstClockSeconds = clockPosition;
+                firstGeometrySignature = geometrySignature;
+                return false;
+            }
+            if (elapsedMs - firstElapsedMs < minimumGapMs) return false;
+            observation = new CoreGeometryStabilityObservation(
+                    firstElapsedMs, elapsedMs,
+                    firstClockSeconds, clockPosition,
+                    displayWidth, displayHeight, geometrySignature, observedSamples);
+            return true;
+        }
+
+        CoreGeometryStabilityObservation observation() {
+            if (observation == null) {
+                throw new IllegalStateException("Settled geometry was not complete");
+            }
+            return observation;
+        }
+
+        private void clearCandidate() {
+            firstElapsedMs = -1;
+            firstClockSeconds = -1;
+            firstGeometrySignature = null;
+        }
+    }
+
     private static final class StablePausedPositionGate {
         private final int minimum;
         private final int maximum;
@@ -602,7 +710,31 @@ public final class RuntimeTouchPlayerFlowTest {
         checks.put("landscapeWidthPx", landscapeWidth);
         checks.put("landscapeHeightPx", landscapeHeight);
         assertCoreLayout("landscape", "Play");
+        checks.put("landscapeImmediateCaptureStartedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
         capture("landscape-controls");
+        checks.put("landscapeImmediateCaptureFinishedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
+        CoreGeometryStabilityObservation landscapeSettledOne =
+                waitForStablePausedCoreGeometry(
+                        "landscape-settled-1", landscapeWidth, landscapeHeight,
+                        preRotationPosition);
+        recordSettledCoreGeometry("landscapeSettledOne", landscapeSettledOne);
+        checks.put("landscapeSettledOneCaptureStartedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
+        capture("landscape-controls-settled-1");
+        checks.put("landscapeSettledOneCaptureFinishedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
+        CoreGeometryStabilityObservation landscapeSettledTwo =
+                waitForStablePausedCoreGeometry(
+                        "landscape-settled-2", landscapeWidth, landscapeHeight,
+                        preRotationPosition);
+        recordSettledCoreGeometry("landscapeSettledTwo", landscapeSettledTwo);
+        checks.put("landscapeSettledTwoCaptureStartedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
+        capture("landscape-controls-settled-2");
+        checks.put("landscapeSettledTwoCaptureFinishedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
         device.setOrientationNatural();
         waitForPortrait();
         int portraitReturnWidth = device.getDisplayWidth();
@@ -622,7 +754,21 @@ public final class RuntimeTouchPlayerFlowTest {
         checks.put("postRotationAbsolutePositionSeconds", postRotationPosition);
         checks.put("portraitLandscapePortrait", true);
         checks.put("audioSelectionPersistedAcrossOrientation", true);
+        checks.put("portraitReturnImmediateCaptureStartedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
         capture("portrait-return-controls");
+        checks.put("portraitReturnImmediateCaptureFinishedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
+        CoreGeometryStabilityObservation portraitReturnSettled =
+                waitForStablePausedCoreGeometry(
+                        "portrait-return-settled", portraitReturnWidth, portraitReturnHeight,
+                        preRotationPosition);
+        recordSettledCoreGeometry("portraitReturnSettled", portraitReturnSettled);
+        checks.put("portraitReturnSettledCaptureStartedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
+        capture("portrait-return-controls-settled");
+        checks.put("portraitReturnSettledCaptureFinishedElapsedMs",
+                SystemClock.uptimeMillis() - startedAtMs);
 
         transition("touch-action-rail-and-settings");
         verifyScrollablePlaybackActionsAndSettings();
@@ -981,6 +1127,82 @@ public final class RuntimeTouchPlayerFlowTest {
                 !Rect.intersects(snapshot.backBounds, snapshot.playPauseBounds)
                         && !Rect.intersects(snapshot.playPauseBounds, snapshot.forwardBounds));
         log("Verified one-snapshot bounded non-overlapping controls: " + label);
+    }
+
+    private CoreGeometryStabilityObservation waitForStablePausedCoreGeometry(
+            String label, int expectedDisplayWidth,
+            int expectedDisplayHeight, int expectedClockPosition) {
+        long started = SystemClock.uptimeMillis();
+        long deadline = started + SHORT_WAIT_MS;
+        CoreGeometryStabilityGate gate = new CoreGeometryStabilityGate(
+                MIN_SETTLED_GEOMETRY_GAP_MS,
+                expectedDisplayWidth, expectedDisplayHeight, expectedClockPosition);
+        while (SystemClock.uptimeMillis() < deadline) {
+            PlayerAxSnapshot snapshot = readPlayerAxSnapshot(false);
+            boolean japaneseSelectionObserved =
+                    findPlayerLabeledClickable("Audio track, " + JAPANESE) != null;
+            int displayWidth = device.getDisplayWidth();
+            int displayHeight = device.getDisplayHeight();
+            long observedAtMs = SystemClock.uptimeMillis();
+            if (observedAtMs > deadline) break;
+            boolean exactPausedSnapshot = hasCompleteCoreSnapshot(snapshot)
+                    && snapshot.playerDialogBounds != null
+                    && snapshot.playControls == 1 && snapshot.pauseControls == 0;
+            String geometrySignature = coreGeometrySignature(snapshot);
+            if (gate.observe(
+                    observedAtMs, displayWidth, displayHeight,
+                    exactPausedSnapshot, snapshot.clockPositionSeconds,
+                    japaneseSelectionObserved, geometrySignature)) {
+                CoreGeometryStabilityObservation observation = gate.observation();
+                assertCoreLayoutSnapshot(label, snapshot, "Play");
+                log(String.format(Locale.ROOT,
+                        "Observed stable paused native core geometry: %s gapMs=%d samples=%d",
+                        label, observation.sampleGapMs(), observation.observedSamples));
+                return observation;
+            }
+            SystemClock.sleep(100);
+        }
+        fail("Timed out waiting for two fresh, guarded, paused " + label
+                + " core-geometry snapshots at least "
+                + MIN_SETTLED_GEOMETRY_GAP_MS + " ms apart without new input");
+        return null;
+    }
+
+    private static String coreGeometrySignature(PlayerAxSnapshot snapshot) {
+        if (snapshot == null || snapshot.playerDialogBounds == null
+                || snapshot.backBounds == null || snapshot.playPauseBounds == null
+                || snapshot.forwardBounds == null || snapshot.seekBounds == null
+                || snapshot.closeBounds == null) {
+            return null;
+        }
+        return rectSignature(snapshot.playerDialogBounds)
+                + "|" + rectSignature(snapshot.backBounds)
+                + "|" + rectSignature(snapshot.playPauseBounds)
+                + "|" + rectSignature(snapshot.forwardBounds)
+                + "|" + rectSignature(snapshot.seekBounds)
+                + "|" + rectSignature(snapshot.closeBounds);
+    }
+
+    private static String rectSignature(Rect bounds) {
+        return bounds.left + "," + bounds.top + "," + bounds.right + "," + bounds.bottom;
+    }
+
+    private void recordSettledCoreGeometry(
+            String prefix, CoreGeometryStabilityObservation observation) {
+        assertNotNull("Missing settled core-geometry observation for " + prefix, observation);
+        assertTrue("Settled core-geometry samples were too close for " + prefix,
+                observation.sampleGapMs() >= MIN_SETTLED_GEOMETRY_GAP_MS);
+        checks.put(prefix + "NativeAxGeometryStableObserved", true);
+        checks.put(prefix + "FirstSampleElapsedMs", observation.firstUptimeMs - startedAtMs);
+        checks.put(prefix + "SecondSampleElapsedMs", observation.secondUptimeMs - startedAtMs);
+        checks.put(prefix + "SampleGapMs", observation.sampleGapMs());
+        checks.put(prefix + "ObservedSamples", observation.observedSamples);
+        checks.put(prefix + "FirstClockSeconds", observation.firstClockSeconds);
+        checks.put(prefix + "SecondClockSeconds", observation.secondClockSeconds);
+        checks.put(prefix + "DisplayWidthPx", observation.displayWidth);
+        checks.put(prefix + "DisplayHeightPx", observation.displayHeight);
+        checks.put(prefix + "CoreBoundsSignature", observation.geometrySignature);
+        checks.put(prefix + "JapaneseActionObserved", true);
     }
 
     private void assertCoreLayout(String label, String expectedPlayPauseLabel) {
@@ -2012,6 +2234,16 @@ public final class RuntimeTouchPlayerFlowTest {
         receipt.put("manualGestureReviewRequired", true);
         receipt.put("manualGestureReviewCaptureLabels",
                 new JSONArray().put("before-side-double-tap").put("after-side-double-tap"));
+        receipt.put("manualRotationPixelReviewRequired", true);
+        receipt.put("manualRotationPixelReviewCaptureLabels", new JSONArray()
+                .put("landscape-controls")
+                .put("landscape-controls-settled-1")
+                .put("landscape-controls-settled-2")
+                .put("portrait-return-controls")
+                .put("portrait-return-controls-settled"));
+        receipt.put("rotationPixelLayoutClaimed", false);
+        receipt.put("rotationGeometryObservationBasis",
+                "two-fresh-guarded-paused-native-AX-snapshots-with-matching-core-bounds-and-display-at-least-500ms-apart");
         receipt.put("decodeBasis", "Automated accessibility clocks and server receipts are provisional; retained before/after PNG pixels require root manual review before any decoded-playback claim");
         if (failure != null) {
             receipt.put("failureNativePollDiagnostics", new JSONArray(nativePollDiagnostics));

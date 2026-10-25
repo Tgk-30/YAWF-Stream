@@ -233,6 +233,7 @@ const strictSeekProbeCache = new Map();
 const stablePausedPositionProbeCache = new Map();
 const fusedAxSafetyGuardProbeCache = new Map();
 const allWindowRootGraphProbeCache = new Map();
+const coreGeometryStabilityProbeCache = new Map();
 
 function spawnDiagnostics(result) {
   return [result?.error?.stack ?? result?.error?.message, result?.stdout, result?.stderr]
@@ -798,6 +799,127 @@ ${graph}
     }
     const result = { sourceHash, compile, runs };
     allWindowRootGraphProbeCache.set(sourceHash, result);
+    return result;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function coreGeometryStabilityProbe(source) {
+  const sourceHash = createHash("sha256").update(source).digest("hex");
+  if (coreGeometryStabilityProbeCache.has(sourceHash)) {
+    return coreGeometryStabilityProbeCache.get(sourceHash);
+  }
+  if (configuredJavaHome) {
+    assert.ok(existsSync(javac), `configured JAVA_HOME has no compiler: ${javac}`);
+    assert.ok(existsSync(java), `configured JAVA_HOME has no runtime: ${java}`);
+  }
+  const gate = exactSlice(
+    source,
+    "    private static final class CoreGeometryStabilityObservation {",
+    "\n\n    private static final class StablePausedPositionGate {",
+  );
+  const probeSource = `public final class CoreGeometryStabilityProbe {
+${gate}
+    private static CoreGeometryStabilityGate gate() {
+        return new CoreGeometryStabilityGate(500, 1920, 1080, 20);
+    }
+
+    private static void reject(
+            CoreGeometryStabilityGate gate, long elapsedMs,
+            int width, int height, boolean paused,
+            int clock, boolean japanese, String geometry) {
+        if (gate.observe(elapsedMs, width, height, paused, clock, japanese, geometry)) {
+            throw new AssertionError("unstable observation was admitted at " + elapsedMs);
+        }
+    }
+
+    private static void admit(
+            CoreGeometryStabilityGate gate, long elapsedMs,
+            int width, int height, boolean paused,
+            int clock, boolean japanese, String geometry) {
+        if (!gate.observe(elapsedMs, width, height, paused, clock, japanese, geometry)) {
+            throw new AssertionError("stable observation was rejected at " + elapsedMs);
+        }
+    }
+
+    private static void expectIllegalArgument(Runnable operation) {
+        try {
+            operation.run();
+            throw new AssertionError("expected IllegalArgumentException");
+        } catch (IllegalArgumentException expected) {
+            // Expected.
+        }
+    }
+
+    public static void main(String[] args) {
+        CoreGeometryStabilityGate valid = gate();
+        reject(valid, 1000, 1920, 1080, true, 20, true, "geometry-a");
+        reject(valid, 1499, 1920, 1080, true, 20, true, "geometry-a");
+        admit(valid, 1500, 1920, 1080, true, 20, true, "geometry-a");
+        CoreGeometryStabilityObservation observation = valid.observation();
+        if (observation.firstUptimeMs != 1000 || observation.secondUptimeMs != 1500
+                || observation.sampleGapMs() != 500 || observation.observedSamples != 3
+                || observation.firstClockSeconds != 20 || observation.secondClockSeconds != 20
+                || observation.displayWidth != 1920 || observation.displayHeight != 1080
+                || !"geometry-a".equals(observation.geometrySignature)) {
+            throw new AssertionError("settled observation metadata was not exact");
+        }
+
+        CoreGeometryStabilityGate changedGeometry = gate();
+        reject(changedGeometry, 1000, 1920, 1080, true, 20, true, "geometry-a");
+        reject(changedGeometry, 1500, 1920, 1080, true, 20, true, "geometry-b");
+        reject(changedGeometry, 1999, 1920, 1080, true, 20, true, "geometry-b");
+        admit(changedGeometry, 2000, 1920, 1080, true, 20, true, "geometry-b");
+
+        CoreGeometryStabilityGate notPaused = gate();
+        reject(notPaused, 1000, 1920, 1080, false, 20, true, "geometry-a");
+        reject(notPaused, 1500, 1920, 1080, false, 20, true, "geometry-a");
+
+        CoreGeometryStabilityGate noJapanese = gate();
+        reject(noJapanese, 1000, 1920, 1080, true, 20, false, "geometry-a");
+        reject(noJapanese, 1500, 1920, 1080, true, 20, false, "geometry-a");
+
+        CoreGeometryStabilityGate wrongDisplay = gate();
+        reject(wrongDisplay, 1000, 1080, 1080, true, 20, true, "geometry-a");
+        reject(wrongDisplay, 1500, 1080, 1080, true, 20, true, "geometry-a");
+
+        CoreGeometryStabilityGate wrongClock = gate();
+        reject(wrongClock, 1000, 1920, 1080, true, 25, true, "geometry-a");
+        reject(wrongClock, 1500, 1920, 1080, true, 25, true, "geometry-a");
+
+        CoreGeometryStabilityGate resetAfterInvalid = gate();
+        reject(resetAfterInvalid, 1000, 1920, 1080, true, 20, true, "geometry-a");
+        reject(resetAfterInvalid, 1500, 1920, 1080, false, 20, true, "geometry-a");
+        reject(resetAfterInvalid, 1600, 1920, 1080, true, 20, true, "geometry-a");
+        reject(resetAfterInvalid, 2099, 1920, 1080, true, 20, true, "geometry-a");
+        admit(resetAfterInvalid, 2100, 1920, 1080, true, 20, true, "geometry-a");
+
+        CoreGeometryStabilityGate monotonic = gate();
+        reject(monotonic, 1000, 1920, 1080, true, 20, true, "geometry-a");
+        expectIllegalArgument(() -> monotonic.observe(
+                999, 1920, 1080, true, 20, true, "geometry-a"));
+        expectIllegalArgument(() -> new CoreGeometryStabilityGate(0, 1920, 1080, 20));
+    }
+}`;
+  const directory = mkdtempSync(join(tmpdir(), "yawf-core-geometry-stability-"));
+  try {
+    const file = join(directory, "CoreGeometryStabilityProbe.java");
+    writeFileSync(file, probeSource);
+    const compile = spawnSync(javac, ["-encoding", "UTF-8", "-d", directory, file], {
+      encoding: "utf8",
+    });
+    assert.equal(compile.error, undefined,
+      `required javac is unavailable (${javac})\n${spawnDiagnostics(compile)}`);
+    const run = compile.status === 0
+      ? spawnSync(java, ["-cp", directory, "CoreGeometryStabilityProbe"], { encoding: "utf8" })
+      : null;
+    if (run != null) {
+      assert.equal(run.error, undefined,
+        `required java runtime is unavailable (${java})\n${spawnDiagnostics(run)}`);
+    }
+    const result = { sourceHash, compile, run };
+    coreGeometryStabilityProbeCache.set(sourceHash, result);
     return result;
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -1923,6 +2045,113 @@ test("every explicit player-control wait reveals hidden chrome once and requires
     "paused Play after transport seeks", "paused Play after scrub",
     "paused Play after audio handoff", "paused Play after side double tap",
   ]) assert.ok(runFlow.includes(description), description);
+});
+
+test("exact Java settled core-geometry gate requires matching paused observations at least 500 ms apart", () => {
+  const accepted = coreGeometryStabilityProbe(driver);
+  assert.equal(accepted.compile.status, 0,
+    `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
+  assert.equal(accepted.run.status, 0,
+    `${accepted.run.stdout}\n${accepted.run.stderr}`);
+
+  const mutants = [
+    exactMutation(
+      driver,
+      "boolean admissible = exactPausedSnapshot",
+      "boolean admissible = true",
+    ),
+    exactMutation(driver, "&& japaneseSelectionObserved", "&& true"),
+    exactMutation(driver, "&& displayWidth == expectedDisplayWidth", "&& true"),
+    exactMutation(
+      driver,
+      "&& Math.abs(clockPosition - expectedClockPosition) <= 1",
+      "&& true",
+    ),
+    exactMutation(
+      driver,
+      "|| !geometrySignature.equals(firstGeometrySignature)",
+      "|| false",
+    ),
+    exactMutation(
+      driver,
+      "elapsedMs - firstElapsedMs < minimumGapMs",
+      "elapsedMs - firstElapsedMs <= minimumGapMs",
+    ),
+    exactMutation(
+      driver,
+      "lastElapsedMs >= 0 && elapsedMs < lastElapsedMs",
+      "false",
+    ),
+    exactMutation(driver, "clearCandidate();", "// candidate intentionally retained"),
+  ];
+  for (const mutant of mutants) {
+    const rejected = coreGeometryStabilityProbe(mutant);
+    assert.equal(rejected.compile.status, 0,
+      `${rejected.compile.stdout}\n${rejected.compile.stderr}`);
+    assert.notEqual(rejected.run.status, 0,
+      "mutated settled core-geometry gate unexpectedly satisfied the oracle");
+  }
+});
+
+test("rotation flow retains immediate captures and adds bounded observation-only settled capture pairs", () => {
+  assert.equal(javaIntConstant("MAX_CAPTURES"), 28);
+  assert.match(driver, /private static final long MIN_SETTLED_GEOMETRY_GAP_MS = 500;/);
+
+  const runFlow = exactSlice(
+    driver,
+    "    private void runFlow() throws Exception {",
+    "\n    private PlayerAxSnapshot waitForPausedGestureSafetySnapshot()",
+  );
+  const orderedMarkers = [
+    'capture("landscape-controls")',
+    'waitForStablePausedCoreGeometry(\n                        "landscape-settled-1"',
+    'capture("landscape-controls-settled-1")',
+    'waitForStablePausedCoreGeometry(\n                        "landscape-settled-2"',
+    'capture("landscape-controls-settled-2")',
+    "device.setOrientationNatural();\n        waitForPortrait();\n        int portraitReturnWidth",
+    'capture("portrait-return-controls")',
+    'waitForStablePausedCoreGeometry(\n                        "portrait-return-settled"',
+    'capture("portrait-return-controls-settled")',
+    'transition("touch-action-rail-and-settings")',
+  ];
+  let lastIndex = -1;
+  for (const marker of orderedMarkers) {
+    const index = runFlow.indexOf(marker);
+    assert.ok(index > lastIndex, `rotation observation order missing or wrong: ${marker}`);
+    lastIndex = index;
+  }
+  assert.equal((runFlow.match(/waitForStablePausedCoreGeometry\(/g) ?? []).length, 3);
+  assert.equal((runFlow.match(/recordSettledCoreGeometry\(/g) ?? []).length, 3);
+  assert.ok((driver.match(/capture\("/g) ?? []).length < javaIntConstant("MAX_CAPTURES"),
+    "static capture sites must remain below the receipt bound");
+
+  const wait = exactSlice(
+    driver,
+    "    private CoreGeometryStabilityObservation waitForStablePausedCoreGeometry(",
+    "\n    private static String coreGeometrySignature(",
+  );
+  for (const required of [
+    "long deadline = started + SHORT_WAIT_MS",
+    "readPlayerAxSnapshot(false)",
+    'findPlayerLabeledClickable("Audio track, " + JAPANESE)',
+    "MIN_SETTLED_GEOMETRY_GAP_MS",
+    "snapshot.clockPositionSeconds",
+    'assertCoreLayoutSnapshot(label, snapshot, "Play")',
+    "SystemClock.sleep(100)",
+  ]) assert.ok(wait.includes(required), required);
+  assert.match(wait, /snapshot\.playControls == 1 && snapshot\.pauseControls == 0/);
+  assert.doesNotMatch(wait,
+    /revealPlayerSurfaceOnceIfHidden|device\.click|device\.swipe|performAction|setOrientation|injectInputEvent/);
+
+  for (const receiptContract of [
+    'receipt.put("manualRotationPixelReviewRequired", true)',
+    'receipt.put("manualRotationPixelReviewCaptureLabels", new JSONArray()',
+    'receipt.put("rotationPixelLayoutClaimed", false)',
+    'receipt.put("rotationGeometryObservationBasis",',
+  ]) assert.ok(driver.includes(receiptContract), receiptContract);
+  assert.match(driver,
+    /"landscape-controls"\)\s*\.put\("landscape-controls-settled-1"\)\s*\.put\("landscape-controls-settled-2"\)\s*\.put\("portrait-return-controls"\)\s*\.put\("portrait-return-controls-settled"\)/);
+  assert.doesNotMatch(driver, /rotationPixelLayoutClaimed", true/);
 });
 
 test("driver stays in product UI and exercises every touch-player behavior", () => {
