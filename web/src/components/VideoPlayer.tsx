@@ -83,7 +83,10 @@ import {
 import { registerPlayerMount } from "../lib/attention";
 import { recordDiagnostic } from "../lib/diagnostics";
 import { mediaErrorMessage, nextHlsRecovery } from "../lib/playerReliability";
-import { findPreferredLanguageMatch } from "../lib/languagePreference";
+import {
+  findPreferredLanguageMatch,
+  normalizeLanguagePreference,
+} from "../lib/languagePreference";
 import { audioTrackLabel } from "../lib/audioTrackLabel";
 import { captionLayout, type CaptionRect } from "../lib/captionLayout";
 import { configuredServerURL } from "../lib/serverMode";
@@ -699,12 +702,69 @@ interface HlsAudioChoice {
   id: string;
   label: string;
   language: string | null;
+  logicalLabel?: string | null;
   isDefault?: boolean;
 }
 
 interface AudioPreference {
   id: string | null;
   language: string | null;
+  label?: string | null;
+}
+
+function normalizedSourceAudioLabel(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+  return normalized || null;
+}
+
+function retainedServerAudioMatch(
+  preference: AudioPreference | null,
+  tracks: readonly HlsAudioChoice[],
+): HlsAudioChoice | null {
+  if (preference == null) return null;
+  const language = normalizeLanguagePreference(preference.language);
+  const label = normalizedSourceAudioLabel(preference.label);
+  const languageMatches = language == null
+    ? []
+    : tracks.filter(
+        (track) => normalizeLanguagePreference(track.language) === language,
+      );
+  if (label != null) {
+    const labeledMatches = (language == null ? tracks : languageMatches).filter(
+      (track) => normalizedSourceAudioLabel(track.logicalLabel) === label,
+    );
+    if (labeledMatches.length === 1) return labeledMatches[0]!;
+    return null;
+  }
+  return languageMatches.length === 1 ? languageMatches[0]! : null;
+}
+
+function manualServerAudioScope(
+  sourceFileName: string | null | undefined,
+  scrobbleContext: TraktScrobbleContext | null,
+  imdbId: string | null | undefined,
+  season: number | null | undefined,
+  episode: number | null | undefined,
+  title: string,
+  subtitle: string | null | undefined,
+): string | null {
+  // Fresh stream URLs and numeric track indexes are generation-local. Retain
+  // only a semantic choice for the same media file and content identity.
+  const file = sourceFileName?.trim();
+  if (!file) return null;
+  const content = scrobbleContext == null
+    ? imdbId?.trim()
+      ? ["imdb", imdbId.trim(), season ?? null, episode ?? null]
+      : ["metadata", title.trim(), subtitle?.trim() ?? null, season ?? null, episode ?? null]
+    : [
+        "tmdb",
+        scrobbleContext.type,
+        scrobbleContext.tmdbId,
+        scrobbleContext.season ?? null,
+        scrobbleContext.episode ?? null,
+      ];
+  return JSON.stringify([content, file]);
 }
 
 /** Safari and some embedded WebViews expose the non-standard AudioTrackList
@@ -799,6 +859,36 @@ export function VideoPlayer({
   serverOptimized,
 }: VideoPlayerProps) {
   const requestedEngine = engine ?? inferEngine(url, kind);
+  const serverAudioRetentionScope = manualServerAudioScope(
+    sourceFileName,
+    scrobbleContext,
+    imdbId,
+    season,
+    episode,
+    title,
+    subtitle,
+  );
+  const [manualServerAudioPreference, setManualServerAudioPreference] = useState<{
+    scope: string;
+    preference: AudioPreference;
+  } | null>(null);
+  const retainedServerAudioPreference =
+    serverAudioRetentionScope != null &&
+    manualServerAudioPreference?.scope === serverAudioRetentionScope
+      ? manualServerAudioPreference.preference
+      : null;
+  useLayoutEffect(() => {
+    setManualServerAudioPreference((current) =>
+      current?.scope === serverAudioRetentionScope ? current : null,
+    );
+  }, [serverAudioRetentionScope]);
+  const rememberManualServerAudioPreference = useCallback((preference: AudioPreference) => {
+    if (serverAudioRetentionScope == null) return;
+    setManualServerAudioPreference({
+      scope: serverAudioRetentionScope,
+      preference,
+    });
+  }, [serverAudioRetentionScope]);
   type ScopedOptimizedSource = ServerOptimizedSource & {
     originOwner: string;
     audioPreference?: AudioPreference;
@@ -1029,6 +1119,17 @@ export function VideoPlayer({
     activeWebSourceRef.current = effectiveUrl;
     playbackOwnerRef.current = playbackOwner;
   }, [effectiveUrl, playbackOwner]);
+  const invalidateManualServerAudioPreference = useCallback((
+    owner: string,
+    preference: AudioPreference,
+  ) => {
+    if (playbackOwnerRef.current !== owner) return;
+    setManualServerAudioPreference((current) =>
+      current?.scope === serverAudioRetentionScope && current.preference === preference
+        ? null
+        : current,
+    );
+  }, [serverAudioRetentionScope]);
   useLayoutEffect(() => {
     playerMountedRef.current = true;
     return () => {
@@ -1562,6 +1663,7 @@ export function VideoPlayer({
       audioTrack?: number,
       audioPreference?: AudioPreference,
       positionIntent: ServerOptimizedPositionIntent = "follow-current",
+      retainAudioPreference = false,
     ) => {
       const owner = playbackOwner;
       if (
@@ -1679,6 +1781,27 @@ export function VideoPlayer({
           : handoffState ?? null;
         if (!ownsRequest()) return;
         const activationHandoffState = currentWebviewHandoffState(requestedHandoffState);
+        const requestedAudioConfirmed =
+          audioPreference != null &&
+          audioTrack != null &&
+          preparedAudioTrack === audioTrack;
+        if (retainAudioPreference && requestedAudioConfirmed) {
+          rememberManualServerAudioPreference(audioPreference);
+        }
+        const appliedTrack = preparedAudioTrack == null
+          ? null
+          : activeKnownSourceAudio?.tracks.find(
+              (track) => track.index === preparedAudioTrack,
+            ) ?? null;
+        const appliedAudioPreference = requestedAudioConfirmed
+          ? audioPreference
+          : preparedAudioTrack == null
+            ? undefined
+            : {
+                id: String(preparedAudioTrack),
+                language: appliedTrack?.language?.trim() || null,
+                label: appliedTrack?.label?.trim() || null,
+              };
         setFallbackSource(null);
         setSourceSwitchPosition({
           originOwner: owner,
@@ -1688,7 +1811,7 @@ export function VideoPlayer({
         setOptimizedSource({
           ...next,
           audioTrack: preparedAudioTrack,
-          audioPreference,
+          audioPreference: appliedAudioPreference,
           leaseTarget: serverHlsLeaseTarget(next.url, manifest),
           partialTimeline: /(?:^|\n)#EXT-X-PLAYLIST-TYPE:EVENT(?:\r?$|\s)/m.test(manifest),
           startPositionSeconds: activationStart,
@@ -1707,7 +1830,13 @@ export function VideoPlayer({
         }
       }
     },
-    [currentWebviewHandoffState, playbackOwner, serverOptimized],
+    [
+      currentWebviewHandoffState,
+      activeKnownSourceAudio,
+      playbackOwner,
+      rememberManualServerAudioPreference,
+      serverOptimized,
+    ],
   );
 
   const switchToDeviceOriginal = useCallback((
@@ -2501,6 +2630,10 @@ export function VideoPlayer({
               activeOptimized == null && explicitInitialServerAudioTrack != null
             }
             activeServerAudioPreference={activeOptimized?.audioPreference ?? null}
+            retainedServerAudioPreference={retainedServerAudioPreference}
+            onRetainedServerAudioPreferenceUnavailable={
+              invalidateManualServerAudioPreference
+            }
             serverOptimizationPending={serverOptimizationPending}
             serverOptimizationError={serverOptimizationError}
             onSwitchServerOptimized={switchToServerOptimized}
@@ -2648,6 +2781,8 @@ function WebviewPlayer({
   activeServerAudioTrack,
   initialServerAudioTrackExplicit,
   activeServerAudioPreference,
+  retainedServerAudioPreference,
+  onRetainedServerAudioPreferenceUnavailable,
   serverOptimizationPending,
   serverOptimizationError,
   onSwitchServerOptimized,
@@ -2735,6 +2870,11 @@ function WebviewPlayer({
   activeServerAudioTrack: number | null;
   initialServerAudioTrackExplicit: boolean;
   activeServerAudioPreference: AudioPreference | null;
+  retainedServerAudioPreference: AudioPreference | null;
+  onRetainedServerAudioPreferenceUnavailable: (
+    owner: string,
+    preference: AudioPreference,
+  ) => void;
   serverOptimizationPending: boolean;
   serverOptimizationError: string | null;
   onSwitchServerOptimized: (
@@ -2744,6 +2884,7 @@ function WebviewPlayer({
     audioTrack?: number,
     audioPreference?: AudioPreference,
     positionIntent?: ServerOptimizedPositionIntent,
+    retainAudioPreference?: boolean,
   ) => Promise<void>;
   onSelectServerOptimized: (
     quality: ServerTranscodeQuality,
@@ -3079,6 +3220,7 @@ function WebviewPlayer({
               `Audio ${track.index + 1}`,
             ),
             language: track.language?.trim() || null,
+            logicalLabel: track.label?.trim() || null,
             isDefault: track.default,
           }));
         setServerAudioTracks(choices);
@@ -3110,6 +3252,7 @@ function WebviewPlayer({
         `Audio ${track.index + 1}`,
       ),
       language: track.language?.trim() || null,
+      logicalLabel: track.label?.trim() || null,
       isDefault: track.default,
     }));
     setServerAudioTracks(choices);
@@ -3121,11 +3264,13 @@ function WebviewPlayer({
     // otherwise stale saved preferences can immediately switch the new stream
     // back to its previous/default track.
     appliedServerAudioPreferenceRef.current =
-      initialServerAudioTrackExplicit || activeServerAudioPreference != null;
+      activeServerAudioPreference != null ||
+      (initialServerAudioTrackExplicit && retainedServerAudioPreference == null);
   }, [
     activeServerAudioPreference,
     initialServerAudioTrackExplicit,
     initialServerAudioTracks,
+    retainedServerAudioPreference,
     serverAudioOwner,
   ]);
 
@@ -5124,6 +5269,7 @@ function WebviewPlayer({
       activeServerAudioPreference ?? (selected == null ? undefined : {
         id: selected.id,
         language: selected.language,
+        label: selected.logicalLabel,
       }),
       "fixed",
     );
@@ -5588,14 +5734,48 @@ function WebviewPlayer({
     const selected = serverAudioTracks.find((track) => track.index === next) ?? null;
     if (selected == null || serverOptimized == null) return;
     const quality = activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
+    const preference = {
+      id: selected.id,
+      language: selected.language,
+      label: selected.logicalLabel,
+    };
     void onSwitchServerOptimized(
       quality,
       absolutePlaybackPosition(),
       playbackHandoffState,
       next,
-      { id: selected.id, language: selected.language },
+      preference,
+      "follow-current",
+      true,
     );
   };
+
+  const matchedRetainedServerAudio = useMemo(
+    () => retainedServerAudioMatch(retainedServerAudioPreference, serverAudioTracks),
+    [retainedServerAudioPreference, serverAudioTracks],
+  );
+
+  useEffect(() => {
+    if (
+      retainedServerAudioPreference == null ||
+      serverAudioInventoryStatus !== "ready" ||
+      serverOptimizationPending ||
+      matchedRetainedServerAudio != null
+    ) {
+      return;
+    }
+    onRetainedServerAudioPreferenceUnavailable(
+      serverAudioOwner,
+      retainedServerAudioPreference,
+    );
+  }, [
+    matchedRetainedServerAudio,
+    onRetainedServerAudioPreferenceUnavailable,
+    retainedServerAudioPreference,
+    serverAudioInventoryStatus,
+    serverAudioOwner,
+    serverOptimizationPending,
+  ]);
 
   useEffect(() => {
     if (
@@ -5611,7 +5791,7 @@ function WebviewPlayer({
       ? null
       : savedPrefs;
     const selected =
-      findPreferredLanguageMatch(
+      matchedRetainedServerAudio ?? findPreferredLanguageMatch(
         perTitlePrefs?.preferredAudioLang,
         serverAudioTracks,
         (track) => track.language,
@@ -5637,11 +5817,12 @@ function WebviewPlayer({
       absolutePlaybackPosition(),
       playbackHandoffState,
       selected.index,
-      { id: selected.id, language: selected.language },
+      { id: selected.id, language: selected.language, label: selected.logicalLabel },
     );
   }, [
     resolvedServerAudioTrack,
     activeServerOptimizedQuality,
+    matchedRetainedServerAudio,
     onSwitchServerOptimized,
     savedPrefs,
     serverAudioInventoryStatus,
