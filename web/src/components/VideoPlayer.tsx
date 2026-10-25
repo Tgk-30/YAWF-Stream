@@ -5667,13 +5667,24 @@ function WebviewPlayer({
   const audioSelectionUnavailable =
     serverAudioInventoryStatus === "unavailable" ||
     (!serverAudioInventoryKnown && !hlsAudioInventoryKnown && !browserAudioApiAvailable);
-  const audioShortcutAvailable = audioChoices.length > 1 || (
-    serverAudioLoaderAvailable && (
-      (serverAudioInventoryStatus === "idle" && initialServerAudioTracks == null) ||
-      serverAudioInventoryStatus === "loading" ||
-      (optionsOpen && optionsOriginRef.current === "audio")
-    )
-  );
+  const touchUnavailableAudioShortcut =
+    touchPlayer &&
+    audioChoices.length === 0 &&
+    audioSelectionUnavailable &&
+    !serverAudioLoaderAvailable;
+  const touchServerAudioRetryShortcut =
+    touchPlayer &&
+    serverAudioLoaderAvailable &&
+    serverAudioInventoryStatus === "unavailable";
+  const audioShortcutAvailable = touchUnavailableAudioShortcut ||
+    touchServerAudioRetryShortcut ||
+    audioChoices.length > 1 || (
+      serverAudioLoaderAvailable && (
+        (serverAudioInventoryStatus === "idle" && initialServerAudioTracks == null) ||
+        serverAudioInventoryStatus === "loading" ||
+        (optionsOpen && optionsOriginRef.current === "audio")
+      )
+    );
   const activeAudioChoice = audioChoices.find((track) => track.index === activeAudioTrack) ?? null;
   const audioShortcutLabel = activeAudioChoice == null
     ? "Audio tracks"
@@ -5705,6 +5716,7 @@ function WebviewPlayer({
     }
   }, [audioShortcutAvailable, optionsOpen]);
   const touchAudioSheet = touchPlayer && optionsOriginRef.current === "audio";
+  const touchAudioFallbackSheet = touchAudioSheet && touchUnavailableAudioShortcut;
 
   return (
     <div
@@ -6207,7 +6219,7 @@ function WebviewPlayer({
       {optionsOpen && (
         <div
           ref={optionsDialogRef}
-          className={`player-options-menu glass-lit${touchAudioSheet ? " is-touch-audio-sheet" : touchPlayer ? " is-touch-settings" : ""}`}
+          className={`player-options-menu glass-lit${touchAudioSheet ? " is-touch-audio-sheet" : touchPlayer ? " is-touch-settings" : ""}${touchAudioFallbackSheet ? " has-audio-fallback" : ""}`}
           role="dialog"
           aria-modal="true"
           aria-label={touchAudioSheet ? "Audio tracks" : "Playback settings"}

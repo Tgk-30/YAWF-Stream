@@ -1386,7 +1386,8 @@
   right: max(10%, var(--safe-area-right));
 }
 
-.player-options-menu.is-touch-audio-sheet > :not(.player-options-head):not(.player-audio-options-section),
+.player-options-menu.is-touch-audio-sheet > :not(.player-options-head):not(.player-audio-options-section):not(.player-options-external),
+.player-options-menu.is-touch-audio-sheet:not(.has-audio-fallback) > .player-options-external,
 .player-options-menu.is-touch-settings .player-audio-options-section,
 .player-options-menu.is-touch-settings .player-fit-options-section {
   display: none;

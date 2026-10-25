@@ -606,6 +606,124 @@ describe("VideoPlayer shell", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("offers the existing Android chooser from the honest unavailable-audio sheet", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    Object.defineProperty(window, "__YAWF_TAURI_ANDROID__", {
+      configurable: true,
+      value: true,
+    });
+    openAndroidExternalPlayerMock
+      .mockRejectedValueOnce(new Error("chooser unavailable"))
+      .mockResolvedValueOnce("Player chooser opened. Select a video app to continue.");
+    render(
+      <VideoPlayer
+        url="https://x/progressive.mp4"
+        title="Android progressive"
+        onClose={() => {}}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Audio tracks" });
+    await userEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Audio tracks" });
+    expect(dialog).toHaveClass("is-touch-audio-sheet", "has-audio-fallback");
+    expect(within(dialog).getByText(
+      "This browser does not expose alternate audio tracks. If this source contains more than one, use an external player.",
+    )).toBeInTheDocument();
+
+    const chooser = within(dialog).getByRole("button", { name: /Open in external player/ });
+    expect(chooser).toBeVisible();
+    await userEvent.click(chooser);
+    expect(await within(dialog).findByText(
+      "The Android player chooser could not be opened. Copy the stream link or use the selectable link below.",
+    )).toBeInTheDocument();
+    await userEvent.click(chooser);
+    expect(await within(dialog).findByText(
+      "Player chooser opened. Select a video app to continue.",
+    )).toBeInTheDocument();
+    expect(openAndroidExternalPlayerMock).toHaveBeenCalledTimes(2);
+    expect(openAndroidExternalPlayerMock.mock.calls[0]?.[0]).toBe("https://x/progressive.mp4");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close audio tracks" }));
+    expect(screen.queryByRole("dialog", { name: "Audio tracks" })).toBeNull();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("keeps an unavailable protected Android stream honest without a fake chooser", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    Object.defineProperty(window, "__YAWF_TAURI_ANDROID__", {
+      configurable: true,
+      value: true,
+    });
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/protected"
+        externalPlaybackUrl={null}
+        title="Protected Android stream"
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    const dialog = screen.getByRole("dialog", { name: "Audio tracks" });
+    expect(within(dialog).getByText(
+      "This browser does not expose alternate audio tracks. If this source contains more than one, use an external player.",
+    )).toBeInTheDocument();
+    expect(within(dialog).getByText(
+      "External playback is not available for this protected stream. Retry playback or choose another source.",
+    )).toBeVisible();
+    expect(within(dialog).queryByRole("button", { name: /external player/i })).toBeNull();
+    expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps failed server audio inventory retry reachable in the focused touch sheet", async () => {
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    Object.defineProperty(window, "__YAWF_TAURI_ANDROID__", {
+      configurable: true,
+      value: true,
+    });
+    const loadAudioTracks = vi.fn()
+      .mockRejectedValueOnce(new Error("inventory unavailable"))
+      .mockResolvedValueOnce([
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "fra", label: "French", default: false },
+      ]);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p",
+      timelineOffsetSeconds: 0,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/session-1/index.m3u8"
+        externalPlaybackUrl={null}
+        title="Protected server audio"
+        serverOptimized={{ qualities: ["480p"], loadAudioTracks, request }}
+        onClose={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    expect(await screen.findByText(
+      "Audio track inventory is temporarily unavailable.",
+    )).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry audio tracks" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /external player/i })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Close audio tracks" }));
+
+    const audio = screen.getByRole("button", { name: "Audio tracks" });
+    expect(audio).toHaveFocus();
+    await userEvent.click(audio);
+    await userEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
+    expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Audio track, English" })).toBeInTheDocument();
+    expect(loadAudioTracks).toHaveBeenCalledTimes(2);
+    expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
+  });
+
   it("shows touch PiP and fullscreen only when their browser APIs are implemented", () => {
     deviceKindMock.mockReturnValue("ios");
     const first = render(
