@@ -231,7 +231,8 @@ const javac = configuredJavaHome ? join(configuredJavaHome, "bin", "javac") : "j
 const java = configuredJavaHome ? join(configuredJavaHome, "bin", "java") : "java";
 const strictSeekProbeCache = new Map();
 const stablePausedPositionProbeCache = new Map();
-const exactPlayerDialogSelectorProbeCache = new Map();
+const fusedAxSafetyGuardProbeCache = new Map();
+const allWindowRootGraphProbeCache = new Map();
 
 function spawnDiagnostics(result) {
   return [result?.error?.stack ?? result?.error?.message, result?.stdout, result?.stderr]
@@ -407,124 +408,97 @@ ${gate}
   }
 }
 
-function exactPlayerDialogSelectorProbe(source) {
+function fusedAxSafetyGuardProbe(source) {
   const sourceHash = createHash("sha256").update(source).digest("hex");
-  if (exactPlayerDialogSelectorProbeCache.has(sourceHash)) {
-    return exactPlayerDialogSelectorProbeCache.get(sourceHash);
+  if (fusedAxSafetyGuardProbeCache.has(sourceHash)) {
+    return fusedAxSafetyGuardProbeCache.get(sourceHash);
   }
   if (configuredJavaHome) {
     assert.ok(existsSync(javac), `configured JAVA_HOME has no compiler: ${javac}`);
     assert.ok(existsSync(java), `configured JAVA_HOME has no runtime: ${java}`);
   }
-  const selector = exactSlice(
+  const bindingPattern = exactSlice(
     source,
-    "    private static final class ExactPlayerDialogSelector {",
-    "\n\n    private static final class StablePausedPositionGate {",
+    "    private static final Pattern BINDING_TERMS",
+    "\n    private static final Pattern URL",
   );
-  const probeSource = `public final class ExactPlayerDialogSelectorProbe {
-    private static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
-    private static final String PLAYER_DIALOG_TITLE = "Playing Synthetic Fixture Movie (2026)";
-${selector}
+  const guard = exactSlice(
+    source,
+    "    static boolean matchesBindingLegalPhrase(",
+    "\n\n    private interface AxNodeReader<N> {",
+  );
+  const probeSource = `import java.util.regex.Pattern;
+
+public final class FusedAxSafetyGuardProbe {
+${bindingPattern}
+${guard}
     private static final class FakeNode {
-        final String packageName;
-        final String className;
         final String text;
-        int identityReads;
+        final String description;
 
-        FakeNode(String packageName, String className, String text) {
-            this.packageName = packageName;
-            this.className = className;
+        FakeNode(String text, String description) {
             this.text = text;
-        }
-
-        String packageName() {
-            identityReads++;
-            return packageName;
-        }
-
-        String className() {
-            identityReads++;
-            return className;
-        }
-
-        String text() {
-            identityReads++;
-            return text;
+            this.description = description;
         }
     }
 
-    private static ExactPlayerDialogSelector select(int maximum, FakeNode... nodes) {
-        ExactPlayerDialogSelector selector = new ExactPlayerDialogSelector(maximum);
-        int inspectable = selector.beginBoundedSelection(nodes.length);
-        for (int index = 0; index < inspectable; index++) {
-            FakeNode node = nodes[index];
-            selector.observe(node.packageName(), node.className(), node.text());
-        }
-        return selector;
+    private static AxSafetyGuard scan(String foreground, FakeNode... nodes) {
+        AxSafetyGuard guard = new AxSafetyGuard(foreground);
+        for (FakeNode node : nodes) guard.observe(node.text, node.description);
+        return guard;
     }
 
-    private static void expect(boolean condition, String message) {
-        if (!condition) throw new AssertionError(message);
+    private static void expectSafe(AxSafetyGuard guard, String message) {
+        if (guard.rejection() != null) throw new AssertionError(message + ": " + guard.rejection());
+    }
+
+    private static void expectRejected(AxSafetyGuard guard, String expected, String message) {
+        String actual = guard.rejection();
+        if (actual == null || !actual.contains(expected)) {
+            throw new AssertionError(message + ": " + actual);
+        }
     }
 
     public static void main(String[] args) {
-        FakeNode exact = new FakeNode(
-                PRODUCT_PACKAGE, "android.app.Dialog", PLAYER_DIALOG_TITLE);
-        ExactPlayerDialogSelector selected = select(8,
-                new FakeNode(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE),
-                new FakeNode("other.package", "android.app.Dialog", PLAYER_DIALOG_TITLE),
-                new FakeNode(PRODUCT_PACKAGE, "android.app.Dialog", "prefix " + PLAYER_DIALOG_TITLE),
-                exact);
-        expect(selected.rejection() == null, "unique exact dialog rejected");
-        expect(selected.selectedIndex() == 3, "wrong exact dialog index");
-        expect(selected.exactDialogMatches() == 1, "wrong exact dialog count");
-        expect(selected.observedTitleMatches() == 4, "not every title candidate was observed");
+        expectSafe(scan("com.tgk30.debridstreamer",
+                new FakeNode("ordinary player text", "ordinary description"),
+                new FakeNode(null, null)), "ordinary player tree rejected");
+        expectRejected(scan("com.tgk30.debridstreamer",
+                new FakeNode("Read the terms of service before continuing", null)),
+                "binding legal phrase", "legal text admitted");
+        expectRejected(scan("com.tgk30.debridstreamer",
+                new FakeNode(null, "Accept the LICENSE AGREEMENT now")),
+                "binding legal phrase", "legal description admitted");
+        expectRejected(scan("com.tgk30.debridstreamer",
+                new FakeNode("prefix\\nUSER AGREEMENT\\nsuffix", null)),
+                "binding legal phrase", "multiline legal text admitted");
+        expectSafe(scan("com.tgk30.debridstreamer",
+                new FakeNode("ordinary terms and privacy summary", "license information")),
+                "nonbinding words were broadened into a block");
 
-        ExactPlayerDialogSelector duplicate = select(8, exact, exact);
-        expect(duplicate.rejection() != null, "duplicate exact dialogs admitted");
-        expect(duplicate.selectedIndex() == -1, "duplicate retained a selected dialog");
-
-        FakeNode overOne = new FakeNode(
-                PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE);
-        FakeNode overTwo = new FakeNode(
-                PRODUCT_PACKAGE, "android.app.Dialog", PLAYER_DIALOG_TITLE);
-        FakeNode overThree = new FakeNode(
-                PRODUCT_PACKAGE, "android.widget.TextView", PLAYER_DIALOG_TITLE);
-        ExactPlayerDialogSelector bounded = select(2, overOne, overTwo, overThree);
-        expect(bounded.rejection() != null, "excess title lookup results admitted");
-        expect(bounded.selectedIndex() == -1, "excess lookup retained a selected dialog");
-        expect(overOne.identityReads + overTwo.identityReads + overThree.identityReads == 0,
-                "over-limit title nodes were inspected");
-
-        ExactPlayerDialogSelector defensiveBound = new ExactPlayerDialogSelector(2);
-        defensiveBound.observe(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE);
-        defensiveBound.observe(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE);
-        defensiveBound.observe(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE);
-        expect(defensiveBound.rejection() != null, "direct observations bypassed selector bound");
-
-        ExactPlayerDialogSelector exactBound = select(2,
-                new FakeNode(PRODUCT_PACKAGE, "android.view.View", PLAYER_DIALOG_TITLE), exact);
-        expect(exactBound.rejection() == null, "exact result bound rejected");
-        expect(exactBound.selectedIndex() == 1, "exact result bound lost selection");
-
-        ExactPlayerDialogSelector absent = select(8,
-                new FakeNode(PRODUCT_PACKAGE, "android.app.Dialog", PLAYER_DIALOG_TITLE + " ended"));
-        expect(absent.rejection() == null, "nonexact containment result caused rejection");
-        expect(absent.selectedIndex() == -1, "containment result was treated as exact");
-        expect(absent.exactDialogMatches() == 0, "containment result incremented exact count");
-
-        boolean invalidBoundRejected = false;
-        try {
-            new ExactPlayerDialogSelector(0);
-        } catch (IllegalArgumentException expected) {
-            invalidBoundRejected = true;
+        String[] blockedPackages = new String[] {
+                "com.android.permissioncontroller",
+                "com.google.android.permissioncontroller",
+                "com.android.settings",
+                "com.google.android.packageinstaller",
+                "com.android.packageinstaller"
+        };
+        for (String packageName : blockedPackages) {
+            expectRejected(scan(packageName), "out-of-scope permission",
+                    "blocked foreground package admitted: " + packageName);
         }
-        expect(invalidBoundRejected, "zero lookup bound admitted");
+        expectSafe(scan("com.android.settings.preview"),
+                "lookalike package was broadened into a block");
+
+        AxSafetyGuard changedForeground = scan("com.tgk30.debridstreamer");
+        changedForeground.observeForegroundPackage("com.android.permissioncontroller");
+        expectRejected(changedForeground, "out-of-scope permission",
+                "blocked foreground transition admitted");
     }
 }`;
-  const directory = mkdtempSync(join(tmpdir(), "yawf-exact-player-dialog-selector-"));
+  const directory = mkdtempSync(join(tmpdir(), "yawf-fused-ax-safety-guard-"));
   try {
-    const file = join(directory, "ExactPlayerDialogSelectorProbe.java");
+    const file = join(directory, "FusedAxSafetyGuardProbe.java");
     writeFileSync(file, probeSource);
     const compile = spawnSync(javac, ["-encoding", "UTF-8", "-d", directory, file], {
       encoding: "utf8",
@@ -532,14 +506,298 @@ ${selector}
     assert.equal(compile.error, undefined,
       `required javac is unavailable (${javac})\n${spawnDiagnostics(compile)}`);
     const run = compile.status === 0
-      ? spawnSync(java, ["-cp", directory, "ExactPlayerDialogSelectorProbe"], { encoding: "utf8" })
+      ? spawnSync(java, ["-cp", directory, "FusedAxSafetyGuardProbe"], { encoding: "utf8" })
       : null;
     if (run != null) {
       assert.equal(run.error, undefined,
         `required java runtime is unavailable (${java})\n${spawnDiagnostics(run)}`);
     }
     const result = { sourceHash, compile, run };
-    exactPlayerDialogSelectorProbeCache.set(sourceHash, result);
+    fusedAxSafetyGuardProbeCache.set(sourceHash, result);
+    return result;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function allWindowRootGraphProbe(source) {
+  const sourceHash = createHash("sha256").update(source).digest("hex");
+  if (allWindowRootGraphProbeCache.has(sourceHash)) {
+    return allWindowRootGraphProbeCache.get(sourceHash);
+  }
+  if (configuredJavaHome) {
+    assert.ok(existsSync(javac), `configured JAVA_HOME has no compiler: ${javac}`);
+    assert.ok(existsSync(java), `configured JAVA_HOME has no runtime: ${java}`);
+  }
+  const bindingPattern = exactSlice(
+    source,
+    "    private static final Pattern BINDING_TERMS",
+    "\n    private static final Pattern URL",
+  );
+  const graph = exactSlice(
+    source,
+    "    static boolean matchesBindingLegalPhrase(",
+    "\n\n    private static final class StablePausedPositionGate {",
+  );
+  const probeSource = `import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.regex.Pattern;
+
+public final class AllWindowRootGraphProbe {
+    private static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
+    private static final String PLAYER_DIALOG_TITLE = "Playing Synthetic Fixture Movie (2026)";
+${bindingPattern}
+${graph}
+    private static final class FakeNode {
+        final String frameworkId;
+        final String packageName;
+        final String className;
+        final String text;
+        final String description;
+        final List<FakeNode> children = new ArrayList<>();
+        int recycleCount;
+
+        FakeNode(String frameworkId, String packageName, String className,
+                String text, String description) {
+            this.frameworkId = frameworkId;
+            this.packageName = packageName;
+            this.className = className;
+            this.text = text;
+            this.description = description;
+        }
+
+        FakeNode children(FakeNode... nodes) {
+            for (FakeNode node : nodes) children.add(node);
+            return this;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof FakeNode
+                    && Objects.equals(frameworkId, ((FakeNode) other).frameworkId);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hashCode(frameworkId);
+        }
+    }
+
+    private static final AxNodeReader<FakeNode> READER = new AxNodeReader<FakeNode>() {
+        public String packageName(FakeNode node) { return node.packageName; }
+        public String className(FakeNode node) { return node.className; }
+        public String text(FakeNode node) { return node.text; }
+        public String description(FakeNode node) { return node.description; }
+        public int childCount(FakeNode node) { return node.children.size(); }
+        public FakeNode childAt(FakeNode node, int index) { return node.children.get(index); }
+        public void recycle(FakeNode node) { node.recycleCount++; }
+    };
+
+    private static final AxActiveNodeObserver<FakeNode> NOOP_OBSERVER =
+            new AxActiveNodeObserver<FakeNode>() {
+        public void observe(FakeNode node, String packageName, String className,
+                String text, String description, boolean isPlayerDialog, boolean insidePlayer) {}
+    };
+
+    private static FakeNode node(String id, String packageName, String className,
+            String text, String description) {
+        return new FakeNode(id, packageName, className, text, description);
+    }
+
+    private static FakeNode ordinaryRoot(String id) {
+        return node(id, PRODUCT_PACKAGE, "android.view.View", "ordinary", null);
+    }
+
+    private static FakeNode playerDialog(String id) {
+        return node(id, PRODUCT_PACKAGE, "android.app.Dialog", PLAYER_DIALOG_TITLE, null);
+    }
+
+    private static AxWindowRootGraph<FakeNode> graph(
+            int displays, long windows, int roots, int nodes) {
+        return new AxWindowRootGraph<>(
+                displays, windows, 4, 8, roots, nodes,
+                PRODUCT_PACKAGE, PLAYER_DIALOG_TITLE);
+    }
+
+    private static AxWindowScanResult scan(
+            AxWindowRootGraph<FakeNode> graph, AxSafetyGuard guard) {
+        return graph.scan(READER, NOOP_OBSERVER, guard);
+    }
+
+    private static void expectFailure(String expected, Runnable operation) {
+        try {
+            operation.run();
+            throw new AssertionError("expected failure containing: " + expected);
+        } catch (IllegalStateException failure) {
+            if (!String.valueOf(failure.getMessage()).contains(expected)) {
+                throw new AssertionError("wrong failure: " + failure.getMessage());
+            }
+        }
+    }
+
+    private static void safetyScenario() {
+        FakeNode active = ordinaryRoot("active");
+        FakeNode legalText = node("legal-text", "other.package", "android.widget.TextView",
+                "Read the terms of service before continuing", null);
+        FakeNode other = ordinaryRoot("other").children(legalText);
+        AxWindowRootGraph<FakeNode> textGraph = graph(2, 2, 4, 16);
+        textGraph.addRoot(active, true);
+        textGraph.addRoot(other, false);
+        expectFailure("binding legal phrase",
+                () -> scan(textGraph, new AxSafetyGuard(PRODUCT_PACKAGE)));
+        if (legalText.recycleCount != 1) throw new AssertionError("legal text child not recycled");
+
+        FakeNode legalDescription = node("legal-description", "other.package",
+                "android.widget.TextView", null, "Accept the LICENSE AGREEMENT now");
+        AxWindowRootGraph<FakeNode> descriptionGraph = graph(2, 2, 4, 16);
+        descriptionGraph.addRoot(ordinaryRoot("active-description"), true);
+        descriptionGraph.addRoot(ordinaryRoot("other-description").children(legalDescription), false);
+        expectFailure("binding legal phrase",
+                () -> scan(descriptionGraph, new AxSafetyGuard(PRODUCT_PACKAGE)));
+
+        AxWindowRootGraph<FakeNode> blockedRootGraph = graph(2, 2, 4, 16);
+        blockedRootGraph.addRoot(ordinaryRoot("active-blocked"), true);
+        blockedRootGraph.addRoot(node("blocked-root", "com.android.settings",
+                "android.view.View", null, null), false);
+        expectFailure("out-of-scope permission",
+                () -> scan(blockedRootGraph, new AxSafetyGuard(PRODUCT_PACKAGE)));
+    }
+
+    private static void isolationScenario() {
+        FakeNode activePlayer = ordinaryRoot("active-player-root")
+                .children(playerDialog("active-player"));
+        FakeNode otherPlayer = ordinaryRoot("other-player-root")
+                .children(playerDialog("other-player"));
+        AxWindowRootGraph<FakeNode> isolated = graph(2, 2, 4, 16);
+        isolated.addRoot(activePlayer, true);
+        isolated.addRoot(otherPlayer, false);
+        AxSafetyGuard safe = new AxSafetyGuard(PRODUCT_PACKAGE);
+        final int[] observedPlayerTitles = new int[] { 0 };
+        AxWindowScanResult result = isolated.scan(READER,
+                new AxActiveNodeObserver<FakeNode>() {
+            public void observe(FakeNode node, String packageName, String className,
+                    String text, String description, boolean isPlayerDialog, boolean insidePlayer) {
+                if (PLAYER_DIALOG_TITLE.equals(text)) observedPlayerTitles[0]++;
+            }
+        }, safe);
+        if (!result.allRootsVerified || result.activeDialogs != 1 || result.nestedDialogs != 0
+                || observedPlayerTitles[0] != 1) {
+            throw new AssertionError("other-display player affected active player identity");
+        }
+        if (!canPerformPauseFocus(result, safe, 1, 0, 1, 0, 0)) {
+            throw new AssertionError("verified active player could not focus");
+        }
+
+        AxWindowRootGraph<FakeNode> onlyOther = graph(2, 2, 4, 16);
+        onlyOther.addRoot(ordinaryRoot("no-active-player"), true);
+        onlyOther.addRoot(otherPlayer, false);
+        final int[] onlyOtherPlayerTitles = new int[] { 0 };
+        AxWindowScanResult onlyOtherResult = onlyOther.scan(READER,
+                new AxActiveNodeObserver<FakeNode>() {
+            public void observe(FakeNode node, String packageName, String className,
+                    String text, String description, boolean isPlayerDialog, boolean insidePlayer) {
+                if (PLAYER_DIALOG_TITLE.equals(text)) onlyOtherPlayerTitles[0]++;
+            }
+        }, new AxSafetyGuard(PRODUCT_PACKAGE));
+        if (onlyOtherResult.activeDialogs != 0 || onlyOtherPlayerTitles[0] != 0) {
+            throw new AssertionError("other-display player qualified as active");
+        }
+
+        AxWindowRootGraph<FakeNode> duplicateActive = graph(1, 1, 4, 16);
+        duplicateActive.addRoot(ordinaryRoot("duplicate-active-root").children(
+                playerDialog("duplicate-player-a"), playerDialog("duplicate-player-b")), true);
+        expectFailure("Multiple exact active player dialogs",
+                () -> scan(duplicateActive, new AxSafetyGuard(PRODUCT_PACKAGE)));
+
+        FakeNode nested = node("nested", PRODUCT_PACKAGE, "android.app.Dialog", "Audio tracks", null);
+        AxWindowRootGraph<FakeNode> nestedGraph = graph(1, 1, 4, 16);
+        nestedGraph.addRoot(ordinaryRoot("nested-root")
+                .children(playerDialog("nested-player").children(nested)), true);
+        AxSafetyGuard nestedGuard = new AxSafetyGuard(PRODUCT_PACKAGE);
+        AxWindowScanResult nestedResult = scan(nestedGraph, nestedGuard);
+        if (nestedResult.nestedDialogs != 1
+                || canPerformPauseFocus(nestedResult, nestedGuard, 1, 1, 1, 0, 0)) {
+            throw new AssertionError("nested player modal admitted focus");
+        }
+    }
+
+    private static void boundsScenario() {
+        AxWindowRootGraph<FakeNode> deduplicated = graph(2, 2, 2, 8);
+        deduplicated.addRoot(ordinaryRoot("same-root"), true);
+        deduplicated.addRoot(ordinaryRoot("same-root"), false);
+        AxWindowScanResult deduplicatedResult =
+                scan(deduplicated, new AxSafetyGuard(PRODUCT_PACKAGE));
+        if (deduplicatedResult.rootCount != 1 || deduplicatedResult.deduplicatedRoots != 1
+                || deduplicatedResult.visitedNodes != 1) {
+            throw new AssertionError("framework-identity root deduplication failed");
+        }
+
+        expectFailure("display inventory", () -> graph(5, 1, 2, 8));
+        expectFailure("window inventory", () -> graph(1, 9, 2, 8));
+
+        AxWindowRootGraph<FakeNode> rootBound = graph(1, 2, 1, 8);
+        rootBound.addRoot(ordinaryRoot("root-bound-a"), true);
+        expectFailure("root inventory", () -> rootBound.addRoot(ordinaryRoot("root-bound-b"), false));
+
+        FakeNode childA = ordinaryRoot("node-bound-a");
+        FakeNode childB = ordinaryRoot("node-bound-b");
+        AxWindowRootGraph<FakeNode> nodeBound = graph(1, 1, 2, 2);
+        nodeBound.addRoot(ordinaryRoot("node-bound-root").children(childA, childB), true);
+        expectFailure("bounded total node scan",
+                () -> scan(nodeBound, new AxSafetyGuard(PRODUCT_PACKAGE)));
+        if (childA.recycleCount + childB.recycleCount != 2) {
+            throw new AssertionError("bounded traversal did not recycle acquired children");
+        }
+    }
+
+    private static void focusOrderScenario() {
+        AxSafetyGuard safe = new AxSafetyGuard(PRODUCT_PACKAGE);
+        if (canPerformPauseFocus(new AxWindowScanResult(), safe, 1, 0, 1, 0, 0)) {
+            throw new AssertionError("focus admitted before all roots were verified");
+        }
+        AxWindowRootGraph<FakeNode> complete = graph(2, 2, 4, 16);
+        complete.addRoot(ordinaryRoot("focus-active").children(playerDialog("focus-player")), true);
+        complete.addRoot(ordinaryRoot("focus-other"), false);
+        AxWindowScanResult completeResult = scan(complete, safe);
+        if (!canPerformPauseFocus(completeResult, safe, 1, 0, 1, 0, 0)) {
+            throw new AssertionError("focus rejected after complete safe traversal");
+        }
+    }
+
+    public static void main(String[] args) {
+        if (args.length != 1) throw new AssertionError("one scenario required");
+        switch (args[0]) {
+            case "safety": safetyScenario(); break;
+            case "isolation": isolationScenario(); break;
+            case "bounds": boundsScenario(); break;
+            case "focus-order": focusOrderScenario(); break;
+            default: throw new AssertionError("unknown scenario: " + args[0]);
+        }
+    }
+}`;
+  const directory = mkdtempSync(join(tmpdir(), "yawf-all-window-root-graph-"));
+  try {
+    const file = join(directory, "AllWindowRootGraphProbe.java");
+    writeFileSync(file, probeSource);
+    const compile = spawnSync(javac, ["-encoding", "UTF-8", "-d", directory, file], {
+      encoding: "utf8",
+    });
+    assert.equal(compile.error, undefined,
+      `required javac is unavailable (${javac})\n${spawnDiagnostics(compile)}`);
+    const runs = {};
+    if (compile.status === 0) {
+      for (const scenario of ["safety", "isolation", "bounds", "focus-order"]) {
+        runs[scenario] = spawnSync(java,
+          ["-cp", directory, "AllWindowRootGraphProbe", scenario], { encoding: "utf8" });
+        assert.equal(runs[scenario].error, undefined,
+          `required java runtime is unavailable (${java})\n${spawnDiagnostics(runs[scenario])}`);
+      }
+    }
+    const result = { sourceHash, compile, runs };
+    allWindowRootGraphProbeCache.set(sourceHash, result);
     return result;
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -548,6 +806,12 @@ ${selector}
 
 function exactMutation(source, before, after) {
   const mutated = source.replace(before, after);
+  assert.notEqual(mutated, source, `mutation target missing: ${before}`);
+  return mutated;
+}
+
+function exactMutationAll(source, before, after) {
+  const mutated = source.replaceAll(before, after);
   assert.notEqual(mutated, source, `mutation target missing: ${before}`);
   return mutated;
 }
@@ -1054,91 +1318,227 @@ test("initial playing choreography reuses one native snapshot and lowers paused 
   assert.doesNotMatch(lower, /evaluateJavascript|executeShellCommand|setText/);
 });
 
-test("exact Java player-dialog selector executes fake-node identity, uniqueness, and lookup bounds", () => {
-  const accepted = exactPlayerDialogSelectorProbe(driver);
+test("exact Java fused AX safety guard rejects legal nodes and blocked foreground packages", () => {
+  const accepted = fusedAxSafetyGuardProbe(driver);
   assert.equal(accepted.compile.status, 0,
     `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
   assert.equal(accepted.run.status, 0, `${accepted.run.stdout}\n${accepted.run.stderr}`);
 
   const mutants = [
-    exactMutation(driver, "PRODUCT_PACKAGE.equals(packageName)", "true"),
-    exactMutation(driver, '"android.app.Dialog".equals(className)', "true"),
-    exactMutation(driver, "PLAYER_DIALOG_TITLE.equals(text)", "text.contains(PLAYER_DIALOG_TITLE)"),
-    exactMutation(driver, "exactDialogMatches > 1", "exactDialogMatches > 2"),
     exactMutation(
       driver,
-      "observedTitleMatches >= maximumTitleMatches",
-      "observedTitleMatches > maximumTitleMatches",
+      "text != null && BINDING_TERMS.matcher(text).matches()",
+      "false",
     ),
     exactMutation(
       driver,
-      "suppliedTitleMatches > maximumTitleMatches",
-      "suppliedTitleMatches > maximumTitleMatches + 1",
+      "description != null && BINDING_TERMS.matcher(description).matches()",
+      "false",
+    ),
+    exactMutation(driver, '"com.android.settings".equals(packageName)', "false"),
+    exactMutation(driver, "(?is)", "(?s)"),
+    exactMutation(
+      driver,
+      "observeForegroundPackage(foregroundPackage);",
+      "observeForegroundPackage(null);",
     ),
   ];
   for (const mutant of mutants) {
-    const rejected = exactPlayerDialogSelectorProbe(mutant);
+    const rejected = fusedAxSafetyGuardProbe(mutant);
     assert.equal(rejected.compile.status, 0,
       `${rejected.compile.stdout}\n${rejected.compile.stderr}`);
     assert.notEqual(rejected.run.status, 0,
-      "mutated exact Java player-dialog selector unexpectedly satisfied the fake-node oracle");
+      "mutated exact Java fused AX safety guard unexpectedly satisfied the oracle");
   }
 
+  const initialWait = exactSlice(
+    driver,
+    "private PlayerAxSnapshot waitForInitialPlayingTransport()",
+    "\n    private boolean hasCompleteCoreSnapshot(",
+  );
+  assert.doesNotMatch(initialWait, /assertNoOutOfScopeApproval\(\)/,
+    "the initial poll must not repeat two whole-tree UiAutomator guard searches");
+  assert.match(initialWait, /PlayerAxSnapshot snapshot = readPlayerAxSnapshot\(true\)/);
+
   const reader = exactSlice(
     driver,
     "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
     "\n    private Rect uniqueBounds(",
   );
-  assert.match(reader, /windowRoot\.findAccessibilityNodeInfosByText\(PLAYER_DIALOG_TITLE\)/);
-  assert.match(reader,
-    /new ExactPlayerDialogSelector\(MAX_PLAYER_DIALOG_TITLE_MATCHES\)/);
-  assert.match(reader, /AccessibilityNodeInfo\.obtain\(titleMatches\.get\(selectedIndex\)\)/);
-  assert.match(reader, /pending\.add\(playerRoot\)/);
-  assert.doesNotMatch(reader, /pending\.add\(windowRoot\)|pendingInsidePlayer/);
-  assert.match(reader, /if \(!pending\.isEmpty\(\)\) fail\("Player dialog subtree exceeded the bounded native scan"\)/);
-  assert.match(reader, /for \(AccessibilityNodeInfo node : titleMatches\) node\.recycle\(\)/);
-  assert.match(reader, /windowRoot\.recycle\(\)/);
-  assert.match(reader, /finally \{\s*node\.recycle\(\);\s*\}/);
-  assert.match(reader, /for \(AccessibilityNodeInfo node : pending\) node\.recycle\(\)/);
-  assert.match(reader, /snapshot\.nestedDialogs\+\+/);
-  assert.match(reader, /Multiple exact Pause controls were exposed inside the active player/);
-  assert.match(reader, /Multiple exact Play controls were exposed inside the active player/);
-  assert.match(reader, /Multiple strict semantic SeekBars were exposed inside the active player/);
-  assert.match(reader, /Active player exposed both Play and Pause/);
-  assert.match(reader, /snapshot\.pauseFocusActionSucceeded = pauseFocusCandidates\.get\(0\)\s*\.performAction\(AccessibilityNodeInfo\.ACTION_FOCUS\)/);
-  assert.doesNotMatch(reader, /device\.findObjects|UiObject2|evaluateJavascript|executeShellCommand/);
-
-  assert.equal(javaIntConstant("MAX_PLAYER_DIALOG_TITLE_MATCHES"), 32);
+  for (const text of [
+    "new AxSafetyGuard(device.getCurrentPackageName())",
+    "automation.getWindowsOnAllDisplays()",
+    "rootGraph.scan(nodeReader, activeObserver, safetyGuard)",
+    "safetyGuard.observeForegroundPackage(device.getCurrentPackageName())",
+    "if (safetyGuard.rejection() != null) fail(safetyGuard.rejection())",
+    "snapshot.safetyGuardComplete = scanResult.allRootsVerified",
+    "snapshot.visitedWindowNodes = scanResult.visitedNodes",
+  ]) assert.ok(reader.includes(text), text);
+  const graph = exactSlice(
+    driver,
+    "private static final class AxWindowRootGraph<N>",
+    "\n\n    static boolean canPerformPauseFocus(",
+  );
+  assert.match(graph, /safetyGuard\.observe\(text, description\)/);
+  assert.match(graph, /if \(current\.rootNode\) safetyGuard\.observeForegroundPackage\(packageName\)/);
+  assert.match(graph, /if \(current\.activeTree\) \{\s*activeObserver\.observe\(/);
+  assert.doesNotMatch(reader, /findAccessibilityNodeInfosByText|ExactPlayerDialogSelector/);
+  assert.match(reader, /if \(insidePlayer && exactPackage\) \{\s*Rect bounds = new Rect\(\);\s*node\.getBoundsInScreen\(bounds\)/);
+  assert.ok(reader.indexOf("rootGraph.scan(nodeReader, activeObserver, safetyGuard)")
+    < reader.indexOf("safetyGuard.observeForegroundPackage(device.getCurrentPackageName())"));
+  assert.ok(reader.indexOf("if (safetyGuard.rejection() != null) fail(safetyGuard.rejection())",
+    reader.indexOf("rootGraph.scan(nodeReader, activeObserver, safetyGuard)"))
+    < reader.indexOf("performAction(AccessibilityNodeInfo.ACTION_FOCUS)"),
+  "the completed all-window guard must reject before ACTION_FOCUS");
+  assert.match(driver, /return snapshot\.safetyGuardComplete\s*&& snapshot\.activeDialogs == 1/);
   assert.match(driver,
-    /titleMatches=%d visitedPlayerNodes=%d "\s*\+ "axReadMs=%d/);
+    /guardComplete=%d visitedWindowNodes=%d "\s*\+ "axDisplays=%d axWindows=%d axRoots=%d deduplicatedRoots=%d "/);
 });
 
-test("bounded exact Java dialog selection inspects zero over-limit node identities", () => {
-  const accepted = exactPlayerDialogSelectorProbe(driver);
+test("exact Java all-window graph blocks nonactive legal text, descriptions, and blocked roots", () => {
+  const accepted = allWindowRootGraphProbe(driver);
   assert.equal(accepted.compile.status, 0,
     `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
-  assert.equal(accepted.run.status, 0, `${accepted.run.stdout}\n${accepted.run.stderr}`);
+  assert.equal(accepted.runs.safety.status, 0,
+    `${accepted.runs.safety.stdout}\n${accepted.runs.safety.stderr}`);
 
-  const selector = exactSlice(
+  const mutants = [
+    exactMutation(
+      driver,
+      "safetyGuard.observe(text, description);",
+      "if (current.activeTree) safetyGuard.observe(text, description);",
+    ),
+    exactMutation(
+      driver,
+      "if (current.rootNode) safetyGuard.observeForegroundPackage(packageName);",
+      "if (false) safetyGuard.observeForegroundPackage(packageName);",
+    ),
+  ];
+  for (const mutant of mutants) {
+    const rejected = allWindowRootGraphProbe(mutant);
+    assert.equal(rejected.compile.status, 0,
+      `${rejected.compile.stdout}\n${rejected.compile.stderr}`);
+    assert.notEqual(rejected.runs.safety.status, 0,
+      "mutated all-window safety scan admitted a nonactive blocker");
+  }
+});
+
+test("exact Java all-window graph isolates player state and rejects duplicate or nested focus", () => {
+  const accepted = allWindowRootGraphProbe(driver);
+  assert.equal(accepted.compile.status, 0,
+    `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
+  assert.equal(accepted.runs.isolation.status, 0,
+    `${accepted.runs.isolation.stdout}\n${accepted.runs.isolation.stderr}`);
+
+  const mutants = [
+    exactMutation(
+      driver,
+      "boolean isPlayerDialog = current.activeTree",
+      "boolean isPlayerDialog = true",
+    ),
+    exactMutation(
+      driver,
+      "if (current.activeTree) {",
+      "if (true) {",
+    ),
+    exactMutation(
+      driver,
+      "if (result.activeDialogs > 1)",
+      "if (false)",
+    ),
+    exactMutation(
+      driver,
+      "&& activeDialogs == 1 && nestedDialogs == 0",
+      "&& activeDialogs == 1 && true",
+    ),
+  ];
+  for (const mutant of mutants) {
+    const rejected = allWindowRootGraphProbe(mutant);
+    assert.equal(rejected.compile.status, 0,
+      `${rejected.compile.stdout}\n${rejected.compile.stderr}`);
+    assert.notEqual(rejected.runs.isolation.status, 0,
+      "mutated all-window player isolation unexpectedly satisfied the oracle");
+  }
+});
+
+test("exact Java all-window graph bounds and deduplicates roots with one total node cap", () => {
+  const accepted = allWindowRootGraphProbe(driver);
+  assert.equal(accepted.compile.status, 0,
+    `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
+  assert.equal(accepted.runs.bounds.status, 0,
+    `${accepted.runs.bounds.stdout}\n${accepted.runs.bounds.stderr}`);
+
+  const mutants = [
+    exactMutation(
+      driver,
+      "AxScanRoot<N> existing = rootsByFrameworkIdentity.get(root);",
+      "AxScanRoot<N> existing = null;",
+    ),
+    exactMutation(
+      driver,
+      "rootsByFrameworkIdentity.size() >= maximumRoots",
+      "rootsByFrameworkIdentity.size() > maximumRoots",
+    ),
+    exactMutationAll(driver, ">= maximumNodes", "> maximumNodes"),
+  ];
+  for (const mutant of mutants) {
+    const rejected = allWindowRootGraphProbe(mutant);
+    assert.equal(rejected.compile.status, 0,
+      `${rejected.compile.stdout}\n${rejected.compile.stderr}`);
+    assert.notEqual(rejected.runs.bounds.status, 0,
+      "mutated all-window bounds unexpectedly satisfied the oracle");
+  }
+});
+
+test("native reader uses public all-display APIs and cannot focus before complete verification", () => {
+  const accepted = allWindowRootGraphProbe(driver);
+  assert.equal(accepted.compile.status, 0,
+    `${accepted.compile.stdout}\n${accepted.compile.stderr}`);
+  assert.equal(accepted.runs["focus-order"].status, 0,
+    `${accepted.runs["focus-order"].stdout}\n${accepted.runs["focus-order"].stderr}`);
+
+  const noCompletionGuard = exactMutation(
     driver,
-    "    private static final class ExactPlayerDialogSelector {",
-    "\n\n    private static final class StablePausedPositionGate {",
+    "scanResult != null && scanResult.allRootsVerified",
+    "scanResult != null",
   );
-  assert.match(selector,
-    /if \(suppliedTitleMatches > maximumTitleMatches\) \{\s*selectedIndex = -1;\s*rejection = "Player-dialog title lookup exceeded the bounded result count";\s*return 0;/);
+  const rejected = allWindowRootGraphProbe(noCompletionGuard);
+  assert.equal(rejected.compile.status, 0,
+    `${rejected.compile.stdout}\n${rejected.compile.stderr}`);
+  assert.notEqual(rejected.runs["focus-order"].status, 0,
+    "focus-order mutant admitted focus before all roots were verified");
 
   const reader = exactSlice(
     driver,
     "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
     "\n    private Rect uniqueBounds(",
   );
-  const boundAt = reader.indexOf(
-    "int inspectableTitleMatches = selector.beginBoundedSelection(titleMatches.size())");
-  const propertyReadAt = reader.indexOf("candidate.getPackageName()");
-  assert.ok(boundAt >= 0 && propertyReadAt > boundAt,
-    "the result-count gate must run before any candidate identity property read");
-  assert.match(reader, /for \(int index = 0; index < inspectableTitleMatches; index\+\+\)/);
-  assert.match(reader, /finally \{\s*if \(titleMatches != null\) \{\s*for \(AccessibilityNodeInfo node : titleMatches\) node\.recycle\(\)/);
+  for (const publicApi of [
+    "automation.getRootInActiveWindow()",
+    "automation.getWindowsOnAllDisplays()",
+    "window.getRoot()",
+  ]) assert.ok(reader.includes(publicApi), publicApi);
+  for (const bound of [
+    "MAX_AX_DISPLAYS", "MAX_AX_WINDOWS", "MAX_AX_ROOTS", "MAX_AX_TOTAL_NODES",
+  ]) assert.ok(driver.includes(bound), bound);
+  assert.equal(javaIntConstant("MAX_AX_DISPLAYS"), 8);
+  assert.equal(javaIntConstant("MAX_AX_WINDOWS"), 64);
+  assert.equal(javaIntConstant("MAX_AX_ROOTS"), 64);
+  assert.equal(javaIntConstant("MAX_AX_TOTAL_NODES"), 2048);
+  assert.equal((reader.match(/automation\.getRootInActiveWindow\(\)/g) ?? []).length, 1,
+    "the fused reader must take one active-root snapshot");
+  assert.equal((reader.match(/automation\.getWindowsOnAllDisplays\(\)/g) ?? []).length, 1,
+    "the fused reader must take one all-display window snapshot");
+  assert.equal((reader.match(/rootGraph\.scan\(/g) ?? []).length, 1,
+    "all retained roots must share one total traversal");
+  assert.ok(reader.indexOf("new AxWindowRootGraph<>") < reader.indexOf("window.getRoot()"),
+    "display and window bounds must be validated before window roots are read");
+  assert.ok(reader.indexOf("rootGraph.scan(nodeReader, activeObserver, safetyGuard)")
+    < reader.indexOf("performAction(AccessibilityNodeInfo.ACTION_FOCUS)"));
+  assert.match(reader, /for \(AccessibilityNodeInfo node : ownedRoots\) node\.recycle\(\)/);
+  assert.match(reader, /for \(AccessibilityWindowInfo window : ownedWindows\) window\.recycle\(\)/);
+  assert.match(reader, /rememberOwnedReference\(ownedRoots, windowRoot\)/);
+  assert.doesNotMatch(reader, /getWindowRoots\(|java\.lang\.reflect|setAccessible\(/);
 });
 
 test("active-player AX selection executes run4 shapes and rejects identity and range mutants", () => {
@@ -1363,7 +1763,14 @@ test("native Pause focus is blocked before input when the exact player has a nes
     "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
     "\n    private Rect uniqueBounds(",
   );
-  assert.match(snapshotReader, /if \(requestPlayingPauseFocus\s*&& snapshot\.activeDialogs == 1\s*&& snapshot\.nestedDialogs == 0\s*&& snapshot\.pauseControls == 1/);
+  assert.match(snapshotReader, /if \(requestPlayingPauseFocus\s*&& canPerformPauseFocus\(/);
+  const focusGuard = exactSlice(
+    driver,
+    "static boolean canPerformPauseFocus(",
+    "\n\n    private static final class StablePausedPositionGate {",
+  );
+  assert.match(focusGuard, /scanResult\.allRootsVerified/);
+  assert.match(focusGuard, /activeDialogs == 1 && nestedDialogs == 0/);
 
   const dialog = playerDialog();
   const container = { parent: dialog };
@@ -1585,7 +1992,7 @@ test("driver disables animated idle waits and refreshes public accessibility obs
     "private PlayerAxSnapshot readPlayerAxSnapshot(boolean requestPlayingPauseFocus)",
     "\n    private Rect uniqueBounds(",
   );
-  assert.ok(snapshotReader.indexOf("long readStarted = SystemClock.uptimeMillis()")
+  assert.ok(snapshotReader.indexOf("new AxSafetyGuard(device.getCurrentPackageName())")
     < snapshotReader.indexOf("refreshObservation()"));
   assert.ok(snapshotReader.indexOf("refreshObservation()")
     < snapshotReader.indexOf("getRootInActiveWindow()"));
