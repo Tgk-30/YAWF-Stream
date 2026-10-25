@@ -1445,7 +1445,7 @@ jobs:
           allowed_dropbox_header = re.compile(
               r"^(?:Drop box contents: [0-9]+ entr(?:y|ies)|Max entries: [0-9]+|"
               r"Low priority rate limit period: [0-9]+ ms|Low priority tags: \{[^\r\n]*\}|"
-              r"Searching for: [A-Za-z0-9_.:-]+|No entries found\.)$"
+              r"Searching for: [A-Za-z0-9_.:-]+|No entries found\.|\(No entries found\.\))$"
           )
           threadtime = re.compile(
               r"^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3,6}\s+"

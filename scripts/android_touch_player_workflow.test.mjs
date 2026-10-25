@@ -290,6 +290,20 @@ test("exact embedded admission accepts real-shaped empty filtered DropBox header
   assert.equal(result.receipt.stableSystemServerPid, true);
 });
 
+test("exact embedded admission accepts parenthesized empty DropBox output but rejects a positive ANR", () => {
+  const empty = cleanDropbox("system_app_anr").replace(/\n$/, "\n(No entries found.)\n");
+  const accepted = executeAdmission({ overrides: { "dropbox-system_app_anr.txt": empty } });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(accepted.receipt.admitted, true);
+  assert.deepEqual(accepted.receipt.anrOrCrashFindings, []);
+  const positive = executeAdmission({ overrides: {
+    "dropbox-system_app_anr.txt": `${empty}========================================\n2026-10-25 00:00:00 system_app_anr (compressed text, 14683 bytes)\nretained diagnostic body\n`,
+  } });
+  assert.notEqual(positive.status, 0);
+  assert.equal(positive.receipt.admitted, false);
+  assert.deepEqual(positive.receipt.anrOrCrashFindings, ["dropbox-system_app_anr.txt"]);
+});
+
 test("exact embedded admission rejects each retained DropBox ANR and crash entry, not its filter echo", async (t) => {
   for (const tag of dropboxTags) {
     await t.test(tag, () => {
