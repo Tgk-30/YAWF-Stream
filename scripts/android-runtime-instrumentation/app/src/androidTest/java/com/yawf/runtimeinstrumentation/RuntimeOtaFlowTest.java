@@ -28,6 +28,7 @@ import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -107,6 +108,7 @@ public final class RuntimeOtaFlowTest {
     private static final String DETAIL_DIALOG_CLASS = "android.app.Dialog";
     private static final long AUTOMATIC_CHECK_BOUND_MS = 55_000L;
     private static final int ABSENT_SETTLED_SAMPLES = 3;
+    private static final int MAX_INITIAL_ENABLE_QUERY_TIMINGS = 32;
     private static final String QUICK_SETUP_ACKNOWLEDGEMENT =
             "I understand the privacy, reliability, catalog, and playback limits and want to use Quick setup.";
 
@@ -156,6 +158,10 @@ public final class RuntimeOtaFlowTest {
     private int initialEnableCancelSelections;
     private boolean initialEnableCancelWon;
     private int initialEnableSettledResultExclusionSamples;
+    private final List<String> initialEnableQueryGroupTimings = new ArrayList<>();
+    private int initialEnableQueryGroupTimingDrops;
+    private long initialEnableLastQueryTimingUptimeMs = -1L;
+    private int initialEnableQueryTimingSequence;
     private int preOfferManualDiscoveries;
     private boolean weeklyOnAtDeferredOffer;
     private boolean automaticOfferAbsentSameForeground;
@@ -559,14 +565,20 @@ public final class RuntimeOtaFlowTest {
     private void enableAndCancelInitialFixed42CheckNoIdle() throws IOException {
         String progressTitle = "Checking for updates";
         String progressMessage = "Checking the official YAWF Stream Android release channel.";
+        String[] progressTexts = {progressTitle, progressMessage};
+        String[] terminalTexts = {
+                "YAWF Stream is up to date",
+                "Update check unavailable",
+                "YAWF Stream " + admittedTargetVersion + " is available"
+        };
         BySelector enableSelector = By.res("android", "button1")
                 .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
                 .clazz("android.widget.Button")
                 .text(Pattern.compile("\\AEnable\\z", Pattern.CASE_INSENSITIVE))
                 .clickable(true)
                 .enabled(true);
-        BySelector titleSelector = nativeDialogText(progressTitle);
-        BySelector messageSelector = nativeDialogText(progressMessage);
+        BySelector progressSelector = nativeDialogTextGroup(progressTexts);
+        BySelector terminalSelector = nativeDialogTextGroup(terminalTexts);
         BySelector cancelSelector = By.res("android", "button2")
                 .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
                 .clazz("android.widget.Button")
@@ -604,17 +616,22 @@ public final class RuntimeOtaFlowTest {
                     SystemClock.sleep(100);
                     continue;
                 }
-                assertNoInitialEnableResultVisibleAtCurrentIdlePolicy();
-                List<UiObject2> titles = cacheCleared
-                        ? device.findObjects(titleSelector) : new ArrayList<>();
-                List<UiObject2> messages = cacheCleared
-                        ? device.findObjects(messageSelector) : new ArrayList<>();
-                List<UiObject2> cancels = cacheCleared
-                        ? device.findObjects(cancelSelector) : new ArrayList<>();
-                assertTrue("Initial Enable CHECKING title was ambiguous", titles.size() <= 1);
-                assertTrue("Initial Enable CHECKING message was ambiguous", messages.size() <= 1);
+                Fixed42CriticalQueryGroupPolicy.Counts terminalCounts =
+                        queryFixed42CriticalTextGroup(
+                                terminalSelector, terminalTexts, "checking-terminal");
+                assertNoInitialEnableResultVisibleAtCurrentIdlePolicy(terminalCounts);
+                Fixed42CriticalQueryGroupPolicy.Counts progressCounts =
+                        queryFixed42CriticalTextGroup(
+                                progressSelector, progressTexts, "checking-progress");
+                List<UiObject2> cancels = queryFixed42CriticalCancelGroup(
+                        cancelSelector, "checking-cancel");
+                assertTrue("Initial Enable CHECKING title was ambiguous",
+                        progressCounts.count(0) <= 1);
+                assertTrue("Initial Enable CHECKING message was ambiguous",
+                        progressCounts.count(1) <= 1);
                 assertTrue("Initial Enable Cancel was ambiguous", cancels.size() <= 1);
-                if (titles.size() == 1 && messages.size() == 1 && cancels.size() == 1) {
+                if (Fixed42CriticalQueryGroupPolicy.isInitialCheckingReady(
+                        progressCounts, terminalCounts, cancels.size())) {
                     UiObject2 cancel = cancels.get(0);
                     assertTrue("Initial Enable Cancel was disabled", cancel.isEnabled());
                     assertTrue("Initial Enable Cancel was not clickable", cancel.isClickable());
@@ -636,8 +653,14 @@ public final class RuntimeOtaFlowTest {
 
             assertTrue("Initial Enable cache could not be refreshed before Cancel",
                     instrumentation.getUiAutomation().clearCache());
-            assertNoInitialEnableResultVisibleAtCurrentIdlePolicy();
-            List<UiObject2> freshCancels = device.findObjects(cancelSelector);
+            Fixed42CriticalQueryGroupPolicy.Counts freshTerminalCounts =
+                    queryFixed42CriticalTextGroup(
+                            terminalSelector, terminalTexts, "fresh-terminal");
+            assertNoInitialEnableResultVisibleAtCurrentIdlePolicy(freshTerminalCounts);
+            List<UiObject2> freshCancels = queryFixed42CriticalCancelGroup(
+                    cancelSelector, "fresh-cancel");
+            Fixed42CriticalQueryGroupPolicy.assertFreshCancelReady(
+                    freshTerminalCounts, freshCancels.size());
             assertEquals("Initial Enable Cancel disappeared or became ambiguous before selection",
                     1, freshCancels.size());
             initialEnableCancelSelections++;
@@ -656,11 +679,17 @@ public final class RuntimeOtaFlowTest {
                     SystemClock.sleep(100);
                     continue;
                 }
-                assertNoInitialEnableResultVisibleAtCurrentIdlePolicy();
-                boolean progressGone = cacheCleared
-                        && device.findObjects(titleSelector).isEmpty()
-                        && device.findObjects(messageSelector).isEmpty()
-                        && device.findObjects(cancelSelector).isEmpty();
+                Fixed42CriticalQueryGroupPolicy.Counts terminalCounts =
+                        queryFixed42CriticalTextGroup(
+                                terminalSelector, terminalTexts, "settled-terminal");
+                assertNoInitialEnableResultVisibleAtCurrentIdlePolicy(terminalCounts);
+                Fixed42CriticalQueryGroupPolicy.Counts progressCounts =
+                        queryFixed42CriticalTextGroup(
+                                progressSelector, progressTexts, "settled-progress");
+                List<UiObject2> cancels = queryFixed42CriticalCancelGroup(
+                        cancelSelector, "settled-cancel");
+                boolean progressGone = Fixed42CriticalQueryGroupPolicy.isSettledAbsent(
+                        progressCounts, terminalCounts, cancels.size());
                 if (progressGone) {
                     settled++;
                     if (settled >= ABSENT_SETTLED_SAMPLES) {
@@ -703,14 +732,14 @@ public final class RuntimeOtaFlowTest {
                         "YAWF Stream " + admittedTargetVersion + " is available")));
     }
 
-    private void assertNoInitialEnableResultVisibleAtCurrentIdlePolicy() {
-        assertFalse("Initial Enable check returned up-to-date before Cancel",
-                device.hasObject(nativeDialogText("YAWF Stream is up to date")));
-        assertFalse("Initial Enable check returned failure before Cancel",
-                device.hasObject(nativeDialogText("Update check unavailable")));
-        assertFalse("Initial Enable check returned target offer before Cancel",
-                device.hasObject(nativeDialogText(
-                        "YAWF Stream " + admittedTargetVersion + " is available")));
+    private void assertNoInitialEnableResultVisibleAtCurrentIdlePolicy(
+            Fixed42CriticalQueryGroupPolicy.Counts terminalCounts) {
+        assertEquals("Initial Enable check returned up-to-date before Cancel",
+                0, terminalCounts.count(0));
+        assertEquals("Initial Enable check returned failure before Cancel",
+                0, terminalCounts.count(1));
+        assertEquals("Initial Enable check returned target offer before Cancel",
+                0, terminalCounts.count(2));
     }
 
     private void completeNormalSetupExact() throws IOException {
@@ -2106,6 +2135,164 @@ public final class RuntimeOtaFlowTest {
         }
     }
 
+    private static final class Fixed42CriticalQueryGroupPolicy {
+        static final String TEXT_VIEW_CLASS = "android.widget.TextView";
+
+        private static final class Candidate {
+            final String packageName;
+            final String className;
+            final String text;
+
+            Candidate(String packageName, String className, String text) {
+                this.packageName = packageName;
+                this.className = className;
+                this.text = text;
+            }
+        }
+
+        private static final class Counts {
+            private final int[] counts;
+
+            Counts(int[] counts) {
+                this.counts = counts.clone();
+            }
+
+            int count(int index) {
+                if (index < 0 || index >= counts.length) {
+                    throw new AssertionError("Fixed42 query count index was out of bounds");
+                }
+                return counts[index];
+            }
+
+            int size() {
+                return counts.length;
+            }
+
+            int total() {
+                int total = 0;
+                for (int count : counts) total += count;
+                return total;
+            }
+
+            int[] values() {
+                return counts.clone();
+            }
+        }
+
+        static Pattern exactTextPattern(String... exactTexts) {
+            validateExactTexts(exactTexts);
+            StringBuilder pattern = new StringBuilder("\\A(?:");
+            for (int index = 0; index < exactTexts.length; index++) {
+                if (index > 0) pattern.append('|');
+                pattern.append(Pattern.quote(exactTexts[index]));
+            }
+            return Pattern.compile(pattern.append(")\\z").toString());
+        }
+
+        static Counts classify(
+                String expectedPackage,
+                String expectedClass,
+                String[] exactTexts,
+                Candidate... candidates) {
+            validateExactTexts(exactTexts);
+            if (expectedPackage == null || expectedClass == null || candidates == null) {
+                throw new AssertionError("Fixed42 query group inputs were incomplete");
+            }
+            int[] counts = new int[exactTexts.length];
+            for (Candidate candidate : candidates) {
+                if (candidate == null
+                        || !expectedPackage.equals(candidate.packageName)
+                        || !expectedClass.equals(candidate.className)) {
+                    throw new AssertionError("Fixed42 query group escaped its package or class scope");
+                }
+                int selected = -1;
+                for (int index = 0; index < exactTexts.length; index++) {
+                    if (exactTexts[index].equals(candidate.text)) {
+                        selected = index;
+                        break;
+                    }
+                }
+                if (selected < 0) {
+                    throw new AssertionError("Fixed42 query group returned an inexact name");
+                }
+                counts[selected]++;
+            }
+            return new Counts(counts);
+        }
+
+        static boolean isInitialCheckingReady(
+                Counts progressCounts, Counts terminalCounts, int cancelCount) {
+            requireCountShape(progressCounts, 2);
+            requireCountShape(terminalCounts, 3);
+            requireAtMostOneEach(progressCounts);
+            requireTerminalAbsent(terminalCounts);
+            requireAtMostOneCancel(cancelCount);
+            return progressCounts.count(0) == 1
+                    && progressCounts.count(1) == 1
+                    && cancelCount == 1;
+        }
+
+        static void assertFreshCancelReady(Counts terminalCounts, int cancelCount) {
+            requireCountShape(terminalCounts, 3);
+            requireTerminalAbsent(terminalCounts);
+            if (cancelCount != 1) {
+                throw new AssertionError("Fixed42 fresh Cancel was absent or ambiguous");
+            }
+        }
+
+        static boolean isSettledAbsent(
+                Counts progressCounts, Counts terminalCounts, int cancelCount) {
+            requireCountShape(progressCounts, 2);
+            requireCountShape(terminalCounts, 3);
+            requireAtMostOneEach(progressCounts);
+            requireTerminalAbsent(terminalCounts);
+            requireAtMostOneCancel(cancelCount);
+            return progressCounts.total() == 0 && cancelCount == 0;
+        }
+
+        private static void validateExactTexts(String[] exactTexts) {
+            if (exactTexts == null || exactTexts.length == 0) {
+                throw new AssertionError("Fixed42 query group had no exact names");
+            }
+            for (int index = 0; index < exactTexts.length; index++) {
+                if (exactTexts[index] == null || exactTexts[index].isEmpty()) {
+                    throw new AssertionError("Fixed42 query group had an empty exact name");
+                }
+                for (int prior = 0; prior < index; prior++) {
+                    if (exactTexts[index].equals(exactTexts[prior])) {
+                        throw new AssertionError("Fixed42 query group had duplicate exact names");
+                    }
+                }
+            }
+        }
+
+        private static void requireCountShape(Counts counts, int expectedSize) {
+            if (counts == null || counts.size() != expectedSize) {
+                throw new AssertionError("Fixed42 query group count shape changed");
+            }
+        }
+
+        private static void requireAtMostOneEach(Counts counts) {
+            for (int index = 0; index < counts.size(); index++) {
+                if (counts.count(index) > 1) {
+                    throw new AssertionError("Fixed42 query group was ambiguous");
+                }
+            }
+        }
+
+        private static void requireTerminalAbsent(Counts terminalCounts) {
+            if (terminalCounts.total() != 0) {
+                throw new AssertionError("Fixed42 terminal result won before cancellation");
+            }
+        }
+
+        private static void requireAtMostOneCancel(int cancelCount) {
+            if (cancelCount < 0 || cancelCount > 1) {
+                throw new AssertionError("Fixed42 Cancel query was ambiguous");
+            }
+        }
+    }
+
     private static final class Fixed42AppearancePolicy {
         private static boolean empty(String value) {
             return value == null || value.isEmpty();
@@ -2756,6 +2943,90 @@ public final class RuntimeOtaFlowTest {
                 .clazz("android.widget.TextView");
     }
 
+    private BySelector nativeDialogTextGroup(String... exactTexts) {
+        return By.text(Fixed42CriticalQueryGroupPolicy.exactTextPattern(exactTexts))
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz(Fixed42CriticalQueryGroupPolicy.TEXT_VIEW_CLASS);
+    }
+
+    private Fixed42CriticalQueryGroupPolicy.Counts queryFixed42CriticalTextGroup(
+            BySelector selector, String[] exactTexts, String phase) {
+        long startedAt = SystemClock.uptimeMillis();
+        Fixed42CriticalQueryGroupPolicy.Counts counts;
+        try {
+            List<UiObject2> matches = device.findObjects(selector);
+            if (matches.size() > exactTexts.length) {
+                throw new AssertionError("Fixed42 query group exceeded its exact-name bound");
+            }
+            Fixed42CriticalQueryGroupPolicy.Candidate[] candidates =
+                    new Fixed42CriticalQueryGroupPolicy.Candidate[matches.size()];
+            for (int index = 0; index < matches.size(); index++) {
+                UiObject2 match = matches.get(index);
+                CharSequence text = match.getText();
+                candidates[index] = new Fixed42CriticalQueryGroupPolicy.Candidate(
+                        match.getApplicationPackage(),
+                        match.getClassName(),
+                        text == null ? null : text.toString());
+            }
+            counts = Fixed42CriticalQueryGroupPolicy.classify(
+                    OtaFlowPolicy.PRODUCT_PACKAGE,
+                    Fixed42CriticalQueryGroupPolicy.TEXT_VIEW_CLASS,
+                    exactTexts,
+                    candidates);
+        } catch (RuntimeException | AssertionError failure) {
+            recordInitialEnableQueryGroupTiming(
+                    phase, startedAt, SystemClock.uptimeMillis(), new int[] {-1});
+            throw failure;
+        }
+        recordInitialEnableQueryGroupTiming(
+                phase, startedAt, SystemClock.uptimeMillis(), counts.values());
+        return counts;
+    }
+
+    private List<UiObject2> queryFixed42CriticalCancelGroup(
+            BySelector selector, String phase) {
+        long startedAt = SystemClock.uptimeMillis();
+        List<UiObject2> matches;
+        try {
+            matches = device.findObjects(selector);
+        } catch (RuntimeException | AssertionError failure) {
+            recordInitialEnableQueryGroupTiming(
+                    phase, startedAt, SystemClock.uptimeMillis(), new int[] {-1});
+            throw failure;
+        }
+        recordInitialEnableQueryGroupTiming(
+                phase, startedAt, SystemClock.uptimeMillis(),
+                new int[] {matches.size()});
+        return matches;
+    }
+
+    private void recordInitialEnableQueryGroupTiming(
+            String phase, long startedAt, long finishedAt, int[] counts) {
+        if (startedAt < 0L
+                || finishedAt < startedAt
+                || (initialEnableLastQueryTimingUptimeMs >= 0L
+                        && startedAt < initialEnableLastQueryTimingUptimeMs)) {
+            throw new AssertionError("Initial Enable query timing was not monotonic");
+        }
+        initialEnableLastQueryTimingUptimeMs = finishedAt;
+        initialEnableQueryTimingSequence++;
+        StringBuilder entry = new StringBuilder()
+                .append("sequence=").append(initialEnableQueryTimingSequence)
+                .append(" phase=").append(phase)
+                .append(" startUptimeMs=").append(startedAt)
+                .append(" finishUptimeMs=").append(finishedAt)
+                .append(" counts=");
+        for (int index = 0; index < counts.length; index++) {
+            if (index > 0) entry.append(',');
+            entry.append(counts[index]);
+        }
+        if (initialEnableQueryGroupTimings.size() >= MAX_INITIAL_ENABLE_QUERY_TIMINGS) {
+            initialEnableQueryGroupTimings.remove(0);
+            initialEnableQueryGroupTimingDrops++;
+        }
+        initialEnableQueryGroupTimings.add(entry.toString());
+    }
+
     private UiObject2 waitFor(BySelector selector, long timeoutMs, String label) {
         UiObject2 object = device.wait(Until.findObject(selector), timeoutMs);
         assertNotNull("Timed out waiting for " + label, object);
@@ -2945,6 +3216,15 @@ public final class RuntimeOtaFlowTest {
                 receipt.put("initialEnableCancelWon", initialEnableCancelWon);
                 receipt.put("initialEnableSettledResultExclusionSamples",
                         initialEnableSettledResultExclusionSamples);
+                JSONArray initialEnableTimingJson = new JSONArray();
+                for (String timing : initialEnableQueryGroupTimings) {
+                    initialEnableTimingJson.put(timing);
+                }
+                receipt.put("initialEnableQueryGroupTimings", initialEnableTimingJson);
+                receipt.put("initialEnableQueryGroupTimingDrops",
+                        initialEnableQueryGroupTimingDrops);
+                receipt.put("initialEnableQueryGroupTimingLimit",
+                        MAX_INITIAL_ENABLE_QUERY_TIMINGS);
                 receipt.put("preOfferManualDiscoveries", preOfferManualDiscoveries);
                 receipt.put("weeklyOnAtDeferredOffer", weeklyOnAtDeferredOffer);
                 receipt.put("automaticTriggerReturnOrdinal", automaticTriggerReturnOrdinal);

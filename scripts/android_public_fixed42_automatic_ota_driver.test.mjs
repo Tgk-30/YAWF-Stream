@@ -86,11 +86,18 @@ function initialEnableContract(body) {
     "assertNoBindingTermsAtCurrentIdlePolicy()",
     "freshEnables.get(0).click()",
     "instrumentation.getUiAutomation().clearCache()",
-    'nativeDialogText(progressTitle)',
-    'nativeDialogText(progressMessage)',
+    "String[] progressTexts",
+    "String[] terminalTexts",
+    "nativeDialogTextGroup(progressTexts)",
+    "nativeDialogTextGroup(terminalTexts)",
     'By.res("android", "button2")',
     'Pattern.compile("\\\\ACancel\\\\z", Pattern.CASE_INSENSITIVE)',
-    "assertNoInitialEnableResultVisibleAtCurrentIdlePolicy()",
+    "queryFixed42CriticalTextGroup(",
+    "queryFixed42CriticalCancelGroup(",
+    "assertNoInitialEnableResultVisibleAtCurrentIdlePolicy(terminalCounts)",
+    "Fixed42CriticalQueryGroupPolicy.isInitialCheckingReady(",
+    "Fixed42CriticalQueryGroupPolicy.assertFreshCancelReady(",
+    "Fixed42CriticalQueryGroupPolicy.isSettledAbsent(",
     "initialEnableCancelSelections++",
     'assertEquals("Initial Enable Cancel must be selected exactly once"',
     "initialEnableSettledResultExclusionSamples = settled",
@@ -99,6 +106,8 @@ function initialEnableContract(body) {
     'capture("fixed42-initial-enable-cancel-settled")',
   ]) need(body, token, `initial Enable contract lost ${token}`);
   assert.equal((body.match(/freshCancels\.get\(0\)\.click\(\)/g) ?? []).length, 1);
+  assert.equal(body.includes("device.hasObject("), false,
+    "fixed42 critical observer restored separate hasObject tree scans");
 }
 
 function fixedCriticalIntervalContract(java) {
@@ -138,6 +147,276 @@ function fixedCriticalIntervalContract(java) {
     "PNG or hierarchy capture occurred between Enable and Cancel");
   assert.equal(beforeCancel.includes("device.waitForIdle("), false,
     "an idle wait occurred between Enable and Cancel");
+}
+
+function fixed42CriticalQueryGroupContract(java) {
+  const critical = methodBody(java, "enableAndCancelInitialFixed42CheckNoIdle");
+  const textGroupSelector = methodBody(java, "nativeDialogTextGroup");
+  const textGroupQuery = methodBody(java, "queryFixed42CriticalTextGroup");
+  const cancelGroupQuery = methodBody(java, "queryFixed42CriticalCancelGroup");
+  const noResult = methodBody(java, "assertNoInitialEnableResultVisibleAtCurrentIdlePolicy");
+  const policy = nestedClassDeclaration(java, "Fixed42CriticalQueryGroupPolicy");
+
+  for (const token of [
+    'String[] progressTexts = {progressTitle, progressMessage}',
+    '"YAWF Stream is up to date"',
+    '"Update check unavailable"',
+    '"YAWF Stream " + admittedTargetVersion + " is available"',
+    "nativeDialogTextGroup(progressTexts)",
+    "nativeDialogTextGroup(terminalTexts)",
+    'queryFixed42CriticalTextGroup(\n                                terminalSelector, terminalTexts, "checking-terminal")',
+    'queryFixed42CriticalTextGroup(\n                                progressSelector, progressTexts, "checking-progress")',
+    'queryFixed42CriticalTextGroup(\n                            terminalSelector, terminalTexts, "fresh-terminal")',
+    "assertNoInitialEnableResultVisibleAtCurrentIdlePolicy(freshTerminalCounts)",
+    'queryFixed42CriticalCancelGroup(\n                    cancelSelector, "fresh-cancel")',
+    "Fixed42CriticalQueryGroupPolicy.assertFreshCancelReady(\n                    freshTerminalCounts, freshCancels.size())",
+    "initialEnableCancelSelections++",
+    "freshCancels.get(0).click()",
+    'queryFixed42CriticalTextGroup(\n                                terminalSelector, terminalTexts, "settled-terminal")',
+    'queryFixed42CriticalTextGroup(\n                                progressSelector, progressTexts, "settled-progress")',
+    "Fixed42CriticalQueryGroupPolicy.isSettledAbsent(",
+  ]) need(critical, token, `fixed42 grouped critical observer lost ${token}`);
+
+  const freshCache = critical.indexOf(
+    'assertTrue("Initial Enable cache could not be refreshed before Cancel"',
+  );
+  const freshTerminal = critical.indexOf('terminalTexts, "fresh-terminal"', freshCache);
+  const freshCancel = critical.indexOf('cancelSelector, "fresh-cancel"', freshTerminal);
+  const freshGate = critical.indexOf(
+    "Fixed42CriticalQueryGroupPolicy.assertFreshCancelReady(", freshCancel,
+  );
+  const cancelCount = critical.indexOf("initialEnableCancelSelections++", freshGate);
+  const cancelClick = critical.indexOf("freshCancels.get(0).click()", cancelCount);
+  assert.ok(freshCache >= 0 && freshCache < freshTerminal && freshTerminal < freshCancel
+    && freshCancel < freshGate && freshGate < cancelCount && cancelCount < cancelClick,
+  "fresh terminal exclusion and fresh unique Cancel must both precede the only Cancel click");
+  assert.equal((critical.match(/freshCancels\.get\(0\)\.click\(\)/g) ?? []).length, 1,
+    "fixed42 critical observer must click exactly one freshly queried Cancel");
+  assert.equal(critical.includes("nativeDialogText(progressTitle)"), false,
+    "fixed42 critical observer restored a separate title query");
+  assert.equal(critical.includes("nativeDialogText(progressMessage)"), false,
+    "fixed42 critical observer restored a separate message query");
+  assert.equal(critical.includes("device.hasObject("), false,
+    "fixed42 critical observer restored per-terminal hasObject scans");
+
+  for (const token of [
+    "Fixed42CriticalQueryGroupPolicy.exactTextPattern(exactTexts)",
+    ".pkg(OtaFlowPolicy.PRODUCT_PACKAGE)",
+    ".clazz(Fixed42CriticalQueryGroupPolicy.TEXT_VIEW_CLASS)",
+  ]) need(textGroupSelector, token, `fixed42 group selector lost ${token}`);
+  assert.equal((textGroupQuery.match(/device\.findObjects\(selector\)/g) ?? []).length, 1,
+    "one text group observation must use exactly one tree query");
+  assert.equal((cancelGroupQuery.match(/device\.findObjects\(selector\)/g) ?? []).length, 1,
+    "one Cancel group observation must use exactly one tree query");
+  for (const token of [
+    "match.getApplicationPackage()",
+    "match.getClassName()",
+    "match.getText()",
+    "matches.size() > exactTexts.length",
+    "Fixed42CriticalQueryGroupPolicy.classify(",
+    "OtaFlowPolicy.PRODUCT_PACKAGE",
+    "Fixed42CriticalQueryGroupPolicy.TEXT_VIEW_CLASS",
+  ]) need(textGroupQuery, token, `fixed42 grouped result classification lost ${token}`);
+  for (const token of [
+    'static final String TEXT_VIEW_CLASS = "android.widget.TextView"',
+    'new StringBuilder("\\\\A(?:")',
+    "Pattern.quote(exactTexts[index])",
+    'pattern.append(")\\\\z")',
+    "expectedPackage.equals(candidate.packageName)",
+    "expectedClass.equals(candidate.className)",
+    "exactTexts[index].equals(candidate.text)",
+    "requireTerminalAbsent(terminalCounts)",
+    "cancelCount != 1",
+  ]) need(policy, token, `fixed42 exact grouped-query policy lost ${token}`);
+  for (const [index, label] of [
+    [0, "up-to-date"],
+    [1, "failure"],
+    [2, "target offer"],
+  ]) need(noResult, `0, terminalCounts.count(${index})`,
+    `fixed42 ${label} terminal variant is not excluded independently`);
+}
+
+function fixed42CriticalTimingContract(java) {
+  const textGroupQuery = methodBody(java, "queryFixed42CriticalTextGroup");
+  const cancelGroupQuery = methodBody(java, "queryFixed42CriticalCancelGroup");
+  const record = methodBody(java, "recordInitialEnableQueryGroupTiming");
+  const receipt = methodBody(java, "writeReceipt");
+  for (const body of [textGroupQuery, cancelGroupQuery]) {
+    for (const token of [
+      "long startedAt = SystemClock.uptimeMillis()",
+      "recordInitialEnableQueryGroupTiming(",
+      "SystemClock.uptimeMillis()",
+      "new int[] {-1}",
+      "throw failure",
+    ]) need(body, token, `fixed42 query timing lost ${token}`);
+  }
+  for (const token of [
+    "finishedAt < startedAt",
+    "startedAt < initialEnableLastQueryTimingUptimeMs",
+    "initialEnableQueryTimingSequence++",
+    'append(" phase=").append(phase)',
+    'append(" startUptimeMs=").append(startedAt)',
+    'append(" finishUptimeMs=").append(finishedAt)',
+    'append(" counts=")',
+    "initialEnableQueryGroupTimings.size() >= MAX_INITIAL_ENABLE_QUERY_TIMINGS",
+    "initialEnableQueryGroupTimings.remove(0)",
+    "initialEnableQueryGroupTimingDrops++",
+  ]) need(record, token, `fixed42 bounded timing buffer lost ${token}`);
+  for (const forbidden of [
+    "exactTexts", "selector", "getText", "getContentDescription", "packageName",
+    "admittedTarget", "http", "failure.getMessage",
+  ]) assert.equal(record.includes(forbidden), false,
+    `fixed42 timing receipt leaked dynamic observer data through ${forbidden}`);
+  for (const token of [
+    'receipt.put("initialEnableQueryGroupTimings", initialEnableTimingJson)',
+    'receipt.put("initialEnableQueryGroupTimingDrops",',
+    'receipt.put("initialEnableQueryGroupTimingLimit",',
+    "MAX_INITIAL_ENABLE_QUERY_TIMINGS",
+  ]) need(receipt, token, `fixed42 timing receipt lost ${token}`);
+}
+
+function runFixed42CriticalQueryGroupPolicyHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42CriticalQueryGroupPolicy");
+  const harness = `
+import java.util.regex.Pattern;
+
+public final class Fixed42CriticalQueryGroupPolicyHarness {
+${policy}
+
+    private static final String PRODUCT = "com.tgk30.debridstreamer";
+    private static final String TEXT_VIEW = "android.widget.TextView";
+
+    private static Fixed42CriticalQueryGroupPolicy.Candidate candidate(
+            String packageName, String className, String text) {
+        return new Fixed42CriticalQueryGroupPolicy.Candidate(packageName, className, text);
+    }
+
+    private static Fixed42CriticalQueryGroupPolicy.Counts counts(
+            String[] exactTexts, Fixed42CriticalQueryGroupPolicy.Candidate... candidates) {
+        return Fixed42CriticalQueryGroupPolicy.classify(
+                PRODUCT, TEXT_VIEW, exactTexts, candidates);
+    }
+
+    private static void require(boolean condition, String message) {
+        if (!condition) throw new AssertionError(message);
+    }
+
+    private static void expectAssertion(Runnable action, String message) {
+        boolean rejected = false;
+        try {
+            action.run();
+        } catch (AssertionError expected) {
+            rejected = true;
+        }
+        require(rejected, message);
+    }
+
+    public static void main(String[] args) {
+        String[] progressTexts = {
+                "Checking for updates",
+                "Checking the official YAWF Stream Android release channel."
+        };
+        String[] terminalTexts = {
+                "YAWF Stream is up to date",
+                "Update check unavailable",
+                "YAWF Stream 2.3.59 is available"
+        };
+        Pattern progressPattern =
+                Fixed42CriticalQueryGroupPolicy.exactTextPattern(progressTexts);
+        require(progressPattern.matcher(progressTexts[0]).matches(),
+                "progress title must match the union");
+        require(progressPattern.matcher(progressTexts[1]).matches(),
+                "progress message must match the union");
+        require(!progressPattern.matcher("Checking for update").matches(),
+                "inexact progress name must not match");
+        Pattern terminalPattern =
+                Fixed42CriticalQueryGroupPolicy.exactTextPattern(terminalTexts);
+        for (String terminal : terminalTexts) {
+            require(terminalPattern.matcher(terminal).matches(),
+                    "each exact terminal name must match");
+        }
+        require(!terminalPattern.matcher("YAWF Stream 2x3x59 is available").matches(),
+                "quoted target version punctuation must stay literal");
+
+        Fixed42CriticalQueryGroupPolicy.Counts progress = counts(
+                progressTexts,
+                candidate(PRODUCT, TEXT_VIEW, progressTexts[0]),
+                candidate(PRODUCT, TEXT_VIEW, progressTexts[1]));
+        Fixed42CriticalQueryGroupPolicy.Counts emptyTerminal = counts(terminalTexts);
+        require(Fixed42CriticalQueryGroupPolicy.isInitialCheckingReady(
+                        progress, emptyTerminal, 1),
+                "exact initial CHECKING snapshot must be ready");
+
+        for (int index = 0; index < terminalTexts.length; index++) {
+            Fixed42CriticalQueryGroupPolicy.Counts terminal = counts(
+                    terminalTexts, candidate(PRODUCT, TEXT_VIEW, terminalTexts[index]));
+            expectAssertion(
+                    () -> Fixed42CriticalQueryGroupPolicy.assertFreshCancelReady(terminal, 1),
+                    "terminal variant " + index + " must beat and reject cancellation");
+        }
+
+        Fixed42CriticalQueryGroupPolicy.Counts laterOffer = counts(
+                terminalTexts, candidate(PRODUCT, TEXT_VIEW, terminalTexts[2]));
+        expectAssertion(
+                () -> Fixed42CriticalQueryGroupPolicy.assertFreshCancelReady(laterOffer, 1),
+                "earlier progress followed by a later terminal offer must fail closed");
+        expectAssertion(
+                () -> Fixed42CriticalQueryGroupPolicy.assertFreshCancelReady(emptyTerminal, 0),
+                "later missing Cancel must fail closed");
+        expectAssertion(
+                () -> Fixed42CriticalQueryGroupPolicy.assertFreshCancelReady(emptyTerminal, 2),
+                "later duplicate Cancel must fail closed");
+
+        expectAssertion(
+                () -> counts(progressTexts,
+                        candidate("other.package", TEXT_VIEW, progressTexts[0])),
+                "wrong package must fail");
+        expectAssertion(
+                () -> counts(progressTexts,
+                        candidate(PRODUCT, "android.view.View", progressTexts[0])),
+                "wrong class must fail");
+        expectAssertion(
+                () -> counts(progressTexts,
+                        candidate(PRODUCT, TEXT_VIEW, "Checking for update")),
+                "wrong name must fail");
+        Fixed42CriticalQueryGroupPolicy.Counts duplicateProgress = counts(
+                progressTexts,
+                candidate(PRODUCT, TEXT_VIEW, progressTexts[0]),
+                candidate(PRODUCT, TEXT_VIEW, progressTexts[0]),
+                candidate(PRODUCT, TEXT_VIEW, progressTexts[1]));
+        expectAssertion(
+                () -> Fixed42CriticalQueryGroupPolicy.isInitialCheckingReady(
+                        duplicateProgress, emptyTerminal, 1),
+                "duplicate initial title must fail closed");
+
+        Fixed42CriticalQueryGroupPolicy.Counts emptyProgress = counts(progressTexts);
+        require(Fixed42CriticalQueryGroupPolicy.isSettledAbsent(
+                        emptyProgress, emptyTerminal, 0),
+                "fresh all-absent post-Cancel sample must settle");
+        require(!Fixed42CriticalQueryGroupPolicy.isSettledAbsent(
+                        progress, emptyTerminal, 0),
+                "visible progress must reset settling");
+        System.out.println("fixed42-critical-query-group-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-query-group-policy-"));
+  const sourceFile = path.join(directory, "Fixed42CriticalQueryGroupPolicyHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `fixed42 grouped-query policy javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand, ["-cp", directory, "Fixed42CriticalQueryGroupPolicyHarness"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, `fixed42 grouped-query policy harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-critical-query-group-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function fixedDataContract(java) {
@@ -641,6 +920,95 @@ test("fixed critical interval enters zero-idle before Enable and captures only a
   );
   assert.notEqual(preCancelCaptureMutant, source, "pre-Cancel capture mutant anchor was absent");
   assert.throws(() => fixedCriticalIntervalContract(preCancelCaptureMutant));
+});
+
+test("fixed42 critical observer uses exact grouped progress and terminal queries before fresh Cancel", () => {
+  fixed42CriticalQueryGroupContract(source);
+
+  const splitTerminalQuery = source.replace(
+    "BySelector terminalSelector = nativeDialogTextGroup(terminalTexts);",
+    'BySelector terminalSelector = nativeDialogText("YAWF Stream is up to date");',
+  );
+  assert.notEqual(splitTerminalQuery, source, "split terminal-query mutant anchor was absent");
+  assert.throws(() => fixed42CriticalQueryGroupContract(splitTerminalQuery));
+
+  const skippedFreshTerminal = source.replace(
+    "            assertNoInitialEnableResultVisibleAtCurrentIdlePolicy(freshTerminalCounts);",
+    "",
+  );
+  assert.notEqual(skippedFreshTerminal, source, "fresh terminal-exclusion mutant anchor was absent");
+  assert.throws(() => fixed42CriticalQueryGroupContract(skippedFreshTerminal));
+
+  const cachedCancel = source.replace(
+    "            freshCancels.get(0).click();",
+    "            cancels.get(0).click();",
+  );
+  assert.notEqual(cachedCancel, source, "cached Cancel mutant anchor was absent");
+  assert.throws(() => fixed42CriticalQueryGroupContract(cachedCancel));
+});
+
+test("fixed42 grouped query policy executes exact scope and unfavorable phase counterexamples", () => {
+  runFixed42CriticalQueryGroupPolicyHarness(source);
+
+  const unquotedPattern = source.replace(
+    "pattern.append(Pattern.quote(exactTexts[index]));",
+    "pattern.append(exactTexts[index]);",
+  );
+  assert.notEqual(unquotedPattern, source, "unquoted union mutant anchor was absent");
+  assert.throws(() => runFixed42CriticalQueryGroupPolicyHarness(unquotedPattern));
+
+  const terminalAllowed = source.replace(
+    "if (terminalCounts.total() != 0) {",
+    "if (terminalCounts.total() < 0) {",
+  );
+  assert.notEqual(terminalAllowed, source, "terminal-admission mutant anchor was absent");
+  assert.throws(() => runFixed42CriticalQueryGroupPolicyHarness(terminalAllowed));
+
+  const missingCancelAllowed = source.replace(
+    "if (cancelCount != 1) {",
+    "if (cancelCount > 1) {",
+  );
+  assert.notEqual(missingCancelAllowed, source, "missing-Cancel mutant anchor was absent");
+  assert.throws(() => runFixed42CriticalQueryGroupPolicyHarness(missingCancelAllowed));
+
+  const packageScopeRemoved = source.replace(
+    "|| !expectedPackage.equals(candidate.packageName)\n                        || !expectedClass.equals(candidate.className)",
+    "|| !expectedClass.equals(candidate.className)",
+  );
+  assert.notEqual(packageScopeRemoved, source, "package-scope mutant anchor was absent");
+  assert.throws(() => runFixed42CriticalQueryGroupPolicyHarness(packageScopeRemoved));
+
+  const duplicatesAllowed = source.replace(
+    "if (counts.count(index) > 1) {",
+    "if (counts.count(index) < 0) {",
+  );
+  assert.notEqual(duplicatesAllowed, source, "duplicate-admission mutant anchor was absent");
+  assert.throws(() => runFixed42CriticalQueryGroupPolicyHarness(duplicatesAllowed));
+});
+
+test("fixed42 grouped query timings stay bounded monotonic sanitized and receipt-visible", () => {
+  fixed42CriticalTimingContract(source);
+
+  const unbounded = source.replace(
+    "            initialEnableQueryGroupTimings.remove(0);",
+    "",
+  );
+  assert.notEqual(unbounded, source, "unbounded timing-buffer mutant anchor was absent");
+  assert.throws(() => fixed42CriticalTimingContract(unbounded));
+
+  const rawTextLeak = source.replace(
+    '.append(" counts=");',
+    '.append(" selector=").append(selector).append(" counts=");',
+  );
+  assert.notEqual(rawTextLeak, source, "raw observer-data mutant anchor was absent");
+  assert.throws(() => fixed42CriticalTimingContract(rawTextLeak));
+
+  const missingReceipt = source.replace(
+    '                receipt.put("initialEnableQueryGroupTimings", initialEnableTimingJson);',
+    "",
+  );
+  assert.notEqual(missingReceipt, source, "timing-receipt mutant anchor was absent");
+  assert.throws(() => fixed42CriticalTimingContract(missingReceipt));
 });
 
 test("fixed baseline42 source-derived selector candidates fail closed and remain read-only after install", () => {
