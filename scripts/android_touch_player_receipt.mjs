@@ -11,9 +11,18 @@ const REQUIRED_TRUE = [
   "twoRealAudioTracksObserved",
   "japaneseSelectionPersistedAfterHandoff",
   "normalHlsMetadataReady",
+  "nativeDoubleTapInjectionUsed",
+  "doubleTapGestureTimingValid",
+  "doubleTapPlayerSafetyVerified",
+  "doubleTapPointOutsideActionableControls",
   "pausedSideDoubleTapSingleSeek",
   "portraitLandscapePortrait",
   "audioSelectionPersistedAcrossOrientation",
+  "playbackActionsRailScrolled",
+  "playbackSettingsOpened",
+  "externalPlayerActionReachable",
+  "playbackSettingsCloseUsed",
+  "pausedJapanesePreservedAfterPlaybackSettings",
 ];
 
 export function validateTouchPlayerEvidence(ui, server) {
@@ -25,6 +34,9 @@ export function validateTouchPlayerEvidence(ui, server) {
   assert.equal(ui?.manualDecodedPlaybackReviewRequired, true);
   assert.deepEqual(ui?.manualDecodedPlaybackReviewCaptureLabels,
     ["playing-clock-initial", "playing-clock-advanced"]);
+  assert.equal(ui?.manualGestureReviewRequired, true);
+  assert.deepEqual(ui?.manualGestureReviewCaptureLabels,
+    ["before-side-double-tap", "after-side-double-tap"]);
   assert.equal(ui?.checks?.webViewInjectionUsed, false);
   assert.equal(ui?.checks?.privatePreferencesUsed, false);
   assert.equal(ui?.checks?.permissionGrantUsed, false);
@@ -40,6 +52,10 @@ export function validateTouchPlayerEvidence(ui, server) {
   ].includes(observationBasis));
   assert.equal(ui.nativeSeekRangeObserved,
     observationBasis === "native-seekbar-range-plus-aria-valuetext");
+  assert.equal(ui?.nativeDoubleTapInjectionUsed, true);
+  assert.equal(ui?.doubleTapObservationBasis,
+    "uiautomation-motion-event-source-touchscreen-uptime");
+  assert.equal(ui?.checks?.doubleTapObservationBasis, ui.doubleTapObservationBasis);
   for (const key of REQUIRED_TRUE) assert.equal(ui.checks[key], true, key);
   assert.ok(Number.isInteger(ui.checks.pausedClockBeforeResumeSeconds));
   assert.ok(ui.checks.pausedClockBeforeResumeSeconds >= 0
@@ -51,6 +67,44 @@ export function validateTouchPlayerEvidence(ui, server) {
   assert.ok(Number.isInteger(preAudioSwitch) && preAudioSwitch > 0 && preAudioSwitch <= 30);
   assert.ok(Number.isInteger(postHandoff) && postHandoff > 0 && postHandoff <= 30);
   assert.ok(Math.abs(postHandoff - preAudioSwitch) <= 1);
+  const preRotation = ui.checks.preRotationAbsolutePositionSeconds;
+  const postRotation = ui.checks.postRotationAbsolutePositionSeconds;
+  assert.ok(Number.isInteger(preRotation) && preRotation > 0 && preRotation <= 30);
+  assert.ok(Number.isInteger(postRotation) && postRotation > 0 && postRotation <= 30);
+  assert.ok(Math.abs(postRotation - preRotation) <= 1);
+
+  const eventTimes = [
+    ui.checks.doubleTapFirstDownUptimeMs,
+    ui.checks.doubleTapFirstUpUptimeMs,
+    ui.checks.doubleTapSecondDownUptimeMs,
+    ui.checks.doubleTapSecondUpUptimeMs,
+  ];
+  for (const value of eventTimes) assert.ok(Number.isSafeInteger(value) && value >= 0);
+  assert.ok(eventTimes[0] < eventTimes[1]
+    && eventTimes[1] < eventTimes[2] && eventTimes[2] < eventTimes[3]);
+  assert.ok(eventTimes[1] - eventTimes[0] <= 100);
+  assert.ok(eventTimes[2] - eventTimes[1] <= 200);
+  assert.ok(eventTimes[3] - eventTimes[2] <= 100);
+  assert.equal(ui.checks.doubleTapUpToUpGapMs, eventTimes[3] - eventTimes[1]);
+  assert.ok(ui.checks.doubleTapUpToUpGapMs <= 320);
+  assert.ok(Number.isInteger(ui.checks.doubleTapPointXPx) && ui.checks.doubleTapPointXPx > 0);
+  assert.ok(Number.isInteger(ui.checks.doubleTapPointYPx) && ui.checks.doubleTapPointYPx > 0);
+  assert.ok(Number.isInteger(ui.checks.pausedSideDoubleTapDeltaSeconds));
+  assert.ok(ui.checks.pausedSideDoubleTapDeltaSeconds >= 9
+    && ui.checks.pausedSideDoubleTapDeltaSeconds <= 11);
+  assert.equal(ui.checks.externalPlayerActionLaunched, false);
+  assert.ok(Number.isInteger(ui.checks.playbackActionsRailPanAttempts)
+    && ui.checks.playbackActionsRailPanAttempts >= 1
+    && ui.checks.playbackActionsRailPanAttempts <= 4);
+  assert.ok(Number.isInteger(ui.checks.playbackSettingsVerticalPanAttempts)
+    && ui.checks.playbackSettingsVerticalPanAttempts >= 0
+    && ui.checks.playbackSettingsVerticalPanAttempts <= 4);
+  assert.ok(Number.isInteger(ui.checks.playbackSettingsUpwardPanAttempts)
+    && ui.checks.playbackSettingsUpwardPanAttempts >= 0
+    && ui.checks.playbackSettingsUpwardPanAttempts <= 4);
+  assert.ok(Number.isInteger(ui.checks.playbackActionsRailReturnPanAttempts)
+    && ui.checks.playbackActionsRailReturnPanAttempts >= 0
+    && ui.checks.playbackActionsRailReturnPanAttempts <= 4);
 
   const dimensions = [
     "initialPortraitWidthPx", "initialPortraitHeightPx",
@@ -96,6 +150,12 @@ export function validateTouchPlayerEvidence(ui, server) {
     manualDecodedPlaybackReviewRequired: true,
     playbackClockObservationBasis: observationBasis,
     nativeSeekRangeObserved: ui.nativeSeekRangeObserved,
+    nativeDoubleTapInjectionUsed: true,
+    doubleTapObservationBasis: ui.doubleTapObservationBasis,
+    manualGestureReviewRequired: true,
+    playbackActionsRailScrolled: true,
+    externalPlayerActionReachable: true,
+    externalPlayerActionLaunched: false,
     uiChecks: REQUIRED_TRUE.length + 16,
     serverEvents: events.length,
     realProxyObserved: true,

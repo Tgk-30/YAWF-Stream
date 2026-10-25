@@ -1041,11 +1041,11 @@ jobs:
     env:
       EVIDENCE: android-touch-player-evidence
       PRODUCT_APK: verified-phone-candidate/YAWF.Stream_Android_2.3.59.apk
-      PRODUCT_SHA256: e6ae8fba123ba22b4de89c5d4d198c301b2f3334dfbf065f74e4011b5a4aa41c
-      PRODUCT_SOURCE: ac6235afd5a7c034184b50300b8dc38bfdac1b4c
+      PRODUCT_SHA256: 5fe550e66658f3c9ae172c087c656d69e126af2892df05ca15e7e021594dae47
+      PRODUCT_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40
       PRODUCT_VERSION: 2.3.59
       PRODUCT_SIGNER_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a
-      TOUCH_UI_SOURCE: ac6235afd5a7c034184b50300b8dc38bfdac1b4c
+      TOUCH_UI_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40
       TOUCH_UI_VERSION: 2.3.59
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       EMULATOR_SERIAL: emulator-5554
@@ -1076,8 +1076,8 @@ jobs:
       - name: Download exact signed59 candidate artifact
         uses: actions/download-artifact@v4
         with:
-          artifact-ids: 12588415686
-          run-id: 40164716441
+          artifact-ids: 12589729254
+          run-id: 40169716770
           github-token: ${{ github.token }}
           path: verified-phone-candidate
           merge-multiple: true
@@ -1102,8 +1102,8 @@ jobs:
             echo "nativeHostSource=$PRODUCT_SOURCE"
             echo "nativeHostSha256=$PRODUCT_SHA256"
             echo "nativeHostVersion=$PRODUCT_VERSION"
-            echo "nativeProducerRunId=40164716441"
-            echo "nativeArtifactId=12588415686"
+            echo "nativeProducerRunId=40169716770"
+            echo "nativeArtifactId=12589729254"
             echo "touchUiSource=$TOUCH_UI_SOURCE"
             echo "touchUiVersion=$TOUCH_UI_VERSION"
             echo "twoSourceBoundary=immutable-native-host-plus-exact-hosted-web-ui"

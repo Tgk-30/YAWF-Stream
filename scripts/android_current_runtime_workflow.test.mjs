@@ -14,11 +14,15 @@ const workflow = readFileSync(workflowPath, "utf8");
 function assertExternalPlayerOuterTimeout(source) {
   const marker = "\n  external-player-fixture:\n";
   assert.equal(source.split(marker).length, 2);
-  const externalPlayerJob = source.slice(source.indexOf(marker));
+  const start = source.indexOf(marker);
+  const nextJob = source.indexOf("\n  touch-player-fixture:\n", start + marker.length);
+  assert.ok(nextJob > start);
+  const externalPlayerJob = source.slice(start, nextJob);
   const externalLimits = [...externalPlayerJob.matchAll(/^    timeout-minutes: (\d+)$/gm)]
     .map((match) => match[1]);
   assert.deepEqual(externalLimits, ["45"]);
-  const allJobLimits = [...source.matchAll(/^    timeout-minutes: (\d+)$/gm)]
+  const allJobLimits = [...source.slice(0, source.indexOf("\n  touch-player-fixture:\n"))
+    .matchAll(/^    timeout-minutes: (\d+)$/gm)]
     .map((match) => match[1]);
   assert.deepEqual(allJobLimits, ["25", "45"]);
 }

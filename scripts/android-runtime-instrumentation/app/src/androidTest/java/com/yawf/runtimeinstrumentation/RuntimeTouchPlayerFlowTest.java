@@ -11,6 +11,8 @@ import android.content.Intent;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -66,6 +68,9 @@ public final class RuntimeTouchPlayerFlowTest {
     private static final int MAX_PHASES = 48;
     private static final int MAX_NATIVE_POLL_SNAPSHOTS = 72;
     private static final int MAX_SURFACE_REVEALS = 1;
+    private static final long DOUBLE_TAP_HOLD_MS = 40;
+    private static final long DOUBLE_TAP_INTER_GAP_MS = 100;
+    private static final long DOUBLE_TAP_MAX_UP_TO_UP_MS = 320;
     private static final long MAX_SCREENSHOT_BYTES = 8L * 1024L * 1024L;
     private static final long MAX_HIERARCHY_BYTES = 1024L * 1024L;
     private static final Pattern SAFE_SUBDIR = Pattern.compile("[A-Za-z0-9._-]{1,64}");
@@ -111,6 +116,8 @@ public final class RuntimeTouchPlayerFlowTest {
         Rect forwardBounds;
         Rect seekBounds;
         Rect closeBounds;
+        Rect playerDialogBounds;
+        final List<Rect> actionableBounds = new ArrayList<>();
         boolean pauseFocusActionAttempted;
         boolean pauseFocusActionSucceeded;
 
@@ -284,27 +291,6 @@ public final class RuntimeTouchPlayerFlowTest {
         checks.put("twoRealAudioTracksObserved", true);
         checks.put("japaneseSelectionPersistedAfterHandoff", true);
 
-        transition("paused-side-double-tap-after-hls");
-        int beforePositioning = waitForPlaybackPositionAvailable(
-                SHORT_WAIT_MS, "paused clock before double-tap positioning");
-        clickPlayerLabeled("Back 10 seconds", "paused Back 10 before side double tap", SHORT_WAIT_MS);
-        int beforeDoubleTap = waitForPlaybackPositionAtMost(beforePositioning - 8, MEDIA_WAIT_MS);
-        assertTrue("Back 10 did not place the paused clock in the non-clamped double-tap window",
-                beforeDoubleTap >= 8 && beforeDoubleTap <= 12);
-        int x = device.getDisplayWidth() * 84 / 100;
-        int y = device.getDisplayHeight() * 35 / 100;
-        device.click(x, y);
-        SystemClock.sleep(180);
-        device.click(x, y);
-        int afterDoubleTap = waitForPlaybackPositionAtLeast(beforeDoubleTap + 9, MEDIA_WAIT_MS);
-        int doubleTapDelta = afterDoubleTap - beforeDoubleTap;
-        assertTrue("Side double tap did not seek forward exactly once", doubleTapDelta >= 9);
-        assertTrue("Side double tap sought more than one ten-second step", doubleTapDelta <= 11);
-        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play after side double tap");
-        checks.put("pausedSideDoubleTapSingleSeek", true);
-        checks.put("pausedSideDoubleTapDeltaSeconds", doubleTapDelta);
-        capture("after-side-double-tap");
-
         transition("orientation-round-trip");
         waitForPortrait();
         int portraitWidth = device.getDisplayWidth();
@@ -312,6 +298,8 @@ public final class RuntimeTouchPlayerFlowTest {
         assertTrue("Pre-rotation display was not portrait", portraitHeight > portraitWidth);
         checks.put("portraitBeforeOrientationWidthPx", portraitWidth);
         checks.put("portraitBeforeOrientationHeightPx", portraitHeight);
+        int preRotationPosition = waitForPlaybackPositionAvailable(
+                SHORT_WAIT_MS, "paused absolute clock before orientation round trip");
         device.setOrientationLeft();
         waitForLandscape();
         int landscapeWidth = device.getDisplayWidth();
@@ -332,10 +320,285 @@ public final class RuntimeTouchPlayerFlowTest {
         assertCoreLayout("portrait-return", "Play");
         waitForPlayerLabeledClickable("Audio track, " + JAPANESE, SHORT_WAIT_MS,
                 "Japanese Audio action after orientation round trip");
+        int postRotationPosition = waitForPlaybackPositionAvailable(
+                SHORT_WAIT_MS, "paused absolute clock after orientation round trip");
+        assertTrue("Orientation round trip changed the paused absolute clock",
+                Math.abs(postRotationPosition - preRotationPosition) <= 1);
+        checks.put("preRotationAbsolutePositionSeconds", preRotationPosition);
+        checks.put("postRotationAbsolutePositionSeconds", postRotationPosition);
         checks.put("portraitLandscapePortrait", true);
         checks.put("audioSelectionPersistedAcrossOrientation", true);
         capture("portrait-return-controls");
+
+        transition("touch-action-rail-and-settings");
+        verifyScrollablePlaybackActionsAndSettings();
+
+        transition("paused-side-double-tap-after-hls");
+        int beforePositioning = waitForPlaybackPositionAvailable(
+                SHORT_WAIT_MS, "paused clock before double-tap positioning");
+        clickPlayerLabeled("Back 10 seconds", "paused Back 10 before side double tap", SHORT_WAIT_MS);
+        int beforeDoubleTap = waitForPlaybackPositionAtMost(beforePositioning - 8, MEDIA_WAIT_MS);
+        assertTrue("Back 10 did not place the paused clock in the non-clamped double-tap window",
+                beforeDoubleTap >= 8 && beforeDoubleTap <= 12);
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play before side double tap");
+        capture("before-side-double-tap");
+        PlayerAxSnapshot gestureSnapshot = waitForPausedGestureSafetySnapshot();
+        int x = device.getDisplayWidth() * 84 / 100;
+        int y = device.getDisplayHeight() * 35 / 100;
+        long[] eventTimes = injectNativePausedDoubleTap(gestureSnapshot, x, y);
+        checks.put("doubleTapFirstDownUptimeMs", eventTimes[0]);
+        checks.put("doubleTapFirstUpUptimeMs", eventTimes[1]);
+        checks.put("doubleTapSecondDownUptimeMs", eventTimes[2]);
+        checks.put("doubleTapSecondUpUptimeMs", eventTimes[3]);
+        checks.put("doubleTapUpToUpGapMs", eventTimes[3] - eventTimes[1]);
+        checks.put("doubleTapPointXPx", x);
+        checks.put("doubleTapPointYPx", y);
+        checks.put("nativeDoubleTapInjectionUsed", true);
+        checks.put("doubleTapGestureTimingValid", true);
+        checks.put("doubleTapPlayerSafetyVerified", true);
+        checks.put("doubleTapPointOutsideActionableControls", true);
+        checks.put("doubleTapObservationBasis",
+                "uiautomation-motion-event-source-touchscreen-uptime");
+        int afterDoubleTap = waitForPlaybackPositionAtLeast(beforeDoubleTap + 9, MEDIA_WAIT_MS);
+        int doubleTapDelta = afterDoubleTap - beforeDoubleTap;
+        assertTrue("Side double tap did not seek forward exactly once", doubleTapDelta >= 9);
+        assertTrue("Side double tap sought more than one ten-second step", doubleTapDelta <= 11);
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play after side double tap");
+        checks.put("pausedSideDoubleTapSingleSeek", true);
+        checks.put("pausedSideDoubleTapDeltaSeconds", doubleTapDelta);
+        capture("after-side-double-tap");
+
         transition("complete");
+    }
+
+    private PlayerAxSnapshot waitForPausedGestureSafetySnapshot() {
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        int reveals = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            PlayerAxSnapshot snapshot = readPlayerAxSnapshot(false);
+            if (snapshot.activeDialogs == 1 && snapshot.nestedDialogs == 0
+                    && snapshot.playControls == 1 && snapshot.pauseControls == 0
+                    && hasCompleteCoreSnapshot(snapshot)
+                    && snapshot.actionableBounds.size() >= 5) {
+                return snapshot;
+            }
+            int updatedReveals = revealPlayerSurfaceOnceIfHidden(
+                    reveals, "fresh paused gesture safety snapshot", snapshot);
+            if (updatedReveals != reveals) {
+                reveals = updatedReveals;
+                // Keep a prior chrome-reveal click outside the product's 320 ms gesture window.
+                SystemClock.sleep(100);
+                continue;
+            }
+            SystemClock.sleep(200);
+        }
+        fail("Invalid harness gesture: no fresh exact paused player snapshot with bounded controls");
+        return null;
+    }
+
+    private void verifyScrollablePlaybackActionsAndSettings() {
+        int beforeSettings = waitForPlaybackPositionAvailable(
+                SHORT_WAIT_MS, "paused clock before playback settings reachability");
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play before action-rail pan");
+        UiObject2 more = null;
+        int horizontalPans = 0;
+        for (int attempt = 0; attempt < 4 && more == null; attempt++) {
+            UiObject2 rail = findPlaybackActionsRail();
+            assertNotNull("Exact Playback actions toolbar was not visible and scrollable", rail);
+            rail.scroll(Direction.RIGHT, 0.72f);
+            horizontalPans++;
+            SystemClock.sleep(350);
+            more = findPlayerLabeledClickable("Playback settings");
+        }
+        assertTrue("Playback settings remained unreachable after bounded horizontal toolbar pans",
+                horizontalPans > 0 && more != null);
+        checks.put("playbackActionsRailScrolled", true);
+        checks.put("playbackActionsRailPanAttempts", horizontalPans);
+        guardedClick(more, "Playback settings after horizontal action-rail pan");
+        waitForExactNestedPlayerDialog("Playback settings", SHORT_WAIT_MS);
+        checks.put("playbackSettingsOpened", true);
+
+        UiObject2 external = findPlayerLabeledClickable("Open in external player");
+        int verticalPans = 0;
+        while (external == null && verticalPans < 4) {
+            UiObject2 settingsScroller = findScrollableInsideExactDialog("Playback settings");
+            assertNotNull("Playback settings overflowed without an exact vertical scroller",
+                    settingsScroller);
+            settingsScroller.scroll(Direction.DOWN, 0.70f);
+            verticalPans++;
+            SystemClock.sleep(350);
+            external = findPlayerLabeledClickable("Open in external player");
+        }
+        assertNotNull("Open in external player was not visibly reachable in Playback settings",
+                external);
+        assertTrue("Open in external player was not enabled or clickable",
+                external.isEnabled() && external.isClickable());
+        checks.put("playbackSettingsVerticalPanAttempts", verticalPans);
+        checks.put("externalPlayerActionReachable", true);
+        checks.put("externalPlayerActionLaunched", false);
+
+        UiObject2 close = findPlayerLabeledClickable("Close playback settings");
+        int upwardPans = 0;
+        while (close == null && upwardPans < 4) {
+            UiObject2 settingsScroller = findScrollableInsideExactDialog("Playback settings");
+            assertNotNull("Playback settings Close was unreachable without a vertical scroller",
+                    settingsScroller);
+            settingsScroller.scroll(Direction.UP, 0.70f);
+            upwardPans++;
+            SystemClock.sleep(350);
+            close = findPlayerLabeledClickable("Close playback settings");
+        }
+        assertNotNull("Close playback settings was not visibly reachable", close);
+        guardedClick(close, "Close playback settings after reachability proof");
+        waitForExactNestedPlayerDialogGone("Playback settings", SHORT_WAIT_MS);
+        waitForPlayerTransport("Play", SHORT_WAIT_MS, "paused Play after playback settings");
+        UiObject2 japaneseAudio = findPlayerLabeledClickable("Audio track, " + JAPANESE);
+        int returnPans = 0;
+        while (japaneseAudio == null && returnPans < 4) {
+            UiObject2 rail = findPlaybackActionsRail();
+            assertNotNull("Playback actions toolbar was unavailable while returning to Audio", rail);
+            rail.scroll(Direction.LEFT, 0.72f);
+            returnPans++;
+            SystemClock.sleep(350);
+            japaneseAudio = findPlayerLabeledClickable("Audio track, " + JAPANESE);
+        }
+        assertNotNull("Japanese Audio action was not reachable after returning the action rail",
+                japaneseAudio);
+        int afterSettings = waitForPlaybackPositionAvailable(
+                SHORT_WAIT_MS, "paused clock after playback settings");
+        assertTrue("Playback settings reachability changed the paused absolute clock",
+                Math.abs(afterSettings - beforeSettings) <= 1);
+        checks.put("playbackSettingsUpwardPanAttempts", upwardPans);
+        checks.put("playbackActionsRailReturnPanAttempts", returnPans);
+        checks.put("playbackSettingsCloseUsed", true);
+        checks.put("pausedJapanesePreservedAfterPlaybackSettings", true);
+    }
+
+    private UiObject2 findPlaybackActionsRail() {
+        refreshObservation();
+        List<UiObject2> candidates = new ArrayList<>();
+        for (UiObject2 candidate : device.findObjects(By.clazz("android.view.View")
+                .pkg(PRODUCT_PACKAGE).text(exactLabel("Playback actions")).scrollable(true))) {
+            if (!isInsideActivePlayerDialog(candidate)) continue;
+            if (!isBoundedVisibleTarget(candidate.getVisibleBounds(), 44, 44)) continue;
+            candidates.add(candidate);
+        }
+        if (candidates.size() > 1) fail("Ambiguous exact Playback actions toolbars");
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private UiObject2 findScrollableInsideExactDialog(String title) {
+        refreshObservation();
+        List<UiObject2> candidates = new ArrayList<>();
+        for (UiObject2 candidate : device.findObjects(
+                By.scrollable(true).pkg(PRODUCT_PACKAGE))) {
+            if (!isInsideExactDialog(candidate, title)) continue;
+            if (!isBoundedVisibleTarget(candidate.getVisibleBounds(), 44, 44)) continue;
+            candidates.add(candidate);
+        }
+        if (candidates.size() > 1) fail("Ambiguous scrollables inside exact dialog: " + title);
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private boolean isInsideExactDialog(UiObject2 node, String title) {
+        UiObject2 current = node;
+        for (int depth = 0; depth < 20 && current != null; depth++) {
+            if (PRODUCT_PACKAGE.equals(current.getApplicationPackage())
+                    && "android.app.Dialog".equals(current.getClassName())
+                    && title.equals(current.getText())) return true;
+            current = current.getParent();
+        }
+        return false;
+    }
+
+    private void waitForExactNestedPlayerDialog(String title, long timeoutMs) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        while (SystemClock.uptimeMillis() < deadline) {
+            refreshObservation();
+            for (UiObject2 candidate : device.findObjects(By.clazz("android.app.Dialog")
+                    .pkg(PRODUCT_PACKAGE).text(exactLabel(title)))) {
+                if (isInsideActivePlayerDialog(candidate)) return;
+            }
+            SystemClock.sleep(200);
+        }
+        fail("Timed out waiting for exact nested player dialog: " + title);
+    }
+
+    private void waitForExactNestedPlayerDialogGone(String title, long timeoutMs) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        while (SystemClock.uptimeMillis() < deadline) {
+            refreshObservation();
+            boolean present = false;
+            for (UiObject2 candidate : device.findObjects(By.clazz("android.app.Dialog")
+                    .pkg(PRODUCT_PACKAGE).text(exactLabel(title)))) {
+                if (isInsideActivePlayerDialog(candidate)) present = true;
+            }
+            if (!present) return;
+            SystemClock.sleep(200);
+        }
+        fail("Exact nested player dialog did not close: " + title);
+    }
+
+    private long[] injectNativePausedDoubleTap(PlayerAxSnapshot snapshot, int x, int y) {
+        assertTrue("Invalid harness gesture: product was not the foreground package",
+                PRODUCT_PACKAGE.equals(device.getCurrentPackageName()));
+        assertTrue("Invalid harness gesture: exact player dialog was unavailable or nested",
+                snapshot.activeDialogs == 1 && snapshot.nestedDialogs == 0
+                        && snapshot.playerDialogBounds != null);
+        assertTrue("Invalid harness gesture: fresh player snapshot omitted a core control",
+                hasCompleteCoreSnapshot(snapshot) && snapshot.actionableBounds.size() >= 5);
+        assertTrue("Invalid harness gesture: player was not in the exact paused Play state",
+                snapshot.playControls == 1 && snapshot.pauseControls == 0);
+        assertTrue("Invalid harness gesture: target point was outside the exact player dialog",
+                snapshot.playerDialogBounds.contains(x, y));
+        for (Rect actionable : snapshot.actionableBounds) {
+            assertTrue("Invalid harness gesture: target point intersected an actionable control",
+                    !actionable.contains(x, y));
+        }
+
+        long firstDown = injectNativeTouchEvent(MotionEvent.ACTION_DOWN, 0L, x, y, "first DOWN");
+        SystemClock.sleep(DOUBLE_TAP_HOLD_MS);
+        long firstUp = injectNativeTouchEvent(MotionEvent.ACTION_UP, firstDown, x, y, "first UP");
+        SystemClock.sleep(DOUBLE_TAP_INTER_GAP_MS);
+        long secondDown = injectNativeTouchEvent(MotionEvent.ACTION_DOWN, 0L, x, y, "second DOWN");
+        SystemClock.sleep(DOUBLE_TAP_HOLD_MS);
+        long secondUp = injectNativeTouchEvent(MotionEvent.ACTION_UP, secondDown, x, y, "second UP");
+        long observedAfterSequence = SystemClock.uptimeMillis();
+        assertTrue("Invalid harness gesture: injected event times were not a real bounded double tap",
+                isValidNativeDoubleTapTiming(firstDown, firstUp, secondDown, secondUp));
+        assertTrue("Invalid harness gesture: injected event time was in the future",
+                secondUp <= observedAfterSequence);
+        log(String.format(Locale.ROOT,
+                "Injected native touchscreen double tap at %d,%d with actual uptime events %d/%d/%d/%d",
+                x, y, firstDown, firstUp, secondDown, secondUp));
+        return new long[] { firstDown, firstUp, secondDown, secondUp };
+    }
+
+    private long injectNativeTouchEvent(
+            int action, long gestureDownTime, int x, int y, String label) {
+        long eventTime = SystemClock.uptimeMillis();
+        long downTime = action == MotionEvent.ACTION_DOWN ? eventTime : gestureDownTime;
+        MotionEvent event = MotionEvent.obtain(
+                downTime, eventTime, action, (float) x, (float) y, 0);
+        event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        boolean injected;
+        try {
+            injected = instrumentation.getUiAutomation().injectInputEvent(event, false);
+        } finally {
+            event.recycle();
+        }
+        assertTrue("Invalid harness gesture: native injection failed for " + label, injected);
+        return eventTime;
+    }
+
+    static boolean isValidNativeDoubleTapTiming(
+            long firstDown, long firstUp, long secondDown, long secondUp) {
+        return firstDown >= 0L
+                && firstDown < firstUp && firstUp < secondDown && secondDown < secondUp
+                && firstUp - firstDown <= 100L
+                && secondUp - secondDown <= 100L
+                && secondDown - firstUp <= 200L
+                && secondUp - firstUp <= DOUBLE_TAP_MAX_UP_TO_UP_MS;
     }
 
     private int positionPausedClockAtMostFive() {
@@ -693,8 +956,16 @@ public final class RuntimeTouchPlayerFlowTest {
                     }
                     Rect bounds = new Rect();
                     node.getBoundsInScreen(bounds);
+                    if (isPlayerDialog) snapshot.playerDialogBounds = new Rect(bounds);
                     String label = text == null ? "" : text.toString();
                     if (label.isEmpty() && description != null) label = description.toString();
+                    if (insidePlayer && exactPackage
+                            && isNativeActionableClass(String.valueOf(className))
+                            && isBoundedNativeControl(bounds, node.isVisibleToUser(),
+                                    node.isEnabled(), node.isClickable(),
+                                    device.getDisplayWidth(), device.getDisplayHeight(), 1, 1)) {
+                        snapshot.actionableBounds.add(new Rect(bounds));
+                    }
                     boolean boundedButton = insidePlayer && exactPackage
                             && isBoundedNativeControl(bounds, node.isVisibleToUser(),
                                     node.isEnabled(), node.isClickable(),
@@ -804,6 +1075,13 @@ public final class RuntimeTouchPlayerFlowTest {
     private Rect uniqueBounds(Rect existing, Rect observed, String label) {
         if (existing != null) fail("Multiple bounded controls exposed for exact label: " + label);
         return new Rect(observed);
+    }
+
+    private static boolean isNativeActionableClass(String className) {
+        return "android.widget.Button".equals(className)
+                || "android.widget.ImageButton".equals(className)
+                || "android.widget.ToggleButton".equals(className)
+                || "android.widget.SeekBar".equals(className);
     }
 
     static int[] parseStrictSeekSemantic(String text, String description) {
@@ -1263,6 +1541,11 @@ public final class RuntimeTouchPlayerFlowTest {
         checks.put("strictSeekSemanticObserved", strictSeekSemanticObserved);
         checks.put("nativeSeekRangeObserved", nativeSeekRangeObserved);
         checks.put("playbackClockObservationBasis", observationBasis);
+        boolean nativeDoubleTapInjectionUsed =
+                Boolean.TRUE.equals(checks.get("nativeDoubleTapInjectionUsed"));
+        String doubleTapObservationBasis = nativeDoubleTapInjectionUsed
+                ? "uiautomation-motion-event-source-touchscreen-uptime"
+                : "none";
         JSONObject receipt = new JSONObject();
         receipt.put("schemaVersion", 1);
         receipt.put("outcome", outcome);
@@ -1277,11 +1560,16 @@ public final class RuntimeTouchPlayerFlowTest {
         receipt.put("strictSeekSemanticObserved", strictSeekSemanticObserved);
         receipt.put("nativeSeekRangeObserved", nativeSeekRangeObserved);
         receipt.put("playbackClockObservationBasis", observationBasis);
+        receipt.put("nativeDoubleTapInjectionUsed", nativeDoubleTapInjectionUsed);
+        receipt.put("doubleTapObservationBasis", doubleTapObservationBasis);
         receipt.put("evidenceStatus", "provisional");
         receipt.put("decodedPlaybackClaimed", false);
         receipt.put("manualDecodedPlaybackReviewRequired", true);
         receipt.put("manualDecodedPlaybackReviewCaptureLabels",
                 new JSONArray().put("playing-clock-initial").put("playing-clock-advanced"));
+        receipt.put("manualGestureReviewRequired", true);
+        receipt.put("manualGestureReviewCaptureLabels",
+                new JSONArray().put("before-side-double-tap").put("after-side-double-tap"));
         receipt.put("decodeBasis", "Automated accessibility clocks and server receipts are provisional; retained before/after PNG pixels require root manual review before any decoded-playback claim");
         if (failure != null) {
             receipt.put("failureNativePollDiagnostics", new JSONArray(nativePollDiagnostics));

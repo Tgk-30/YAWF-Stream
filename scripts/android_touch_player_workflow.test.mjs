@@ -144,8 +144,12 @@ function validUi() {
     evidenceStatus: "provisional", decodedPlaybackClaimed: false,
     manualDecodedPlaybackReviewRequired: true,
     manualDecodedPlaybackReviewCaptureLabels: ["playing-clock-initial", "playing-clock-advanced"],
+    manualGestureReviewRequired: true,
+    manualGestureReviewCaptureLabels: ["before-side-double-tap", "after-side-double-tap"],
     strictSeekSemanticObserved: true, nativeSeekRangeObserved: false,
     playbackClockObservationBasis: "native-seekbar-aria-valuetext",
+    nativeDoubleTapInjectionUsed: true,
+    doubleTapObservationBasis: "uiautomation-motion-event-source-touchscreen-uptime",
     checks: {
       nativeUiAutomationOnly: true, webViewInjectionUsed: false, privatePreferencesUsed: false,
       permissionGrantUsed: false, firstDecodeClockAdvanced: true, centralPauseResume: true,
@@ -155,8 +159,21 @@ function validUi() {
       pausedBackForward: true, touchScrubDeltaSeconds: 8, twoRealAudioTracksObserved: true,
       japaneseSelectionPersistedAfterHandoff: true, normalHlsMetadataReady: true,
       preAudioSwitchAbsolutePositionSeconds: 20, postHandoffAbsolutePositionSeconds: 20,
-      pausedSideDoubleTapSingleSeek: true,
+      preRotationAbsolutePositionSeconds: 20, postRotationAbsolutePositionSeconds: 20,
+      nativeDoubleTapInjectionUsed: true, doubleTapGestureTimingValid: true,
+      doubleTapPlayerSafetyVerified: true, doubleTapPointOutsideActionableControls: true,
+      doubleTapObservationBasis: "uiautomation-motion-event-source-touchscreen-uptime",
+      doubleTapFirstDownUptimeMs: 1000, doubleTapFirstUpUptimeMs: 1040,
+      doubleTapSecondDownUptimeMs: 1140, doubleTapSecondUpUptimeMs: 1180,
+      doubleTapUpToUpGapMs: 140, doubleTapPointXPx: 907, doubleTapPointYPx: 672,
+      pausedSideDoubleTapSingleSeek: true, pausedSideDoubleTapDeltaSeconds: 10,
       portraitLandscapePortrait: true, audioSelectionPersistedAcrossOrientation: true,
+      playbackActionsRailScrolled: true, playbackActionsRailPanAttempts: 2,
+      playbackSettingsOpened: true, playbackSettingsVerticalPanAttempts: 1,
+      externalPlayerActionReachable: true, externalPlayerActionLaunched: false,
+      playbackSettingsUpwardPanAttempts: 1, playbackSettingsCloseUsed: true,
+      playbackActionsRailReturnPanAttempts: 2,
+      pausedJapanesePreservedAfterPlaybackSettings: true,
       initialPortraitWidthPx: 1080, initialPortraitHeightPx: 1920,
       portraitBeforeOrientationWidthPx: 1080, portraitBeforeOrientationHeightPx: 1920,
       landscapeWidthPx: 1920, landscapeHeightPx: 1080,
@@ -188,7 +205,9 @@ function executeJavaBooleanReturn(methodSource, parameterNames, values) {
   assert.ok(match, "missing Java boolean return expression");
   const expression = match[1]
     .replaceAll("MAX_SURFACE_REVEALS", String(javaIntConstant("MAX_SURFACE_REVEALS")))
+    .replaceAll("DOUBLE_TAP_MAX_UP_TO_UP_MS", "320")
     .replaceAll("Float.isFinite", "Number.isFinite")
+    .replace(/(\d+)L\b/g, "$1")
     .replace(/(\d+)f\b/g, "$1");
   return Function(...parameterNames, `"use strict"; return (${expression});`)(...values);
 }
@@ -460,21 +479,21 @@ test("dispatch is opt-in and mutually excludes every older runtime route", () =>
 
 test("touch job binds the exact immutable host and exact hosted UI without inventing version code", () => {
   assert.match(job, /PRODUCT_APK: verified-phone-candidate\/YAWF\.Stream_Android_2\.3\.59\.apk/);
-  assert.match(job, /PRODUCT_SHA256: e6ae8fba123ba22b4de89c5d4d198c301b2f3334dfbf065f74e4011b5a4aa41c/);
-  assert.match(job, /PRODUCT_SOURCE: ac6235afd5a7c034184b50300b8dc38bfdac1b4c/);
+  assert.match(job, /PRODUCT_SHA256: 5fe550e66658f3c9ae172c087c656d69e126af2892df05ca15e7e021594dae47/);
+  assert.match(job, /PRODUCT_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
   assert.match(job, /PRODUCT_SIGNER_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a/);
-  assert.match(job, /TOUCH_UI_SOURCE: ac6235afd5a7c034184b50300b8dc38bfdac1b4c/);
+  assert.match(job, /TOUCH_UI_SOURCE: ac885bb98b2672614beb801b5aea11eb2f98ab40/);
   assert.match(job, /PRODUCT_VERSION: 2\.3\.59/);
   assert.match(job, /TOUCH_UI_VERSION: 2\.3\.59/);
   assert.doesNotMatch(job, /PRODUCT_VERSION_CODE:\s*["']?[0-9]/);
   assert.match(job, /actual_version_code="\$\(apkanalyzer manifest version-code/);
   assert.match(job, /versionCodeSource.*apkanalyzer-from-immutable-apk/);
   assert.match(job, /actions\/download-artifact@v4/);
-  assert.match(job, /artifact-ids: 12588415686/);
-  assert.match(job, /run-id: 40164716441/);
+  assert.match(job, /artifact-ids: 12589729254/);
+  assert.match(job, /run-id: 40169716770/);
   assert.match(job, /merge-multiple: true/);
-  assert.match(job, /nativeProducerRunId=40164716441/);
-  assert.match(job, /nativeArtifactId=12588415686/);
+  assert.match(job, /nativeProducerRunId=40169716770/);
+  assert.match(job, /nativeArtifactId=12589729254/);
   assert.doesNotMatch(job, /PRODUCT_URL|curl .*YAWF\.Stream/);
 });
 
@@ -1180,9 +1199,10 @@ test("driver stays in product UI and exercises every touch-player behavior", () 
     "japaneseSelectionPersistedAfterHandoff", "pausedSideDoubleTapSingleSeek",
     "portraitLandscapePortrait", "audioSelectionPersistedAcrossOrientation",
     "device.setOrientationLeft()", "device.setOrientationNatural()",
-    "device.swipe(", "device.click(x, y)", "SystemClock.sleep(180)",
+    "device.swipe(", "injectNativePausedDoubleTap", "MotionEvent.ACTION_DOWN",
+    "InputDevice.SOURCE_TOUCHSCREEN", "injectInputEvent(event, false)",
   ]) assert.ok(driver.includes(text), text);
-  assert.doesNotMatch(driver, /evaluateJavascript|executeShellCommand|VLC|external player|pm grant/i);
+  assert.doesNotMatch(driver, /evaluateJavascript|executeShellCommand|VLC|pm grant/i);
 });
 
 test("driver emits provisional decode evidence, exact handoff clocks, and measured orientation dimensions", () => {
@@ -1206,6 +1226,9 @@ test("driver emits provisional decode evidence, exact handoff clocks, and measur
   assert.match(driver, /receipt\.put\("strictSeekSemanticObserved", strictSeekSemanticObserved\)/);
   assert.match(driver, /receipt\.put\("nativeSeekRangeObserved", nativeSeekRangeObserved\)/);
   assert.match(driver, /receipt\.put\("playbackClockObservationBasis", observationBasis\)/);
+  assert.match(driver, /receipt\.put\("nativeDoubleTapInjectionUsed", nativeDoubleTapInjectionUsed\)/);
+  assert.match(driver, /receipt\.put\("doubleTapObservationBasis", doubleTapObservationBasis\)/);
+  assert.match(driver, /receipt\.put\("manualGestureReviewRequired", true\)/);
   assert.doesNotMatch(driver, /receipt\.put\("decodedPlaybackClaimed", "passed"\.equals\(outcome\)\)/);
 });
 
@@ -1252,14 +1275,134 @@ test("driver uses observed language labels and reopens the source-remounted audi
 test("driver positions paused playback away from either clamp before one ten-second side double tap", () => {
   assert.match(driver, /seekBounds\.left \+ seekBounds\.width\(\) \* 2 \/ 3/);
   const doubleTap = driver.slice(driver.indexOf('transition("paused-side-double-tap-after-hls")'),
-    driver.indexOf('transition("orientation-round-trip")'));
+    driver.indexOf('transition("complete")'));
+  const orientation = driver.slice(driver.indexOf('transition("orientation-round-trip")'),
+    driver.indexOf('transition("paused-side-double-tap-after-hls")'));
+  assert.ok(orientation.length > 0, "orientation checks must complete before the independent gesture case");
+  assert.match(orientation, /Math\.abs\(postRotationPosition - preRotationPosition\) <= 1/);
   assert.match(doubleTap, /clickPlayerLabeled\("Back 10 seconds", "paused Back 10 before side double tap"/);
   assert.match(doubleTap, /beforeDoubleTap >= 8 && beforeDoubleTap <= 12/);
+  assert.match(doubleTap, /capture\("before-side-double-tap"\)/);
+  assert.match(doubleTap, /PlayerAxSnapshot gestureSnapshot = waitForPausedGestureSafetySnapshot\(\)/);
+  assert.match(doubleTap, /injectNativePausedDoubleTap\(gestureSnapshot, x, y\)/);
+  assert.match(doubleTap, /capture\("after-side-double-tap"\)/);
   assert.match(doubleTap, /waitForPlaybackPositionAtLeast\(beforeDoubleTap \+ 9/);
   assert.match(doubleTap, /doubleTapDelta >= 9/);
   assert.match(doubleTap, /doubleTapDelta <= 11/);
   assert.match(driver, /assertAbsoluteThirtySecondTimeline\(\)/);
   assert.match(driver, /assertEquals\("HLS audio handoff changed the absolute 30 second timeline", 30, total\)/);
+});
+
+test("exact Playback actions rail pans to a reachable non-launched external action and closes", () => {
+  const runFlow = exactSlice(driver, "private void runFlow()", "\n    private PlayerAxSnapshot waitForPausedGestureSafetySnapshot(");
+  const orientationAt = runFlow.indexOf('transition("orientation-round-trip")');
+  const railAt = runFlow.indexOf('transition("touch-action-rail-and-settings")');
+  const gestureAt = runFlow.indexOf('transition("paused-side-double-tap-after-hls")');
+  assert.ok(orientationAt >= 0 && orientationAt < railAt && railAt < gestureAt);
+
+  const reachability = exactSlice(
+    driver,
+    "private void verifyScrollablePlaybackActionsAndSettings()",
+    "\n    private UiObject2 findPlaybackActionsRail()",
+  );
+  for (const text of [
+    "attempt < 4",
+    "rail.scroll(Direction.RIGHT, 0.72f)",
+    'findPlayerLabeledClickable("Playback settings")',
+    'guardedClick(more, "Playback settings after horizontal action-rail pan")',
+    'waitForExactNestedPlayerDialog("Playback settings", SHORT_WAIT_MS)',
+    'findPlayerLabeledClickable("Open in external player")',
+    "settingsScroller.scroll(Direction.DOWN, 0.70f)",
+    "external.isEnabled() && external.isClickable()",
+    'checks.put("externalPlayerActionLaunched", false)',
+    'findPlayerLabeledClickable("Close playback settings")',
+    "settingsScroller.scroll(Direction.UP, 0.70f)",
+    'guardedClick(close, "Close playback settings after reachability proof")',
+    "rail.scroll(Direction.LEFT, 0.72f)",
+    'findPlayerLabeledClickable("Audio track, " + JAPANESE)',
+    "Math.abs(afterSettings - beforeSettings) <= 1",
+  ]) assert.ok(reachability.includes(text), text);
+  assert.doesNotMatch(reachability, /guardedClick\(external|external\.click\(|Open in external player[^\n]*guardedClick/);
+
+  const rail = exactSlice(
+    driver,
+    "private UiObject2 findPlaybackActionsRail()",
+    "\n    private UiObject2 findScrollableInsideExactDialog(",
+  );
+  assert.match(rail, /By\.clazz\("android\.view\.View"\)/);
+  assert.match(rail, /text\(exactLabel\("Playback actions"\)\)\.scrollable\(true\)/);
+  assert.match(rail, /isInsideActivePlayerDialog\(candidate\)/);
+  assert.match(rail, /isBoundedVisibleTarget\(candidate\.getVisibleBounds\(\), 44, 44\)/);
+});
+
+test("native double-tap timing and four-event sequence reject invalid harness gestures", () => {
+  const timing = exactSlice(
+    driver,
+    "static boolean isValidNativeDoubleTapTiming(",
+    "\n    private int positionPausedClockAtMostFive(",
+  );
+  const valid = (values, source = timing) => executeJavaBooleanReturn(source,
+    ["firstDown", "firstUp", "secondDown", "secondUp"], values);
+  assert.equal(valid([1000, 1040, 1140, 1180]), true);
+  for (const values of [
+    [1000, 1000, 1100, 1140],
+    [1000, 1101, 1200, 1240],
+    [1000, 1040, 1241, 1281],
+    [1000, 1040, 1140, 1241],
+    [1000, 1040, 1100, 1361],
+    [1000, 1050, 1049, 1090],
+  ]) assert.equal(valid(values), false, values.join("/"));
+
+  const nonMonotonicMutant = timing.replace(
+    "firstDown < firstUp && firstUp < secondDown && secondDown < secondUp",
+    "firstDown <= firstUp && firstUp < secondDown && secondDown < secondUp",
+  );
+  assert.notEqual(nonMonotonicMutant, timing);
+  assert.equal(valid([1000, 1000, 1100, 1140], nonMonotonicMutant), true,
+    "the equality mutant must be killed by the boundary oracle");
+  const gapMutant = timing.replace("&& secondDown - firstUp <= 200L", "");
+  assert.notEqual(gapMutant, timing);
+  assert.equal(valid([1000, 1040, 1241, 1281], gapMutant), true,
+    "the unbounded inter-tap mutant must be killed by the boundary oracle");
+
+  const injection = exactSlice(
+    driver,
+    "private long[] injectNativePausedDoubleTap(",
+    "\n    static boolean isValidNativeDoubleTapTiming(",
+  );
+  for (const text of [
+    "PRODUCT_PACKAGE.equals(device.getCurrentPackageName())",
+    "snapshot.activeDialogs == 1 && snapshot.nestedDialogs == 0",
+    "hasCompleteCoreSnapshot(snapshot) && snapshot.actionableBounds.size() >= 5",
+    "snapshot.playControls == 1 && snapshot.pauseControls == 0",
+    "snapshot.playerDialogBounds.contains(x, y)",
+    "!actionable.contains(x, y)",
+    "MotionEvent.ACTION_DOWN, 0L, x, y, \"first DOWN\"",
+    "MotionEvent.ACTION_UP, firstDown, x, y, \"first UP\"",
+    "MotionEvent.ACTION_DOWN, 0L, x, y, \"second DOWN\"",
+    "MotionEvent.ACTION_UP, secondDown, x, y, \"second UP\"",
+    "event.setSource(InputDevice.SOURCE_TOUCHSCREEN)",
+    "injectInputEvent(event, false)",
+    "event.recycle()",
+  ]) assert.ok(injection.includes(text), text);
+  const firstInjection = injection.indexOf("injectNativeTouchEvent(MotionEvent.ACTION_DOWN");
+  for (const safety of ["getCurrentPackageName", "nestedDialogs", "playerDialogBounds.contains", "actionable.contains"]) {
+    assert.ok(injection.indexOf(safety) >= 0 && injection.indexOf(safety) < firstInjection, safety);
+  }
+  const orderedEvents = [
+    'MotionEvent.ACTION_DOWN, 0L, x, y, "first DOWN"',
+    'MotionEvent.ACTION_UP, firstDown, x, y, "first UP"',
+    'MotionEvent.ACTION_DOWN, 0L, x, y, "second DOWN"',
+    'MotionEvent.ACTION_UP, secondDown, x, y, "second UP"',
+  ].map((event) => injection.indexOf(event));
+  assert.ok(orderedEvents.every((index) => index >= 0));
+  assert.deepEqual([...orderedEvents].sort((a, b) => a - b), orderedEvents);
+  assert.ok(injection.indexOf("event.setSource(InputDevice.SOURCE_TOUCHSCREEN)")
+    < injection.indexOf("injectInputEvent(event, false)"));
+  assert.ok(injection.indexOf("injectInputEvent(event, false)")
+    < injection.indexOf("event.recycle()"));
+  assert.match(injection, /secondUp <= observedAfterSequence/);
+  assert.doesNotMatch(injection, /device\.click|evaluateJavascript|eventTime\s*[+-]|uptimeMillis\(\)\s*[+-]/);
 });
 
 test("bounded receipt validator accepts complete evidence and kills each semantic omission", () => {
@@ -1269,6 +1412,13 @@ test("bounded receipt validator accepts complete evidence and kills each semanti
   assert.equal(accepted.manualDecodedPlaybackReviewRequired, true);
   assert.equal(accepted.playbackClockObservationBasis, "native-seekbar-aria-valuetext");
   assert.equal(accepted.nativeSeekRangeObserved, false);
+  assert.equal(accepted.nativeDoubleTapInjectionUsed, true);
+  assert.equal(accepted.doubleTapObservationBasis,
+    "uiautomation-motion-event-source-touchscreen-uptime");
+  assert.equal(accepted.manualGestureReviewRequired, true);
+  assert.equal(accepted.playbackActionsRailScrolled, true);
+  assert.equal(accepted.externalPlayerActionReachable, true);
+  assert.equal(accepted.externalPlayerActionLaunched, false);
   assert.equal(accepted.selectedAudioHlsStartSeconds, 20);
   const withRange = validUi();
   withRange.nativeSeekRangeObserved = true;
@@ -1286,6 +1436,31 @@ test("bounded receipt validator accepts complete evidence and kills each semanti
     () => { const x = validUi(); x.checks.nativeSeekRangeObserved = true; return [x, validServer()]; },
     () => { const x = validUi(); x.playbackClockObservationBasis = "native-seekbar-range-plus-aria-valuetext"; return [x, validServer()]; },
     () => { const x = validUi(); x.checks.pausedClockBeforeResumeSeconds = 6; return [x, validServer()]; },
+    () => { const x = validUi(); x.manualGestureReviewRequired = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.manualGestureReviewCaptureLabels.reverse(); return [x, validServer()]; },
+    () => { const x = validUi(); x.nativeDoubleTapInjectionUsed = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.doubleTapObservationBasis = "device-click"; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.doubleTapObservationBasis = "device-click"; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.nativeDoubleTapInjectionUsed = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.doubleTapGestureTimingValid = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.doubleTapPlayerSafetyVerified = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.doubleTapPointOutsideActionableControls = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.doubleTapSecondDownUptimeMs = 1040; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.doubleTapSecondDownUptimeMs = 1241; x.checks.doubleTapSecondUpUptimeMs = 1281; x.checks.doubleTapUpToUpGapMs = 241; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.doubleTapUpToUpGapMs = 139; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.doubleTapPointXPx = 0; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.pausedSideDoubleTapDeltaSeconds = 12; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.postRotationAbsolutePositionSeconds = 18; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.playbackActionsRailScrolled = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.playbackActionsRailPanAttempts = 0; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.playbackSettingsOpened = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.playbackSettingsVerticalPanAttempts = 5; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.externalPlayerActionReachable = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.externalPlayerActionLaunched = true; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.playbackSettingsUpwardPanAttempts = -1; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.playbackActionsRailReturnPanAttempts = 5; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.playbackSettingsCloseUsed = false; return [x, validServer()]; },
+    () => { const x = validUi(); x.checks.pausedJapanesePreservedAfterPlaybackSettings = false; return [x, validServer()]; },
     () => { const x = validUi(); x.checks.touchScrubDeltaSeconds = 0; return [x, validServer()]; },
     () => { const x = validUi(); x.decodedPlaybackClaimed = true; return [x, validServer()]; },
     () => { const x = validUi(); x.manualDecodedPlaybackReviewRequired = false; return [x, validServer()]; },
