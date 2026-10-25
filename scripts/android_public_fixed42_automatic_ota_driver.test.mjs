@@ -1367,9 +1367,7 @@ function fixed42LauncherReadinessContract(java) {
     "fixed42LauncherIconFullyVisible(",
     "false, false, true",
   ]) need(observe, token, `fixed42 launcher observation lost ${token}`);
-  assert.ok(observe.indexOf("if (!launcherForeground)")
-      < observe.indexOf("instrumentation.getUiAutomation().clearCache()"),
-  "non-launcher foreground must wait without traversing an unrelated tree");
+  fixed42LauncherCacheOrderingContract(java);
   for (const token of [
     "!fixed42FullBounds(iconBounds, width, height)",
     "cursor >= 0 && depth < FIXED42_LAUNCHER_ANCESTOR_LIMIT",
@@ -1399,6 +1397,35 @@ function fixed42LauncherReadinessContract(java) {
     "return READY;",
     "now >= startedAt && now - startedAt < SHORT_WAIT_MS",
   ]) need(policy, token, `fixed42 launcher policy lost ${token}`);
+}
+
+function fixed42LauncherCacheOrderingContract(java) {
+  const observe = methodBody(java, "observeFixed42LauncherReadiness");
+  const apiGate = observe.indexOf(
+    "Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE",
+  );
+  const cacheRefresh = observe.indexOf(
+    "instrumentation.getUiAutomation().clearCache()",
+  );
+  const foregroundRead = observe.indexOf("device.getCurrentPackageName()");
+  const foregroundReject = observe.indexOf("if (!launcherForeground)");
+
+  assert.equal((observe.match(/clearCache\(\)/g) ?? []).length, 1,
+    "fixed42 launcher observation must clear the accessibility cache exactly once");
+  assert.ok(apiGate >= 0
+      && apiGate < cacheRefresh
+      && cacheRefresh < foregroundRead
+      && foregroundRead < foregroundReject,
+  "fixed42 launcher must fail closed on API 34 cache refresh before reading foreground");
+
+  const traversal = observe.indexOf("List<AccessibilityNodeInfo> owned");
+  assert.ok(foregroundReject < traversal,
+    "fixed42 non-launcher foreground must return before tree traversal");
+  const falseForeground = observe.slice(foregroundReject, traversal);
+  need(falseForeground, "false, 0, false, 0, false, false, false",
+    "fixed42 false foreground no longer classifies as waiting");
+  need(falseForeground, "return new Fixed42LauncherObservation(",
+    "fixed42 false foreground no longer returns before traversal");
 }
 
 function runFixed42LauncherReadinessPolicyHarness(java) {
@@ -1958,6 +1985,29 @@ test("fixed42 Blade seed uses one guarded public-scroll budget and one fresh ord
     assert.notEqual(mutant, source, "fixed42 structural mutant anchor was absent");
     assert.throws(() => fixed42TwoAxisSeedContract(mutant), `${label} mutant survived`);
   }
+});
+
+test("fixed42 launcher clears the API 34 cache before a false foreground decision", () => {
+  fixed42LauncherCacheOrderingContract(source);
+
+  const earlyForegroundRead = source.replace(
+    `        assertTrue("Fixed42 launcher cache refresh requires API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        assertTrue("Fixed42 launcher accessibility cache refresh failed",
+                instrumentation.getUiAutomation().clearCache());
+        boolean launcherForeground = launcherPackage.equals(device.getCurrentPackageName());`,
+    `        boolean launcherForeground = launcherPackage.equals(device.getCurrentPackageName());
+        assertTrue("Fixed42 launcher cache refresh requires API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        assertTrue("Fixed42 launcher accessibility cache refresh failed",
+                instrumentation.getUiAutomation().clearCache());`,
+  );
+  assert.notEqual(earlyForegroundRead, source,
+    "fixed42 early-foreground mutant anchor was absent");
+  assert.throws(
+    () => fixed42LauncherCacheOrderingContract(earlyForegroundRead),
+    "fixed42 foreground read before cache refresh survived",
+  );
 });
 
 test("fixed42 launcher waits through one bounded public transition before one fresh icon click", () => {

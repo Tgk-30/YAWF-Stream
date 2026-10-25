@@ -2325,6 +2325,10 @@ public final class RuntimeOtaFlowTest {
 
     private Fixed42LauncherObservation observeFixed42LauncherReadiness(
             String appLabel, String launcherPackage) {
+        assertTrue("Fixed42 launcher cache refresh requires API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        assertTrue("Fixed42 launcher accessibility cache refresh failed",
+                instrumentation.getUiAutomation().clearCache());
         boolean launcherForeground = launcherPackage.equals(device.getCurrentPackageName());
         if (!launcherForeground) {
             int state = Fixed42LauncherReadinessPolicy.classify(
@@ -2341,10 +2345,6 @@ public final class RuntimeOtaFlowTest {
         List<AccessibilityNodeInfo> owned = new ArrayList<>();
         List<Integer> parents = new ArrayList<>();
         try {
-            assertTrue("Fixed42 launcher cache refresh requires API 34 or newer",
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
-            assertTrue("Fixed42 launcher accessibility cache refresh failed",
-                    instrumentation.getUiAutomation().clearCache());
             int width = device.getDisplayWidth();
             int height = device.getDisplayHeight();
             String launcherResource = launcherPackage + ":id/launcher";
