@@ -124,7 +124,7 @@ function validateSettingsAccessibility(source) {
   if (/setGestureMargins?\(\s*\d/.test(source)) {
     failures.push("Settings scroll gesture uses fixed numeric margins");
   }
-  if (/(?:assertTrue|assertFalse|if)\s*\([^\n]*scrollable\.scroll\(/.test(source)) {
+  if (/(?:assertTrue|assertFalse|if)\s*\([^\n)]*scrollable\.scroll\(/.test(source)) {
     failures.push("scroll return is treated as gesture success instead of remaining scroll capacity");
   }
   return failures;
@@ -133,6 +133,30 @@ function validateSettingsAccessibility(source) {
 test("Settings and OTA controls require exact semantic identity and safe visibility", async () => {
   const source = await readFile(runtimePath, "utf8");
   assert.deepEqual(validateSettingsAccessibility(source), []);
+  assert.deepEqual(
+    validateSettingsAccessibility(source.replace(
+      "boolean canStillScroll = scrollable.scroll(direction, 0.75f);",
+      "if (scrollable != null) scrollable.scroll(direction, 0.75f);",
+    )),
+    [],
+    "nullable scroll action is not a scroll-return success assertion",
+  );
+  for (const mutant of [
+    "assertTrue(scrollable.scroll(direction, 0.75f));",
+    "if (scrollable.scroll(direction, 0.75f)) {",
+    "assertFalse(scrollable.scroll(direction, 0.75f));",
+    "if (ready && scrollable.scroll(direction, 0.75f)) {",
+    "assertTrue(\"scroll\", scrollable.scroll(direction, 0.75f));",
+  ]) {
+    assert.notDeepEqual(
+      validateSettingsAccessibility(source.replace(
+        "boolean canStillScroll = scrollable.scroll(direction, 0.75f);",
+        mutant,
+      )),
+      [],
+      `scroll-return success form was admitted: ${mutant}`,
+    );
+  }
 
   const mutants = [
     [

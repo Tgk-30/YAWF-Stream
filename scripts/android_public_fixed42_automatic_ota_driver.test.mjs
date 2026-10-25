@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -38,6 +40,32 @@ function methodBody(java, name) {
     if (character === "}" && --depth === 0) return java.slice(open + 1, index);
   }
   assert.fail(`unterminated Java method ${name}`);
+}
+
+function nestedClassDeclaration(java, name) {
+  const signature = new RegExp(`\\bprivate\\s+static\\s+final\\s+class\\s+${name}\\s*\\{`, "m");
+  const match = signature.exec(java);
+  assert.notEqual(match, null, `missing Java nested class ${name}`);
+  const open = match.index + match[0].lastIndexOf("{");
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = open; index < java.length; index += 1) {
+    const character = java[index];
+    if (quote != null) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    if (character === "}" && --depth === 0) return java.slice(match.index, index + 1);
+  }
+  assert.fail(`unterminated Java nested class ${name}`);
 }
 
 function need(haystack, needle, message) {
@@ -217,6 +245,195 @@ function fixedAppearanceFreshCacheContract(java) {
     "an Appearance observation bypasses the fresh-cache wrapper");
 }
 
+function fixedProfileClosureObservationContract(java) {
+  const close = methodBody(java, "closeFixed42ProfileDialog");
+  assert.equal((close.match(/clickFreshFixed42Button\("Close", SHORT_WAIT_MS\)/g) ?? []).length, 1,
+    "fixed42 Profile closure must select Close exactly once");
+  need(close, 'waitForFreshFixed42DialogGone("Profile", SHORT_WAIT_MS)',
+    "fixed42 Profile closure does not use the bounded fresh observer");
+  assert.equal(close.includes("waitForUniqueExactProductDialogGone("), false,
+    "fixed42 Profile closure still uses the stale legacy observer");
+
+  const wait = methodBody(java, "waitForFreshFixed42DialogGone");
+  for (const token of [
+    "isFixed42AutomaticMode()",
+    "Fixed42DialogClosurePolicy.waitForGone(",
+    "timeoutMs",
+    "observeFreshFixed42Dialog(exactIdentity)",
+    "SystemClock.uptimeMillis()",
+    "SystemClock.sleep(millis)",
+  ]) need(wait, token, `fixed42 Profile closure wait lost ${token}`);
+  for (const forbidden of [".click()", "device.swipe(", ".scroll(", "device.press", ".setText("]) {
+    assert.equal(wait.includes(forbidden), false,
+      `fixed42 Profile closure wait added input ${forbidden}`);
+  }
+
+  const observe = methodBody(java, "observeFreshFixed42Dialog");
+  for (const token of [
+    "Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE",
+    "instrumentation.getUiAutomation().clearCache()",
+    "By.clazz(DETAIL_DIALOG_CLASS).pkg(OtaFlowPolicy.PRODUCT_PACKAGE)",
+    "dialog.getApplicationPackage()",
+    "dialog.getClassName()",
+    "dialog.getText()",
+    "dialog.getContentDescription()",
+    "AutomaticOtaDriverChecks.uniqueExactDialogIndex(",
+    "OtaFlowPolicy.PRODUCT_PACKAGE",
+    "DETAIL_DIALOG_CLASS",
+    "exactIdentity",
+    "AutomaticOtaDriverChecks.AMBIGUOUS_DIALOG_INDEX",
+    "return Fixed42DialogClosurePolicy.AMBIGUOUS",
+    "AutomaticOtaDriverChecks.NO_DIALOG_INDEX",
+    "catch (StaleObjectException stale)",
+    "return Fixed42DialogClosurePolicy.STALE",
+  ]) need(observe, token, `fresh fixed42 dialog observation lost ${token}`);
+  const refresh = observe.indexOf("instrumentation.getUiAutomation().clearCache()");
+  const query = observe.indexOf("device.findObjects(", refresh);
+  const classify = observe.indexOf("AutomaticOtaDriverChecks.uniqueExactDialogIndex(", query);
+  assert.ok(refresh >= 0 && refresh < query && query < classify,
+    "fixed42 dialog observation is not a complete post-refresh snapshot");
+  const staleCatch = observe.slice(observe.indexOf("catch (StaleObjectException stale)"));
+  assert.equal(staleCatch.includes("Fixed42DialogClosurePolicy.ABSENT"), false,
+    "a stale fixed42 snapshot was treated as absence");
+  for (const forbidden of [".click()", "device.swipe(", ".scroll(", "device.press", ".setText("]) {
+    assert.equal(observe.includes(forbidden), false,
+      `fresh fixed42 dialog observation added input ${forbidden}`);
+  }
+
+  const policy = nestedClassDeclaration(java, "Fixed42DialogClosurePolicy");
+  for (const token of [
+    "static final int STALE = 0",
+    "static final int PRESENT = 1",
+    "static final int ABSENT = 2",
+    "static final int AMBIGUOUS = 3",
+    "long deadline = timeoutMs > Long.MAX_VALUE - startedAt",
+    "while (clock.uptimeMillis() < deadline)",
+    "if (observation == AMBIGUOUS)",
+    "throw new AssertionError",
+    "if (completedAt >= deadline) return false",
+    "if (observation == ABSENT) return true",
+    "observation != STALE && observation != PRESENT",
+    "Math.min(RETRY_MS, deadline - completedAt)",
+  ]) need(policy, token, `fixed42 dialog closure policy lost ${token}`);
+  assert.equal((policy.match(/long deadline\s*=/g) ?? []).length, 1,
+    "fixed42 dialog closure policy reset its original deadline");
+}
+
+function runFixed42DialogClosurePolicyHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42DialogClosurePolicy");
+  const harness = `
+public final class Fixed42DialogClosurePolicyHarness {
+${policy}
+
+    private static final class FakeClock implements Fixed42DialogClosurePolicy.Clock {
+        long now;
+        long maxObserved;
+        int sleeps;
+
+        FakeClock(long start) {
+            now = start;
+            maxObserved = start;
+        }
+
+        @Override
+        public long uptimeMillis() {
+            maxObserved = Math.max(maxObserved, now);
+            return now;
+        }
+
+        @Override
+        public void sleep(long millis) {
+            require(millis > 0L, "sleep must be positive");
+            now += millis;
+            maxObserved = Math.max(maxObserved, now);
+            sleeps++;
+        }
+    }
+
+    private static final class Sequence implements Fixed42DialogClosurePolicy.ObservationSource {
+        final int[] observations;
+        int calls;
+
+        Sequence(int... observations) {
+            this.observations = observations;
+        }
+
+        @Override
+        public int observe() {
+            int index = Math.min(calls, observations.length - 1);
+            calls++;
+            return observations[index];
+        }
+    }
+
+    private static void require(boolean condition, String message) {
+        if (!condition) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        FakeClock stalePresentClock = new FakeClock(1_000L);
+        Sequence stalePresent = new Sequence(
+                Fixed42DialogClosurePolicy.STALE,
+                Fixed42DialogClosurePolicy.PRESENT);
+        require(!Fixed42DialogClosurePolicy.waitForGone(
+                        450L, stalePresent, stalePresentClock),
+                "stale then present must not prove gone");
+        require(stalePresent.calls >= 2, "stale snapshot was not retried");
+
+        FakeClock staleOnlyClock = new FakeClock(2_000L);
+        Sequence staleOnly = new Sequence(Fixed42DialogClosurePolicy.STALE);
+        require(!Fixed42DialogClosurePolicy.waitForGone(450L, staleOnly, staleOnlyClock),
+                "stale-only observations must time out");
+        require(staleOnly.calls >= 2, "stale-only observations were not retried");
+
+        FakeClock absentClock = new FakeClock(3_000L);
+        Sequence absent = new Sequence(Fixed42DialogClosurePolicy.ABSENT);
+        require(Fixed42DialogClosurePolicy.waitForGone(450L, absent, absentClock),
+                "fresh absence must prove gone");
+        require(absent.calls == 1, "fresh absence was not immediately conclusive");
+
+        boolean ambiguityRejected = false;
+        try {
+            Fixed42DialogClosurePolicy.waitForGone(
+                    450L,
+                    new Sequence(Fixed42DialogClosurePolicy.AMBIGUOUS),
+                    new FakeClock(4_000L));
+        } catch (AssertionError expected) {
+            ambiguityRejected = true;
+        }
+        require(ambiguityRejected, "ambiguous dialogs must fail closed");
+
+        FakeClock expiryClock = new FakeClock(5_000L);
+        Sequence present = new Sequence(Fixed42DialogClosurePolicy.PRESENT);
+        require(!Fixed42DialogClosurePolicy.waitForGone(450L, present, expiryClock),
+                "present dialog must expire as not gone");
+        require(expiryClock.now == 5_450L, "retry sleeps changed the original deadline");
+        require(expiryClock.maxObserved <= 5_450L, "retry slept beyond the original deadline");
+        require(expiryClock.sleeps == 3, "bounded retry cadence changed");
+
+        System.out.println("fixed42-dialog-closure-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-dialog-policy-"));
+  const sourceFile = path.join(directory, "Fixed42DialogClosurePolicyHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `fixed42 policy javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand, ["-cp", directory, "Fixed42DialogClosurePolicyHarness"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, `fixed42 policy harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-dialog-closure-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function postInstallContract(body) {
   for (const token of [
     'selectFixed42SettingsCategory("Help & updates", "Android APK updates")',
@@ -346,6 +563,63 @@ test("fixed42 refreshes the API 34 accessibility cache before each observation w
   );
   assert.notEqual(inputMutant, source, "observation input mutant anchor was absent");
   assert.throws(() => fixedAppearanceFreshCacheContract(inputMutant));
+});
+
+test("fixed42 Profile closure uses one input and complete fresh observations within one deadline", () => {
+  fixedProfileClosureObservationContract(source);
+
+  const staleAsAbsent = source.replace(
+    "return Fixed42DialogClosurePolicy.STALE;",
+    "return Fixed42DialogClosurePolicy.ABSENT;",
+  );
+  assert.notEqual(staleAsAbsent, source, "stale-as-absence mutant anchor was absent");
+  assert.throws(() => fixedProfileClosureObservationContract(staleAsAbsent));
+
+  const ambiguityAsAbsent = source.replace(
+    "return Fixed42DialogClosurePolicy.AMBIGUOUS;",
+    "return Fixed42DialogClosurePolicy.ABSENT;",
+  );
+  assert.notEqual(ambiguityAsAbsent, source, "ambiguity-as-absence mutant anchor was absent");
+  assert.throws(() => fixedProfileClosureObservationContract(ambiguityAsAbsent));
+
+  const repeatedClose = source.replace(
+    '        clickFreshFixed42Button("Close", SHORT_WAIT_MS);',
+    '        clickFreshFixed42Button("Close", SHORT_WAIT_MS);\n        clickFreshFixed42Button("Close", SHORT_WAIT_MS);',
+  );
+  assert.notEqual(repeatedClose, source, "repeated Close mutant anchor was absent");
+  assert.throws(() => fixedProfileClosureObservationContract(repeatedClose));
+
+  const resetDeadline = source.replace(
+    "            while (clock.uptimeMillis() < deadline) {",
+    "            while (clock.uptimeMillis() < deadline) {\n                long deadline = clock.uptimeMillis() + timeoutMs;",
+  );
+  assert.notEqual(resetDeadline, source, "deadline-reset mutant anchor was absent");
+  assert.throws(() => fixedProfileClosureObservationContract(resetDeadline));
+
+  const broadSelector = source.replaceAll(
+    "By.clazz(DETAIL_DIALOG_CLASS).pkg(OtaFlowPolicy.PRODUCT_PACKAGE)",
+    "By.clazz(DETAIL_DIALOG_CLASS)",
+  );
+  assert.notEqual(broadSelector, source, "broad dialog selector mutant anchor was absent");
+  assert.throws(() => fixedProfileClosureObservationContract(broadSelector));
+});
+
+test("fixed42 Profile closure policy executes stale, present, absent, ambiguous and expiry cases", () => {
+  runFixed42DialogClosurePolicyHarness(source);
+
+  const presentAsGone = source.replace(
+    "if (observation == ABSENT) return true;",
+    "if (observation == ABSENT || observation == PRESENT) return true;",
+  );
+  assert.notEqual(presentAsGone, source, "present-as-gone mutant anchor was absent");
+  assert.throws(() => runFixed42DialogClosurePolicyHarness(presentAsGone));
+
+  const unboundedSleep = source.replace(
+    "Math.min(RETRY_MS, deadline - completedAt)",
+    "RETRY_MS",
+  );
+  assert.notEqual(unboundedSleep, source, "unbounded retry sleep mutant anchor was absent");
+  assert.throws(() => runFixed42DialogClosurePolicyHarness(unboundedSleep));
 });
 
 test("automatic offer comes from a distinct launcher return with no pre-offer manual discovery", () => {

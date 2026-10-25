@@ -23,6 +23,7 @@ import androidx.test.uiautomator.By;
 import androidx.test.uiautomator.BySelector;
 import androidx.test.uiautomator.Configurator;
 import androidx.test.uiautomator.Direction;
+import androidx.test.uiautomator.StaleObjectException;
 import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
@@ -1129,7 +1130,7 @@ public final class RuntimeOtaFlowTest {
     private void closeFixed42ProfileDialog(String phase) {
         clickFreshFixed42Button("Close", SHORT_WAIT_MS);
         assertTrue("Fixed42 Profile dialog did not close " + phase,
-                waitForUniqueExactProductDialogGone("Profile", SHORT_WAIT_MS));
+                waitForFreshFixed42DialogGone("Profile", SHORT_WAIT_MS));
     }
 
     private void selectFixed42SettingsCategory(String target, String contentAnchor) {
@@ -1937,6 +1938,107 @@ public final class RuntimeOtaFlowTest {
             SystemClock.sleep(200);
         }
         return false;
+    }
+
+    private boolean waitForFreshFixed42DialogGone(String exactIdentity, long timeoutMs) {
+        assertTrue("Fresh dialog closure observation is restricted to the fixed42 profile",
+                isFixed42AutomaticMode());
+        return Fixed42DialogClosurePolicy.waitForGone(
+                timeoutMs,
+                new Fixed42DialogClosurePolicy.ObservationSource() {
+                    @Override
+                    public int observe() {
+                        return observeFreshFixed42Dialog(exactIdentity);
+                    }
+                },
+                new Fixed42DialogClosurePolicy.Clock() {
+                    @Override
+                    public long uptimeMillis() {
+                        return SystemClock.uptimeMillis();
+                    }
+
+                    @Override
+                    public void sleep(long millis) {
+                        SystemClock.sleep(millis);
+                    }
+                });
+    }
+
+    private int observeFreshFixed42Dialog(String exactIdentity) {
+        assertTrue("Fixed42 dialog cache refresh requires API 34 or newer",
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        assertTrue("Fixed42 dialog accessibility cache refresh failed",
+                instrumentation.getUiAutomation().clearCache());
+        try {
+            List<UiObject2> dialogs = device.findObjects(
+                    By.clazz(DETAIL_DIALOG_CLASS).pkg(OtaFlowPolicy.PRODUCT_PACKAGE));
+            AutomaticOtaDriverChecks.DialogCandidate[] candidates =
+                    new AutomaticOtaDriverChecks.DialogCandidate[dialogs.size()];
+            for (int index = 0; index < dialogs.size(); index++) {
+                UiObject2 dialog = dialogs.get(index);
+                candidates[index] = new AutomaticOtaDriverChecks.DialogCandidate(
+                        dialog.getApplicationPackage(),
+                        dialog.getClassName(),
+                        dialog.getText(),
+                        dialog.getContentDescription());
+            }
+            int selected = AutomaticOtaDriverChecks.uniqueExactDialogIndex(
+                    OtaFlowPolicy.PRODUCT_PACKAGE,
+                    DETAIL_DIALOG_CLASS,
+                    exactIdentity,
+                    candidates);
+            if (selected == AutomaticOtaDriverChecks.AMBIGUOUS_DIALOG_INDEX) {
+                return Fixed42DialogClosurePolicy.AMBIGUOUS;
+            }
+            return selected == AutomaticOtaDriverChecks.NO_DIALOG_INDEX
+                    ? Fixed42DialogClosurePolicy.ABSENT
+                    : Fixed42DialogClosurePolicy.PRESENT;
+        } catch (StaleObjectException stale) {
+            return Fixed42DialogClosurePolicy.STALE;
+        }
+    }
+
+    private static final class Fixed42DialogClosurePolicy {
+        static final int STALE = 0;
+        static final int PRESENT = 1;
+        static final int ABSENT = 2;
+        static final int AMBIGUOUS = 3;
+        private static final long RETRY_MS = 200L;
+
+        interface ObservationSource {
+            int observe();
+        }
+
+        interface Clock {
+            long uptimeMillis();
+
+            void sleep(long millis);
+        }
+
+        static boolean waitForGone(
+                long timeoutMs, ObservationSource source, Clock clock) {
+            if (timeoutMs <= 0L) return false;
+            long startedAt = clock.uptimeMillis();
+            long deadline = timeoutMs > Long.MAX_VALUE - startedAt
+                    ? Long.MAX_VALUE
+                    : startedAt + timeoutMs;
+            while (clock.uptimeMillis() < deadline) {
+                int observation = source.observe();
+                long completedAt = clock.uptimeMillis();
+                if (observation == AMBIGUOUS) {
+                    throw new AssertionError("Fixed42 exact product dialog was ambiguous");
+                }
+                if (completedAt >= deadline) return false;
+                if (observation == ABSENT) return true;
+                if (observation != STALE && observation != PRESENT) {
+                    throw new AssertionError("Unknown fixed42 dialog observation state");
+                }
+                long sleepMs = Math.min(RETRY_MS, deadline - completedAt);
+                if (sleepMs <= 0L) return false;
+                clock.sleep(sleepMs);
+            }
+            return false;
+        }
     }
 
     private UiObject2 scrollUntilVisibleInExactDialog(
