@@ -133,6 +133,10 @@ Native systemd and `.deb` operators continue to install a newer package
 manually; Settings reports that distinction instead of presenting desktop OTA
 controls as a server updater.
 
+If startup reports a legacy or invalid database lease, follow the
+[offline database-ownership migration](../../docs/SERVER_DATABASE_LEASE.md).
+Do not delete a lock file or downgrade only the image to bypass that error.
+
 ---
 
 ## First run

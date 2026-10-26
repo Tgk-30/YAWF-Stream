@@ -441,12 +441,77 @@ function containerIdentity(info) {
   };
 }
 
-const RUNTIME_STATE_CODE = String.raw`
-const fs=require('fs'),crypto=require('crypto'),{DatabaseSync}=require('node:sqlite');
-(async()=>{const expected=process.argv[1];const health=await fetch('http://127.0.0.1:43110/api/health').then(async r=>{if(!r.ok)throw Error('health '+r.status);return r.json()});
-const self=process.pid;const pids=fs.readdirSync('/proc').filter(v=>/^\d+$/.test(v)).map(Number);const apps=[];for(const pid of pids){if(pid===self)continue;try{const cmd=fs.readFileSync('/proc/'+pid+'/cmdline','utf8');if(cmd.includes('server/dist/index.cjs'))apps.push(pid)}catch{}}if(apps.length!==1)throw Error('expected one app pid');
-const dbPath='/data/debridstreamer.sqlite',leasePath=dbPath+'.server.lock';const db=new DatabaseSync(dbPath,{readOnly:true});db.exec('PRAGMA query_only=ON');const row=db.prepare('SELECT value FROM runtime_lease_marker WHERE id=1').get();db.close();if(row?.value!==expected)throw Error('marker mismatch');
-const stat=p=>{const s=fs.statSync(p);return{uid:s.uid,gid:s.gid,mode:(s.mode&0o777).toString(8),size:s.size}};const lease=fs.readFileSync(leasePath);process.stdout.write(JSON.stringify({health:{ok:health.ok,ready:health.ready,version:health.version},guestPid:apps[0],marker:{matches:true,sha256:crypto.createHash('sha256').update(row.value).digest('hex')},database:stat(dbPath),lease:{...stat(leasePath),sha256:crypto.createHash('sha256').update(lease).digest('hex')}}))})().catch(e=>{process.stderr.write(e.name+'\n');process.exit(1)});`;
+async function runtimeStateProbeMain(config) {
+  const fs = require("fs");
+  const crypto = require("crypto");
+  const path = require("path");
+  const { DatabaseSync } = require("node:sqlite");
+  const expected = process.argv[1];
+  const health = await fetch(config.healthUrl).then(async (response) => {
+    if (!response.ok) throw new Error(`health ${response.status}`);
+    return response.json();
+  });
+  const self = process.pid;
+  const pids = fs.readdirSync(config.procRoot).filter((value) => /^\d+$/.test(value)).map(Number);
+  const apps = [];
+  for (const pid of pids) {
+    if (pid === self) continue;
+    try {
+      const root = `${config.procRoot}/${pid}`;
+      const executable = fs.readlinkSync(`${root}/exe`);
+      const argv = fs.readFileSync(`${root}/cmdline`).toString("utf8").split("\0");
+      const script = argv[1];
+      if (
+        path.basename(executable) === "node" &&
+        (script === "server/dist/index.cjs" || script === "/app/server/dist/index.cjs")
+      ) {
+        apps.push(pid);
+      }
+    } catch {
+      // Processes can exit while /proc is being inspected.
+    }
+  }
+  if (apps.length !== 1) {
+    const error = new Error("expected exactly one production node application process");
+    error.name = "RuntimeProbeProcessCountError";
+    throw error;
+  }
+  const leasePath = `${config.databasePath}.server.lock`;
+  const database = new DatabaseSync(config.databasePath, { readOnly: true });
+  database.exec("PRAGMA query_only=ON");
+  const row = database.prepare("SELECT value FROM runtime_lease_marker WHERE id=1").get();
+  database.close();
+  if (row?.value !== expected) throw new Error("marker mismatch");
+  const stat = (target) => {
+    const value = fs.statSync(target);
+    return { uid: value.uid, gid: value.gid, mode: (value.mode & 0o777).toString(8), size: value.size };
+  };
+  const lease = fs.readFileSync(leasePath);
+  process.stdout.write(JSON.stringify({
+    health: { ok: health.ok, ready: health.ready, version: health.version },
+    guestPid: apps[0],
+    marker: { matches: true, sha256: crypto.createHash("sha256").update(row.value).digest("hex") },
+    database: stat(config.databasePath),
+    lease: { ...stat(leasePath), sha256: crypto.createHash("sha256").update(lease).digest("hex") },
+  }));
+}
+
+export function buildRuntimeStateProbeCode({
+  procRoot = "/proc",
+  databasePath = "/data/debridstreamer.sqlite",
+  healthUrl = "http://127.0.0.1:43110/api/health",
+} = {}) {
+  assert.ok(procRoot.startsWith("/"), "probe proc root must be absolute");
+  assert.ok(databasePath.startsWith("/"), "probe database path must be absolute");
+  assert.ok(
+    healthUrl.startsWith("http://127.0.0.1:") || healthUrl.startsWith("data:application/json,"),
+    "probe health URL must be loopback HTTP or an inline test fixture",
+  );
+  const config = JSON.stringify({ procRoot, databasePath, healthUrl });
+  return `(${runtimeStateProbeMain.toString()})(${config}).catch((error)=>{process.stderr.write(error.name+'\\n');process.exit(1)});`;
+}
+
+const RUNTIME_STATE_CODE = buildRuntimeStateProbeCode();
 
 const LEASE_STATE_CODE = String.raw`
 const fs=require('fs'),crypto=require('crypto');const p='/data/debridstreamer.sqlite.server.lock',b=fs.readFileSync(p),s=fs.statSync(p);process.stdout.write(JSON.stringify({sha256:crypto.createHash('sha256').update(b).digest('hex'),size:s.size,uid:s.uid,gid:s.gid,mode:(s.mode&0o777).toString(8),text:b.toString('utf8'),hex:b.toString('hex')}));`;
@@ -567,6 +632,16 @@ function stoppedLeaseState(api, ledger, { runLabel, role, name, volume, image })
   return parseJson(logs.stdout, "stopped lease state");
 }
 
+export function publicLeaseProof(lease) {
+  return {
+    sha256: lease.sha256,
+    size: lease.size,
+    uid: lease.uid,
+    gid: lease.gid,
+    mode: lease.mode,
+  };
+}
+
 function assertControl(api, id, volume, runLabel, marker) {
   const container = api.inspectContainer(id);
   assertOwnedLabels(container, runLabel, "control-container");
@@ -579,7 +654,43 @@ function assertControl(api, id, volume, runLabel, marker) {
   return { containerId: id, volume, running: true, preserved: true, marker: proof };
 }
 
-async function runCandidate(api, ledger, context, imageId, marker, names) {
+export const PUBLIC_RUNTIME_STAGES = Object.freeze([
+  "image-admission",
+  "control-initial",
+  "baseline-runtime",
+  "candidate-seed",
+  "candidate-pid1-owner",
+  "candidate-first-contender",
+  "candidate-post-kill",
+  "candidate-restart",
+  "candidate-normal-stop",
+  "candidate-init-owner",
+  "candidate-second-contender",
+  "candidate-complete",
+  "control-final",
+]);
+
+export function beginRuntimeStage(receipt, stage) {
+  assert.ok(PUBLIC_RUNTIME_STAGES.includes(stage), "runtime stage is not public and bounded");
+  receipt.runtime.stage = stage;
+}
+
+export function completeRuntimeStage(receipt, stage, proof) {
+  assert.equal(receipt.runtime.stage, stage, "completed runtime stage was not active");
+  assert.equal(receipt.runtime.completedStages.includes(stage), false, "runtime stage completed twice");
+  receipt.runtime.completedStages.push(stage);
+  receipt.runtime.proofs[stage] = proof;
+}
+
+export function recordRuntimeFailure(receipt, error) {
+  receipt.failure = {
+    name: error instanceof Error ? error.name : "Error",
+    phase: receipt.runtime.stage,
+  };
+}
+
+async function runCandidate(api, ledger, context, imageId, marker, names, receipt) {
+  beginRuntimeStage(receipt, "candidate-seed");
   const volume = createTrackedVolume(api, ledger, context.runLabel, "candidate-volume", names.candidateVolume);
   runOneShot(api, ledger, {
     runLabel: context.runLabel,
@@ -589,7 +700,9 @@ async function runCandidate(api, ledger, context, imageId, marker, names) {
     image: imageId,
     command: { entrypoint: "node", args: ["-e", SEED_CODE, marker] },
   });
+  completeRuntimeStage(receipt, "candidate-seed", { volume, seeded: true });
 
+  beginRuntimeStage(receipt, "candidate-pid1-owner");
   const owner = createTrackedContainer(api, ledger, {
     runLabel: context.runLabel,
     role: "candidate-pid1-owner",
@@ -601,7 +714,16 @@ async function runCandidate(api, ledger, context, imageId, marker, names) {
   const initial = await waitForState(api, owner.id, marker);
   assertState(initial, context.expectedVersion, marker, 1);
   const ownerIdentity = containerIdentity(api.inspectContainer(owner.id));
+  completeRuntimeStage(receipt, "candidate-pid1-owner", {
+    containerId: owner.id,
+    guestPid: initial.guestPid,
+    health: initial.health,
+    data: initial.marker,
+    lease: initial.lease,
+    database: initial.database,
+  });
 
+  beginRuntimeStage(receipt, "candidate-first-contender");
   const contender = createTrackedContainer(api, ledger, {
     runLabel: context.runLabel,
     role: "candidate-pid1-contender-one",
@@ -623,7 +745,9 @@ async function runCandidate(api, ledger, context, imageId, marker, names) {
     contenderPidMode: contenderExit.HostConfig?.PidMode,
   });
   assertState(await waitForState(api, owner.id, marker), context.expectedVersion, marker, 1);
+  completeRuntimeStage(receipt, "candidate-first-contender", contenderBusy);
 
+  beginRuntimeStage(receipt, "candidate-post-kill");
   api.kill(owner.id);
   const killed = await waitForExit(api, owner.id);
   assert.equal(killed.State?.ExitCode, 137, "owned candidate SIGKILL did not produce exit 137");
@@ -635,17 +759,34 @@ async function runCandidate(api, ledger, context, imageId, marker, names) {
     image: imageId,
   });
   assert.equal(killedLease.sha256, initial.lease.sha256, "SIGKILL changed persistent lease bytes");
+  completeRuntimeStage(receipt, "candidate-post-kill", {
+    exitCode: killed.State?.ExitCode,
+    lease: publicLeaseProof(killedLease),
+  });
 
+  beginRuntimeStage(receipt, "candidate-restart");
   const beforeRestartId = owner.id;
   api.start(owner.id);
   const restarted = await waitForState(api, owner.id, marker);
   assertRestartIdentity(beforeRestartId, api.inspectContainer(owner.id).Id);
   assertState(restarted, context.expectedVersion, marker, 1);
   assertPersistentState(initial, restarted);
+  completeRuntimeStage(receipt, "candidate-restart", {
+    containerId: owner.id,
+    sameIdentity: true,
+    guestPid: restarted.guestPid,
+    health: restarted.health,
+    data: restarted.marker,
+    lease: restarted.lease,
+  });
+
+  beginRuntimeStage(receipt, "candidate-normal-stop");
   api.stop(owner.id);
   const normallyStopped = await waitForExit(api, owner.id);
   assert.equal(normallyStopped.State?.ExitCode, 0, "normal candidate stop failed");
+  completeRuntimeStage(receipt, "candidate-normal-stop", { exitCode: normallyStopped.State?.ExitCode });
 
+  beginRuntimeStage(receipt, "candidate-init-owner");
   const initOwner = createTrackedContainer(api, ledger, {
     runLabel: context.runLabel,
     role: "candidate-init-owner",
@@ -660,7 +801,15 @@ async function runCandidate(api, ledger, context, imageId, marker, names) {
   assertPersistentState(initial, initState);
   const initIdentity = containerIdentity(api.inspectContainer(initOwner.id));
   assert.equal(initIdentity.init, true, "non-PID1 owner did not use Docker init");
+  completeRuntimeStage(receipt, "candidate-init-owner", {
+    containerId: initOwner.id,
+    guestPid: initState.guestPid,
+    health: initState.health,
+    data: initState.marker,
+    lease: initState.lease,
+  });
 
+  beginRuntimeStage(receipt, "candidate-second-contender");
   const pid1Contender = createTrackedContainer(api, ledger, {
     runLabel: context.runLabel,
     role: "candidate-pid1-contender-two",
@@ -680,14 +829,18 @@ async function runCandidate(api, ledger, context, imageId, marker, names) {
   assertState(await waitForState(api, initOwner.id, marker), context.expectedVersion, marker, "non-pid1");
   api.stop(initOwner.id);
   await waitForExit(api, initOwner.id);
+  completeRuntimeStage(receipt, "candidate-second-contender", pid1Busy);
 
-  return {
+  const result = {
     volume,
     initial: { guestPid: initial.guestPid, health: initial.health, data: initial.marker, lease: initial.lease, database: initial.database },
     separatePidNamespaces: contenderBusy,
     sameContainerRestart: { containerId: owner.id, sameIdentity: true, health: restarted.health, guestPid: restarted.guestPid, data: restarted.marker, lease: restarted.lease },
     initOwner: { containerId: initOwner.id, guestPid: initState.guestPid, pid1Contender: pid1Busy, health: initState.health },
   };
+  beginRuntimeStage(receipt, "candidate-complete");
+  completeRuntimeStage(receipt, "candidate-complete", { completed: true });
+  return result;
 }
 
 async function runBaseline(api, ledger, context, imageId, names) {
@@ -784,11 +937,13 @@ export async function runRuntime({ options, env = process.env, api = new DockerA
     candidate: null,
     baseline: null,
     control: null,
+    runtime: { stage: "image-admission", completedStages: [], proofs: {} },
     cleanup: null,
     ok: false,
   };
   let primaryError = null;
   try {
+    beginRuntimeStage(receipt, "image-admission");
     const candidateInfo = api.inspectImage(options.candidateImage);
     const candidateIdentity = admitImageIdentity(candidateInfo, {
       kind: "candidate",
@@ -804,7 +959,12 @@ export async function runRuntime({ options, env = process.env, api = new DockerA
       sourceRevision: BASELINE_SOURCE,
       version: BASELINE_VERSION,
     });
+    completeRuntimeStage(receipt, "image-admission", {
+      candidateImageId: candidateIdentity.imageId,
+      baselineImageId: baselineIdentity.imageId,
+    });
 
+    beginRuntimeStage(receipt, "control-initial");
     const controlVolume = createTrackedVolume(api, ledger, runLabel, "control-volume", names.controlVolume);
     const controlMarker = `unrelated-control-${admitted.runId}-${admitted.runAttempt}-${suffix}`;
     const control = createTrackedContainer(api, ledger, {
@@ -822,27 +982,42 @@ export async function runRuntime({ options, env = process.env, api = new DockerA
       probe: () => assertControl(api, control.id, controlVolume, runLabel, controlMarker),
       accept: (proof) => proof.marker?.matches === true,
     });
+    completeRuntimeStage(receipt, "control-initial", receipt.control);
 
     const context = { runLabel, expectedVersion: options.expectedVersion };
+    beginRuntimeStage(receipt, "baseline-runtime");
     receipt.baseline = {
       reference: BASELINE_IMAGE,
       sourceRevision: baselineIdentity.sourceRevision,
       version: baselineIdentity.version,
       ...(await runBaseline(api, ledger, context, baselineIdentity.imageId, names)),
     };
+    completeRuntimeStage(receipt, "baseline-runtime", {
+      guestPid: receipt.baseline.guestPid,
+      initialHealth: receipt.baseline.initialHealth,
+      sameContainerRestart: receipt.baseline.sameContainerRestart,
+      lease: receipt.baseline.lease,
+    });
     const marker = `database-lease-runtime-${admitted.runId}-${admitted.runAttempt}-${suffix}`;
     receipt.candidate = {
       imageId: candidateIdentity.imageId,
       sourceRevision: candidateIdentity.sourceRevision,
       version: candidateIdentity.version,
       user: candidateIdentity.user,
-      ...(await runCandidate(api, ledger, context, candidateIdentity.imageId, marker, names)),
+      completed: false,
     };
+    Object.assign(
+      receipt.candidate,
+      await runCandidate(api, ledger, context, candidateIdentity.imageId, marker, names, receipt),
+      { completed: true },
+    );
+    beginRuntimeStage(receipt, "control-final");
     receipt.control = assertControl(api, control.id, controlVolume, runLabel, controlMarker);
+    completeRuntimeStage(receipt, "control-final", receipt.control);
     receipt.ok = true;
   } catch (error) {
     primaryError = error;
-    receipt.failure = { name: error instanceof Error ? error.name : "Error", phase: "runtime" };
+    recordRuntimeFailure(receipt, error);
   } finally {
     try {
       receipt.cleanup = await ledger.cleanup(api);
