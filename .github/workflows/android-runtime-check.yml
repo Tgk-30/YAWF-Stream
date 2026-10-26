@@ -27,13 +27,39 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CANDIDATE_RUN_ID: "39857024891"
-      CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a
-      CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3
-      CANDIDATE_VERSION: 2.3.31
-      CANDIDATE_VERSION_CODE: "2003031"
-      PUBLISHED_ANDROID_VERSION: 2.3.27
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.31.apk
+      CANDIDATE_RUN_ID: "40238512551"
+      CANDIDATE_RUN_WORKFLOW_ID: "387280245"
+      CANDIDATE_RUN_HEAD_BRANCH: codex/touch-dialog-ux61
+      CANDIDATE_SOURCE_SHA: e2dee689276610ffb1685a6f47ac37f183f35a7e
+      CANDIDATE_APK_SHA256: a4696ab0533cdc99e3f5e373031d89e58a6cd8f6742a9107085220765bb5b247
+      CANDIDATE_APK_SIZE: "88640385"
+      CANDIDATE_RELEASE_ID: "423712065"
+      CANDIDATE_RELEASE_TAG: android-v2.3.61
+      CANDIDATE_RELEASE_NAME: "YAWF Stream Android 2.3.61: player recovery"
+      CANDIDATE_RELEASE_PUBLISHED_AT: "2026-10-25T23:00:52Z"
+      CANDIDATE_TAG_OBJECT_SHA: c86f5788a8ae2984aca4087101d7b98532cb0c30
+      CANDIDATE_APK_ASSET_ID: "676347366"
+      CANDIDATE_APK_ASSET_NAME: YAWF.Stream_Android_2.3.61.apk
+      CANDIDATE_MANIFEST_ASSET_ID: "676347367"
+      CANDIDATE_MANIFEST_ASSET_NAME: android-update.json
+      CANDIDATE_MANIFEST_SHA256: 8828c76dd0696c7b70d548fcfdbb4657076825c5b40e5fa81b2ce1dd23be9815
+      CANDIDATE_MANIFEST_SIZE: "348"
+      CANDIDATE_VERIFICATION_ASSET_ID: "676359185"
+      CANDIDATE_VERIFICATION_ASSET_NAME: Android_2.3.61_verification.json
+      CANDIDATE_VERIFICATION_SHA256: 25afa6bca5261b02a0372eb0fc88934573ae2bce0091bd526007f963fe5b26b2
+      CANDIDATE_VERIFICATION_SIZE: "4411"
+      CANDIDATE_CHECKSUMS_ASSET_ID: "676359184"
+      CANDIDATE_CHECKSUMS_ASSET_NAME: SHA256SUMS
+      CANDIDATE_CHECKSUMS_SHA256: 46ab6b40b63ea787feb33215df993d99898d023e4371b986b79d4eb1ac94e1a8
+      CANDIDATE_CHECKSUMS_SIZE: "282"
+      CANDIDATE_CERT_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a
+      CANDIDATE_VERSION: 2.3.61
+      CANDIDATE_VERSION_CODE: "2003061"
+      PUBLISHED_ANDROID_VERSION: 2.3.61
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.61.apk
+      CANDIDATE_MANIFEST: candidate/android-update.json
+      CANDIDATE_VERIFICATION: candidate/Android_2.3.61_verification.json
+      CANDIDATE_CHECKSUMS: candidate/SHA256SUMS
       EVIDENCE: android-runtime-evidence
       AVD_NAME: yawf-phone-api30-runtime
       EMULATOR_SERIAL: emulator-5554
@@ -67,19 +93,213 @@ jobs:
           {
             echo "sourceRevision=$actual"
             echo "candidateRunId=$CANDIDATE_RUN_ID"
+            echo "candidateReleaseId=$CANDIDATE_RELEASE_ID"
+            echo "candidateReleaseTag=$CANDIDATE_RELEASE_TAG"
+            echo "verificationScope=current-public-api30"
+            echo "automaticOtaEvidence=false"
             echo "acceptanceRuns=2-sequential-fresh-avds"
             echo "emulatorImage=system-images;android-30;google_apis;x86_64"
             echo "gpuBackend=$EMULATOR_GPU"
           } > "$EVIDENCE/binding.txt"
 
-      - name: Download exact signed candidate artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: android-phone-verification-candidate
-          path: candidate
-          github-token: ${{ github.token }}
-          run-id: ${{ env.CANDIDATE_RUN_ID }}
+      - name: Download and admit exact public current release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$CANDIDATE_APK")" "$EVIDENCE"
+          curl_args=(
+            --fail --silent --show-error --location
+            --proto '=https' --proto-redir '=https'
+            --connect-timeout 15 --max-time 180
+            --retry 2 --retry-max-time 240
+          )
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          curl "${curl_args[@]}" --max-filesize 1048576 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/releases/$CANDIDATE_RELEASE_ID" \
+            --output "$EVIDENCE/public-release.json"
+          curl "${curl_args[@]}" --max-filesize 1048576 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/actions/runs/$CANDIDATE_RUN_ID" \
+            --output "$EVIDENCE/producer-run.json"
+          curl "${curl_args[@]}" --max-filesize 1048576 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/git/ref/tags/$CANDIDATE_RELEASE_TAG" \
+            --output "$EVIDENCE/tag-ref.json"
+          curl "${curl_args[@]}" --max-filesize 1048576 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/git/tags/$CANDIDATE_TAG_OBJECT_SHA" \
+            --output "$EVIDENCE/tag-object.json"
 
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = Path(os.environ["EVIDENCE"])
+          release = json.loads((evidence / "public-release.json").read_text())
+          run = json.loads((evidence / "producer-run.json").read_text())
+          tag_ref = json.loads((evidence / "tag-ref.json").read_text())
+          tag = json.loads((evidence / "tag-object.json").read_text())
+          repo = os.environ["GITHUB_REPOSITORY"]
+          source = os.environ["CANDIDATE_SOURCE_SHA"]
+          release_id = int(os.environ["CANDIDATE_RELEASE_ID"])
+          release_tag = os.environ["CANDIDATE_RELEASE_TAG"]
+
+          assert release.get("id") == release_id, "Public release id changed"
+          assert release.get("tag_name") == release_tag, "Public release tag changed"
+          assert release.get("name") == os.environ["CANDIDATE_RELEASE_NAME"], "Public release name changed"
+          assert release.get("draft") is False and release.get("prerelease") is False, "Public release state changed"
+          assert release.get("published_at") == os.environ["CANDIDATE_RELEASE_PUBLISHED_AT"], "Public release timestamp changed"
+          assert release.get("target_commitish") == "main", "Public release target changed"
+          assert release.get("immutable") is False, "Public release immutability state changed"
+
+          expected_assets = {
+              os.environ["CANDIDATE_APK_ASSET_NAME"]: {
+                  "id": int(os.environ["CANDIDATE_APK_ASSET_ID"]),
+                  "size": int(os.environ["CANDIDATE_APK_SIZE"]),
+                  "digest": f"sha256:{os.environ['CANDIDATE_APK_SHA256']}",
+                  "content_type": "application/vnd.android.package-archive",
+              },
+              os.environ["CANDIDATE_MANIFEST_ASSET_NAME"]: {
+                  "id": int(os.environ["CANDIDATE_MANIFEST_ASSET_ID"]),
+                  "size": int(os.environ["CANDIDATE_MANIFEST_SIZE"]),
+                  "digest": f"sha256:{os.environ['CANDIDATE_MANIFEST_SHA256']}",
+                  "content_type": "application/json",
+              },
+              os.environ["CANDIDATE_VERIFICATION_ASSET_NAME"]: {
+                  "id": int(os.environ["CANDIDATE_VERIFICATION_ASSET_ID"]),
+                  "size": int(os.environ["CANDIDATE_VERIFICATION_SIZE"]),
+                  "digest": f"sha256:{os.environ['CANDIDATE_VERIFICATION_SHA256']}",
+                  "content_type": "application/json",
+              },
+              os.environ["CANDIDATE_CHECKSUMS_ASSET_NAME"]: {
+                  "id": int(os.environ["CANDIDATE_CHECKSUMS_ASSET_ID"]),
+                  "size": int(os.environ["CANDIDATE_CHECKSUMS_SIZE"]),
+                  "digest": f"sha256:{os.environ['CANDIDATE_CHECKSUMS_SHA256']}",
+                  "content_type": "application/octet-stream",
+              },
+          }
+          assets = release.get("assets")
+          assert isinstance(assets, list) and len(assets) == len(expected_assets), "Public asset inventory changed"
+          observed_assets = {asset.get("name"): asset for asset in assets}
+          assert set(observed_assets) == set(expected_assets), "Public asset names changed"
+          for name, expected in expected_assets.items():
+              asset = observed_assets[name]
+              for key, value in expected.items():
+                  assert asset.get(key) == value, f"Public asset {name} {key} changed"
+              assert asset.get("state") == "uploaded", f"Public asset {name} state changed"
+              assert asset.get("uploader", {}).get("login") == "Tgk-30", f"Public asset {name} uploader changed"
+              assert asset.get("browser_download_url") == (
+                  f"https://github.com/{repo}/releases/download/{release_tag}/{name}"
+              ), f"Public asset {name} URL changed"
+
+          run_id = int(os.environ["CANDIDATE_RUN_ID"])
+          assert run.get("id") == run_id, "Producer run id changed"
+          assert run.get("workflow_id") == int(os.environ["CANDIDATE_RUN_WORKFLOW_ID"]), "Producer workflow changed"
+          assert run.get("name") == "android-release", "Producer workflow name changed"
+          assert run.get("path") == ".github/workflows/android-release.yml", "Producer workflow path changed"
+          assert run.get("event") == "workflow_dispatch", "Producer run event changed"
+          assert run.get("status") == "completed" and run.get("conclusion") == "success", "Producer run is not successful"
+          assert run.get("run_attempt") == 1, "Producer run attempt changed"
+          assert run.get("head_sha") == source, "Producer source changed"
+          assert run.get("head_branch") == os.environ["CANDIDATE_RUN_HEAD_BRANCH"], "Producer branch changed"
+          assert run.get("repository", {}).get("full_name") == repo, "Producer repository changed"
+          assert run.get("head_repository", {}).get("full_name") == repo, "Producer source repository changed"
+
+          assert tag_ref.get("ref") == f"refs/tags/{release_tag}", "Public tag ref changed"
+          assert tag_ref.get("object", {}).get("type") == "tag", "Public tag is not annotated"
+          assert tag_ref.get("object", {}).get("sha") == os.environ["CANDIDATE_TAG_OBJECT_SHA"], "Public tag object changed"
+          assert tag.get("tag") == release_tag, "Annotated tag name changed"
+          assert tag.get("object", {}).get("type") == "commit", "Annotated tag target is not a commit"
+          assert tag.get("object", {}).get("sha") == source, "Annotated tag source changed"
+
+          (evidence / "candidate-delivery.txt").write_text(
+              "\n".join([
+                  "classification=official-public-current-platform-runtime-fixture",
+                  "delivery=canonical-public-release",
+                  f"sourceRevision={source}",
+                  f"candidateRunId={run_id}",
+                  f"releaseId={release_id}",
+                  f"releaseTag={release_tag}",
+                  "publicReleaseVerified=true",
+                  "publicDownload=true",
+                  "currentPlatformVerification=true",
+                  "legacy31CompatibilityEvidence=false",
+                  "automaticOtaEvidence=false",
+              ]) + "\n"
+          )
+          PY
+
+          release_base="https://github.com/$GITHUB_REPOSITORY/releases/download/$CANDIDATE_RELEASE_TAG"
+          curl "${curl_args[@]}" --max-filesize "$CANDIDATE_APK_SIZE" \
+            "$release_base/$CANDIDATE_APK_ASSET_NAME" --output "$CANDIDATE_APK"
+          curl "${curl_args[@]}" --max-filesize "$CANDIDATE_MANIFEST_SIZE" \
+            "$release_base/$CANDIDATE_MANIFEST_ASSET_NAME" --output "$CANDIDATE_MANIFEST"
+          curl "${curl_args[@]}" --max-filesize "$CANDIDATE_VERIFICATION_SIZE" \
+            "$release_base/$CANDIDATE_VERIFICATION_ASSET_NAME" --output "$CANDIDATE_VERIFICATION"
+          curl "${curl_args[@]}" --max-filesize "$CANDIDATE_CHECKSUMS_SIZE" \
+            "$release_base/$CANDIDATE_CHECKSUMS_ASSET_NAME" --output "$CANDIDATE_CHECKSUMS"
+
+          test "$(stat -c %s "$CANDIDATE_APK")" = "$CANDIDATE_APK_SIZE"
+          test "$(stat -c %s "$CANDIDATE_MANIFEST")" = "$CANDIDATE_MANIFEST_SIZE"
+          test "$(stat -c %s "$CANDIDATE_VERIFICATION")" = "$CANDIDATE_VERIFICATION_SIZE"
+          test "$(stat -c %s "$CANDIDATE_CHECKSUMS")" = "$CANDIDATE_CHECKSUMS_SIZE"
+          printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$CANDIDATE_APK" | sha256sum --check -
+          printf '%s  %s\n' "$CANDIDATE_MANIFEST_SHA256" "$CANDIDATE_MANIFEST" | sha256sum --check -
+          printf '%s  %s\n' "$CANDIDATE_VERIFICATION_SHA256" "$CANDIDATE_VERIFICATION" | sha256sum --check -
+          printf '%s  %s\n' "$CANDIDATE_CHECKSUMS_SHA256" "$CANDIDATE_CHECKSUMS" | sha256sum --check -
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path(os.environ["CANDIDATE_MANIFEST"]).read_text())
+          verification = json.loads(Path(os.environ["CANDIDATE_VERIFICATION"]).read_text())
+          version = os.environ["CANDIDATE_VERSION"]
+          version_code = int(os.environ["CANDIDATE_VERSION_CODE"])
+          source = os.environ["CANDIDATE_SOURCE_SHA"]
+          apk_name = os.environ["CANDIDATE_APK_ASSET_NAME"]
+          apk_sha = os.environ["CANDIDATE_APK_SHA256"]
+          apk_size = int(os.environ["CANDIDATE_APK_SIZE"])
+          expected_apk = {"name": apk_name, "sha256": apk_sha, "size": apk_size}
+
+          assert set(manifest) == {"schemaVersion", "version", "versionCode", "packageName", "sourceRevision", "apk"}
+          assert manifest["schemaVersion"] == 1
+          assert manifest["version"] == version
+          assert manifest["versionCode"] == version_code
+          assert manifest["packageName"] == "com.tgk30.debridstreamer"
+          assert manifest["sourceRevision"] == source
+          assert manifest["apk"] == expected_apk
+
+          assert verification["version"] == version
+          assert verification["sourceRevision"] == source
+          assert verification["buildRun"] == int(os.environ["CANDIDATE_RUN_ID"])
+          assert verification["apk"] == expected_apk
+          assert verification["certificateSha256"] == os.environ["CANDIDATE_CERT_SHA256"]
+          provenance = verification["checks"]["buildProvenance"]
+          assert provenance == {
+              "workflowRun": int(os.environ["CANDIDATE_RUN_ID"]),
+              "sourceRevision": source,
+              "canonicalSignedCandidateUnchanged": True,
+          }
+          assert verification["checks"]["actualApkVersionCode"] == version_code
+
+          expected_sums = [
+              f"{apk_sha}  {apk_name}",
+              f"{os.environ['CANDIDATE_MANIFEST_SHA256']}  {os.environ['CANDIDATE_MANIFEST_ASSET_NAME']}",
+              f"{os.environ['CANDIDATE_VERIFICATION_SHA256']}  {os.environ['CANDIDATE_VERIFICATION_ASSET_NAME']}",
+          ]
+          assert Path(os.environ["CANDIDATE_CHECKSUMS"]).read_text().splitlines() == expected_sums
+          with (Path(os.environ["EVIDENCE"]) / "candidate-delivery.txt").open("a") as evidence_file:
+              evidence_file.write("assetBytesVerified=true\n")
+              evidence_file.write("releaseMetadataVerified=true\n")
+          PY
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -126,6 +346,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f "$CANDIDATE_APK"
+          test "$(stat -c %s "$CANDIDATE_APK")" = "$CANDIDATE_APK_SIZE"
           printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$CANDIDATE_APK" | sha256sum -c -
           test "$(apkanalyzer manifest application-id "$CANDIDATE_APK")" = "com.tgk30.debridstreamer"
           test "$(apkanalyzer manifest version-name "$CANDIDATE_APK")" = "$CANDIDATE_VERSION"
@@ -154,10 +375,14 @@ jobs:
           )
           {
             echo "classification=locally-generated-runtime-verification-metadata"
-            echo "releaseAsset=false"
-            echo "otaPublicationEvidence=false"
+            echo "candidateClassification=official-public-current-platform-runtime-fixture"
+            echo "releaseAssetSource=canonical-public-release"
+            echo "runtimeScope=current-platform"
+            echo "automaticOtaEvidence=false"
             echo "sourceRevision=$CANDIDATE_SOURCE_SHA"
             echo "candidateRunId=$CANDIDATE_RUN_ID"
+            echo "releaseId=$CANDIDATE_RELEASE_ID"
+            echo "releaseTag=$CANDIDATE_RELEASE_TAG"
           } > "$local_metadata_dir/PROVENANCE.txt"
           export LOCAL_METADATA_DIR="$local_metadata_dir"
           python3 - <<'PY'
@@ -689,12 +914,38 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CANDIDATE_RUN_ID: "39857024891"
-      CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a
-      CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.31.apk
-      CANDIDATE_VERSION: 2.3.31
-      CANDIDATE_VERSION_CODE: "2003031"
+      CANDIDATE_RUN_ID: "40238512551"
+      CANDIDATE_RUN_WORKFLOW_ID: "387280245"
+      CANDIDATE_RUN_HEAD_BRANCH: codex/touch-dialog-ux61
+      CANDIDATE_SOURCE_SHA: e2dee689276610ffb1685a6f47ac37f183f35a7e
+      CANDIDATE_APK_SHA256: a4696ab0533cdc99e3f5e373031d89e58a6cd8f6742a9107085220765bb5b247
+      CANDIDATE_APK_SIZE: "88640385"
+      CANDIDATE_RELEASE_ID: "423712065"
+      CANDIDATE_RELEASE_TAG: android-v2.3.61
+      CANDIDATE_RELEASE_NAME: "YAWF Stream Android 2.3.61: player recovery"
+      CANDIDATE_RELEASE_PUBLISHED_AT: "2026-10-25T23:00:52Z"
+      CANDIDATE_TAG_OBJECT_SHA: c86f5788a8ae2984aca4087101d7b98532cb0c30
+      CANDIDATE_APK_ASSET_ID: "676347366"
+      CANDIDATE_APK_ASSET_NAME: YAWF.Stream_Android_2.3.61.apk
+      CANDIDATE_MANIFEST_ASSET_ID: "676347367"
+      CANDIDATE_MANIFEST_ASSET_NAME: android-update.json
+      CANDIDATE_MANIFEST_SHA256: 8828c76dd0696c7b70d548fcfdbb4657076825c5b40e5fa81b2ce1dd23be9815
+      CANDIDATE_MANIFEST_SIZE: "348"
+      CANDIDATE_VERIFICATION_ASSET_ID: "676359185"
+      CANDIDATE_VERIFICATION_ASSET_NAME: Android_2.3.61_verification.json
+      CANDIDATE_VERIFICATION_SHA256: 25afa6bca5261b02a0372eb0fc88934573ae2bce0091bd526007f963fe5b26b2
+      CANDIDATE_VERIFICATION_SIZE: "4411"
+      CANDIDATE_CHECKSUMS_ASSET_ID: "676359184"
+      CANDIDATE_CHECKSUMS_ASSET_NAME: SHA256SUMS
+      CANDIDATE_CHECKSUMS_SHA256: 46ab6b40b63ea787feb33215df993d99898d023e4371b986b79d4eb1ac94e1a8
+      CANDIDATE_CHECKSUMS_SIZE: "282"
+      CANDIDATE_CERT_SHA256: 233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.61.apk
+      CANDIDATE_MANIFEST: candidate/android-update.json
+      CANDIDATE_VERIFICATION: candidate/Android_2.3.61_verification.json
+      CANDIDATE_CHECKSUMS: candidate/SHA256SUMS
+      CANDIDATE_VERSION: 2.3.61
+      CANDIDATE_VERSION_CODE: "2003061"
       EVIDENCE: android-stock-webview-guide-evidence
       SYSTEM_IMAGE_PACKAGE: system-images;android-30;google_apis;x86_64
       EMULATOR_SERIAL: emulator-5554
@@ -707,13 +958,204 @@ jobs:
         with:
           ref: ${{ env.CANDIDATE_SOURCE_SHA }}
           path: candidate-source
-      - name: Download exact signed candidate
-        uses: actions/download-artifact@v4
-        with:
-          name: android-phone-verification-candidate
-          path: candidate
-          github-token: ${{ github.token }}
-          run-id: ${{ env.CANDIDATE_RUN_ID }}
+      - name: Download and admit exact public current release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$CANDIDATE_APK")" "$EVIDENCE"
+          curl_args=(
+            --fail --silent --show-error --location
+            --proto '=https' --proto-redir '=https'
+            --connect-timeout 15 --max-time 180
+            --retry 2 --retry-max-time 240
+          )
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          curl "${curl_args[@]}" --max-filesize 1048576 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/releases/$CANDIDATE_RELEASE_ID" \
+            --output "$EVIDENCE/public-release.json"
+          curl "${curl_args[@]}" --max-filesize 1048576 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/actions/runs/$CANDIDATE_RUN_ID" \
+            --output "$EVIDENCE/producer-run.json"
+          curl "${curl_args[@]}" --max-filesize 1048576 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/git/ref/tags/$CANDIDATE_RELEASE_TAG" \
+            --output "$EVIDENCE/tag-ref.json"
+          curl "${curl_args[@]}" --max-filesize 1048576 \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/git/tags/$CANDIDATE_TAG_OBJECT_SHA" \
+            --output "$EVIDENCE/tag-object.json"
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = Path(os.environ["EVIDENCE"])
+          release = json.loads((evidence / "public-release.json").read_text())
+          run = json.loads((evidence / "producer-run.json").read_text())
+          tag_ref = json.loads((evidence / "tag-ref.json").read_text())
+          tag = json.loads((evidence / "tag-object.json").read_text())
+          repo = os.environ["GITHUB_REPOSITORY"]
+          source = os.environ["CANDIDATE_SOURCE_SHA"]
+          release_id = int(os.environ["CANDIDATE_RELEASE_ID"])
+          release_tag = os.environ["CANDIDATE_RELEASE_TAG"]
+
+          assert release.get("id") == release_id, "Public release id changed"
+          assert release.get("tag_name") == release_tag, "Public release tag changed"
+          assert release.get("name") == os.environ["CANDIDATE_RELEASE_NAME"], "Public release name changed"
+          assert release.get("draft") is False and release.get("prerelease") is False, "Public release state changed"
+          assert release.get("published_at") == os.environ["CANDIDATE_RELEASE_PUBLISHED_AT"], "Public release timestamp changed"
+          assert release.get("target_commitish") == "main", "Public release target changed"
+          assert release.get("immutable") is False, "Public release immutability state changed"
+
+          expected_assets = {
+              os.environ["CANDIDATE_APK_ASSET_NAME"]: {
+                  "id": int(os.environ["CANDIDATE_APK_ASSET_ID"]),
+                  "size": int(os.environ["CANDIDATE_APK_SIZE"]),
+                  "digest": f"sha256:{os.environ['CANDIDATE_APK_SHA256']}",
+                  "content_type": "application/vnd.android.package-archive",
+              },
+              os.environ["CANDIDATE_MANIFEST_ASSET_NAME"]: {
+                  "id": int(os.environ["CANDIDATE_MANIFEST_ASSET_ID"]),
+                  "size": int(os.environ["CANDIDATE_MANIFEST_SIZE"]),
+                  "digest": f"sha256:{os.environ['CANDIDATE_MANIFEST_SHA256']}",
+                  "content_type": "application/json",
+              },
+              os.environ["CANDIDATE_VERIFICATION_ASSET_NAME"]: {
+                  "id": int(os.environ["CANDIDATE_VERIFICATION_ASSET_ID"]),
+                  "size": int(os.environ["CANDIDATE_VERIFICATION_SIZE"]),
+                  "digest": f"sha256:{os.environ['CANDIDATE_VERIFICATION_SHA256']}",
+                  "content_type": "application/json",
+              },
+              os.environ["CANDIDATE_CHECKSUMS_ASSET_NAME"]: {
+                  "id": int(os.environ["CANDIDATE_CHECKSUMS_ASSET_ID"]),
+                  "size": int(os.environ["CANDIDATE_CHECKSUMS_SIZE"]),
+                  "digest": f"sha256:{os.environ['CANDIDATE_CHECKSUMS_SHA256']}",
+                  "content_type": "application/octet-stream",
+              },
+          }
+          assets = release.get("assets")
+          assert isinstance(assets, list) and len(assets) == len(expected_assets), "Public asset inventory changed"
+          observed_assets = {asset.get("name"): asset for asset in assets}
+          assert set(observed_assets) == set(expected_assets), "Public asset names changed"
+          for name, expected in expected_assets.items():
+              asset = observed_assets[name]
+              for key, value in expected.items():
+                  assert asset.get(key) == value, f"Public asset {name} {key} changed"
+              assert asset.get("state") == "uploaded", f"Public asset {name} state changed"
+              assert asset.get("uploader", {}).get("login") == "Tgk-30", f"Public asset {name} uploader changed"
+              assert asset.get("browser_download_url") == (
+                  f"https://github.com/{repo}/releases/download/{release_tag}/{name}"
+              ), f"Public asset {name} URL changed"
+
+          run_id = int(os.environ["CANDIDATE_RUN_ID"])
+          assert run.get("id") == run_id, "Producer run id changed"
+          assert run.get("workflow_id") == int(os.environ["CANDIDATE_RUN_WORKFLOW_ID"]), "Producer workflow changed"
+          assert run.get("name") == "android-release", "Producer workflow name changed"
+          assert run.get("path") == ".github/workflows/android-release.yml", "Producer workflow path changed"
+          assert run.get("event") == "workflow_dispatch", "Producer run event changed"
+          assert run.get("status") == "completed" and run.get("conclusion") == "success", "Producer run is not successful"
+          assert run.get("run_attempt") == 1, "Producer run attempt changed"
+          assert run.get("head_sha") == source, "Producer source changed"
+          assert run.get("head_branch") == os.environ["CANDIDATE_RUN_HEAD_BRANCH"], "Producer branch changed"
+          assert run.get("repository", {}).get("full_name") == repo, "Producer repository changed"
+          assert run.get("head_repository", {}).get("full_name") == repo, "Producer source repository changed"
+
+          assert tag_ref.get("ref") == f"refs/tags/{release_tag}", "Public tag ref changed"
+          assert tag_ref.get("object", {}).get("type") == "tag", "Public tag is not annotated"
+          assert tag_ref.get("object", {}).get("sha") == os.environ["CANDIDATE_TAG_OBJECT_SHA"], "Public tag object changed"
+          assert tag.get("tag") == release_tag, "Annotated tag name changed"
+          assert tag.get("object", {}).get("type") == "commit", "Annotated tag target is not a commit"
+          assert tag.get("object", {}).get("sha") == source, "Annotated tag source changed"
+
+          (evidence / "candidate-delivery.txt").write_text(
+              "\n".join([
+                  "classification=official-public-current-platform-runtime-fixture",
+                  "delivery=canonical-public-release",
+                  f"sourceRevision={source}",
+                  f"candidateRunId={run_id}",
+                  f"releaseId={release_id}",
+                  f"releaseTag={release_tag}",
+                  "publicReleaseVerified=true",
+                  "publicDownload=true",
+                  "currentPlatformVerification=true",
+                  "legacy31CompatibilityEvidence=false",
+                  "automaticOtaEvidence=false",
+              ]) + "\n"
+          )
+          PY
+
+          release_base="https://github.com/$GITHUB_REPOSITORY/releases/download/$CANDIDATE_RELEASE_TAG"
+          curl "${curl_args[@]}" --max-filesize "$CANDIDATE_APK_SIZE" \
+            "$release_base/$CANDIDATE_APK_ASSET_NAME" --output "$CANDIDATE_APK"
+          curl "${curl_args[@]}" --max-filesize "$CANDIDATE_MANIFEST_SIZE" \
+            "$release_base/$CANDIDATE_MANIFEST_ASSET_NAME" --output "$CANDIDATE_MANIFEST"
+          curl "${curl_args[@]}" --max-filesize "$CANDIDATE_VERIFICATION_SIZE" \
+            "$release_base/$CANDIDATE_VERIFICATION_ASSET_NAME" --output "$CANDIDATE_VERIFICATION"
+          curl "${curl_args[@]}" --max-filesize "$CANDIDATE_CHECKSUMS_SIZE" \
+            "$release_base/$CANDIDATE_CHECKSUMS_ASSET_NAME" --output "$CANDIDATE_CHECKSUMS"
+
+          test "$(stat -c %s "$CANDIDATE_APK")" = "$CANDIDATE_APK_SIZE"
+          test "$(stat -c %s "$CANDIDATE_MANIFEST")" = "$CANDIDATE_MANIFEST_SIZE"
+          test "$(stat -c %s "$CANDIDATE_VERIFICATION")" = "$CANDIDATE_VERIFICATION_SIZE"
+          test "$(stat -c %s "$CANDIDATE_CHECKSUMS")" = "$CANDIDATE_CHECKSUMS_SIZE"
+          printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$CANDIDATE_APK" | sha256sum --check -
+          printf '%s  %s\n' "$CANDIDATE_MANIFEST_SHA256" "$CANDIDATE_MANIFEST" | sha256sum --check -
+          printf '%s  %s\n' "$CANDIDATE_VERIFICATION_SHA256" "$CANDIDATE_VERIFICATION" | sha256sum --check -
+          printf '%s  %s\n' "$CANDIDATE_CHECKSUMS_SHA256" "$CANDIDATE_CHECKSUMS" | sha256sum --check -
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path(os.environ["CANDIDATE_MANIFEST"]).read_text())
+          verification = json.loads(Path(os.environ["CANDIDATE_VERIFICATION"]).read_text())
+          version = os.environ["CANDIDATE_VERSION"]
+          version_code = int(os.environ["CANDIDATE_VERSION_CODE"])
+          source = os.environ["CANDIDATE_SOURCE_SHA"]
+          apk_name = os.environ["CANDIDATE_APK_ASSET_NAME"]
+          apk_sha = os.environ["CANDIDATE_APK_SHA256"]
+          apk_size = int(os.environ["CANDIDATE_APK_SIZE"])
+          expected_apk = {"name": apk_name, "sha256": apk_sha, "size": apk_size}
+
+          assert set(manifest) == {"schemaVersion", "version", "versionCode", "packageName", "sourceRevision", "apk"}
+          assert manifest["schemaVersion"] == 1
+          assert manifest["version"] == version
+          assert manifest["versionCode"] == version_code
+          assert manifest["packageName"] == "com.tgk30.debridstreamer"
+          assert manifest["sourceRevision"] == source
+          assert manifest["apk"] == expected_apk
+
+          assert verification["version"] == version
+          assert verification["sourceRevision"] == source
+          assert verification["buildRun"] == int(os.environ["CANDIDATE_RUN_ID"])
+          assert verification["apk"] == expected_apk
+          assert verification["certificateSha256"] == os.environ["CANDIDATE_CERT_SHA256"]
+          provenance = verification["checks"]["buildProvenance"]
+          assert provenance == {
+              "workflowRun": int(os.environ["CANDIDATE_RUN_ID"]),
+              "sourceRevision": source,
+              "canonicalSignedCandidateUnchanged": True,
+          }
+          assert verification["checks"]["actualApkVersionCode"] == version_code
+
+          expected_sums = [
+              f"{apk_sha}  {apk_name}",
+              f"{os.environ['CANDIDATE_MANIFEST_SHA256']}  {os.environ['CANDIDATE_MANIFEST_ASSET_NAME']}",
+              f"{os.environ['CANDIDATE_VERIFICATION_SHA256']}  {os.environ['CANDIDATE_VERIFICATION_ASSET_NAME']}",
+          ]
+          assert Path(os.environ["CANDIDATE_CHECKSUMS"]).read_text().splitlines() == expected_sums
+          with (Path(os.environ["EVIDENCE"]) / "candidate-delivery.txt").open("a") as evidence_file:
+              evidence_file.write("assetBytesVerified=true\n")
+              evidence_file.write("releaseMetadataVerified=true\n")
+          PY
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -733,6 +1175,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$EVIDENCE"
           test "$(git -C candidate-source rev-parse HEAD)" = "$CANDIDATE_SOURCE_SHA"
+          test "$(stat -c %s "$CANDIDATE_APK")" = "$CANDIDATE_APK_SIZE"
           printf '%s  %s\n' "$CANDIDATE_APK_SHA256" "$CANDIDATE_APK" | sha256sum --check -
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libpulse0
@@ -749,8 +1192,9 @@ jobs:
           image_root="$sdk_root/system-images/android-30/google_apis/x86_64"
           cp "$image_root/source.properties" "$EVIDENCE/image-source.properties"
           sha256sum "$image_root/package.xml" "$image_root/source.properties" > "$EVIDENCE/image-metadata-sha256.txt"
-          printf 'sourceRevision=%s\ncandidateRunId=%s\napkSha256=%s\nstartupGuidanceOnly=true\nplaybackTested=false\notaTested=false\n' \
-            "$CANDIDATE_SOURCE_SHA" "$CANDIDATE_RUN_ID" "$CANDIDATE_APK_SHA256" > "$EVIDENCE/binding.txt"
+          printf 'sourceRevision=%s\ncandidateRunId=%s\nreleaseId=%s\nreleaseTag=%s\napkSha256=%s\nverificationScope=current-public-api30\nstartupGuidanceOnly=true\nplaybackTested=false\notaTested=false\nautomaticOtaEvidence=false\n' \
+            "$CANDIDATE_SOURCE_SHA" "$CANDIDATE_RUN_ID" "$CANDIDATE_RELEASE_ID" \
+            "$CANDIDATE_RELEASE_TAG" "$CANDIDATE_APK_SHA256" > "$EVIDENCE/binding.txt"
       - name: Check normal native warning and App info round trip
         shell: bash
         run: |

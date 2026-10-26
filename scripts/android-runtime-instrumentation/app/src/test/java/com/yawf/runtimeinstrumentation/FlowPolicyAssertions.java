@@ -185,6 +185,8 @@ final class FlowPolicyAssertions {
                 "The exact current candidate and public channel versions must pass");
         check(FlowPolicy.isExpectedVersionPair("2.3.31", "2.3.27"),
                 "The independently pinned next candidate and stable versions must pass");
+        check(FlowPolicy.isExpectedVersionPair("2.3.61", "2.3.61"),
+                "The exact current public candidate and channel versions must pass");
         check(!FlowPolicy.isExpectedVersionPair("2.3.25", "2.3.25"),
                 "A changed candidate version must fail closed");
         check(!FlowPolicy.isExpectedVersionPair("2.3.26", "2.3.21"),
@@ -201,6 +203,12 @@ final class FlowPolicyAssertions {
                 "Equal current and stable versions must fail closed");
         check(!FlowPolicy.isExpectedVersionPair("2.3.31", "2.3.28"),
                 "The unreviewed 28 intermediate stable must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.60", "2.3.61"),
+                "The prior candidate with the current public channel must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.61", "2.3.60"),
+                "The current public candidate with the prior channel must fail closed");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.62", "2.3.61"),
+                "An unreviewed future candidate must fail closed");
         check(!FlowPolicy.isExpectedVersionPair(null, "2.3.26"),
                 "Null candidate versions must fail closed");
         check(!FlowPolicy.isExpectedVersionPair("2.3.27", null),
