@@ -1,7 +1,7 @@
 {
   "name": "yawf-stream-site",
   "private": true,
-  "version": "2.3.59",
+  "version": "2.3.62",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -63,7 +63,7 @@
     "tailwind-merge": "^3.4.0",
     "three": "^0.185.1",
     "vaul": "^1.1.2",
-    "zod": "^4.3.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

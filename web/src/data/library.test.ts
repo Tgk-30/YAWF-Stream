@@ -5,8 +5,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MediaPreview } from "../models/media";
 
-const { store, calls } = vi.hoisted(() => {
+const { store, calls, historyWrites } = vi.hoisted(() => {
   const calls: string[] = [];
+  const historyWrites: Array<Record<string, unknown>> = [];
   const watchlistIds = new Set<string>();
   return {
     calls,
@@ -37,7 +38,15 @@ const { store, calls } = vi.hoisted(() => {
         calls.push(`remove:${id}`);
         watchlistIds.delete(id);
       },
+      async getResume() {
+        return null;
+      },
+      async recordHistory(entry: Record<string, unknown>) {
+        historyWrites.push(entry);
+        return entry;
+      },
     },
+    historyWrites,
   };
 });
 
@@ -48,6 +57,7 @@ const {
   loadWatchlist,
   loadHistory,
   loadContinueWatching,
+  recordHistory,
   toggleWatchlist,
   removeFromWatchlist,
 } = await import("./library");
@@ -59,6 +69,7 @@ function movie(id: string): MediaPreview {
 afterEach(() => {
   store.watchlistIds.clear();
   calls.length = 0;
+  historyWrites.length = 0;
 });
 
 describe("isInWatchlist (pure)", () => {
@@ -90,6 +101,29 @@ describe("loadContinueWatching", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].mediaId).toBe("cw1");
     expect(calls).toContain("continueWatching:20");
+  });
+});
+
+describe("recordHistory", () => {
+  it("forwards all six playback preferences to the active store", async () => {
+    await recordHistory(movie("prefs"), {
+      progressSeconds: 10,
+      preferredAudioId: "audio-jpn",
+      preferredAudioLang: "jpn",
+      preferredSubId: "sub-eng",
+      playbackSpeed: 1.5,
+      subtitleDelay: -0.4,
+      subtitlePosition: 82,
+    });
+
+    expect(historyWrites).toContainEqual(expect.objectContaining({
+      preferredAudioId: "audio-jpn",
+      preferredAudioLang: "jpn",
+      preferredSubId: "sub-eng",
+      playbackSpeed: 1.5,
+      subtitleDelay: -0.4,
+      subtitlePosition: 82,
+    }));
   });
 });
 

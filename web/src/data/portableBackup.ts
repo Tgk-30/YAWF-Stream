@@ -80,6 +80,12 @@ export interface PortableProfileBundle {
     lastWatched: string;
     streamQuality: string | null;
     preview: Record<string, unknown>;
+    preferredAudioId?: string | null;
+    preferredAudioLang?: string | null;
+    preferredSubId?: string | null;
+    playbackSpeed?: number | null;
+    subtitleDelay?: number | null;
+    subtitlePosition?: number | null;
   }>;
   folders: Array<{
     id: string;
@@ -345,6 +351,18 @@ export function parsePortableProfileBundle(
   if (!candidate.settings.every(isPortableSetting)) {
     throw new Error("Profile bundle contains a secret-valued setting.");
   }
+  if (!candidate.history.every((entry) => {
+    const row = portableObject(entry);
+    return row != null &&
+      portableOptionalString(row.preferredAudioId, 512).valid &&
+      portableOptionalString(row.preferredAudioLang, 128).valid &&
+      portableOptionalString(row.preferredSubId, 512).valid &&
+      portableOptionalNumber(row.playbackSpeed, 0.25, 3).valid &&
+      portableOptionalNumber(row.subtitleDelay, -10, 10).valid &&
+      portableOptionalNumber(row.subtitlePosition, 0, 100).valid;
+  })) {
+    throw new Error("Profile bundle contains invalid playback preferences.");
+  }
   return value as PortableProfileBundle;
 }
 
@@ -384,6 +402,36 @@ function portableNumber(value: unknown, minimum = 0): number | null {
     value >= minimum
     ? value
     : null;
+}
+
+function portableOptionalString(
+  value: unknown,
+  maxLength: number,
+): { valid: boolean; value: string | null | undefined } {
+  if (value === undefined) return { valid: true, value: undefined };
+  if (value === null) return { valid: true, value: null };
+  if (typeof value !== "string" || value.length < 1 || value.length > maxLength) {
+    return { valid: false, value: undefined };
+  }
+  return { valid: true, value };
+}
+
+function portableOptionalNumber(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): { valid: boolean; value: number | null | undefined } {
+  if (value === undefined) return { valid: true, value: undefined };
+  if (value === null) return { valid: true, value: null };
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    return { valid: false, value: undefined };
+  }
+  return { valid: true, value };
 }
 
 function portablePreview(value: unknown): Record<string, unknown> | null {
@@ -471,6 +519,12 @@ export function portableProfileBundleFromBackup(
     const lastWatched = portableDate(row?.lastWatched);
     const streamQuality = portableNullableString(row?.streamQuality, 80);
     const preview = portablePreview(row?.preview);
+    const preferredAudioId = portableOptionalString(row?.preferredAudioId, 512);
+    const preferredAudioLang = portableOptionalString(row?.preferredAudioLang, 128);
+    const preferredSubId = portableOptionalString(row?.preferredSubId, 512);
+    const playbackSpeed = portableOptionalNumber(row?.playbackSpeed, 0.25, 3);
+    const subtitleDelay = portableOptionalNumber(row?.subtitleDelay, -10, 10);
+    const subtitlePosition = portableOptionalNumber(row?.subtitlePosition, 0, 100);
     if (
       mediaId == null ||
       episodeId === undefined ||
@@ -479,7 +533,13 @@ export function portableProfileBundleFromBackup(
       typeof row?.completed !== "boolean" ||
       lastWatched == null ||
       streamQuality === undefined ||
-      preview == null
+      preview == null ||
+      !preferredAudioId.valid ||
+      !preferredAudioLang.valid ||
+      !preferredSubId.valid ||
+      !playbackSpeed.valid ||
+      !subtitleDelay.valid ||
+      !subtitlePosition.valid
     ) {
       skippedRows += 1;
       continue;
@@ -493,6 +553,18 @@ export function portableProfileBundleFromBackup(
       lastWatched,
       streamQuality,
       preview,
+      ...(preferredAudioId.value === undefined
+        ? {} : { preferredAudioId: preferredAudioId.value }),
+      ...(preferredAudioLang.value === undefined
+        ? {} : { preferredAudioLang: preferredAudioLang.value }),
+      ...(preferredSubId.value === undefined
+        ? {} : { preferredSubId: preferredSubId.value }),
+      ...(playbackSpeed.value === undefined
+        ? {} : { playbackSpeed: playbackSpeed.value }),
+      ...(subtitleDelay.value === undefined
+        ? {} : { subtitleDelay: subtitleDelay.value }),
+      ...(subtitlePosition.value === undefined
+        ? {} : { subtitlePosition: subtitlePosition.value }),
     });
   }
 

@@ -634,7 +634,9 @@ export function App() {
       initialRouteRef.current = false;
       return;
     }
-    const frame = window.requestAnimationFrame(() => routeFrameRef.current?.focus());
+    const frame = window.requestAnimationFrame(() =>
+      routeFrameRef.current?.focus({ preventScroll: true }),
+    );
     return () => window.cancelAnimationFrame(frame);
   }, [route, routeTitle]);
 

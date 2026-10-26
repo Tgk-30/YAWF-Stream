@@ -71,6 +71,8 @@ export async function recordHistory(
     preferredAudioLang?: string | null;
     preferredSubId?: string | null;
     playbackSpeed?: number | null;
+    subtitleDelay?: number | null;
+    subtitlePosition?: number | null;
   },
 ): Promise<MediaPreview[]> {
   const store = getStore();
@@ -101,6 +103,8 @@ export async function recordHistory(
     preferredAudioLang: opts?.preferredAudioLang,
     preferredSubId: opts?.preferredSubId,
     playbackSpeed: opts?.playbackSpeed,
+    subtitleDelay: opts?.subtitleDelay,
+    subtitlePosition: opts?.subtitlePosition,
   });
   return loadHistory();
 }
