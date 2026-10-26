@@ -63,6 +63,7 @@ function validate(source) {
   assert.match(metadata, /release\.get\("draft"\) is False and release\.get\("prerelease"\) is False/);
   assert.match(metadata, /set\(observed_assets\) == set\(expected_assets\)/);
   assert.match(metadata, /run\.get\("head_sha"\) == source/);
+  assert.match(metadata, /release\.get\("target_commitish"\) == source/);
   assert.match(metadata, /tag\.get\("object", \{\}\)\.get\("sha"\) == source/);
   assert.match(assets, /verification\["certificateSha256"\] == os\.environ\["CANDIDATE_CERT_SHA256"\]/);
   assert.match(assets, /read_text\(\)\.splitlines\(\) == expected_sums/);
@@ -141,6 +142,7 @@ for (const [name, mutate] of [
   ["XML redaction gate omitted", (s) => s.replace(" scripts/runtime_webview_hierarchy_redaction.test.mjs", "")],
   ["public release identity", (s) => s.replaceAll('CANDIDATE_RELEASE_ID: "423712065"', 'CANDIDATE_RELEASE_ID: "1"')],
   ["public release state", (s) => s.replaceAll('release.get("draft") is False', 'release.get("draft") is True')],
+  ["public release source", (s) => s.replaceAll('release.get("target_commitish") == source', 'release.get("target_commitish") == "main"')],
   ["current public classification", (s) => s.replaceAll("classification=official-public-current-platform-runtime-fixture", "classification=private-fixture")],
   ["automatic OTA boundary", (s) => s.replaceAll("automaticOtaEvidence=false", "automaticOtaEvidence=true")],
   ["private token access", (s) => s.replaceAll("shell: bash\n        run:", "shell: bash\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run:")],
