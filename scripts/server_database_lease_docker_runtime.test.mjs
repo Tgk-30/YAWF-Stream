@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import * as runtimeHarness from "./server_database_lease_docker_runtime.mjs";
 import {
@@ -62,6 +65,60 @@ function imageInfo({ id = imageId, user = "node", revision = sourceRevision, ver
   };
 }
 
+function executableProbeCodeForFixture({ procRoot, databasePath, healthUrl }) {
+  if (typeof runtimeHarness.buildRuntimeStateProbeCode === "function") {
+    return runtimeHarness.buildRuntimeStateProbeCode({ procRoot, databasePath, healthUrl });
+  }
+  const source = readFileSync(new URL("./server_database_lease_docker_runtime.mjs", import.meta.url), "utf8");
+  const match = /const RUNTIME_STATE_CODE = String\.raw`([\s\S]*?)`;/u.exec(source);
+  assert.ok(match, "frozen predecessor probe source was not found");
+  return match[1]
+    .replace("fetch('http://127.0.0.1:43110/api/health')", `fetch(${JSON.stringify(healthUrl)})`)
+    .replace("fs.readdirSync('/proc')", `fs.readdirSync(${JSON.stringify(procRoot)})`)
+    .replace("fs.readFileSync('/proc/'+pid+'/cmdline','utf8')", `fs.readFileSync(${JSON.stringify(`${procRoot}/`)}+pid+'/cmdline','utf8')`)
+    .replace("const dbPath='/data/debridstreamer.sqlite'", `const dbPath=${JSON.stringify(databasePath)}`);
+}
+
+function runProbeFixture(processes) {
+  const root = mkdtempSync(join(tmpdir(), "yawf-runtime-probe-"));
+  try {
+    const procRoot = join(root, "proc");
+    mkdirSync(procRoot);
+    const marker = "controlled-runtime-marker";
+    const databasePath = join(root, "debridstreamer.sqlite");
+    const database = new DatabaseSync(databasePath);
+    database.exec("CREATE TABLE runtime_lease_marker(id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+    database.prepare("INSERT INTO runtime_lease_marker(id,value) VALUES(1,?)").run(marker);
+    database.close();
+    writeFileSync(`${databasePath}.server.lock`, "controlled-lease", { mode: 0o600 });
+    for (const processFixture of processes) {
+      const processRoot = join(procRoot, String(processFixture.pid));
+      mkdirSync(processRoot);
+      symlinkSync(processFixture.executable, join(processRoot, "exe"));
+      writeFileSync(join(processRoot, "cmdline"), Buffer.from(`${processFixture.argv.join("\0")}\0`));
+    }
+    const healthUrl = `data:application/json,${encodeURIComponent(JSON.stringify({ ok: true, ready: true, version: "2.3.64" }))}`;
+    const code = executableProbeCodeForFixture({ procRoot, databasePath, healthUrl });
+    return spawnSync(process.execPath, ["-e", code, marker], {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function realApplication(pid, script = "server/dist/index.cjs") {
+  return { pid, executable: process.execPath, argv: ["node", script] };
+}
+
+function assertProbeProcessCountFailure(result) {
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /^RuntimeProbeProcessCountError$/m);
+  assert.equal(result.stdout, "");
+}
+
 test("runtime admission is explicit, owner-bound, source-bound, and Linux-only", () => {
   assert.deepEqual(validateRuntimeEnvironment(admittedEnv()), {
     repository: "Tgk-30/YAWF-Stream",
@@ -88,6 +145,89 @@ test("receipt output is confined to the disposable runner directory", () => {
   );
   assert.throws(() => assertReceiptPath("/home/runner/work/receipt.json", "/home/runner/work/_temp"));
   assert.throws(() => assertReceiptPath("/home/runner/work/_temp-other/receipt.json", "/home/runner/work/_temp"));
+});
+
+test("production probe ignores docker-init argv and selects the real node child", () => {
+  const fakeBin = mkdtempSync(join(tmpdir(), "yawf-runtime-bin-"));
+  const fakeInit = join(fakeBin, "docker-init");
+  writeFileSync(fakeInit, "fixture");
+  try {
+    const result = runProbeFixture([
+      { pid: 1, executable: fakeInit, argv: ["/sbin/docker-init", "--", "node", "server/dist/index.cjs"] },
+      realApplication(7),
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    const state = JSON.parse(result.stdout);
+    assert.equal(state.guestPid, 7);
+    assert.deepEqual(state.health, { ok: true, ready: true, version: "2.3.64" });
+    assert.equal(state.marker.matches, true);
+    assert.match(state.marker.sha256, /^[a-f0-9]{64}$/);
+    assert.match(state.lease.sha256, /^[a-f0-9]{64}$/);
+  } finally {
+    rmSync(fakeBin, { recursive: true, force: true });
+  }
+});
+
+test("production probe rejects a node helper whose -e source names the app script", () => {
+  assertProbeProcessCountFailure(runProbeFixture([
+    { pid: 9, executable: process.execPath, argv: ["node", "-e", "const text='server/dist/index.cjs'"] },
+  ]));
+});
+
+test("production probe rejects an app argv under the wrong executable", () => {
+  assertProbeProcessCountFailure(runProbeFixture([
+    { pid: 11, executable: "/bin/sh", argv: ["sh", "server/dist/index.cjs"] },
+  ]));
+});
+
+test("production probe rejects multiple real application nodes", () => {
+  assertProbeProcessCountFailure(runProbeFixture([realApplication(12), realApplication(13, "/app/server/dist/index.cjs")]));
+});
+
+test("production probe rejects an absent real application node", () => {
+  assertProbeProcessCountFailure(runProbeFixture([]));
+});
+
+test("receipt stage and completed proofs survive a later sanitized failure", () => {
+  const receipt = { runtime: { stage: "image-admission", completedStages: [], proofs: {} } };
+  runtimeHarness.beginRuntimeStage(receipt, "candidate-pid1-owner");
+  runtimeHarness.completeRuntimeStage(receipt, "candidate-pid1-owner", {
+    guestPid: 1,
+    health: { ok: true, ready: true, version: "2.3.64" },
+    lease: { sha256: "a".repeat(64) },
+  });
+  runtimeHarness.beginRuntimeStage(receipt, "candidate-init-owner");
+  runtimeHarness.recordRuntimeFailure(receipt, new Error("private diagnostic must not persist"));
+  assert.equal(receipt.runtime.stage, "candidate-init-owner");
+  assert.deepEqual(receipt.runtime.completedStages, ["candidate-pid1-owner"]);
+  assert.equal(receipt.runtime.proofs["candidate-pid1-owner"].guestPid, 1);
+  assert.deepEqual(receipt.failure, { name: "Error", phase: "candidate-init-owner" });
+  assert.doesNotMatch(JSON.stringify(receipt), /private diagnostic/);
+  assert.throws(() => runtimeHarness.beginRuntimeStage(receipt, "unbounded-private-stage"));
+});
+
+test("public lease proof omits raw producer text and hex", () => {
+  const runtime = readFileSync(new URL("./server_database_lease_docker_runtime.mjs", import.meta.url), "utf8");
+  assert.match(runtime, /"candidate-post-kill", \{\s+exitCode:[^\n]+\s+lease: publicLeaseProof\(killedLease\)/);
+  assert.doesNotMatch(runtime, /"candidate-post-kill", \{\s+exitCode:[^\n]+\s+lease: killedLease/);
+  const proof = runtimeHarness.publicLeaseProof({
+    sha256: "b".repeat(64),
+    size: 8192,
+    uid: 1000,
+    gid: 1000,
+    mode: "600",
+    text: "raw lease payload",
+    hex: "726177206c65617365207061796c6f6164",
+  });
+  assert.deepEqual(proof, {
+    sha256: "b".repeat(64),
+    size: 8192,
+    uid: 1000,
+    gid: 1000,
+    mode: "600",
+  });
+  assert.equal("text" in proof, false);
+  assert.equal("hex" in proof, false);
 });
 
 test("candidate image admission requires immutable identity, OCI binding, and non-root user", () => {
@@ -330,6 +470,11 @@ test("workflow registers validation broadly but admits real runtime only for own
   assert.doesNotMatch(runtime, /docker\s+(?:system\s+)?prune|--pid[= ]host|\/var\/run\/docker\.sock/);
   assert.equal((runtime.match(/classifyPid1ContenderExit\(\{ containerInfo:/g) ?? []).length, 2);
   assert.doesNotMatch(runtime, /classifyBusyExit\(\{[^}]*guestPid:\s*1/s);
+  assert.match(runtime, /runtime: \{ stage: "image-admission", completedStages: \[\], proofs: \{\} \}/);
+  assert.match(runtime, /beginRuntimeStage\(receipt, "candidate-init-owner"\);\s+const initOwner/);
+  assert.match(runtime, /completed: false,[\s\S]*await runCandidate\(/);
+  assert.match(runtime, /recordRuntimeFailure\(receipt, error\)/);
+  assert.doesNotMatch(runtime, /receipt\.failure[\s\S]{0,120}error\.message/);
 });
 
 test("owned-label admission rejects role and run mutations", () => {
