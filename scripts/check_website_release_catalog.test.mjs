@@ -15,6 +15,11 @@ for (const { name, from, to } of [
     to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.25', tag: 'v2.3.28-web' };",
   },
   {
+    name: "Windows availability",
+    from: "export const WINDOWS_RELEASE_AVAILABLE = false;",
+    to: "export const WINDOWS_RELEASE_AVAILABLE = true;",
+  },
+  {
     name: "Android phone tag",
     from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.61', tag: 'android-v2.3.61' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.13' };",
@@ -31,12 +36,12 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.63', tag: 'v2.3.63' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.64', tag: 'v2.3.64' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.63'",
+    from: "tag: 'v2.3.64'",
     to: "tag: 'v2.3.51'",
   },
   {
