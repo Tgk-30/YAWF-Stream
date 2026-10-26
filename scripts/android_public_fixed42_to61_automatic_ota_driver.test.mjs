@@ -2259,6 +2259,234 @@ function fixed42MainProofDiagnosticContract(java) {
     "fixed42 main proof diagnostic added an accessibility query, input, wait, or action");
 }
 
+function fixed42MainGeometryReacquisitionContract(java) {
+  const drive = methodBody(java, "clickFixed42SampleThroughDiscoverRails");
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const capture = methodBody(java, "captureFixed42MainGeometryDiagnostic");
+  const policy = nestedClassDeclaration(java, "Fixed42MainGeometryPolicy");
+  const diagnostic = nestedClassDeclaration(java, "Fixed42MainGeometryDiagnostic");
+
+  for (const token of [
+    "private static final int FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT = 3;",
+    "private static final long FIXED42_TO61_MAIN_GEOMETRY_RETRY_MS = 200L;",
+  ]) need(java, token, `fixed42-to61 geometry bound lost ${token}`);
+
+  for (const token of [
+    "int mainGeometryMismatchSamples = 0",
+    "assertNoBindingTerms();",
+    "observeFixed42SeedSnapshot()",
+    "catch (Fixed42MainGeometryMismatch mismatch)",
+    "isFixed42To61AutomaticMode()",
+    "mainGeometryMismatchSamples++",
+    "mismatch.diagnostic.line(",
+    "Fixed42MainGeometryPolicy.mayReacquire(",
+    "startedAt",
+    "FIXED42_SEED_SCROLL_BOUND_MS",
+    "Fixed42MainGeometryPolicy.remainingMs(",
+    "SystemClock.sleep(Math.min(",
+    "continue;",
+  ]) need(drive, token, `fixed42-to61 geometry reacquisition lost ${token}`);
+  const guard = drive.indexOf("assertNoBindingTerms();");
+  const observeCall = drive.indexOf("observeFixed42SeedSnapshot()", guard);
+  const catchStart = drive.indexOf("catch (Fixed42MainGeometryMismatch mismatch)", observeCall);
+  const retry = drive.indexOf("continue;", catchStart);
+  const action = drive.indexOf("performFixed42SeedScroll(", observeCall);
+  assert.ok(guard >= 0 && guard < observeCall && observeCall < catchStart && catchStart < retry,
+    "geometry reacquisition escaped the guarded full-snapshot loop");
+  const catchBody = drive.slice(catchStart, retry);
+  assert.doesNotMatch(drive,
+    /catch \((?:AssertionError|RuntimeException|Exception|Throwable)\b/,
+    "identity, ambiguity, traversal, or terms failures entered the geometry retry path");
+  assert.equal(catchBody.includes("completedActions++"), false,
+    "geometry mismatch consumed the 16-action budget");
+  assert.doesNotMatch(catchBody,
+    /performFixed42SeedScroll|\.click\(|device\.(?:click|swipe|press)|ACTION_SCROLL/,
+    "geometry mismatch emitted input before exact proof");
+  assert.ok(action >= 0 && action < catchStart,
+    "normal scroll action moved outside the exact-snapshot path");
+  assert.equal((drive.match(/long startedAt = SystemClock\.uptimeMillis\(\)/g) ?? []).length, 1,
+    "geometry retry reset the original seed deadline");
+  need(drive, `Fixed42MainGeometryPolicy.mayReacquire(
+                                mainGeometryMismatchSamples,
+                                startedAt,
+                                observedAt,
+                                FIXED42_SEED_SCROLL_BOUND_MS)`,
+  "geometry retry did not retain the original seed start time");
+
+  const nullChild = observe.indexOf("assertNotNull(\"Fixed42 seed snapshot returned a null child\", child)");
+  const childCap = observe.indexOf("childCount >= 0 && childCount <= FIXED42_SEED_AX_CHILD_LIMIT");
+  const nodeCap = observe.indexOf("owned.size() < FIXED42_SEED_AX_NODE_LIMIT");
+  const duplicate = observe.indexOf("Fixed42 seed snapshot returned a duplicate node");
+  const main = observe.indexOf('fixed42UniqueResource(nodes, "main-content")');
+  const discover = observe.indexOf('fixed42UniqueSemantic(nodes, "Discover page", true)', main);
+  const primary = observe.indexOf('fixed42UniqueSemantic(nodes, "Primary", true)', discover);
+  const heading = observe.indexOf('fixed42UniqueSemantic(nodes, "Popular Movies", false)', primary);
+  const semanticPositions = observe.indexOf("fixed42SemanticPositions(", heading);
+  const phase = observe.indexOf("Fixed42SeedPolicy.phase(observation)", semanticPositions);
+  const mismatchThrow = observe.indexOf("throw new Fixed42MainGeometryMismatch");
+  const transfer = observe.indexOf("transferred = true", mismatchThrow);
+  const recycle = observe.indexOf("if (!transferred) fixed42RecycleNodes(owned)", transfer);
+  assert.ok(childCap >= 0 && childCap < nullChild && nullChild < nodeCap
+    && nodeCap < duplicate && duplicate < main && main < discover
+    && discover < primary && primary < heading && heading < semanticPositions
+    && semanticPositions < phase && phase < mismatchThrow && mismatchThrow < transfer
+    && transfer < recycle,
+  "geometry-only retry occurs before a full guarded snapshot or after ownership transfer");
+  for (const token of [
+    "Rect expectedMainBounds = new Rect(0, 0, width, height);",
+    "boolean boundsMatch = main.bounds.equals(expectedMainBounds);",
+    "if (!isFixed42To61AutomaticMode()) {",
+    "if (!(mainIdentityMatches && boundsMatch)) {",
+    `assertTrue("Fixed42 main-content identity changed",
+                    mainIdentityMatches && boundsMatch);`,
+    `assertTrue("Fixed42-to61 main-content identity changed",
+                        mainIdentityMatches);`,
+    `assertEquals("Fixed42-to61 raw bounds policies diverged",
+                        boundsMatch,`,
+    "Fixed42MainGeometryPolicy.isExactRawBounds(",
+  ]) need(observe, token, `fixed42 profile-scoped raw geometry proof lost ${token}`);
+  assert.equal(`${observe}\n${capture}`.includes("getVisibleBounds"), false,
+    "raw snapshot eligibility was replaced with clipped visible bounds");
+
+  for (const token of [
+    "root.getBoundsInWindow(rootWindowBounds)",
+    "main.getBoundsInWindow(mainWindowBounds)",
+    "main.getWindow()",
+    "window.getDisplayId()",
+    "window.getId()",
+    "window.getBoundsInScreen(accessibilityWindowBounds)",
+    "window.recycle()",
+    "root.getWindowId()",
+    "main.getWindowId()",
+  ]) need(capture, token, `same-snapshot primitive diagnostic lost ${token}`);
+  for (const forbidden of ["getText", "getContentDescription", "getPackageName", "getClassName"])
+    assert.equal(capture.includes(forbidden), false,
+      `geometry diagnostic leaked dynamic accessibility identity through ${forbidden}`);
+  for (const token of [
+    '" display=" + displayWidth + \',\' + displayHeight',
+    '" rootScreen=" + rect(rootScreenBounds)',
+    '" rootWindow=" + rect(rootWindowBounds)',
+    '" mainScreen=" + rect(mainScreenBounds)',
+    '" mainWindow=" + rect(mainWindowBounds)',
+    '" axWindow=" + accessibilityWindowPresent',
+    '" nodeWindowIds=" + rootWindowId + \',\' + mainWindowId',
+  ]) need(diagnostic, token, `bounded numeric geometry diagnostic lost ${token}`);
+  assert.doesNotMatch(diagnostic,
+    /getText|getContentDescription|getPackageName|getClassName|https?:|admittedTarget/,
+    "geometry diagnostic contains dynamic text, identity, or URL data");
+
+  for (const token of [
+    "left == 0",
+    "top == 0",
+    "right == displayWidth",
+    "bottom == displayHeight",
+    "mismatchSamples < FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT",
+    "now - startedAt < boundMs",
+  ]) need(policy, token, `raw exact retry policy lost ${token}`);
+  assert.doesNotMatch(policy, /Math\.(?:abs|min|max)|intersect|getVisibleBounds|[<>]=?\s*2\b/,
+    "geometry policy added clipping or a 2px tolerance");
+}
+
+function runFixed42MainGeometryPolicyHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42MainGeometryPolicy");
+  const harness = `
+public final class Fixed42MainGeometryPolicyHarness {
+    private static final int FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT = 3;
+    ${policy}
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static void reject(Runnable operation, String message) {
+        try {
+            operation.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError(message);
+    }
+
+    private static int drive(int[][] samples, long[] finishedAt) {
+        long startedAt = 1_000L;
+        int mismatches = 0;
+        int inputs = 0;
+        int recycled = 0;
+        for (int index = 0; index < samples.length; index++) {
+            int[] bounds = samples[index];
+            try {
+                if (Fixed42MainGeometryPolicy.isExactRawBounds(
+                        bounds[0], bounds[1], bounds[2], bounds[3], 1080, 1920)) {
+                    require(inputs == 0, "input preceded exact geometry");
+                    return recycled + 1;
+                }
+                mismatches++;
+                if (!Fixed42MainGeometryPolicy.mayReacquire(
+                        mismatches, startedAt, finishedAt[index], 45_000L)) {
+                    throw new AssertionError("persistent geometry mismatch");
+                }
+            } finally {
+                recycled++;
+            }
+        }
+        throw new AssertionError("sequence ended without exact geometry");
+    }
+
+    public static void main(String[] ignored) {
+        require(Fixed42MainGeometryPolicy.isExactRawBounds(0, 0, 1080, 1920, 1080, 1920),
+                "exact raw display bounds were rejected");
+        require(!Fixed42MainGeometryPolicy.isExactRawBounds(0, 0, 1082, 1922, 1080, 1920),
+                "+2 raw overflow was tolerated");
+        require(!Fixed42MainGeometryPolicy.isExactRawBounds(0, 0, 1082, 1920, 1080, 1920),
+                "+2 raw width overflow was tolerated");
+        require(!Fixed42MainGeometryPolicy.isExactRawBounds(0, 0, 1080, 1922, 1080, 1920),
+                "+2 raw height overflow was tolerated");
+        require(drive(
+                new int[][] {{0, 0, 1082, 1922}, {0, 0, 1080, 1920}},
+                new long[] {2_000L, 2_200L}) == 2,
+                "+2 then exact did not recycle and reacquire without input");
+        reject(() -> drive(
+                new int[][] {
+                        {0, 0, 1082, 1922},
+                        {0, 0, 1082, 1922},
+                        {0, 0, 1082, 1922}},
+                new long[] {2_000L, 2_200L, 2_400L}),
+                "persistent +2 geometry did not fail at the sample cap");
+        require(!Fixed42MainGeometryPolicy.mayReacquire(3, 1_000L, 2_400L, 45_000L),
+                "third mismatch sample admitted another reacquisition");
+        require(!Fixed42MainGeometryPolicy.mayReacquire(1, 1_000L, 46_000L, 45_000L),
+                "deadline equality admitted another observation");
+        require(Fixed42MainGeometryPolicy.remainingMs(1_000L, 2_000L, 45_000L) == 44_000L,
+                "remaining time reset from the original start");
+        require(Fixed42MainGeometryPolicy.elapsedMs(2_000L, 1_000L) == -1L,
+                "non-monotonic time was not rejected diagnostically");
+        reject(() -> Fixed42MainGeometryPolicy.mayReacquire(0, 1_000L, 2_000L, 45_000L),
+                "zero mismatch samples were admitted");
+        reject(() -> Fixed42MainGeometryPolicy.mayReacquire(4, 1_000L, 2_000L, 45_000L),
+                "unbounded mismatch samples were admitted");
+        System.out.println("fixed42-main-geometry-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-main-geometry-policy-"));
+  const sourceFile = path.join(directory, "Fixed42MainGeometryPolicyHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `fixed42 main geometry policy javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand, ["-cp", directory, "Fixed42MainGeometryPolicyHarness"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, `fixed42 main geometry policy harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-main-geometry-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function fixed42FinalClickDeadlineContract(java) {
   assert.match(
     java,
@@ -2637,33 +2865,138 @@ test("fixed42 launcher timeout emits one failure-only primitive diagnostic", () 
   }
 });
 
-test("fixed42 main-content proof logs bounded primitive predicates only on failure", () => {
+test("fixed42-to61 geometry-only mismatch reacquires raw exact bounds without input", () => {
   fixed42MainProofDiagnosticContract(source);
+  fixed42MainGeometryReacquisitionContract(source);
 
   const mutants = [
-    ["always-log", source.replace(
-      "if (!(mainIdentityMatches && boundsMatch)) {",
-      "if (true) {",
+    ["identity-retry", source.replace(
+      `assertTrue("Fixed42-to61 main-content identity changed",
+                        mainIdentityMatches);`,
+      `assertTrue("Fixed42-to61 main-content identity changed",
+                        true);`,
     )],
-    ["visible-relaxed", source.replace(
-      "                    && visible\n                    && scrollable",
-      "                    && scrollable",
+    ["old59-retry", source.replace(
+      "if (!isFixed42To61AutomaticMode()) {",
+      "if (false) {",
     )],
-    ["clickable-inverted", source.replace("                    && !clickable", "                    && clickable")],
-    ["raw-package", source.replace(
-      '" packageMatch=" + packageMatch',
-      '" packageMatch=" + main.packageName',
+    ["action-on-mismatch", source.replace(
+      "                mainGeometryMismatchSamples++;",
+      "                completedActions++;\n                mainGeometryMismatchSamples++;",
     )],
-    ["bounds-relaxed", source.replace(
-      "                    mainIdentityMatches && boundsMatch);",
-      "                    mainIdentityMatches);",
+    ["clipped-eligibility", source.replace(
+      "boolean boundsMatch = main.bounds.equals(expectedMainBounds);",
+      "boolean boundsMatch = main.getVisibleBounds().equals(expectedMainBounds);",
+    )],
+    ["clamped-eligibility", source.replace(
+      "boolean boundsMatch = main.bounds.equals(expectedMainBounds);",
+      `boolean boundsMatch = main.bounds.left == 0 && main.bounds.top == 0
+                    && Math.min(main.bounds.right, width) == width
+                    && Math.min(main.bounds.bottom, height) == height;`,
     )],
   ];
   for (const [label, mutant] of mutants) {
-    assert.notEqual(mutant, source, `fixed42 main proof ${label} mutant anchor was absent`);
+    assert.notEqual(mutant, source, `fixed42 geometry ${label} mutant anchor was absent`);
     assert.throws(
-      () => fixed42MainProofDiagnosticContract(mutant),
-      `fixed42 main proof ${label} mutant survived`,
+      () => fixed42MainGeometryReacquisitionContract(mutant),
+      `fixed42 geometry ${label} mutant survived`,
+    );
+  }
+});
+
+test("fixed42-to61 raw geometry policy executes transient persistent and deadline cases", () => {
+  runFixed42MainGeometryPolicyHarness(source);
+  const geometryPolicy = nestedClassDeclaration(source, "Fixed42MainGeometryPolicy");
+  const mutateGeometryPolicy = (from, to) => {
+    const changedPolicy = geometryPolicy.replace(from, to);
+    assert.notEqual(changedPolicy, geometryPolicy, "fixed42 geometry policy mutant anchor was absent");
+    return source.replace(geometryPolicy, changedPolicy);
+  };
+
+  const mutants = [
+    ["two-pixel-tolerance", mutateGeometryPolicy(
+      `&& right == displayWidth
+                    && bottom == displayHeight`,
+      `&& right <= displayWidth + 2
+                    && bottom == displayHeight`,
+    )],
+    ["two-pixel-height-tolerance", mutateGeometryPolicy(
+      "&& bottom == displayHeight",
+      "&& bottom <= displayHeight + 2",
+    )],
+    ["sample-cap", mutateGeometryPolicy(
+      "mismatchSamples < FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT",
+      "mismatchSamples <= FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT",
+    )],
+    ["deadline-equality", mutateGeometryPolicy(
+      "now - startedAt < boundMs",
+      "now - startedAt <= boundMs",
+    )],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, source, `fixed42 geometry policy ${label} anchor was absent`);
+    assert.throws(
+      () => runFixed42MainGeometryPolicyHarness(mutant),
+      `fixed42 geometry policy ${label} mutant survived`,
+    );
+  }
+});
+
+test("fixed42-to61 geometry retries retain full guards recycling and numeric diagnostics", () => {
+  fixed42MainGeometryReacquisitionContract(source);
+
+  const mutants = [
+    ["recycle", source.replace(
+      "if (!transferred) fixed42RecycleNodes(owned);",
+      "if (!transferred) owned.clear();",
+    )],
+    ["early-retry", source.replace(
+      `            Fixed42SeedPolicy.phase(observation);
+            if (mainGeometryDiagnostic != null) {`,
+      `            if (mainGeometryDiagnostic != null) {
+                throw new Fixed42MainGeometryMismatch(mainGeometryDiagnostic);
+            }
+            Fixed42SeedPolicy.phase(observation);
+            if (false) {`,
+    )],
+    ["terms", source.replace(
+      "            assertNoBindingTerms();\n            Fixed42ReadyProof ready = null;",
+      "            Fixed42ReadyProof ready = null;",
+    )],
+    ["null-child", source.replace(
+      'assertNotNull("Fixed42 seed snapshot returned a null child", child);',
+      "if (child == null) continue;",
+    )],
+    ["child-cap", source.replace(
+      "childCount >= 0 && childCount <= FIXED42_SEED_AX_CHILD_LIMIT",
+      "childCount >= 0",
+    )],
+    ["node-cap", source.replace(
+      "owned.size() < FIXED42_SEED_AX_NODE_LIMIT",
+      "true",
+    )],
+    ["main-ambiguity", source.replace(
+      'int mainIndex = fixed42UniqueResource(nodes, "main-content");',
+      "int mainIndex = 0;",
+    )],
+    ["deadline-reset", source.replace(
+      `                                mainGeometryMismatchSamples,
+                                startedAt,
+                                observedAt,`,
+      `                                mainGeometryMismatchSamples,
+                                observedAt,
+                                observedAt,`,
+    )],
+    ["visible-bounds", source.replace(
+      "main.getBoundsInWindow(mainWindowBounds);",
+      "main.getBoundsInWindow(mainWindowBounds);\n        main.getVisibleBounds();",
+    )],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, source, `fixed42 geometry guard ${label} anchor was absent`);
+    assert.throws(
+      () => fixed42MainGeometryReacquisitionContract(mutant),
+      `fixed42 geometry guard ${label} mutant survived`,
     );
   }
 });

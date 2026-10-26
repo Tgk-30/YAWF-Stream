@@ -17,6 +17,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -132,6 +133,8 @@ public final class RuntimeOtaFlowTest {
     private static final int FIXED42_SEED_SCROLL_ACTION_LIMIT = 16;
     private static final long FIXED42_SEED_SCROLL_BOUND_MS = 45_000L;
     private static final long FIXED42_SEED_SCROLL_SETTLE_MS = 600L;
+    private static final int FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT = 3;
+    private static final long FIXED42_TO61_MAIN_GEOMETRY_RETRY_MS = 200L;
     private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
     private static final int FIXED42_SEED_AX_CHILD_LIMIT = 128;
     private static final int FIXED42_LAUNCHER_ANCESTOR_LIMIT = 16;
@@ -1269,6 +1272,7 @@ public final class RuntimeOtaFlowTest {
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
         long startedAt = SystemClock.uptimeMillis();
         int completedActions = 0;
+        int mainGeometryMismatchSamples = 0;
         int priorActionPhase = -1;
         Fixed42SeedPolicy.Observation beforeAction = null;
 
@@ -1327,6 +1331,25 @@ public final class RuntimeOtaFlowTest {
                     log("Performed fixed42 seed scroll action=" + completedActions
                             + " phase=" + Fixed42SeedPolicy.phaseName(phase));
                 }
+            } catch (Fixed42MainGeometryMismatch mismatch) {
+                assertTrue("Main geometry reacquisition is restricted to fixed42-to61",
+                        isFixed42To61AutomaticMode());
+                mainGeometryMismatchSamples++;
+                long observedAt = SystemClock.uptimeMillis();
+                log(mismatch.diagnostic.line(
+                        mainGeometryMismatchSamples,
+                        Fixed42MainGeometryPolicy.elapsedMs(startedAt, observedAt)));
+                assertTrue("Fixed42-to61 main-content raw geometry remained inexact",
+                        Fixed42MainGeometryPolicy.mayReacquire(
+                                mainGeometryMismatchSamples,
+                                startedAt,
+                                observedAt,
+                                FIXED42_SEED_SCROLL_BOUND_MS));
+                long remainingMs = Fixed42MainGeometryPolicy.remainingMs(
+                        startedAt, observedAt, FIXED42_SEED_SCROLL_BOUND_MS);
+                SystemClock.sleep(Math.min(
+                        FIXED42_TO61_MAIN_GEOMETRY_RETRY_MS, remainingMs));
+                continue;
             }
 
             if (ready != null) {
@@ -1421,24 +1444,47 @@ public final class RuntimeOtaFlowTest {
                     && scrollable
                     && !clickable
                     && enabled;
-            if (!(mainIdentityMatches && boundsMatch)) {
-                log("Fixed42 main-content proof failed"
-                        + " packageMatch=" + packageMatch
-                        + " classMatch=" + classMatch
-                        + " visible=" + visible
-                        + " scrollable=" + scrollable
-                        + " clickable=" + clickable
-                        + " enabled=" + enabled
-                        + " boundsMatch=" + boundsMatch
-                        + " rawLeft=" + main.bounds.left
-                        + " rawTop=" + main.bounds.top
-                        + " rawRight=" + main.bounds.right
-                        + " rawBottom=" + main.bounds.bottom
-                        + " expectedWidth=" + width
-                        + " expectedHeight=" + height);
-            }
-            assertTrue("Fixed42 main-content identity changed",
+            if (!isFixed42To61AutomaticMode()) {
+                if (!(mainIdentityMatches && boundsMatch)) {
+                    log("Fixed42 main-content proof failed"
+                            + " packageMatch=" + packageMatch
+                            + " classMatch=" + classMatch
+                            + " visible=" + visible
+                            + " scrollable=" + scrollable
+                            + " clickable=" + clickable
+                            + " enabled=" + enabled
+                            + " boundsMatch=" + boundsMatch
+                            + " rawLeft=" + main.bounds.left
+                            + " rawTop=" + main.bounds.top
+                            + " rawRight=" + main.bounds.right
+                            + " rawBottom=" + main.bounds.bottom
+                            + " expectedWidth=" + width
+                            + " expectedHeight=" + height);
+                }
+                assertTrue("Fixed42 main-content identity changed",
                     mainIdentityMatches && boundsMatch);
+            } else {
+                assertTrue("Fixed42-to61 main-content identity changed",
+                        mainIdentityMatches);
+                assertEquals("Fixed42-to61 raw bounds policies diverged",
+                        boundsMatch,
+                        Fixed42MainGeometryPolicy.isExactRawBounds(
+                                main.bounds.left,
+                                main.bounds.top,
+                                main.bounds.right,
+                                main.bounds.bottom,
+                                width,
+                                height));
+            }
+            Fixed42MainGeometryDiagnostic mainGeometryDiagnostic = boundsMatch
+                    ? null
+                    : captureFixed42MainGeometryDiagnostic(
+                            root,
+                            main.info,
+                            nodes.get(0).bounds,
+                            main.bounds,
+                            width,
+                            height);
 
             int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);
             Fixed42AxNode discover = nodes.get(discoverIndex);
@@ -1521,6 +1567,9 @@ public final class RuntimeOtaFlowTest {
                     verticalTops,
                     cardLefts);
             Fixed42SeedPolicy.phase(observation);
+            if (mainGeometryDiagnostic != null) {
+                throw new Fixed42MainGeometryMismatch(mainGeometryDiagnostic);
+            }
             Fixed42SeedSnapshot snapshot = new Fixed42SeedSnapshot(
                     owned,
                     main.info,
@@ -1797,6 +1846,51 @@ public final class RuntimeOtaFlowTest {
         if (bounds == null) return "absent";
         return "[" + bounds.left + "," + bounds.top + ","
                 + bounds.right + "," + bounds.bottom + "]";
+    }
+
+    private static Fixed42MainGeometryDiagnostic captureFixed42MainGeometryDiagnostic(
+            AccessibilityNodeInfo root,
+            AccessibilityNodeInfo main,
+            Rect rootScreenBounds,
+            Rect mainScreenBounds,
+            int displayWidth,
+            int displayHeight) {
+        Rect rootWindowBounds = new Rect();
+        Rect mainWindowBounds = new Rect();
+        root.getBoundsInWindow(rootWindowBounds);
+        main.getBoundsInWindow(mainWindowBounds);
+        Rect accessibilityWindowBounds = new Rect(
+                Integer.MIN_VALUE,
+                Integer.MIN_VALUE,
+                Integer.MIN_VALUE,
+                Integer.MIN_VALUE);
+        int accessibilityWindowPresent = 0;
+        int accessibilityWindowDisplayId = -1;
+        int accessibilityWindowId = -1;
+        AccessibilityWindowInfo window = main.getWindow();
+        if (window != null) {
+            try {
+                accessibilityWindowPresent = 1;
+                accessibilityWindowDisplayId = window.getDisplayId();
+                accessibilityWindowId = window.getId();
+                window.getBoundsInScreen(accessibilityWindowBounds);
+            } finally {
+                window.recycle();
+            }
+        }
+        return new Fixed42MainGeometryDiagnostic(
+                rootScreenBounds,
+                rootWindowBounds,
+                mainScreenBounds,
+                mainWindowBounds,
+                accessibilityWindowBounds,
+                displayWidth,
+                displayHeight,
+                root.getWindowId(),
+                main.getWindowId(),
+                accessibilityWindowPresent,
+                accessibilityWindowDisplayId,
+                accessibilityWindowId);
     }
 
     private static void fixed42RecycleNodes(List<AccessibilityNodeInfo> nodes) {
@@ -3898,6 +3992,49 @@ public final class RuntimeOtaFlowTest {
         }
     }
 
+    private static final class Fixed42MainGeometryPolicy {
+        static boolean isExactRawBounds(
+                int left,
+                int top,
+                int right,
+                int bottom,
+                int displayWidth,
+                int displayHeight) {
+            return displayWidth > 0
+                    && displayHeight > 0
+                    && left == 0
+                    && top == 0
+                    && right == displayWidth
+                    && bottom == displayHeight;
+        }
+
+        static boolean mayReacquire(
+                int mismatchSamples,
+                long startedAt,
+                long now,
+                long boundMs) {
+            if (mismatchSamples <= 0
+                    || mismatchSamples > FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT
+                    || startedAt < 0L
+                    || now < startedAt
+                    || boundMs <= 0L) {
+                throw new AssertionError("Fixed42-to61 geometry retry inputs were invalid");
+            }
+            return mismatchSamples < FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT
+                    && now - startedAt < boundMs;
+        }
+
+        static long elapsedMs(long startedAt, long now) {
+            return startedAt >= 0L && now >= startedAt ? now - startedAt : -1L;
+        }
+
+        static long remainingMs(long startedAt, long now, long boundMs) {
+            long elapsed = elapsedMs(startedAt, now);
+            if (elapsed < 0L || boundMs <= 0L || elapsed >= boundMs) return 0L;
+            return boundMs - elapsed;
+        }
+    }
+
     private static final class Fixed42SeedPolicy {
         static final int ABSENT = Integer.MIN_VALUE;
         static final int PHASE_VERTICAL = 0;
@@ -4119,6 +4256,76 @@ public final class RuntimeOtaFlowTest {
 
         private static String joinCounts(int[] counts) {
             return counts[0] + "/" + counts[1] + "/" + counts[2] + "/" + counts[3];
+        }
+    }
+
+    private static final class Fixed42MainGeometryDiagnostic {
+        final Rect rootScreenBounds;
+        final Rect rootWindowBounds;
+        final Rect mainScreenBounds;
+        final Rect mainWindowBounds;
+        final Rect accessibilityWindowBounds;
+        final int displayWidth;
+        final int displayHeight;
+        final int rootWindowId;
+        final int mainWindowId;
+        final int accessibilityWindowPresent;
+        final int accessibilityWindowDisplayId;
+        final int accessibilityWindowId;
+
+        Fixed42MainGeometryDiagnostic(
+                Rect rootScreenBounds,
+                Rect rootWindowBounds,
+                Rect mainScreenBounds,
+                Rect mainWindowBounds,
+                Rect accessibilityWindowBounds,
+                int displayWidth,
+                int displayHeight,
+                int rootWindowId,
+                int mainWindowId,
+                int accessibilityWindowPresent,
+                int accessibilityWindowDisplayId,
+                int accessibilityWindowId) {
+            this.rootScreenBounds = new Rect(rootScreenBounds);
+            this.rootWindowBounds = new Rect(rootWindowBounds);
+            this.mainScreenBounds = new Rect(mainScreenBounds);
+            this.mainWindowBounds = new Rect(mainWindowBounds);
+            this.accessibilityWindowBounds = new Rect(accessibilityWindowBounds);
+            this.displayWidth = displayWidth;
+            this.displayHeight = displayHeight;
+            this.rootWindowId = rootWindowId;
+            this.mainWindowId = mainWindowId;
+            this.accessibilityWindowPresent = accessibilityWindowPresent;
+            this.accessibilityWindowDisplayId = accessibilityWindowDisplayId;
+            this.accessibilityWindowId = accessibilityWindowId;
+        }
+
+        String line(int sample, long elapsedMs) {
+            return "Fixed42-to61 main geometry mismatch sample=" + sample
+                    + " elapsedMs=" + elapsedMs
+                    + " display=" + displayWidth + ',' + displayHeight
+                    + " rootScreen=" + rect(rootScreenBounds)
+                    + " rootWindow=" + rect(rootWindowBounds)
+                    + " mainScreen=" + rect(mainScreenBounds)
+                    + " mainWindow=" + rect(mainWindowBounds)
+                    + " axWindow=" + accessibilityWindowPresent + ','
+                    + accessibilityWindowDisplayId + ',' + accessibilityWindowId + ','
+                    + rect(accessibilityWindowBounds)
+                    + " nodeWindowIds=" + rootWindowId + ',' + mainWindowId;
+        }
+
+        private static String rect(Rect value) {
+            return value.left + "," + value.top + ","
+                    + value.right + "," + value.bottom;
+        }
+    }
+
+    private static final class Fixed42MainGeometryMismatch extends RuntimeException {
+        final Fixed42MainGeometryDiagnostic diagnostic;
+
+        Fixed42MainGeometryMismatch(Fixed42MainGeometryDiagnostic diagnostic) {
+            super("Fixed42-to61 main-content raw geometry was inexact");
+            this.diagnostic = diagnostic;
         }
     }
 
