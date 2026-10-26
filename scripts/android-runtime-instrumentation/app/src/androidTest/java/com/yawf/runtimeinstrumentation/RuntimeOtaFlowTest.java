@@ -492,7 +492,9 @@ public final class RuntimeOtaFlowTest {
         waitFor(By.text("Enable Android update checks?"), UI_WAIT_MS,
                 "initial native update consent");
         capture("automatic-initial-consent");
-        if (isFixed42AutomaticMode()) {
+        if (isFixed42To61AutomaticMode()) {
+            enableAndCancelInitialFixed42To61CheckNoIdle();
+        } else if (isFixed42AutomaticMode()) {
             enableAndCancelInitialFixed42CheckNoIdle();
         } else {
             click(
@@ -649,6 +651,190 @@ public final class RuntimeOtaFlowTest {
             SystemClock.sleep(250);
         }
         fail("Initial manual cancellation did not settle");
+    }
+
+    private void enableAndCancelInitialFixed42To61CheckNoIdle() throws IOException {
+        assertTrue("Fused initial Cancel observer is restricted to fixed42-to61",
+                isFixed42To61AutomaticMode());
+        String progressTitle = "Checking for updates";
+        String progressMessage = "Checking the official YAWF Stream Android release channel.";
+        String[] progressTexts = {progressTitle, progressMessage};
+        String[] terminalTexts = {
+                "YAWF Stream is up to date",
+                "Update check unavailable",
+                "YAWF Stream " + admittedTargetVersion + " is available"
+        };
+        BySelector enableSelector = By.res("android", "button1")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.Button")
+                .text(Pattern.compile("\\AEnable\\z", Pattern.CASE_INSENSITIVE))
+                .clickable(true)
+                .enabled(true);
+        BySelector snapshotSelector =
+                fixed42To61InitialCancelSnapshotSelector(progressTexts, terminalTexts);
+        BySelector progressSelector = nativeDialogTextGroup(progressTexts);
+        BySelector terminalSelector = nativeDialogTextGroup(terminalTexts);
+        BySelector cancelSelector = By.res("android", "button2")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.Button")
+                .text(Pattern.compile("\\ACancel\\z", Pattern.CASE_INSENSITIVE))
+                .clickable(true)
+                .enabled(true);
+        Configurator configurator = Configurator.getInstance();
+        long previousIdleTimeout = configurator.getWaitForIdleTimeout();
+        long enableClickStartedUptimeMs = -1L;
+        long enableClickFinishedUptimeMs = -1L;
+        long snapshotStartedUptimeMs = -1L;
+        long snapshotFinishedUptimeMs = -1L;
+        long cancelClickStartedUptimeMs = -1L;
+        long cancelClickFinishedUptimeMs = -1L;
+        long checkingObservedUptimeMs = -1L;
+        long cancelSelectedUptimeMs = -1L;
+        long cancelSettledUptimeMs = -1L;
+        int snapshotAttempts = 0;
+        int staleSnapshots = 0;
+        boolean cancellationSettled = false;
+        configurator.setWaitForIdleTimeout(0L);
+        try {
+            assertTrue("Initial Enable cache could not be refreshed before safety guard",
+                    instrumentation.getUiAutomation().clearCache());
+            List<UiObject2> enables = device.findObjects(enableSelector);
+            assertEquals("Initial Enable was absent or ambiguous before safety guard",
+                    1, enables.size());
+            assertNoBindingTermsAtCurrentIdlePolicy();
+            assertTrue("Initial Enable cache could not be refreshed after safety guard",
+                    instrumentation.getUiAutomation().clearCache());
+            List<UiObject2> freshEnables = device.findObjects(enableSelector);
+            assertEquals("Initial Enable disappeared or became ambiguous after safety guard",
+                    1, freshEnables.size());
+            enableClickStartedUptimeMs = SystemClock.uptimeMillis();
+            try {
+                freshEnables.get(0).click();
+            } finally {
+                enableClickFinishedUptimeMs = SystemClock.uptimeMillis();
+            }
+            log("Selected one exact native Enable with UiAutomator idle waiting disabled");
+
+            long cancelDeadline = enableClickFinishedUptimeMs + SHORT_WAIT_MS;
+            while (SystemClock.uptimeMillis() < cancelDeadline) {
+                boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+                if (!cacheCleared) {
+                    long remaining = cancelDeadline - SystemClock.uptimeMillis();
+                    if (remaining > 0L) SystemClock.sleep(Math.min(100L, remaining));
+                    continue;
+                }
+                snapshotAttempts++;
+                snapshotStartedUptimeMs = SystemClock.uptimeMillis();
+                Fixed42To61ObservedCancelSnapshot snapshot;
+                try {
+                    snapshot = queryFixed42To61InitialCancelSnapshot(
+                            snapshotSelector, progressTexts, terminalTexts);
+                    snapshotFinishedUptimeMs = SystemClock.uptimeMillis();
+                } catch (StaleObjectException stale) {
+                    snapshotFinishedUptimeMs = SystemClock.uptimeMillis();
+                    staleSnapshots++;
+                    long remaining = cancelDeadline - snapshotFinishedUptimeMs;
+                    if (remaining > 0L) SystemClock.sleep(Math.min(100L, remaining));
+                    continue;
+                } catch (RuntimeException | AssertionError failure) {
+                    snapshotFinishedUptimeMs = SystemClock.uptimeMillis();
+                    throw failure;
+                }
+                snapshot.assertNoTerminalBeforeCancel();
+                if (!snapshot.isReadyToCancel()) {
+                    long remaining = cancelDeadline - SystemClock.uptimeMillis();
+                    if (remaining > 0L) SystemClock.sleep(Math.min(100L, remaining));
+                    continue;
+                }
+                initialEnableCheckingTitleObserved = true;
+                initialEnableCheckingMessageObserved = true;
+                initialEnableCancelObserved = true;
+                initialEnableTerminalResultExcludedBeforeCancel = true;
+                checkingObservedUptimeMs = snapshotFinishedUptimeMs;
+                cancelClickStartedUptimeMs = SystemClock.uptimeMillis();
+                Fixed42To61CancelSnapshotPolicy.assertWithinDeadline(
+                        cancelDeadline, cancelClickStartedUptimeMs);
+                initialEnableCancelSelections++;
+                assertEquals("Initial Enable Cancel must be selected exactly once",
+                        1, initialEnableCancelSelections);
+                try {
+                    snapshot.cancel.click();
+                } catch (StaleObjectException stale) {
+                    throw new AssertionError(
+                            "Initial Enable Cancel became stale during its sole selection", stale);
+                } finally {
+                    cancelClickFinishedUptimeMs = SystemClock.uptimeMillis();
+                }
+                cancelSelectedUptimeMs = cancelClickFinishedUptimeMs;
+                log("Selected one exact native Cancel from the fused initial Enable snapshot");
+                break;
+            }
+            assertTrue("Initial Enable did not expose one coherent exact CHECKING snapshot",
+                    initialEnableCheckingTitleObserved
+                            && initialEnableCheckingMessageObserved
+                            && initialEnableCancelObserved
+                            && initialEnableTerminalResultExcludedBeforeCancel);
+
+            long settleDeadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+            int settled = 0;
+            while (SystemClock.uptimeMillis() < settleDeadline) {
+                boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+                if (!cacheCleared) {
+                    settled = 0;
+                    SystemClock.sleep(100);
+                    continue;
+                }
+                Fixed42CriticalQueryGroupPolicy.Counts terminalCounts =
+                        queryFixed42CriticalTextGroup(
+                                terminalSelector, terminalTexts, "settled-terminal");
+                assertNoInitialEnableResultVisibleAfterCancel(terminalCounts);
+                Fixed42CriticalQueryGroupPolicy.Counts progressCounts =
+                        queryFixed42CriticalTextGroup(
+                                progressSelector, progressTexts, "settled-progress");
+                List<UiObject2> cancels = queryFixed42CriticalCancelGroup(
+                        cancelSelector, "settled-cancel");
+                boolean progressGone = Fixed42CriticalQueryGroupPolicy.isSettledAbsent(
+                        progressCounts, terminalCounts, cancels.size());
+                if (progressGone) {
+                    settled++;
+                    if (settled >= ABSENT_SETTLED_SAMPLES) {
+                        initialEnableSettledResultExclusionSamples = settled;
+                        initialEnableCancelWon = true;
+                        cancelSettledUptimeMs = SystemClock.uptimeMillis();
+                        cancellationSettled = true;
+                        break;
+                    }
+                } else {
+                    settled = 0;
+                }
+                SystemClock.sleep(100);
+            }
+        } finally {
+            configurator.setWaitForIdleTimeout(previousIdleTimeout);
+            recordFixed42To61InitialObserverTiming(
+                    enableClickStartedUptimeMs,
+                    enableClickFinishedUptimeMs,
+                    snapshotStartedUptimeMs,
+                    snapshotFinishedUptimeMs,
+                    cancelClickStartedUptimeMs,
+                    cancelClickFinishedUptimeMs,
+                    snapshotAttempts,
+                    staleSnapshots);
+        }
+        assertTrue("Initial Enable cancellation did not settle before a terminal result",
+                cancellationSettled);
+        assertTrue("Initial Enable timing observations were incomplete",
+                enableClickStartedUptimeMs >= 0L
+                        && enableClickFinishedUptimeMs >= enableClickStartedUptimeMs
+                        && checkingObservedUptimeMs >= enableClickFinishedUptimeMs
+                        && cancelSelectedUptimeMs >= checkingObservedUptimeMs
+                        && cancelSettledUptimeMs >= cancelSelectedUptimeMs);
+        log("Initial Enable no-idle timing checkingMs="
+                + (checkingObservedUptimeMs - enableClickFinishedUptimeMs)
+                + " cancelMs=" + (cancelSelectedUptimeMs - enableClickFinishedUptimeMs)
+                + " settledMs=" + (cancelSettledUptimeMs - enableClickFinishedUptimeMs));
+        capture("fixed42-initial-enable-cancel-settled");
+        log("Initial Enable check cancellation settled before any terminal result");
     }
 
     private void enableAndCancelInitialFixed42CheckNoIdle() throws IOException {
@@ -828,6 +1014,16 @@ public final class RuntimeOtaFlowTest {
         assertEquals("Initial Enable check returned failure before Cancel",
                 0, terminalCounts.count(1));
         assertEquals("Initial Enable check returned target offer before Cancel",
+                0, terminalCounts.count(2));
+    }
+
+    private void assertNoInitialEnableResultVisibleAfterCancel(
+            Fixed42CriticalQueryGroupPolicy.Counts terminalCounts) {
+        assertEquals("Initial Enable check returned up-to-date after Cancel selection",
+                0, terminalCounts.count(0));
+        assertEquals("Initial Enable check returned failure after Cancel selection",
+                0, terminalCounts.count(1));
+        assertEquals("Initial Enable check returned target offer after Cancel selection",
                 0, terminalCounts.count(2));
     }
 
@@ -3218,6 +3414,205 @@ public final class RuntimeOtaFlowTest {
         }
     }
 
+    private static final class Fixed42To61CancelSnapshotPolicy {
+        static final String TEXT_VIEW_CLASS = "android.widget.TextView";
+        static final String BUTTON_CLASS = "android.widget.Button";
+        static final String CANCEL_RESOURCE = "android:id/button2";
+        static final String CANCEL_TEXT = "Cancel";
+        static final int MAX_CANDIDATES = 6;
+
+        private static final class Candidate {
+            final String packageName;
+            final String className;
+            final String resourceName;
+            final String text;
+            final boolean enabled;
+            final boolean clickable;
+
+            Candidate(
+                    String packageName,
+                    String className,
+                    String resourceName,
+                    String text,
+                    boolean enabled,
+                    boolean clickable) {
+                this.packageName = packageName;
+                this.className = className;
+                this.resourceName = resourceName;
+                this.text = text;
+                this.enabled = enabled;
+                this.clickable = clickable;
+            }
+        }
+
+        private static final class Snapshot {
+            private final int[] progressCounts;
+            private final int[] terminalCounts;
+            private final int cancelCount;
+            private final int cancelIndex;
+
+            Snapshot(
+                    int[] progressCounts,
+                    int[] terminalCounts,
+                    int cancelCount,
+                    int cancelIndex) {
+                this.progressCounts = progressCounts.clone();
+                this.terminalCounts = terminalCounts.clone();
+                this.cancelCount = cancelCount;
+                this.cancelIndex = cancelIndex;
+            }
+
+            boolean isReadyToCancel() {
+                return progressCounts[0] == 1
+                        && progressCounts[1] == 1
+                        && terminalTotal() == 0
+                        && cancelCount == 1;
+            }
+
+            void assertNoTerminalBeforeCancel() {
+                if (terminalTotal() != 0) {
+                    throw new AssertionError(
+                            "Fixed42-to61 terminal result won before Cancel selection");
+                }
+            }
+
+            int cancelIndex() {
+                return cancelIndex;
+            }
+
+            private int terminalTotal() {
+                int total = 0;
+                for (int count : terminalCounts) total += count;
+                return total;
+            }
+        }
+
+        static Pattern exactObservationPattern(
+                String[] progressTexts, String[] terminalTexts) {
+            validateExactTexts(progressTexts, 2);
+            validateExactTexts(terminalTexts, 3);
+            StringBuilder pattern = new StringBuilder("\\A(?:");
+            for (int index = 0; index < progressTexts.length; index++) {
+                if (index > 0) pattern.append('|');
+                pattern.append(Pattern.quote(progressTexts[index]));
+            }
+            for (int index = 0; index < terminalTexts.length; index++) {
+                pattern.append('|').append(Pattern.quote(terminalTexts[index]));
+            }
+            pattern.append('|').append("(?i:")
+                    .append(Pattern.quote(CANCEL_TEXT)).append(")");
+            return Pattern.compile(pattern.append(")\\z").toString());
+        }
+
+        static void assertCandidateCount(int count) {
+            if (count < 0 || count > MAX_CANDIDATES) {
+                throw new AssertionError("Fixed42-to61 snapshot exceeded its total bound");
+            }
+        }
+
+        static Snapshot classify(
+                String expectedPackage,
+                String[] progressTexts,
+                String[] terminalTexts,
+                Candidate... candidates) {
+            validateExactTexts(progressTexts, 2);
+            validateExactTexts(terminalTexts, 3);
+            if (expectedPackage == null || candidates == null) {
+                throw new AssertionError("Fixed42-to61 snapshot inputs were incomplete");
+            }
+            assertCandidateCount(candidates.length);
+            int[] progressCounts = new int[progressTexts.length];
+            int[] terminalCounts = new int[terminalTexts.length];
+            int cancelCount = 0;
+            int cancelIndex = -1;
+            for (int candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+                Candidate candidate = candidates[candidateIndex];
+                if (candidate == null || !expectedPackage.equals(candidate.packageName)) {
+                    throw new AssertionError(
+                            "Fixed42-to61 snapshot escaped its exact product package");
+                }
+                int progressIndex = exactIndex(progressTexts, candidate.text);
+                if (progressIndex >= 0) {
+                    requireTextView(candidate);
+                    progressCounts[progressIndex]++;
+                    continue;
+                }
+                int terminalIndex = exactIndex(terminalTexts, candidate.text);
+                if (terminalIndex >= 0) {
+                    requireTextView(candidate);
+                    terminalCounts[terminalIndex]++;
+                    continue;
+                }
+                if (candidate.text != null
+                        && CANCEL_TEXT.equalsIgnoreCase(candidate.text)) {
+                    if (!BUTTON_CLASS.equals(candidate.className)
+                            || !CANCEL_RESOURCE.equals(candidate.resourceName)
+                            || !candidate.enabled
+                            || !candidate.clickable) {
+                        throw new AssertionError(
+                                "Fixed42-to61 Cancel escaped its exact native identity");
+                    }
+                    cancelCount++;
+                    cancelIndex = candidateIndex;
+                    continue;
+                }
+                throw new AssertionError("Fixed42-to61 snapshot returned an inexact name");
+            }
+            requireAtMostOneEach(progressCounts);
+            requireAtMostOneEach(terminalCounts);
+            if (cancelCount > 1) {
+                throw new AssertionError("Fixed42-to61 Cancel snapshot was ambiguous");
+            }
+            return new Snapshot(progressCounts, terminalCounts, cancelCount, cancelIndex);
+        }
+
+        static void assertWithinDeadline(long deadlineUptimeMs, long nowUptimeMs) {
+            if (deadlineUptimeMs <= 0L
+                    || nowUptimeMs < 0L
+                    || nowUptimeMs >= deadlineUptimeMs) {
+                throw new AssertionError("Fixed42-to61 Cancel observation deadline expired");
+            }
+        }
+
+        private static int exactIndex(String[] exactTexts, String text) {
+            for (int index = 0; index < exactTexts.length; index++) {
+                if (exactTexts[index].equals(text)) return index;
+            }
+            return -1;
+        }
+
+        private static void requireTextView(Candidate candidate) {
+            if (!TEXT_VIEW_CLASS.equals(candidate.className)) {
+                throw new AssertionError(
+                        "Fixed42-to61 progress or terminal node changed class");
+            }
+        }
+
+        private static void requireAtMostOneEach(int[] counts) {
+            for (int count : counts) {
+                if (count > 1) {
+                    throw new AssertionError("Fixed42-to61 snapshot was ambiguous");
+                }
+            }
+        }
+
+        private static void validateExactTexts(String[] exactTexts, int expectedLength) {
+            if (exactTexts == null || exactTexts.length != expectedLength) {
+                throw new AssertionError("Fixed42-to61 exact-name shape changed");
+            }
+            for (int index = 0; index < exactTexts.length; index++) {
+                if (exactTexts[index] == null || exactTexts[index].isEmpty()) {
+                    throw new AssertionError("Fixed42-to61 exact name was empty");
+                }
+                for (int prior = 0; prior < index; prior++) {
+                    if (exactTexts[index].equals(exactTexts[prior])) {
+                        throw new AssertionError("Fixed42-to61 exact names were duplicated");
+                    }
+                }
+            }
+        }
+    }
+
     private static final class Fixed42CriticalQueryGroupPolicy {
         static final String TEXT_VIEW_CLASS = "android.widget.TextView";
 
@@ -4396,6 +4791,80 @@ public final class RuntimeOtaFlowTest {
         return By.text(Fixed42CriticalQueryGroupPolicy.exactTextPattern(exactTexts))
                 .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
                 .clazz(Fixed42CriticalQueryGroupPolicy.TEXT_VIEW_CLASS);
+    }
+
+    private BySelector fixed42To61InitialCancelSnapshotSelector(
+            String[] progressTexts, String[] terminalTexts) {
+        return By.text(Fixed42To61CancelSnapshotPolicy.exactObservationPattern(
+                        progressTexts, terminalTexts))
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE);
+    }
+
+    private static final class Fixed42To61ObservedCancelSnapshot {
+        final Fixed42To61CancelSnapshotPolicy.Snapshot classified;
+        final UiObject2 cancel;
+
+        Fixed42To61ObservedCancelSnapshot(
+                Fixed42To61CancelSnapshotPolicy.Snapshot classified,
+                UiObject2 cancel) {
+            this.classified = classified;
+            this.cancel = cancel;
+        }
+
+        void assertNoTerminalBeforeCancel() {
+            classified.assertNoTerminalBeforeCancel();
+        }
+
+        boolean isReadyToCancel() {
+            return classified.isReadyToCancel() && cancel != null;
+        }
+    }
+
+    private Fixed42To61ObservedCancelSnapshot queryFixed42To61InitialCancelSnapshot(
+            BySelector selector, String[] progressTexts, String[] terminalTexts) {
+        List<UiObject2> matches = device.findObjects(selector);
+        Fixed42To61CancelSnapshotPolicy.assertCandidateCount(matches.size());
+        Fixed42To61CancelSnapshotPolicy.Candidate[] candidates =
+                new Fixed42To61CancelSnapshotPolicy.Candidate[matches.size()];
+        for (int index = 0; index < matches.size(); index++) {
+            UiObject2 match = matches.get(index);
+            CharSequence text = match.getText();
+            candidates[index] = new Fixed42To61CancelSnapshotPolicy.Candidate(
+                    match.getApplicationPackage(),
+                    match.getClassName(),
+                    match.getResourceName(),
+                    text == null ? null : text.toString(),
+                    match.isEnabled(),
+                    match.isClickable());
+        }
+        Fixed42To61CancelSnapshotPolicy.Snapshot classified =
+                Fixed42To61CancelSnapshotPolicy.classify(
+                        OtaFlowPolicy.PRODUCT_PACKAGE,
+                        progressTexts,
+                        terminalTexts,
+                        candidates);
+        int cancelIndex = classified.cancelIndex();
+        UiObject2 cancel = cancelIndex < 0 ? null : matches.get(cancelIndex);
+        return new Fixed42To61ObservedCancelSnapshot(classified, cancel);
+    }
+
+    private void recordFixed42To61InitialObserverTiming(
+            long enableStart,
+            long enableFinish,
+            long snapshotStart,
+            long snapshotFinish,
+            long cancelClickStart,
+            long cancelClickFinish,
+            int snapshotAttempts,
+            int staleSnapshots) {
+        log("Fixed42-to61 initial observer timing enableStartUptimeMs=" + enableStart
+                + " enableFinishUptimeMs=" + enableFinish
+                + " snapshotStartUptimeMs=" + snapshotStart
+                + " snapshotFinishUptimeMs=" + snapshotFinish
+                + " cancelClickStartUptimeMs=" + cancelClickStart
+                + " cancelClickFinishUptimeMs=" + cancelClickFinish
+                + " snapshotAttempts=" + snapshotAttempts
+                + " staleSnapshots=" + staleSnapshots);
     }
 
     private Fixed42CriticalQueryGroupPolicy.Counts queryFixed42CriticalTextGroup(

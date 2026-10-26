@@ -77,6 +77,12 @@ function rejectMutation(body, original, replacement, contract) {
   assert.throws(() => contract(body.replace(original, replacement)));
 }
 
+function replaceLast(body, original, replacement) {
+  const index = body.lastIndexOf(original);
+  assert.notEqual(index, -1, `mutation anchor is missing: ${original}`);
+  return body.slice(0, index) + replacement + body.slice(index + original.length);
+}
+
 function initialEnableContract(body) {
   for (const token of [
     "Configurator.getInstance()",
@@ -902,19 +908,20 @@ test("fixed critical interval enters zero-idle before Enable and captures only a
   assert.notEqual(genericClickMutant, source, "generic click mutant anchor was absent");
   assert.throws(() => fixedCriticalIntervalContract(genericClickMutant));
 
-  const movedZeroIdleMutant = source
-    .replace(
+  const movedZeroIdleMutant = replaceLast(
+    replaceLast(
+      source,
       "configurator.setWaitForIdleTimeout(0L);\n        try {",
       "try {",
-    )
-    .replace(
+    ),
       "freshEnables.get(0).click();",
       "freshEnables.get(0).click();\n            configurator.setWaitForIdleTimeout(0L);",
-    );
+  );
   assert.notEqual(movedZeroIdleMutant, source, "late zero-idle mutant anchor was absent");
   assert.throws(() => fixedCriticalIntervalContract(movedZeroIdleMutant));
 
-  const preCancelCaptureMutant = source.replace(
+  const preCancelCaptureMutant = replaceLast(
+    source,
     "freshEnables.get(0).click();",
     'freshEnables.get(0).click();\n            capture("mutant-before-cancel");',
   );
@@ -925,7 +932,8 @@ test("fixed critical interval enters zero-idle before Enable and captures only a
 test("fixed42 critical observer uses exact grouped progress and terminal queries before fresh Cancel", () => {
   fixed42CriticalQueryGroupContract(source);
 
-  const splitTerminalQuery = source.replace(
+  const splitTerminalQuery = replaceLast(
+    source,
     "BySelector terminalSelector = nativeDialogTextGroup(terminalTexts);",
     'BySelector terminalSelector = nativeDialogText("YAWF Stream is up to date");',
   );

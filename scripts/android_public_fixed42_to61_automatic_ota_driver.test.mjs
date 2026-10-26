@@ -180,6 +180,12 @@ function rejectMutation(body, original, replacement, contract) {
   assert.throws(() => contract(body.replace(original, replacement)));
 }
 
+function replaceLast(body, original, replacement) {
+  const index = body.lastIndexOf(original);
+  assert.notEqual(index, -1, `mutation anchor is missing: ${original}`);
+  return body.slice(0, index) + replacement + body.slice(index + original.length);
+}
+
 function initialEnableContract(body) {
   for (const token of [
     "Configurator.getInstance()",
@@ -329,7 +335,8 @@ function fixed42CriticalQueryGroupContract(java) {
     "expectedClass.equals(candidate.className)",
     "exactTexts[index].equals(candidate.text)",
     "requireTerminalAbsent(terminalCounts)",
-    "cancelCount != 1",
+    "cancelCount == 1",
+    "cancelCount > 1",
   ]) need(policy, token, `fixed42 exact grouped-query policy lost ${token}`);
   for (const [index, label] of [
     [0, "up-to-date"],
@@ -376,6 +383,307 @@ function fixed42CriticalTimingContract(java) {
     'receipt.put("initialEnableQueryGroupTimingLimit",',
     "MAX_INITIAL_ENABLE_QUERY_TIMINGS",
   ]) need(receipt, token, `fixed42 timing receipt lost ${token}`);
+}
+
+function fixed42To61FusedCancelObserverContract(java) {
+  const run = methodBody(java, "runAutomaticFlow");
+  const to61Branch = run.indexOf("if (isFixed42To61AutomaticMode()) {");
+  const to61Call = run.indexOf("enableAndCancelInitialFixed42To61CheckNoIdle()", to61Branch);
+  const legacyBranch = run.indexOf("} else if (isFixed42AutomaticMode()) {", to61Call);
+  const legacyCall = run.indexOf("enableAndCancelInitialFixed42CheckNoIdle()", legacyBranch);
+  const genericBranch = run.indexOf("} else {", legacyCall);
+  assert.ok(to61Branch >= 0 && to61Branch < to61Call && to61Call < legacyBranch
+    && legacyBranch < legacyCall && legacyCall < genericBranch,
+  "fixed42-to61 fused observer is not isolated from the frozen fixed42-to59 path");
+
+  const critical = methodBody(java, "enableAndCancelInitialFixed42To61CheckNoIdle");
+  const selector = methodBody(java, "fixed42To61InitialCancelSnapshotSelector");
+  const query = methodBody(java, "queryFixed42To61InitialCancelSnapshot");
+  const timing = methodBody(java, "recordFixed42To61InitialObserverTiming");
+  const noResultAfter = methodBody(java, "assertNoInitialEnableResultVisibleAfterCancel");
+  const policy = nestedClassDeclaration(java, "Fixed42To61CancelSnapshotPolicy");
+
+  for (const token of [
+    "isFixed42To61AutomaticMode()",
+    "Configurator.getInstance()",
+    "configurator.setWaitForIdleTimeout(0L)",
+    'By.res("android", "button1")',
+    'Pattern.compile("\\\\AEnable\\\\z", Pattern.CASE_INSENSITIVE)',
+    "assertNoBindingTermsAtCurrentIdlePolicy()",
+    "freshEnables.get(0).click()",
+    "long cancelDeadline = enableClickFinishedUptimeMs + SHORT_WAIT_MS",
+    "instrumentation.getUiAutomation().clearCache()",
+    "queryFixed42To61InitialCancelSnapshot(",
+    "snapshot.assertNoTerminalBeforeCancel()",
+    "snapshot.isReadyToCancel()",
+    "Fixed42To61CancelSnapshotPolicy.assertWithinDeadline(",
+    "initialEnableCancelSelections++",
+    'assertEquals("Initial Enable Cancel must be selected exactly once"',
+    "snapshot.cancel.click()",
+    "catch (StaleObjectException stale)",
+    '"Initial Enable Cancel became stale during its sole selection", stale)',
+    "assertNoInitialEnableResultVisibleAfterCancel(terminalCounts)",
+    "initialEnableSettledResultExclusionSamples = settled",
+    "initialEnableCancelWon = true",
+    "recordFixed42To61InitialObserverTiming(",
+    "configurator.setWaitForIdleTimeout(previousIdleTimeout)",
+    'capture("fixed42-initial-enable-cancel-settled")',
+  ]) need(critical, token, `fixed42-to61 fused observer lost ${token}`);
+  assert.equal((critical.match(/snapshot\.cancel\.click\(\)/g) ?? []).length, 1,
+    "fixed42-to61 must issue exactly one Cancel input");
+  assert.equal((critical.match(/queryFixed42To61InitialCancelSnapshot\(/g) ?? []).length, 1,
+    "fixed42-to61 pre-action loop must use one coherent snapshot call site");
+  const zeroIdle = critical.indexOf("configurator.setWaitForIdleTimeout(0L)");
+  const enable = critical.indexOf("freshEnables.get(0).click()");
+  const clear = critical.indexOf("instrumentation.getUiAutomation().clearCache()", enable);
+  const observe = critical.indexOf("queryFixed42To61InitialCancelSnapshot(", clear);
+  const terminal = critical.indexOf("snapshot.assertNoTerminalBeforeCancel()", observe);
+  const ready = critical.indexOf("snapshot.isReadyToCancel()", terminal);
+  const deadline = critical.indexOf("Fixed42To61CancelSnapshotPolicy.assertWithinDeadline(", ready);
+  const select = critical.indexOf("initialEnableCancelSelections++", deadline);
+  const click = critical.indexOf("snapshot.cancel.click()", select);
+  const staleObservation = critical.indexOf("catch (StaleObjectException stale)", observe);
+  const staleObservationContinue = critical.indexOf("continue;", staleObservation);
+  const clickStale = critical.indexOf("catch (StaleObjectException stale)", click);
+  const clickStaleFailure = critical.indexOf(
+    '"Initial Enable Cancel became stale during its sole selection", stale)', clickStale,
+  );
+  assert.ok(zeroIdle >= 0 && zeroIdle < enable && enable < clear && clear < observe
+    && observe < terminal && terminal < ready && ready < deadline && deadline < select
+    && select < click,
+  "fixed42-to61 did not prove one fresh snapshot and its original deadline before its sole click");
+  assert.ok(staleObservation > observe && staleObservationContinue > staleObservation
+    && staleObservationContinue < terminal,
+  "stale pre-action snapshots are not wholly discarded within the observation loop");
+  assert.ok(clickStale > click && clickStaleFailure > clickStale,
+    "a stale sole click does not fail closed");
+  assert.equal(critical.slice(clickStale, clickStaleFailure).includes("continue;"), false,
+    "a stale Cancel click was retried");
+  const beforeClick = critical.slice(enable, click);
+  assert.equal(beforeClick.includes("capture("), false,
+    "fixed42-to61 captured during the critical Enable-to-Cancel interval");
+  assert.equal(beforeClick.includes("device.waitForIdle("), false,
+    "fixed42-to61 waited for idle during the critical Enable-to-Cancel interval");
+  assert.equal(beforeClick.includes("queryFixed42CriticalTextGroup("), false,
+    "fixed42-to61 restored an independently expensive pre-click text query");
+  assert.equal(beforeClick.includes("queryFixed42CriticalCancelGroup("), false,
+    "fixed42-to61 restored an independently expensive pre-click Cancel query");
+  const observerLoop = critical.slice(critical.indexOf("while (", enable),
+    critical.indexOf("assertTrue(\"Initial Enable did not expose", enable));
+  assert.equal((observerLoop.match(/clearCache\(\)/g) ?? []).length, 1,
+    "fixed42-to61 observation attempt must use exactly one cache refresh");
+  assert.equal((observerLoop.match(/queryFixed42To61InitialCancelSnapshot\(/g) ?? []).length, 1,
+    "fixed42-to61 observation attempt must use exactly one all-root snapshot");
+
+  for (const token of [
+    "Fixed42To61CancelSnapshotPolicy.exactObservationPattern(",
+    "progressTexts, terminalTexts)",
+    ".pkg(OtaFlowPolicy.PRODUCT_PACKAGE)",
+  ]) need(selector, token, `fixed42-to61 all-root selector lost ${token}`);
+  assert.equal(selector.includes(".clazz("), false,
+    "combined snapshot selector must admit both exact TextView and Button roles for classification");
+  assert.equal((query.match(/device\.findObjects\(selector\)/g) ?? []).length, 1,
+    "one fixed42-to61 snapshot must perform exactly one public all-root UiDevice query");
+  assert.equal(query.includes("scope.findObjects"), false,
+    "fixed42-to61 snapshot was narrowed below UiDevice all-root scope");
+  for (const token of [
+    "Fixed42To61CancelSnapshotPolicy.assertCandidateCount(matches.size())",
+    "match.getApplicationPackage()",
+    "match.getClassName()",
+    "match.getResourceName()",
+    "match.getText()",
+    "match.isEnabled()",
+    "match.isClickable()",
+    "Fixed42To61CancelSnapshotPolicy.classify(",
+    "int cancelIndex = classified.cancelIndex()",
+    "matches.get(cancelIndex)",
+  ]) need(query, token, `fixed42-to61 snapshot classification lost ${token}`);
+
+  for (const token of [
+    'static final String TEXT_VIEW_CLASS = "android.widget.TextView"',
+    'static final String BUTTON_CLASS = "android.widget.Button"',
+    'static final String CANCEL_RESOURCE = "android:id/button2"',
+    "static final int MAX_CANDIDATES = 6",
+    "Pattern.quote(progressTexts[index])",
+    "Pattern.quote(terminalTexts[index])",
+    'append("(?i:")',
+    ".append(Pattern.quote(CANCEL_TEXT)).append(\")\")",
+    "expectedPackage.equals(candidate.packageName)",
+    "TEXT_VIEW_CLASS.equals(candidate.className)",
+    "BUTTON_CLASS.equals(candidate.className)",
+    "CANCEL_RESOURCE.equals(candidate.resourceName)",
+    "candidate.enabled",
+    "candidate.clickable",
+    "terminalTotal() != 0",
+    "cancelCount == 1",
+    "cancelCount > 1",
+    "nowUptimeMs >= deadlineUptimeMs",
+  ]) need(policy, token, `fixed42-to61 fused policy lost ${token}`);
+  need(noResultAfter, "after Cancel selection", "post-click terminal error remained temporally misleading");
+
+  for (const token of [
+    '"Fixed42-to61 initial observer timing enableStartUptimeMs="',
+    '" enableFinishUptimeMs="',
+    '" snapshotStartUptimeMs="',
+    '" snapshotFinishUptimeMs="',
+    '" cancelClickStartUptimeMs="',
+    '" cancelClickFinishUptimeMs="',
+    '" snapshotAttempts="',
+    '" staleSnapshots="',
+  ]) need(timing, token, `fixed42-to61 failure timing lost ${token}`);
+  for (const forbidden of [
+    "getText", "getContentDescription", "selector", "admittedTarget", "http", "failure",
+  ]) assert.equal(timing.includes(forbidden), false,
+    `fixed42-to61 timing diagnostic leaked dynamic observer data through ${forbidden}`);
+  const restore = critical.indexOf("configurator.setWaitForIdleTimeout(previousIdleTimeout)");
+  const timingCall = critical.lastIndexOf("recordFixed42To61InitialObserverTiming(");
+  const capture = critical.indexOf('capture("fixed42-initial-enable-cancel-settled")');
+  assert.ok(restore > click && timingCall > restore && capture > timingCall,
+    "fixed42-to61 timing is not retained from the failure-safe finally block");
+}
+
+function runFixed42To61CancelSnapshotPolicyHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42To61CancelSnapshotPolicy");
+  const harness = `
+import java.util.regex.Pattern;
+
+public final class Fixed42To61CancelSnapshotPolicyHarness {
+${policy}
+
+    private static final String PRODUCT = "com.tgk30.debridstreamer";
+    private static final String TEXT = "android.widget.TextView";
+    private static final String BUTTON = "android.widget.Button";
+    private static final String CANCEL_RES = "android:id/button2";
+    private static final String[] PROGRESS = {
+            "Checking for updates",
+            "Checking the official YAWF Stream Android release channel."
+    };
+    private static final String[] TERMINAL = {
+            "YAWF Stream is up to date",
+            "Update check unavailable",
+            "YAWF Stream 2.3.61 is available"
+    };
+
+    private static Fixed42To61CancelSnapshotPolicy.Candidate candidate(
+            String packageName, String className, String resourceName, String text,
+            boolean enabled, boolean clickable) {
+        return new Fixed42To61CancelSnapshotPolicy.Candidate(
+                packageName, className, resourceName, text, enabled, clickable);
+    }
+
+    private static Fixed42To61CancelSnapshotPolicy.Candidate title() {
+        return candidate(PRODUCT, TEXT, "android:id/alertTitle", PROGRESS[0], true, false);
+    }
+
+    private static Fixed42To61CancelSnapshotPolicy.Candidate message() {
+        return candidate(PRODUCT, TEXT, "android:id/message", PROGRESS[1], true, false);
+    }
+
+    private static Fixed42To61CancelSnapshotPolicy.Candidate cancel() {
+        return candidate(PRODUCT, BUTTON, CANCEL_RES, "CANCEL", true, true);
+    }
+
+    private static Fixed42To61CancelSnapshotPolicy.Snapshot classify(
+            Fixed42To61CancelSnapshotPolicy.Candidate... candidates) {
+        return Fixed42To61CancelSnapshotPolicy.classify(
+                PRODUCT, PROGRESS, TERMINAL, candidates);
+    }
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static void expectAssertion(Runnable action, String message) {
+        boolean rejected = false;
+        try {
+            action.run();
+        } catch (AssertionError expected) {
+            rejected = true;
+        }
+        require(rejected, message);
+    }
+
+    public static void main(String[] args) {
+        Pattern exact = Fixed42To61CancelSnapshotPolicy.exactObservationPattern(
+                PROGRESS, TERMINAL);
+        for (String value : PROGRESS) require(exact.matcher(value).matches(), "progress missed");
+        for (String value : TERMINAL) require(exact.matcher(value).matches(), "terminal missed");
+        require(exact.matcher("Cancel").matches(), "Cancel missed");
+        require(exact.matcher("CANCEL").matches(), "case-normalized Cancel missed");
+        require(!exact.matcher("checking for updates").matches(), "progress became case-insensitive");
+        require(!exact.matcher("Cancel update").matches(), "Cancel prefix admitted");
+
+        Fixed42To61CancelSnapshotPolicy.Snapshot ready = classify(title(), message(), cancel());
+        require(ready.isReadyToCancel(), "exact coherent snapshot was not ready");
+        require(ready.cancelIndex() == 2, "exact Cancel index changed");
+        ready.assertNoTerminalBeforeCancel();
+        Fixed42To61CancelSnapshotPolicy.assertWithinDeadline(100L, 99L);
+        expectAssertion(
+                () -> Fixed42To61CancelSnapshotPolicy.assertWithinDeadline(100L, 100L),
+                "deadline equality admitted a late click");
+        expectAssertion(
+                () -> Fixed42To61CancelSnapshotPolicy.assertCandidateCount(7),
+                "candidate total bound was not enforced");
+
+        for (int index = 0; index < TERMINAL.length; index++) {
+            final int selected = index;
+            Fixed42To61CancelSnapshotPolicy.Snapshot result = classify(
+                    title(), message(), cancel(),
+                    candidate(PRODUCT, TEXT, "android:id/alertTitle",
+                            TERMINAL[selected], true, false));
+            expectAssertion(result::assertNoTerminalBeforeCancel,
+                    "terminal variant " + selected + " did not win");
+        }
+        Fixed42To61CancelSnapshotPolicy.Snapshot laterTerminal = classify(
+                candidate(PRODUCT, TEXT, "android:id/alertTitle", TERMINAL[2], true, false));
+        expectAssertion(laterTerminal::assertNoTerminalBeforeCancel,
+                "earlier readiness incorrectly authorized a later terminal state");
+
+        require(!classify(title(), message()).isReadyToCancel(), "missing Cancel admitted");
+        require(!classify(title(), cancel()).isReadyToCancel(), "missing message admitted");
+        expectAssertion(() -> classify(title(), title(), message(), cancel()),
+                "duplicate title admitted");
+        expectAssertion(() -> classify(title(), message(), cancel(), cancel()),
+                "duplicate or other-window Cancel admitted");
+        expectAssertion(() -> classify(
+                candidate("other.package", TEXT, "android:id/alertTitle", PROGRESS[0], true, false),
+                message(), cancel()), "wrong package admitted");
+        expectAssertion(() -> classify(
+                candidate(PRODUCT, BUTTON, "android:id/alertTitle", PROGRESS[0], true, false),
+                message(), cancel()), "wrong progress class admitted");
+        expectAssertion(() -> classify(title(), message(),
+                candidate(PRODUCT, TEXT, CANCEL_RES, "Cancel", true, true)),
+                "wrong Cancel class admitted");
+        expectAssertion(() -> classify(title(), message(),
+                candidate(PRODUCT, BUTTON, "android:id/button1", "Cancel", true, true)),
+                "wrong Cancel resource admitted");
+        expectAssertion(() -> classify(title(), message(),
+                candidate(PRODUCT, BUTTON, CANCEL_RES, "Cancel", false, true)),
+                "disabled Cancel admitted");
+        expectAssertion(() -> classify(title(), message(),
+                candidate(PRODUCT, BUTTON, CANCEL_RES, "Cancel", true, false)),
+                "unclickable Cancel admitted");
+        System.out.println("fixed42-to61-cancel-snapshot-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-to61-cancel-policy-"));
+  const sourceFile = path.join(directory, "Fixed42To61CancelSnapshotPolicyHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `fixed42-to61 snapshot policy javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand, ["-cp", directory, "Fixed42To61CancelSnapshotPolicyHarness"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, `fixed42-to61 snapshot policy harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-to61-cancel-snapshot-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function runFixed42CriticalQueryGroupPolicyHarness(java) {
@@ -979,56 +1287,136 @@ function postInstallContract(body) {
   assert.equal(body.includes("openHelpAndUpdates()"), false, "fixed profile reused the old category selector");
 }
 
-test("fixed profile is exact and routes through one fresh initial Enable cancellation", () => {
+test("fixed42-to61 profile routes through its isolated fused initial Cancel observer", () => {
   need(source, '"public-fixed42-to61-initial-cancel-due-resume-v1"', "profile name is missing");
-  const run = methodBody(source, "runAutomaticFlow");
-  need(run, "enableAndCancelInitialFixed42CheckNoIdle()", "fixed flow does not cancel the first Enable check");
-  const initial = methodBody(source, "enableAndCancelInitialFixed42CheckNoIdle");
-  initialEnableContract(initial);
-  rejectMutation(initial, "setWaitForIdleTimeout(0L)", "setWaitForIdleTimeout(10_000L)", initialEnableContract);
-  rejectMutation(initial, "initialEnableCancelSelections++", "initialEnableCancelSelections += 0", initialEnableContract);
+  fixed42To61FusedCancelObserverContract(source);
+
+  const genericIdle = source.replace(
+    "configurator.setWaitForIdleTimeout(0L);\n        try {",
+    "configurator.setWaitForIdleTimeout(10_000L);\n        try {",
+  );
+  assert.notEqual(genericIdle, source, "zero-idle mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(genericIdle));
+
+  const legacyRoute = source.replace(
+    "if (isFixed42To61AutomaticMode()) {\n            enableAndCancelInitialFixed42To61CheckNoIdle();",
+    "if (isFixed42To61AutomaticMode()) {\n            enableAndCancelInitialFixed42CheckNoIdle();",
+  );
+  assert.notEqual(legacyRoute, source, "legacy-route mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(legacyRoute));
 });
 
-test("fixed critical interval enters zero-idle before Enable and captures only after Cancel", () => {
-  fixedCriticalIntervalContract(source);
+test("fixed42-to61 critical interval performs one all-root query and one immediate action", () => {
+  fixed42To61FusedCancelObserverContract(source);
 
-  const genericClickMutant = source.replace(
-    "if (isFixed42AutomaticMode()) {\n            enableAndCancelInitialFixed42CheckNoIdle();",
-    `if (isFixed42AutomaticMode()) {
-            click(
-                    By.res("android", "button1")
-                            .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
-                            .text(Pattern.compile("\\\\AEnable\\\\z", Pattern.CASE_INSENSITIVE)),
-                    "Enable", SHORT_WAIT_MS, true);
-            enableAndCancelInitialFixed42CheckNoIdle();`,
+  const extraQuery = source.replace(
+    "List<UiObject2> matches = device.findObjects(selector);",
+    "List<UiObject2> matches = device.findObjects(selector);\n            device.findObjects(selector);",
   );
-  assert.notEqual(genericClickMutant, source, "generic click mutant anchor was absent");
-  assert.throws(() => fixedCriticalIntervalContract(genericClickMutant));
+  assert.notEqual(extraQuery, source, "extra-query mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(extraQuery));
 
-  const movedZeroIdleMutant = source
-    .replace(
-      "configurator.setWaitForIdleTimeout(0L);\n        try {",
-      "try {",
-    )
-    .replace(
-      "freshEnables.get(0).click();",
-      "freshEnables.get(0).click();\n            configurator.setWaitForIdleTimeout(0L);",
-    );
-  assert.notEqual(movedZeroIdleMutant, source, "late zero-idle mutant anchor was absent");
-  assert.throws(() => fixedCriticalIntervalContract(movedZeroIdleMutant));
-
-  const preCancelCaptureMutant = source.replace(
-    "freshEnables.get(0).click();",
-    'freshEnables.get(0).click();\n            capture("mutant-before-cancel");',
+  const removedTerminalGate = source.replace(
+    "                snapshot.assertNoTerminalBeforeCancel();\n",
+    "",
   );
-  assert.notEqual(preCancelCaptureMutant, source, "pre-Cancel capture mutant anchor was absent");
-  assert.throws(() => fixedCriticalIntervalContract(preCancelCaptureMutant));
+  assert.notEqual(removedTerminalGate, source, "terminal-gate mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(removedTerminalGate));
+
+  const cachedCancel = source.replace(
+    "                    snapshot.cancel.click();",
+    "                    device.findObject(snapshotSelector).click();",
+  );
+  assert.notEqual(cachedCancel, source, "fresh-object mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(cachedCancel));
+
+  const lateAction = source.replace(
+    "                Fixed42To61CancelSnapshotPolicy.assertWithinDeadline(\n                        cancelDeadline, cancelClickStartedUptimeMs);\n",
+    "",
+  );
+  assert.notEqual(lateAction, source, "deadline mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(lateAction));
+
+  const preCancelCapture = source.replace(
+    "                initialEnableCancelSelections++;",
+    '                capture("mutant-before-cancel");\n                initialEnableCancelSelections++;',
+  );
+  assert.notEqual(preCancelCapture, source, "pre-Cancel capture mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(preCancelCapture));
+
+  const legalGuardRemoved = source.replace(
+    "            assertNoBindingTermsAtCurrentIdlePolicy();\n",
+    "",
+  );
+  assert.notEqual(legalGuardRemoved, source, "legal-guard mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(legalGuardRemoved));
+
+  const staleSnapshotRetained = source.replace(
+    "                    if (remaining > 0L) SystemClock.sleep(Math.min(100L, remaining));\n                    continue;\n                } catch (RuntimeException | AssertionError failure)",
+    "                    if (remaining > 0L) SystemClock.sleep(Math.min(100L, remaining));\n                    break;\n                } catch (RuntimeException | AssertionError failure)",
+  );
+  assert.notEqual(staleSnapshotRetained, source, "stale-snapshot mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(staleSnapshotRetained));
+
+  const clickRetry = source.replace(
+    '                    throw new AssertionError(\n                            "Initial Enable Cancel became stale during its sole selection", stale);',
+    "                    snapshot.cancel.click();",
+  );
+  assert.notEqual(clickRetry, source, "click-retry mutant anchor was absent");
+  assert.throws(() => fixed42To61FusedCancelObserverContract(clickRetry));
+});
+
+test("fixed42-to61 fused policy executes scope, terminal, ambiguity and deadline counterexamples", () => {
+  runFixed42To61CancelSnapshotPolicyHarness(source);
+
+  const terminalAllowed = source.replace(
+    "if (terminalTotal() != 0) {",
+    "if (terminalTotal() < 0) {",
+  );
+  assert.notEqual(terminalAllowed, source, "terminal-admission mutant anchor was absent");
+  assert.throws(() => runFixed42To61CancelSnapshotPolicyHarness(terminalAllowed));
+
+  const unbounded = source.replace(
+    "if (count < 0 || count > MAX_CANDIDATES) {",
+    "if (count < 0) {",
+  );
+  assert.notEqual(unbounded, source, "candidate-bound mutant anchor was absent");
+  assert.throws(() => runFixed42To61CancelSnapshotPolicyHarness(unbounded));
+
+  const packageScopeRemoved = source.replace(
+    "if (candidate == null || !expectedPackage.equals(candidate.packageName)) {",
+    "if (candidate == null) {",
+  );
+  assert.notEqual(packageScopeRemoved, source, "package-scope mutant anchor was absent");
+  assert.throws(() => runFixed42To61CancelSnapshotPolicyHarness(packageScopeRemoved));
+
+  const resourceScopeRemoved = source.replace(
+    "|| !CANCEL_RESOURCE.equals(candidate.resourceName)",
+    "",
+  );
+  assert.notEqual(resourceScopeRemoved, source, "Cancel-resource mutant anchor was absent");
+  assert.throws(() => runFixed42To61CancelSnapshotPolicyHarness(resourceScopeRemoved));
+
+  const stateScopeRemoved = source.replace(
+    "|| !candidate.enabled\n                            || !candidate.clickable",
+    "",
+  );
+  assert.notEqual(stateScopeRemoved, source, "Cancel-state mutant anchor was absent");
+  assert.throws(() => runFixed42To61CancelSnapshotPolicyHarness(stateScopeRemoved));
+
+  const lateDeadlineAllowed = source.replace(
+    "nowUptimeMs >= deadlineUptimeMs",
+    "nowUptimeMs > deadlineUptimeMs",
+  );
+  assert.notEqual(lateDeadlineAllowed, source, "deadline-equality mutant anchor was absent");
+  assert.throws(() => runFixed42To61CancelSnapshotPolicyHarness(lateDeadlineAllowed));
 });
 
 test("fixed42 critical observer uses exact grouped progress and terminal queries before fresh Cancel", () => {
   fixed42CriticalQueryGroupContract(source);
 
-  const splitTerminalQuery = source.replace(
+  const splitTerminalQuery = replaceLast(
+    source,
     "BySelector terminalSelector = nativeDialogTextGroup(terminalTexts);",
     'BySelector terminalSelector = nativeDialogText("YAWF Stream is up to date");',
   );
