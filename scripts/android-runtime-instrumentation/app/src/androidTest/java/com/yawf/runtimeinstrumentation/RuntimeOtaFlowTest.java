@@ -138,6 +138,7 @@ public final class RuntimeOtaFlowTest {
     private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
     private static final int FIXED42_SEED_AX_CHILD_LIMIT = 128;
     private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 4;
+    private static final int FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT = 12;
     private static final int FIXED42_LAUNCHER_ANCESTOR_LIMIT = 16;
     private static final int FIXED42_LAUNCHER_NODE_LIMIT = 256;
     private static final int FIXED42_LAUNCHER_CHILD_LIMIT = 128;
@@ -1521,8 +1522,15 @@ public final class RuntimeOtaFlowTest {
             boolean railReady = false;
             if (headingIndex >= 0) {
                 Fixed42AxNode heading = nodes.get(headingIndex);
+                boolean headingMatches = heading.matches(
+                        product, "android.widget.TextView", false, false);
+                if (isFixed42To61AutomaticMode() && !headingMatches) {
+                    logFixed42To61SeedHeadingFailure(
+                            nodes, mainIndex, discoverIndex, headingIndex,
+                            width, height, boundsMatch);
+                }
                 assertTrue("Fixed42 Popular Movies heading identity changed",
-                        heading.matches(product, "android.widget.TextView", false, false));
+                        headingMatches);
                 popularSectionIndex = heading.parentIndex;
                 assertTrue("Popular Movies heading lacked its section parent",
                         popularSectionIndex >= 0);
@@ -1874,6 +1882,151 @@ public final class RuntimeOtaFlowTest {
         assertEquals("Fixed42-to61 Discover diagnostic was changed by action-log retention",
                 value, safe(value));
         log(value);
+    }
+
+    private void logFixed42To61SeedHeadingFailure(
+            List<Fixed42AxNode> nodes,
+            int mainIndex,
+            int discoverIndex,
+            int headingIndex,
+            int displayWidth,
+            int displayHeight,
+            boolean mainRawExact) {
+        if (!isFixed42To61AutomaticMode()) return;
+        try {
+            int[] recordIndexes =
+                    new int[FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT];
+            int[] recordRoles =
+                    new int[FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT];
+            int recordCount = 0;
+            int totalRecords = 0;
+
+            Fixed42AxNode heading = nodes.get(headingIndex);
+            recordIndexes[recordCount] = headingIndex;
+            recordRoles[recordCount] = Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING;
+            recordCount++;
+            totalRecords++;
+
+            if (heading.parentIndex >= 0) {
+                recordIndexes[recordCount] = heading.parentIndex;
+                recordRoles[recordCount] = Fixed42SeedFailureDiagnosticPolicy.ROLE_PARENT;
+                recordCount++;
+                totalRecords++;
+            }
+
+            recordIndexes[recordCount] = discoverIndex;
+            recordRoles[recordCount] = Fixed42SeedFailureDiagnosticPolicy.ROLE_ROUTE;
+            recordCount++;
+            totalRecords++;
+            recordIndexes[recordCount] = mainIndex;
+            recordRoles[recordCount] = Fixed42SeedFailureDiagnosticPolicy.ROLE_MAIN;
+            recordCount++;
+            totalRecords++;
+
+            int cursor = heading.parentIndex < 0
+                    ? -1
+                    : nodes.get(heading.parentIndex).parentIndex;
+            for (int depth = 0; cursor >= 0; depth++) {
+                if (cursor >= nodes.size() || depth > nodes.size()) {
+                    throw new AssertionError("Fixed42 seed diagnostic ancestry was invalid");
+                }
+                if (cursor == mainIndex) break;
+                if (cursor != heading.parentIndex && cursor != discoverIndex) {
+                    totalRecords++;
+                    if (recordCount < recordIndexes.length) {
+                        recordIndexes[recordCount] = cursor;
+                        recordRoles[recordCount] =
+                                Fixed42SeedFailureDiagnosticPolicy.ROLE_ANCESTOR;
+                        recordCount++;
+                    }
+                }
+                cursor = nodes.get(cursor).parentIndex;
+            }
+
+            Fixed42AxNode rootNode = nodes.get(0);
+            Fixed42AxNode mainNode = nodes.get(mainIndex);
+            String correlation = Fixed42SeedFailureDiagnosticPolicy.correlation(
+                    nodes.size(),
+                    rootNode.info.getWindowId(),
+                    mainNode.info.getWindowId(),
+                    heading.info.getWindowId(),
+                    nodes.get(discoverIndex).info.getWindowId());
+            List<String> lines = new ArrayList<>();
+            lines.add(Fixed42SeedFailureDiagnosticPolicy.headerLine(
+                    recordCount,
+                    totalRecords,
+                    nodes.size(),
+                    correlation,
+                    headingIndex,
+                    heading.parentIndex,
+                    discoverIndex,
+                    mainIndex,
+                    displayWidth,
+                    displayHeight,
+                    rootNode.bounds.left,
+                    rootNode.bounds.top,
+                    rootNode.bounds.right,
+                    rootNode.bounds.bottom,
+                    mainNode.bounds.left,
+                    mainNode.bounds.top,
+                    mainNode.bounds.right,
+                    mainNode.bounds.bottom,
+                    mainRawExact));
+            for (int recordIndex = 0; recordIndex < recordCount; recordIndex++) {
+                int nodeIndex = recordIndexes[recordIndex];
+                int role = recordRoles[recordIndex];
+                Fixed42AxNode candidate = nodes.get(nodeIndex);
+                boolean headingRole = role == Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING;
+                boolean routeRole = role == Fixed42SeedFailureDiagnosticPolicy.ROLE_ROUTE;
+                String flags = Fixed42SeedFailureDiagnosticPolicy.flags(
+                        headingRole
+                                ? "Popular Movies".equals(candidate.text)
+                                : routeRole && "Discover page".equals(candidate.text),
+                        headingRole
+                                ? "Popular Movies".equals(candidate.description)
+                                : routeRole && "Discover page".equals(candidate.description),
+                        OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName),
+                        "android.view.View".equals(candidate.className),
+                        "android.widget.TextView".equals(candidate.className),
+                        candidate.visible,
+                        candidate.enabled,
+                        candidate.scrollable,
+                        candidate.clickable,
+                        candidate.info.isFocusable(),
+                        candidate.info.isFocused(),
+                        candidate.info.isAccessibilityFocused(),
+                        candidate.info.getLiveRegion()
+                                != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                        fixed42IsDescendant(nodes, nodeIndex, mainIndex),
+                        fixed42IsDescendant(nodes, nodeIndex, discoverIndex),
+                        "main-content".equals(candidate.resourceName));
+                lines.add(Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                        recordIndex,
+                        correlation,
+                        role,
+                        nodeIndex,
+                        candidate.parentIndex,
+                        candidate.info.getWindowId(),
+                        candidate.bounds.left,
+                        candidate.bounds.top,
+                        candidate.bounds.right,
+                        candidate.bounds.bottom,
+                        flags));
+            }
+            retainFixed42To61SeedFailureDiagnosticLines(lines);
+        } catch (RuntimeException | AssertionError ignored) {
+            // Diagnostic retention must never replace the original heading assertion.
+        }
+    }
+
+    private void retainFixed42To61SeedFailureDiagnosticLines(List<String> values) {
+        if (values == null
+                || values.isEmpty()
+                || actions.size() + values.size() > MAX_ACTION_LINES) return;
+        for (String value : values) {
+            if (value == null || value.length() >= 500 || !value.equals(safe(value))) return;
+        }
+        for (String value : values) log(value);
     }
 
     private static int fixed42UniqueScrollableDescendant(
@@ -4736,6 +4889,199 @@ public final class RuntimeOtaFlowTest {
 
         private static char bit(boolean value) {
             return value ? '1' : '0';
+        }
+    }
+
+    private static final class Fixed42SeedFailureDiagnosticPolicy {
+        static final int ROLE_HEADING = 0;
+        static final int ROLE_PARENT = 1;
+        static final int ROLE_ANCESTOR = 2;
+        static final int ROLE_ROUTE = 3;
+        static final int ROLE_MAIN = 4;
+        private static final String ROLE_MAP = "0:h,1:p,2:a,3:r,4:m";
+        private static final String FLAG_MAP =
+                "tx,dx,pkg,v,tv,vis,en,scr,clk,foc,fd,af,live,main,route,rm";
+
+        static String correlation(
+                int nodeCount,
+                int rootWindowId,
+                int mainWindowId,
+                int headingWindowId,
+                int routeWindowId) {
+            require(nodeCount > 0 && nodeCount <= FIXED42_SEED_AX_NODE_LIMIT,
+                    "Fixed42 seed diagnostic node count was invalid");
+            return nodeCount + "," + rootWindowId + "," + mainWindowId + ","
+                    + headingWindowId + "," + routeWindowId;
+        }
+
+        static String headerLine(
+                int recordCount,
+                int totalRecords,
+                int nodeCount,
+                String correlation,
+                int headingIndex,
+                int parentIndex,
+                int routeIndex,
+                int mainIndex,
+                int displayWidth,
+                int displayHeight,
+                int rootLeft,
+                int rootTop,
+                int rootRight,
+                int rootBottom,
+                int mainLeft,
+                int mainTop,
+                int mainRight,
+                int mainBottom,
+                boolean mainRawExact) {
+            require(recordCount >= 3
+                            && recordCount <= FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT
+                            && totalRecords >= recordCount
+                            && nodeCount > 0
+                            && nodeCount <= FIXED42_SEED_AX_NODE_LIMIT
+                            && totalRecords <= nodeCount + 3
+                            && validCorrelation(correlation)
+                            && headingIndex >= 0
+                            && headingIndex < nodeCount
+                            && parentIndex >= -1
+                            && parentIndex < nodeCount
+                            && routeIndex >= 0
+                            && routeIndex < nodeCount
+                            && mainIndex >= 0
+                            && mainIndex < nodeCount
+                            && displayWidth > 0
+                            && displayHeight > 0
+                            && rootRight >= rootLeft
+                            && rootBottom >= rootTop
+                            && mainRight >= mainLeft
+                            && mainBottom >= mainTop,
+                    "Fixed42 seed diagnostic header was invalid");
+            return "Fixed42-to61 seed failure header"
+                    + " records=" + recordCount
+                    + " total=" + totalRecords
+                    + " truncated=" + (totalRecords > recordCount)
+                    + " nodes=" + nodeCount
+                    + " correlation=" + correlation
+                    + " heading=" + headingIndex
+                    + " parent=" + parentIndex
+                    + " route=" + routeIndex
+                    + " main=" + mainIndex
+                    + " display=" + displayWidth + "," + displayHeight
+                    + " rootBounds=" + numericBounds(
+                            rootLeft, rootTop, rootRight, rootBottom)
+                    + " mainBounds=" + numericBounds(
+                            mainLeft, mainTop, mainRight, mainBottom)
+                    + " mainRawExact=" + mainRawExact
+                    + " roleMap=" + ROLE_MAP
+                    + " flagMap=" + FLAG_MAP;
+        }
+
+        static String flags(
+                boolean textExact,
+                boolean descriptionExact,
+                boolean productPackage,
+                boolean view,
+                boolean textView,
+                boolean visible,
+                boolean enabled,
+                boolean scrollable,
+                boolean clickable,
+                boolean focusable,
+                boolean focused,
+                boolean accessibilityFocused,
+                boolean liveRegion,
+                boolean mainAncestor,
+                boolean routeAncestor,
+                boolean mainResource) {
+            return new StringBuilder(16)
+                    .append(bit(textExact))
+                    .append(bit(descriptionExact))
+                    .append(bit(productPackage))
+                    .append(bit(view))
+                    .append(bit(textView))
+                    .append(bit(visible))
+                    .append(bit(enabled))
+                    .append(bit(scrollable))
+                    .append(bit(clickable))
+                    .append(bit(focusable))
+                    .append(bit(focused))
+                    .append(bit(accessibilityFocused))
+                    .append(bit(liveRegion))
+                    .append(bit(mainAncestor))
+                    .append(bit(routeAncestor))
+                    .append(bit(mainResource))
+                    .toString();
+        }
+
+        static String recordLine(
+                int recordIndex,
+                String correlation,
+                int role,
+                int nodeIndex,
+                int parentIndex,
+                int windowId,
+                int left,
+                int top,
+                int right,
+                int bottom,
+                String flags) {
+            require(recordIndex >= 0
+                            && recordIndex
+                                    < FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT
+                            && role >= ROLE_HEADING
+                            && role <= ROLE_MAIN
+                            && nodeIndex >= 0
+                            && parentIndex >= -1
+                            && right >= left
+                            && bottom >= top
+                            && validCorrelation(correlation)
+                            && flags != null
+                            && flags.length() == 16
+                            && validFlags(flags),
+                    "Fixed42 seed diagnostic record was invalid");
+            return "Fixed42-to61 seed failure record"
+                    + " record=" + recordIndex
+                    + " correlation=" + correlation
+                    + " role=" + role
+                    + " index=" + nodeIndex
+                    + " parent=" + parentIndex
+                    + " window=" + windowId
+                    + " bounds=" + numericBounds(left, top, right, bottom)
+                    + " flags=" + flags;
+        }
+
+        private static String numericBounds(
+                int left, int top, int right, int bottom) {
+            return left + "," + top + "," + right + "," + bottom;
+        }
+
+        private static boolean validCorrelation(String value) {
+            if (value == null) return false;
+            String[] fields = value.split(",", -1);
+            if (fields.length != 5) return false;
+            try {
+                for (String field : fields) Integer.parseInt(field);
+                return true;
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+
+        private static boolean validFlags(String value) {
+            if (value == null || value.length() != 16) return false;
+            for (int index = 0; index < value.length(); index++) {
+                char current = value.charAt(index);
+                if (current != '0' && current != '1') return false;
+            }
+            return true;
+        }
+
+        private static char bit(boolean value) {
+            return value ? '1' : '0';
+        }
+
+        private static void require(boolean condition, String message) {
+            if (!condition) throw new AssertionError(message);
         }
     }
 

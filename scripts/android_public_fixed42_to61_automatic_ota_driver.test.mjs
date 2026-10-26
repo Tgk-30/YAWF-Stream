@@ -3357,6 +3357,384 @@ public final class Fixed42DiscoverAmbiguityPolicyHarness {
   }
 }
 
+function fixed42SeedFailureDiagnosticContract(java) {
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const diagnostic = methodBody(java, "logFixed42To61SeedHeadingFailure");
+  const retention = methodBody(java, "retainFixed42To61SeedFailureDiagnosticLines");
+  const policy = nestedClassDeclaration(java, "Fixed42SeedFailureDiagnosticPolicy");
+  const safe = methodBody(java, "safe");
+  const log = methodBody(java, "log");
+
+  need(java,
+    "private static final int FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT = 12;",
+    "seed-failure diagnostics lost their twelve-record bound");
+  need(java, "private static final int FIXED42_SEED_SCROLL_ACTION_LIMIT = 16;",
+    "seed-failure diagnostics changed the shared action cap");
+  need(java, "private static final long FIXED42_SEED_SCROLL_BOUND_MS = 45_000L;",
+    "seed-failure diagnostics changed the original deadline");
+
+  const headingLookup = observe.indexOf(
+    'int headingIndex = fixed42UniqueSemantic(nodes, "Popular Movies", false);',
+  );
+  const match = observe.indexOf("boolean headingMatches = heading.matches(", headingLookup);
+  const failureGate = observe.indexOf(
+    "if (isFixed42To61AutomaticMode() && !headingMatches) {",
+    match,
+  );
+  const diagnosticCall = observe.indexOf(
+    "logFixed42To61SeedHeadingFailure(", failureGate,
+  );
+  const unchangedAssertion = observe.indexOf(
+    'assertTrue("Fixed42 Popular Movies heading identity changed",',
+    diagnosticCall,
+  );
+  const sectionParent = observe.indexOf(
+    "popularSectionIndex = heading.parentIndex;",
+    unchangedAssertion,
+  );
+  assert.ok(headingLookup >= 0 && match > headingLookup && failureGate > match
+      && diagnosticCall > failureGate && unchangedAssertion > diagnosticCall
+      && sectionParent > unchangedAssertion,
+  "seed-failure diagnostics are not exact-to61-only, failure-only, and before the unchanged guard");
+  need(observe.slice(match, sectionParent), "heading.matches(",
+    "heading failure no longer uses the original identity predicate");
+  need(observe.slice(match, sectionParent),
+    'product, "android.widget.TextView", false, false);',
+    "heading failure no longer uses every original identity field");
+  need(observe.slice(unchangedAssertion, sectionParent), "headingMatches",
+    "unchanged heading rejection no longer consumes the original predicate result");
+  assert.equal((observe.match(/logFixed42To61SeedHeadingFailure\(/g) ?? []).length, 1,
+    "seed-failure diagnostic must have one call site");
+  for (const token of [
+    "nodes,", "mainIndex,", "discoverIndex,", "headingIndex,",
+    "width,", "height,", "boundsMatch",
+  ]) need(observe.slice(diagnosticCall, unchangedAssertion), token,
+    `seed-failure call lost cached same-graph input ${token}`);
+  assert.equal((observe.match(/getRootInActiveWindow\(\)/g) ?? []).length, 1,
+    "seed-failure diagnostics added another root query");
+  assert.equal((observe.match(/clearCache\(\)/g) ?? []).length, 1,
+    "seed-failure diagnostics added another cache refresh");
+
+  for (const token of [
+    'if (!isFixed42To61AutomaticMode()) return;',
+    "new int[FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT]",
+    "Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING",
+    "Fixed42SeedFailureDiagnosticPolicy.ROLE_PARENT",
+    "Fixed42SeedFailureDiagnosticPolicy.ROLE_ANCESTOR",
+    "Fixed42SeedFailureDiagnosticPolicy.ROLE_ROUTE",
+    "Fixed42SeedFailureDiagnosticPolicy.ROLE_MAIN",
+    "heading.parentIndex",
+    "nodes.get(cursor).parentIndex",
+    "Fixed42SeedFailureDiagnosticPolicy.correlation(",
+    "Fixed42SeedFailureDiagnosticPolicy.headerLine(",
+    "Fixed42SeedFailureDiagnosticPolicy.flags(",
+    "Fixed42SeedFailureDiagnosticPolicy.recordLine(",
+    '"Popular Movies".equals(candidate.text)',
+    '"Popular Movies".equals(candidate.description)',
+    '"Discover page".equals(candidate.text)',
+    '"Discover page".equals(candidate.description)',
+    "OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName)",
+    '"android.view.View".equals(candidate.className)',
+    '"android.widget.TextView".equals(candidate.className)',
+    "candidate.visible",
+    "candidate.enabled",
+    "candidate.scrollable",
+    "candidate.clickable",
+    "candidate.info.isFocusable()",
+    "candidate.info.isFocused()",
+    "candidate.info.isAccessibilityFocused()",
+    "candidate.info.getLiveRegion()",
+    "fixed42IsDescendant(nodes, nodeIndex, mainIndex)",
+    "fixed42IsDescendant(nodes, nodeIndex, discoverIndex)",
+    '"main-content".equals(candidate.resourceName)',
+    "retainFixed42To61SeedFailureDiagnosticLines(lines)",
+    "catch (RuntimeException | AssertionError ignored)",
+  ]) need(diagnostic, token, `seed-failure diagnostic lost ${token}`);
+  need(diagnostic, `        } catch (RuntimeException | AssertionError ignored) {
+            // Diagnostic retention must never replace the original heading assertion.
+        }`, "seed-failure diagnostic can mask the unchanged heading rejection");
+  assert.doesNotMatch(diagnostic,
+    /getRootInActiveWindow|clearCache|waitForIdle|SystemClock|\.click\(|performAction|device\.(?:click|swipe|press)/,
+    "seed-failure diagnostics added a query, wait, clock, or input");
+  assert.doesNotMatch(diagnostic,
+    /lines\.add\([^\n]*(?:candidate\.(?:text|description|packageName|className|resourceName)|getText|getContentDescription|getPackageName|getClassName)/,
+    "seed-failure formatter received a raw accessibility identity");
+
+  for (const token of [
+    "if (values == null",
+    "actions.size() + values.size() > MAX_ACTION_LINES",
+    "value == null || value.length() >= 500",
+    "!value.equals(safe(value))",
+    "for (String value : values) log(value);",
+  ]) need(retention, token, `seed-failure retention lost ${token}`);
+  assert.doesNotMatch(retention,
+    /assert|fail\(|throw|getRootInActiveWindow|clearCache|waitForIdle|\.click\(|performAction/,
+    "seed-failure retention can mask the original rejection or perform observation/input");
+  need(safe, "redacted.length() <= 500 ? redacted : redacted.substring(0, 500)",
+    "production sanitizer lost its 500-character cap");
+  need(log, "actions.add(safe(value));",
+    "seed-failure diagnostic no longer uses the production action logger");
+
+  for (const token of [
+    'private static final String ROLE_MAP = "0:h,1:p,2:a,3:r,4:m";',
+    'private static final String FLAG_MAP =',
+    '"tx,dx,pkg,v,tv,vis,en,scr,clk,foc,fd,af,live,main,route,rm";',
+    "static final int ROLE_HEADING = 0;",
+    "static final int ROLE_PARENT = 1;",
+    "static final int ROLE_ANCESTOR = 2;",
+    "static final int ROLE_ROUTE = 3;",
+    "static final int ROLE_MAIN = 4;",
+    '"Fixed42-to61 seed failure header"',
+    '" records=" + recordCount',
+    '" total=" + totalRecords',
+    '" truncated=" + (totalRecords > recordCount)',
+    '" correlation=" + correlation',
+    '" heading=" + headingIndex',
+    '" parent=" + parentIndex',
+    '" route=" + routeIndex',
+    '" main=" + mainIndex',
+    '" display=" + displayWidth + "," + displayHeight',
+    '" rootBounds=" + numericBounds(',
+    '" mainBounds=" + numericBounds(',
+    '" mainRawExact=" + mainRawExact',
+    '" roleMap=" + ROLE_MAP',
+    '" flagMap=" + FLAG_MAP',
+    "new StringBuilder(16)",
+    ".append(bit(textExact))",
+    ".append(bit(descriptionExact))",
+    ".append(bit(productPackage))",
+    ".append(bit(view))",
+    ".append(bit(textView))",
+    ".append(bit(visible))",
+    ".append(bit(enabled))",
+    ".append(bit(scrollable))",
+    ".append(bit(clickable))",
+    ".append(bit(focusable))",
+    ".append(bit(focused))",
+    ".append(bit(accessibilityFocused))",
+    ".append(bit(liveRegion))",
+    ".append(bit(mainAncestor))",
+    ".append(bit(routeAncestor))",
+    ".append(bit(mainResource))",
+    '"Fixed42-to61 seed failure record"',
+    '" role=" + role',
+    '" index=" + nodeIndex',
+    '" parent=" + parentIndex',
+    '" window=" + windowId',
+    '" bounds=" + numericBounds(',
+    '" flags=" + flags',
+    "< FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT",
+    "flags.length() == 16",
+    "validCorrelation(correlation)",
+    "validFlags(flags)",
+  ]) need(policy, token, `seed-failure compact policy lost ${token}`);
+  assert.doesNotMatch(policy,
+    /textValue|descriptionValue|packageValue|classValue|resourceValue|https?:|credential|token|cookie|authorization/i,
+    "seed-failure policy accepts raw identity or credential-bearing values");
+
+  const phase = observe.indexOf("Fixed42SeedPolicy.phase(observation)", sectionParent);
+  const geometryThrow = observe.indexOf("throw new Fixed42MainGeometryMismatch", phase);
+  assert.ok(phase > sectionParent && geometryThrow > phase,
+    "seed-failure logging changed the geometry mismatch type or ordering");
+}
+
+function runFixed42SeedFailureDiagnosticHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42SeedFailureDiagnosticPolicy");
+  const safe = methodBody(java, "safe");
+  const log = methodBody(java, "log");
+  const retention = methodBody(java, "retainFixed42To61SeedFailureDiagnosticLines");
+  const harness = `
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+
+public final class Fixed42SeedFailureDiagnosticHarness {
+    private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
+    private static final int FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT = 12;
+    private static final int MAX_ACTION_LINES = 260;
+    private static final Pattern URL = Pattern.compile("https?://\\\\S+", Pattern.CASE_INSENSITIVE);
+    private static final List<String> actions = new ArrayList<>();
+    ${policy}
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+    private static void fail(String message) { throw new AssertionError(message); }
+    private static void reject(Runnable operation, String message) {
+        try {
+            operation.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError(message);
+    }
+    private static String safe(String value) {
+${safe}
+    }
+    private static void log(String value) {
+${log}
+    }
+    private static void retainFixed42To61SeedFailureDiagnosticLines(List<String> values) {
+${retention}
+    }
+
+    public static void main(String[] ignored) {
+        String correlation = Fixed42SeedFailureDiagnosticPolicy.correlation(
+                113, 10, 10, 52, 24);
+        String header = Fixed42SeedFailureDiagnosticPolicy.headerLine(
+                5, 5, 113, correlation, 52, 40, 24, 14,
+                1080, 1920, 0, 0, 1080, 1920,
+                0, 0, 1082, 1922, false);
+        String headingFlags = Fixed42SeedFailureDiagnosticPolicy.flags(
+                true, false, true, false, true, false, true, false,
+                false, false, false, false, false, true, true, false);
+        String parentFlags = Fixed42SeedFailureDiagnosticPolicy.flags(
+                false, false, true, true, false, false, true, false,
+                false, false, false, false, false, true, true, false);
+        String routeFlags = Fixed42SeedFailureDiagnosticPolicy.flags(
+                true, false, true, true, false, true, true, false,
+                false, true, true, false, false, true, true, false);
+        String mainFlags = Fixed42SeedFailureDiagnosticPolicy.flags(
+                false, false, true, true, false, true, true, true,
+                false, false, false, false, false, true, false, true);
+        require(headingFlags.equals("1010101000000110"), "heading flag mapping changed");
+        require(parentFlags.equals("0011001000000110"), "parent flag mapping changed");
+        require(routeFlags.equals("1011011001100110"), "route flag mapping changed");
+        require(mainFlags.equals("0011011100000101"), "main flag mapping changed");
+
+        List<String> lines = new ArrayList<>();
+        lines.add(header);
+        lines.add(Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                0, correlation, Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING,
+                52, 40, 10, 0, 1900, 1082, 1950, headingFlags));
+        lines.add(Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                1, correlation, Fixed42SeedFailureDiagnosticPolicy.ROLE_PARENT,
+                40, 24, 10, 0, 1850, 1082, 2050, parentFlags));
+        lines.add(Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                2, correlation, Fixed42SeedFailureDiagnosticPolicy.ROLE_ANCESTOR,
+                32, 24, 10, 0, 60, 1055, 1922, parentFlags));
+        lines.add(Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                3, correlation, Fixed42SeedFailureDiagnosticPolicy.ROLE_ROUTE,
+                24, 14, 10, 0, 60, 1055, 1922, routeFlags));
+        lines.add(Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                4, correlation, Fixed42SeedFailureDiagnosticPolicy.ROLE_MAIN,
+                14, 4, 10, 0, 0, 1082, 1922, mainFlags));
+        retainFixed42To61SeedFailureDiagnosticLines(lines);
+        require(actions.equals(lines), "formatter-to-safe-to-log pipeline changed a record");
+        for (String line : actions) {
+            require(line.length() < 500, "seed diagnostic reached the safe limit");
+            require(safe(line).equals(line), "seed diagnostic was clipped or redacted");
+            require(!line.contains("textValue")
+                            && !line.contains("descriptionValue")
+                            && !line.contains("packageValue")
+                            && !line.contains("classValue")
+                            && !line.contains("resourceValue"),
+                    "seed diagnostic leaked a raw identity field");
+        }
+        require(header.contains("records=5 total=5 truncated=false nodes=113")
+                        && header.contains("correlation=" + correlation)
+                        && header.contains("heading=52 parent=40 route=24 main=14")
+                        && header.contains("display=1080,1920")
+                        && header.contains("rootBounds=0,0,1080,1920")
+                        && header.contains("mainBounds=0,0,1082,1922")
+                        && header.contains("mainRawExact=false")
+                        && header.contains("roleMap=0:h,1:p,2:a,3:r,4:m")
+                        && header.contains("flagMap=tx,dx,pkg,v,tv,vis,en,scr,clk,foc,fd,af,live,main,route,rm"),
+                "header lost same-graph identity, geometry, maps, or counts");
+        require(actions.get(1).contains("role=0 index=52 parent=40 window=10")
+                        && actions.get(1).contains("bounds=0,1900,1082,1950")
+                        && actions.get(1).contains("flags=" + headingFlags),
+                "heading fields did not survive retention");
+        require(actions.get(5).contains("role=4 index=14 parent=4 window=10")
+                        && actions.get(5).contains("flags=" + mainFlags),
+                "main identity fields did not survive retention");
+
+        String extremeCorrelation = Fixed42SeedFailureDiagnosticPolicy.correlation(
+                512, Integer.MIN_VALUE, Integer.MAX_VALUE,
+                Integer.MIN_VALUE, Integer.MAX_VALUE);
+        String extremeHeader = Fixed42SeedFailureDiagnosticPolicy.headerLine(
+                12, 515, 512, extremeCorrelation, 511, 510, 509, 508,
+                Integer.MAX_VALUE, Integer.MAX_VALUE,
+                Integer.MIN_VALUE, Integer.MIN_VALUE,
+                Integer.MAX_VALUE, Integer.MAX_VALUE,
+                Integer.MIN_VALUE, Integer.MIN_VALUE,
+                Integer.MAX_VALUE, Integer.MAX_VALUE, false);
+        String extremeRecord = Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                11, extremeCorrelation, Fixed42SeedFailureDiagnosticPolicy.ROLE_ANCESTOR,
+                511, -1, Integer.MIN_VALUE,
+                Integer.MIN_VALUE, Integer.MIN_VALUE,
+                Integer.MAX_VALUE, Integer.MAX_VALUE, headingFlags);
+        retainFixed42To61SeedFailureDiagnosticLines(List.of(extremeHeader, extremeRecord));
+        require(extremeHeader.length() < 500 && extremeRecord.length() < 500,
+                "maximum-width numeric formatter exceeded its retention bound");
+        require(actions.get(actions.size() - 2).equals(extremeHeader)
+                        && actions.get(actions.size() - 1).equals(extremeRecord),
+                "maximum-width numeric records changed through safe and log");
+
+        reject(() -> Fixed42SeedFailureDiagnosticPolicy.headerLine(
+                        6, 5, 113, correlation, 52, 40, 24, 14,
+                        1080, 1920, 0, 0, 1080, 1920,
+                        0, 0, 1082, 1922, false),
+                "record count mismatch survived");
+        reject(() -> Fixed42SeedFailureDiagnosticPolicy.headerLine(
+                        13, 13, 113, correlation, 52, 40, 24, 14,
+                        1080, 1920, 0, 0, 1080, 1920,
+                        0, 0, 1082, 1922, false),
+                "diagnostic record cap overflow survived");
+        reject(() -> Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                        12, correlation, Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING,
+                        52, 40, 10, 0, 0, 1, 1, headingFlags),
+                "thirteenth record survived");
+        reject(() -> Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                        0, "113,10", Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING,
+                        52, 40, 10, 0, 0, 1, 1, headingFlags),
+                "malformed correlation survived");
+        reject(() -> Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                        0, correlation, 9, 52, 40, 10, 0, 0, 1, 1, headingFlags),
+                "unknown role survived");
+        reject(() -> Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                        0, correlation, Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING,
+                        52, 40, 10, 0, 0, 1, 1, headingFlags.substring(1)),
+                "missing flag survived");
+        reject(() -> Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                        0, correlation, Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING,
+                        52, 40, 10, 0, 0, 1, 1, "x" + headingFlags.substring(1)),
+                "nonbinary flag survived");
+
+        int retained = actions.size();
+        retainFixed42To61SeedFailureDiagnosticLines(List.of("https://sensitive.invalid/value"));
+        retainFixed42To61SeedFailureDiagnosticLines(List.of("x".repeat(500)));
+        require(actions.size() == retained, "unsafe or clipped diagnostic reached log");
+        String predecessorPacked = String.join(" ", lines);
+        require(predecessorPacked.length() > 500
+                        && safe(predecessorPacked).length() == 500
+                        && !safe(predecessorPacked).equals(predecessorPacked),
+                "predecessor packed-line clipping control did not reproduce");
+        System.out.println("fixed42-seed-failure-diagnostic-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-seed-failure-diagnostic-"));
+  const sourceFile = path.join(directory, "Fixed42SeedFailureDiagnosticHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0,
+      `fixed42 seed-failure diagnostic javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand,
+      ["-cp", directory, "Fixed42SeedFailureDiagnosticHarness"],
+      { encoding: "utf8" });
+    assert.equal(run.status, 0,
+      `fixed42 seed-failure diagnostic harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-seed-failure-diagnostic-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function runFixed42MainGeometryPolicyHarness(java) {
   const policy = nestedClassDeclaration(java, "Fixed42MainGeometryPolicy");
   const harness = `
@@ -4145,6 +4523,97 @@ test("fixed42-to61 Discover diagnostic is sanitized observation-only and recycle
     assert.throws(() => fixed42DiscoverAmbiguityDiagnosticContract(mutant),
       `Discover observation mutant survived: ${label}`);
   }
+});
+
+test("fixed42-to61 heading failure retains only the cached same-graph seed identities", () => {
+  fixed42SeedFailureDiagnosticContract(source);
+
+  const mutants = [
+    ["profile", source.replace(
+      "if (isFixed42To61AutomaticMode() && !headingMatches) {",
+      "if (isFixed42AutomaticMode() && !headingMatches) {",
+    )],
+    ["success-log", source.replace(
+      "if (isFixed42To61AutomaticMode() && !headingMatches) {",
+      "if (isFixed42To61AutomaticMode()) {",
+    )],
+    ["removed-call", source.replace(
+      "                    logFixed42To61SeedHeadingFailure(",
+      "                    retainFixed42To61SeedFailureDiagnosticLines(",
+    )],
+    ["new-root", source.replace(
+      "        if (!isFixed42To61AutomaticMode()) return;",
+      "        instrumentation.getUiAutomation().getRootInActiveWindow();\n"
+        + "        if (!isFixed42To61AutomaticMode()) return;",
+    )],
+    ["input", source.replace(
+      "            retainFixed42To61SeedFailureDiagnosticLines(lines);",
+      "            device.click(1, 1);\n            retainFixed42To61SeedFailureDiagnosticLines(lines);",
+    )],
+    ["mask-original", source.replace(
+      "        } catch (RuntimeException | AssertionError ignored) {",
+      "        } catch (RuntimeException | AssertionError ignored) { throw ignored;",
+    )],
+    ["direct-log", source.replace(
+      "            retainFixed42To61SeedFailureDiagnosticLines(lines);",
+      "            for (String value : lines) log(value);",
+    )],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, source, `seed-failure ${label} mutant anchor was absent`);
+    assert.throws(
+      () => fixed42SeedFailureDiagnosticContract(mutant),
+      `seed-failure ${label} mutant survived`,
+    );
+  }
+});
+
+test("fixed42-to61 seed failure formatter preserves all fields through safe and log", () => {
+  fixed42SeedFailureDiagnosticContract(source);
+  runFixed42SeedFailureDiagnosticHarness(source);
+  const policy = nestedClassDeclaration(source, "Fixed42SeedFailureDiagnosticPolicy");
+
+  const mutants = [
+    ["record-cap", source.replace(
+      "private static final int FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT = 12;",
+      "private static final int FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT = 13;",
+    )],
+    ["missing-visible", source.replace(policy, policy.replace(
+      ".append(bit(visible))",
+      "",
+    ))],
+    ["missing-correlation", source.replace(policy, policy.replace(
+      '+ " correlation=" + correlation\n                    + " heading=" + headingIndex',
+      '+ " heading=" + headingIndex',
+    ))],
+    ["malformed-admitted", source.replace(policy, policy.replaceAll(
+      "&& validCorrelation(correlation)",
+      "&& true",
+    ))],
+    ["raw-identity", source.replace(policy, policy.replace(
+      '+ " flags=" + flags;',
+      '+ " flags=" + flags + " classValue";',
+    ))],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, source, `seed-failure formatter ${label} mutant anchor was absent`);
+    assert.throws(
+      () => label === "record-cap"
+        ? fixed42SeedFailureDiagnosticContract(mutant)
+        : runFixed42SeedFailureDiagnosticHarness(mutant),
+      `seed-failure formatter ${label} mutant survived`,
+    );
+  }
+
+  const overlongPolicy = policy.replace(
+    '+ " flags=" + flags;',
+    `+ " flags=" + flags + "${"x".repeat(400)}";`,
+  );
+  assert.notEqual(overlongPolicy, policy, "seed-failure overlong formatter anchor was absent");
+  assert.throws(
+    () => runFixed42SeedFailureDiagnosticHarness(source.replace(policy, overlongPolicy)),
+    "overlong seed-failure record survived the actual action pipeline",
+  );
 });
 
 test("fixed42-to61 geometry-only mismatch reacquires raw exact bounds without input", () => {
