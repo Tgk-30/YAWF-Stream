@@ -10,7 +10,12 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { hashPassword, nowISO, randomId } from "./crypto.js";
-import { isDatabaseServerRunning } from "./db.js";
+import {
+  acquireDatabaseLease,
+  DatabaseLeaseBusyError,
+  retainFailedDatabaseCleanup,
+  type DatabaseLeaseHandle,
+} from "./db.js";
 
 interface ResetOwnerOptions {
   username?: string;
@@ -28,6 +33,43 @@ export interface DatabaseBackupResult {
   pages: number;
 }
 
+function acquireRecoveryLease(databasePath: string, message: string): DatabaseLeaseHandle {
+  try {
+    return acquireDatabaseLease(databasePath);
+  } catch (error) {
+    if (error instanceof DatabaseLeaseBusyError) {
+      throw new Error(message, { cause: error });
+    }
+    throw error;
+  }
+}
+
+function closeRecoveryResources(
+  connections: Set<DatabaseSync>,
+  lease: DatabaseLeaseHandle,
+): void {
+  let closeError: unknown;
+  for (const sqlite of connections) {
+    try {
+      if (sqlite.isOpen) sqlite.close();
+    } catch (error) {
+      closeError ??= error;
+    }
+  }
+  const stillOpen = [...connections].filter((sqlite) => sqlite.isOpen);
+  if (stillOpen.length > 0) {
+    for (const sqlite of stillOpen) retainFailedDatabaseCleanup(sqlite, lease);
+    throw closeError ?? new Error("Recovery could not close its database safely. Restart this process before retrying.");
+  }
+  try {
+    lease.close();
+  } catch (error) {
+    retainFailedDatabaseCleanup(null, lease);
+    throw closeError ?? error;
+  }
+  if (closeError != null) throw closeError;
+}
+
 function timestampForPath(now = new Date()): string {
   return now.toISOString().replaceAll(":", "-").replaceAll(".", "-");
 }
@@ -40,11 +82,12 @@ function defaultBackupPath(databasePath: string, kind: string): string {
   );
 }
 
-function assertHealthyDatabase(path: string): void {
+function assertHealthyDatabase(path: string, connections?: Set<DatabaseSync>): void {
   if (!existsSync(path)) {
     throw new Error(`Database file does not exist: ${path}`);
   }
   const sqlite = new DatabaseSync(path, { readOnly: true });
+  connections?.add(sqlite);
   try {
     const integrity = sqlite.prepare("PRAGMA integrity_check").get() as {
       integrity_check: string;
@@ -62,12 +105,21 @@ function assertHealthyDatabase(path: string): void {
     }
   } finally {
     sqlite.close();
+    if (!sqlite.isOpen) connections?.delete(sqlite);
   }
 }
 
 export async function createDatabaseBackup(
   databasePath: string,
   outputPath = defaultBackupPath(databasePath, "manual"),
+): Promise<DatabaseBackupResult> {
+  return createDatabaseBackupWithConnections(databasePath, outputPath);
+}
+
+async function createDatabaseBackupWithConnections(
+  databasePath: string,
+  outputPath: string,
+  connections?: Set<DatabaseSync>,
 ): Promise<DatabaseBackupResult> {
   if (!existsSync(databasePath)) {
     throw new Error(`Database file does not exist: ${databasePath}`);
@@ -83,17 +135,19 @@ export async function createDatabaseBackup(
 
   mkdirSync(dirname(resolvedOutput), { recursive: true });
   const source = new DatabaseSync(resolvedDatabase);
+  connections?.add(source);
   try {
     source.exec("PRAGMA busy_timeout = 5000;");
     const pages = await backup(source, resolvedOutput);
     chmodSync(resolvedOutput, 0o600);
-    assertHealthyDatabase(resolvedOutput);
+    assertHealthyDatabase(resolvedOutput, connections);
     return { outputPath: resolvedOutput, pages };
   } catch (error) {
     rmSync(resolvedOutput, { force: true });
     throw error;
   } finally {
     source.close();
+    if (!source.isOpen) connections?.delete(source);
   }
 }
 
@@ -106,23 +160,37 @@ export async function restoreDatabaseBackup(
   if (resolvedDatabase === resolvedInput) {
     throw new Error("Restore input must be different from the live database.");
   }
-  if (isDatabaseServerRunning(resolvedDatabase)) {
-    throw new Error("Stop the YAWF Stream server before restoring its database.");
-  }
-  assertHealthyDatabase(resolvedInput);
-
   mkdirSync(dirname(resolvedDatabase), { recursive: true });
+  const lease = acquireRecoveryLease(
+    resolvedDatabase,
+    "Stop the YAWF Stream server before restoring its database.",
+  );
+  const connections = new Set<DatabaseSync>();
+  try {
+    return await restoreDatabaseBackupUnderLease(resolvedDatabase, resolvedInput, connections);
+  } finally {
+    closeRecoveryResources(connections, lease);
+  }
+}
+
+async function restoreDatabaseBackupUnderLease(
+  resolvedDatabase: string,
+  resolvedInput: string,
+  connections: Set<DatabaseSync>,
+): Promise<{ restoredFrom: string; safetyBackup: string | null }> {
+  assertHealthyDatabase(resolvedInput, connections);
+
   let safetyBackup: string | null = null;
   if (existsSync(resolvedDatabase)) {
     safetyBackup = defaultBackupPath(resolvedDatabase, "pre-restore");
-    await createDatabaseBackup(resolvedDatabase, safetyBackup);
+    await createDatabaseBackupWithConnections(resolvedDatabase, safetyBackup, connections);
   }
 
   const staged = `${resolvedDatabase}.restore-${timestampForPath()}.tmp`;
   rmSync(staged, { force: true });
   copyFileSync(resolvedInput, staged);
   chmodSync(staged, 0o600);
-  assertHealthyDatabase(staged);
+  assertHealthyDatabase(staged, connections);
 
   const displaced = `${resolvedDatabase}.replaced-${timestampForPath()}`;
   try {
@@ -130,7 +198,7 @@ export async function restoreDatabaseBackup(
     rmSync(`${resolvedDatabase}-shm`, { force: true });
     if (existsSync(resolvedDatabase)) renameSync(resolvedDatabase, displaced);
     renameSync(staged, resolvedDatabase);
-    assertHealthyDatabase(resolvedDatabase);
+    assertHealthyDatabase(resolvedDatabase, connections);
     rmSync(displaced, { force: true });
   } catch (error) {
     rmSync(staged, { force: true });
@@ -157,18 +225,32 @@ export async function resetOwnerPassword(
   if (options.password.length < 8) {
     throw new Error("The new owner password must be at least 8 characters.");
   }
-  if (isDatabaseServerRunning(databasePath)) {
-    throw new Error("Stop the YAWF Stream server before recovering its owner.");
-  }
   if (!existsSync(databasePath)) {
     throw new Error(`Database file does not exist: ${databasePath}`);
   }
 
-  const sqlite = new DatabaseSync(databasePath);
-  sqlite.exec("PRAGMA foreign_keys = ON;");
-  sqlite.exec("PRAGMA busy_timeout = 1000;");
-
+  const lease = acquireRecoveryLease(
+    databasePath,
+    "Stop the YAWF Stream server before recovering its owner.",
+  );
+  const connections = new Set<DatabaseSync>();
   try {
+    return await resetOwnerPasswordUnderLease(databasePath, options, connections);
+  } finally {
+    closeRecoveryResources(connections, lease);
+  }
+}
+
+async function resetOwnerPasswordUnderLease(
+  databasePath: string,
+  options: ResetOwnerOptions,
+  connections: Set<DatabaseSync>,
+): Promise<ResetOwnerResult> {
+  const sqlite = new DatabaseSync(databasePath);
+  connections.add(sqlite);
+  try {
+    sqlite.exec("PRAGMA foreign_keys = ON;");
+    sqlite.exec("PRAGMA busy_timeout = 1000;");
     const owners = sqlite
       .prepare(
         `SELECT id, username, totp_enabled
@@ -247,6 +329,7 @@ export async function resetOwnerPassword(
     }
   } finally {
     sqlite.close();
+    if (!sqlite.isOpen) connections.delete(sqlite);
   }
 }
 

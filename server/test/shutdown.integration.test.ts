@@ -3,10 +3,15 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { get, type ClientRequest, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance } from "fastify";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
-import { AppDatabase, databaseLockPath } from "../src/db.js";
+import {
+  AppDatabase,
+  DatabaseLeaseBusyError,
+  databaseLockPath,
+} from "../src/db.js";
 
 const SHUTDOWN_BOUND_MS = 1_000;
 const CLEANUP_BOUND_MS = 2_000;
@@ -86,6 +91,7 @@ describe("server shutdown connection draining", () => {
       ));
       expect(response.complete).toBe(false);
       expect(existsSync(lockPath)).toBe(true);
+      expect(() => new AppDatabase(databasePath)).toThrow(DatabaseLeaseBusyError);
 
       const disconnected = response.destroyed
         ? Promise.resolve()
@@ -103,12 +109,13 @@ describe("server shutdown connection draining", () => {
 
       expect(response.destroyed).toBe(true);
       expect(response.complete).toBe(false);
-      expect(existsSync(lockPath)).toBe(false);
+      expect(existsSync(lockPath)).toBe(true);
       reopened = new AppDatabase(databasePath);
       expect(existsSync(lockPath)).toBe(true);
+      expect(() => new AppDatabase(databasePath)).toThrow(DatabaseLeaseBusyError);
       reopened.close();
       reopened = undefined;
-      expect(existsSync(lockPath)).toBe(false);
+      expect(existsSync(lockPath)).toBe(true);
     } finally {
       request?.destroy();
       response?.destroy();
@@ -129,18 +136,49 @@ describe("server shutdown connection draining", () => {
       app = await buildApp({ config: testConfig(databasePath, dataDir) });
       await app.listen({ host: "127.0.0.1", port: 0 });
       expect(existsSync(lockPath)).toBe(true);
+      expect(() => new AppDatabase(databasePath)).toThrow(DatabaseLeaseBusyError);
       await within(
         app.close(),
         SHUTDOWN_BOUND_MS,
         "Fastify did not complete a normal close",
       );
-      expect(existsSync(lockPath)).toBe(false);
+      expect(existsSync(lockPath)).toBe(true);
       reopened = new AppDatabase(databasePath);
+      expect(() => new AppDatabase(databasePath)).toThrow(DatabaseLeaseBusyError);
       reopened.close();
       reopened = undefined;
-      expect(existsSync(lockPath)).toBe(false);
+      expect(existsSync(lockPath)).toBe(true);
     } finally {
       reopened?.close();
+      await closeForCleanup(app);
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries a one-shot database close failure without releasing the lease early", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-shutdown-close-retry-"));
+    const databasePath = join(dataDir, "app.sqlite");
+    const lockPath = databaseLockPath(databasePath);
+    const originalClose = DatabaseSync.prototype.close;
+    let app: FastifyInstance | undefined;
+    let failOnce = true;
+
+    try {
+      app = await buildApp({ config: testConfig(databasePath, dataDir) });
+      DatabaseSync.prototype.close = function closeWithInjectedFailure() {
+        if (failOnce) {
+          failOnce = false;
+          throw new Error("injected shutdown database close failure");
+        }
+        originalClose.call(this);
+      };
+
+      await app.close();
+      expect(existsSync(lockPath)).toBe(true);
+      const reopened = new AppDatabase(databasePath);
+      reopened.close();
+    } finally {
+      DatabaseSync.prototype.close = originalClose;
       await closeForCleanup(app);
       rmSync(dataDir, { recursive: true, force: true });
     }

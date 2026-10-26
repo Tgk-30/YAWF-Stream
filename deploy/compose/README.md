@@ -1,5 +1,9 @@
 # DebridStreamer Docker Compose
 
+For legacy database-lock migration, interrupted startup and rollback, see
+[server database ownership](../../docs/SERVER_DATABASE_LEASE.md). Never remove
+an active lease file to start another container against the same database.
+
 This runs Server Mode and serves the built PWA from the same container.
 
 ## Quick Start
