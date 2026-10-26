@@ -55,6 +55,7 @@ const scrubBarMock = vi.hoisted(() => vi.fn((props: {
   currentTime: number;
   duration: number;
   onSeek: (time: number) => void;
+  onSeekPreview?: (time: number) => void;
   onScrubbingChange?: (scrubbing: boolean) => void;
 }) => (
   <div
@@ -3320,6 +3321,442 @@ describe("WebviewPlayer", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  describe("paused native HLS seek confirmation", () => {
+    const nativeHlsSeekConfirmTimeoutMs = 1_200;
+    const press = (key: string) => {
+      act(() => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+        );
+      });
+    };
+
+    async function setupNativePausedSeek(acceptAssignments: boolean) {
+      deviceKindMock.mockReturnValue("ios");
+      (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+        () => "probably",
+      );
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      const request = vi.fn(async (_quality: string, position: number, audioTrack?: number) => ({
+        url: `https://server.example/api/stream/session-2/index.m3u8?quality=480p&start=${position}&audio=${audioTrack}`,
+        timelineOffsetSeconds: position,
+        startPositionSeconds: 0,
+        audioTrack,
+        quality: "480p" as const,
+      }));
+      const view = render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=0&audio=1"
+          engine="webview-hls-transcode"
+          title="Paused native HLS"
+          startPositionSeconds={0}
+          initialHandoffState={{ paused: true, volume: 0.6, muted: false, playbackRate: 1.25 }}
+          serverOptimized={{
+            qualities: ["720p", "480p"],
+            loadSourceInfo: async () => ({
+              durationSeconds: 30,
+              tracks: [
+                { index: 0, language: "eng", label: "English", default: true },
+                { index: 1, language: "jpn", label: "Japanese", default: false },
+              ],
+            }),
+            request,
+          }}
+          onClose={() => {}}
+        />,
+      );
+      const player = screen.getByRole("dialog", { name: "Playing Paused native HLS" });
+      await waitFor(() => expect(
+        (player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toContain("#t=0.001"));
+      await waitFor(() => expect(screen.getByTestId("scrub-bar")).toHaveAttribute(
+        "data-duration",
+        "30",
+      ));
+      const video = player.querySelector("video.player-video") as HTMLVideoElement;
+      const assigned: number[] = [];
+      let currentTime = 0.001;
+      Object.defineProperties(video, {
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (next: number) => {
+            assigned.push(next);
+            if (acceptAssignments) currentTime = next;
+          },
+        },
+        duration: { configurable: true, value: 30 },
+        paused: { configurable: true, value: true },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+        seeking: { configurable: true, value: false },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 30 },
+        },
+      });
+      video.volume = 0.6;
+      video.muted = false;
+      video.defaultPlaybackRate = 1.25;
+      video.playbackRate = 1.25;
+      fireEvent.loadedMetadata(video);
+      fireEvent.seeked(video);
+      vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+      vi.mocked(HTMLMediaElement.prototype.pause).mockClear();
+      return {
+        assigned,
+        player,
+        request,
+        setCurrentTime: (next: number) => { currentTime = next; },
+        video,
+        view,
+      };
+    }
+
+    it("recovers one ignored paused seek at the exact target without playing the stale origin", async () => {
+      const probe = await setupNativePausedSeek(false);
+      probe.setCurrentTime(0);
+      vi.useFakeTimers();
+
+      press("3");
+      expect(probe.assigned.at(-1)).toBe(9);
+      fireEvent.seeked(probe.video);
+      fireEvent.timeUpdate(probe.video);
+      press(" ");
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs);
+      });
+      expect(probe.request).toHaveBeenCalledTimes(1);
+      expect(probe.request).toHaveBeenCalledWith("480p", 9, 1);
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+
+      vi.useRealTimers();
+      await waitFor(() => expect(
+        (probe.player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toContain("start=9&audio=1#t=0.001"));
+      const replacement = probe.player.querySelector("video.player-video") as HTMLVideoElement;
+      expect(replacement).not.toBe(probe.video);
+      expect(replacement.volume).toBeCloseTo(0.6);
+      expect(replacement.playbackRate).toBe(1.25);
+      expect(replacement.paused).toBe(true);
+      expect(within(probe.player).getByRole("button", { name: "Pause" })).toBeInTheDocument();
+
+      Object.defineProperties(replacement, {
+        currentTime: { configurable: true, value: 0.001, writable: true },
+        duration: { configurable: true, value: 21 },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+        seeking: { configurable: true, value: false },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 21 },
+        },
+      });
+      fireEvent.seeked(replacement);
+      expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1);
+      expect(probe.request).toHaveBeenCalledTimes(1);
+    });
+
+    it("accepts an independently observed native seek without a server fallback", async () => {
+      const probe = await setupNativePausedSeek(true);
+      let seeking = true;
+      Object.defineProperty(probe.video, "seeking", {
+        configurable: true,
+        get: () => seeking,
+      });
+      vi.useFakeTimers();
+
+      press("3");
+      expect(probe.assigned.at(-1)).toBe(9);
+      expect(within(probe.player).getByRole("status")).toHaveTextContent(
+        "Synchronizing playback",
+      );
+      fireEvent.timeUpdate(probe.video);
+      press(" ");
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+      seeking = false;
+      fireEvent.seeked(probe.video);
+      expect(within(probe.player).queryByText("Synchronizing playback…")).toBeNull();
+      expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs * 2);
+      expect(probe.request).not.toHaveBeenCalled();
+    });
+
+    it("accepts a stable nonseeking readback at the deadline when WebKit omits events", async () => {
+      const probe = await setupNativePausedSeek(true);
+      vi.useFakeTimers();
+
+      press("3");
+      expect(within(probe.player).getByRole("status")).toHaveTextContent(
+        "Synchronizing playback",
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs);
+      });
+      expect(probe.request).not.toHaveBeenCalled();
+      expect(within(probe.player).queryByText("Synchronizing playback…")).toBeNull();
+    });
+
+    it("falls back when the deadline readback lacks decoded media readiness", async () => {
+      const probe = await setupNativePausedSeek(true);
+      Object.defineProperty(probe.video, "readyState", {
+        configurable: true,
+        value: HTMLMediaElement.HAVE_METADATA,
+      });
+      vi.useFakeTimers();
+
+      press("3");
+      expect(probe.assigned.at(-1)).toBe(9);
+      press(" ");
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs);
+      });
+
+      expect(probe.request).toHaveBeenCalledTimes(1);
+      expect(probe.request).toHaveBeenCalledWith("480p", 9, 1);
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+    });
+
+    it("releases a failed recovery without playing and allows a later explicit play", async () => {
+      const probe = await setupNativePausedSeek(false);
+      probe.request.mockRejectedValueOnce(new Error("seek recovery rejected"));
+      probe.setCurrentTime(0);
+      vi.useFakeTimers();
+
+      press("3");
+      press(" ");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs);
+      });
+
+      expect(probe.request).toHaveBeenCalledTimes(1);
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+      expect(within(probe.player).queryByText("Synchronizing playback…")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("alert")).toHaveTextContent("seek recovery rejected");
+      fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+      press(" ");
+      expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1);
+    });
+
+    it("releases a refused recovery while another playback change is pending", async () => {
+      const probe = await setupNativePausedSeek(false);
+      const ordinary = deferred<{
+        url: string;
+        timelineOffsetSeconds: number;
+        startPositionSeconds: number;
+        audioTrack: number | undefined;
+        quality: "480p";
+      }>();
+      probe.request.mockImplementationOnce(() => ordinary.promise);
+      probe.setCurrentTime(0);
+
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "720p" }));
+      await act(async () => Promise.resolve());
+      expect(probe.request).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+      vi.useFakeTimers();
+
+      press("3");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs);
+      });
+
+      expect(probe.request).toHaveBeenCalledTimes(1);
+      expect(within(probe.player).queryByText("Synchronizing playback…")).toBeNull();
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Another playback change is still being prepared. Try seeking again.",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+
+      press("4");
+      expect(probe.assigned.at(-1)).toBe(12);
+      expect(within(probe.player).getByRole("status")).toHaveTextContent(
+        "Synchronizing playback",
+      );
+    });
+
+    it("lets the newest seek supersede stale confirmation and fallback work", async () => {
+      const probe = await setupNativePausedSeek(false);
+      const first = deferred<{
+        url: string;
+        timelineOffsetSeconds: number;
+        startPositionSeconds: number;
+        audioTrack: number | undefined;
+        quality: "480p";
+      }>();
+      const second = deferred<{
+        url: string;
+        timelineOffsetSeconds: number;
+        startPositionSeconds: number;
+        audioTrack: number | undefined;
+        quality: "480p";
+      }>();
+      probe.request
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(() => second.promise);
+      probe.setCurrentTime(0);
+      vi.useFakeTimers();
+
+      press("3");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs);
+      });
+      expect(probe.request).toHaveBeenNthCalledWith(1, "480p", 9, 1);
+
+      press("6");
+      probe.setCurrentTime(9);
+      fireEvent.seeked(probe.video);
+      expect(within(probe.player).getByRole("status")).toHaveTextContent(
+        "Synchronizing playback",
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs);
+      });
+      expect(probe.request).toHaveBeenCalledTimes(2);
+      expect(probe.request).toHaveBeenNthCalledWith(2, "480p", 18, 1);
+
+      await act(async () => {
+        first.resolve({
+          url: "https://server.example/api/stream/stale/index.m3u8?quality=480p&start=9&audio=1",
+          timelineOffsetSeconds: 9,
+          startPositionSeconds: 0,
+          audioTrack: 1,
+          quality: "480p",
+        });
+        await first.promise;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(within(probe.player).getByRole("status")).toHaveTextContent(
+        "Synchronizing playback",
+      );
+      press(" ");
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+
+      await act(async () => {
+        second.resolve({
+          url: "https://server.example/api/stream/current/index.m3u8?quality=480p&start=18&audio=1",
+          timelineOffsetSeconds: 18,
+          startPositionSeconds: 0,
+          audioTrack: 1,
+          quality: "480p",
+        });
+        await second.promise;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      vi.useRealTimers();
+      await waitFor(() => expect(
+        (probe.player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toContain("/current/index.m3u8?quality=480p&start=18&audio=1"));
+      expect((probe.player.querySelector("video.player-video") as HTMLVideoElement).src)
+        .not.toContain("/stale/");
+    });
+
+    it("supersedes an ignored in-window seek with the latest committed out-of-window target", async () => {
+      const probe = await setupNativePausedSeek(false);
+      const replacement = deferred<{
+        url: string;
+        timelineOffsetSeconds: number;
+        startPositionSeconds: number;
+        audioTrack: number | undefined;
+        quality: "480p";
+      }>();
+      probe.request.mockImplementationOnce(() => replacement.promise);
+      Object.defineProperty(probe.video, "seekable", {
+        configurable: true,
+        value: { length: 1, start: () => 0, end: () => 15 },
+      });
+      probe.setCurrentTime(0);
+      vi.useFakeTimers();
+
+      press("3");
+      press(" ");
+      const scrub = scrubBarMock.mock.calls.at(-1)?.[0];
+      if (scrub == null) throw new Error("Scrub bar props were not captured");
+      if (scrub.onSeekPreview == null) throw new Error("Scrub preview was not captured");
+      act(() => scrub.onSeekPreview?.(24));
+      expect(probe.request).not.toHaveBeenCalled();
+
+      press("8");
+      await act(async () => Promise.resolve());
+      expect(probe.request).toHaveBeenCalledTimes(1);
+      expect(probe.request).toHaveBeenCalledWith("480p", 24, 1);
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs * 2);
+      expect(probe.request).toHaveBeenCalledTimes(1);
+    });
+
+    it("invalidates the confirmation deadline when the player is torn down", async () => {
+      const probe = await setupNativePausedSeek(false);
+      vi.useFakeTimers();
+      press("3");
+      expect(within(probe.player).getByRole("status")).toHaveTextContent(
+        "Synchronizing playback",
+      );
+      probe.view.unmount();
+      await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs * 2);
+      expect(probe.request).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["ordinary MP4", "https://server.example/movie.mp4"],
+      ["hls.js", "https://server.example/api/stream/session-1/index.m3u8?quality=480p"],
+    ])("leaves %s paused seeks on their existing local path", async (_label, url) => {
+      deviceKindMock.mockReturnValue("mac");
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      const request = vi.fn(async () => ({
+        url: "https://server.example/api/stream/replacement/index.m3u8?quality=480p&start=9",
+        timelineOffsetSeconds: 9,
+        startPositionSeconds: 0,
+        quality: "480p" as const,
+      }));
+      render(
+        <VideoPlayer
+          url={url}
+          title="Unaffected local seek"
+          serverOptimized={{
+            qualities: ["480p"],
+            loadSourceInfo: async () => ({ durationSeconds: 30 }),
+            request,
+          }}
+          onClose={() => {}}
+        />,
+      );
+      if (url.endsWith("480p")) await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let currentTime = 0;
+      Object.defineProperties(video, {
+        currentTime: {
+          configurable: true,
+          get: () => currentTime,
+          set: (next: number) => { currentTime = next; },
+        },
+        duration: { configurable: true, value: 30 },
+        paused: { configurable: true, value: true },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 30 },
+        },
+      });
+      await waitFor(() => expect(screen.getByTestId("scrub-bar")).toHaveAttribute(
+        "data-duration",
+        "30",
+      ));
+      vi.useFakeTimers();
+      press("3");
+      expect(currentTime).toBe(9);
+      await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs * 2);
+      expect(request).not.toHaveBeenCalled();
+    });
   });
 
   it("loads server audio inventory and restarts the owned optimized stream at the current position", async () => {
