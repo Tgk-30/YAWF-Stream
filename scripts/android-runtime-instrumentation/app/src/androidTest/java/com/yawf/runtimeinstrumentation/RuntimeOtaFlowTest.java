@@ -1487,6 +1487,7 @@ public final class RuntimeOtaFlowTest {
                             width,
                             height);
 
+            int discoverIndex;
             if (isFixed42To61AutomaticMode()) {
                 logFixed42To61DiscoverAmbiguityIfPresent(
                         nodes,
@@ -1498,8 +1499,10 @@ public final class RuntimeOtaFlowTest {
                         width,
                         height,
                         mainGeometryDiagnostic);
+                discoverIndex = fixed42UniqueTo61DiscoverRoute(nodes, mainIndex);
+            } else {
+                discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);
             }
-            int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);
             Fixed42AxNode discover = nodes.get(discoverIndex);
             assertTrue("Fixed42 Discover page identity changed",
                     discover.matches(product, "android.view.View", false, false)
@@ -1753,6 +1756,43 @@ public final class RuntimeOtaFlowTest {
         }
         if (required) assertTrue("Fixed42 semantic identity was absent for " + exact, found >= 0);
         return found;
+    }
+
+    private int fixed42UniqueTo61DiscoverRoute(
+            List<Fixed42AxNode> nodes, int mainIndex) {
+        assertTrue("Discover route classification is restricted to fixed42-to61",
+                isFixed42To61AutomaticMode());
+        int rootWindowId = nodes.get(0).info.getWindowId();
+        int mainWindowId = nodes.get(mainIndex).info.getWindowId();
+        List<Fixed42DiscoverRoutePolicy.Candidate> matches = new ArrayList<>();
+        for (int index = 0; index < nodes.size(); index++) {
+            Fixed42AxNode candidate = nodes.get(index);
+            if (!candidate.semanticEquals("Discover page")) continue;
+            matches.add(new Fixed42DiscoverRoutePolicy.Candidate(
+                    index,
+                    candidate.parentIndex,
+                    candidate.info.getWindowId(),
+                    "Discover page".equals(candidate.text),
+                    "Discover page".equals(candidate.description),
+                    OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName),
+                    "android.view.View".equals(candidate.className),
+                    candidate.visible,
+                    candidate.enabled,
+                    candidate.scrollable,
+                    candidate.clickable,
+                    candidate.info.isFocusable(),
+                    candidate.info.isFocused(),
+                    candidate.info.isAccessibilityFocused(),
+                    candidate.info.getLiveRegion()
+                            != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                    fixed42IsDescendant(nodes, index, mainIndex),
+                    candidate.bounds.left,
+                    candidate.bounds.top,
+                    candidate.bounds.right,
+                    candidate.bounds.bottom));
+        }
+        return Fixed42DiscoverRoutePolicy.selectRouteNodeIndex(
+                matches, rootWindowId, mainWindowId);
     }
 
     private void logFixed42To61DiscoverAmbiguityIfPresent(
@@ -4470,6 +4510,138 @@ public final class RuntimeOtaFlowTest {
         static String rect(Rect value) {
             return value.left + "," + value.top + ","
                     + value.right + "," + value.bottom;
+        }
+    }
+
+    private static final class Fixed42DiscoverRoutePolicy {
+        private static final class Candidate {
+            final int nodeIndex;
+            final int parentIndex;
+            final int windowId;
+            final boolean textExact;
+            final boolean descriptionExact;
+            final boolean productPackage;
+            final boolean viewClass;
+            final boolean visible;
+            final boolean enabled;
+            final boolean scrollable;
+            final boolean clickable;
+            final boolean focusable;
+            final boolean focused;
+            final boolean accessibilityFocused;
+            final boolean liveRegion;
+            final boolean inMain;
+            final int left;
+            final int top;
+            final int right;
+            final int bottom;
+
+            Candidate(
+                    int nodeIndex,
+                    int parentIndex,
+                    int windowId,
+                    boolean textExact,
+                    boolean descriptionExact,
+                    boolean productPackage,
+                    boolean viewClass,
+                    boolean visible,
+                    boolean enabled,
+                    boolean scrollable,
+                    boolean clickable,
+                    boolean focusable,
+                    boolean focused,
+                    boolean accessibilityFocused,
+                    boolean liveRegion,
+                    boolean inMain,
+                    int left,
+                    int top,
+                    int right,
+                    int bottom) {
+                this.nodeIndex = nodeIndex;
+                this.parentIndex = parentIndex;
+                this.windowId = windowId;
+                this.textExact = textExact;
+                this.descriptionExact = descriptionExact;
+                this.productPackage = productPackage;
+                this.viewClass = viewClass;
+                this.visible = visible;
+                this.enabled = enabled;
+                this.scrollable = scrollable;
+                this.clickable = clickable;
+                this.focusable = focusable;
+                this.focused = focused;
+                this.accessibilityFocused = accessibilityFocused;
+                this.liveRegion = liveRegion;
+                this.inMain = inMain;
+                this.left = left;
+                this.top = top;
+                this.right = right;
+                this.bottom = bottom;
+            }
+
+            boolean isRoute(int rootWindowId) {
+                return (textExact || descriptionExact)
+                        && productPackage
+                        && viewClass
+                        && visible
+                        && enabled
+                        && !scrollable
+                        && !clickable
+                        && inMain
+                        && windowId == rootWindowId;
+            }
+
+            boolean isKnownHiddenAnnouncement(Candidate route, int rootWindowId) {
+                return textExact
+                        && !descriptionExact
+                        && productPackage
+                        && viewClass
+                        && !visible
+                        && enabled
+                        && !scrollable
+                        && !clickable
+                        && !focusable
+                        && !focused
+                        && !accessibilityFocused
+                        && !liveRegion
+                        && inMain
+                        && left == 0
+                        && top == 0
+                        && right == 0
+                        && bottom == 0
+                        && parentIndex == route.parentIndex
+                        && windowId == route.windowId;
+            }
+        }
+
+        static int selectRouteNodeIndex(
+                List<Candidate> matches, int rootWindowId, int mainWindowId) {
+            require(rootWindowId == mainWindowId,
+                    "Fixed42-to61 Discover root and main windows diverged");
+            int routeRecord = -1;
+            for (int record = 0; record < matches.size(); record++) {
+                if (!matches.get(record).isRoute(rootWindowId)) continue;
+                require(routeRecord < 0,
+                        "Fixed42-to61 Discover route identity was ambiguous");
+                routeRecord = record;
+            }
+            require(routeRecord >= 0,
+                    "Fixed42-to61 Discover route identity was absent");
+            Candidate route = matches.get(routeRecord);
+            int hiddenAnnouncements = 0;
+            for (int record = 0; record < matches.size(); record++) {
+                if (record == routeRecord) continue;
+                require(matches.get(record).isKnownHiddenAnnouncement(route, rootWindowId),
+                        "Fixed42-to61 Discover semantic match was unrecognized");
+                hiddenAnnouncements++;
+                require(hiddenAnnouncements <= 1,
+                        "Fixed42-to61 Discover hidden announcement was ambiguous");
+            }
+            return route.nodeIndex;
+        }
+
+        private static void require(boolean condition, String message) {
+            if (!condition) throw new AssertionError(message);
         }
     }
 

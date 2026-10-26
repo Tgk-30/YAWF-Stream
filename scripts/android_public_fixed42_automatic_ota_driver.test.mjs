@@ -1719,12 +1719,25 @@ public final class Fixed42LauncherDiagnosticsHarness {
 function fixed42MainProofDiagnosticContract(java) {
   const observe = methodBody(java, "observeFixed42SeedSnapshot");
   const mainStart = observe.indexOf('int mainIndex = fixed42UniqueResource(nodes, "main-content");');
-  const discoverStart = observe.indexOf(
-    'int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
-    mainStart,
-  );
+  const discoverStart = observe.indexOf("int discoverIndex;", mainStart);
   assert.ok(mainStart >= 0 && discoverStart > mainStart,
     "fixed42 main-content proof block is not bounded before Discover observation");
+  const to61Gate = observe.indexOf("if (isFixed42To61AutomaticMode()) {", discoverStart);
+  const to61Classifier = observe.indexOf(
+    "discoverIndex = fixed42UniqueTo61DiscoverRoute(nodes, mainIndex);",
+    to61Gate,
+  );
+  const legacyElse = observe.indexOf("} else {", to61Classifier);
+  const legacyUnique = observe.indexOf(
+    'discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
+    legacyElse,
+  );
+  assert.ok(to61Gate > discoverStart && to61Classifier > to61Gate
+      && legacyElse > to61Classifier && legacyUnique > legacyElse,
+  "fixed42-to61 classifier no longer retains the unchanged non-to61 uniqueness branch");
+  assert.equal((observe.match(
+    /discoverIndex = fixed42UniqueSemantic\(nodes, "Discover page", true\);/g,
+  ) ?? []).length, 1, "non-to61 must use original Discover uniqueness exactly once");
   const block = observe.slice(mainStart, discoverStart);
 
   for (const token of [

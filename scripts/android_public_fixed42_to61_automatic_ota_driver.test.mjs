@@ -2476,7 +2476,7 @@ function fixed42MainProofDiagnosticContract(java) {
   const observe = methodBody(java, "observeFixed42SeedSnapshot");
   const mainStart = observe.indexOf('int mainIndex = fixed42UniqueResource(nodes, "main-content");');
   const discoverStart = observe.indexOf(
-    'int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
+    'discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
     mainStart,
   );
   assert.ok(mainStart >= 0 && discoverStart > mainStart,
@@ -2660,6 +2660,306 @@ function fixed42MainGeometryReacquisitionContract(java) {
     "geometry policy added clipping or a 2px tolerance");
 }
 
+function fixed42DiscoverRouteClassifierContract(java) {
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const adapter = methodBody(java, "fixed42UniqueTo61DiscoverRoute");
+  const generic = methodBody(java, "fixed42UniqueSemantic");
+  const policy = nestedClassDeclaration(java, "Fixed42DiscoverRoutePolicy");
+  const drive = methodBody(java, "clickFixed42SampleThroughDiscoverRails");
+
+  const profileGate = observe.indexOf("if (isFixed42To61AutomaticMode()) {");
+  const diagnostic = observe.indexOf("logFixed42To61DiscoverAmbiguityIfPresent(", profileGate);
+  const classified = observe.indexOf(
+    "discoverIndex = fixed42UniqueTo61DiscoverRoute(nodes, mainIndex);",
+    diagnostic,
+  );
+  const legacyElse = observe.indexOf("} else {", classified);
+  const genericCall = observe.indexOf(
+    'discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
+    legacyElse,
+  );
+  const routeProof = observe.indexOf(
+    'assertTrue("Fixed42 Discover page identity changed"',
+    genericCall,
+  );
+  assert.ok(profileGate >= 0 && diagnostic > profileGate && classified > diagnostic
+      && legacyElse > classified && genericCall > legacyElse && routeProof > genericCall,
+  "source-backed Discover classifier escaped its exact-to61 branch or existing route proof");
+  assert.equal((java.match(/fixed42UniqueTo61DiscoverRoute\s*\(/g) ?? []).length, 2,
+    "source-backed Discover classifier must have one declaration and one call site");
+
+  const expectedGeneric = `int found = -1;
+        for (int index = 0; index < nodes.size(); index++) {
+            if (!nodes.get(index).semanticEquals(exact)) continue;
+            assertTrue("Fixed42 semantic identity was ambiguous for " + exact, found < 0);
+            found = index;
+        }
+        if (required) assertTrue("Fixed42 semantic identity was absent for " + exact, found >= 0);
+        return found;`;
+  assert.equal(generic.trim(), expectedGeneric,
+    "generic and old59 semantic uniqueness changed");
+
+  for (const token of [
+    'assertTrue("Discover route classification is restricted to fixed42-to61"',
+    "isFixed42To61AutomaticMode()",
+    "nodes.get(0).info.getWindowId()",
+    "nodes.get(mainIndex).info.getWindowId()",
+    "new ArrayList<>()",
+    "for (int index = 0; index < nodes.size(); index++)",
+    'if (!candidate.semanticEquals("Discover page")) continue;',
+    "new Fixed42DiscoverRoutePolicy.Candidate(",
+    "candidate.parentIndex",
+    "candidate.info.getWindowId()",
+    '"Discover page".equals(candidate.text)',
+    '"Discover page".equals(candidate.description)',
+    "OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName)",
+    '"android.view.View".equals(candidate.className)',
+    "candidate.visible",
+    "candidate.enabled",
+    "candidate.scrollable",
+    "candidate.clickable",
+    "candidate.info.isFocusable()",
+    "candidate.info.isFocused()",
+    "candidate.info.isAccessibilityFocused()",
+    "candidate.info.getLiveRegion()",
+    "android.view.View.ACCESSIBILITY_LIVE_REGION_NONE",
+    "fixed42IsDescendant(nodes, index, mainIndex)",
+    "candidate.bounds.left",
+    "candidate.bounds.top",
+    "candidate.bounds.right",
+    "candidate.bounds.bottom",
+    "Fixed42DiscoverRoutePolicy.selectRouteNodeIndex(",
+    "matches, rootWindowId, mainWindowId",
+  ]) need(adapter, token, `Discover route adapter lost ${token}`);
+  assert.doesNotMatch(adapter,
+    /clearCache|getRootInActiveWindow|SystemClock|waitForIdle|\.click\(|performAction|device\.(?:click|swipe|press)/,
+    "Discover route adapter added a query, wait, retry, deadline, or input");
+
+  for (const token of [
+    "(textExact || descriptionExact)",
+    "&& productPackage",
+    "&& viewClass",
+    "&& visible",
+    "&& enabled",
+    "&& !scrollable",
+    "&& !clickable",
+    "&& inMain",
+    "&& windowId == rootWindowId",
+    "textExact",
+    "&& !descriptionExact",
+    "&& !visible",
+    "&& !focusable",
+    "&& !focused",
+    "&& !accessibilityFocused",
+    "&& !liveRegion",
+    "&& left == 0",
+    "&& top == 0",
+    "&& right == 0",
+    "&& bottom == 0",
+    "&& parentIndex == route.parentIndex",
+    "&& windowId == route.windowId",
+    "rootWindowId == mainWindowId",
+    "routeRecord < 0",
+    "routeRecord >= 0",
+    "isKnownHiddenAnnouncement(route, rootWindowId)",
+    "hiddenAnnouncements <= 1",
+    "return route.nodeIndex",
+  ]) need(policy, token, `Discover route policy lost ${token}`);
+  assert.doesNotMatch(policy, /\b(?:21|24|14|1055|1922)\b/,
+    "Discover route policy encoded one observed candidate index, parent, or extent");
+  assert.doesNotMatch(policy,
+    /clearCache|getRootInActiveWindow|SystemClock|waitForIdle|Thread\.sleep|\.click\(|performAction|device\./,
+    "Discover route policy added an observation, retry, deadline reset, or input");
+  assert.equal((drive.match(/long startedAt = SystemClock\.uptimeMillis\(\)/g) ?? []).length, 1,
+    "Discover route classification reset the original 45-second deadline");
+  assert.doesNotMatch(drive,
+    /catch \((?:AssertionError|RuntimeException|Exception|Throwable)\b/,
+    "Discover route classification entered a favorable-order retry path");
+}
+
+function runFixed42DiscoverRoutePolicyHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42DiscoverRoutePolicy");
+  const harness = `
+import java.util.List;
+
+public final class Fixed42DiscoverRoutePolicyHarness {
+${policy}
+
+    private static Fixed42DiscoverRoutePolicy.Candidate candidate(
+            int nodeIndex, int parentIndex, int windowId,
+            boolean textExact, boolean descriptionExact,
+            boolean productPackage, boolean viewClass,
+            boolean visible, boolean enabled, boolean scrollable, boolean clickable,
+            boolean focusable, boolean focused, boolean accessibilityFocused,
+            boolean liveRegion, boolean inMain,
+            int left, int top, int right, int bottom) {
+        return new Fixed42DiscoverRoutePolicy.Candidate(
+                nodeIndex, parentIndex, windowId,
+                textExact, descriptionExact, productPackage, viewClass,
+                visible, enabled, scrollable, clickable,
+                focusable, focused, accessibilityFocused, liveRegion, inMain,
+                left, top, right, bottom);
+    }
+
+    private static Fixed42DiscoverRoutePolicy.Candidate route(
+            int nodeIndex, int parentIndex, int windowId) {
+        return candidate(nodeIndex, parentIndex, windowId,
+                true, false, true, true,
+                true, true, false, false,
+                true, true, false, false, true,
+                0, 60, 1055, 1922);
+    }
+
+    private static Fixed42DiscoverRoutePolicy.Candidate mirror(
+            int nodeIndex, int parentIndex, int windowId) {
+        return candidate(nodeIndex, parentIndex, windowId,
+                true, false, true, true,
+                false, true, false, false,
+                false, false, false, false, true,
+                0, 0, 0, 0);
+    }
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static void reject(List<Fixed42DiscoverRoutePolicy.Candidate> matches,
+            int rootWindowId, int mainWindowId, String message) {
+        boolean rejected = false;
+        try {
+            Fixed42DiscoverRoutePolicy.selectRouteNodeIndex(
+                    matches, rootWindowId, mainWindowId);
+        } catch (AssertionError expected) {
+            rejected = true;
+        }
+        require(rejected, message);
+    }
+
+    public static void main(String[] args) {
+        Fixed42DiscoverRoutePolicy.Candidate hidden = mirror(21, 14, 10);
+        Fixed42DiscoverRoutePolicy.Candidate visible = route(24, 14, 10);
+        require(Fixed42DiscoverRoutePolicy.selectRouteNodeIndex(
+                        List.of(hidden, visible), 10, 10) == 24,
+                "actual failed graph primitives did not select the visible route");
+        require(Fixed42DiscoverRoutePolicy.selectRouteNodeIndex(
+                        List.of(visible, hidden), 10, 10) == 24,
+                "classifier encoded candidate ordering");
+        require(Fixed42DiscoverRoutePolicy.selectRouteNodeIndex(
+                        List.of(visible), 10, 10) == 24,
+                "zero-mirror graph was not admitted");
+        Fixed42DiscoverRoutePolicy.Candidate describedRoute = candidate(
+                31, 14, 10, false, true, true, true,
+                true, true, false, false, false, false, false, false, true,
+                0, 60, 1055, 1920);
+        require(Fixed42DiscoverRoutePolicy.selectRouteNodeIndex(
+                        List.of(describedRoute), 10, 10) == 31,
+                "existing exact-description semantics were narrowed");
+
+        reject(List.of(), 10, 10, "absent route survived");
+        reject(List.of(hidden), 10, 10, "hidden announcement qualified as route");
+        reject(List.of(visible, route(25, 14, 10)), 10, 10,
+                "duplicate visible routes survived");
+        reject(List.of(hidden, mirror(22, 14, 10), visible), 10, 10,
+                "duplicate hidden announcements survived");
+        reject(List.of(visible), 10, 11, "root/main window divergence survived");
+        reject(List.of(route(24, 14, 11)), 10, 10, "foreign-window route survived");
+
+        reject(List.of(candidate(24, 14, 10, true, false, false, true,
+                true, true, false, false, true, true, false, false, true,
+                0, 60, 1055, 1922)), 10, 10, "wrong route package survived");
+        reject(List.of(candidate(24, 14, 10, true, false, true, false,
+                true, true, false, false, true, true, false, false, true,
+                0, 60, 1055, 1922)), 10, 10, "wrong route class survived");
+        reject(List.of(candidate(24, 14, 10, true, false, true, true,
+                true, true, false, false, true, true, false, false, false,
+                0, 60, 1055, 1922)), 10, 10, "route outside main survived");
+        reject(List.of(candidate(24, 14, 10, true, false, true, true,
+                true, false, false, false, true, true, false, false, true,
+                0, 60, 1055, 1922)), 10, 10, "disabled route survived");
+        reject(List.of(candidate(24, 14, 10, false, false, true, true,
+                true, true, false, false, true, true, false, false, true,
+                0, 60, 1055, 1922)), 10, 10, "nonsemantic route survived");
+        reject(List.of(candidate(24, 14, 10, true, false, true, true,
+                true, true, true, false, true, true, false, false, true,
+                0, 60, 1055, 1922)), 10, 10, "scrollable route survived");
+        reject(List.of(candidate(24, 14, 10, true, false, true, true,
+                true, true, false, true, true, true, false, false, true,
+                0, 60, 1055, 1922)), 10, 10, "clickable route survived");
+
+        reject(List.of(candidate(21, 15, 10, true, false, true, true,
+                false, true, false, false, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "wrong-parent mirror survived");
+        reject(List.of(candidate(21, 14, 11, true, false, true, true,
+                false, true, false, false, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "wrong-window mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, false, true,
+                false, true, false, false, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "wrong-package mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, false,
+                false, true, false, false, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "wrong-class mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                false, true, false, false, false, false, false, false, false,
+                0, 0, 0, 0), visible), 10, 10, "mirror outside main survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                true, true, false, false, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "visible mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                false, false, false, false, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "disabled mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                false, true, true, false, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "scrollable mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                false, true, false, true, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "clickable mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, true, true, true,
+                false, true, false, false, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "description-exact mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                false, true, false, false, true, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "focusable mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                false, true, false, false, false, true, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "focused mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                false, true, false, false, false, false, true, false, true,
+                0, 0, 0, 0), visible), 10, 10, "accessibility-focused mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                false, true, false, false, false, false, false, true, true,
+                0, 0, 0, 0), visible), 10, 10, "Android live-region mirror survived");
+        reject(List.of(candidate(21, 14, 10, true, false, true, true,
+                false, true, false, false, false, false, false, false, true,
+                0, 0, 1, 0), visible), 10, 10, "nonzero mirror bounds survived");
+        reject(List.of(candidate(21, 14, 10, false, true, true, true,
+                false, true, false, false, false, false, false, false, true,
+                0, 0, 0, 0), visible), 10, 10, "description-only hidden match survived");
+
+        System.out.println("fixed42-discover-route-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-discover-route-policy-"));
+  const sourceFile = path.join(directory, "Fixed42DiscoverRoutePolicyHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0,
+      `fixed42 Discover route policy javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand,
+      ["-cp", directory, "Fixed42DiscoverRoutePolicyHarness"],
+      { encoding: "utf8" });
+    assert.equal(run.status, 0,
+      `fixed42 Discover route policy harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-discover-route-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function fixed42DiscoverAmbiguityDiagnosticContract(java) {
   const observe = methodBody(java, "observeFixed42SeedSnapshot");
   const diagnostic = methodBody(java, "logFixed42To61DiscoverAmbiguityIfPresent");
@@ -2684,13 +2984,19 @@ function fixed42DiscoverAmbiguityDiagnosticContract(java) {
     "logFixed42To61DiscoverAmbiguityIfPresent(",
     profileGate,
   );
-  const unchangedRejection = observe.indexOf(
-    'int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
+  const routeClassifier = observe.indexOf(
+    "discoverIndex = fixed42UniqueTo61DiscoverRoute(nodes, mainIndex);",
     diagnosticCall,
   );
+  const legacyElse = observe.indexOf("} else {", routeClassifier);
+  const unchangedGenericRejection = observe.indexOf(
+    'discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
+    legacyElse,
+  );
   assert.ok(mainGeometry >= 0 && profileGate > mainGeometry
-      && diagnosticCall > profileGate && unchangedRejection > diagnosticCall,
-  "Discover diagnostics must remain to61-only and immediately precede the unchanged rejection");
+      && diagnosticCall > profileGate && routeClassifier > diagnosticCall
+      && legacyElse > routeClassifier && unchangedGenericRejection > legacyElse,
+  "Discover diagnostics and route classifier escaped the to61-only branch");
   assert.equal((observe.match(/logFixed42To61DiscoverAmbiguityIfPresent\(/g) ?? []).length, 1,
     "Discover diagnostic must have exactly one seed-snapshot call site");
   for (const token of [
@@ -2703,7 +3009,7 @@ function fixed42DiscoverAmbiguityDiagnosticContract(java) {
     "width,",
     "height,",
     "mainGeometryDiagnostic",
-  ]) need(observe.slice(diagnosticCall, unchangedRejection), token,
+  ]) need(observe.slice(diagnosticCall, routeClassifier), token,
     `Discover diagnostic call lost same-graph primitive ${token}`);
   assert.equal((observe.match(/getRootInActiveWindow\(\)/g) ?? []).length, 1,
     "Discover diagnostics added another active-root query");
@@ -3604,7 +3910,97 @@ test("fixed42-to61 fresh launcher failure retains absent and clipped observation
   }
 });
 
-test("fixed42-to61 logs Discover ambiguity only before the unchanged uniqueness rejection", () => {
+test("fixed42-to61 classifies the exact failed Discover graph without favorable-order retry", () => {
+  fixed42DiscoverRouteClassifierContract(source);
+  runFixed42DiscoverRoutePolicyHarness(source);
+
+  const policy = nestedClassDeclaration(source, "Fixed42DiscoverRoutePolicy");
+  const policyMutations = [
+    ["semantic", "(textExact || descriptionExact)", "true"],
+    ["route-package", "&& productPackage\n                        && viewClass",
+      "&& true\n                        && viewClass"],
+    ["route-class", "&& viewClass\n                        && visible",
+      "&& true\n                        && visible"],
+    ["route-visible", "&& visible\n                        && enabled",
+      "&& true\n                        && enabled"],
+    ["route-enabled", "&& enabled\n                        && !scrollable",
+      "&& true\n                        && !scrollable"],
+    ["route-scroll", "&& !scrollable\n                        && !clickable",
+      "&& true\n                        && !clickable"],
+    ["route-click", "&& !clickable\n                        && inMain",
+      "&& true\n                        && inMain"],
+    ["route-ancestry", "&& inMain\n                        && windowId == rootWindowId;",
+      "&& true\n                        && windowId == rootWindowId;"],
+    ["route-window", "&& windowId == rootWindowId;",
+      "&& true;"],
+    ["mirror-description", "&& !descriptionExact\n                        && productPackage",
+      "&& true\n                        && productPackage"],
+    ["mirror-focusable", "&& !focusable\n                        && !focused",
+      "&& true\n                        && !focused"],
+    ["mirror-focused", "&& !focused\n                        && !accessibilityFocused",
+      "&& true\n                        && !accessibilityFocused"],
+    ["mirror-accessibility-focus", "&& !accessibilityFocused\n                        && !liveRegion",
+      "&& true\n                        && !liveRegion"],
+    ["mirror-live", "&& !liveRegion\n                        && inMain",
+      "&& true\n                        && inMain"],
+    ["mirror-bounds", "&& right == 0\n                        && bottom == 0",
+      "&& true\n                        && bottom == 0"],
+    ["mirror-parent", "&& parentIndex == route.parentIndex",
+      "&& true"],
+    ["mirror-window", "&& windowId == route.windowId;",
+      "&& true;"],
+    ["root-main-window", "rootWindowId == mainWindowId",
+      "true"],
+    ["mirror-count", "hiddenAnnouncements <= 1",
+      "true"],
+  ];
+  for (const [label, before, after] of policyMutations) {
+    const changedPolicy = policy.replace(before, after);
+    assert.notEqual(changedPolicy, policy,
+      `Discover classifier ${label} mutant anchor was absent`);
+    const mutant = source.replace(policy, changedPolicy);
+    assert.throws(() => runFixed42DiscoverRoutePolicyHarness(mutant),
+      `Discover classifier ${label} mutant survived`);
+  }
+
+  const wrongProfile = source.replace(
+    `            if (isFixed42To61AutomaticMode()) {
+                logFixed42To61DiscoverAmbiguityIfPresent(`,
+    `            if (isFixed42AutomaticMode()) {
+                logFixed42To61DiscoverAmbiguityIfPresent(`,
+  );
+  assert.notEqual(wrongProfile, source, "Discover classifier profile mutant anchor was absent");
+  assert.throws(() => fixed42DiscoverRouteClassifierContract(wrongProfile),
+    "old fixed42 profile admitted the source-backed classifier");
+
+  const legacyBranch = source.replace(
+    'discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
+    "discoverIndex = fixed42UniqueTo61DiscoverRoute(nodes, mainIndex);",
+  );
+  assert.notEqual(legacyBranch, source, "Discover old59 branch mutant anchor was absent");
+  assert.throws(() => fixed42DiscoverRouteClassifierContract(legacyBranch),
+    "old59 branch admitted the exact-to61 classifier");
+
+  const addedWait = source.replace(
+    `        int rootWindowId = nodes.get(0).info.getWindowId();`,
+    `        SystemClock.sleep(1L);
+        int rootWindowId = nodes.get(0).info.getWindowId();`,
+  );
+  assert.notEqual(addedWait, source, "Discover wait mutant anchor was absent");
+  assert.throws(() => fixed42DiscoverRouteClassifierContract(addedWait),
+    "Discover classifier admitted a new wait");
+
+  const resetDeadline = source.replace(
+    "        int mainGeometryMismatchSamples = 0;",
+    `        int mainGeometryMismatchSamples = 0;
+        long startedAt = SystemClock.uptimeMillis();`,
+  );
+  assert.notEqual(resetDeadline, source, "Discover deadline-reset mutant anchor was absent");
+  assert.throws(() => fixed42DiscoverRouteClassifierContract(resetDeadline),
+    "Discover classifier admitted a second deadline origin");
+});
+
+test("fixed42-to61 retains bounded ambiguity diagnostics before route classification", () => {
   fixed42DiscoverAmbiguityDiagnosticContract(source);
 
   const wrongProfile = source.replace(
@@ -3631,7 +4027,7 @@ test("fixed42-to61 logs Discover ambiguity only before the unchanged uniqueness 
   );
   assert.notEqual(weakenedRejection, source, "uniqueness-rejection mutant anchor was absent");
   assert.throws(() => fixed42DiscoverAmbiguityDiagnosticContract(weakenedRejection),
-    "semantic uniqueness rejection changed under the diagnostic");
+    "generic semantic uniqueness changed under the to61 classifier");
 });
 
 test("fixed42-to61 Discover diagnostic keeps full counts and at most four records", () => {
@@ -3709,6 +4105,7 @@ test("fixed42-to61 Discover records survive the actual 500-character action pipe
 
 test("fixed42-to61 Discover diagnostic is sanitized observation-only and recycles the graph", () => {
   fixed42DiscoverAmbiguityDiagnosticContract(source);
+  const diagnosticBody = methodBody(source, "logFixed42To61DiscoverAmbiguityIfPresent");
 
   const mutants = [
     ["raw-text", source.replace(
@@ -3735,10 +4132,9 @@ test("fixed42-to61 Discover diagnostic is sanitized observation-only and recycle
       "geometry.primitiveLine()));",
       '""));',
     )],
-    ["focus", source.replace(
-      "candidate.info.isFocused(),",
-      "false,",
-    )],
+    ["focus", source.replace(diagnosticBody, diagnosticBody.replace(
+      "candidate.info.isFocused(),", "false,",
+    ))],
     ["ancestry", source.replace(
       "boolean inMain = fixed42IsDescendant(nodes, nodeIndex, mainIndex);",
       "boolean inMain = true;",
