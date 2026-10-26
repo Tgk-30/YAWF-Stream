@@ -1,9 +1,18 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { AppDatabase, databaseLockPath, migrateDatabase } from "../src/db.js";
+import {
+  acquireDatabaseLease,
+  AppDatabase,
+  databaseLockPath,
+  DatabaseLeaseAccessError,
+  DatabaseLeaseBusyError,
+  DatabaseLeaseFormatError,
+  isDatabaseServerRunning,
+  migrateDatabase,
+} from "../src/db.js";
 import { MIGRATIONS } from "../src/schema.js";
 import {
   createLegacyServerFixture,
@@ -28,17 +37,120 @@ describe("AppDatabase", () => {
     }
   });
 
-  it("releases its lock only once and never removes a replacement lock", () => {
+  it("holds a persistent exclusive lease and releases it idempotently", () => {
     const path = temporaryDatabasePath(tempDirs);
     const db = new AppDatabase(path);
     const lockPath = databaseLockPath(path);
     expect(existsSync(lockPath)).toBe(true);
-    db.close();
-    expect(existsSync(lockPath)).toBe(false);
+    expect(statSync(lockPath).mode & 0o777).toBe(0o600);
+    expect(isDatabaseServerRunning(path)).toBe(true);
+    expect(() => acquireDatabaseLease(path)).toThrow(DatabaseLeaseBusyError);
 
-    writeFileSync(lockPath, "999999\n", { mode: 0o600 });
+    db.close();
     db.close();
     expect(existsSync(lockPath)).toBe(true);
+    expect(isDatabaseServerRunning(path)).toBe(false);
+
+    const reopened = new AppDatabase(path);
+    reopened.close();
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it("keeps the lease held until a failed application database close is retried", () => {
+    const path = temporaryDatabasePath(tempDirs);
+    const db = new AppDatabase(path);
+    const originalClose = db.sqlite.close.bind(db.sqlite);
+    let failOnce = true;
+    db.sqlite.close = () => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("injected application database close failure");
+      }
+      originalClose();
+    };
+
+    try {
+      expect(() => db.close()).toThrow("injected application database close failure");
+      expect(() => new AppDatabase(path)).toThrow(DatabaseLeaseBusyError);
+
+      db.close();
+      const reopened = new AppDatabase(path);
+      reopened.close();
+    } finally {
+      db.sqlite.close = originalClose;
+      db.close();
+    }
+  });
+
+  it("retains a failed lease close handle so release can be retried", () => {
+    const path = temporaryDatabasePath(tempDirs);
+    const lease = acquireDatabaseLease(path);
+    const originalClose = DatabaseSync.prototype.close;
+    let failOnce = true;
+    let replacement: ReturnType<typeof acquireDatabaseLease> | null = null;
+    DatabaseSync.prototype.close = function closeWithInjectedFailure() {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("injected lease close failure");
+      }
+      originalClose.call(this);
+    };
+
+    try {
+      expect(() => lease.close()).toThrow("injected lease close failure");
+      expect(() => acquireDatabaseLease(path)).toThrow(DatabaseLeaseBusyError);
+
+      lease.close();
+      replacement = acquireDatabaseLease(path);
+    } finally {
+      DatabaseSync.prototype.close = originalClose;
+      replacement?.close();
+      lease.close();
+    }
+  });
+
+  it("does not create a lease file when the compatibility probe finds none", () => {
+    const path = temporaryDatabasePath(tempDirs);
+    const lockPath = databaseLockPath(path);
+
+    expect(isDatabaseServerRunning(path)).toBe(false);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it.each([
+    ["legacy numeric", "1\n"],
+    ["malformed", "not a SQLite lease\n"],
+  ])("leaves a %s lease untouched and requires offline migration", (_label, contents) => {
+    const path = temporaryDatabasePath(tempDirs);
+    const lockPath = databaseLockPath(path);
+    writeFileSync(lockPath, contents, { mode: 0o600 });
+    const before = readFileSync(lockPath);
+
+    expect(() => acquireDatabaseLease(path)).toThrow(DatabaseLeaseFormatError);
+    expect(() => isDatabaseServerRunning(path)).toThrow(DatabaseLeaseFormatError);
+    expect(readFileSync(lockPath)).toEqual(before);
+  });
+
+  it("leaves an unrecognized SQLite lease untouched and reports its format", () => {
+    const path = temporaryDatabasePath(tempDirs);
+    const lockPath = databaseLockPath(path);
+    const unrelated = new DatabaseSync(lockPath);
+    unrelated.exec("CREATE TABLE unrelated (value TEXT NOT NULL);");
+    unrelated.close();
+    const before = readFileSync(lockPath);
+
+    expect(() => acquireDatabaseLease(path)).toThrow(DatabaseLeaseFormatError);
+    expect(() => isDatabaseServerRunning(path)).toThrow(DatabaseLeaseFormatError);
+    expect(readFileSync(lockPath)).toEqual(before);
+  });
+
+  it("distinguishes an inaccessible lease path from a held lease", () => {
+    const path = temporaryDatabasePath(tempDirs);
+    const lockPath = databaseLockPath(path);
+    mkdirSync(lockPath);
+
+    expect(() => acquireDatabaseLease(path)).toThrow(DatabaseLeaseAccessError);
+    expect(statSync(lockPath).isDirectory()).toBe(true);
   });
 
   it("removes expired audit records while retaining recent records", () => {
@@ -224,6 +336,24 @@ describe("AppDatabase", () => {
     } finally {
       sqlite.close();
     }
+  });
+
+  it("releases the lease when AppDatabase construction fails", { timeout: 30_000 }, () => {
+    const path = temporaryDatabasePath(tempDirs);
+    createLegacyServerFixture(path, 7);
+    const sqlite = new DatabaseSync(path);
+    try {
+      sqlite.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (99, ?)")
+        .run("2035-01-01T00:00:00.000Z");
+    } finally {
+      sqlite.close();
+    }
+
+    expect(() => new AppDatabase(path)).toThrow(
+      "Database schema version 99 is newer than supported version 12.",
+    );
+    const lease = acquireDatabaseLease(path);
+    lease.close();
   });
 });
 

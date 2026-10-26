@@ -6501,6 +6501,36 @@ function registerRoutes(
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   let config = loadConfig(options.config);
   const db = new AppDatabase(config.databasePath);
+  let directTorrentRegistry: DirectTorrentRegistry | null = null;
+  let transcodeRegistry: TranscodeRegistry | null = null;
+  let app: FastifyInstance | null = null;
+  let resourcesClosed = false;
+  const closeResources = async () => {
+    if (resourcesClosed) return;
+    try {
+      await directTorrentRegistry?.close();
+    } finally {
+      try {
+        await transcodeRegistry?.stop();
+      } finally {
+        db.close();
+      }
+    }
+    resourcesClosed = true;
+  };
+  const closeResourcesWithRetry = async () => {
+    try {
+      await closeResources();
+    } catch (firstError) {
+      try {
+        await closeResources();
+      } catch {
+        throw firstError;
+      }
+    }
+  };
+
+  try {
 
   // Direct sessions are backed by an in-process engine and cannot survive a
   // process restart. Revoke any unexpired crash leftovers so admin activity
@@ -6521,7 +6551,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const directTorrentAdapter = config.enableDirectTorrent
     ? options.directTorrentAdapter ?? await createWebTorrentAdapter(config)
     : null;
-  const directTorrentRegistry = directTorrentAdapter == null
+  directTorrentRegistry = directTorrentAdapter == null
     ? null
     : new DirectTorrentRegistry(directTorrentAdapter, config, (sessionId) => {
         db.sqlite
@@ -6570,14 +6600,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       transcodeVideoEncoder: effectiveVideoEncoder,
     };
   }
-  const transcodeRegistry = new TranscodeRegistry(db, config, transcoder);
+  transcodeRegistry = new TranscodeRegistry(db, config, transcoder);
   if (transcodeReady) transcodeRegistry.start();
 
-  const app = Fastify({
+  app = Fastify({
     logger: config.logger,
     trustProxy: config.trustProxy,
     forceCloseConnections: true,
   });
+  app.addHook("onClose", closeResourcesWithRetry);
 
   await app.register(cookie);
   await app.register(compress, {
@@ -6653,7 +6684,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const statusCode = zodError ? 400 : selectionFailed ? 422
       : ((error as { statusCode?: number }).statusCode ?? 500);
     const message = error instanceof Error ? error.message : "Request failed.";
-    if (statusCode >= 500) app.log.error(error);
+    if (statusCode >= 500) app?.log.error(error);
     // Debrid provider failures (invalid token, upstream 5xx) used to collapse
     // into "Internal server error.", leaving users with no hint that the fix
     // is re-entering a token in Settings. DebridError messages are static,
@@ -6671,12 +6702,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   });
 
-  app.addHook("onClose", async () => {
-    await directTorrentRegistry?.close();
-    await transcodeRegistry.stop();
-    db.close();
-  });
-
   registerRoutes(app, db, config, {
     ready: transcodeReady,
     toneMappingAvailable: transcodeCapabilities.toneMapping,
@@ -6689,4 +6714,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }, directTorrentRegistry);
   registerStaticApp(app, config);
   return app;
+  } catch (error) {
+    try {
+      await app?.close();
+    } catch {
+      // Preserve the construction error while still releasing owned resources.
+    }
+    let cleanupFailed = false;
+    try {
+      await closeResourcesWithRetry();
+    } catch {
+      cleanupFailed = true;
+      // Preserve the construction error after best-effort cleanup.
+    }
+    if (cleanupFailed) db.retainAfterFailedClose();
+    throw error;
+  }
 }
