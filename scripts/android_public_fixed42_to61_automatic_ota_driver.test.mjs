@@ -2199,6 +2199,279 @@ public final class Fixed42LauncherDiagnosticsHarness {
   }
 }
 
+function fixed42FreshLauncherFailureDiagnosticContract(java) {
+  const launch = methodBody(java, "launchFixed42ProductFromVisibleLauncher");
+  const retention = methodBody(java, "logFixed42To61FreshLauncherFailure");
+  const formatter = nestedClassDeclaration(java, "Fixed42FreshLauncherFailureDiagnostic");
+  const safe = methodBody(java, "safe");
+  const log = methodBody(java, "log");
+
+  const freshObservation = launch.indexOf(
+    "Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(",
+  );
+  const profileGate = launch.indexOf("if (isFixed42To61AutomaticMode()", freshObservation);
+  const failedState = launch.indexOf(
+    "&& fresh.state != Fixed42LauncherReadinessPolicy.READY",
+    profileGate,
+  );
+  const diagnosticCall = launch.indexOf(
+    "logFixed42To61FreshLauncherFailure(ready, fresh);",
+    failedState,
+  );
+  const unchangedAssertion = launch.indexOf(
+    'assertEquals("Fixed42 launcher icon was not freshly ready before click",\n'
+      + "                Fixed42LauncherReadinessPolicy.READY, fresh.state);",
+    diagnosticCall,
+  );
+  assert.ok(freshObservation >= 0 && profileGate > freshObservation
+      && failedState > profileGate && diagnosticCall > failedState
+      && unchangedAssertion > diagnosticCall,
+  "fresh launcher diagnostic must be to61-only, failure-only, and before the unchanged rejection");
+  assert.equal((java.match(/logFixed42To61FreshLauncherFailure\s*\(/g) ?? []).length, 2,
+    "fresh launcher diagnostic must have one declaration and one call site");
+  const failureBlock = launch.slice(profileGate, unchangedAssertion);
+  assert.doesNotMatch(failureBlock,
+    /observeFixed42LauncherReadiness|clearCache|getRootInActiveWindow|device\.|SystemClock|\.click\(|\.swipe\(/,
+    "fresh launcher diagnostic added a query, wait, or input");
+  assert.doesNotMatch(failureBlock, /appLabel|launcherPackage/,
+    "fresh launcher diagnostic added raw launcher identity");
+
+  for (const token of [
+    'assertTrue("Fresh launcher failure diagnostic is restricted to fixed42-to61"',
+    "isFixed42To61AutomaticMode()",
+    'assertNotNull("Prior fixed42-to61 READY bounds were unavailable", ready.iconBounds)',
+    "Fixed42FreshLauncherFailureDiagnostic.line(",
+    "ready.state,",
+    "ready.iconBounds.left,",
+    "ready.iconBounds.top,",
+    "ready.iconBounds.right,",
+    "ready.iconBounds.bottom,",
+    "fresh.state,",
+    "fresh.diagnostic",
+    'assertTrue("Fixed42-to61 fresh launcher diagnostic reached the action-log limit"',
+    "value.length() < 500",
+    'assertEquals("Fixed42-to61 fresh launcher diagnostic changed under action-log retention"',
+    "value, safe(value)",
+    "log(value)",
+  ]) need(retention, token, `fresh launcher retention lost ${token}`);
+  assert.doesNotMatch(retention,
+    /observeFixed42LauncherReadiness|clearCache|getRootInActiveWindow|device\.|SystemClock|\.click\(|\.swipe\(/,
+    "fresh launcher retention added a query, wait, or input");
+  const exactRetention = retention.indexOf("value, safe(value)");
+  const retainedLog = retention.indexOf("log(value)", exactRetention);
+  assert.ok(exactRetention >= 0 && retainedLog > exactRetention,
+    "fresh launcher diagnostic logged before exact retention proof");
+
+  for (const token of [
+    "priorState != Fixed42LauncherReadinessPolicy.READY",
+    "priorLeft < 0",
+    "priorTop < 0",
+    "priorRight <= priorLeft",
+    "priorBottom <= priorTop",
+    "freshState < Fixed42LauncherReadinessPolicy.WAITING_FOR_LAUNCHER",
+    "freshState >= Fixed42LauncherReadinessPolicy.READY",
+    "freshDiagnostic == null",
+    "freshDiagnostic.isEmpty()",
+    'new StringBuilder("Fixed42-to61 fresh launcher failure")',
+    '.append(" priorState=").append(priorState)',
+    '.append(" priorBounds=").append(priorLeft).append(\',\').append(priorTop)',
+    ".append(',').append(priorRight).append(',').append(priorBottom)",
+    '.append(" freshState=").append(freshState)',
+    ".append(' ').append(freshDiagnostic)",
+  ]) need(formatter, token, `fresh launcher formatter lost ${token}`);
+  assert.doesNotMatch(formatter,
+    /appLabel|launcherPackage|packageName|className|contentDescription|https?:|credential|token|cookie/i,
+    "fresh launcher formatter accepts raw identity or credential-bearing values");
+  need(safe, "redacted.length() <= 500 ? redacted : redacted.substring(0, 500)",
+    "actual action sanitizer lost its 500-character bound");
+  need(log, "actions.add(safe(value));",
+    "fresh launcher diagnostic no longer passes through the production action logger");
+}
+
+function runFixed42FreshLauncherFailureRetentionHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42LauncherReadinessPolicy");
+  const formatter = nestedClassDeclaration(java, "Fixed42FreshLauncherFailureDiagnostic");
+  const primitive = methodBody(java, "fixed42LauncherPrimitiveDiagnostic");
+  const retention = methodBody(java, "logFixed42To61FreshLauncherFailure");
+  const safe = methodBody(java, "safe");
+  const log = methodBody(java, "log");
+  const harness = `
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+
+public final class Fixed42FreshLauncherFailureRetentionHarness {
+    private static final long SHORT_WAIT_MS = 20_000L;
+    private static final int MAX_ACTION_LINES = 260;
+    private static final Pattern URL = Pattern.compile("https?://\\\\S+", Pattern.CASE_INSENSITIVE);
+    private static final List<String> actions = new ArrayList<>();
+    ${policy}
+    ${formatter}
+
+    private static final class Rect {
+        final int left;
+        final int top;
+        final int right;
+        final int bottom;
+        Rect(int left, int top, int right, int bottom) {
+            this.left = left;
+            this.top = top;
+            this.right = right;
+            this.bottom = bottom;
+        }
+    }
+    private static final class Fixed42LauncherObservation {
+        final int state;
+        final Rect iconBounds;
+        final String diagnostic;
+        Fixed42LauncherObservation(int state, Rect iconBounds, String diagnostic) {
+            this.state = state;
+            this.iconBounds = iconBounds;
+            this.diagnostic = diagnostic;
+        }
+    }
+    private static boolean isFixed42To61AutomaticMode() { return true; }
+    private static void assertTrue(String message, boolean value) {
+        if (!value) throw new AssertionError(message);
+    }
+    private static void assertNotNull(String message, Object value) {
+        if (value == null) throw new AssertionError(message);
+    }
+    private static void assertEquals(String message, Object expected, Object actual) {
+        if (expected == null ? actual != null : !expected.equals(actual)) {
+            throw new AssertionError(message + ": " + expected + " != " + actual);
+        }
+    }
+    private static void fail(String message) { throw new AssertionError(message); }
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+    private static void reject(Runnable operation, String message) {
+        try {
+            operation.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError(message);
+    }
+    private static String fixed42LauncherPrimitiveDiagnostic(
+            String rejectionReason,
+            boolean launcherForeground,
+            boolean activeRootPresent,
+            String activeRootPackageMatch,
+            int nodeCount,
+            boolean nullChildObserved,
+            int rootCount,
+            boolean rootExact,
+            boolean rootBoundsMatch,
+            int iconCount,
+            boolean iconExact,
+            boolean iconFullyVisible,
+            String iconRejectionReason,
+            int iconAncestryDepth,
+            boolean iconReachedRoot) {
+${primitive}
+    }
+    private static String safe(String value) {
+${safe}
+    }
+    private static void log(String value) {
+${log}
+    }
+    private static void logFixed42To61FreshLauncherFailure(
+            Fixed42LauncherObservation ready,
+            Fixed42LauncherObservation fresh) {
+${retention}
+    }
+
+    public static void main(String[] ignored) {
+        Rect priorBounds = new Rect(472, 1461, 609, 1616);
+        Fixed42LauncherObservation ready = new Fixed42LauncherObservation(
+                Fixed42LauncherReadinessPolicy.READY, priorBounds, "ready");
+        String absent = fixed42LauncherPrimitiveDiagnostic(
+                "icon-absent", true, true, "match", 56, false,
+                1, true, true, 0, false, false,
+                "not-evaluated", 0, false);
+        String clipped = fixed42LauncherPrimitiveDiagnostic(
+                "icon-clipped", true, true, "match", 57, false,
+                1, true, true, 1, true, false,
+                "ancestor-bounds", 3, false);
+        logFixed42To61FreshLauncherFailure(ready,
+                new Fixed42LauncherObservation(
+                        Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON, null, absent));
+        logFixed42To61FreshLauncherFailure(ready,
+                new Fixed42LauncherObservation(
+                        Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON, priorBounds, clipped));
+        require(actions.size() == 2, "absent and clipped failures were not retained separately");
+        String absentLine = actions.get(0);
+        String clippedLine = actions.get(1);
+        String prior = "priorState=3 priorBounds=472,1461,609,1616 freshState=1";
+        require(absentLine.contains(prior) && clippedLine.contains(prior),
+                "prior READY numeric state or bounds were not retained");
+        require(absentLine.contains("reject=icon-absent")
+                        && absentLine.contains("nodes=56")
+                        && absentLine.contains("icon=0/false/false")
+                        && absentLine.contains("iconReject=not-evaluated")
+                        && absentLine.contains("ancestry=0/false"),
+                "absent icon primitives were not retained losslessly");
+        require(clippedLine.contains("reject=icon-clipped")
+                        && clippedLine.contains("nodes=57")
+                        && clippedLine.contains("icon=1/true/false")
+                        && clippedLine.contains("iconReject=ancestor-bounds")
+                        && clippedLine.contains("ancestry=3/false"),
+                "clipped icon primitives were not retained losslessly");
+        require(!absentLine.equals(clippedLine),
+                "absent and clipped observations became indistinguishable");
+        for (String line : actions) {
+            require(line.length() < 500, "fresh launcher diagnostic reached the safe limit");
+            require(safe(line).equals(line), "production action retention changed a diagnostic");
+        }
+        reject(() -> Fixed42FreshLauncherFailureDiagnostic.line(
+                        Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON,
+                        472, 1461, 609, 1616,
+                        Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON, absent),
+                "non-READY prior observation survived");
+        reject(() -> Fixed42FreshLauncherFailureDiagnostic.line(
+                        Fixed42LauncherReadinessPolicy.READY,
+                        472, 1461, 609, 1616,
+                        Fixed42LauncherReadinessPolicy.READY, absent),
+                "fresh READY observation entered the failure formatter");
+        reject(() -> Fixed42FreshLauncherFailureDiagnostic.line(
+                        Fixed42LauncherReadinessPolicy.READY,
+                        472, 1461, 472, 1616,
+                        Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON, absent),
+                "empty prior bounds survived");
+        reject(() -> logFixed42To61FreshLauncherFailure(ready,
+                        new Fixed42LauncherObservation(
+                                Fixed42LauncherReadinessPolicy.WAITING_FOR_ICON,
+                                null, "https://sensitive.invalid/value")),
+                "sanitizer-changing diagnostic reached the production action log");
+        require(actions.size() == 2, "rejected diagnostics changed the action log");
+        System.out.println("fixed42-fresh-launcher-failure-retention-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-fresh-launcher-failure-"));
+  const sourceFile = path.join(directory, "Fixed42FreshLauncherFailureRetentionHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0,
+      `fixed42 fresh launcher retention javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand,
+      ["-cp", directory, "Fixed42FreshLauncherFailureRetentionHarness"],
+      { encoding: "utf8" });
+    assert.equal(run.status, 0,
+      `fixed42 fresh launcher retention harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-fresh-launcher-failure-retention-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function fixed42MainProofDiagnosticContract(java) {
   const observe = methodBody(java, "observeFixed42SeedSnapshot");
   const mainStart = observe.indexOf('int mainIndex = fixed42UniqueResource(nodes, "main-content");');
@@ -3130,8 +3403,11 @@ test("fixed42 launcher waits through one bounded public transition before one fr
       "if (false) {\n            launchFixed42ProductFromVisibleLauncher(phase);",
     )],
     ["deadline-reset", source.replace(
-      "observeFixed42LauncherReadiness(\n                appLabel, launcherPackage);\n        assertEquals(\"Fixed42 launcher icon was not freshly ready before click\"",
-      "observeFixed42LauncherReadiness(\n                appLabel, launcherPackage);\n        startedAt = SystemClock.uptimeMillis();\n        assertEquals(\"Fixed42 launcher icon was not freshly ready before click\"",
+      `Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(
+                appLabel, launcherPackage);`,
+      `Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(
+                appLabel, launcherPackage);
+        startedAt = SystemClock.uptimeMillis();`,
     )],
     ["second-drawer", source.replace(
       "drawerGestureSent = true;",
@@ -3252,6 +3528,78 @@ test("fixed42 launcher timeout emits one failure-only primitive diagnostic", () 
     assert.throws(
       () => runFixed42LauncherDiagnosticsHarness(mutant),
       "fixed42 launcher diagnostic executable mutant survived",
+    );
+  }
+});
+
+test("fixed42-to61 fresh launcher failure retains absent and clipped observations exactly", () => {
+  fixed42FreshLauncherFailureDiagnosticContract(source);
+  runFixed42FreshLauncherFailureRetentionHarness(source);
+
+  const structuralMutants = [
+    ["wrong-profile", source.replace(
+      `        if (isFixed42To61AutomaticMode()
+                && fresh.state != Fixed42LauncherReadinessPolicy.READY) {
+            logFixed42To61FreshLauncherFailure(ready, fresh);
+        }`,
+      `        if (isFixed42AutomaticMode()
+                && fresh.state != Fixed42LauncherReadinessPolicy.READY) {
+            logFixed42To61FreshLauncherFailure(ready, fresh);
+        }`,
+    )],
+    ["success-log", source.replace(
+      "&& fresh.state != Fixed42LauncherReadinessPolicy.READY",
+      "&& true",
+    )],
+    ["retention-bypass", source.replace(
+      `        assertEquals("Fixed42-to61 fresh launcher diagnostic changed under action-log retention",
+                value, safe(value));`,
+      `        assertEquals("Fixed42-to61 fresh launcher diagnostic changed under action-log retention",
+                value, value);`,
+    )],
+    ["limit-boundary", source.replace(
+      `        assertTrue("Fixed42-to61 fresh launcher diagnostic reached the action-log limit",
+                value.length() < 500);`,
+      `        assertTrue("Fixed42-to61 fresh launcher diagnostic reached the action-log limit",
+                value.length() <= 500);`,
+    )],
+    ["extra-query", source.replace(
+      "            logFixed42To61FreshLauncherFailure(ready, fresh);",
+      "            observeFixed42LauncherReadiness(appLabel, launcherPackage);\n"
+        + "            logFixed42To61FreshLauncherFailure(ready, fresh);",
+    )],
+  ];
+  for (const [label, mutant] of structuralMutants) {
+    assert.notEqual(mutant, source, `fresh launcher ${label} mutant anchor was absent`);
+    assert.throws(
+      () => fixed42FreshLauncherFailureDiagnosticContract(mutant),
+      `fresh launcher ${label} mutant survived`,
+    );
+  }
+
+  const executableMutants = [
+    ["drop-prior-right", source.replace(
+      ".append(',').append(priorRight).append(',').append(priorBottom)",
+      ".append(',').append(priorBottom)",
+    )],
+    ["drop-fresh-diagnostic", source.replace(
+      ".append(' ').append(freshDiagnostic)",
+      ".append(' ')",
+    )],
+    ["collapse-absent-count", source.replace(
+      ".append(\" icon=\").append(iconCount).append('/')",
+      ".append(\" icon=\").append(1).append('/')",
+    )],
+    ["collapse-clipped-visibility", source.replace(
+      ".append(iconExact).append('/').append(iconFullyVisible)",
+      ".append(iconExact).append('/').append(true)",
+    )],
+  ];
+  for (const [label, mutant] of executableMutants) {
+    assert.notEqual(mutant, source, `fresh launcher ${label} executable anchor was absent`);
+    assert.throws(
+      () => runFixed42FreshLauncherFailureRetentionHarness(mutant),
+      `fresh launcher ${label} executable mutant survived`,
     );
   }
 });

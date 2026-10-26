@@ -2028,8 +2028,11 @@ test("fixed42 launcher waits through one bounded public transition before one fr
       "if (false) {\n            launchFixed42ProductFromVisibleLauncher(phase);",
     )],
     ["deadline-reset", source.replace(
-      "observeFixed42LauncherReadiness(\n                appLabel, launcherPackage);\n        assertEquals(\"Fixed42 launcher icon was not freshly ready before click\"",
-      "observeFixed42LauncherReadiness(\n                appLabel, launcherPackage);\n        startedAt = SystemClock.uptimeMillis();\n        assertEquals(\"Fixed42 launcher icon was not freshly ready before click\"",
+      `Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(
+                appLabel, launcherPackage);`,
+      `Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(
+                appLabel, launcherPackage);
+        startedAt = SystemClock.uptimeMillis();`,
     )],
     ["second-drawer", source.replace(
       "drawerGestureSent = true;",

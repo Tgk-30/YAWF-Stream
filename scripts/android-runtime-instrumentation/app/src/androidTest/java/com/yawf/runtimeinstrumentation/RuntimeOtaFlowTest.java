@@ -2774,6 +2774,10 @@ public final class RuntimeOtaFlowTest {
                         startedAt, SystemClock.uptimeMillis()));
         Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(
                 appLabel, launcherPackage);
+        if (isFixed42To61AutomaticMode()
+                && fresh.state != Fixed42LauncherReadinessPolicy.READY) {
+            logFixed42To61FreshLauncherFailure(ready, fresh);
+        }
         assertEquals("Fixed42 launcher icon was not freshly ready before click",
                 Fixed42LauncherReadinessPolicy.READY, fresh.state);
         assertEquals("Fixed42 launcher icon bounds changed before click",
@@ -2789,6 +2793,27 @@ public final class RuntimeOtaFlowTest {
         device.waitForIdle(2_000);
         log("Opened " + appLabel
                 + " through its exact visible fixed42 launcher icon for " + phase);
+    }
+
+    private void logFixed42To61FreshLauncherFailure(
+            Fixed42LauncherObservation ready,
+            Fixed42LauncherObservation fresh) {
+        assertTrue("Fresh launcher failure diagnostic is restricted to fixed42-to61",
+                isFixed42To61AutomaticMode());
+        assertNotNull("Prior fixed42-to61 READY bounds were unavailable", ready.iconBounds);
+        String value = Fixed42FreshLauncherFailureDiagnostic.line(
+                ready.state,
+                ready.iconBounds.left,
+                ready.iconBounds.top,
+                ready.iconBounds.right,
+                ready.iconBounds.bottom,
+                fresh.state,
+                fresh.diagnostic);
+        assertTrue("Fixed42-to61 fresh launcher diagnostic reached the action-log limit",
+                value.length() < 500);
+        assertEquals("Fixed42-to61 fresh launcher diagnostic changed under action-log retention",
+                value, safe(value));
+        log(value);
     }
 
     private void assertFixed42ExpectedLauncherPackage(String launcherPackage) {
@@ -4280,6 +4305,36 @@ public final class RuntimeOtaFlowTest {
             this.state = state;
             this.iconBounds = iconBounds == null ? null : new Rect(iconBounds);
             this.diagnostic = diagnostic;
+        }
+    }
+
+    private static final class Fixed42FreshLauncherFailureDiagnostic {
+        static String line(
+                int priorState,
+                int priorLeft,
+                int priorTop,
+                int priorRight,
+                int priorBottom,
+                int freshState,
+                String freshDiagnostic) {
+            if (priorState != Fixed42LauncherReadinessPolicy.READY
+                    || priorLeft < 0
+                    || priorTop < 0
+                    || priorRight <= priorLeft
+                    || priorBottom <= priorTop
+                    || freshState < Fixed42LauncherReadinessPolicy.WAITING_FOR_LAUNCHER
+                    || freshState >= Fixed42LauncherReadinessPolicy.READY
+                    || freshDiagnostic == null
+                    || freshDiagnostic.isEmpty()) {
+                throw new AssertionError("Fixed42-to61 fresh launcher diagnostic was invalid");
+            }
+            return new StringBuilder("Fixed42-to61 fresh launcher failure")
+                    .append(" priorState=").append(priorState)
+                    .append(" priorBounds=").append(priorLeft).append(',').append(priorTop)
+                    .append(',').append(priorRight).append(',').append(priorBottom)
+                    .append(" freshState=").append(freshState)
+                    .append(' ').append(freshDiagnostic)
+                    .toString();
         }
     }
 
