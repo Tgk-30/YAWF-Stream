@@ -30,7 +30,7 @@ export function validateWebsiteReleaseCatalog(source) {
     ["DESKTOP_RELEASE", "2.3.58", "v2.3.58-web"],
     ["ANDROID_TV_RELEASE", "2.3.38", "v2.3.38-web"],
     ["ANDROID_PHONE_RELEASE", "2.3.61", "android-v2.3.61"],
-    ["SERVER_RELEASE", "2.3.63", "v2.3.63"],
+    ["SERVER_RELEASE", "2.3.64", "v2.3.64"],
   ]) {
     includes(
       source,
@@ -45,6 +45,12 @@ export function validateWebsiteReleaseCatalog(source) {
     "export const VERSION = DESKTOP_RELEASE.tag;",
     failures,
     "VERSION must remain an explicit desktop-only compatibility label",
+  );
+  includes(
+    source,
+    "export const WINDOWS_RELEASE_AVAILABLE = false;",
+    failures,
+    "Windows release availability must remain disabled",
   );
   includes(source, "desktopChecksums: releaseAsset(DESKTOP_RELEASE, 'SHA256SUMS')", failures, "desktop checksum channel must use the desktop release");
   includes(source, "androidTvChecksums: releaseAsset(ANDROID_TV_RELEASE, 'SHA256SUMS')", failures, "Android TV checksum channel must use the Android TV release");
