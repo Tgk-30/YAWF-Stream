@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const failures = [];
 const args = process.argv.slice(2);
+const MAX_GIT_OUTPUT_BYTES = 20 * 1024 * 1024;
 
 function parseArgs(argv) {
   const refs = [];
@@ -45,11 +46,26 @@ Use --all-refs before pushing multiple branches or tags to a public remote.`);
 const options = parseArgs(args);
 
 function git(args) {
-  return execFileSync("git", args, { cwd: root, encoding: "utf8" });
+  try {
+    return execFileSync("git", args, {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: MAX_GIT_OUTPUT_BYTES,
+    });
+  } catch (error) {
+    if (error?.code === "ENOBUFS") {
+      throw new Error(`Git command output exceeded ${MAX_GIT_OUTPUT_BYTES} bytes`);
+    }
+    throw error;
+  }
 }
 
 function gitBuffer(args) {
-  return execFileSync("git", args, { cwd: root, encoding: "buffer", maxBuffer: 20 * 1024 * 1024 });
+  return execFileSync("git", args, {
+    cwd: root,
+    encoding: "buffer",
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
+  });
 }
 
 function gitWithInput(args, input) {
@@ -57,7 +73,7 @@ function gitWithInput(args, input) {
     cwd: root,
     encoding: "utf8",
     input,
-    maxBuffer: 20 * 1024 * 1024,
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
   });
 }
 
