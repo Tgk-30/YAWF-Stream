@@ -137,6 +137,7 @@ public final class RuntimeOtaFlowTest {
     private static final long FIXED42_TO61_MAIN_GEOMETRY_RETRY_MS = 200L;
     private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
     private static final int FIXED42_SEED_AX_CHILD_LIMIT = 128;
+    private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 4;
     private static final int FIXED42_LAUNCHER_ANCESTOR_LIMIT = 16;
     private static final int FIXED42_LAUNCHER_NODE_LIMIT = 256;
     private static final int FIXED42_LAUNCHER_CHILD_LIMIT = 128;
@@ -1486,6 +1487,18 @@ public final class RuntimeOtaFlowTest {
                             width,
                             height);
 
+            if (isFixed42To61AutomaticMode()) {
+                logFixed42To61DiscoverAmbiguityIfPresent(
+                        nodes,
+                        mainIndex,
+                        root,
+                        main.info,
+                        nodes.get(0).bounds,
+                        main.bounds,
+                        width,
+                        height,
+                        mainGeometryDiagnostic);
+            }
             int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);
             Fixed42AxNode discover = nodes.get(discoverIndex);
             assertTrue("Fixed42 Discover page identity changed",
@@ -1740,6 +1753,81 @@ public final class RuntimeOtaFlowTest {
         }
         if (required) assertTrue("Fixed42 semantic identity was absent for " + exact, found >= 0);
         return found;
+    }
+
+    private void logFixed42To61DiscoverAmbiguityIfPresent(
+            List<Fixed42AxNode> nodes,
+            int mainIndex,
+            AccessibilityNodeInfo root,
+            AccessibilityNodeInfo main,
+            Rect rootScreenBounds,
+            Rect mainScreenBounds,
+            int displayWidth,
+            int displayHeight,
+            Fixed42MainGeometryDiagnostic existingGeometry) {
+        int matchCount = 0;
+        int[] matchingIndexes =
+                new int[FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT];
+        for (int index = 0; index < nodes.size(); index++) {
+            if (!nodes.get(index).semanticEquals("Discover page")) continue;
+            if (matchCount < matchingIndexes.length) matchingIndexes[matchCount] = index;
+            matchCount++;
+        }
+        if (matchCount <= 1) return;
+        assertTrue("Discover ambiguity diagnostic is restricted to fixed42-to61",
+                isFixed42To61AutomaticMode());
+        int recordCount = Fixed42DiscoverAmbiguityPolicy.recordCount(matchCount);
+        Fixed42MainGeometryDiagnostic geometry = existingGeometry != null
+                ? existingGeometry
+                : captureFixed42MainGeometryDiagnostic(
+                        root,
+                        main,
+                        rootScreenBounds,
+                        mainScreenBounds,
+                        displayWidth,
+                        displayHeight);
+        StringBuilder line = new StringBuilder(
+                "Fixed42-to61 semantic ambiguity diagnostic")
+                .append(" matches=").append(matchCount)
+                .append(" records=").append(recordCount)
+                .append(" truncated=").append(matchCount > recordCount)
+                .append(" nodes=").append(nodes.size())
+                .append(geometry.primitiveLine());
+        for (int recordIndex = 0; recordIndex < recordCount; recordIndex++) {
+            int nodeIndex = matchingIndexes[recordIndex];
+            Fixed42AxNode candidate = nodes.get(nodeIndex);
+            boolean inMain = fixed42IsDescendant(nodes, nodeIndex, mainIndex);
+            line.append(" candidate").append(recordIndex).append("=index:")
+                    .append(nodeIndex).append(",parent:")
+                    .append(candidate.parentIndex).append(",window:")
+                    .append(candidate.info.getWindowId()).append(",bounds:")
+                    .append(Fixed42MainGeometryDiagnostic.rect(candidate.bounds)).append(',')
+                    .append("textExact:")
+                    .append("Discover page".equals(candidate.text)).append(',')
+                    .append("descriptionExact:")
+                    .append("Discover page".equals(candidate.description)).append(',')
+                    .append("productPackage:")
+                    .append(OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName)).append(',')
+                    .append("view:")
+                    .append("android.view.View".equals(candidate.className)).append(',')
+                    .append("textView:")
+                    .append("android.widget.TextView".equals(candidate.className)).append(',')
+                    .append("visible:").append(candidate.visible).append(',')
+                    .append("enabled:").append(candidate.enabled).append(',')
+                    .append("scrollable:").append(candidate.scrollable).append(',')
+                    .append("clickable:").append(candidate.clickable).append(',')
+                    .append("focusable:").append(candidate.info.isFocusable()).append(',')
+                    .append("focused:").append(candidate.info.isFocused()).append(',')
+                    .append("accessibilityFocused:")
+                    .append(candidate.info.isAccessibilityFocused()).append(',')
+                    .append("liveRegion:")
+                    .append(candidate.info.getLiveRegion()
+                            != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE)
+                    .append(',').append("mainAncestor:").append(inMain)
+                    .append(',').append("nonScrollMain:")
+                    .append(inMain && !candidate.scrollable);
+        }
+        log(line.toString());
     }
 
     private static int fixed42UniqueScrollableDescendant(
@@ -4303,7 +4391,11 @@ public final class RuntimeOtaFlowTest {
         String line(int sample, long elapsedMs) {
             return "Fixed42-to61 main geometry mismatch sample=" + sample
                     + " elapsedMs=" + elapsedMs
-                    + " display=" + displayWidth + ',' + displayHeight
+                    + primitiveLine();
+        }
+
+        String primitiveLine() {
+            return " display=" + displayWidth + ',' + displayHeight
                     + " rootScreen=" + rect(rootScreenBounds)
                     + " rootWindow=" + rect(rootWindowBounds)
                     + " mainScreen=" + rect(mainScreenBounds)
@@ -4314,9 +4406,18 @@ public final class RuntimeOtaFlowTest {
                     + " nodeWindowIds=" + rootWindowId + ',' + mainWindowId;
         }
 
-        private static String rect(Rect value) {
+        static String rect(Rect value) {
             return value.left + "," + value.top + ","
                     + value.right + "," + value.bottom;
+        }
+    }
+
+    private static final class Fixed42DiscoverAmbiguityPolicy {
+        static int recordCount(int matchCount) {
+            if (matchCount < 2 || matchCount > FIXED42_SEED_AX_NODE_LIMIT) {
+                throw new AssertionError("Fixed42 Discover diagnostic match count was invalid");
+            }
+            return Math.min(matchCount, FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT);
         }
     }
 

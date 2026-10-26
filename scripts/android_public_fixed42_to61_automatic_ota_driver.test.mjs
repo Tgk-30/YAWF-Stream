@@ -2387,6 +2387,203 @@ function fixed42MainGeometryReacquisitionContract(java) {
     "geometry policy added clipping or a 2px tolerance");
 }
 
+function fixed42DiscoverAmbiguityDiagnosticContract(java) {
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const diagnostic = methodBody(java, "logFixed42To61DiscoverAmbiguityIfPresent");
+  const unique = methodBody(java, "fixed42UniqueSemantic");
+  const capture = methodBody(java, "captureFixed42MainGeometryDiagnostic");
+
+  need(java, "private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 4;",
+    "Discover ambiguity diagnostic lost its four-record bound");
+  need(java, "private static final int FIXED42_SEED_SCROLL_ACTION_LIMIT = 16;",
+    "Discover diagnostics changed the shared 16-action bound");
+  need(java, "private static final long FIXED42_SEED_SCROLL_BOUND_MS = 45_000L;",
+    "Discover diagnostics changed the shared 45-second deadline");
+  const mainGeometry = observe.indexOf(
+    "Fixed42MainGeometryDiagnostic mainGeometryDiagnostic = boundsMatch",
+  );
+  const profileGate = observe.indexOf("if (isFixed42To61AutomaticMode()) {", mainGeometry);
+  const diagnosticCall = observe.indexOf(
+    "logFixed42To61DiscoverAmbiguityIfPresent(",
+    profileGate,
+  );
+  const unchangedRejection = observe.indexOf(
+    'int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
+    diagnosticCall,
+  );
+  assert.ok(mainGeometry >= 0 && profileGate > mainGeometry
+      && diagnosticCall > profileGate && unchangedRejection > diagnosticCall,
+  "Discover diagnostics must remain to61-only and immediately precede the unchanged rejection");
+  assert.equal((observe.match(/logFixed42To61DiscoverAmbiguityIfPresent\(/g) ?? []).length, 1,
+    "Discover diagnostic must have exactly one seed-snapshot call site");
+  for (const token of [
+    "nodes,",
+    "mainIndex,",
+    "root,",
+    "main.info,",
+    "nodes.get(0).bounds,",
+    "main.bounds,",
+    "width,",
+    "height,",
+    "mainGeometryDiagnostic",
+  ]) need(observe.slice(diagnosticCall, unchangedRejection), token,
+    `Discover diagnostic call lost same-graph primitive ${token}`);
+  assert.equal((observe.match(/getRootInActiveWindow\(\)/g) ?? []).length, 1,
+    "Discover diagnostics added another active-root query");
+  assert.equal((observe.match(/clearCache\(\)/g) ?? []).length, 1,
+    "Discover diagnostics added another cache refresh");
+
+  const expectedUniqueBody = `int found = -1;
+        for (int index = 0; index < nodes.size(); index++) {
+            if (!nodes.get(index).semanticEquals(exact)) continue;
+            assertTrue("Fixed42 semantic identity was ambiguous for " + exact, found < 0);
+            found = index;
+        }
+        if (required) assertTrue("Fixed42 semantic identity was absent for " + exact, found >= 0);
+        return found;`;
+  assert.equal(unique.trim(), expectedUniqueBody,
+    "generic semantic uniqueness and its ambiguity rejection changed");
+
+  for (const token of [
+    "int matchCount = 0",
+    "new int[FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT]",
+    "for (int index = 0; index < nodes.size(); index++)",
+    'nodes.get(index).semanticEquals("Discover page")',
+    "if (matchCount <= 1) return;",
+    'assertTrue("Discover ambiguity diagnostic is restricted to fixed42-to61"',
+    "isFixed42To61AutomaticMode()",
+    "Fixed42DiscoverAmbiguityPolicy.recordCount(matchCount)",
+    "existingGeometry != null",
+    "captureFixed42MainGeometryDiagnostic(",
+    '"Fixed42-to61 semantic ambiguity diagnostic"',
+    'append(" matches=").append(matchCount)',
+    'append(" records=").append(recordCount)',
+    'append(" truncated=").append(matchCount > recordCount)',
+    'append(" nodes=").append(nodes.size())',
+    "geometry.primitiveLine()",
+    'append("=index:")',
+    'append(",parent:")',
+    "candidate.parentIndex",
+    'append(",window:")',
+    "candidate.info.getWindowId()",
+    'append(",bounds:")',
+    "Fixed42MainGeometryDiagnostic.rect(candidate.bounds)",
+    '"Discover page".equals(candidate.text)',
+    '"Discover page".equals(candidate.description)',
+    "OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName)",
+    '"android.view.View".equals(candidate.className)',
+    '"android.widget.TextView".equals(candidate.className)',
+    "candidate.visible",
+    "candidate.enabled",
+    "candidate.scrollable",
+    "candidate.clickable",
+    "candidate.info.isFocusable()",
+    "candidate.info.isFocused()",
+    "candidate.info.isAccessibilityFocused()",
+    "candidate.info.getLiveRegion()",
+    "android.view.View.ACCESSIBILITY_LIVE_REGION_NONE",
+    "fixed42IsDescendant(nodes, nodeIndex, mainIndex)",
+    'append("nonScrollMain:")',
+    "inMain && !candidate.scrollable",
+    "log(line.toString())",
+  ]) need(diagnostic, token, `Discover ambiguity diagnostic lost ${token}`);
+  assert.equal((diagnostic.match(/\blog\(/g) ?? []).length, 1,
+    "Discover ambiguity diagnostic must emit one bounded line");
+  assert.doesNotMatch(diagnostic,
+    /\.append\(\s*candidate\.(?:text|description|packageName|className|resourceName)\b/,
+    "Discover diagnostic appended raw accessibility identity");
+  assert.doesNotMatch(diagnostic,
+    /candidate\.info\.(?:getText|getContentDescription|getPackageName|getClassName|getViewIdResourceName)/,
+    "Discover diagnostic re-read raw accessibility identity");
+  assert.doesNotMatch(diagnostic,
+    /https?:|admittedTarget|credential|token|cookie|authorization/i,
+    "Discover diagnostic contains URL or credential-bearing data");
+  assert.doesNotMatch(diagnostic,
+    /clearCache|getRootInActiveWindow|SystemClock|waitForIdle|\.click\(|performAction|device\.(?:click|swipe|press)/,
+    "Discover diagnostic added a cache change, root query, wait, or input");
+
+  for (const token of [
+    "root.getBoundsInWindow(rootWindowBounds)",
+    "main.getBoundsInWindow(mainWindowBounds)",
+    "main.getWindow()",
+    "window.getDisplayId()",
+    "window.getId()",
+    "window.getBoundsInScreen(accessibilityWindowBounds)",
+    "window.recycle()",
+    "root.getWindowId()",
+    "main.getWindowId()",
+  ]) need(capture, token, `Discover same-graph geometry lost ${token}`);
+  need(observe, "if (!transferred) fixed42RecycleNodes(owned);",
+    "Discover ambiguity rejection no longer recycles the full graph");
+
+  const drive = methodBody(java, "clickFixed42SampleThroughDiscoverRails");
+  assert.equal((drive.match(/long startedAt = SystemClock\.uptimeMillis\(\)/g) ?? []).length, 1,
+    "Discover diagnostics reset the original 45-second deadline");
+  assert.doesNotMatch(drive,
+    /catch \((?:AssertionError|RuntimeException|Exception|Throwable)\b/,
+    "Discover ambiguity entered a retry path instead of the unchanged rejection");
+}
+
+function runFixed42DiscoverAmbiguityPolicyHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42DiscoverAmbiguityPolicy");
+  const harness = `
+public final class Fixed42DiscoverAmbiguityPolicyHarness {
+    private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
+    private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 4;
+    ${policy}
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static void reject(int matchCount) {
+        boolean rejected = false;
+        try {
+            Fixed42DiscoverAmbiguityPolicy.recordCount(matchCount);
+        } catch (AssertionError expected) {
+            rejected = true;
+        }
+        require(rejected, "invalid match count survived: " + matchCount);
+    }
+
+    public static void main(String[] ignored) {
+        require(Fixed42DiscoverAmbiguityPolicy.recordCount(2) == 2,
+                "two candidates must retain two records");
+        require(Fixed42DiscoverAmbiguityPolicy.recordCount(4) == 4,
+                "four candidates must retain four records");
+        require(Fixed42DiscoverAmbiguityPolicy.recordCount(5) == 4,
+                "five candidates must truncate to four records");
+        require(Fixed42DiscoverAmbiguityPolicy.recordCount(512) == 4,
+                "the traversal cap must retain only four records");
+        reject(-1);
+        reject(0);
+        reject(1);
+        reject(513);
+        System.out.println("fixed42-discover-ambiguity-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-discover-diagnostic-"));
+  const sourceFile = path.join(directory, "Fixed42DiscoverAmbiguityPolicyHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0,
+      `fixed42 Discover diagnostic policy javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand,
+      ["-cp", directory, "Fixed42DiscoverAmbiguityPolicyHarness"],
+      { encoding: "utf8" });
+    assert.equal(run.status, 0,
+      `fixed42 Discover diagnostic policy harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-discover-ambiguity-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function runFixed42MainGeometryPolicyHarness(java) {
   const policy = nestedClassDeclaration(java, "Fixed42MainGeometryPolicy");
   const harness = `
@@ -2862,6 +3059,109 @@ test("fixed42 launcher timeout emits one failure-only primitive diagnostic", () 
       () => runFixed42LauncherDiagnosticsHarness(mutant),
       "fixed42 launcher diagnostic executable mutant survived",
     );
+  }
+});
+
+test("fixed42-to61 logs Discover ambiguity only before the unchanged uniqueness rejection", () => {
+  fixed42DiscoverAmbiguityDiagnosticContract(source);
+
+  const wrongProfile = source.replace(
+    `            if (isFixed42To61AutomaticMode()) {
+                logFixed42To61DiscoverAmbiguityIfPresent(`,
+    `            if (isFixed42AutomaticMode()) {
+                logFixed42To61DiscoverAmbiguityIfPresent(`,
+  );
+  assert.notEqual(wrongProfile, source, "Discover profile-scope mutant anchor was absent");
+  assert.throws(() => fixed42DiscoverAmbiguityDiagnosticContract(wrongProfile),
+    "old fixed42 profile admitted the new diagnostic");
+
+  const wrongSemantic = source.replace(
+    'nodes.get(index).semanticEquals("Discover page")',
+    'nodes.get(index).semanticEquals("Primary")',
+  );
+  assert.notEqual(wrongSemantic, source, "Discover semantic-scope mutant anchor was absent");
+  assert.throws(() => fixed42DiscoverAmbiguityDiagnosticContract(wrongSemantic),
+    "a non-Discover semantic admitted the diagnostic");
+
+  const weakenedRejection = source.replace(
+    'assertTrue("Fixed42 semantic identity was ambiguous for " + exact, found < 0);',
+    'assertTrue("Fixed42 semantic identity was ambiguous for " + exact, found <= 0);',
+  );
+  assert.notEqual(weakenedRejection, source, "uniqueness-rejection mutant anchor was absent");
+  assert.throws(() => fixed42DiscoverAmbiguityDiagnosticContract(weakenedRejection),
+    "semantic uniqueness rejection changed under the diagnostic");
+});
+
+test("fixed42-to61 Discover diagnostic keeps full counts and at most four records", () => {
+  fixed42DiscoverAmbiguityDiagnosticContract(source);
+  runFixed42DiscoverAmbiguityPolicyHarness(source);
+  const policy = nestedClassDeclaration(source, "Fixed42DiscoverAmbiguityPolicy");
+  const mutations = [
+    [
+      "return Math.min(matchCount, FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT);",
+      "return matchCount;",
+    ],
+    ["matchCount < 2", "matchCount < 1"],
+    ["matchCount > FIXED42_SEED_AX_NODE_LIMIT", "false"],
+  ];
+  for (const [before, after] of mutations) {
+    const changedPolicy = policy.replace(before, after);
+    assert.notEqual(changedPolicy, policy, `Discover policy mutant anchor was absent: ${before}`);
+    const mutant = source.replace(policy, changedPolicy);
+    assert.throws(() => runFixed42DiscoverAmbiguityPolicyHarness(mutant),
+      `Discover bounded-record policy mutant survived: ${before}`);
+  }
+
+  const raisedRecordLimit = source.replace(
+    "private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 4;",
+    "private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 5;",
+  );
+  assert.notEqual(raisedRecordLimit, source, "Discover record-limit mutant anchor was absent");
+  assert.throws(() => fixed42DiscoverAmbiguityDiagnosticContract(raisedRecordLimit),
+    "Discover diagnostic admitted more than four candidate records");
+});
+
+test("fixed42-to61 Discover diagnostic is sanitized observation-only and recycles the graph", () => {
+  fixed42DiscoverAmbiguityDiagnosticContract(source);
+
+  const mutants = [
+    ["raw-text", source.replace(
+      '.append("textExact:")',
+      ".append(candidate.text).append(\",textExact:\")",
+    )],
+    ["new-root", source.replace(
+      "        int matchCount = 0;",
+      "        instrumentation.getUiAutomation().getRootInActiveWindow();\n        int matchCount = 0;",
+    )],
+    ["input", source.replace(
+      "        log(line.toString());",
+      "        device.click(1, 1);\n        log(line.toString());",
+    )],
+    ["node-recycle", source.replace(
+      "if (!transferred) fixed42RecycleNodes(owned);",
+      "if (!transferred) owned.clear();",
+    )],
+    ["window-recycle", source.replace(
+      "                window.recycle();",
+      "                accessibilityWindowPresent = 1;",
+    )],
+    ["geometry", source.replace(
+      ".append(geometry.primitiveLine());",
+      ";",
+    )],
+    ["focus", source.replace(
+      '.append("focused:").append(candidate.info.isFocused()).append(\',\')',
+      '.append("focused:false,")',
+    )],
+    ["ancestry", source.replace(
+      "boolean inMain = fixed42IsDescendant(nodes, nodeIndex, mainIndex);",
+      "boolean inMain = true;",
+    )],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, source, `Discover observation mutant anchor was absent: ${label}`);
+    assert.throws(() => fixed42DiscoverAmbiguityDiagnosticContract(mutant),
+      `Discover observation mutant survived: ${label}`);
   }
 });
 
