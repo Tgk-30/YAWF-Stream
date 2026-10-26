@@ -29,6 +29,7 @@ type HlsInstance = InstanceType<typeof HlsType>;
 export const WEBVIEW_STARTUP_TIMEOUT_MS = 20_000;
 export const SERVER_HLS_STARTUP_TIMEOUT_MS = 45_000;
 export const WEBVIEW_FALLBACK_TIMEOUT_MS = 8_000;
+const NATIVE_HLS_SEEK_CONFIRM_TIMEOUT_MS = 1_200;
 const SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS = 8_000;
 const SERVER_SOURCE_INFO_RETRY_DELAY_MS = 5_000;
 const MAX_SOURCE_DURATION_SECONDS = 86_400;
@@ -143,6 +144,16 @@ export interface PlaybackHandoffState {
 }
 
 type ServerOptimizedPositionIntent = "follow-current" | "fixed";
+type ServerOptimizationPurpose = "ordinary" | "native-hls-seek";
+type PendingNativeHlsSeek = {
+  sequence: number;
+  absoluteTarget: number;
+  localTarget: number;
+  paused: boolean;
+  playbackIntent: "play" | "pause" | null;
+  fallbackStarted: boolean;
+  timer: number | null;
+};
 
 function applyMediaPlaybackRate(video: HTMLMediaElement, playbackRate: number): void {
   // The media load algorithm can reset playbackRate to defaultPlaybackRate.
@@ -1096,6 +1107,7 @@ export function VideoPlayer({
     owner: string;
     request: number;
     controller: AbortController;
+    purpose: ServerOptimizationPurpose;
   } | null>(null);
   const sourceInfoLoadOwnerRef = useRef<string | null>(null);
   const sourceInfoGenerationRef = useRef(0);
@@ -1664,15 +1676,23 @@ export function VideoPlayer({
       audioPreference?: AudioPreference,
       positionIntent: ServerOptimizedPositionIntent = "follow-current",
       retainAudioPreference = false,
-    ) => {
+      purpose: ServerOptimizationPurpose = "ordinary",
+    ): Promise<boolean> => {
       const owner = playbackOwner;
       if (
         serverOptimized == null ||
         !playerMountedRef.current ||
-        playbackOwnerRef.current !== owner ||
-        optimizationPendingRef.current?.owner === owner
+        playbackOwnerRef.current !== owner
       ) {
-        return;
+        return false;
+      }
+      if (optimizationPendingRef.current?.owner === owner) {
+        if (purpose === "native-hls-seek") {
+          setServerOptimizationError(
+            "Another playback change is still being prepared. Try seeking again.",
+          );
+        }
+        return false;
       }
       const position = Number.isFinite(absolutePositionSeconds)
         ? Math.max(0, absolutePositionSeconds)
@@ -1680,7 +1700,7 @@ export function VideoPlayer({
       const request = ++optimizationRequestSequenceRef.current;
       const controller = new AbortController();
       optimizationPendingRef.current?.controller.abort();
-      optimizationPendingRef.current = { owner, request, controller };
+      optimizationPendingRef.current = { owner, request, controller, purpose };
       const ownsRequest = () =>
         playerMountedRef.current &&
         playbackOwnerRef.current === owner &&
@@ -1702,7 +1722,7 @@ export function VideoPlayer({
           SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS,
           "Server optimized playback timed out before preparation began.",
         );
-        if (!ownsRequest()) return;
+        if (!ownsRequest()) return false;
         if (!isTrustedServerHlsManifestURL(next.url)) {
           throw new Error("The server returned an untrusted optimized playback URL.");
         }
@@ -1711,7 +1731,7 @@ export function VideoPlayer({
         let manifest: string | null = null;
         let preparedAudioTrack = audioTrack ?? next.audioTrack;
         while (manifest == null) {
-          if (!ownsRequest() || controller.signal.aborted) return;
+          if (!ownsRequest() || controller.signal.aborted) return false;
           const remainingMs = manifestDeadline - Date.now();
           if (remainingMs <= 0) {
             controller.abort();
@@ -1727,7 +1747,7 @@ export function VideoPlayer({
             "Server optimized playback timed out.",
             () => controller.abort(),
           );
-          if (!ownsRequest()) return;
+          if (!ownsRequest()) return false;
           if (response.status === 503 || response.status === 504) {
             const retryRemainingMs = manifestDeadline - Date.now();
             if (retryRemainingMs <= 0) {
@@ -1760,11 +1780,11 @@ export function VideoPlayer({
             () => controller.abort(),
           );
         }
-        if (!ownsRequest()) return;
+        if (!ownsRequest()) return false;
         if (!manifest.startsWith("#EXTM3U")) {
           throw new Error("The server did not return a playable HLS manifest.");
         }
-        if (!ownsRequest()) return;
+        if (!ownsRequest()) return false;
         // Ordinary quality switches follow playback while the manifest warms.
         // An explicit out-of-window seek instead owns its requested position;
         // a late clock event from the old media must not undo that user action.
@@ -1779,8 +1799,12 @@ export function VideoPlayer({
         const requestedHandoffState = typeof handoffState === "function"
           ? handoffState()
           : handoffState ?? null;
-        if (!ownsRequest()) return;
-        const activationHandoffState = currentWebviewHandoffState(requestedHandoffState);
+        if (!ownsRequest()) return false;
+        const currentHandoffState = currentWebviewHandoffState(requestedHandoffState);
+        const activationHandoffState =
+          purpose === "native-hls-seek" && requestedHandoffState != null && currentHandoffState != null
+            ? { ...currentHandoffState, paused: requestedHandoffState.paused }
+            : currentHandoffState;
         const requestedAudioConfirmed =
           audioPreference != null &&
           audioTrack != null &&
@@ -1818,11 +1842,13 @@ export function VideoPlayer({
           originOwner: owner,
         });
         recordDiagnostic("player", "server_optimized.ready", "info", quality);
+        return true;
       } catch (error) {
-        if (!ownsRequest()) return;
+        if (!ownsRequest()) return false;
         const message = error instanceof Error ? error.message : "The server could not prepare optimized playback.";
         setServerOptimizationError(message);
         recordDiagnostic("player", "server_optimized.failed", "warning", message);
+        return false;
       } finally {
         if (ownsRequest()) {
           optimizationPendingRef.current = null;
@@ -1838,6 +1864,15 @@ export function VideoPlayer({
       serverOptimized,
     ],
   );
+
+  const cancelNativeHlsSeekOptimization = useCallback(() => {
+    const pending = optimizationPendingRef.current;
+    if (pending?.purpose !== "native-hls-seek") return;
+    optimizationRequestSequenceRef.current += 1;
+    pending.controller.abort();
+    optimizationPendingRef.current = null;
+    setServerOptimizationPending(false);
+  }, []);
 
   const switchToDeviceOriginal = useCallback((
     absolutePositionSeconds: number,
@@ -1887,7 +1922,7 @@ export function VideoPlayer({
       audioTrack,
       audioPreference,
       positionIntent,
-    );
+    ).then(() => undefined);
   }, [claimExplicitServerOptimizationChoice, switchToServerOptimized]);
 
   const selectDeviceOriginal = useCallback((
@@ -2637,6 +2672,7 @@ export function VideoPlayer({
             serverOptimizationPending={serverOptimizationPending}
             serverOptimizationError={serverOptimizationError}
             onSwitchServerOptimized={switchToServerOptimized}
+            onCancelNativeHlsSeekOptimization={cancelNativeHlsSeekOptimization}
             onSelectServerOptimized={selectServerOptimized}
             onSelectDeviceOriginal={selectDeviceOriginal}
             onAbsolutePositionChange={reportAbsolutePosition}
@@ -2786,6 +2822,7 @@ function WebviewPlayer({
   serverOptimizationPending,
   serverOptimizationError,
   onSwitchServerOptimized,
+  onCancelNativeHlsSeekOptimization,
   onSelectServerOptimized,
   onSelectDeviceOriginal,
   onAbsolutePositionChange,
@@ -2885,7 +2922,9 @@ function WebviewPlayer({
     audioPreference?: AudioPreference,
     positionIntent?: ServerOptimizedPositionIntent,
     retainAudioPreference?: boolean,
-  ) => Promise<void>;
+    purpose?: ServerOptimizationPurpose,
+  ) => Promise<boolean>;
+  onCancelNativeHlsSeekOptimization: () => void;
   onSelectServerOptimized: (
     quality: ServerTranscodeQuality,
     absolutePositionSeconds: number,
@@ -2994,6 +3033,8 @@ function WebviewPlayer({
   const sourceSwitchStateRef = useRef(sourceSwitchState);
   sourceSwitchStateRef.current = sourceSwitchState;
   const pendingHandoffPlaybackIntentRef = useRef<"play" | "pause" | null>(null);
+  const pendingNativeHlsSeekSequenceRef = useRef(0);
+  const pendingNativeHlsSeekRef = useRef<PendingNativeHlsSeek | null>(null);
   const verifiedPlaybackProgressReportedRef = useRef(false);
   const verifiedPlaybackPlayingRef = useRef(false);
   const lastObservedMediaTimeRef = useRef(0);
@@ -3003,6 +3044,14 @@ function WebviewPlayer({
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const [playbackRate, setPlaybackRate] = useState(() => {
+    if (
+      sourceSwitchState != null &&
+      Number.isFinite(sourceSwitchState.playbackRate) &&
+      sourceSwitchState.playbackRate >= 0.5 &&
+      sourceSwitchState.playbackRate <= 2
+    ) {
+      return sourceSwitchState.playbackRate;
+    }
     const saved = playerPreferences?.rememberPerTitleTrackChoices === false
       ? null
       : savedPrefs?.playbackSpeed;
@@ -3063,6 +3112,8 @@ function WebviewPlayer({
   const [hlsAudioTrack, setHlsAudioTrack] = useState(-1);
   const [hlsAudioInventoryKnown, setHlsAudioInventoryKnown] = useState(false);
   const [nativeHlsPlayback, setNativeHlsPlayback] = useState(false);
+  const nativeHlsPlaybackRef = useRef(false);
+  nativeHlsPlaybackRef.current = nativeHlsPlayback;
   const [browserAudioTracks, setBrowserAudioTracks] = useState<HlsAudioChoice[]>([]);
   const [browserAudioTrack, setBrowserAudioTrack] = useState(-1);
   const [browserAudioApiAvailable, setBrowserAudioApiAvailable] = useState(false);
@@ -3116,6 +3167,17 @@ function WebviewPlayer({
   const requestPlaybackState = useCallback((shouldPlay: boolean) => {
     const video = videoRef.current;
     if (video == null) return;
+    const pendingNativeSeek = pendingNativeHlsSeekRef.current;
+    if (pendingNativeSeek != null) {
+      pendingNativeSeek.playbackIntent = shouldPlay ? "play" : "pause";
+      // A requested Play is an intent, not permission to decode from the stale
+      // position while native HLS has not confirmed the seek.
+      if (!video.paused) video.pause();
+      setPaused(true);
+      setPlaying(false);
+      onPausedChange(true);
+      return;
+    }
     if (
       exactHandoffPendingRef.current ||
       (suspendedRef.current && pendingHandoffPlaybackIntentRef.current != null)
@@ -3161,6 +3223,13 @@ function WebviewPlayer({
   const togglePlaybackState = useCallback(() => {
     const video = videoRef.current;
     if (video == null) return;
+    const pendingNativeSeek = pendingNativeHlsSeekRef.current;
+    if (pendingNativeSeek != null) {
+      const wantsPlayback = pendingNativeSeek.playbackIntent === "play" ||
+        (pendingNativeSeek.playbackIntent == null && !pendingNativeSeek.paused);
+      requestPlaybackState(!wantsPlayback);
+      return;
+    }
     const pendingIntent = pendingHandoffPlaybackIntentRef.current;
     const hasDeferredHandoffIntent = exactHandoffPendingRef.current ||
       (suspendedRef.current && pendingIntent != null);
@@ -4242,6 +4311,74 @@ function WebviewPlayer({
       : null;
   };
   const didSeekRef = useRef(false);
+  const invalidatePendingNativeHlsSeek = useCallback(() => {
+    pendingNativeHlsSeekSequenceRef.current += 1;
+    const pending = pendingNativeHlsSeekRef.current;
+    if (pending?.timer != null) window.clearTimeout(pending.timer);
+    pendingNativeHlsSeekRef.current = null;
+    onCancelNativeHlsSeekOptimization();
+  }, [onCancelNativeHlsSeekOptimization]);
+
+  const confirmPendingNativeHlsSeek = useCallback((video: HTMLVideoElement) => {
+    const pending = pendingNativeHlsSeekRef.current;
+    if (
+      pending == null ||
+      pending.fallbackStarted ||
+      videoRef.current !== video ||
+      video.seeking ||
+      video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+      !Number.isFinite(video.currentTime) ||
+      Math.abs(video.currentTime - pending.localTarget) > 0.25
+    ) {
+      return pending == null;
+    }
+    if (pending.timer != null) window.clearTimeout(pending.timer);
+    pendingNativeHlsSeekRef.current = null;
+    onAbsolutePositionChange(pending.absoluteTarget);
+    scrubberRef.current?.setCurrentTime(pending.absoluteTarget);
+    setPlaybackStatus(null);
+    const shouldPlay = pending.playbackIntent === "play" ||
+      (pending.playbackIntent == null && !pending.paused);
+    applyDeferredHandoffPlayback(video, shouldPlay);
+    return true;
+  }, [applyDeferredHandoffPlayback, onAbsolutePositionChange]);
+
+  const settleNativeHlsSeekReplacement = useCallback((
+    pending: PendingNativeHlsSeek,
+    video: HTMLVideoElement,
+    activated: boolean,
+  ) => {
+    if (
+      activated ||
+      pendingNativeHlsSeekRef.current !== pending ||
+      pendingNativeHlsSeekSequenceRef.current !== pending.sequence ||
+      videoRef.current !== video
+    ) {
+      return;
+    }
+    if (pending.timer != null) window.clearTimeout(pending.timer);
+    pendingNativeHlsSeekRef.current = null;
+    if (!video.paused) video.pause();
+    setPlaybackStatus(null);
+    setPaused(true);
+    setPlaying(false);
+    onPausedChange(true);
+  }, [onPausedChange]);
+
+  useEffect(() => () => {
+    invalidatePendingNativeHlsSeek();
+  }, [
+    engine,
+    episode,
+    imdbId,
+    invalidatePendingNativeHlsSeek,
+    season,
+    serverAudioOwner,
+    subtitle,
+    title,
+    url,
+  ]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (video == null) return;
@@ -4426,6 +4563,11 @@ function WebviewPlayer({
       return true;
     };
     const onTimeUpdate = () => {
+      if (pendingNativeHlsSeekRef.current != null && !confirmPendingNativeHlsSeek(video)) {
+        setPlaybackStatus("seeking");
+        video.pause();
+        return;
+      }
       if (exactHandoffPendingRef.current && !confirmExactHandoff()) {
         setPlaybackStatus("seeking");
         video.pause();
@@ -4553,6 +4695,10 @@ function WebviewPlayer({
       applyResume();
     };
     const onSeekedForResume = () => {
+      if (pendingNativeHlsSeekRef.current != null) {
+        confirmPendingNativeHlsSeek(video);
+        if (pendingNativeHlsSeekRef.current != null) return;
+      }
       if (!confirmExactHandoff()) applyResume();
     };
     const onProgressForResume = () => applyResume();
@@ -4613,6 +4759,12 @@ function WebviewPlayer({
     };
     const onPause = () => {
       verifiedPlaybackPlayingRef.current = false;
+      if (pendingNativeHlsSeekRef.current != null) {
+        setPaused(true);
+        setPlaying(false);
+        onPausedChange(true);
+        return;
+      }
       if (exactHandoffPendingRef.current) {
         const pendingIntent = pendingHandoffPlaybackIntentRef.current;
         const shouldPlay = pendingIntent === "play" ||
@@ -4630,9 +4782,18 @@ function WebviewPlayer({
       }
     };
     const onPlay = () => {
-      if (suspendedRef.current || exactHandoffPendingRef.current) {
+      if (
+        suspendedRef.current ||
+        exactHandoffPendingRef.current ||
+        pendingNativeHlsSeekRef.current != null
+      ) {
         video.pause();
-        if (exactHandoffPendingRef.current) {
+        if (pendingNativeHlsSeekRef.current != null) {
+          setPaused(true);
+          setPlaying(false);
+          onPausedChange(true);
+          setPlaybackStatus("seeking");
+        } else if (exactHandoffPendingRef.current) {
           const pendingIntent = pendingHandoffPlaybackIntentRef.current;
           const shouldPlay = pendingIntent === "play" ||
             (pendingIntent == null && sourceSwitchStateRef.current?.paused !== true);
@@ -4663,7 +4824,7 @@ function WebviewPlayer({
       exactHandoffPendingRef.current ? "seeking" : "buffering",
     );
     const onPlaying = () => {
-      if (exactHandoffPendingRef.current) {
+      if (exactHandoffPendingRef.current || pendingNativeHlsSeekRef.current != null) {
         video.pause();
         setPlaybackStatus("seeking");
         return;
@@ -4676,7 +4837,7 @@ function WebviewPlayer({
       setPlaybackStatus(null);
     };
     const onCanPlay = () => {
-      if (exactHandoffPendingRef.current) {
+      if (exactHandoffPendingRef.current || pendingNativeHlsSeekRef.current != null) {
         setPlaybackStatus("seeking");
         return;
       }
@@ -4714,6 +4875,7 @@ function WebviewPlayer({
         autoplayAttemptedRef.current ||
         suspendedRef.current ||
         exactHandoffPendingRef.current ||
+        pendingNativeHlsSeekRef.current != null ||
         sourceSwitchStateRef.current?.paused === true
       ) return;
       autoplayAttemptedRef.current = true;
@@ -4785,6 +4947,7 @@ function WebviewPlayer({
     };
   }, [
     applyDeferredHandoffPlayback,
+    confirmPendingNativeHlsSeek,
     onAbsolutePositionChange,
     onPausedChange,
     onVerifiedPlaybackProgress,
@@ -5196,6 +5359,95 @@ function WebviewPlayer({
     };
   }, [engine, url, isHls, leasePreparationReady]);
 
+  const beginConfirmedNativeHlsSeek = (
+    video: HTMLVideoElement,
+    localTarget: number,
+    absoluteTarget: number,
+    allowPreparation: boolean,
+  ): boolean => {
+    if (
+      !allowPreparation ||
+      !nativeHlsPlaybackRef.current ||
+      !video.paused ||
+      exactHandoffPendingRef.current ||
+      serverOptimized == null ||
+      activeServerOptimizedQuality == null
+    ) {
+      return false;
+    }
+
+    const previousPending = pendingNativeHlsSeekRef.current;
+    invalidatePendingNativeHlsSeek();
+    const sequence = ++pendingNativeHlsSeekSequenceRef.current;
+    const pending = {
+      sequence,
+      absoluteTarget,
+      localTarget,
+      paused: previousPending?.paused ?? true,
+      playbackIntent: previousPending?.playbackIntent ?? null,
+      fallbackStarted: false,
+      timer: null as number | null,
+    };
+    pendingNativeHlsSeekRef.current = pending;
+    setPlaybackStatus("seeking");
+    try {
+      video.currentTime = localTarget;
+    } catch {
+      // The confirmation deadline owns recovery when WebKit rejects the seek.
+    }
+    scrubberRef.current?.setCurrentTime(absoluteTarget);
+    pending.timer = window.setTimeout(() => {
+      if (
+        pendingNativeHlsSeekRef.current !== pending ||
+        pendingNativeHlsSeekSequenceRef.current !== sequence ||
+        videoRef.current !== video ||
+        !nativeHlsPlaybackRef.current
+      ) {
+        return;
+      }
+      pending.timer = null;
+      if (
+        !video.seeking &&
+        Number.isFinite(video.currentTime) &&
+        Math.abs(video.currentTime - pending.localTarget) <= 0.25
+      ) {
+        if (confirmPendingNativeHlsSeek(video)) return;
+      }
+      pending.fallbackStarted = true;
+      if (!video.paused) video.pause();
+      setPlaybackStatus("seeking");
+      const selected = serverAudioTracks.find(
+        (track) => track.index === resolvedServerAudioTrack,
+      );
+      void onSwitchServerOptimized(
+        activeServerOptimizedQuality,
+        pending.absoluteTarget,
+        () => ({
+          paused: pending.playbackIntent === "play"
+            ? false
+            : pending.playbackIntent === "pause"
+              ? true
+              : pending.paused,
+          volume: video.volume,
+          muted: video.muted,
+          playbackRate: video.playbackRate,
+        }),
+        resolvedServerAudioTrack ?? undefined,
+        activeServerAudioPreference ?? (selected == null ? undefined : {
+          id: selected.id,
+          language: selected.language,
+          label: selected.logicalLabel,
+        }),
+        "fixed",
+        false,
+        "native-hls-seek",
+      ).then((activated) => {
+        settleNativeHlsSeekReplacement(pending, video, activated);
+      });
+    }, NATIVE_HLS_SEEK_CONFIRM_TIMEOUT_MS);
+    return true;
+  };
+
   const seekAbsolute = (t: number, allowPreparation = true) => {
     const video = videoRef.current;
     if (video == null || !Number.isFinite(t)) return;
@@ -5205,7 +5457,9 @@ function WebviewPlayer({
         ? video.duration
         : Number.POSITIVE_INFINITY;
       const localTarget = Math.min(Math.max(t, 0), localDuration);
-      video.currentTime = localTarget;
+      if (!beginConfirmedNativeHlsSeek(video, localTarget, localTarget, allowPreparation)) {
+        video.currentTime = localTarget;
+      }
       scrubberRef.current?.setCurrentTime(localTarget);
       return;
     }
@@ -5244,7 +5498,9 @@ function WebviewPlayer({
           : windowDuration != null && localTarget <= windowDuration)
       )
     ) {
-      video.currentTime = localTarget;
+      if (!beginConfirmedNativeHlsSeek(video, localTarget, absoluteTarget, allowPreparation)) {
+        video.currentTime = localTarget;
+      }
       scrubberRef.current?.setCurrentTime(
         knownDuration == null ? localTarget : absoluteTarget,
       );
@@ -5253,14 +5509,37 @@ function WebviewPlayer({
     // Pointer movement previews the local window without starting a server job.
     // Only the final release may replace it with a new optimized generation.
     if (!allowPreparation || serverOptimized == null || activeServerOptimizedQuality == null) return;
+    const pendingNativeSeek = pendingNativeHlsSeekRef.current;
+    const nativePausedServerSeek = nativeHlsPlaybackRef.current &&
+      video.paused &&
+      !exactHandoffPendingRef.current;
+    let replacementPending = pendingNativeSeek;
+    if (nativePausedServerSeek) {
+      invalidatePendingNativeHlsSeek();
+      replacementPending = {
+        sequence: ++pendingNativeHlsSeekSequenceRef.current,
+        absoluteTarget,
+        localTarget,
+        paused: pendingNativeSeek?.paused ?? true,
+        playbackIntent: pendingNativeSeek?.playbackIntent ?? null,
+        fallbackStarted: true,
+        timer: null,
+      };
+      pendingNativeHlsSeekRef.current = replacementPending;
+      setPlaybackStatus("seeking");
+    }
     const selected = serverAudioTracks.find(
       (track) => track.index === resolvedServerAudioTrack,
     );
-    void onSwitchServerOptimized(
+    const replacement = onSwitchServerOptimized(
       activeServerOptimizedQuality,
       absoluteTarget,
       () => ({
-        paused: video.paused,
+        paused: replacementPending?.playbackIntent === "play"
+          ? false
+          : replacementPending?.playbackIntent === "pause"
+            ? true
+            : replacementPending?.paused ?? video.paused,
         volume: video.volume,
         muted: video.muted,
         playbackRate: video.playbackRate,
@@ -5272,7 +5551,14 @@ function WebviewPlayer({
         label: selected.logicalLabel,
       }),
       "fixed",
+      false,
+      nativePausedServerSeek ? "native-hls-seek" : "ordinary",
     );
+    if (nativePausedServerSeek && replacementPending != null) {
+      void replacement.then((activated) => {
+        settleNativeHlsSeekReplacement(replacementPending, video, activated);
+      });
+    }
   };
 
   const seek = (t: number, allowPreparation = true) => {
@@ -5286,7 +5572,12 @@ function WebviewPlayer({
       ? video.duration
       : Number.POSITIVE_INFINITY;
     const localTarget = Math.min(Math.max(t, 0), localDuration);
-    video.currentTime = localTarget;
+    const absoluteTarget = localTarget + (
+      optimizedTimelineIsPartialRef.current ? timelineOffsetRef.current : 0
+    );
+    if (!beginConfirmedNativeHlsSeek(video, localTarget, absoluteTarget, allowPreparation)) {
+      video.currentTime = localTarget;
+    }
     scrubberRef.current?.setCurrentTime(localTarget);
   };
   absoluteSeekRef.current = seekAbsolute;
@@ -5479,11 +5770,19 @@ function WebviewPlayer({
         }
         case "<":
           e.preventDefault();
-          applyMediaPlaybackRate(video, Math.max(0.5, video.playbackRate - 0.25));
+          {
+            const next = Math.max(0.5, video.playbackRate - 0.25);
+            applyMediaPlaybackRate(video, next);
+            setPlaybackRate(next);
+          }
           break;
         case ">":
           e.preventDefault();
-          applyMediaPlaybackRate(video, Math.min(2, video.playbackRate + 0.25));
+          {
+            const next = Math.min(2, video.playbackRate + 0.25);
+            applyMediaPlaybackRate(video, next);
+            setPlaybackRate(next);
+          }
           break;
         case "n":
         case "N":
@@ -6120,7 +6419,7 @@ function WebviewPlayer({
                 onChange={(event) => changePlaybackRate(Number(event.target.value))}
                 tabIndex={chromeVisible ? undefined : -1}
               >
-                {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => (
                   <option value={speed} key={speed}>
                     {speed}×
                   </option>
@@ -6307,7 +6606,7 @@ function WebviewPlayer({
                   onChange={(event) => changePlaybackRate(Number(event.target.value))}
                   tabIndex={chromeVisible ? undefined : -1}
                 >
-                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                  {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => (
                     <option value={speed} key={speed}>{speed}×</option>
                   ))}
                 </select>

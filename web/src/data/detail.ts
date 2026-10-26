@@ -182,14 +182,24 @@ export function useDetail(
 ): DetailState {
   const serverMode = isServerMode();
   const networkMode = getNetworkMode();
+  const requestPreview = useMemo(() => preview, [
+    preview?.id,
+    preview?.type,
+    preview?.title,
+    preview?.year,
+    preview?.posterPath,
+    preview?.backdropPath,
+    preview?.imdbRating,
+    preview?.tmdbId,
+  ]);
   const owner = useMemo<DetailOwner>(() => ({
-    id: preview?.id ?? null,
-    type: preview?.type ?? null,
-    tmdbId: preview?.tmdbId ?? null,
+    id: requestPreview?.id ?? null,
+    type: requestPreview?.type ?? null,
+    tmdbId: requestPreview?.tmdbId ?? null,
     service,
     requestMode: serverMode ? "server" : networkMode,
-  }), [preview?.id, preview?.type, preview?.tmdbId, service, serverMode, networkMode]);
-  const fallback = initialDetailState(preview);
+  }), [requestPreview?.id, requestPreview?.type, requestPreview?.tmdbId, service, serverMode, networkMode]);
+  const fallback = initialDetailState(requestPreview);
   const [state, setState] = useState<OwnedDetailState>(() => ({
     owner,
     value: fallback,
@@ -207,7 +217,7 @@ export function useDetail(
       setState((current) => {
         const currentValue = sameDetailOwner(current.owner, owner)
           ? current.value
-          : initialDetailState(preview);
+          : initialDetailState(requestPreview);
         return {
           owner,
           value: typeof next === "function" ? next(currentValue) : next,
@@ -215,11 +225,11 @@ export function useDetail(
       });
     };
 
-    if (preview == null) {
+    if (requestPreview == null) {
       commitState(initialDetailState(null));
       return;
     }
-    const currentPreview = preview;
+    const currentPreview = requestPreview;
     let cancelled = false;
 
     commitState(initialDetailState(currentPreview));
@@ -314,7 +324,7 @@ export function useDetail(
     return () => {
       cancelled = true;
     };
-  }, [preview, service, owner, serverMode]);
+  }, [requestPreview, service, owner, serverMode]);
 
   return sameDetailOwner(state.owner, owner) ? state.value : fallback;
 }

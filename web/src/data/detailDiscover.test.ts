@@ -694,6 +694,60 @@ describe("useDetail", () => {
     expect(svc.getDetail).not.toHaveBeenCalled();
   });
 
+  it("preserves resolved server detail across an equivalent cloned preview", async () => {
+    isServerMode.mockReturnValue(true);
+    const serverData = {
+      item: mediaItem({
+        id: "tt1234567",
+        title: "Enriched server title",
+        overview: "Server overview",
+        genres: ["Drama"],
+        runtime: 123,
+        tmdbId: 9,
+      }),
+      cast,
+      related: [],
+      imdbId: "tt1234567",
+    };
+    fetchServerDetail.mockResolvedValue(serverData);
+    const selected = preview({
+      id: "tmdb-9",
+      type: "series",
+      title: "Sparse preview",
+      tmdbId: 9,
+    });
+    const hook = renderHook(
+      ({ value }: { value: MediaPreview }) => useDetail(value, null),
+      { initialProps: { value: selected } },
+    );
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+
+    hook.rerender({ value: structuredClone(selected) });
+
+    expect(hook.result.current).toMatchObject({
+      loading: false,
+      source: "live",
+      data: {
+        imdbId: "tt1234567",
+        item: {
+          title: "Enriched server title",
+          overview: "Server overview",
+          genres: ["Drama"],
+          runtime: 123,
+        },
+      },
+    });
+    expect(fetchServerDetail).toHaveBeenCalledTimes(1);
+
+    hook.rerender({ value: { ...selected, title: "Updated preview title" } });
+    expect(hook.result.current).toMatchObject({
+      loading: true,
+      source: "fixtures",
+      data: { item: { title: "Updated preview title" } },
+    });
+    expect(fetchServerDetail).toHaveBeenCalledTimes(2);
+  });
+
   it("server mode failure falls back to fixtures with the error message", async () => {
     isServerMode.mockReturnValue(true);
     fetchServerDetail.mockRejectedValue(new Error("server 500"));
