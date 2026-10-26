@@ -17,6 +17,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -132,8 +133,13 @@ public final class RuntimeOtaFlowTest {
     private static final int FIXED42_SEED_SCROLL_ACTION_LIMIT = 16;
     private static final long FIXED42_SEED_SCROLL_BOUND_MS = 45_000L;
     private static final long FIXED42_SEED_SCROLL_SETTLE_MS = 600L;
+    private static final int FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT = 3;
+    private static final long FIXED42_TO61_MAIN_GEOMETRY_RETRY_MS = 200L;
     private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
     private static final int FIXED42_SEED_AX_CHILD_LIMIT = 128;
+    private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 4;
+    private static final int FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT = 12;
+    private static final int FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT = 32;
     private static final int FIXED42_LAUNCHER_ANCESTOR_LIMIT = 16;
     private static final int FIXED42_LAUNCHER_NODE_LIMIT = 256;
     private static final int FIXED42_LAUNCHER_CHILD_LIMIT = 128;
@@ -492,7 +498,9 @@ public final class RuntimeOtaFlowTest {
         waitFor(By.text("Enable Android update checks?"), UI_WAIT_MS,
                 "initial native update consent");
         capture("automatic-initial-consent");
-        if (isFixed42AutomaticMode()) {
+        if (isFixed42To61AutomaticMode()) {
+            enableAndCancelInitialFixed42To61CheckNoIdle();
+        } else if (isFixed42AutomaticMode()) {
             enableAndCancelInitialFixed42CheckNoIdle();
         } else {
             click(
@@ -649,6 +657,190 @@ public final class RuntimeOtaFlowTest {
             SystemClock.sleep(250);
         }
         fail("Initial manual cancellation did not settle");
+    }
+
+    private void enableAndCancelInitialFixed42To61CheckNoIdle() throws IOException {
+        assertTrue("Fused initial Cancel observer is restricted to fixed42-to61",
+                isFixed42To61AutomaticMode());
+        String progressTitle = "Checking for updates";
+        String progressMessage = "Checking the official YAWF Stream Android release channel.";
+        String[] progressTexts = {progressTitle, progressMessage};
+        String[] terminalTexts = {
+                "YAWF Stream is up to date",
+                "Update check unavailable",
+                "YAWF Stream " + admittedTargetVersion + " is available"
+        };
+        BySelector enableSelector = By.res("android", "button1")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.Button")
+                .text(Pattern.compile("\\AEnable\\z", Pattern.CASE_INSENSITIVE))
+                .clickable(true)
+                .enabled(true);
+        BySelector snapshotSelector =
+                fixed42To61InitialCancelSnapshotSelector(progressTexts, terminalTexts);
+        BySelector progressSelector = nativeDialogTextGroup(progressTexts);
+        BySelector terminalSelector = nativeDialogTextGroup(terminalTexts);
+        BySelector cancelSelector = By.res("android", "button2")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                .clazz("android.widget.Button")
+                .text(Pattern.compile("\\ACancel\\z", Pattern.CASE_INSENSITIVE))
+                .clickable(true)
+                .enabled(true);
+        Configurator configurator = Configurator.getInstance();
+        long previousIdleTimeout = configurator.getWaitForIdleTimeout();
+        long enableClickStartedUptimeMs = -1L;
+        long enableClickFinishedUptimeMs = -1L;
+        long snapshotStartedUptimeMs = -1L;
+        long snapshotFinishedUptimeMs = -1L;
+        long cancelClickStartedUptimeMs = -1L;
+        long cancelClickFinishedUptimeMs = -1L;
+        long checkingObservedUptimeMs = -1L;
+        long cancelSelectedUptimeMs = -1L;
+        long cancelSettledUptimeMs = -1L;
+        int snapshotAttempts = 0;
+        int staleSnapshots = 0;
+        boolean cancellationSettled = false;
+        configurator.setWaitForIdleTimeout(0L);
+        try {
+            assertTrue("Initial Enable cache could not be refreshed before safety guard",
+                    instrumentation.getUiAutomation().clearCache());
+            List<UiObject2> enables = device.findObjects(enableSelector);
+            assertEquals("Initial Enable was absent or ambiguous before safety guard",
+                    1, enables.size());
+            assertNoBindingTermsAtCurrentIdlePolicy();
+            assertTrue("Initial Enable cache could not be refreshed after safety guard",
+                    instrumentation.getUiAutomation().clearCache());
+            List<UiObject2> freshEnables = device.findObjects(enableSelector);
+            assertEquals("Initial Enable disappeared or became ambiguous after safety guard",
+                    1, freshEnables.size());
+            enableClickStartedUptimeMs = SystemClock.uptimeMillis();
+            try {
+                freshEnables.get(0).click();
+            } finally {
+                enableClickFinishedUptimeMs = SystemClock.uptimeMillis();
+            }
+            log("Selected one exact native Enable with UiAutomator idle waiting disabled");
+
+            long cancelDeadline = enableClickFinishedUptimeMs + SHORT_WAIT_MS;
+            while (SystemClock.uptimeMillis() < cancelDeadline) {
+                boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+                if (!cacheCleared) {
+                    long remaining = cancelDeadline - SystemClock.uptimeMillis();
+                    if (remaining > 0L) SystemClock.sleep(Math.min(100L, remaining));
+                    continue;
+                }
+                snapshotAttempts++;
+                snapshotStartedUptimeMs = SystemClock.uptimeMillis();
+                Fixed42To61ObservedCancelSnapshot snapshot;
+                try {
+                    snapshot = queryFixed42To61InitialCancelSnapshot(
+                            snapshotSelector, progressTexts, terminalTexts);
+                    snapshotFinishedUptimeMs = SystemClock.uptimeMillis();
+                } catch (StaleObjectException stale) {
+                    snapshotFinishedUptimeMs = SystemClock.uptimeMillis();
+                    staleSnapshots++;
+                    long remaining = cancelDeadline - snapshotFinishedUptimeMs;
+                    if (remaining > 0L) SystemClock.sleep(Math.min(100L, remaining));
+                    continue;
+                } catch (RuntimeException | AssertionError failure) {
+                    snapshotFinishedUptimeMs = SystemClock.uptimeMillis();
+                    throw failure;
+                }
+                snapshot.assertNoTerminalBeforeCancel();
+                if (!snapshot.isReadyToCancel()) {
+                    long remaining = cancelDeadline - SystemClock.uptimeMillis();
+                    if (remaining > 0L) SystemClock.sleep(Math.min(100L, remaining));
+                    continue;
+                }
+                initialEnableCheckingTitleObserved = true;
+                initialEnableCheckingMessageObserved = true;
+                initialEnableCancelObserved = true;
+                initialEnableTerminalResultExcludedBeforeCancel = true;
+                checkingObservedUptimeMs = snapshotFinishedUptimeMs;
+                cancelClickStartedUptimeMs = SystemClock.uptimeMillis();
+                Fixed42To61CancelSnapshotPolicy.assertWithinDeadline(
+                        cancelDeadline, cancelClickStartedUptimeMs);
+                initialEnableCancelSelections++;
+                assertEquals("Initial Enable Cancel must be selected exactly once",
+                        1, initialEnableCancelSelections);
+                try {
+                    snapshot.cancel.click();
+                } catch (StaleObjectException stale) {
+                    throw new AssertionError(
+                            "Initial Enable Cancel became stale during its sole selection", stale);
+                } finally {
+                    cancelClickFinishedUptimeMs = SystemClock.uptimeMillis();
+                }
+                cancelSelectedUptimeMs = cancelClickFinishedUptimeMs;
+                log("Selected one exact native Cancel from the fused initial Enable snapshot");
+                break;
+            }
+            assertTrue("Initial Enable did not expose one coherent exact CHECKING snapshot",
+                    initialEnableCheckingTitleObserved
+                            && initialEnableCheckingMessageObserved
+                            && initialEnableCancelObserved
+                            && initialEnableTerminalResultExcludedBeforeCancel);
+
+            long settleDeadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+            int settled = 0;
+            while (SystemClock.uptimeMillis() < settleDeadline) {
+                boolean cacheCleared = instrumentation.getUiAutomation().clearCache();
+                if (!cacheCleared) {
+                    settled = 0;
+                    SystemClock.sleep(100);
+                    continue;
+                }
+                Fixed42CriticalQueryGroupPolicy.Counts terminalCounts =
+                        queryFixed42CriticalTextGroup(
+                                terminalSelector, terminalTexts, "settled-terminal");
+                assertNoInitialEnableResultVisibleAfterCancel(terminalCounts);
+                Fixed42CriticalQueryGroupPolicy.Counts progressCounts =
+                        queryFixed42CriticalTextGroup(
+                                progressSelector, progressTexts, "settled-progress");
+                List<UiObject2> cancels = queryFixed42CriticalCancelGroup(
+                        cancelSelector, "settled-cancel");
+                boolean progressGone = Fixed42CriticalQueryGroupPolicy.isSettledAbsent(
+                        progressCounts, terminalCounts, cancels.size());
+                if (progressGone) {
+                    settled++;
+                    if (settled >= ABSENT_SETTLED_SAMPLES) {
+                        initialEnableSettledResultExclusionSamples = settled;
+                        initialEnableCancelWon = true;
+                        cancelSettledUptimeMs = SystemClock.uptimeMillis();
+                        cancellationSettled = true;
+                        break;
+                    }
+                } else {
+                    settled = 0;
+                }
+                SystemClock.sleep(100);
+            }
+        } finally {
+            configurator.setWaitForIdleTimeout(previousIdleTimeout);
+            recordFixed42To61InitialObserverTiming(
+                    enableClickStartedUptimeMs,
+                    enableClickFinishedUptimeMs,
+                    snapshotStartedUptimeMs,
+                    snapshotFinishedUptimeMs,
+                    cancelClickStartedUptimeMs,
+                    cancelClickFinishedUptimeMs,
+                    snapshotAttempts,
+                    staleSnapshots);
+        }
+        assertTrue("Initial Enable cancellation did not settle before a terminal result",
+                cancellationSettled);
+        assertTrue("Initial Enable timing observations were incomplete",
+                enableClickStartedUptimeMs >= 0L
+                        && enableClickFinishedUptimeMs >= enableClickStartedUptimeMs
+                        && checkingObservedUptimeMs >= enableClickFinishedUptimeMs
+                        && cancelSelectedUptimeMs >= checkingObservedUptimeMs
+                        && cancelSettledUptimeMs >= cancelSelectedUptimeMs);
+        log("Initial Enable no-idle timing checkingMs="
+                + (checkingObservedUptimeMs - enableClickFinishedUptimeMs)
+                + " cancelMs=" + (cancelSelectedUptimeMs - enableClickFinishedUptimeMs)
+                + " settledMs=" + (cancelSettledUptimeMs - enableClickFinishedUptimeMs));
+        capture("fixed42-initial-enable-cancel-settled");
+        log("Initial Enable check cancellation settled before any terminal result");
     }
 
     private void enableAndCancelInitialFixed42CheckNoIdle() throws IOException {
@@ -828,6 +1020,16 @@ public final class RuntimeOtaFlowTest {
         assertEquals("Initial Enable check returned failure before Cancel",
                 0, terminalCounts.count(1));
         assertEquals("Initial Enable check returned target offer before Cancel",
+                0, terminalCounts.count(2));
+    }
+
+    private void assertNoInitialEnableResultVisibleAfterCancel(
+            Fixed42CriticalQueryGroupPolicy.Counts terminalCounts) {
+        assertEquals("Initial Enable check returned up-to-date after Cancel selection",
+                0, terminalCounts.count(0));
+        assertEquals("Initial Enable check returned failure after Cancel selection",
+                0, terminalCounts.count(1));
+        assertEquals("Initial Enable check returned target offer after Cancel selection",
                 0, terminalCounts.count(2));
     }
 
@@ -1073,6 +1275,7 @@ public final class RuntimeOtaFlowTest {
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
         long startedAt = SystemClock.uptimeMillis();
         int completedActions = 0;
+        int mainGeometryMismatchSamples = 0;
         int priorActionPhase = -1;
         Fixed42SeedPolicy.Observation beforeAction = null;
 
@@ -1131,6 +1334,25 @@ public final class RuntimeOtaFlowTest {
                     log("Performed fixed42 seed scroll action=" + completedActions
                             + " phase=" + Fixed42SeedPolicy.phaseName(phase));
                 }
+            } catch (Fixed42MainGeometryMismatch mismatch) {
+                assertTrue("Main geometry reacquisition is restricted to fixed42-to61",
+                        isFixed42To61AutomaticMode());
+                mainGeometryMismatchSamples++;
+                long observedAt = SystemClock.uptimeMillis();
+                log(mismatch.diagnostic.line(
+                        mainGeometryMismatchSamples,
+                        Fixed42MainGeometryPolicy.elapsedMs(startedAt, observedAt)));
+                assertTrue("Fixed42-to61 main-content raw geometry remained inexact",
+                        Fixed42MainGeometryPolicy.mayReacquire(
+                                mainGeometryMismatchSamples,
+                                startedAt,
+                                observedAt,
+                                FIXED42_SEED_SCROLL_BOUND_MS));
+                long remainingMs = Fixed42MainGeometryPolicy.remainingMs(
+                        startedAt, observedAt, FIXED42_SEED_SCROLL_BOUND_MS);
+                SystemClock.sleep(Math.min(
+                        FIXED42_TO61_MAIN_GEOMETRY_RETRY_MS, remainingMs));
+                continue;
             }
 
             if (ready != null) {
@@ -1225,26 +1447,64 @@ public final class RuntimeOtaFlowTest {
                     && scrollable
                     && !clickable
                     && enabled;
-            if (!(mainIdentityMatches && boundsMatch)) {
-                log("Fixed42 main-content proof failed"
-                        + " packageMatch=" + packageMatch
-                        + " classMatch=" + classMatch
-                        + " visible=" + visible
-                        + " scrollable=" + scrollable
-                        + " clickable=" + clickable
-                        + " enabled=" + enabled
-                        + " boundsMatch=" + boundsMatch
-                        + " rawLeft=" + main.bounds.left
-                        + " rawTop=" + main.bounds.top
-                        + " rawRight=" + main.bounds.right
-                        + " rawBottom=" + main.bounds.bottom
-                        + " expectedWidth=" + width
-                        + " expectedHeight=" + height);
-            }
-            assertTrue("Fixed42 main-content identity changed",
+            if (!isFixed42To61AutomaticMode()) {
+                if (!(mainIdentityMatches && boundsMatch)) {
+                    log("Fixed42 main-content proof failed"
+                            + " packageMatch=" + packageMatch
+                            + " classMatch=" + classMatch
+                            + " visible=" + visible
+                            + " scrollable=" + scrollable
+                            + " clickable=" + clickable
+                            + " enabled=" + enabled
+                            + " boundsMatch=" + boundsMatch
+                            + " rawLeft=" + main.bounds.left
+                            + " rawTop=" + main.bounds.top
+                            + " rawRight=" + main.bounds.right
+                            + " rawBottom=" + main.bounds.bottom
+                            + " expectedWidth=" + width
+                            + " expectedHeight=" + height);
+                }
+                assertTrue("Fixed42 main-content identity changed",
                     mainIdentityMatches && boundsMatch);
+            } else {
+                assertTrue("Fixed42-to61 main-content identity changed",
+                        mainIdentityMatches);
+                assertEquals("Fixed42-to61 raw bounds policies diverged",
+                        boundsMatch,
+                        Fixed42MainGeometryPolicy.isExactRawBounds(
+                                main.bounds.left,
+                                main.bounds.top,
+                                main.bounds.right,
+                                main.bounds.bottom,
+                                width,
+                                height));
+            }
+            Fixed42MainGeometryDiagnostic mainGeometryDiagnostic = boundsMatch
+                    ? null
+                    : captureFixed42MainGeometryDiagnostic(
+                            root,
+                            main.info,
+                            nodes.get(0).bounds,
+                            main.bounds,
+                            width,
+                            height);
 
-            int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);
+            int discoverIndex;
+            if (isFixed42To61AutomaticMode()) {
+                logFixed42To61DiscoverAmbiguityIfPresent(
+                        nodes,
+                        mainIndex,
+                        root,
+                        main.info,
+                        nodes.get(0).bounds,
+                        main.bounds,
+                        width,
+                        height,
+                        mainGeometryDiagnostic);
+                discoverIndex = fixed42UniqueTo61DiscoverRoute(nodes, mainIndex);
+            } else {
+                discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);
+            }
             Fixed42AxNode discover = nodes.get(discoverIndex);
             assertTrue("Fixed42 Discover page identity changed",
                     discover.matches(product, "android.view.View", false, false)
@@ -1263,8 +1523,15 @@ public final class RuntimeOtaFlowTest {
             boolean railReady = false;
             if (headingIndex >= 0) {
                 Fixed42AxNode heading = nodes.get(headingIndex);
+                boolean headingMatches = heading.matches(
+                        product, "android.widget.TextView", false, false);
+                if (isFixed42To61AutomaticMode() && !headingMatches) {
+                    logFixed42To61SeedHeadingFailure(
+                            nodes, mainIndex, discoverIndex, headingIndex,
+                            width, height, boundsMatch);
+                }
                 assertTrue("Fixed42 Popular Movies heading identity changed",
-                        heading.matches(product, "android.widget.TextView", false, false));
+                        headingMatches);
                 popularSectionIndex = heading.parentIndex;
                 assertTrue("Popular Movies heading lacked its section parent",
                         popularSectionIndex >= 0);
@@ -1325,6 +1592,9 @@ public final class RuntimeOtaFlowTest {
                     verticalTops,
                     cardLefts);
             Fixed42SeedPolicy.phase(observation);
+            if (mainGeometryDiagnostic != null) {
+                throw new Fixed42MainGeometryMismatch(mainGeometryDiagnostic);
+            }
             Fixed42SeedSnapshot snapshot = new Fixed42SeedSnapshot(
                     owned,
                     main.info,
@@ -1497,6 +1767,351 @@ public final class RuntimeOtaFlowTest {
         return found;
     }
 
+    private int fixed42UniqueTo61DiscoverRoute(
+            List<Fixed42AxNode> nodes, int mainIndex) {
+        assertTrue("Discover route classification is restricted to fixed42-to61",
+                isFixed42To61AutomaticMode());
+        int rootWindowId = nodes.get(0).info.getWindowId();
+        int mainWindowId = nodes.get(mainIndex).info.getWindowId();
+        List<Fixed42DiscoverRoutePolicy.Candidate> matches = new ArrayList<>();
+        for (int index = 0; index < nodes.size(); index++) {
+            Fixed42AxNode candidate = nodes.get(index);
+            if (!candidate.semanticEquals("Discover page")) continue;
+            matches.add(new Fixed42DiscoverRoutePolicy.Candidate(
+                    index,
+                    candidate.parentIndex,
+                    candidate.info.getWindowId(),
+                    "Discover page".equals(candidate.text),
+                    "Discover page".equals(candidate.description),
+                    OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName),
+                    "android.view.View".equals(candidate.className),
+                    candidate.visible,
+                    candidate.enabled,
+                    candidate.scrollable,
+                    candidate.clickable,
+                    candidate.info.isFocusable(),
+                    candidate.info.isFocused(),
+                    candidate.info.isAccessibilityFocused(),
+                    candidate.info.getLiveRegion()
+                            != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                    fixed42IsDescendant(nodes, index, mainIndex),
+                    candidate.bounds.left,
+                    candidate.bounds.top,
+                    candidate.bounds.right,
+                    candidate.bounds.bottom));
+        }
+        return Fixed42DiscoverRoutePolicy.selectRouteNodeIndex(
+                matches, rootWindowId, mainWindowId);
+    }
+
+    private void logFixed42To61DiscoverAmbiguityIfPresent(
+            List<Fixed42AxNode> nodes,
+            int mainIndex,
+            AccessibilityNodeInfo root,
+            AccessibilityNodeInfo main,
+            Rect rootScreenBounds,
+            Rect mainScreenBounds,
+            int displayWidth,
+            int displayHeight,
+            Fixed42MainGeometryDiagnostic existingGeometry) {
+        int matchCount = 0;
+        int[] matchingIndexes =
+                new int[FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT];
+        for (int index = 0; index < nodes.size(); index++) {
+            if (!nodes.get(index).semanticEquals("Discover page")) continue;
+            if (matchCount < matchingIndexes.length) matchingIndexes[matchCount] = index;
+            matchCount++;
+        }
+        if (matchCount <= 1) return;
+        assertTrue("Discover ambiguity diagnostic is restricted to fixed42-to61",
+                isFixed42To61AutomaticMode());
+        int recordCount = Fixed42DiscoverAmbiguityPolicy.recordCount(matchCount);
+        Fixed42MainGeometryDiagnostic geometry = existingGeometry != null
+                ? existingGeometry
+                : captureFixed42MainGeometryDiagnostic(
+                        root,
+                        main,
+                        rootScreenBounds,
+                        mainScreenBounds,
+                        displayWidth,
+                        displayHeight);
+        String correlation = Fixed42DiscoverAmbiguityPolicy.correlation(
+                nodes.size(), geometry.rootWindowId, geometry.mainWindowId);
+        logFixed42To61DiscoverDiagnosticLine(
+                Fixed42DiscoverAmbiguityPolicy.headerLine(
+                        matchCount,
+                        recordCount,
+                        nodes.size(),
+                        correlation,
+                        geometry.primitiveLine()));
+        for (int recordIndex = 0; recordIndex < recordCount; recordIndex++) {
+            int nodeIndex = matchingIndexes[recordIndex];
+            Fixed42AxNode candidate = nodes.get(nodeIndex);
+            boolean inMain = fixed42IsDescendant(nodes, nodeIndex, mainIndex);
+            String flags = Fixed42DiscoverAmbiguityPolicy.flags(
+                    "Discover page".equals(candidate.text),
+                    "Discover page".equals(candidate.description),
+                    OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName),
+                    "android.view.View".equals(candidate.className),
+                    "android.widget.TextView".equals(candidate.className),
+                    candidate.visible,
+                    candidate.enabled,
+                    candidate.scrollable,
+                    candidate.clickable,
+                    candidate.info.isFocusable(),
+                    candidate.info.isFocused(),
+                    candidate.info.isAccessibilityFocused(),
+                    candidate.info.getLiveRegion()
+                            != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                    inMain,
+                    inMain && !candidate.scrollable);
+            logFixed42To61DiscoverDiagnosticLine(
+                    Fixed42DiscoverAmbiguityPolicy.candidateLine(
+                            recordIndex,
+                            correlation,
+                            nodeIndex,
+                            candidate.parentIndex,
+                            candidate.info.getWindowId(),
+                            Fixed42MainGeometryDiagnostic.rect(candidate.bounds),
+                            flags));
+        }
+    }
+
+    private void logFixed42To61DiscoverDiagnosticLine(String value) {
+        assertTrue("Fixed42-to61 Discover diagnostic reached the action-log limit",
+                value.length() < 500);
+        assertEquals("Fixed42-to61 Discover diagnostic was changed by action-log retention",
+                value, safe(value));
+        log(value);
+    }
+
+    private void logFixed42To61SeedHeadingFailure(
+            List<Fixed42AxNode> nodes,
+            int mainIndex,
+            int discoverIndex,
+            int headingIndex,
+            int displayWidth,
+            int displayHeight,
+            boolean mainRawExact) {
+        if (!isFixed42To61AutomaticMode()) return;
+        try {
+            int[] recordIndexes =
+                    new int[FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT];
+            int[] recordRoles =
+                    new int[FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT];
+            int recordCount = 0;
+            int totalRecords = 0;
+
+            Fixed42AxNode heading = nodes.get(headingIndex);
+            recordIndexes[recordCount] = headingIndex;
+            recordRoles[recordCount] = Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING;
+            recordCount++;
+            totalRecords++;
+
+            if (heading.parentIndex >= 0) {
+                recordIndexes[recordCount] = heading.parentIndex;
+                recordRoles[recordCount] = Fixed42SeedFailureDiagnosticPolicy.ROLE_PARENT;
+                recordCount++;
+                totalRecords++;
+            }
+
+            recordIndexes[recordCount] = discoverIndex;
+            recordRoles[recordCount] = Fixed42SeedFailureDiagnosticPolicy.ROLE_ROUTE;
+            recordCount++;
+            totalRecords++;
+            recordIndexes[recordCount] = mainIndex;
+            recordRoles[recordCount] = Fixed42SeedFailureDiagnosticPolicy.ROLE_MAIN;
+            recordCount++;
+            totalRecords++;
+
+            int cursor = heading.parentIndex < 0
+                    ? -1
+                    : nodes.get(heading.parentIndex).parentIndex;
+            for (int depth = 0; cursor >= 0; depth++) {
+                if (cursor >= nodes.size() || depth > nodes.size()) {
+                    throw new AssertionError("Fixed42 seed diagnostic ancestry was invalid");
+                }
+                if (cursor == mainIndex) break;
+                if (cursor != heading.parentIndex && cursor != discoverIndex) {
+                    totalRecords++;
+                    if (recordCount < recordIndexes.length) {
+                        recordIndexes[recordCount] = cursor;
+                        recordRoles[recordCount] =
+                                Fixed42SeedFailureDiagnosticPolicy.ROLE_ANCESTOR;
+                        recordCount++;
+                    }
+                }
+                cursor = nodes.get(cursor).parentIndex;
+            }
+
+            Fixed42AxNode rootNode = nodes.get(0);
+            Fixed42AxNode mainNode = nodes.get(mainIndex);
+            String correlation = Fixed42SeedFailureDiagnosticPolicy.correlation(
+                    nodes.size(),
+                    rootNode.info.getWindowId(),
+                    mainNode.info.getWindowId(),
+                    heading.info.getWindowId(),
+                    nodes.get(discoverIndex).info.getWindowId());
+            List<String> lines = new ArrayList<>();
+            lines.add(Fixed42SeedFailureDiagnosticPolicy.headerLine(
+                    recordCount,
+                    totalRecords,
+                    nodes.size(),
+                    correlation,
+                    headingIndex,
+                    heading.parentIndex,
+                    discoverIndex,
+                    mainIndex,
+                    displayWidth,
+                    displayHeight,
+                    rootNode.bounds.left,
+                    rootNode.bounds.top,
+                    rootNode.bounds.right,
+                    rootNode.bounds.bottom,
+                    mainNode.bounds.left,
+                    mainNode.bounds.top,
+                    mainNode.bounds.right,
+                    mainNode.bounds.bottom,
+                    mainRawExact));
+            for (int recordIndex = 0; recordIndex < recordCount; recordIndex++) {
+                int nodeIndex = recordIndexes[recordIndex];
+                int role = recordRoles[recordIndex];
+                Fixed42AxNode candidate = nodes.get(nodeIndex);
+                boolean headingRole = role == Fixed42SeedFailureDiagnosticPolicy.ROLE_HEADING;
+                boolean routeRole = role == Fixed42SeedFailureDiagnosticPolicy.ROLE_ROUTE;
+                String flags = Fixed42SeedFailureDiagnosticPolicy.flags(
+                        headingRole
+                                ? "Popular Movies".equals(candidate.text)
+                                : routeRole && "Discover page".equals(candidate.text),
+                        headingRole
+                                ? "Popular Movies".equals(candidate.description)
+                                : routeRole && "Discover page".equals(candidate.description),
+                        OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName),
+                        "android.view.View".equals(candidate.className),
+                        "android.widget.TextView".equals(candidate.className),
+                        candidate.visible,
+                        candidate.enabled,
+                        candidate.scrollable,
+                        candidate.clickable,
+                        candidate.info.isFocusable(),
+                        candidate.info.isFocused(),
+                        candidate.info.isAccessibilityFocused(),
+                        candidate.info.getLiveRegion()
+                                != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                        fixed42IsDescendant(nodes, nodeIndex, mainIndex),
+                        fixed42IsDescendant(nodes, nodeIndex, discoverIndex),
+                        "main-content".equals(candidate.resourceName));
+                lines.add(Fixed42SeedFailureDiagnosticPolicy.recordLine(
+                        recordIndex,
+                        correlation,
+                        role,
+                        nodeIndex,
+                        candidate.parentIndex,
+                        candidate.info.getWindowId(),
+                        candidate.bounds.left,
+                        candidate.bounds.top,
+                        candidate.bounds.right,
+                        candidate.bounds.bottom,
+                        flags));
+            }
+            retainFixed42To61SeedFailureDiagnosticLines(lines);
+            retainFixed42To61SeedSubtreeDiagnostic(
+                    nodes,
+                    headingIndex,
+                    discoverIndex,
+                    mainIndex,
+                    correlation);
+        } catch (RuntimeException | AssertionError ignored) {
+            // Diagnostic retention must never replace the original heading assertion.
+        }
+    }
+
+    private void retainFixed42To61SeedSubtreeDiagnostic(
+            List<Fixed42AxNode> nodes,
+            int headingIndex,
+            int discoverIndex,
+            int mainIndex,
+            String correlation) {
+        Fixed42AxNode heading = nodes.get(headingIndex);
+        int sectionIndex = heading.parentIndex;
+        int[] parentIndexes = new int[nodes.size()];
+        int popularMatches = 0;
+        int bladeMatches = 0;
+        for (int index = 0; index < nodes.size(); index++) {
+            Fixed42AxNode candidate = nodes.get(index);
+            parentIndexes[index] = candidate.parentIndex;
+            if (candidate.semanticEquals("Popular Movies")) popularMatches++;
+            if (candidate.semanticEquals(AUTOMATIC_SAMPLE_TITLE)) bladeMatches++;
+        }
+        Fixed42SeedSubtreeDiagnosticPolicy.Selection selection =
+                Fixed42SeedSubtreeDiagnosticPolicy.select(
+                        parentIndexes, sectionIndex);
+        List<String> lines = new ArrayList<>();
+        lines.add(Fixed42SeedSubtreeDiagnosticPolicy.headerLine(
+                selection.indexes.length,
+                selection.total,
+                selection.omitted,
+                nodes.size(),
+                correlation,
+                headingIndex,
+                sectionIndex,
+                discoverIndex,
+                mainIndex,
+                popularMatches,
+                bladeMatches));
+        for (int recordIndex = 0;
+                recordIndex < selection.indexes.length;
+                recordIndex++) {
+            int nodeIndex = selection.indexes[recordIndex];
+            Fixed42AxNode candidate = nodes.get(nodeIndex);
+            String flags = Fixed42SeedSubtreeDiagnosticPolicy.flags(
+                    "Popular Movies".equals(candidate.text),
+                    "Popular Movies".equals(candidate.description),
+                    AUTOMATIC_SAMPLE_TITLE.equals(candidate.text),
+                    AUTOMATIC_SAMPLE_TITLE.equals(candidate.description),
+                    OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName),
+                    "android.view.View".equals(candidate.className),
+                    "android.widget.TextView".equals(candidate.className),
+                    "android.widget.Button".equals(candidate.className),
+                    candidate.visible,
+                    candidate.enabled,
+                    candidate.scrollable,
+                    candidate.clickable,
+                    candidate.info.isFocusable(),
+                    candidate.info.isFocused(),
+                    candidate.info.isAccessibilityFocused(),
+                    candidate.info.getLiveRegion()
+                            != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                    fixed42IsDescendant(nodes, nodeIndex, mainIndex),
+                    fixed42IsDescendant(nodes, nodeIndex, discoverIndex),
+                    fixed42IsDescendant(nodes, nodeIndex, sectionIndex),
+                    "main-content".equals(candidate.resourceName));
+            lines.add(Fixed42SeedSubtreeDiagnosticPolicy.recordLine(
+                    recordIndex,
+                    nodes.size(),
+                    correlation,
+                    nodeIndex,
+                    candidate.parentIndex,
+                    candidate.info.getWindowId(),
+                    candidate.bounds.left,
+                    candidate.bounds.top,
+                    candidate.bounds.right,
+                    candidate.bounds.bottom,
+                    flags));
+        }
+        retainFixed42To61SeedFailureDiagnosticLines(lines);
+    }
+
+    private void retainFixed42To61SeedFailureDiagnosticLines(List<String> values) {
+        if (values == null
+                || values.isEmpty()
+                || actions.size() + values.size() > MAX_ACTION_LINES) return;
+        for (String value : values) {
+            if (value == null || value.length() >= 500 || !value.equals(safe(value))) return;
+        }
+        for (String value : values) log(value);
+    }
+
     private static int fixed42UniqueScrollableDescendant(
             List<Fixed42AxNode> nodes, int ancestorIndex, String productPackage) {
         int found = -1;
@@ -1601,6 +2216,51 @@ public final class RuntimeOtaFlowTest {
         if (bounds == null) return "absent";
         return "[" + bounds.left + "," + bounds.top + ","
                 + bounds.right + "," + bounds.bottom + "]";
+    }
+
+    private static Fixed42MainGeometryDiagnostic captureFixed42MainGeometryDiagnostic(
+            AccessibilityNodeInfo root,
+            AccessibilityNodeInfo main,
+            Rect rootScreenBounds,
+            Rect mainScreenBounds,
+            int displayWidth,
+            int displayHeight) {
+        Rect rootWindowBounds = new Rect();
+        Rect mainWindowBounds = new Rect();
+        root.getBoundsInWindow(rootWindowBounds);
+        main.getBoundsInWindow(mainWindowBounds);
+        Rect accessibilityWindowBounds = new Rect(
+                Integer.MIN_VALUE,
+                Integer.MIN_VALUE,
+                Integer.MIN_VALUE,
+                Integer.MIN_VALUE);
+        int accessibilityWindowPresent = 0;
+        int accessibilityWindowDisplayId = -1;
+        int accessibilityWindowId = -1;
+        AccessibilityWindowInfo window = main.getWindow();
+        if (window != null) {
+            try {
+                accessibilityWindowPresent = 1;
+                accessibilityWindowDisplayId = window.getDisplayId();
+                accessibilityWindowId = window.getId();
+                window.getBoundsInScreen(accessibilityWindowBounds);
+            } finally {
+                window.recycle();
+            }
+        }
+        return new Fixed42MainGeometryDiagnostic(
+                rootScreenBounds,
+                rootWindowBounds,
+                mainScreenBounds,
+                mainWindowBounds,
+                accessibilityWindowBounds,
+                displayWidth,
+                displayHeight,
+                root.getWindowId(),
+                main.getWindowId(),
+                accessibilityWindowPresent,
+                accessibilityWindowDisplayId,
+                accessibilityWindowId);
     }
 
     private static void fixed42RecycleNodes(List<AccessibilityNodeInfo> nodes) {
@@ -2390,6 +3050,10 @@ public final class RuntimeOtaFlowTest {
                         startedAt, SystemClock.uptimeMillis()));
         Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(
                 appLabel, launcherPackage);
+        if (isFixed42To61AutomaticMode()
+                && fresh.state != Fixed42LauncherReadinessPolicy.READY) {
+            logFixed42To61FreshLauncherFailure(ready, fresh);
+        }
         assertEquals("Fixed42 launcher icon was not freshly ready before click",
                 Fixed42LauncherReadinessPolicy.READY, fresh.state);
         assertEquals("Fixed42 launcher icon bounds changed before click",
@@ -2405,6 +3069,27 @@ public final class RuntimeOtaFlowTest {
         device.waitForIdle(2_000);
         log("Opened " + appLabel
                 + " through its exact visible fixed42 launcher icon for " + phase);
+    }
+
+    private void logFixed42To61FreshLauncherFailure(
+            Fixed42LauncherObservation ready,
+            Fixed42LauncherObservation fresh) {
+        assertTrue("Fresh launcher failure diagnostic is restricted to fixed42-to61",
+                isFixed42To61AutomaticMode());
+        assertNotNull("Prior fixed42-to61 READY bounds were unavailable", ready.iconBounds);
+        String value = Fixed42FreshLauncherFailureDiagnostic.line(
+                ready.state,
+                ready.iconBounds.left,
+                ready.iconBounds.top,
+                ready.iconBounds.right,
+                ready.iconBounds.bottom,
+                fresh.state,
+                fresh.diagnostic);
+        assertTrue("Fixed42-to61 fresh launcher diagnostic reached the action-log limit",
+                value.length() < 500);
+        assertEquals("Fixed42-to61 fresh launcher diagnostic changed under action-log retention",
+                value, safe(value));
+        log(value);
     }
 
     private void assertFixed42ExpectedLauncherPackage(String launcherPackage) {
@@ -3218,6 +3903,205 @@ public final class RuntimeOtaFlowTest {
         }
     }
 
+    private static final class Fixed42To61CancelSnapshotPolicy {
+        static final String TEXT_VIEW_CLASS = "android.widget.TextView";
+        static final String BUTTON_CLASS = "android.widget.Button";
+        static final String CANCEL_RESOURCE = "android:id/button2";
+        static final String CANCEL_TEXT = "Cancel";
+        static final int MAX_CANDIDATES = 6;
+
+        private static final class Candidate {
+            final String packageName;
+            final String className;
+            final String resourceName;
+            final String text;
+            final boolean enabled;
+            final boolean clickable;
+
+            Candidate(
+                    String packageName,
+                    String className,
+                    String resourceName,
+                    String text,
+                    boolean enabled,
+                    boolean clickable) {
+                this.packageName = packageName;
+                this.className = className;
+                this.resourceName = resourceName;
+                this.text = text;
+                this.enabled = enabled;
+                this.clickable = clickable;
+            }
+        }
+
+        private static final class Snapshot {
+            private final int[] progressCounts;
+            private final int[] terminalCounts;
+            private final int cancelCount;
+            private final int cancelIndex;
+
+            Snapshot(
+                    int[] progressCounts,
+                    int[] terminalCounts,
+                    int cancelCount,
+                    int cancelIndex) {
+                this.progressCounts = progressCounts.clone();
+                this.terminalCounts = terminalCounts.clone();
+                this.cancelCount = cancelCount;
+                this.cancelIndex = cancelIndex;
+            }
+
+            boolean isReadyToCancel() {
+                return progressCounts[0] == 1
+                        && progressCounts[1] == 1
+                        && terminalTotal() == 0
+                        && cancelCount == 1;
+            }
+
+            void assertNoTerminalBeforeCancel() {
+                if (terminalTotal() != 0) {
+                    throw new AssertionError(
+                            "Fixed42-to61 terminal result won before Cancel selection");
+                }
+            }
+
+            int cancelIndex() {
+                return cancelIndex;
+            }
+
+            private int terminalTotal() {
+                int total = 0;
+                for (int count : terminalCounts) total += count;
+                return total;
+            }
+        }
+
+        static Pattern exactObservationPattern(
+                String[] progressTexts, String[] terminalTexts) {
+            validateExactTexts(progressTexts, 2);
+            validateExactTexts(terminalTexts, 3);
+            StringBuilder pattern = new StringBuilder("\\A(?:");
+            for (int index = 0; index < progressTexts.length; index++) {
+                if (index > 0) pattern.append('|');
+                pattern.append(Pattern.quote(progressTexts[index]));
+            }
+            for (int index = 0; index < terminalTexts.length; index++) {
+                pattern.append('|').append(Pattern.quote(terminalTexts[index]));
+            }
+            pattern.append('|').append("(?i:")
+                    .append(Pattern.quote(CANCEL_TEXT)).append(")");
+            return Pattern.compile(pattern.append(")\\z").toString());
+        }
+
+        static void assertCandidateCount(int count) {
+            if (count < 0 || count > MAX_CANDIDATES) {
+                throw new AssertionError("Fixed42-to61 snapshot exceeded its total bound");
+            }
+        }
+
+        static Snapshot classify(
+                String expectedPackage,
+                String[] progressTexts,
+                String[] terminalTexts,
+                Candidate... candidates) {
+            validateExactTexts(progressTexts, 2);
+            validateExactTexts(terminalTexts, 3);
+            if (expectedPackage == null || candidates == null) {
+                throw new AssertionError("Fixed42-to61 snapshot inputs were incomplete");
+            }
+            assertCandidateCount(candidates.length);
+            int[] progressCounts = new int[progressTexts.length];
+            int[] terminalCounts = new int[terminalTexts.length];
+            int cancelCount = 0;
+            int cancelIndex = -1;
+            for (int candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+                Candidate candidate = candidates[candidateIndex];
+                if (candidate == null || !expectedPackage.equals(candidate.packageName)) {
+                    throw new AssertionError(
+                            "Fixed42-to61 snapshot escaped its exact product package");
+                }
+                int progressIndex = exactIndex(progressTexts, candidate.text);
+                if (progressIndex >= 0) {
+                    requireTextView(candidate);
+                    progressCounts[progressIndex]++;
+                    continue;
+                }
+                int terminalIndex = exactIndex(terminalTexts, candidate.text);
+                if (terminalIndex >= 0) {
+                    requireTextView(candidate);
+                    terminalCounts[terminalIndex]++;
+                    continue;
+                }
+                if (candidate.text != null
+                        && CANCEL_TEXT.equalsIgnoreCase(candidate.text)) {
+                    if (!BUTTON_CLASS.equals(candidate.className)
+                            || !CANCEL_RESOURCE.equals(candidate.resourceName)
+                            || !candidate.enabled
+                            || !candidate.clickable) {
+                        throw new AssertionError(
+                                "Fixed42-to61 Cancel escaped its exact native identity");
+                    }
+                    cancelCount++;
+                    cancelIndex = candidateIndex;
+                    continue;
+                }
+                throw new AssertionError("Fixed42-to61 snapshot returned an inexact name");
+            }
+            requireAtMostOneEach(progressCounts);
+            requireAtMostOneEach(terminalCounts);
+            if (cancelCount > 1) {
+                throw new AssertionError("Fixed42-to61 Cancel snapshot was ambiguous");
+            }
+            return new Snapshot(progressCounts, terminalCounts, cancelCount, cancelIndex);
+        }
+
+        static void assertWithinDeadline(long deadlineUptimeMs, long nowUptimeMs) {
+            if (deadlineUptimeMs <= 0L
+                    || nowUptimeMs < 0L
+                    || nowUptimeMs >= deadlineUptimeMs) {
+                throw new AssertionError("Fixed42-to61 Cancel observation deadline expired");
+            }
+        }
+
+        private static int exactIndex(String[] exactTexts, String text) {
+            for (int index = 0; index < exactTexts.length; index++) {
+                if (exactTexts[index].equals(text)) return index;
+            }
+            return -1;
+        }
+
+        private static void requireTextView(Candidate candidate) {
+            if (!TEXT_VIEW_CLASS.equals(candidate.className)) {
+                throw new AssertionError(
+                        "Fixed42-to61 progress or terminal node changed class");
+            }
+        }
+
+        private static void requireAtMostOneEach(int[] counts) {
+            for (int count : counts) {
+                if (count > 1) {
+                    throw new AssertionError("Fixed42-to61 snapshot was ambiguous");
+                }
+            }
+        }
+
+        private static void validateExactTexts(String[] exactTexts, int expectedLength) {
+            if (exactTexts == null || exactTexts.length != expectedLength) {
+                throw new AssertionError("Fixed42-to61 exact-name shape changed");
+            }
+            for (int index = 0; index < exactTexts.length; index++) {
+                if (exactTexts[index] == null || exactTexts[index].isEmpty()) {
+                    throw new AssertionError("Fixed42-to61 exact name was empty");
+                }
+                for (int prior = 0; prior < index; prior++) {
+                    if (exactTexts[index].equals(exactTexts[prior])) {
+                        throw new AssertionError("Fixed42-to61 exact names were duplicated");
+                    }
+                }
+            }
+        }
+    }
+
     private static final class Fixed42CriticalQueryGroupPolicy {
         static final String TEXT_VIEW_CLASS = "android.widget.TextView";
 
@@ -3503,6 +4387,49 @@ public final class RuntimeOtaFlowTest {
         }
     }
 
+    private static final class Fixed42MainGeometryPolicy {
+        static boolean isExactRawBounds(
+                int left,
+                int top,
+                int right,
+                int bottom,
+                int displayWidth,
+                int displayHeight) {
+            return displayWidth > 0
+                    && displayHeight > 0
+                    && left == 0
+                    && top == 0
+                    && right == displayWidth
+                    && bottom == displayHeight;
+        }
+
+        static boolean mayReacquire(
+                int mismatchSamples,
+                long startedAt,
+                long now,
+                long boundMs) {
+            if (mismatchSamples <= 0
+                    || mismatchSamples > FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT
+                    || startedAt < 0L
+                    || now < startedAt
+                    || boundMs <= 0L) {
+                throw new AssertionError("Fixed42-to61 geometry retry inputs were invalid");
+            }
+            return mismatchSamples < FIXED42_TO61_MAIN_GEOMETRY_SAMPLE_LIMIT
+                    && now - startedAt < boundMs;
+        }
+
+        static long elapsedMs(long startedAt, long now) {
+            return startedAt >= 0L && now >= startedAt ? now - startedAt : -1L;
+        }
+
+        static long remainingMs(long startedAt, long now, long boundMs) {
+            long elapsed = elapsedMs(startedAt, now);
+            if (elapsed < 0L || boundMs <= 0L || elapsed >= boundMs) return 0L;
+            return boundMs - elapsed;
+        }
+    }
+
     private static final class Fixed42SeedPolicy {
         static final int ABSENT = Integer.MIN_VALUE;
         static final int PHASE_VERTICAL = 0;
@@ -3657,6 +4584,36 @@ public final class RuntimeOtaFlowTest {
         }
     }
 
+    private static final class Fixed42FreshLauncherFailureDiagnostic {
+        static String line(
+                int priorState,
+                int priorLeft,
+                int priorTop,
+                int priorRight,
+                int priorBottom,
+                int freshState,
+                String freshDiagnostic) {
+            if (priorState != Fixed42LauncherReadinessPolicy.READY
+                    || priorLeft < 0
+                    || priorTop < 0
+                    || priorRight <= priorLeft
+                    || priorBottom <= priorTop
+                    || freshState < Fixed42LauncherReadinessPolicy.WAITING_FOR_LAUNCHER
+                    || freshState >= Fixed42LauncherReadinessPolicy.READY
+                    || freshDiagnostic == null
+                    || freshDiagnostic.isEmpty()) {
+                throw new AssertionError("Fixed42-to61 fresh launcher diagnostic was invalid");
+            }
+            return new StringBuilder("Fixed42-to61 fresh launcher failure")
+                    .append(" priorState=").append(priorState)
+                    .append(" priorBounds=").append(priorLeft).append(',').append(priorTop)
+                    .append(',').append(priorRight).append(',').append(priorBottom)
+                    .append(" freshState=").append(freshState)
+                    .append(' ').append(freshDiagnostic)
+                    .toString();
+        }
+    }
+
     private static final class Fixed42LauncherIconDiagnostic {
         final String reason;
         final int ancestryDepth;
@@ -3724,6 +4681,724 @@ public final class RuntimeOtaFlowTest {
 
         private static String joinCounts(int[] counts) {
             return counts[0] + "/" + counts[1] + "/" + counts[2] + "/" + counts[3];
+        }
+    }
+
+    private static final class Fixed42MainGeometryDiagnostic {
+        final Rect rootScreenBounds;
+        final Rect rootWindowBounds;
+        final Rect mainScreenBounds;
+        final Rect mainWindowBounds;
+        final Rect accessibilityWindowBounds;
+        final int displayWidth;
+        final int displayHeight;
+        final int rootWindowId;
+        final int mainWindowId;
+        final int accessibilityWindowPresent;
+        final int accessibilityWindowDisplayId;
+        final int accessibilityWindowId;
+
+        Fixed42MainGeometryDiagnostic(
+                Rect rootScreenBounds,
+                Rect rootWindowBounds,
+                Rect mainScreenBounds,
+                Rect mainWindowBounds,
+                Rect accessibilityWindowBounds,
+                int displayWidth,
+                int displayHeight,
+                int rootWindowId,
+                int mainWindowId,
+                int accessibilityWindowPresent,
+                int accessibilityWindowDisplayId,
+                int accessibilityWindowId) {
+            this.rootScreenBounds = new Rect(rootScreenBounds);
+            this.rootWindowBounds = new Rect(rootWindowBounds);
+            this.mainScreenBounds = new Rect(mainScreenBounds);
+            this.mainWindowBounds = new Rect(mainWindowBounds);
+            this.accessibilityWindowBounds = new Rect(accessibilityWindowBounds);
+            this.displayWidth = displayWidth;
+            this.displayHeight = displayHeight;
+            this.rootWindowId = rootWindowId;
+            this.mainWindowId = mainWindowId;
+            this.accessibilityWindowPresent = accessibilityWindowPresent;
+            this.accessibilityWindowDisplayId = accessibilityWindowDisplayId;
+            this.accessibilityWindowId = accessibilityWindowId;
+        }
+
+        String line(int sample, long elapsedMs) {
+            return "Fixed42-to61 main geometry mismatch sample=" + sample
+                    + " elapsedMs=" + elapsedMs
+                    + primitiveLine();
+        }
+
+        String primitiveLine() {
+            return " display=" + displayWidth + ',' + displayHeight
+                    + " rootScreen=" + rect(rootScreenBounds)
+                    + " rootWindow=" + rect(rootWindowBounds)
+                    + " mainScreen=" + rect(mainScreenBounds)
+                    + " mainWindow=" + rect(mainWindowBounds)
+                    + " axWindow=" + accessibilityWindowPresent + ','
+                    + accessibilityWindowDisplayId + ',' + accessibilityWindowId + ','
+                    + rect(accessibilityWindowBounds)
+                    + " nodeWindowIds=" + rootWindowId + ',' + mainWindowId;
+        }
+
+        static String rect(Rect value) {
+            return value.left + "," + value.top + ","
+                    + value.right + "," + value.bottom;
+        }
+    }
+
+    private static final class Fixed42DiscoverRoutePolicy {
+        private static final class Candidate {
+            final int nodeIndex;
+            final int parentIndex;
+            final int windowId;
+            final boolean textExact;
+            final boolean descriptionExact;
+            final boolean productPackage;
+            final boolean viewClass;
+            final boolean visible;
+            final boolean enabled;
+            final boolean scrollable;
+            final boolean clickable;
+            final boolean focusable;
+            final boolean focused;
+            final boolean accessibilityFocused;
+            final boolean liveRegion;
+            final boolean inMain;
+            final int left;
+            final int top;
+            final int right;
+            final int bottom;
+
+            Candidate(
+                    int nodeIndex,
+                    int parentIndex,
+                    int windowId,
+                    boolean textExact,
+                    boolean descriptionExact,
+                    boolean productPackage,
+                    boolean viewClass,
+                    boolean visible,
+                    boolean enabled,
+                    boolean scrollable,
+                    boolean clickable,
+                    boolean focusable,
+                    boolean focused,
+                    boolean accessibilityFocused,
+                    boolean liveRegion,
+                    boolean inMain,
+                    int left,
+                    int top,
+                    int right,
+                    int bottom) {
+                this.nodeIndex = nodeIndex;
+                this.parentIndex = parentIndex;
+                this.windowId = windowId;
+                this.textExact = textExact;
+                this.descriptionExact = descriptionExact;
+                this.productPackage = productPackage;
+                this.viewClass = viewClass;
+                this.visible = visible;
+                this.enabled = enabled;
+                this.scrollable = scrollable;
+                this.clickable = clickable;
+                this.focusable = focusable;
+                this.focused = focused;
+                this.accessibilityFocused = accessibilityFocused;
+                this.liveRegion = liveRegion;
+                this.inMain = inMain;
+                this.left = left;
+                this.top = top;
+                this.right = right;
+                this.bottom = bottom;
+            }
+
+            boolean isRoute(int rootWindowId) {
+                return (textExact || descriptionExact)
+                        && productPackage
+                        && viewClass
+                        && visible
+                        && enabled
+                        && !scrollable
+                        && !clickable
+                        && inMain
+                        && windowId == rootWindowId;
+            }
+
+            boolean isKnownHiddenAnnouncement(Candidate route, int rootWindowId) {
+                return textExact
+                        && !descriptionExact
+                        && productPackage
+                        && viewClass
+                        && !visible
+                        && enabled
+                        && !scrollable
+                        && !clickable
+                        && !focusable
+                        && !focused
+                        && !accessibilityFocused
+                        && !liveRegion
+                        && inMain
+                        && left == 0
+                        && top == 0
+                        && right == 0
+                        && bottom == 0
+                        && parentIndex == route.parentIndex
+                        && windowId == route.windowId;
+            }
+        }
+
+        static int selectRouteNodeIndex(
+                List<Candidate> matches, int rootWindowId, int mainWindowId) {
+            require(rootWindowId == mainWindowId,
+                    "Fixed42-to61 Discover root and main windows diverged");
+            int routeRecord = -1;
+            for (int record = 0; record < matches.size(); record++) {
+                if (!matches.get(record).isRoute(rootWindowId)) continue;
+                require(routeRecord < 0,
+                        "Fixed42-to61 Discover route identity was ambiguous");
+                routeRecord = record;
+            }
+            require(routeRecord >= 0,
+                    "Fixed42-to61 Discover route identity was absent");
+            Candidate route = matches.get(routeRecord);
+            int hiddenAnnouncements = 0;
+            for (int record = 0; record < matches.size(); record++) {
+                if (record == routeRecord) continue;
+                require(matches.get(record).isKnownHiddenAnnouncement(route, rootWindowId),
+                        "Fixed42-to61 Discover semantic match was unrecognized");
+                hiddenAnnouncements++;
+                require(hiddenAnnouncements <= 1,
+                        "Fixed42-to61 Discover hidden announcement was ambiguous");
+            }
+            return route.nodeIndex;
+        }
+
+        private static void require(boolean condition, String message) {
+            if (!condition) throw new AssertionError(message);
+        }
+    }
+
+    private static final class Fixed42DiscoverAmbiguityPolicy {
+        private static final String FLAG_MAP =
+                "tx,dx,pkg,v,tv,vis,en,scr,clk,foc,fd,af,live,main,nsm";
+
+        static int recordCount(int matchCount) {
+            if (matchCount < 2 || matchCount > FIXED42_SEED_AX_NODE_LIMIT) {
+                throw new AssertionError("Fixed42 Discover diagnostic match count was invalid");
+            }
+            return Math.min(matchCount, FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT);
+        }
+
+        static String correlation(int nodeCount, int rootWindowId, int mainWindowId) {
+            return nodeCount + "," + rootWindowId + "," + mainWindowId;
+        }
+
+        static String headerLine(
+                int matchCount,
+                int recordCount,
+                int nodeCount,
+                String correlation,
+                String geometry) {
+            return "Fixed42-to61 semantic ambiguity header"
+                    + " matches=" + matchCount
+                    + " records=" + recordCount
+                    + " truncated=" + (matchCount > recordCount)
+                    + " nodes=" + nodeCount
+                    + " correlation=" + correlation
+                    + geometry
+                    + " flagMap=" + FLAG_MAP;
+        }
+
+        static String flags(
+                boolean textExact,
+                boolean descriptionExact,
+                boolean productPackage,
+                boolean view,
+                boolean textView,
+                boolean visible,
+                boolean enabled,
+                boolean scrollable,
+                boolean clickable,
+                boolean focusable,
+                boolean focused,
+                boolean accessibilityFocused,
+                boolean liveRegion,
+                boolean mainAncestor,
+                boolean nonScrollMain) {
+            return new StringBuilder(15)
+                    .append(bit(textExact))
+                    .append(bit(descriptionExact))
+                    .append(bit(productPackage))
+                    .append(bit(view))
+                    .append(bit(textView))
+                    .append(bit(visible))
+                    .append(bit(enabled))
+                    .append(bit(scrollable))
+                    .append(bit(clickable))
+                    .append(bit(focusable))
+                    .append(bit(focused))
+                    .append(bit(accessibilityFocused))
+                    .append(bit(liveRegion))
+                    .append(bit(mainAncestor))
+                    .append(bit(nonScrollMain))
+                    .toString();
+        }
+
+        static String candidateLine(
+                int recordIndex,
+                String correlation,
+                int nodeIndex,
+                int parentIndex,
+                int windowId,
+                String bounds,
+                String flags) {
+            if (recordIndex < 0
+                    || recordIndex >= FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT
+                    || flags.length() != 15) {
+                throw new AssertionError("Fixed42 Discover diagnostic record was invalid");
+            }
+            return "Fixed42-to61 semantic ambiguity candidate"
+                    + " record=" + recordIndex
+                    + " correlation=" + correlation
+                    + " index=" + nodeIndex
+                    + " parent=" + parentIndex
+                    + " window=" + windowId
+                    + " bounds=" + bounds
+                    + " flags=" + flags;
+        }
+
+        private static char bit(boolean value) {
+            return value ? '1' : '0';
+        }
+    }
+
+    private static final class Fixed42SeedSubtreeDiagnosticPolicy {
+        private static final String FLAG_MAP =
+                "s0t,s0d,s1t,s1d,pkg,v,tv,btn,vis,en,scr,clk,foc,fd,af,live,main,route,section,rm";
+
+        static final class Selection {
+            final int[] indexes;
+            final int total;
+            final int omitted;
+
+            Selection(int[] indexes, int total, int omitted) {
+                this.indexes = indexes.clone();
+                this.total = total;
+                this.omitted = omitted;
+            }
+        }
+
+        static Selection select(int[] parentIndexes, int sectionIndex) {
+            require(parentIndexes != null
+                            && parentIndexes.length > 0
+                            && parentIndexes.length <= FIXED42_SEED_AX_NODE_LIMIT
+                            && sectionIndex > 0
+                            && sectionIndex < parentIndexes.length
+                            && parentIndexes[0] == -1,
+                    "Fixed42 seed subtree graph was invalid");
+            for (int index = 1; index < parentIndexes.length; index++) {
+                require(parentIndexes[index] >= 0 && parentIndexes[index] < index,
+                        "Fixed42 seed subtree parent graph was invalid");
+            }
+            int[] retained = new int[Math.min(
+                    parentIndexes.length,
+                    FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT)];
+            int retainedCount = 0;
+            int total = 0;
+            for (int index = 0; index < parentIndexes.length; index++) {
+                if (!isDescendant(parentIndexes, index, sectionIndex)) continue;
+                total++;
+                if (retainedCount < retained.length) {
+                    retained[retainedCount++] = index;
+                }
+            }
+            require(total > 0 && retainedCount > 0,
+                    "Fixed42 seed subtree was absent");
+            int[] indexes = new int[retainedCount];
+            System.arraycopy(retained, 0, indexes, 0, retainedCount);
+            return new Selection(indexes, total, total - retainedCount);
+        }
+
+        static String headerLine(
+                int recordCount,
+                int total,
+                int omitted,
+                int nodeCount,
+                String correlation,
+                int headingIndex,
+                int sectionIndex,
+                int routeIndex,
+                int mainIndex,
+                int popularMatches,
+                int bladeMatches) {
+            require(recordCount > 0
+                            && recordCount
+                                    <= FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT
+                            && total >= recordCount
+                            && total <= nodeCount
+                            && omitted == total - recordCount
+                            && nodeCount > 0
+                            && nodeCount <= FIXED42_SEED_AX_NODE_LIMIT
+                            && recordCount == Math.min(
+                                    total,
+                                    FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT)
+                            && validCorrelation(correlation)
+                            && headingIndex >= 0
+                            && headingIndex < nodeCount
+                            && sectionIndex > 0
+                            && sectionIndex < nodeCount
+                            && routeIndex >= 0
+                            && routeIndex < nodeCount
+                            && mainIndex >= 0
+                            && mainIndex < nodeCount
+                            && popularMatches >= 0
+                            && popularMatches <= nodeCount
+                            && bladeMatches >= 0
+                            && bladeMatches <= nodeCount,
+                    "Fixed42 seed subtree diagnostic header was invalid");
+            return "Fixed42-to61 seed subtree header"
+                    + " records=" + recordCount
+                    + " total=" + total
+                    + " omitted=" + omitted
+                    + " truncated=" + (omitted > 0)
+                    + " nodes=" + nodeCount
+                    + " correlation=" + correlation
+                    + " heading=" + headingIndex
+                    + " section=" + sectionIndex
+                    + " route=" + routeIndex
+                    + " main=" + mainIndex
+                    + " semantic0=" + popularMatches
+                    + " semantic1=" + bladeMatches
+                    + " limit=" + FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT
+                    + " flagMap=" + FLAG_MAP;
+        }
+
+        static String flags(
+                boolean popularText,
+                boolean popularDescription,
+                boolean bladeText,
+                boolean bladeDescription,
+                boolean productPackage,
+                boolean view,
+                boolean textView,
+                boolean button,
+                boolean visible,
+                boolean enabled,
+                boolean scrollable,
+                boolean clickable,
+                boolean focusable,
+                boolean focused,
+                boolean accessibilityFocused,
+                boolean liveRegion,
+                boolean mainAncestor,
+                boolean routeAncestor,
+                boolean sectionAncestor,
+                boolean mainResource) {
+            return new StringBuilder(20)
+                    .append(bit(popularText))
+                    .append(bit(popularDescription))
+                    .append(bit(bladeText))
+                    .append(bit(bladeDescription))
+                    .append(bit(productPackage))
+                    .append(bit(view))
+                    .append(bit(textView))
+                    .append(bit(button))
+                    .append(bit(visible))
+                    .append(bit(enabled))
+                    .append(bit(scrollable))
+                    .append(bit(clickable))
+                    .append(bit(focusable))
+                    .append(bit(focused))
+                    .append(bit(accessibilityFocused))
+                    .append(bit(liveRegion))
+                    .append(bit(mainAncestor))
+                    .append(bit(routeAncestor))
+                    .append(bit(sectionAncestor))
+                    .append(bit(mainResource))
+                    .toString();
+        }
+
+        static String recordLine(
+                int recordIndex,
+                int nodeCount,
+                String correlation,
+                int nodeIndex,
+                int parentIndex,
+                int windowId,
+                int left,
+                int top,
+                int right,
+                int bottom,
+                String flags) {
+            require(recordIndex >= 0
+                            && recordIndex
+                                    < FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT
+                            && nodeCount > 0
+                            && nodeCount <= FIXED42_SEED_AX_NODE_LIMIT
+                            && nodeIndex >= 0
+                            && nodeIndex < nodeCount
+                            && parentIndex >= -1
+                            && parentIndex < nodeCount
+                            && right >= left
+                            && bottom >= top
+                            && validCorrelation(correlation)
+                            && flags != null
+                            && flags.length() == 20
+                            && validFlags(flags),
+                    "Fixed42 seed subtree diagnostic record was invalid");
+            return "Fixed42-to61 seed subtree record"
+                    + " record=" + recordIndex
+                    + " correlation=" + correlation
+                    + " index=" + nodeIndex
+                    + " parent=" + parentIndex
+                    + " window=" + windowId
+                    + " bounds=" + left + "," + top + "," + right + "," + bottom
+                    + " flags=" + flags;
+        }
+
+        private static boolean isDescendant(
+                int[] parentIndexes, int childIndex, int ancestorIndex) {
+            int cursor = childIndex;
+            for (int depth = 0; cursor >= 0 && depth <= parentIndexes.length; depth++) {
+                if (cursor == ancestorIndex) return true;
+                cursor = parentIndexes[cursor];
+            }
+            require(cursor < 0, "Fixed42 seed subtree ancestry was cyclic");
+            return false;
+        }
+
+        private static boolean validCorrelation(String value) {
+            if (value == null) return false;
+            String[] fields = value.split(",", -1);
+            if (fields.length != 5) return false;
+            try {
+                for (String field : fields) Integer.parseInt(field);
+                return true;
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+
+        private static boolean validFlags(String value) {
+            if (value == null || value.length() != 20) return false;
+            for (int index = 0; index < value.length(); index++) {
+                char current = value.charAt(index);
+                if (current != '0' && current != '1') return false;
+            }
+            return true;
+        }
+
+        private static char bit(boolean value) {
+            return value ? '1' : '0';
+        }
+
+        private static void require(boolean condition, String message) {
+            if (!condition) throw new AssertionError(message);
+        }
+    }
+
+    private static final class Fixed42SeedFailureDiagnosticPolicy {
+        static final int ROLE_HEADING = 0;
+        static final int ROLE_PARENT = 1;
+        static final int ROLE_ANCESTOR = 2;
+        static final int ROLE_ROUTE = 3;
+        static final int ROLE_MAIN = 4;
+        private static final String ROLE_MAP = "0:h,1:p,2:a,3:r,4:m";
+        private static final String FLAG_MAP =
+                "tx,dx,pkg,v,tv,vis,en,scr,clk,foc,fd,af,live,main,route,rm";
+
+        static String correlation(
+                int nodeCount,
+                int rootWindowId,
+                int mainWindowId,
+                int headingWindowId,
+                int routeWindowId) {
+            require(nodeCount > 0 && nodeCount <= FIXED42_SEED_AX_NODE_LIMIT,
+                    "Fixed42 seed diagnostic node count was invalid");
+            return nodeCount + "," + rootWindowId + "," + mainWindowId + ","
+                    + headingWindowId + "," + routeWindowId;
+        }
+
+        static String headerLine(
+                int recordCount,
+                int totalRecords,
+                int nodeCount,
+                String correlation,
+                int headingIndex,
+                int parentIndex,
+                int routeIndex,
+                int mainIndex,
+                int displayWidth,
+                int displayHeight,
+                int rootLeft,
+                int rootTop,
+                int rootRight,
+                int rootBottom,
+                int mainLeft,
+                int mainTop,
+                int mainRight,
+                int mainBottom,
+                boolean mainRawExact) {
+            require(recordCount >= 3
+                            && recordCount <= FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT
+                            && totalRecords >= recordCount
+                            && nodeCount > 0
+                            && nodeCount <= FIXED42_SEED_AX_NODE_LIMIT
+                            && totalRecords <= nodeCount + 3
+                            && validCorrelation(correlation)
+                            && headingIndex >= 0
+                            && headingIndex < nodeCount
+                            && parentIndex >= -1
+                            && parentIndex < nodeCount
+                            && routeIndex >= 0
+                            && routeIndex < nodeCount
+                            && mainIndex >= 0
+                            && mainIndex < nodeCount
+                            && displayWidth > 0
+                            && displayHeight > 0
+                            && rootRight >= rootLeft
+                            && rootBottom >= rootTop
+                            && mainRight >= mainLeft
+                            && mainBottom >= mainTop,
+                    "Fixed42 seed diagnostic header was invalid");
+            return "Fixed42-to61 seed failure header"
+                    + " records=" + recordCount
+                    + " total=" + totalRecords
+                    + " truncated=" + (totalRecords > recordCount)
+                    + " nodes=" + nodeCount
+                    + " correlation=" + correlation
+                    + " heading=" + headingIndex
+                    + " parent=" + parentIndex
+                    + " route=" + routeIndex
+                    + " main=" + mainIndex
+                    + " display=" + displayWidth + "," + displayHeight
+                    + " rootBounds=" + numericBounds(
+                            rootLeft, rootTop, rootRight, rootBottom)
+                    + " mainBounds=" + numericBounds(
+                            mainLeft, mainTop, mainRight, mainBottom)
+                    + " mainRawExact=" + mainRawExact
+                    + " roleMap=" + ROLE_MAP
+                    + " flagMap=" + FLAG_MAP;
+        }
+
+        static String flags(
+                boolean textExact,
+                boolean descriptionExact,
+                boolean productPackage,
+                boolean view,
+                boolean textView,
+                boolean visible,
+                boolean enabled,
+                boolean scrollable,
+                boolean clickable,
+                boolean focusable,
+                boolean focused,
+                boolean accessibilityFocused,
+                boolean liveRegion,
+                boolean mainAncestor,
+                boolean routeAncestor,
+                boolean mainResource) {
+            return new StringBuilder(16)
+                    .append(bit(textExact))
+                    .append(bit(descriptionExact))
+                    .append(bit(productPackage))
+                    .append(bit(view))
+                    .append(bit(textView))
+                    .append(bit(visible))
+                    .append(bit(enabled))
+                    .append(bit(scrollable))
+                    .append(bit(clickable))
+                    .append(bit(focusable))
+                    .append(bit(focused))
+                    .append(bit(accessibilityFocused))
+                    .append(bit(liveRegion))
+                    .append(bit(mainAncestor))
+                    .append(bit(routeAncestor))
+                    .append(bit(mainResource))
+                    .toString();
+        }
+
+        static String recordLine(
+                int recordIndex,
+                String correlation,
+                int role,
+                int nodeIndex,
+                int parentIndex,
+                int windowId,
+                int left,
+                int top,
+                int right,
+                int bottom,
+                String flags) {
+            require(recordIndex >= 0
+                            && recordIndex
+                                    < FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT
+                            && role >= ROLE_HEADING
+                            && role <= ROLE_MAIN
+                            && nodeIndex >= 0
+                            && parentIndex >= -1
+                            && right >= left
+                            && bottom >= top
+                            && validCorrelation(correlation)
+                            && flags != null
+                            && flags.length() == 16
+                            && validFlags(flags),
+                    "Fixed42 seed diagnostic record was invalid");
+            return "Fixed42-to61 seed failure record"
+                    + " record=" + recordIndex
+                    + " correlation=" + correlation
+                    + " role=" + role
+                    + " index=" + nodeIndex
+                    + " parent=" + parentIndex
+                    + " window=" + windowId
+                    + " bounds=" + numericBounds(left, top, right, bottom)
+                    + " flags=" + flags;
+        }
+
+        private static String numericBounds(
+                int left, int top, int right, int bottom) {
+            return left + "," + top + "," + right + "," + bottom;
+        }
+
+        private static boolean validCorrelation(String value) {
+            if (value == null) return false;
+            String[] fields = value.split(",", -1);
+            if (fields.length != 5) return false;
+            try {
+                for (String field : fields) Integer.parseInt(field);
+                return true;
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+
+        private static boolean validFlags(String value) {
+            if (value == null || value.length() != 16) return false;
+            for (int index = 0; index < value.length(); index++) {
+                char current = value.charAt(index);
+                if (current != '0' && current != '1') return false;
+            }
+            return true;
+        }
+
+        private static char bit(boolean value) {
+            return value ? '1' : '0';
+        }
+
+        private static void require(boolean condition, String message) {
+            if (!condition) throw new AssertionError(message);
+        }
+    }
+
+    private static final class Fixed42MainGeometryMismatch extends RuntimeException {
+        final Fixed42MainGeometryDiagnostic diagnostic;
+
+        Fixed42MainGeometryMismatch(Fixed42MainGeometryDiagnostic diagnostic) {
+            super("Fixed42-to61 main-content raw geometry was inexact");
+            this.diagnostic = diagnostic;
         }
     }
 
@@ -4396,6 +6071,80 @@ public final class RuntimeOtaFlowTest {
         return By.text(Fixed42CriticalQueryGroupPolicy.exactTextPattern(exactTexts))
                 .pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
                 .clazz(Fixed42CriticalQueryGroupPolicy.TEXT_VIEW_CLASS);
+    }
+
+    private BySelector fixed42To61InitialCancelSnapshotSelector(
+            String[] progressTexts, String[] terminalTexts) {
+        return By.text(Fixed42To61CancelSnapshotPolicy.exactObservationPattern(
+                        progressTexts, terminalTexts))
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE);
+    }
+
+    private static final class Fixed42To61ObservedCancelSnapshot {
+        final Fixed42To61CancelSnapshotPolicy.Snapshot classified;
+        final UiObject2 cancel;
+
+        Fixed42To61ObservedCancelSnapshot(
+                Fixed42To61CancelSnapshotPolicy.Snapshot classified,
+                UiObject2 cancel) {
+            this.classified = classified;
+            this.cancel = cancel;
+        }
+
+        void assertNoTerminalBeforeCancel() {
+            classified.assertNoTerminalBeforeCancel();
+        }
+
+        boolean isReadyToCancel() {
+            return classified.isReadyToCancel() && cancel != null;
+        }
+    }
+
+    private Fixed42To61ObservedCancelSnapshot queryFixed42To61InitialCancelSnapshot(
+            BySelector selector, String[] progressTexts, String[] terminalTexts) {
+        List<UiObject2> matches = device.findObjects(selector);
+        Fixed42To61CancelSnapshotPolicy.assertCandidateCount(matches.size());
+        Fixed42To61CancelSnapshotPolicy.Candidate[] candidates =
+                new Fixed42To61CancelSnapshotPolicy.Candidate[matches.size()];
+        for (int index = 0; index < matches.size(); index++) {
+            UiObject2 match = matches.get(index);
+            CharSequence text = match.getText();
+            candidates[index] = new Fixed42To61CancelSnapshotPolicy.Candidate(
+                    match.getApplicationPackage(),
+                    match.getClassName(),
+                    match.getResourceName(),
+                    text == null ? null : text.toString(),
+                    match.isEnabled(),
+                    match.isClickable());
+        }
+        Fixed42To61CancelSnapshotPolicy.Snapshot classified =
+                Fixed42To61CancelSnapshotPolicy.classify(
+                        OtaFlowPolicy.PRODUCT_PACKAGE,
+                        progressTexts,
+                        terminalTexts,
+                        candidates);
+        int cancelIndex = classified.cancelIndex();
+        UiObject2 cancel = cancelIndex < 0 ? null : matches.get(cancelIndex);
+        return new Fixed42To61ObservedCancelSnapshot(classified, cancel);
+    }
+
+    private void recordFixed42To61InitialObserverTiming(
+            long enableStart,
+            long enableFinish,
+            long snapshotStart,
+            long snapshotFinish,
+            long cancelClickStart,
+            long cancelClickFinish,
+            int snapshotAttempts,
+            int staleSnapshots) {
+        log("Fixed42-to61 initial observer timing enableStartUptimeMs=" + enableStart
+                + " enableFinishUptimeMs=" + enableFinish
+                + " snapshotStartUptimeMs=" + snapshotStart
+                + " snapshotFinishUptimeMs=" + snapshotFinish
+                + " cancelClickStartUptimeMs=" + cancelClickStart
+                + " cancelClickFinishUptimeMs=" + cancelClickFinish
+                + " snapshotAttempts=" + snapshotAttempts
+                + " staleSnapshots=" + staleSnapshots);
     }
 
     private Fixed42CriticalQueryGroupPolicy.Counts queryFixed42CriticalTextGroup(
