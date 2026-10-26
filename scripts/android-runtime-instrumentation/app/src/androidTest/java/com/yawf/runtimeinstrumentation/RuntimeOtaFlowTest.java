@@ -1786,48 +1786,54 @@ public final class RuntimeOtaFlowTest {
                         mainScreenBounds,
                         displayWidth,
                         displayHeight);
-        StringBuilder line = new StringBuilder(
-                "Fixed42-to61 semantic ambiguity diagnostic")
-                .append(" matches=").append(matchCount)
-                .append(" records=").append(recordCount)
-                .append(" truncated=").append(matchCount > recordCount)
-                .append(" nodes=").append(nodes.size())
-                .append(geometry.primitiveLine());
+        String correlation = Fixed42DiscoverAmbiguityPolicy.correlation(
+                nodes.size(), geometry.rootWindowId, geometry.mainWindowId);
+        logFixed42To61DiscoverDiagnosticLine(
+                Fixed42DiscoverAmbiguityPolicy.headerLine(
+                        matchCount,
+                        recordCount,
+                        nodes.size(),
+                        correlation,
+                        geometry.primitiveLine()));
         for (int recordIndex = 0; recordIndex < recordCount; recordIndex++) {
             int nodeIndex = matchingIndexes[recordIndex];
             Fixed42AxNode candidate = nodes.get(nodeIndex);
             boolean inMain = fixed42IsDescendant(nodes, nodeIndex, mainIndex);
-            line.append(" candidate").append(recordIndex).append("=index:")
-                    .append(nodeIndex).append(",parent:")
-                    .append(candidate.parentIndex).append(",window:")
-                    .append(candidate.info.getWindowId()).append(",bounds:")
-                    .append(Fixed42MainGeometryDiagnostic.rect(candidate.bounds)).append(',')
-                    .append("textExact:")
-                    .append("Discover page".equals(candidate.text)).append(',')
-                    .append("descriptionExact:")
-                    .append("Discover page".equals(candidate.description)).append(',')
-                    .append("productPackage:")
-                    .append(OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName)).append(',')
-                    .append("view:")
-                    .append("android.view.View".equals(candidate.className)).append(',')
-                    .append("textView:")
-                    .append("android.widget.TextView".equals(candidate.className)).append(',')
-                    .append("visible:").append(candidate.visible).append(',')
-                    .append("enabled:").append(candidate.enabled).append(',')
-                    .append("scrollable:").append(candidate.scrollable).append(',')
-                    .append("clickable:").append(candidate.clickable).append(',')
-                    .append("focusable:").append(candidate.info.isFocusable()).append(',')
-                    .append("focused:").append(candidate.info.isFocused()).append(',')
-                    .append("accessibilityFocused:")
-                    .append(candidate.info.isAccessibilityFocused()).append(',')
-                    .append("liveRegion:")
-                    .append(candidate.info.getLiveRegion()
-                            != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE)
-                    .append(',').append("mainAncestor:").append(inMain)
-                    .append(',').append("nonScrollMain:")
-                    .append(inMain && !candidate.scrollable);
+            String flags = Fixed42DiscoverAmbiguityPolicy.flags(
+                    "Discover page".equals(candidate.text),
+                    "Discover page".equals(candidate.description),
+                    OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName),
+                    "android.view.View".equals(candidate.className),
+                    "android.widget.TextView".equals(candidate.className),
+                    candidate.visible,
+                    candidate.enabled,
+                    candidate.scrollable,
+                    candidate.clickable,
+                    candidate.info.isFocusable(),
+                    candidate.info.isFocused(),
+                    candidate.info.isAccessibilityFocused(),
+                    candidate.info.getLiveRegion()
+                            != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                    inMain,
+                    inMain && !candidate.scrollable);
+            logFixed42To61DiscoverDiagnosticLine(
+                    Fixed42DiscoverAmbiguityPolicy.candidateLine(
+                            recordIndex,
+                            correlation,
+                            nodeIndex,
+                            candidate.parentIndex,
+                            candidate.info.getWindowId(),
+                            Fixed42MainGeometryDiagnostic.rect(candidate.bounds),
+                            flags));
         }
-        log(line.toString());
+    }
+
+    private void logFixed42To61DiscoverDiagnosticLine(String value) {
+        assertTrue("Fixed42-to61 Discover diagnostic reached the action-log limit",
+                value.length() < 500);
+        assertEquals("Fixed42-to61 Discover diagnostic was changed by action-log retention",
+                value, safe(value));
+        log(value);
     }
 
     private static int fixed42UniqueScrollableDescendant(
@@ -4413,11 +4419,96 @@ public final class RuntimeOtaFlowTest {
     }
 
     private static final class Fixed42DiscoverAmbiguityPolicy {
+        private static final String FLAG_MAP =
+                "tx,dx,pkg,v,tv,vis,en,scr,clk,foc,fd,af,live,main,nsm";
+
         static int recordCount(int matchCount) {
             if (matchCount < 2 || matchCount > FIXED42_SEED_AX_NODE_LIMIT) {
                 throw new AssertionError("Fixed42 Discover diagnostic match count was invalid");
             }
             return Math.min(matchCount, FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT);
+        }
+
+        static String correlation(int nodeCount, int rootWindowId, int mainWindowId) {
+            return nodeCount + "," + rootWindowId + "," + mainWindowId;
+        }
+
+        static String headerLine(
+                int matchCount,
+                int recordCount,
+                int nodeCount,
+                String correlation,
+                String geometry) {
+            return "Fixed42-to61 semantic ambiguity header"
+                    + " matches=" + matchCount
+                    + " records=" + recordCount
+                    + " truncated=" + (matchCount > recordCount)
+                    + " nodes=" + nodeCount
+                    + " correlation=" + correlation
+                    + geometry
+                    + " flagMap=" + FLAG_MAP;
+        }
+
+        static String flags(
+                boolean textExact,
+                boolean descriptionExact,
+                boolean productPackage,
+                boolean view,
+                boolean textView,
+                boolean visible,
+                boolean enabled,
+                boolean scrollable,
+                boolean clickable,
+                boolean focusable,
+                boolean focused,
+                boolean accessibilityFocused,
+                boolean liveRegion,
+                boolean mainAncestor,
+                boolean nonScrollMain) {
+            return new StringBuilder(15)
+                    .append(bit(textExact))
+                    .append(bit(descriptionExact))
+                    .append(bit(productPackage))
+                    .append(bit(view))
+                    .append(bit(textView))
+                    .append(bit(visible))
+                    .append(bit(enabled))
+                    .append(bit(scrollable))
+                    .append(bit(clickable))
+                    .append(bit(focusable))
+                    .append(bit(focused))
+                    .append(bit(accessibilityFocused))
+                    .append(bit(liveRegion))
+                    .append(bit(mainAncestor))
+                    .append(bit(nonScrollMain))
+                    .toString();
+        }
+
+        static String candidateLine(
+                int recordIndex,
+                String correlation,
+                int nodeIndex,
+                int parentIndex,
+                int windowId,
+                String bounds,
+                String flags) {
+            if (recordIndex < 0
+                    || recordIndex >= FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT
+                    || flags.length() != 15) {
+                throw new AssertionError("Fixed42 Discover diagnostic record was invalid");
+            }
+            return "Fixed42-to61 semantic ambiguity candidate"
+                    + " record=" + recordIndex
+                    + " correlation=" + correlation
+                    + " index=" + nodeIndex
+                    + " parent=" + parentIndex
+                    + " window=" + windowId
+                    + " bounds=" + bounds
+                    + " flags=" + flags;
+        }
+
+        private static char bit(boolean value) {
+            return value ? '1' : '0';
         }
     }
 

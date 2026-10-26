@@ -2390,8 +2390,12 @@ function fixed42MainGeometryReacquisitionContract(java) {
 function fixed42DiscoverAmbiguityDiagnosticContract(java) {
   const observe = methodBody(java, "observeFixed42SeedSnapshot");
   const diagnostic = methodBody(java, "logFixed42To61DiscoverAmbiguityIfPresent");
+  const retention = methodBody(java, "logFixed42To61DiscoverDiagnosticLine");
   const unique = methodBody(java, "fixed42UniqueSemantic");
   const capture = methodBody(java, "captureFixed42MainGeometryDiagnostic");
+  const safe = methodBody(java, "safe");
+  const log = methodBody(java, "log");
+  const policy = nestedClassDeclaration(java, "Fixed42DiscoverAmbiguityPolicy");
 
   need(java, "private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 4;",
     "Discover ambiguity diagnostic lost its four-record bound");
@@ -2455,18 +2459,17 @@ function fixed42DiscoverAmbiguityDiagnosticContract(java) {
     "Fixed42DiscoverAmbiguityPolicy.recordCount(matchCount)",
     "existingGeometry != null",
     "captureFixed42MainGeometryDiagnostic(",
-    '"Fixed42-to61 semantic ambiguity diagnostic"',
-    'append(" matches=").append(matchCount)',
-    'append(" records=").append(recordCount)',
-    'append(" truncated=").append(matchCount > recordCount)',
-    'append(" nodes=").append(nodes.size())',
+    "Fixed42DiscoverAmbiguityPolicy.correlation(",
+    "nodes.size(), geometry.rootWindowId, geometry.mainWindowId",
+    "Fixed42DiscoverAmbiguityPolicy.headerLine(",
+    "matchCount,",
+    "recordCount,",
+    "correlation,",
     "geometry.primitiveLine()",
-    'append("=index:")',
-    'append(",parent:")',
+    "for (int recordIndex = 0; recordIndex < recordCount; recordIndex++)",
+    "Fixed42DiscoverAmbiguityPolicy.flags(",
     "candidate.parentIndex",
-    'append(",window:")',
     "candidate.info.getWindowId()",
-    'append(",bounds:")',
     "Fixed42MainGeometryDiagnostic.rect(candidate.bounds)",
     '"Discover page".equals(candidate.text)',
     '"Discover page".equals(candidate.description)',
@@ -2483,24 +2486,81 @@ function fixed42DiscoverAmbiguityDiagnosticContract(java) {
     "candidate.info.getLiveRegion()",
     "android.view.View.ACCESSIBILITY_LIVE_REGION_NONE",
     "fixed42IsDescendant(nodes, nodeIndex, mainIndex)",
-    'append("nonScrollMain:")',
     "inMain && !candidate.scrollable",
-    "log(line.toString())",
+    "Fixed42DiscoverAmbiguityPolicy.candidateLine(",
+    "logFixed42To61DiscoverDiagnosticLine(",
   ]) need(diagnostic, token, `Discover ambiguity diagnostic lost ${token}`);
-  assert.equal((diagnostic.match(/\blog\(/g) ?? []).length, 1,
-    "Discover ambiguity diagnostic must emit one bounded line");
+  assert.equal((diagnostic.match(/logFixed42To61DiscoverDiagnosticLine\(/g) ?? []).length, 2,
+    "Discover ambiguity diagnostic must have one header and one per-record logging site");
+  assert.equal((diagnostic.match(/\blog\(/g) ?? []).length, 0,
+    "Discover ambiguity diagnostic bypassed its retention assertion");
   assert.doesNotMatch(diagnostic,
-    /\.append\(\s*candidate\.(?:text|description|packageName|className|resourceName)\b/,
-    "Discover diagnostic appended raw accessibility identity");
+    /candidateLine\([\s\S]*?candidate\.(?:text|description|packageName|className|resourceName)\b/,
+    "Discover candidate formatter received raw accessibility identity");
   assert.doesNotMatch(diagnostic,
     /candidate\.info\.(?:getText|getContentDescription|getPackageName|getClassName|getViewIdResourceName)/,
     "Discover diagnostic re-read raw accessibility identity");
   assert.doesNotMatch(diagnostic,
     /https?:|admittedTarget|credential|token|cookie|authorization/i,
     "Discover diagnostic contains URL or credential-bearing data");
-  assert.doesNotMatch(diagnostic,
+  assert.doesNotMatch(`${diagnostic}\n${retention}`,
     /clearCache|getRootInActiveWindow|SystemClock|waitForIdle|\.click\(|performAction|device\.(?:click|swipe|press)/,
     "Discover diagnostic added a cache change, root query, wait, or input");
+
+  for (const token of [
+    'assertTrue("Fixed42-to61 Discover diagnostic reached the action-log limit"',
+    "value.length() < 500",
+    'assertEquals("Fixed42-to61 Discover diagnostic was changed by action-log retention"',
+    "value, safe(value)",
+    "log(value)",
+  ]) need(retention, token, `Discover action-log retention proof lost ${token}`);
+  const sanitize = retention.indexOf("safe(value)");
+  const retainedLog = retention.indexOf("log(value)", sanitize);
+  assert.ok(sanitize >= 0 && retainedLog > sanitize,
+    "Discover diagnostic logged before proving exact retention");
+  need(safe, "redacted.length() <= 500 ? redacted : redacted.substring(0, 500)",
+    "actual action sanitizer lost its 500-character retention bound");
+  need(log, "actions.add(safe(value));",
+    "Discover diagnostic no longer passes through the actual action logger");
+
+  for (const token of [
+    '"tx,dx,pkg,v,tv,vis,en,scr,clk,foc,fd,af,live,main,nsm"',
+    '"Fixed42-to61 semantic ambiguity header"',
+    '" matches=" + matchCount',
+    '" records=" + recordCount',
+    '" truncated=" + (matchCount > recordCount)',
+    '" nodes=" + nodeCount',
+    '" correlation=" + correlation',
+    '" flagMap=" + FLAG_MAP',
+    'new StringBuilder(15)',
+    ".append(bit(textExact))",
+    ".append(bit(descriptionExact))",
+    ".append(bit(productPackage))",
+    ".append(bit(view))",
+    ".append(bit(textView))",
+    ".append(bit(visible))",
+    ".append(bit(enabled))",
+    ".append(bit(scrollable))",
+    ".append(bit(clickable))",
+    ".append(bit(focusable))",
+    ".append(bit(focused))",
+    ".append(bit(accessibilityFocused))",
+    ".append(bit(liveRegion))",
+    ".append(bit(mainAncestor))",
+    ".append(bit(nonScrollMain))",
+    '"Fixed42-to61 semantic ambiguity candidate"',
+    '" record=" + recordIndex',
+    '" index=" + nodeIndex',
+    '" parent=" + parentIndex',
+    '" window=" + windowId',
+    '" bounds=" + bounds',
+    '" flags=" + flags',
+    "recordIndex >= FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT",
+    "flags.length() != 15",
+  ]) need(policy, token, `Discover compact retention policy lost ${token}`);
+  assert.doesNotMatch(policy,
+    /textValue|descriptionValue|packageValue|classValue|resourceValue|https?:|credential|token|cookie/i,
+    "Discover formatter accepts raw identity or credential-bearing values");
 
   for (const token of [
     "root.getBoundsInWindow(rootWindowBounds)",
@@ -2522,6 +2582,140 @@ function fixed42DiscoverAmbiguityDiagnosticContract(java) {
   assert.doesNotMatch(drive,
     /catch \((?:AssertionError|RuntimeException|Exception|Throwable)\b/,
     "Discover ambiguity entered a retry path instead of the unchanged rejection");
+}
+
+function runFixed42DiscoverAmbiguityRetentionHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42DiscoverAmbiguityPolicy");
+  const safe = methodBody(java, "safe");
+  const log = methodBody(java, "log");
+  const retention = methodBody(java, "logFixed42To61DiscoverDiagnosticLine");
+  const harness = `
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+
+public final class Fixed42DiscoverAmbiguityRetentionHarness {
+    private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
+    private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 4;
+    private static final int MAX_ACTION_LINES = 260;
+    private static final Pattern URL = Pattern.compile("https?://\\\\S+", Pattern.CASE_INSENSITIVE);
+    private static final List<String> actions = new ArrayList<>();
+    ${policy}
+
+    private static void assertEquals(String message, Object expected, Object actual) {
+        if (expected == null ? actual != null : !expected.equals(actual)) {
+            throw new AssertionError(message + ": " + expected + " != " + actual);
+        }
+    }
+    private static void assertTrue(String message, boolean value) {
+        if (!value) throw new AssertionError(message);
+    }
+    private static void fail(String message) { throw new AssertionError(message); }
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+    private static void reject(Runnable operation, String message) {
+        try {
+            operation.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError(message);
+    }
+    private static String safe(String value) {
+${safe}
+    }
+    private static void log(String value) {
+${log}
+    }
+    private static void logFixed42To61DiscoverDiagnosticLine(String value) {
+${retention}
+    }
+
+    public static void main(String[] ignored) {
+        String correlation = Fixed42DiscoverAmbiguityPolicy.correlation(114, 10, 10);
+        String geometry = " display=1080,1920 rootScreen=0,0,1080,1920"
+                + " rootWindow=0,0,1080,1920 mainScreen=0,0,1082,1922"
+                + " mainWindow=0,0,0,0 axWindow=1,0,10,0,0,1080,1920"
+                + " nodeWindowIds=10,10";
+        String header = Fixed42DiscoverAmbiguityPolicy.headerLine(
+                2, 2, 114, correlation, geometry);
+        String flags0 = Fixed42DiscoverAmbiguityPolicy.flags(
+                true, false, true, true, false,
+                false, true, false, false, false,
+                false, false, true, true, true);
+        String flags1 = Fixed42DiscoverAmbiguityPolicy.flags(
+                false, true, true, true, false,
+                true, true, false, false, true,
+                true, true, false, true, true);
+        require(flags0.equals("101100100000111"), "candidate0 flag mapping changed");
+        require(flags1.equals("011101100111011"), "candidate1 flag mapping changed");
+        String candidate0 = Fixed42DiscoverAmbiguityPolicy.candidateLine(
+                0, correlation, 21, 14, 10, "0,0,0,0", flags0);
+        String candidate1 = Fixed42DiscoverAmbiguityPolicy.candidateLine(
+                1, correlation, 45, 14, 10, "0,0,1080,1920", flags1);
+
+        logFixed42To61DiscoverDiagnosticLine(header);
+        logFixed42To61DiscoverDiagnosticLine(candidate0);
+        logFixed42To61DiscoverDiagnosticLine(candidate1);
+        require(actions.size() == 3, "header and both candidates were not retained separately");
+        require(actions.get(0).equals(header)
+                        && actions.get(1).equals(candidate0)
+                        && actions.get(2).equals(candidate1),
+                "actual action pipeline changed a diagnostic line");
+        for (String line : actions) {
+            require(line.length() < 500, "diagnostic line did not stay below safe limit");
+            require(safe(line).equals(line), "diagnostic line was clipped or redacted");
+        }
+        require(header.contains("matches=2 records=2 truncated=false nodes=114")
+                        && header.contains("correlation=" + correlation)
+                        && header.contains("mainScreen=0,0,1082,1922")
+                        && header.contains("flagMap=tx,dx,pkg,v,tv,vis,en,scr,clk,foc,fd,af,live,main,nsm"),
+                "header lost count, geometry, correlation, or public flag map");
+        require(candidate0.contains("record=0 correlation=" + correlation)
+                        && candidate0.contains("index=21 parent=14 window=10 bounds=0,0,0,0")
+                        && candidate0.contains("flags=" + flags0),
+                "candidate0 fields did not survive");
+        require(candidate1.contains("record=1 correlation=" + correlation)
+                        && candidate1.contains("index=45 parent=14 window=10 bounds=0,0,1080,1920")
+                        && candidate1.contains("flags=" + flags1),
+                "candidate1 fields did not survive");
+
+        String predecessor = header + " " + candidate0 + " " + candidate1;
+        require(predecessor.length() > 500 && safe(predecessor).length() == 500
+                        && !safe(predecessor).equals(predecessor),
+                "predecessor one-line clipping control did not reproduce");
+        reject(() -> logFixed42To61DiscoverDiagnosticLine("https://sensitive.invalid/value"),
+                "sanitizer-changing raw value reached the action log");
+        reject(() -> logFixed42To61DiscoverDiagnosticLine("x".repeat(500)),
+                "limit-sized diagnostic reached the action log instead of staying below it");
+        require(actions.size() == 3, "rejected retention inputs changed the action log");
+        reject(() -> Fixed42DiscoverAmbiguityPolicy.candidateLine(
+                        4, correlation, 1, 0, 10, "0,0,1,1", flags0),
+                "fifth candidate record survived");
+        System.out.println("fixed42-discover-retention-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-discover-retention-"));
+  const sourceFile = path.join(directory, "Fixed42DiscoverAmbiguityRetentionHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0,
+      `fixed42 Discover retention javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand,
+      ["-cp", directory, "Fixed42DiscoverAmbiguityRetentionHarness"],
+      { encoding: "utf8" });
+    assert.equal(run.status, 0,
+      `fixed42 Discover retention harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-discover-retention-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function runFixed42DiscoverAmbiguityPolicyHarness(java) {
@@ -3121,21 +3315,65 @@ test("fixed42-to61 Discover diagnostic keeps full counts and at most four record
     "Discover diagnostic admitted more than four candidate records");
 });
 
+test("fixed42-to61 Discover records survive the actual 500-character action pipeline", () => {
+  fixed42DiscoverAmbiguityDiagnosticContract(source);
+  runFixed42DiscoverAmbiguityRetentionHarness(source);
+  const policy = nestedClassDeclaration(source, "Fixed42DiscoverAmbiguityPolicy");
+
+  const overlongPolicy = policy.replace(
+    '+ " flags=" + flags;',
+    `+ " flags=" + flags + "${"x".repeat(400)}";`,
+  );
+  assert.notEqual(overlongPolicy, policy, "overlong formatter mutant anchor was absent");
+  assert.throws(
+    () => runFixed42DiscoverAmbiguityRetentionHarness(source.replace(policy, overlongPolicy)),
+    "overlong formatter survived the actual action adapter",
+  );
+
+  const droppedFlagPolicy = policy.replace(".append(bit(liveRegion))", "");
+  assert.notEqual(droppedFlagPolicy, policy, "dropped-flag mutant anchor was absent");
+  assert.throws(
+    () => runFixed42DiscoverAmbiguityRetentionHarness(source.replace(policy, droppedFlagPolicy)),
+    "formatter that dropped one boolean field survived",
+  );
+
+  const missingCorrelationPolicy = policy.replace(
+    '+ " correlation=" + correlation\n                    + " index=" + nodeIndex',
+    '+ " index=" + nodeIndex',
+  );
+  assert.notEqual(missingCorrelationPolicy, policy,
+    "candidate-correlation mutant anchor was absent");
+  assert.throws(
+    () => runFixed42DiscoverAmbiguityRetentionHarness(
+      source.replace(policy, missingCorrelationPolicy),
+    ),
+    "candidate without same-observation correlation survived",
+  );
+
+  const bypassedRetention = source.replace(
+    "                value, safe(value));",
+    "                value, value);",
+  );
+  assert.notEqual(bypassedRetention, source, "retention-bypass mutant anchor was absent");
+  assert.throws(() => fixed42DiscoverAmbiguityDiagnosticContract(bypassedRetention),
+    "action logger no longer asserted exact retention");
+});
+
 test("fixed42-to61 Discover diagnostic is sanitized observation-only and recycles the graph", () => {
   fixed42DiscoverAmbiguityDiagnosticContract(source);
 
   const mutants = [
     ["raw-text", source.replace(
-      '.append("textExact:")',
-      ".append(candidate.text).append(\",textExact:\")",
+      "Fixed42MainGeometryDiagnostic.rect(candidate.bounds),",
+      "candidate.text,",
     )],
     ["new-root", source.replace(
       "        int matchCount = 0;",
       "        instrumentation.getUiAutomation().getRootInActiveWindow();\n        int matchCount = 0;",
     )],
     ["input", source.replace(
-      "        log(line.toString());",
-      "        device.click(1, 1);\n        log(line.toString());",
+      "        log(value);",
+      "        device.click(1, 1);\n        log(value);",
     )],
     ["node-recycle", source.replace(
       "if (!transferred) fixed42RecycleNodes(owned);",
@@ -3146,12 +3384,12 @@ test("fixed42-to61 Discover diagnostic is sanitized observation-only and recycle
       "                accessibilityWindowPresent = 1;",
     )],
     ["geometry", source.replace(
-      ".append(geometry.primitiveLine());",
-      ";",
+      "geometry.primitiveLine()));",
+      '""));',
     )],
     ["focus", source.replace(
-      '.append("focused:").append(candidate.info.isFocused()).append(\',\')',
-      '.append("focused:false,")',
+      "candidate.info.isFocused(),",
+      "false,",
     )],
     ["ancestry", source.replace(
       "boolean inMain = fixed42IsDescendant(nodes, nodeIndex, mainIndex);",
