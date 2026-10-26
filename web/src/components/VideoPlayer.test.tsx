@@ -3333,7 +3333,10 @@ describe("WebviewPlayer", () => {
       });
     };
 
-    async function setupNativePausedSeek(acceptAssignments: boolean) {
+    async function setupNativePausedSeek(
+      acceptAssignments: boolean,
+      initialPlaybackRate = 1.25,
+    ) {
       deviceKindMock.mockReturnValue("ios");
       (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
         () => "probably",
@@ -3352,7 +3355,12 @@ describe("WebviewPlayer", () => {
           engine="webview-hls-transcode"
           title="Paused native HLS"
           startPositionSeconds={0}
-          initialHandoffState={{ paused: true, volume: 0.6, muted: false, playbackRate: 1.25 }}
+          initialHandoffState={{
+            paused: true,
+            volume: 0.6,
+            muted: false,
+            playbackRate: initialPlaybackRate,
+          }}
           serverOptimized={{
             qualities: ["720p", "480p"],
             loadSourceInfo: async () => ({
@@ -3398,8 +3406,8 @@ describe("WebviewPlayer", () => {
       });
       video.volume = 0.6;
       video.muted = false;
-      video.defaultPlaybackRate = 1.25;
-      video.playbackRate = 1.25;
+      video.defaultPlaybackRate = initialPlaybackRate;
+      video.playbackRate = initialPlaybackRate;
       fireEvent.loadedMetadata(video);
       fireEvent.seeked(video);
       vi.mocked(HTMLMediaElement.prototype.play).mockClear();
@@ -3457,6 +3465,73 @@ describe("WebviewPlayer", () => {
       fireEvent.seeked(replacement);
       expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1);
       expect(probe.request).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the latest speed and its control in sync across a paused fallback replacement", async () => {
+      const probe = await setupNativePausedSeek(false, 1);
+      probe.setCurrentTime(0);
+      Object.defineProperties(probe.video, {
+        defaultPlaybackRate: { configurable: true, value: 1, writable: true },
+        playbackRate: { configurable: true, value: 1, writable: true },
+      });
+      probe.video.volume = 0.35;
+      probe.video.muted = true;
+      fireEvent.volumeChange(probe.video);
+      vi.useFakeTimers();
+
+      press("3");
+      press(">");
+      press(" ");
+      expect(probe.video.playbackRate).toBe(1.25);
+      expect(screen.getByRole("combobox", { name: "Playback speed" })).toHaveValue("1.25");
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(nativeHlsSeekConfirmTimeoutMs);
+      });
+      expect(probe.request).toHaveBeenCalledTimes(1);
+      expect(probe.request).toHaveBeenCalledWith("480p", 9, 1);
+
+      vi.useRealTimers();
+      await waitFor(() => expect(
+        (probe.player.querySelector("video.player-video") as HTMLVideoElement).src,
+      ).toContain("start=9&audio=1#t=0.001"));
+      const replacement = probe.player.querySelector("video.player-video") as HTMLVideoElement;
+      expect(replacement).not.toBe(probe.video);
+
+      expect(replacement.volume).toBeCloseTo(0.35);
+      expect(replacement.muted).toBe(true);
+      expect(replacement.playbackRate).toBe(1.25);
+      expect(screen.getByRole("combobox", { name: "Playback speed" })).toHaveValue("1.25");
+      expect(replacement.paused).toBe(true);
+      expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+
+      Object.defineProperties(replacement, {
+        currentTime: { configurable: true, value: 0.001, writable: true },
+        duration: { configurable: true, value: 21 },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+        seeking: { configurable: true, value: false },
+        seekable: {
+          configurable: true,
+          value: { length: 1, start: () => 0, end: () => 21 },
+        },
+      });
+      fireEvent.seeked(replacement);
+
+      expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1);
+      expect(replacement.playbackRate).toBe(1.25);
+      expect(screen.getByRole("combobox", { name: "Playback speed" })).toHaveValue("1.25");
+      expect(probe.request).toHaveBeenCalledTimes(1);
+
+      Object.defineProperties(replacement, {
+        defaultPlaybackRate: { configurable: true, value: 1.25, writable: true },
+        playbackRate: { configurable: true, value: 1.25, writable: true },
+      });
+      press(">");
+      press(">");
+      expect(replacement.playbackRate).toBe(1.75);
+      expect(screen.getByRole("option", { name: "1.75×" })).toBeInTheDocument();
+      expect(screen.getByRole("combobox", { name: "Playback speed" })).toHaveValue("1.75");
     });
 
     it("accepts an independently observed native seek without a server fallback", async () => {

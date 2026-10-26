@@ -3044,6 +3044,14 @@ function WebviewPlayer({
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const [playbackRate, setPlaybackRate] = useState(() => {
+    if (
+      sourceSwitchState != null &&
+      Number.isFinite(sourceSwitchState.playbackRate) &&
+      sourceSwitchState.playbackRate >= 0.5 &&
+      sourceSwitchState.playbackRate <= 2
+    ) {
+      return sourceSwitchState.playbackRate;
+    }
     const saved = playerPreferences?.rememberPerTitleTrackChoices === false
       ? null
       : savedPrefs?.playbackSpeed;
@@ -5762,11 +5770,19 @@ function WebviewPlayer({
         }
         case "<":
           e.preventDefault();
-          applyMediaPlaybackRate(video, Math.max(0.5, video.playbackRate - 0.25));
+          {
+            const next = Math.max(0.5, video.playbackRate - 0.25);
+            applyMediaPlaybackRate(video, next);
+            setPlaybackRate(next);
+          }
           break;
         case ">":
           e.preventDefault();
-          applyMediaPlaybackRate(video, Math.min(2, video.playbackRate + 0.25));
+          {
+            const next = Math.min(2, video.playbackRate + 0.25);
+            applyMediaPlaybackRate(video, next);
+            setPlaybackRate(next);
+          }
           break;
         case "n":
         case "N":
@@ -6403,7 +6419,7 @@ function WebviewPlayer({
                 onChange={(event) => changePlaybackRate(Number(event.target.value))}
                 tabIndex={chromeVisible ? undefined : -1}
               >
-                {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => (
                   <option value={speed} key={speed}>
                     {speed}×
                   </option>
@@ -6590,7 +6606,7 @@ function WebviewPlayer({
                   onChange={(event) => changePlaybackRate(Number(event.target.value))}
                   tabIndex={chromeVisible ? undefined : -1}
                 >
-                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                  {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => (
                     <option value={speed} key={speed}>{speed}×</option>
                   ))}
                 </select>
