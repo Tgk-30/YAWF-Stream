@@ -1,0 +1,135 @@
+name: server-database-lease-runtime
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/server-database-lease-runtime.yml"
+      - "scripts/server_database_lease_docker_runtime.mjs"
+      - "scripts/server_database_lease_docker_runtime.test.mjs"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "server/**"
+      - "web/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/server-database-lease-runtime.yml"
+      - "scripts/server_database_lease_docker_runtime.mjs"
+      - "scripts/server_database_lease_docker_runtime.test.mjs"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "server/**"
+      - "web/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-database-lease-runtime-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate runtime driver
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout caller revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run driver contract tests
+        run: node --test scripts/server_database_lease_docker_runtime.test.mjs
+
+  runtime:
+    name: Isolated Docker runtime
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'Tgk-30/YAWF-Stream' && github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      DS_DATABASE_LEASE_DOCKER_RUNTIME: "1"
+    steps:
+      - name: Checkout exact caller revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Bind source and version
+        id: binding
+        shell: bash
+        env:
+          CALLER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          EVIDENCE_DIR="$RUNNER_TEMP/server-database-lease-runtime"
+          echo "EVIDENCE_DIR=$EVIDENCE_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$EVIDENCE_DIR"
+          actual_sha="$(git rev-parse HEAD)"
+          test "$actual_sha" = "$CALLER_SHA"
+          version="$(node -p "require('./server/package.json').version")"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          {
+            echo "source=$actual_sha"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          node -e 'const fs=require("fs"); const [path,source,version]=process.argv.slice(1); fs.writeFileSync(path, JSON.stringify({sourceRevision:source,version},null,2)+"\n", {mode:0o600})' \
+            "$EVIDENCE_DIR/source-binding.json" "$actual_sha" "$version"
+
+      - name: Build current production image with source binding
+        id: image
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ steps.binding.outputs.source }}
+          SOURCE_VERSION: ${{ steps.binding.outputs.version }}
+        run: |
+          set -euo pipefail
+          local_tag="yawf-database-lease-runtime:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker build \
+            --label "org.opencontainers.image.revision=$SOURCE_REVISION" \
+            --label "org.opencontainers.image.version=$SOURCE_VERSION" \
+            --label "org.opencontainers.image.source=https://github.com/Tgk-30/YAWF-Stream" \
+            --tag "$local_tag" \
+            --file Dockerfile \
+            .
+          image_id="$(docker image inspect --format '{{.Id}}' "$local_tag")"
+          [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
+
+      - name: Run isolated database lease lifecycle
+        env:
+          CANDIDATE_IMAGE_ID: ${{ steps.image.outputs.image_id }}
+          EXPECTED_SOURCE: ${{ steps.binding.outputs.source }}
+          EXPECTED_VERSION: ${{ steps.binding.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/server_database_lease_docker_runtime.mjs \
+            --candidate-image "$CANDIDATE_IMAGE_ID" \
+            --expected-version "$EXPECTED_VERSION" \
+            --expected-source "$EXPECTED_SOURCE" \
+            --receipt "$EVIDENCE_DIR/runtime-receipt.json"
+
+      - name: Upload sanitized runtime receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-database-lease-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/server-database-lease-runtime
+          if-no-files-found: error
+          retention-days: 14
