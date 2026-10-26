@@ -312,6 +312,7 @@ jobs:
 
       - name: Smoke packaged desktop server resources
         run: |
+          node --test scripts/smoke_tauri_server_bundle.test.mjs
           node scripts/prepare_tauri_server_resources.mjs
           node scripts/download_tauri_node_runtime.mjs linux-x64
           node scripts/smoke_tauri_server_bundle.mjs web/src-tauri/resources/server
