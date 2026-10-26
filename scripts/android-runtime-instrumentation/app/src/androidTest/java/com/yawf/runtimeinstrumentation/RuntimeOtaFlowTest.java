@@ -139,6 +139,7 @@ public final class RuntimeOtaFlowTest {
     private static final int FIXED42_SEED_AX_CHILD_LIMIT = 128;
     private static final int FIXED42_TO61_DISCOVER_DIAGNOSTIC_RECORD_LIMIT = 4;
     private static final int FIXED42_TO61_SEED_FAILURE_DIAGNOSTIC_RECORD_LIMIT = 12;
+    private static final int FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT = 32;
     private static final int FIXED42_LAUNCHER_ANCESTOR_LIMIT = 16;
     private static final int FIXED42_LAUNCHER_NODE_LIMIT = 256;
     private static final int FIXED42_LAUNCHER_CHILD_LIMIT = 128;
@@ -2014,9 +2015,91 @@ public final class RuntimeOtaFlowTest {
                         flags));
             }
             retainFixed42To61SeedFailureDiagnosticLines(lines);
+            retainFixed42To61SeedSubtreeDiagnostic(
+                    nodes,
+                    headingIndex,
+                    discoverIndex,
+                    mainIndex,
+                    correlation);
         } catch (RuntimeException | AssertionError ignored) {
             // Diagnostic retention must never replace the original heading assertion.
         }
+    }
+
+    private void retainFixed42To61SeedSubtreeDiagnostic(
+            List<Fixed42AxNode> nodes,
+            int headingIndex,
+            int discoverIndex,
+            int mainIndex,
+            String correlation) {
+        Fixed42AxNode heading = nodes.get(headingIndex);
+        int sectionIndex = heading.parentIndex;
+        int[] parentIndexes = new int[nodes.size()];
+        int popularMatches = 0;
+        int bladeMatches = 0;
+        for (int index = 0; index < nodes.size(); index++) {
+            Fixed42AxNode candidate = nodes.get(index);
+            parentIndexes[index] = candidate.parentIndex;
+            if (candidate.semanticEquals("Popular Movies")) popularMatches++;
+            if (candidate.semanticEquals(AUTOMATIC_SAMPLE_TITLE)) bladeMatches++;
+        }
+        Fixed42SeedSubtreeDiagnosticPolicy.Selection selection =
+                Fixed42SeedSubtreeDiagnosticPolicy.select(
+                        parentIndexes, sectionIndex);
+        List<String> lines = new ArrayList<>();
+        lines.add(Fixed42SeedSubtreeDiagnosticPolicy.headerLine(
+                selection.indexes.length,
+                selection.total,
+                selection.omitted,
+                nodes.size(),
+                correlation,
+                headingIndex,
+                sectionIndex,
+                discoverIndex,
+                mainIndex,
+                popularMatches,
+                bladeMatches));
+        for (int recordIndex = 0;
+                recordIndex < selection.indexes.length;
+                recordIndex++) {
+            int nodeIndex = selection.indexes[recordIndex];
+            Fixed42AxNode candidate = nodes.get(nodeIndex);
+            String flags = Fixed42SeedSubtreeDiagnosticPolicy.flags(
+                    "Popular Movies".equals(candidate.text),
+                    "Popular Movies".equals(candidate.description),
+                    AUTOMATIC_SAMPLE_TITLE.equals(candidate.text),
+                    AUTOMATIC_SAMPLE_TITLE.equals(candidate.description),
+                    OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName),
+                    "android.view.View".equals(candidate.className),
+                    "android.widget.TextView".equals(candidate.className),
+                    "android.widget.Button".equals(candidate.className),
+                    candidate.visible,
+                    candidate.enabled,
+                    candidate.scrollable,
+                    candidate.clickable,
+                    candidate.info.isFocusable(),
+                    candidate.info.isFocused(),
+                    candidate.info.isAccessibilityFocused(),
+                    candidate.info.getLiveRegion()
+                            != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                    fixed42IsDescendant(nodes, nodeIndex, mainIndex),
+                    fixed42IsDescendant(nodes, nodeIndex, discoverIndex),
+                    fixed42IsDescendant(nodes, nodeIndex, sectionIndex),
+                    "main-content".equals(candidate.resourceName));
+            lines.add(Fixed42SeedSubtreeDiagnosticPolicy.recordLine(
+                    recordIndex,
+                    nodes.size(),
+                    correlation,
+                    nodeIndex,
+                    candidate.parentIndex,
+                    candidate.info.getWindowId(),
+                    candidate.bounds.left,
+                    candidate.bounds.top,
+                    candidate.bounds.right,
+                    candidate.bounds.bottom,
+                    flags));
+        }
+        retainFixed42To61SeedFailureDiagnosticLines(lines);
     }
 
     private void retainFixed42To61SeedFailureDiagnosticLines(List<String> values) {
@@ -4889,6 +4972,231 @@ public final class RuntimeOtaFlowTest {
 
         private static char bit(boolean value) {
             return value ? '1' : '0';
+        }
+    }
+
+    private static final class Fixed42SeedSubtreeDiagnosticPolicy {
+        private static final String FLAG_MAP =
+                "s0t,s0d,s1t,s1d,pkg,v,tv,btn,vis,en,scr,clk,foc,fd,af,live,main,route,section,rm";
+
+        static final class Selection {
+            final int[] indexes;
+            final int total;
+            final int omitted;
+
+            Selection(int[] indexes, int total, int omitted) {
+                this.indexes = indexes.clone();
+                this.total = total;
+                this.omitted = omitted;
+            }
+        }
+
+        static Selection select(int[] parentIndexes, int sectionIndex) {
+            require(parentIndexes != null
+                            && parentIndexes.length > 0
+                            && parentIndexes.length <= FIXED42_SEED_AX_NODE_LIMIT
+                            && sectionIndex > 0
+                            && sectionIndex < parentIndexes.length
+                            && parentIndexes[0] == -1,
+                    "Fixed42 seed subtree graph was invalid");
+            for (int index = 1; index < parentIndexes.length; index++) {
+                require(parentIndexes[index] >= 0 && parentIndexes[index] < index,
+                        "Fixed42 seed subtree parent graph was invalid");
+            }
+            int[] retained = new int[Math.min(
+                    parentIndexes.length,
+                    FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT)];
+            int retainedCount = 0;
+            int total = 0;
+            for (int index = 0; index < parentIndexes.length; index++) {
+                if (!isDescendant(parentIndexes, index, sectionIndex)) continue;
+                total++;
+                if (retainedCount < retained.length) {
+                    retained[retainedCount++] = index;
+                }
+            }
+            require(total > 0 && retainedCount > 0,
+                    "Fixed42 seed subtree was absent");
+            int[] indexes = new int[retainedCount];
+            System.arraycopy(retained, 0, indexes, 0, retainedCount);
+            return new Selection(indexes, total, total - retainedCount);
+        }
+
+        static String headerLine(
+                int recordCount,
+                int total,
+                int omitted,
+                int nodeCount,
+                String correlation,
+                int headingIndex,
+                int sectionIndex,
+                int routeIndex,
+                int mainIndex,
+                int popularMatches,
+                int bladeMatches) {
+            require(recordCount > 0
+                            && recordCount
+                                    <= FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT
+                            && total >= recordCount
+                            && total <= nodeCount
+                            && omitted == total - recordCount
+                            && nodeCount > 0
+                            && nodeCount <= FIXED42_SEED_AX_NODE_LIMIT
+                            && recordCount == Math.min(
+                                    total,
+                                    FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT)
+                            && validCorrelation(correlation)
+                            && headingIndex >= 0
+                            && headingIndex < nodeCount
+                            && sectionIndex > 0
+                            && sectionIndex < nodeCount
+                            && routeIndex >= 0
+                            && routeIndex < nodeCount
+                            && mainIndex >= 0
+                            && mainIndex < nodeCount
+                            && popularMatches >= 0
+                            && popularMatches <= nodeCount
+                            && bladeMatches >= 0
+                            && bladeMatches <= nodeCount,
+                    "Fixed42 seed subtree diagnostic header was invalid");
+            return "Fixed42-to61 seed subtree header"
+                    + " records=" + recordCount
+                    + " total=" + total
+                    + " omitted=" + omitted
+                    + " truncated=" + (omitted > 0)
+                    + " nodes=" + nodeCount
+                    + " correlation=" + correlation
+                    + " heading=" + headingIndex
+                    + " section=" + sectionIndex
+                    + " route=" + routeIndex
+                    + " main=" + mainIndex
+                    + " semantic0=" + popularMatches
+                    + " semantic1=" + bladeMatches
+                    + " limit=" + FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT
+                    + " flagMap=" + FLAG_MAP;
+        }
+
+        static String flags(
+                boolean popularText,
+                boolean popularDescription,
+                boolean bladeText,
+                boolean bladeDescription,
+                boolean productPackage,
+                boolean view,
+                boolean textView,
+                boolean button,
+                boolean visible,
+                boolean enabled,
+                boolean scrollable,
+                boolean clickable,
+                boolean focusable,
+                boolean focused,
+                boolean accessibilityFocused,
+                boolean liveRegion,
+                boolean mainAncestor,
+                boolean routeAncestor,
+                boolean sectionAncestor,
+                boolean mainResource) {
+            return new StringBuilder(20)
+                    .append(bit(popularText))
+                    .append(bit(popularDescription))
+                    .append(bit(bladeText))
+                    .append(bit(bladeDescription))
+                    .append(bit(productPackage))
+                    .append(bit(view))
+                    .append(bit(textView))
+                    .append(bit(button))
+                    .append(bit(visible))
+                    .append(bit(enabled))
+                    .append(bit(scrollable))
+                    .append(bit(clickable))
+                    .append(bit(focusable))
+                    .append(bit(focused))
+                    .append(bit(accessibilityFocused))
+                    .append(bit(liveRegion))
+                    .append(bit(mainAncestor))
+                    .append(bit(routeAncestor))
+                    .append(bit(sectionAncestor))
+                    .append(bit(mainResource))
+                    .toString();
+        }
+
+        static String recordLine(
+                int recordIndex,
+                int nodeCount,
+                String correlation,
+                int nodeIndex,
+                int parentIndex,
+                int windowId,
+                int left,
+                int top,
+                int right,
+                int bottom,
+                String flags) {
+            require(recordIndex >= 0
+                            && recordIndex
+                                    < FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT
+                            && nodeCount > 0
+                            && nodeCount <= FIXED42_SEED_AX_NODE_LIMIT
+                            && nodeIndex >= 0
+                            && nodeIndex < nodeCount
+                            && parentIndex >= -1
+                            && parentIndex < nodeCount
+                            && right >= left
+                            && bottom >= top
+                            && validCorrelation(correlation)
+                            && flags != null
+                            && flags.length() == 20
+                            && validFlags(flags),
+                    "Fixed42 seed subtree diagnostic record was invalid");
+            return "Fixed42-to61 seed subtree record"
+                    + " record=" + recordIndex
+                    + " correlation=" + correlation
+                    + " index=" + nodeIndex
+                    + " parent=" + parentIndex
+                    + " window=" + windowId
+                    + " bounds=" + left + "," + top + "," + right + "," + bottom
+                    + " flags=" + flags;
+        }
+
+        private static boolean isDescendant(
+                int[] parentIndexes, int childIndex, int ancestorIndex) {
+            int cursor = childIndex;
+            for (int depth = 0; cursor >= 0 && depth <= parentIndexes.length; depth++) {
+                if (cursor == ancestorIndex) return true;
+                cursor = parentIndexes[cursor];
+            }
+            require(cursor < 0, "Fixed42 seed subtree ancestry was cyclic");
+            return false;
+        }
+
+        private static boolean validCorrelation(String value) {
+            if (value == null) return false;
+            String[] fields = value.split(",", -1);
+            if (fields.length != 5) return false;
+            try {
+                for (String field : fields) Integer.parseInt(field);
+                return true;
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+
+        private static boolean validFlags(String value) {
+            if (value == null || value.length() != 20) return false;
+            for (int index = 0; index < value.length(); index++) {
+                char current = value.charAt(index);
+                if (current != '0' && current != '1') return false;
+            }
+            return true;
+        }
+
+        private static char bit(boolean value) {
+            return value ? '1' : '0';
+        }
+
+        private static void require(boolean condition, String message) {
+            if (!condition) throw new AssertionError(message);
         }
     }
 

@@ -3735,6 +3735,358 @@ ${retention}
   }
 }
 
+function fixed42SeedSubtreeDiagnosticContract(java) {
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const failureDiagnostic = methodBody(java, "logFixed42To61SeedHeadingFailure");
+  const subtreeDiagnostic = methodBody(java, "retainFixed42To61SeedSubtreeDiagnostic");
+  const retention = methodBody(java, "retainFixed42To61SeedFailureDiagnosticLines");
+  const policy = nestedClassDeclaration(java, "Fixed42SeedSubtreeDiagnosticPolicy");
+
+  need(java,
+    "private static final int FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT = 32;",
+    "seed subtree diagnostic lost its bounded record limit");
+  for (const token of [
+    'if (isFixed42To61AutomaticMode() && !headingMatches) {',
+    "logFixed42To61SeedHeadingFailure(",
+    'assertTrue("Fixed42 Popular Movies heading identity changed",',
+    "headingMatches",
+  ]) need(observe, token, `seed subtree diagnostic changed original eligibility: ${token}`);
+  const failureGate = observe.indexOf(
+    "if (isFixed42To61AutomaticMode() && !headingMatches) {",
+  );
+  const originalAssertion = observe.indexOf(
+    'assertTrue("Fixed42 Popular Movies heading identity changed",', failureGate,
+  );
+  const parentAssignment = observe.indexOf(
+    "popularSectionIndex = heading.parentIndex;", originalAssertion,
+  );
+  assert.ok(failureGate >= 0 && originalAssertion > failureGate
+      && parentAssignment > originalAssertion,
+  "seed subtree diagnostic moved or weakened the unchanged heading assertion");
+  assert.equal((observe.match(/retainFixed42To61SeedSubtreeDiagnostic\(/g) ?? []).length, 0,
+    "subtree diagnostics escaped the failure-only diagnostic method");
+
+  const oldRetention = failureDiagnostic.indexOf(
+    "retainFixed42To61SeedFailureDiagnosticLines(lines);");
+  const subtreeRetention = failureDiagnostic.indexOf(
+    "retainFixed42To61SeedSubtreeDiagnostic(", oldRetention);
+  assert.ok(oldRetention >= 0 && subtreeRetention > oldRetention,
+    "subtree retention no longer follows the established failure diagnostic");
+  need(failureDiagnostic, "nodes,", "subtree diagnostic lost the cached graph");
+  need(failureDiagnostic, "headingIndex,", "subtree diagnostic lost the failed heading");
+  need(failureDiagnostic, "discoverIndex,", "subtree diagnostic lost the exact route");
+  need(failureDiagnostic, "mainIndex,", "subtree diagnostic lost the main root");
+  need(failureDiagnostic, "correlation", "subtree diagnostic lost same-graph correlation");
+  need(failureDiagnostic, "catch (RuntimeException | AssertionError ignored)",
+    "subtree diagnostics can replace the original heading failure");
+
+  for (const token of [
+    "Fixed42AxNode heading = nodes.get(headingIndex);",
+    "int sectionIndex = heading.parentIndex;",
+    "int[] parentIndexes = new int[nodes.size()];",
+    "parentIndexes[index] = candidate.parentIndex;",
+    'candidate.semanticEquals("Popular Movies")',
+    "candidate.semanticEquals(AUTOMATIC_SAMPLE_TITLE)",
+    "Fixed42SeedSubtreeDiagnosticPolicy.select(",
+    "parentIndexes, sectionIndex",
+    "selection.indexes.length",
+    "selection.total",
+    "selection.omitted",
+    "Fixed42SeedSubtreeDiagnosticPolicy.headerLine(",
+    "Fixed42SeedSubtreeDiagnosticPolicy.flags(",
+    "Fixed42SeedSubtreeDiagnosticPolicy.recordLine(",
+    "candidate.parentIndex",
+    "candidate.info.getWindowId()",
+    "candidate.bounds.left",
+    "candidate.bounds.top",
+    "candidate.bounds.right",
+    "candidate.bounds.bottom",
+    '"Popular Movies".equals(candidate.text)',
+    '"Popular Movies".equals(candidate.description)',
+    "AUTOMATIC_SAMPLE_TITLE.equals(candidate.text)",
+    "AUTOMATIC_SAMPLE_TITLE.equals(candidate.description)",
+    "OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName)",
+    '"android.view.View".equals(candidate.className)',
+    '"android.widget.TextView".equals(candidate.className)',
+    '"android.widget.Button".equals(candidate.className)',
+    "candidate.visible",
+    "candidate.enabled",
+    "candidate.scrollable",
+    "candidate.clickable",
+    "candidate.info.isFocusable()",
+    "candidate.info.isFocused()",
+    "candidate.info.isAccessibilityFocused()",
+    "candidate.info.getLiveRegion()",
+    "fixed42IsDescendant(nodes, nodeIndex, mainIndex)",
+    "fixed42IsDescendant(nodes, nodeIndex, discoverIndex)",
+    "fixed42IsDescendant(nodes, nodeIndex, sectionIndex)",
+    '"main-content".equals(candidate.resourceName)',
+    "retainFixed42To61SeedFailureDiagnosticLines(lines);",
+  ]) need(subtreeDiagnostic, token, `seed subtree diagnostic lost ${token}`);
+  assert.doesNotMatch(subtreeDiagnostic,
+    /getRootInActiveWindow|clearCache|waitForIdle|SystemClock|\.click\(|performAction|device\.(?:click|swipe|press)/,
+    "seed subtree diagnostic added a query, wait, clock, or input");
+  assert.doesNotMatch(subtreeDiagnostic,
+    /lines\.add\([^\n]*(?:candidate\.(?:text|description|packageName|className|resourceName)|getText|getContentDescription|getPackageName|getClassName)/,
+    "seed subtree diagnostic passed a raw accessibility identity to retention");
+
+  for (const token of [
+    '"s0t,s0d,s1t,s1d,pkg,v,tv,btn,vis,en,scr,clk,foc,fd,af,live,main,route,section,rm"',
+    "static Selection select(int[] parentIndexes, int sectionIndex)",
+    "parentIndexes.length <= FIXED42_SEED_AX_NODE_LIMIT",
+    "parentIndexes[index] >= 0 && parentIndexes[index] < index",
+    "isDescendant(parentIndexes, index, sectionIndex)",
+    "FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT",
+    "new Selection(indexes, total, total - retainedCount)",
+    '"Fixed42-to61 seed subtree header"',
+    '" records=" + recordCount',
+    '" total=" + total',
+    '" omitted=" + omitted',
+    '" truncated=" + (omitted > 0)',
+    '" correlation=" + correlation',
+    '" heading=" + headingIndex',
+    '" section=" + sectionIndex',
+    '" route=" + routeIndex',
+    '" main=" + mainIndex',
+    '" semantic0=" + popularMatches',
+    '" semantic1=" + bladeMatches',
+    '" limit=" + FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT',
+    '" flagMap=" + FLAG_MAP',
+    "omitted == total - recordCount",
+    "recordCount == Math.min(",
+    "new StringBuilder(20)",
+    ".append(bit(popularText))",
+    ".append(bit(popularDescription))",
+    ".append(bit(bladeText))",
+    ".append(bit(bladeDescription))",
+    ".append(bit(productPackage))",
+    ".append(bit(view))",
+    ".append(bit(textView))",
+    ".append(bit(button))",
+    ".append(bit(visible))",
+    ".append(bit(enabled))",
+    ".append(bit(scrollable))",
+    ".append(bit(clickable))",
+    ".append(bit(focusable))",
+    ".append(bit(focused))",
+    ".append(bit(accessibilityFocused))",
+    ".append(bit(liveRegion))",
+    ".append(bit(mainAncestor))",
+    ".append(bit(routeAncestor))",
+    ".append(bit(sectionAncestor))",
+    ".append(bit(mainResource))",
+    '"Fixed42-to61 seed subtree record"',
+    '" index=" + nodeIndex',
+    '" parent=" + parentIndex',
+    '" window=" + windowId',
+    '" bounds=" + left + "," + top + "," + right + "," + bottom',
+    '" flags=" + flags',
+    "flags.length() == 20",
+    "validCorrelation(correlation)",
+    "validFlags(flags)",
+  ]) need(policy, token, `seed subtree policy lost ${token}`);
+  assert.doesNotMatch(policy,
+    /textValue|descriptionValue|packageValue|classValue|resourceValue|https?:|credential|token|cookie|authorization/i,
+    "seed subtree policy accepts raw identity or credential-bearing values");
+
+  for (const token of [
+    "actions.size() + values.size() > MAX_ACTION_LINES",
+    "value.length() >= 500",
+    "!value.equals(safe(value))",
+    "for (String value : values) log(value);",
+  ]) need(retention, token, `seed subtree retention lost ${token}`);
+}
+
+function runFixed42SeedSubtreeDiagnosticHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42SeedSubtreeDiagnosticPolicy");
+  const safe = methodBody(java, "safe");
+  const log = methodBody(java, "log");
+  const retention = methodBody(java, "retainFixed42To61SeedFailureDiagnosticLines");
+  const harness = `
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+
+public final class Fixed42SeedSubtreeDiagnosticHarness {
+    private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
+    private static final int FIXED42_TO61_SEED_SUBTREE_DIAGNOSTIC_RECORD_LIMIT = 32;
+    private static final int MAX_ACTION_LINES = 260;
+    private static final Pattern URL = Pattern.compile("https?://\\\\S+", Pattern.CASE_INSENSITIVE);
+    private static final List<String> actions = new ArrayList<>();
+    ${policy}
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+    private static void fail(String message) { throw new AssertionError(message); }
+    private static void reject(Runnable operation, String message) {
+        try {
+            operation.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError(message);
+    }
+    private static String safe(String value) {
+${safe}
+    }
+    private static void log(String value) {
+${log}
+    }
+    private static void retainFixed42To61SeedFailureDiagnosticLines(List<String> values) {
+${retention}
+    }
+
+    public static void main(String[] ignored) {
+        int[] graph = {-1, 0, 1, 1, 3, 1, 5, 0};
+        Fixed42SeedSubtreeDiagnosticPolicy.Selection selection =
+                Fixed42SeedSubtreeDiagnosticPolicy.select(graph, 1);
+        require(selection.total == 6 && selection.omitted == 0,
+                "whole cached subtree count changed");
+        require(selection.indexes.length == 6,
+                "whole cached subtree was not retained");
+        int[] expected = {1, 2, 3, 4, 5, 6};
+        for (int index = 0; index < expected.length; index++) {
+            require(selection.indexes[index] == expected[index],
+                    "unknown, nested, foreign, or scrollable descendant was omitted");
+        }
+
+        String correlation = "8,10,10,10,10";
+        String headingFlags = Fixed42SeedSubtreeDiagnosticPolicy.flags(
+                true, false, false, false, true, false, true, false,
+                false, true, false, false, false, false, false, false,
+                true, true, true, false);
+        String sectionFlags = Fixed42SeedSubtreeDiagnosticPolicy.flags(
+                false, false, false, false, true, true, false, false,
+                false, true, false, false, false, false, false, false,
+                true, true, true, false);
+        String unknownFlags = Fixed42SeedSubtreeDiagnosticPolicy.flags(
+                false, false, false, false, false, false, false, false,
+                false, false, false, true, true, false, false, false,
+                true, true, true, false);
+        String railFlags = Fixed42SeedSubtreeDiagnosticPolicy.flags(
+                false, false, false, false, false, true, false, false,
+                false, true, true, false, false, false, false, false,
+                true, true, true, false);
+        String bladeFlags = Fixed42SeedSubtreeDiagnosticPolicy.flags(
+                false, false, true, false, true, false, false, true,
+                false, true, false, true, true, false, false, false,
+                true, true, true, false);
+        require(headingFlags.equals("10001010010000001110"),
+                "heading subtree flag mapping changed");
+        require(sectionFlags.equals("00001100010000001110"),
+                "section subtree flag mapping changed");
+        require(railFlags.charAt(10) == '1' && railFlags.charAt(4) == '0',
+                "foreign scrollable descendant flags were lost");
+
+        String header = Fixed42SeedSubtreeDiagnosticPolicy.headerLine(
+                6, 6, 0, 8, correlation, 2, 1, 0, 0, 1, 1);
+        String[] flags = {
+            sectionFlags, headingFlags, unknownFlags, unknownFlags, railFlags, bladeFlags
+        };
+        int[] parents = {0, 1, 1, 3, 1, 5};
+        int[] windows = {10, 10, 10, 10, 11, 10};
+        List<String> lines = new ArrayList<>();
+        lines.add(header);
+        for (int record = 0; record < selection.indexes.length; record++) {
+            int node = selection.indexes[record];
+            lines.add(Fixed42SeedSubtreeDiagnosticPolicy.recordLine(
+                    record, 8, correlation, node, parents[record], windows[record],
+                    28 + record, 1922, 443 + record, 1922, flags[record]));
+        }
+        retainFixed42To61SeedFailureDiagnosticLines(lines);
+        require(actions.equals(lines),
+                "subtree formatter-to-safe-to-log pipeline changed a record");
+        require(header.contains("records=6 total=6 omitted=0 truncated=false nodes=8")
+                        && header.contains("correlation=" + correlation)
+                        && header.contains("heading=2 section=1 route=0 main=0")
+                        && header.contains("semantic0=1 semantic1=1 limit=32")
+                        && header.contains("flagMap=s0t,s0d,s1t,s1d,pkg,v,tv,btn,vis,en,scr,clk,foc,fd,af,live,main,route,section,rm"),
+                "subtree header lost graph counts, correlation, or flag map");
+        require(actions.get(4).contains("index=4 parent=3 window=10"),
+                "nested unknown descendant was lost");
+        require(actions.get(5).contains("index=5 parent=1 window=11")
+                        && actions.get(5).contains("flags=" + railFlags),
+                "foreign scrollable descendant was lost");
+        for (String line : actions) {
+            require(line.length() < 500,
+                    "subtree diagnostic reached the production safe limit");
+            require(safe(line).equals(line),
+                    "subtree diagnostic was clipped or redacted");
+            require(!line.contains("Popular Movies")
+                            && !line.contains("Blade Runner")
+                            && !line.contains("http")
+                            && !line.contains("packageValue")
+                            && !line.contains("classValue"),
+                    "subtree diagnostic leaked a raw identity");
+        }
+
+        int[] large = new int[40];
+        large[0] = -1;
+        large[1] = 0;
+        for (int index = 2; index < large.length; index++) large[index] = 1;
+        Fixed42SeedSubtreeDiagnosticPolicy.Selection truncated =
+                Fixed42SeedSubtreeDiagnosticPolicy.select(large, 1);
+        require(truncated.indexes.length == 32
+                        && truncated.total == 39
+                        && truncated.omitted == 7,
+                "bounded subtree omission accounting changed");
+        String truncatedHeader = Fixed42SeedSubtreeDiagnosticPolicy.headerLine(
+                32, 39, 7, 40, "40,10,10,10,10", 2, 1, 0, 0, 1, 0);
+        require(truncatedHeader.contains("omitted=7 truncated=true"),
+                "truncated subtree header lost omission count");
+        require(truncatedHeader.length() < 500
+                        && safe(truncatedHeader).equals(truncatedHeader),
+                "maximum retained subtree header was clipped");
+
+        reject(() -> Fixed42SeedSubtreeDiagnosticPolicy.select(
+                        new int[] {-1, 0, -1}, 1),
+                "detached cached node survived");
+        reject(() -> Fixed42SeedSubtreeDiagnosticPolicy.select(
+                        new int[] {-1, 0, 2}, 1),
+                "cyclic cached node survived");
+        reject(() -> Fixed42SeedSubtreeDiagnosticPolicy.headerLine(
+                        6, 6, 1, 8, correlation, 2, 1, 0, 0, 1, 1),
+                "wrong omission accounting survived");
+        reject(() -> Fixed42SeedSubtreeDiagnosticPolicy.recordLine(
+                        0, 8, correlation, 8, 1, 10,
+                        0, 0, 1, 1, headingFlags),
+                "out-of-range node survived");
+        reject(() -> Fixed42SeedSubtreeDiagnosticPolicy.recordLine(
+                        0, 8, correlation, 2, 1, 10,
+                        0, 0, 1, 1, headingFlags.substring(1)),
+                "missing subtree flag survived");
+
+        actions.clear();
+        for (int index = 0; index < MAX_ACTION_LINES - 1; index++) log("pad");
+        int retained = actions.size();
+        retainFixed42To61SeedFailureDiagnosticLines(lines);
+        require(actions.size() == retained,
+                "subtree records partially crossed the action-log cap");
+        System.out.println("fixed42-seed-subtree-diagnostic-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-seed-subtree-diagnostic-"));
+  const sourceFile = path.join(directory, "Fixed42SeedSubtreeDiagnosticHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0,
+      `fixed42 seed subtree diagnostic javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand,
+      ["-cp", directory, "Fixed42SeedSubtreeDiagnosticHarness"], { encoding: "utf8" });
+    assert.equal(run.status, 0,
+      `fixed42 seed subtree diagnostic harness failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-seed-subtree-diagnostic-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function runFixed42MainGeometryPolicyHarness(java) {
   const policy = nestedClassDeclaration(java, "Fixed42MainGeometryPolicy");
   const harness = `
@@ -4614,6 +4966,59 @@ test("fixed42-to61 seed failure formatter preserves all fields through safe and 
     () => runFixed42SeedFailureDiagnosticHarness(source.replace(policy, overlongPolicy)),
     "overlong seed-failure record survived the actual action pipeline",
   );
+});
+
+test("fixed42-to61 heading failure retains the complete bounded cached section subtree", () => {
+  fixed42SeedFailureDiagnosticContract(source);
+  fixed42SeedSubtreeDiagnosticContract(source);
+  runFixed42SeedSubtreeDiagnosticHarness(source);
+
+  const policy = nestedClassDeclaration(source, "Fixed42SeedSubtreeDiagnosticPolicy");
+  const diagnostic = methodBody(source, "retainFixed42To61SeedSubtreeDiagnostic");
+  const mutants = [
+    ["removed-call", source.replace(
+      "            retainFixed42To61SeedSubtreeDiagnostic(\n",
+      "            retainFixed42To61SeedFailureDiagnosticLines(\n",
+    )],
+    ["section-only", source.replace(policy, policy.replace(
+      "if (!isDescendant(parentIndexes, index, sectionIndex)) continue;",
+      "if (index != sectionIndex) continue;",
+    ))],
+    ["wrong-omission", source.replace(policy, policy.replace(
+      "new Selection(indexes, total, total - retainedCount)",
+      "new Selection(indexes, total, 0)",
+    ))],
+    ["parent-validation", source.replace(policy, policy.replace(
+      "parentIndexes[index] >= 0 && parentIndexes[index] < index",
+      "parentIndexes[index] >= -1 && parentIndexes[index] <= index",
+    ))],
+    ["missing-scrollable", source.replace(policy, policy.replace(
+      ".append(bit(scrollable))",
+      "",
+    ))],
+    ["raw-identity", source.replace(policy, policy.replace(
+      '+ " flags=" + flags;',
+      '+ " flags=" + flags + " classValue";',
+    ))],
+    ["new-query", source.replace(diagnostic, diagnostic.replace(
+      "Fixed42AxNode heading = nodes.get(headingIndex);",
+      "instrumentation.getUiAutomation().getRootInActiveWindow();\n"
+        + "        Fixed42AxNode heading = nodes.get(headingIndex);",
+    ))],
+    ["input", source.replace(diagnostic, diagnostic.replace(
+      "retainFixed42To61SeedFailureDiagnosticLines(lines);",
+      "device.click(1, 1);\n        retainFixed42To61SeedFailureDiagnosticLines(lines);",
+    ))],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, source, `seed subtree ${label} mutant anchor was absent`);
+    assert.throws(
+      () => label === "new-query" || label === "input" || label === "removed-call"
+        ? fixed42SeedSubtreeDiagnosticContract(mutant)
+        : runFixed42SeedSubtreeDiagnosticHarness(mutant),
+      `seed subtree ${label} mutant survived`,
+    );
+  }
 });
 
 test("fixed42-to61 geometry-only mismatch reacquires raw exact bounds without input", () => {
