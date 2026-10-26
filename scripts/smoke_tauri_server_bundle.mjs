@@ -219,7 +219,12 @@ async function main() {
   } finally {
     if (exitStatus == null) child.kill();
     await childExit;
-    rmSync(tempRoot, { recursive: true, force: true });
+    rmSync(tempRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
 }
 

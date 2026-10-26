@@ -193,7 +193,7 @@ test("public 25 uses the visible update card and an ordinary exact-button tap", 
   assert.equal(source.match(/OtaFlowPolicy\.matchesVersionPins\(/g)?.length, 1);
   assert.doesNotMatch(source, /private static final String (?:BASELINE|TARGET)_VERSION/);
   assert.doesNotMatch(source, /private static boolean (?:expectedArguments|matchesVersionPins)\(/);
-  assert.doesNotMatch(source, /2\.3\.21|ANDROID APK UPDATES|InfoTip|AccessibilityNodeInfo|ACTION_CLICK|performAction/);
+  assert.doesNotMatch(source, /2\.3\.21|ANDROID APK UPDATES|InfoTip|ACTION_CLICK/);
   assert.match(source, /arguments\.getString\("signerSha256", ""\)/);
   assert.match(
     source,
@@ -208,7 +208,19 @@ test("public 25 uses the visible update card and an ordinary exact-button tap", 
     source.indexOf("private UiObject2 scrollUntilVisibleExactProduct("),
   );
   assert.match(helper, /button\.click\(\);/);
-  assert.doesNotMatch(helper, /By\.desc|InfoTip|performAction|ACTION_CLICK|device\.click/);
+  assert.doesNotMatch(
+    helper,
+    /By\.desc|InfoTip|AccessibilityNodeInfo|performAction|ACTION_CLICK|device\.click/,
+  );
+  const fixed42Scroll = source.slice(
+    source.indexOf("private void performFixed42SeedScroll("),
+    source.indexOf("private Fixed42SeedSnapshot observeFixed42SeedSnapshot()"),
+  );
+  assert.equal(source.match(/\.performAction\(/g)?.length, 1);
+  assert.match(fixed42Scroll, /node\.performAction\(actionId\)/);
+  assert.match(fixed42Scroll, /ACTION_SCROLL_FORWARD/);
+  assert.match(fixed42Scroll, /ACTION_SCROLL_RIGHT/);
+  assert.doesNotMatch(fixed42Scroll, /ACTION_CLICK|\b\d{3,}\b/);
   assert.doesNotMatch(source, /ANDROID APK UPDATES|public 2\.3\.21 Android updater information/);
 });
 

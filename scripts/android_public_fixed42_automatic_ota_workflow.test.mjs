@@ -13,6 +13,10 @@ const workflowPath = process.env.FIXED42_WORKFLOW_SOURCE == null
   ? defaultWorkflow
   : path.resolve(process.env.FIXED42_WORKFLOW_SOURCE);
 const source = fs.readFileSync(workflowPath, "utf8");
+const runtimeSource = fs.readFileSync(
+  path.join(root, "scripts/android_public_ota_runtime_check.py"),
+  "utf8",
+);
 
 function need(haystack, needle, message) {
   assert.ok(haystack.includes(needle), message);
@@ -128,4 +132,43 @@ test("recorded protocol separates automatic discovery from one later manual insp
     'echo "automaticDiscoveryProofIncludesPostInstallInspection=true"',
   );
   assert.equal(changed.includes('echo "automaticDiscoveryProofIncludesPostInstallInspection=false"'), false);
+});
+
+test("failure trap always retains bounded host health before conditional device evidence", () => {
+  for (const token of [
+    "collect_fixed42_host_failure_diagnostics",
+    '--fixed42-host-failure-diagnostics',
+    '--fixed42-device-capture-gate',
+    '--emulator-pid-liveness "$emulator_pid_liveness"',
+    '--emulator-exit-status "$emulator_exit_status"',
+    '--runner-temp "$RUNNER_TEMP"',
+    '--workspace "$GITHUB_WORKSPACE"',
+    'command -v adb',
+    'status=$?',
+    'exit "$status"',
+  ]) need(source, token, `bounded host failure observation lost ${token}`);
+  for (const token of [
+    'sha256_file(resolved_adb)',
+    'os.statvfs(path)',
+    '"MemAvailable"',
+    '[str(resolved_adb), "version"]',
+    '[str(resolved_adb), "-s", serial, "get-state"]',
+    'workflow-host-diagnostics.json',
+    '"workflow-adb-get-state"',
+    'f"{stem}-{stream}-retention.json"',
+  ]) need(runtimeSource, token, `bounded host failure observation lost ${token}`);
+
+  const hostStart = source.indexOf("collect_fixed42_host_failure_diagnostics");
+  const deviceGate = source.indexOf('if [ "$get_state" != "device" ]', hostStart);
+  assert.ok(hostStart >= 0, "host evidence must be collected");
+  assert.equal(deviceGate, -1, "stdout text alone must not admit device capture");
+  const semanticGate = source.indexOf("--fixed42-device-capture-gate", hostStart);
+  const deviceUnavailable = source.indexOf('echo "deviceEvidence=unavailable"', semanticGate);
+  assert.ok(semanticGate > hostStart && deviceUnavailable > semanticGate,
+    "validated host receipt must gate conditional device evidence");
+  assert.equal(source.includes("adb reconnect"), false);
+  assert.equal(source.includes("adb kill-server"), false);
+  assert.equal(source.includes("adb start-server"), false);
+  assert.equal(/\bps\s+(?:aux|-[a-z]*e)/.test(source), false, "failure evidence must not enumerate processes");
+  assert.equal(/\benv\b\s*>/.test(source), false, "failure evidence must not dump environment values");
 });
