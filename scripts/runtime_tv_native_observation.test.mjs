@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -37,6 +38,25 @@ function method(source, name) {
     if (depth === 0) return source.slice(lineStart, index + 1);
   }
   assert.fail(`unclosed Java method ${name}`);
+}
+
+function nestedType(source, name) {
+  const signature = new RegExp(
+    `^\\s*private\\s+static\\s+final\\s+class\\s+${name}\\b`,
+    "m",
+  );
+  const match = signature.exec(source);
+  assert.ok(match, `missing Java nested type ${name}`);
+  const lineStart = match.index;
+  const open = source.indexOf("{", match.index + match[0].length);
+  assert.ok(open > match.index, `missing Java nested type body ${name}`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) return source.slice(lineStart, index + 1);
+  }
+  assert.fail(`unclosed Java nested type ${name}`);
 }
 
 function runJavaSources(sources, mainClass) {
@@ -247,11 +267,13 @@ public final class RuntimeTvNativeFocusProbe {
     private static final RuntimeTvNativeFocus.Bounds NATIVE_SETTINGS =
             new RuntimeTvNativeFocus.Bounds(1820, 972, 1916, 1068);
     private static final RuntimeTvNativeFocus.Bounds SETTINGS_LIST =
-            new RuntimeTvNativeFocus.Bounds(720, 180, 1200, 900);
-    private static final RuntimeTvNativeFocus.Bounds AUDIO_TARGET =
-            new RuntimeTvNativeFocus.Bounds(900, 450, 1100, 550);
-    private static final RuntimeTvNativeFocus.Bounds POPUP_ROW_BELOW =
-            new RuntimeTvNativeFocus.Bounds(900, 650, 1100, 750);
+            new RuntimeTvNativeFocus.Bounds(1620, 844, 1920, 1052);
+    private static final RuntimeTvNativeFocus.Bounds SPEED_FOCUSED_ROW =
+            new RuntimeTvNativeFocus.Bounds(1620, 844, 1920, 948);
+    private static final RuntimeTvNativeFocus.Bounds AUDIO_TEXT =
+            new RuntimeTvNativeFocus.Bounds(1704, 964, 1776, 1002);
+    private static final RuntimeTvNativeFocus.Bounds AUDIO_ACTIVATION_ROW =
+            new RuntimeTvNativeFocus.Bounds(1620, 948, 1920, 1052);
 
     private static void check(boolean value, String label) {
         if (!value) throw new AssertionError(label);
@@ -264,12 +286,6 @@ public final class RuntimeTvNativeFocusProbe {
             return;
         }
         throw new AssertionError("Expected AssertionError: " + label);
-    }
-
-    private static RuntimeTvNativeFocus.FocusedNode focused(
-            String packageName,
-            RuntimeTvNativeFocus.Bounds bounds) {
-        return new RuntimeTvNativeFocus.FocusedNode(packageName, bounds);
     }
 
     private static RuntimeTvNativeFocus.FocusedNode focused(
@@ -295,217 +311,233 @@ public final class RuntimeTvNativeFocusProbe {
     private static RuntimeTvNativeFocus.ScopeNode settings(
             String packageName,
             String resourceName,
+            String className,
             RuntimeTvNativeFocus.Bounds bounds) {
         return RuntimeTvNativeFocus.ScopeNode.settingsList(
-                packageName, resourceName,
-                RuntimeTvNativeFocus.SETTINGS_LIST_CLASS, true, bounds);
+                packageName, resourceName, className, true, bounds);
     }
 
-    private static void retainedDualFocusCoordinatesUseTheNativeDescendant() {
+    private static RuntimeTvNativeFocus.ScopeNode exactSettings() {
+        return settings(
+                PRODUCT_PACKAGE,
+                SETTINGS_LIST_RESOURCE,
+                RuntimeTvNativeFocus.SETTINGS_LIST_CLASS,
+                SETTINGS_LIST);
+    }
+
+    private static RuntimeTvNativeFocus.PopupObservationTransaction ownedTransition() {
+        return RuntimeTvNativeFocus.beginSettingsPopupTransaction(
+                true, true, RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW);
+    }
+
+    private static RuntimeTvNativeFocus.Ownership actualRetainedPopupOwnership(
+            RuntimeTvNativeFocus.PopupObservationTransaction transaction) {
+        RuntimeTvNativeFocus.ScopeNode popup = exactSettings();
+        return RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(target(PRODUCT_PACKAGE, true, AUDIO_TEXT)),
+                List.of(),
+                List.of(popup),
+                List.of(popup),
+                transaction);
+    }
+
+    private static void mainControlsRemainStrictAndScoped() {
         check(RuntimeTvNativeFocus.direction(PAUSE, WEB_PLAY)
                         == RuntimeTvNativeFocus.Direction.RIGHT,
                 "legacy global Web focus did not reproduce wrong RIGHT steering");
-
-        RuntimeTvNativeFocus.Selection cc = RuntimeTvNativeFocus.select(
-                1, PRODUCT_PACKAGE, List.of(focused(PRODUCT_PACKAGE, NATIVE_CC)));
-        check(cc.present, "scoped native CC focus missing");
-        check(RuntimeTvNativeFocus.direction(PAUSE, cc.bounds)
-                        == RuntimeTvNativeFocus.Direction.LEFT,
-                "scoped native CC focus did not steer LEFT toward Pause");
-
-        RuntimeTvNativeFocus.Selection settings = RuntimeTvNativeFocus.select(
-                1, PRODUCT_PACKAGE, List.of(focused(PRODUCT_PACKAGE, NATIVE_SETTINGS)));
-        check(settings.present, "scoped native Settings focus missing");
-        check(RuntimeTvNativeFocus.direction(PAUSE, settings.bounds)
-                        == RuntimeTvNativeFocus.Direction.LEFT,
-                "scoped native Settings focus did not steer LEFT toward Pause");
-    }
-
-    private static RuntimeTvNativeFocus.Ownership popupOwnership() {
-        RuntimeTvNativeFocus.ScopeNode player = player(PRODUCT_PACKAGE, PLAYER_ROOT);
-        RuntimeTvNativeFocus.ScopeNode popup =
-                settings(PRODUCT_PACKAGE, SETTINGS_LIST_RESOURCE, SETTINGS_LIST);
-        return RuntimeTvNativeFocus.selectOwnership(
+        RuntimeTvNativeFocus.Selection nativeFocus = RuntimeTvNativeFocus.select(
+                1,
                 PRODUCT_PACKAGE,
-                List.of(target(PRODUCT_PACKAGE, true, AUDIO_TARGET)),
+                List.of(focused(
+                        RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW,
+                        PRODUCT_PACKAGE,
+                        NATIVE_CC)));
+        check(nativeFocus.present, "scoped native focus missing");
+        check(RuntimeTvNativeFocus.direction(PAUSE, nativeFocus.bounds)
+                        == RuntimeTvNativeFocus.Direction.LEFT,
+                "scoped native focus did not steer LEFT toward Pause");
+        expectAssertion(() -> RuntimeTvNativeFocus.select(
+                0, PRODUCT_PACKAGE, List.of()), "missing main PlayerView");
+        expectAssertion(() -> RuntimeTvNativeFocus.select(
+                2, PRODUCT_PACKAGE, List.of()), "ambiguous main PlayerView");
+        expectAssertion(() -> RuntimeTvNativeFocus.select(
+                1, "example.wrong", List.of()), "wrong main PlayerView package");
+
+        RuntimeTvNativeFocus.ScopeNode player = player(PRODUCT_PACKAGE, PLAYER_ROOT);
+        RuntimeTvNativeFocus.Ownership ownership = RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(target(PRODUCT_PACKAGE, true, PAUSE)),
                 List.of(player),
-                List.of(popup),
-                List.of(popup));
+                List.of(),
+                List.of(player),
+                null);
+        check(ownership.targetPresent
+                        && ownership.scopeKind == RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW,
+                "main control did not retain PlayerView ownership");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(target(PRODUCT_PACKAGE, true, PAUSE)),
+                List.of(),
+                List.of(),
+                List.of(player),
+                null), "zero-root main control");
     }
 
-    private static void popupTargetUsesOnlyItsSiblingSettingsListFocus() {
-        check(RuntimeTvNativeFocus.direction(AUDIO_TARGET, WEB_PLAY)
+    private static void retainedPopupWithNoPlayerViewSteersDown() {
+        check(RuntimeTvNativeFocus.direction(AUDIO_ACTIVATION_ROW, WEB_PLAY)
                         == RuntimeTvNativeFocus.Direction.RIGHT,
                 "stale Web focus did not reproduce wrong RIGHT steering");
-        check(RuntimeTvNativeFocus.direction(AUDIO_TARGET, NATIVE_SETTINGS)
+        check(RuntimeTvNativeFocus.direction(AUDIO_ACTIVATION_ROW, NATIVE_SETTINGS)
                         == RuntimeTvNativeFocus.Direction.LEFT,
                 "stale controller focus did not reproduce wrong LEFT steering");
 
-        RuntimeTvNativeFocus.Ownership ownership = popupOwnership();
+        RuntimeTvNativeFocus.PopupObservationTransaction transaction = ownedTransition();
+        RuntimeTvNativeFocus.Ownership ownership = actualRetainedPopupOwnership(transaction);
         check(ownership.targetPresent
                         && ownership.scopeKind == RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
-                "popup target did not select its sibling Media3 settings list");
+                "actual popup target did not select the current Media3 list");
         RuntimeTvNativeFocus.Selection popupFocus = RuntimeTvNativeFocus.selectFocused(
                 ownership,
                 List.of(focused(
                         RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
                         PRODUCT_PACKAGE,
-                        POPUP_ROW_BELOW)));
-        check(popupFocus.present, "popup row focus was not selected");
-        check(RuntimeTvNativeFocus.direction(AUDIO_TARGET, popupFocus.bounds)
-                        == RuntimeTvNativeFocus.Direction.UP,
-                "popup row below the target did not steer UP");
-        RuntimeTvNativeFocus.Selection noPopupFocus =
-                RuntimeTvNativeFocus.selectFocused(ownership, List.of());
-        check(!noPopupFocus.present && noPopupFocus.bounds == null,
-                "zero popup focus did not preserve the no-focus fallback state");
+                        SPEED_FOCUSED_ROW)));
+        check(popupFocus.present, "actual Speed row focus was not selected");
+        check(RuntimeTvNativeFocus.direction(AUDIO_ACTIVATION_ROW, popupFocus.bounds)
+                        == RuntimeTvNativeFocus.Direction.DOWN,
+                "actual Audio row below Speed did not steer DOWN");
+        transaction.close();
+        check(!transaction.isActive(), "popup transaction did not end on close");
+        expectAssertion(() -> actualRetainedPopupOwnership(transaction),
+                "closed popup transaction reused");
     }
 
-    private static void zeroFocusPreservesFallbackState() {
-        RuntimeTvNativeFocus.Selection selection = RuntimeTvNativeFocus.select(
-                1, PRODUCT_PACKAGE, List.of());
-        check(!selection.present && selection.bounds == null,
-                "zero native focus did not preserve the no-focus fallback state");
+    private static void transactionEndsOnFailure() {
+        RuntimeTvNativeFocus.PopupObservationTransaction transaction = ownedTransition();
+        try {
+            throw new IllegalStateException("synthetic popup failure");
+        } catch (IllegalStateException expected) {
+            check(transaction.isActive(), "transaction ended before failure cleanup");
+        } finally {
+            transaction.close();
+        }
+        check(!transaction.isActive(), "popup transaction remained active after failure cleanup");
     }
 
-    private static void invalidScopesFailClosed() {
-        expectAssertion(() -> RuntimeTvNativeFocus.select(
-                0, PRODUCT_PACKAGE, List.of()), "missing admitted root");
-        expectAssertion(() -> RuntimeTvNativeFocus.select(
-                2, PRODUCT_PACKAGE, List.of()), "multiple admitted roots");
-        expectAssertion(() -> RuntimeTvNativeFocus.select(
-                1, "example.wrong", List.of()), "wrong root package");
-        expectAssertion(() -> RuntimeTvNativeFocus.select(
-                1, PRODUCT_PACKAGE, List.of(focused("example.wrong", NATIVE_CC))),
-                "wrong focused package");
-        expectAssertion(() -> RuntimeTvNativeFocus.select(
-                1, PRODUCT_PACKAGE, List.of(
-                        focused(PRODUCT_PACKAGE, NATIVE_CC),
-                        focused(PRODUCT_PACKAGE, NATIVE_SETTINGS))),
-                "ambiguous native focus");
-        expectAssertion(() -> RuntimeTvNativeFocus.select(
-                1, PRODUCT_PACKAGE, List.of(focused(
-                        PRODUCT_PACKAGE,
-                        new RuntimeTvNativeFocus.Bounds(4, 4, 4, 8)))),
-                "empty focused bounds");
+    private static void rejectsUnownedAndInvalidTransitions() {
+        expectAssertion(() -> RuntimeTvNativeFocus.beginSettingsPopupTransaction(
+                false, true, RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW),
+                "missing exact Settings target");
+        expectAssertion(() -> RuntimeTvNativeFocus.beginSettingsPopupTransaction(
+                true, false, RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW),
+                "unfocused exact Settings target");
+        expectAssertion(() -> RuntimeTvNativeFocus.beginSettingsPopupTransaction(
+                true, true, RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST),
+                "Settings transition not owned by admitted PlayerView");
+        expectAssertion(() -> actualRetainedPopupOwnership(null),
+                "popup without owned transition");
 
         RuntimeTvNativeFocus.ScopeNode player = player(PRODUCT_PACKAGE, PLAYER_ROOT);
-        RuntimeTvNativeFocus.ScopeNode popup =
-                settings(PRODUCT_PACKAGE, SETTINGS_LIST_RESOURCE, SETTINGS_LIST);
-        RuntimeTvNativeFocus.TargetNode audio = target(PRODUCT_PACKAGE, true, AUDIO_TARGET);
-        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                "example.wrong", List.of(audio), List.of(player), List.of(popup), List.of(popup)),
-                "wrong foreground package");
-        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                PRODUCT_PACKAGE, List.of(audio), List.of(), List.of(popup), List.of(popup)),
-                "missing admitted PlayerView");
+        RuntimeTvNativeFocus.PopupObservationTransaction transaction = ownedTransition();
         expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
                 PRODUCT_PACKAGE,
-                List.of(audio),
-                List.of(player, player),
-                List.of(popup),
-                List.of(popup)),
-                "duplicate admitted PlayerView");
-        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                PRODUCT_PACKAGE,
-                List.of(audio),
-                List.of(player("example.wrong", PLAYER_ROOT)),
-                List.of(popup),
-                List.of(popup)),
-                "wrong PlayerView package");
-        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                PRODUCT_PACKAGE,
-                List.of(target("example.wrong", true, AUDIO_TARGET)),
+                List.of(target(PRODUCT_PACKAGE, true, PAUSE)),
                 List.of(player),
-                List.of(popup),
-                List.of(popup)),
+                List.of(),
+                List.of(player),
+                transaction), "popup transaction escaped to main controls");
+        transaction.close();
+    }
+
+    private static void rejectsWrongOrAmbiguousPopupIdentity() {
+        RuntimeTvNativeFocus.TargetNode audio = target(PRODUCT_PACKAGE, true, AUDIO_TEXT);
+        RuntimeTvNativeFocus.ScopeNode popup = exactSettings();
+        RuntimeTvNativeFocus.PopupObservationTransaction transaction = ownedTransition();
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                "example.wrong", List.of(audio), List.of(), List.of(popup), List.of(popup),
+                transaction), "wrong foreground package");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE,
+                List.of(target("example.wrong", true, AUDIO_TEXT)),
+                List.of(), List.of(popup), List.of(popup), transaction),
                 "wrong target package");
         expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                PRODUCT_PACKAGE,
-                List.of(audio, audio),
-                List.of(player),
-                List.of(popup),
-                List.of(popup)),
-                "duplicate exact target");
+                PRODUCT_PACKAGE, List.of(audio, audio), List.of(), List.of(popup), List.of(popup),
+                transaction), "duplicate exact target");
         expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
                 PRODUCT_PACKAGE,
-                List.of(target(PRODUCT_PACKAGE, false, AUDIO_TARGET)),
-                List.of(player),
-                List.of(popup),
-                List.of(popup)),
+                List.of(target(PRODUCT_PACKAGE, false, AUDIO_TEXT)),
+                List.of(), List.of(popup), List.of(popup), transaction),
                 "disabled exact target");
         expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
                 PRODUCT_PACKAGE,
                 List.of(target(PRODUCT_PACKAGE, true,
-                        new RuntimeTvNativeFocus.Bounds(9, 9, 9, 10))),
-                List.of(player),
-                List.of(popup),
-                List.of(popup)),
+                        new RuntimeTvNativeFocus.Bounds(1, 1, 1, 2))),
+                List.of(), List.of(popup), List.of(popup), transaction),
                 "empty target bounds");
         expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                PRODUCT_PACKAGE, List.of(audio), List.of(player), List.of(popup), List.of()),
-                "missing target ownership ancestor");
+                PRODUCT_PACKAGE, List.of(audio), List.of(), List.of(popup), List.of(), transaction),
+                "missing bounded popup ancestor");
         expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                PRODUCT_PACKAGE,
-                List.of(audio),
-                List.of(player),
-                List.of(settings("example.wrong", SETTINGS_LIST_RESOURCE, SETTINGS_LIST)),
-                List.of(popup)),
-                "wrong settings-list package");
-        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                PRODUCT_PACKAGE,
-                List.of(audio),
-                List.of(player),
-                List.of(popup, popup),
-                List.of(popup)),
-                "duplicate settings-list scopes");
-        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                PRODUCT_PACKAGE,
-                List.of(audio),
-                List.of(player),
-                List.of(settings(PRODUCT_PACKAGE, "example:id/list", SETTINGS_LIST)),
-                List.of(settings(PRODUCT_PACKAGE, "example:id/list", SETTINGS_LIST))),
-                "wrong settings-list resource");
-        for (String wrongClass : new String[] { "android.webkit.WebView", "android.view.View", null }) {
-            RuntimeTvNativeFocus.ScopeNode lookalike = RuntimeTvNativeFocus.ScopeNode.settingsList(
-                    PRODUCT_PACKAGE, SETTINGS_LIST_RESOURCE, wrongClass, true, SETTINGS_LIST);
-            expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                    PRODUCT_PACKAGE, List.of(audio), List.of(player),
-                    List.of(lookalike), List.of(lookalike)),
-                    "wrong native settings-list class in visible scope");
-            expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                    PRODUCT_PACKAGE, List.of(audio), List.of(player),
-                    List.of(popup), List.of(lookalike)),
-                    "wrong native settings-list class in actual ancestor");
-        }
+                PRODUCT_PACKAGE, List.of(audio), List.of(), List.of(popup, popup), List.of(popup),
+                transaction), "duplicate popup scope");
 
+        RuntimeTvNativeFocus.ScopeNode wrongPackage = settings(
+                "example.wrong", SETTINGS_LIST_RESOURCE,
+                RuntimeTvNativeFocus.SETTINGS_LIST_CLASS, SETTINGS_LIST);
         expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
-                PRODUCT_PACKAGE,
-                List.of(audio),
-                List.of(player),
-                List.of(popup),
-                List.of(settings(
-                        PRODUCT_PACKAGE,
-                        SETTINGS_LIST_RESOURCE,
-                        new RuntimeTvNativeFocus.Bounds(721, 180, 1200, 900)))),
-                "target outside unique settings-list scope");
+                PRODUCT_PACKAGE, List.of(audio), List.of(), List.of(wrongPackage),
+                List.of(wrongPackage), transaction), "wrong popup package");
+        RuntimeTvNativeFocus.ScopeNode wrongResource = settings(
+                PRODUCT_PACKAGE, "example:id/list",
+                RuntimeTvNativeFocus.SETTINGS_LIST_CLASS, SETTINGS_LIST);
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE, List.of(audio), List.of(), List.of(wrongResource),
+                List.of(wrongResource), transaction), "wrong popup resource");
+        RuntimeTvNativeFocus.ScopeNode wrongClass = settings(
+                PRODUCT_PACKAGE, SETTINGS_LIST_RESOURCE,
+                "android.view.View", SETTINGS_LIST);
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE, List.of(audio), List.of(), List.of(wrongClass),
+                List.of(wrongClass), transaction), "wrong popup class");
+        RuntimeTvNativeFocus.ScopeNode mismatchedAncestor = settings(
+                PRODUCT_PACKAGE, SETTINGS_LIST_RESOURCE,
+                RuntimeTvNativeFocus.SETTINGS_LIST_CLASS,
+                new RuntimeTvNativeFocus.Bounds(1621, 844, 1920, 1052));
+        expectAssertion(() -> RuntimeTvNativeFocus.selectOwnership(
+                PRODUCT_PACKAGE, List.of(audio), List.of(), List.of(popup),
+                List.of(mismatchedAncestor), transaction), "target outside current popup identity");
+        transaction.close();
+    }
 
-        RuntimeTvNativeFocus.Ownership popupOwnership = popupOwnership();
+    private static void rejectsFocusOutsidePopup() {
+        RuntimeTvNativeFocus.PopupObservationTransaction transaction = ownedTransition();
+        RuntimeTvNativeFocus.Ownership ownership = actualRetainedPopupOwnership(transaction);
         expectAssertion(() -> RuntimeTvNativeFocus.selectFocused(
-                popupOwnership,
+                ownership,
                 List.of(focused(
                         RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW,
                         PRODUCT_PACKAGE,
-                        NATIVE_SETTINGS))),
-                "focus outside target-owned popup scope");
+                        NATIVE_CC))), "focus outside popup scope");
         expectAssertion(() -> RuntimeTvNativeFocus.selectFocused(
-                popupOwnership,
+                ownership,
                 List.of(
                         focused(RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
-                                PRODUCT_PACKAGE, POPUP_ROW_BELOW),
+                                PRODUCT_PACKAGE, SPEED_FOCUSED_ROW),
                         focused(RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
-                                PRODUCT_PACKAGE, AUDIO_TARGET))),
+                                PRODUCT_PACKAGE, AUDIO_ACTIVATION_ROW))),
                 "ambiguous popup focus");
+        expectAssertion(() -> RuntimeTvNativeFocus.selectFocused(
+                ownership,
+                List.of(focused(RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
+                        "example.wrong", SPEED_FOCUSED_ROW))),
+                "wrong popup focus package");
+        RuntimeTvNativeFocus.Selection none = RuntimeTvNativeFocus.selectFocused(
+                ownership, List.of());
+        check(!none.present && none.bounds == null,
+                "zero popup focus did not preserve fallback state");
+        transaction.close();
     }
 
     private static void immutableSnapshots() {
@@ -525,10 +557,12 @@ public final class RuntimeTvNativeFocusProbe {
     }
 
     public static void main(String[] arguments) {
-        retainedDualFocusCoordinatesUseTheNativeDescendant();
-        popupTargetUsesOnlyItsSiblingSettingsListFocus();
-        zeroFocusPreservesFallbackState();
-        invalidScopesFailClosed();
+        mainControlsRemainStrictAndScoped();
+        retainedPopupWithNoPlayerViewSteersDown();
+        transactionEndsOnFailure();
+        rejectsUnownedAndInvalidTransitions();
+        rejectsWrongOrAmbiguousPopupIdentity();
+        rejectsFocusOutsidePopup();
         immutableSnapshots();
     }
 }
@@ -918,6 +952,521 @@ function assertNativeKeyMutantKilled(keySource) {
     `native key mutant survived:\n${result.run.stdout}${result.run.stderr}`);
 }
 
+// Exact bytes from run 39879838063 run-1/07-failure.xml.
+const retainedPopupXmlBase64 = "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnIHN0YW5kYWxvbmU9J3llcycgPz4NCjxoaWVyYXJjaHkgcm90YXRpb249IjAiPg0KICA8bm9kZSBpbmRleD0iMCIgdGV4dD0iIiByZXNvdXJjZS1pZD0iIiBjbGFzcz0iYW5kcm9pZC53aWRnZXQuRnJhbWVMYXlvdXQiIHBhY2thZ2U9ImNvbS55YXdmLnN0cmVhbS50diIgY29udGVudC1kZXNjPSIiIGNoZWNrYWJsZT0iZmFsc2UiIGNoZWNrZWQ9ImZhbHNlIiBjbGlja2FibGU9ImZhbHNlIiBlbmFibGVkPSJ0cnVlIiBmb2N1c2FibGU9ImZhbHNlIiBmb2N1c2VkPSJmYWxzZSIgc2Nyb2xsYWJsZT0iZmFsc2UiIGxvbmctY2xpY2thYmxlPSJmYWxzZSIgcGFzc3dvcmQ9ImZhbHNlIiBzZWxlY3RlZD0iZmFsc2UiIHZpc2libGUtdG8tdXNlcj0idHJ1ZSIgYm91bmRzPSJbMTYyMCw4NDRdWzE5MjAsMTA1Ml0iIGRyYXdpbmctb3JkZXI9IjAiIGhpbnQ9IiIgZGlzcGxheS1pZD0iMCI+DQogICAgPG5vZGUgaW5kZXg9IjAiIHRleHQ9IiIgcmVzb3VyY2UtaWQ9ImNvbS55YXdmLnN0cmVhbS50djppZC9leG9fc2V0dGluZ3NfbGlzdHZpZXciIGNsYXNzPSJhbmRyb2lkeC5yZWN5Y2xlcnZpZXcud2lkZ2V0LlJlY3ljbGVyVmlldyIgcGFja2FnZT0iY29tLnlhd2Yuc3RyZWFtLnR2IiBjb250ZW50LWRlc2M9IiIgY2hlY2thYmxlPSJmYWxzZSIgY2hlY2tlZD0iZmFsc2UiIGNsaWNrYWJsZT0iZmFsc2UiIGVuYWJsZWQ9InRydWUiIGZvY3VzYWJsZT0idHJ1ZSIgZm9jdXNlZD0iZmFsc2UiIHNjcm9sbGFibGU9ImZhbHNlIiBsb25nLWNsaWNrYWJsZT0iZmFsc2UiIHBhc3N3b3JkPSJmYWxzZSIgc2VsZWN0ZWQ9ImZhbHNlIiB2aXNpYmxlLXRvLXVzZXI9InRydWUiIGJvdW5kcz0iWzE2MjAsODQ0XVsxOTIwLDEwNTJdIiBkcmF3aW5nLW9yZGVyPSIxIiBoaW50PSIiIGRpc3BsYXktaWQ9IjAiPg0KICAgICAgPG5vZGUgaW5kZXg9IjAiIHRleHQ9IiIgcmVzb3VyY2UtaWQ9IiIgY2xhc3M9ImFuZHJvaWQud2lkZ2V0LkxpbmVhckxheW91dCIgcGFja2FnZT0iY29tLnlhd2Yuc3RyZWFtLnR2IiBjb250ZW50LWRlc2M9IiIgY2hlY2thYmxlPSJmYWxzZSIgY2hlY2tlZD0iZmFsc2UiIGNsaWNrYWJsZT0idHJ1ZSIgZW5hYmxlZD0idHJ1ZSIgZm9jdXNhYmxlPSJ0cnVlIiBmb2N1c2VkPSJ0cnVlIiBzY3JvbGxhYmxlPSJmYWxzZSIgbG9uZy1jbGlja2FibGU9ImZhbHNlIiBwYXNzd29yZD0iZmFsc2UiIHNlbGVjdGVkPSJmYWxzZSIgdmlzaWJsZS10by11c2VyPSJ0cnVlIiBib3VuZHM9IlsxNjIwLDg0NF1bMTkyMCw5NDhdIiBkcmF3aW5nLW9yZGVyPSIxIiBoaW50PSIiIGRpc3BsYXktaWQ9IjAiPg0KICAgICAgICA8bm9kZSBpbmRleD0iMCIgdGV4dD0iIiByZXNvdXJjZS1pZD0iY29tLnlhd2Yuc3RyZWFtLnR2OmlkL2V4b19pY29uIiBjbGFzcz0iYW5kcm9pZC53aWRnZXQuSW1hZ2VWaWV3IiBwYWNrYWdlPSJjb20ueWF3Zi5zdHJlYW0udHYiIGNvbnRlbnQtZGVzYz0iIiBjaGVja2FibGU9ImZhbHNlIiBjaGVja2VkPSJmYWxzZSIgY2xpY2thYmxlPSJmYWxzZSIgZW5hYmxlZD0idHJ1ZSIgZm9jdXNhYmxlPSJmYWxzZSIgZm9jdXNlZD0iZmFsc2UiIHNjcm9sbGFibGU9ImZhbHNlIiBsb25nLWNsaWNrYWJsZT0iZmFsc2UiIHBhc3N3b3JkPSJmYWxzZSIgc2VsZWN0ZWQ9ImZhbHNlIiB2aXNpYmxlLXRvLXVzZXI9InRydWUiIGJvdW5kcz0iWzE2MzYsODY4XVsxNjg0LDkxNl0iIGRyYXdpbmctb3JkZXI9IjEiIGhpbnQ9IiIgZGlzcGxheS1pZD0iMCIgLz4NCiAgICAgICAgPG5vZGUgaW5kZXg9IjEiIHRleHQ9IiIgcmVzb3VyY2UtaWQ9IiIgY2xhc3M9ImFuZHJvaWQud2lkZ2V0LkxpbmVhckxheW91dCIgcGFja2FnZT0iY29tLnlhd2Yuc3RyZWFtLnR2IiBjb250ZW50LWRlc2M9IiIgY2hlY2thYmxlPSJmYWxzZSIgY2hlY2tlZD0iZmFsc2UiIGNsaWNrYWJsZT0iZmFsc2UiIGVuYWJsZWQ9InRydWUiIGZvY3VzYWJsZT0iZmFsc2UiIGZvY3VzZWQ9ImZhbHNlIiBzY3JvbGxhYmxlPSJmYWxzZSIgbG9uZy1jbGlja2FibGU9ImZhbHNlIiBwYXNzd29yZD0iZmFsc2UiIHNlbGVjdGVkPSJmYWxzZSIgdmlzaWJsZS10by11c2VyPSJ0cnVlIiBib3VuZHM9IlsxNzA0LDg0NF1bMTc5MSw5NDhdIiBkcmF3aW5nLW9yZGVyPSIyIiBoaW50PSIiIGRpc3BsYXktaWQ9IjAiPg0KICAgICAgICAgIDxub2RlIGluZGV4PSIwIiB0ZXh0PSJTcGVlZCIgcmVzb3VyY2UtaWQ9ImNvbS55YXdmLnN0cmVhbS50djppZC9leG9fbWFpbl90ZXh0IiBjbGFzcz0iYW5kcm9pZC53aWRnZXQuVGV4dFZpZXciIHBhY2thZ2U9ImNvbS55YXdmLnN0cmVhbS50diIgY29udGVudC1kZXNjPSIiIGNoZWNrYWJsZT0iZmFsc2UiIGNoZWNrZWQ9ImZhbHNlIiBjbGlja2FibGU9ImZhbHNlIiBlbmFibGVkPSJ0cnVlIiBmb2N1c2FibGU9ImZhbHNlIiBmb2N1c2VkPSJmYWxzZSIgc2Nyb2xsYWJsZT0iZmFsc2UiIGxvbmctY2xpY2thYmxlPSJmYWxzZSIgcGFzc3dvcmQ9ImZhbHNlIiBzZWxlY3RlZD0iZmFsc2UiIHZpc2libGUtdG8tdXNlcj0idHJ1ZSIgYm91bmRzPSJbMTcwNCw4NjBdWzE3ODMsODk4XSIgZHJhd2luZy1vcmRlcj0iMSIgaGludD0iIiBkaXNwbGF5LWlkPSIwIiAvPg0KICAgICAgICAgIDxub2RlIGluZGV4PSIxIiB0ZXh0PSJOb3JtYWwiIHJlc291cmNlLWlkPSJjb20ueWF3Zi5zdHJlYW0udHY6aWQvZXhvX3N1Yl90ZXh0IiBjbGFzcz0iYW5kcm9pZC53aWRnZXQuVGV4dFZpZXciIHBhY2thZ2U9ImNvbS55YXdmLnN0cmVhbS50diIgY29udGVudC1kZXNjPSIiIGNoZWNrYWJsZT0iZmFsc2UiIGNoZWNrZWQ9ImZhbHNlIiBjbGlja2FibGU9ImZhbHNlIiBlbmFibGVkPSJ0cnVlIiBmb2N1c2FibGU9ImZhbHNlIiBmb2N1c2VkPSJmYWxzZSIgc2Nyb2xsYWJsZT0iZmFsc2UiIGxvbmctY2xpY2thYmxlPSJmYWxzZSIgcGFzc3dvcmQ9ImZhbHNlIiBzZWxlY3RlZD0iZmFsc2UiIHZpc2libGUtdG8tdXNlcj0idHJ1ZSIgYm91bmRzPSJbMTcwNCw4OThdWzE3ODMsOTMxXSIgZHJhd2luZy1vcmRlcj0iMiIgaGludD0iIiBkaXNwbGF5LWlkPSIwIiAvPg0KICAgICAgICA8L25vZGU+DQogICAgICA8L25vZGU+DQogICAgICA8bm9kZSBpbmRleD0iMSIgdGV4dD0iIiByZXNvdXJjZS1pZD0iIiBjbGFzcz0iYW5kcm9pZC53aWRnZXQuTGluZWFyTGF5b3V0IiBwYWNrYWdlPSJjb20ueWF3Zi5zdHJlYW0udHYiIGNvbnRlbnQtZGVzYz0iIiBjaGVja2FibGU9ImZhbHNlIiBjaGVja2VkPSJmYWxzZSIgY2xpY2thYmxlPSJ0cnVlIiBlbmFibGVkPSJ0cnVlIiBmb2N1c2FibGU9InRydWUiIGZvY3VzZWQ9ImZhbHNlIiBzY3JvbGxhYmxlPSJmYWxzZSIgbG9uZy1jbGlja2FibGU9ImZhbHNlIiBwYXNzd29yZD0iZmFsc2UiIHNlbGVjdGVkPSJmYWxzZSIgdmlzaWJsZS10by11c2VyPSJ0cnVlIiBib3VuZHM9IlsxNjIwLDk0OF1bMTkyMCwxMDUyXSIgZHJhd2luZy1vcmRlcj0iMiIgaGludD0iIiBkaXNwbGF5LWlkPSIwIj4NCiAgICAgICAgPG5vZGUgaW5kZXg9IjAiIHRleHQ9IiIgcmVzb3VyY2UtaWQ9ImNvbS55YXdmLnN0cmVhbS50djppZC9leG9faWNvbiIgY2xhc3M9ImFuZHJvaWQud2lkZ2V0LkltYWdlVmlldyIgcGFja2FnZT0iY29tLnlhd2Yuc3RyZWFtLnR2IiBjb250ZW50LWRlc2M9IiIgY2hlY2thYmxlPSJmYWxzZSIgY2hlY2tlZD0iZmFsc2UiIGNsaWNrYWJsZT0iZmFsc2UiIGVuYWJsZWQ9InRydWUiIGZvY3VzYWJsZT0iZmFsc2UiIGZvY3VzZWQ9ImZhbHNlIiBzY3JvbGxhYmxlPSJmYWxzZSIgbG9uZy1jbGlja2FibGU9ImZhbHNlIiBwYXNzd29yZD0iZmFsc2UiIHNlbGVjdGVkPSJmYWxzZSIgdmlzaWJsZS10by11c2VyPSJ0cnVlIiBib3VuZHM9IlsxNjM2LDk3Ml1bMTY4NCwxMDIwXSIgZHJhd2luZy1vcmRlcj0iMSIgaGludD0iIiBkaXNwbGF5LWlkPSIwIiAvPg0KICAgICAgICA8bm9kZSBpbmRleD0iMSIgdGV4dD0iIiByZXNvdXJjZS1pZD0iIiBjbGFzcz0iYW5kcm9pZC53aWRnZXQuTGluZWFyTGF5b3V0IiBwYWNrYWdlPSJjb20ueWF3Zi5zdHJlYW0udHYiIGNvbnRlbnQtZGVzYz0iIiBjaGVja2FibGU9ImZhbHNlIiBjaGVja2VkPSJmYWxzZSIgY2xpY2thYmxlPSJmYWxzZSIgZW5hYmxlZD0idHJ1ZSIgZm9jdXNhYmxlPSJmYWxzZSIgZm9jdXNlZD0iZmFsc2UiIHNjcm9sbGFibGU9ImZhbHNlIiBsb25nLWNsaWNrYWJsZT0iZmFsc2UiIHBhc3N3b3JkPSJmYWxzZSIgc2VsZWN0ZWQ9ImZhbHNlIiB2aXNpYmxlLXRvLXVzZXI9InRydWUiIGJvdW5kcz0iWzE3MDQsOTQ4XVsxNzg0LDEwNTJdIiBkcmF3aW5nLW9yZGVyPSIyIiBoaW50PSIiIGRpc3BsYXktaWQ9IjAiPg0KICAgICAgICAgIDxub2RlIGluZGV4PSIwIiB0ZXh0PSJBdWRpbyIgcmVzb3VyY2UtaWQ9ImNvbS55YXdmLnN0cmVhbS50djppZC9leG9fbWFpbl90ZXh0IiBjbGFzcz0iYW5kcm9pZC53aWRnZXQuVGV4dFZpZXciIHBhY2thZ2U9ImNvbS55YXdmLnN0cmVhbS50diIgY29udGVudC1kZXNjPSIiIGNoZWNrYWJsZT0iZmFsc2UiIGNoZWNrZWQ9ImZhbHNlIiBjbGlja2FibGU9ImZhbHNlIiBlbmFibGVkPSJ0cnVlIiBmb2N1c2FibGU9ImZhbHNlIiBmb2N1c2VkPSJmYWxzZSIgc2Nyb2xsYWJsZT0iZmFsc2UiIGxvbmctY2xpY2thYmxlPSJmYWxzZSIgcGFzc3dvcmQ9ImZhbHNlIiBzZWxlY3RlZD0iZmFsc2UiIHZpc2libGUtdG8tdXNlcj0idHJ1ZSIgYm91bmRzPSJbMTcwNCw5NjRdWzE3NzYsMTAwMl0iIGRyYXdpbmctb3JkZXI9IjEiIGhpbnQ9IiIgZGlzcGxheS1pZD0iMCIgLz4NCiAgICAgICAgICA8bm9kZSBpbmRleD0iMSIgdGV4dD0iQXV0byIgcmVzb3VyY2UtaWQ9ImNvbS55YXdmLnN0cmVhbS50djppZC9leG9fc3ViX3RleHQiIGNsYXNzPSJhbmRyb2lkLndpZGdldC5UZXh0VmlldyIgcGFja2FnZT0iY29tLnlhd2Yuc3RyZWFtLnR2IiBjb250ZW50LWRlc2M9IiIgY2hlY2thYmxlPSJmYWxzZSIgY2hlY2tlZD0iZmFsc2UiIGNsaWNrYWJsZT0iZmFsc2UiIGVuYWJsZWQ9InRydWUiIGZvY3VzYWJsZT0iZmFsc2UiIGZvY3VzZWQ9ImZhbHNlIiBzY3JvbGxhYmxlPSJmYWxzZSIgbG9uZy1jbGlja2FibGU9ImZhbHNlIiBwYXNzd29yZD0iZmFsc2UiIHNlbGVjdGVkPSJmYWxzZSIgdmlzaWJsZS10by11c2VyPSJ0cnVlIiBib3VuZHM9IlsxNzA0LDEwMDJdWzE3NTUsMTAzNV0iIGRyYXdpbmctb3JkZXI9IjIiIGhpbnQ9IiIgZGlzcGxheS1pZD0iMCIgLz4NCiAgICAgICAgPC9ub2RlPg0KICAgICAgPC9ub2RlPg0KICAgIDwvbm9kZT4NCiAgPC9ub2RlPg0KPC9oaWVyYXJjaHk+";
+const retainedPopupXmlSha256 = "9854fe74893d5f96f66d0368c895597023f8747e36d1276c94fcad8281afcd1a";
+
+const popupAdapterStubSources = {
+  "android/graphics/Rect.java": `
+package android.graphics;
+public final class Rect {
+    public final int left;
+    public final int top;
+    public final int right;
+    public final int bottom;
+    public Rect(int left, int top, int right, int bottom) {
+        this.left = left;
+        this.top = top;
+        this.right = right;
+        this.bottom = bottom;
+    }
+    public boolean isEmpty() { return left >= right || top >= bottom; }
+}
+`,
+  "android/os/SystemClock.java": `
+package android.os;
+public final class SystemClock {
+    private static long now;
+    public static long uptimeMillis() { return now; }
+    public static void sleep(long millis) { now += millis; }
+    public static void reset() { now = 0L; }
+}
+`,
+  "android/view/KeyEvent.java": `
+package android.view;
+public final class KeyEvent {
+    public static final int KEYCODE_DPAD_UP = 19;
+    public static final int KEYCODE_DPAD_DOWN = 20;
+    public static final int KEYCODE_DPAD_LEFT = 21;
+    public static final int KEYCODE_DPAD_RIGHT = 22;
+    public static final int KEYCODE_DPAD_CENTER = 23;
+}
+`,
+  "com/yawf/runtimeinstrumentation/FreshGuard.java": `
+package com.yawf.runtimeinstrumentation;
+public final class FreshGuard {
+    private static boolean active;
+    public static void enter() {
+        if (active) throw new AssertionError("nested fresh scope");
+        active = true;
+    }
+    public static void exit() { active = false; }
+    public static boolean isActive() { return active; }
+    public static void require() {
+        if (!active) throw new AssertionError("live UiObject2 getter escaped fresh observation");
+    }
+}
+`,
+  "androidx/test/uiautomator/BySelector.java": `
+package androidx.test.uiautomator;
+import java.util.regex.Pattern;
+public final class BySelector {
+    String text;
+    Pattern textPattern;
+    String resource;
+    String packageName;
+    String className;
+    Boolean enabled;
+    Boolean clickable;
+    Boolean focusable;
+    Boolean focused;
+    public BySelector text(String value) { text = value; return this; }
+    public BySelector text(Pattern value) { textPattern = value; return this; }
+    public BySelector res(String value) { resource = value; return this; }
+    public BySelector pkg(String value) { packageName = value; return this; }
+    public BySelector clazz(String value) { className = value; return this; }
+    public BySelector enabled(boolean value) { enabled = value; return this; }
+    public BySelector clickable(boolean value) { clickable = value; return this; }
+    public BySelector focusable(boolean value) { focusable = value; return this; }
+    public BySelector focused(boolean value) { focused = value; return this; }
+    public boolean isFocusedOnly() {
+        return focused != null && text == null && textPattern == null && resource == null
+                && packageName == null && className == null && enabled == null
+                && clickable == null && focusable == null;
+    }
+    public boolean matches(UiObject2 node) {
+        if (text != null && !text.equals(node.getText())) return false;
+        if (textPattern != null && !textPattern.matcher(node.getText()).matches()) return false;
+        if (resource != null && !resource.equals(node.getResourceName())) return false;
+        if (packageName != null && !packageName.equals(node.getApplicationPackage())) return false;
+        if (className != null && !className.equals(node.getClassName())) return false;
+        if (enabled != null && enabled.booleanValue() != node.isEnabled()) return false;
+        if (clickable != null && clickable.booleanValue() != node.isClickable()) return false;
+        if (focusable != null && focusable.booleanValue() != node.isFocusable()) return false;
+        return focused == null || focused.booleanValue() == node.isFocused();
+    }
+}
+`,
+  "androidx/test/uiautomator/By.java": `
+package androidx.test.uiautomator;
+import java.util.regex.Pattern;
+public final class By {
+    public static BySelector text(String value) { return new BySelector().text(value); }
+    public static BySelector text(Pattern value) { return new BySelector().text(value); }
+    public static BySelector res(String packageName, String id) {
+        return new BySelector().res(packageName + ":id/" + id);
+    }
+    public static BySelector pkg(String value) { return new BySelector().pkg(value); }
+    public static BySelector clazz(String value) { return new BySelector().clazz(value); }
+    public static BySelector focused(boolean value) { return new BySelector().focused(value); }
+}
+`,
+  "androidx/test/uiautomator/UiObject2.java": `
+package androidx.test.uiautomator;
+import android.graphics.Rect;
+import com.yawf.runtimeinstrumentation.FreshGuard;
+import java.util.ArrayList;
+import java.util.List;
+public final class UiObject2 {
+    private final String text;
+    private final String resource;
+    private final String className;
+    private final String packageName;
+    private final boolean enabled;
+    private final boolean clickable;
+    private final boolean focusable;
+    private boolean focused;
+    private final Rect bounds;
+    private UiObject2 parent;
+    private final List<UiObject2> children = new ArrayList<>();
+    public UiObject2(String text, String resource, String className, String packageName,
+            boolean enabled, boolean clickable, boolean focusable, boolean focused, Rect bounds) {
+        this.text = text;
+        this.resource = resource;
+        this.className = className;
+        this.packageName = packageName;
+        this.enabled = enabled;
+        this.clickable = clickable;
+        this.focusable = focusable;
+        this.focused = focused;
+        this.bounds = bounds;
+    }
+    public void addChild(UiObject2 child) { child.parent = this; children.add(child); }
+    public void setFocused(boolean value) { focused = value; }
+    public String getText() { FreshGuard.require(); return text; }
+    public String getResourceName() { FreshGuard.require(); return resource; }
+    public String getClassName() { FreshGuard.require(); return className; }
+    public String getApplicationPackage() { FreshGuard.require(); return packageName; }
+    public boolean isEnabled() { FreshGuard.require(); return enabled; }
+    public boolean isClickable() { FreshGuard.require(); return clickable; }
+    public boolean isFocusable() { FreshGuard.require(); return focusable; }
+    public boolean isFocused() { FreshGuard.require(); return focused; }
+    public Rect getVisibleBounds() { FreshGuard.require(); return bounds; }
+    public UiObject2 getParent() { FreshGuard.require(); return parent; }
+    public List<UiObject2> findObjects(BySelector selector) {
+        FreshGuard.require();
+        List<UiObject2> matches = new ArrayList<>();
+        for (UiObject2 child : children) child.collect(selector, matches, true);
+        return matches;
+    }
+    public void collect(BySelector selector, List<UiObject2> matches, boolean includeSelf) {
+        FreshGuard.require();
+        if (includeSelf && selector.matches(this)) matches.add(this);
+        for (UiObject2 child : children) child.collect(selector, matches, true);
+    }
+}
+`,
+  "androidx/test/uiautomator/UiDevice.java": `
+package androidx.test.uiautomator;
+import com.yawf.runtimeinstrumentation.FreshGuard;
+import java.util.ArrayList;
+import java.util.List;
+public final class UiDevice {
+    private List<UiObject2> roots;
+    private final UiObject2 staleGlobalFocus;
+    public UiDevice(List<UiObject2> roots, UiObject2 staleGlobalFocus) {
+        this.roots = roots;
+        this.staleGlobalFocus = staleGlobalFocus;
+    }
+    public void setRoots(List<UiObject2> roots) { this.roots = roots; }
+    public String getCurrentPackageName() {
+        FreshGuard.require();
+        return "com.yawf.stream.tv";
+    }
+    public List<UiObject2> findObjects(BySelector selector) {
+        FreshGuard.require();
+        if (selector.isFocusedOnly()) return List.of(staleGlobalFocus);
+        List<UiObject2> matches = new ArrayList<>();
+        for (UiObject2 root : roots) root.collect(selector, matches, true);
+        return matches;
+    }
+}
+`,
+  "com/yawf/runtimeinstrumentation/RuntimeTvNativeSurface.java": `
+package com.yawf.runtimeinstrumentation;
+final class RuntimeTvNativeSurface {
+    static final class Candidate { }
+    static boolean admits(Candidate candidate) { return false; }
+}
+`,
+};
+
+function runPopupAdapterProbe(
+  flowSource,
+  focusSource = read(focusHelperPath),
+) {
+  const retainedBytes = Buffer.from(retainedPopupXmlBase64, "base64");
+  assert.equal(createHash("sha256").update(retainedBytes).digest("hex"), retainedPopupXmlSha256);
+  const methods = [
+    "nativePlayerSurfaceRootSelector",
+    "nativeSettingsListSelector",
+    "selectAudioTrack",
+    "audioLabel",
+    "focusNativePopupAndActivate",
+    "focusNativeTarget",
+    "focusNativeTargetInOwnershipScope",
+    "waitForNativeFocusSnapshot",
+    "readNativeFocusSnapshot",
+    "readTargetOwnedNativeFocus",
+  ].map(name => method(flowSource, name)).join("\n\n");
+  const snapshots = ["BoundsSnapshot", "NativeFocusSnapshot"]
+    .map(name => nestedType(flowSource, name)).join("\n\n");
+  const probe = `
+package com.yawf.runtimeinstrumentation;
+
+import android.graphics.Rect;
+import android.os.SystemClock;
+import android.view.KeyEvent;
+import androidx.test.uiautomator.By;
+import androidx.test.uiautomator.BySelector;
+import androidx.test.uiautomator.UiDevice;
+import androidx.test.uiautomator.UiObject2;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+public final class RuntimeTvPopupAdapterProbe {
+    private static final String PRODUCT_PACKAGE = "com.yawf.stream.tv";
+    private static final long UI_WAIT = 60_000L;
+    private static final int MAX_NATIVE_ACTIVATION_DEPTH = 4;
+    private static final int MAX_NATIVE_OWNERSHIP_DEPTH = 16;
+    private static final Pattern BOUNDS = Pattern.compile(
+            "\\\\[(\\\\d+),(\\\\d+)\\\\]\\\\[(\\\\d+),(\\\\d+)\\\\]");
+    private static final String RETAINED_XML_BASE64 = "${retainedPopupXmlBase64}";
+
+    private UiDevice device;
+    private UiObject2 popupRoot;
+    private UiObject2 speedRow;
+    private UiObject2 audioRow;
+    private UiObject2 staleGlobalFocus;
+    private final List<Integer> keys = new ArrayList<>();
+    private int freshReads;
+    private boolean failNextNativeWait;
+    private RuntimeTvNativeFocus.PopupObservationTransaction lastTransaction;
+
+    private static void check(boolean value, String label) {
+        if (!value) throw new AssertionError(label);
+    }
+
+    private static void assertTrue(String message, boolean value) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static void assertNotNull(String message, Object value) {
+        if (value == null) throw new AssertionError(message);
+    }
+
+    private static void assertEquals(String message, Object expected, Object actual) {
+        if (expected == null ? actual != null : !expected.equals(actual)) {
+            throw new AssertionError(message + ": " + expected + " != " + actual);
+        }
+    }
+
+    private static void fail(String message) { throw new AssertionError(message); }
+
+    private static void expectAssertion(Runnable action, String label) {
+        try {
+            action.run();
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError("Expected AssertionError: " + label);
+    }
+
+    private static void expectRuntime(Runnable action, String label) {
+        try {
+            action.run();
+        } catch (RuntimeException expected) {
+            return;
+        }
+        throw new AssertionError("Expected RuntimeException: " + label);
+    }
+
+    private RuntimeTvPopupAdapterProbe() throws Exception {
+        popupRoot = parseRetainedPopup();
+        staleGlobalFocus = new UiObject2(
+                "stale web focus", "", "android.webkit.WebView", PRODUCT_PACKAGE,
+                true, true, true, true, new Rect(152, 684, 842, 850));
+        device = new UiDevice(List.of(popupRoot), staleGlobalFocus);
+        UiObject2[] rows = observeFreshNative(() -> new UiObject2[] {
+                activationFor(device.findObjects(By.text("Speed")).get(0)),
+                activationFor(device.findObjects(By.text("Audio")).get(0))
+        });
+        speedRow = rows[0];
+        audioRow = rows[1];
+    }
+
+    private UiObject2 activationFor(UiObject2 target) {
+        UiObject2 current = target;
+        while (current != null) {
+            if (current.isFocusable()) return current;
+            current = current.getParent();
+        }
+        throw new AssertionError("retained semantic target lacked activation row");
+    }
+
+    private static Rect parseBounds(String value) {
+        Matcher match = BOUNDS.matcher(value);
+        if (!match.matches()) throw new AssertionError("bad retained bounds " + value);
+        return new Rect(
+                Integer.parseInt(match.group(1)), Integer.parseInt(match.group(2)),
+                Integer.parseInt(match.group(3)), Integer.parseInt(match.group(4)));
+    }
+
+    private static UiObject2 parseNode(Element element) {
+        UiObject2 object = new UiObject2(
+                element.getAttribute("text"),
+                element.getAttribute("resource-id"),
+                element.getAttribute("class"),
+                element.getAttribute("package"),
+                Boolean.parseBoolean(element.getAttribute("enabled")),
+                Boolean.parseBoolean(element.getAttribute("clickable")),
+                Boolean.parseBoolean(element.getAttribute("focusable")),
+                Boolean.parseBoolean(element.getAttribute("focused")),
+                parseBounds(element.getAttribute("bounds")));
+        NodeList children = element.getChildNodes();
+        for (int index = 0; index < children.getLength(); index++) {
+            Node child = children.item(index);
+            if (child instanceof Element && "node".equals(child.getNodeName())) {
+                object.addChild(parseNode((Element) child));
+            }
+        }
+        return object;
+    }
+
+    private static UiObject2 parseRetainedPopup() throws Exception {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        byte[] xml = Base64.getDecoder().decode(RETAINED_XML_BASE64);
+        Element hierarchy = factory.newDocumentBuilder()
+                .parse(new ByteArrayInputStream(xml)).getDocumentElement();
+        NodeList children = hierarchy.getChildNodes();
+        for (int index = 0; index < children.getLength(); index++) {
+            Node child = children.item(index);
+            if (child instanceof Element && "node".equals(child.getNodeName())) {
+                return parseNode((Element) child);
+            }
+        }
+        throw new AssertionError("retained popup XML had no root node");
+    }
+
+    private RuntimeTvNativeSurface.Candidate readNativePlayerSurfaceCandidate(UiObject2 root) {
+        return new RuntimeTvNativeSurface.Candidate();
+    }
+
+    private <T> T observeFreshNative(Supplier<T> reader) {
+        FreshGuard.enter();
+        freshReads++;
+        try {
+            return reader.get();
+        } finally {
+            FreshGuard.exit();
+        }
+    }
+
+    private void revealControls() { }
+
+    private RuntimeTvNativeFocus.PopupObservationTransaction activateNativeSettingsPopup() {
+        lastTransaction = RuntimeTvNativeFocus.beginSettingsPopupTransaction(
+                true, true, RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW);
+        return lastTransaction;
+    }
+
+    private UiObject2 waitForNative(BySelector selector, long timeout, String label) {
+        if (failNextNativeWait) {
+            failNextNativeWait = false;
+            throw new IllegalStateException("synthetic popup observation failure");
+        }
+        return null;
+    }
+
+    private void sendNativeDpadKey(int keyCode) {
+        check(!FreshGuard.isActive(), "key input happened inside fresh observation");
+        keys.add(keyCode);
+        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+            speedRow.setFocused(false);
+            audioRow.setFocused(true);
+        }
+    }
+
+    private void log(String ignored) { }
+
+${methods}
+
+${snapshots}
+
+    private void resetRetainedPopup() {
+        device.setRoots(List.of(popupRoot));
+        speedRow.setFocused(true);
+        audioRow.setFocused(false);
+        keys.clear();
+    }
+
+    private void retainedXmlUsesPopupLocalFocusAndSteersDown() {
+        resetRetainedPopup();
+        RuntimeTvNativeFocus.PopupObservationTransaction transaction =
+                RuntimeTvNativeFocus.beginSettingsPopupTransaction(
+                        true, true, RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW);
+        NativeFocusSnapshot snapshot = observeFreshNative(
+                () -> readNativeFocusSnapshot(By.text("Audio"), transaction));
+        check(snapshot.targetPresent, "retained Audio target missing");
+        check(snapshot.scopeKind == RuntimeTvNativeFocus.ScopeKind.SETTINGS_LIST,
+                "retained Audio target used wrong scope");
+        check(snapshot.currentFocusPresent, "retained Speed focus missing");
+        check(RuntimeTvNativeFocus.direction(
+                        snapshot.activationBounds.toNativeFocusBounds(),
+                        snapshot.currentFocusBounds.toNativeFocusBounds())
+                        == RuntimeTvNativeFocus.Direction.DOWN,
+                "retained Audio below Speed did not select DOWN");
+
+        RuntimeTvNativeFocus.Bounds stale = observeFreshNative(() -> {
+            Rect bounds = device.findObjects(By.focused(true)).get(0).getVisibleBounds();
+            return new RuntimeTvNativeFocus.Bounds(
+                    bounds.left, bounds.top, bounds.right, bounds.bottom);
+        });
+        check(RuntimeTvNativeFocus.direction(
+                        snapshot.activationBounds.toNativeFocusBounds(), stale)
+                        == RuntimeTvNativeFocus.Direction.RIGHT,
+                "stale global Web focus did not reproduce wrong RIGHT predecessor");
+
+        focusNativePopupAndActivate(By.text("Audio"), "Audio settings", 12, transaction);
+        check(keys.equals(List.of(
+                        KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_CENTER)),
+                "actual popup navigation keys " + keys);
+        check(freshReads >= 4, "actual adapter did not make fresh reads");
+        transaction.close();
+    }
+
+    private void droppedTokenFailsBeforeInput() {
+        resetRetainedPopup();
+        expectAssertion(() -> focusNativePopupAndActivate(
+                By.text("Audio"), "Audio settings", 12, null), "dropped popup token");
+        check(keys.isEmpty(), "dropped popup token reached input");
+    }
+
+    private void zeroRootMainFailsClosed() {
+        UiObject2 mainTarget = new UiObject2(
+                "Main control", "", "android.widget.TextView", PRODUCT_PACKAGE,
+                true, false, false, false, new Rect(800, 400, 900, 450));
+        UiObject2 outer = new UiObject2(
+                "", "", "android.widget.FrameLayout", PRODUCT_PACKAGE,
+                true, false, false, false, new Rect(0, 0, 1920, 1080));
+        outer.addChild(mainTarget);
+        device.setRoots(List.of(outer));
+        keys.clear();
+        expectAssertion(() -> focusNativeTarget(
+                By.text("Main control"), "zero-root main", 1), "zero-root main");
+        check(keys.isEmpty(), "zero-root main reached input");
+        device.setRoots(List.of(popupRoot));
+    }
+
+    private void actualSelectAudioTrackClosesTransactionOnFailure() {
+        resetRetainedPopup();
+        failNextNativeWait = true;
+        expectRuntime(() -> selectAudioTrack("English"), "popup failure cleanup");
+        check(lastTransaction != null && !lastTransaction.isActive(),
+                "actual selectAudioTrack finally left transaction active");
+        check(keys.isEmpty(), "synthetic pre-navigation failure reached input");
+    }
+
+    public static void main(String[] arguments) throws Exception {
+        SystemClock.reset();
+        RuntimeTvPopupAdapterProbe probe = new RuntimeTvPopupAdapterProbe();
+        probe.retainedXmlUsesPopupLocalFocusAndSteersDown();
+        probe.droppedTokenFailsBeforeInput();
+        probe.zeroRootMainFailsClosed();
+        probe.actualSelectAudioTrackClosesTransactionOnFailure();
+    }
+}
+`;
+  return runJavaSources({
+    ...popupAdapterStubSources,
+    "RuntimeTvNativeFocus.java": focusSource,
+    "RuntimeTvPopupAdapterProbe.java": probe,
+  }, "com.yawf.runtimeinstrumentation.RuntimeTvPopupAdapterProbe");
+}
+
+function assertPopupAdapterMutantKilled(
+  flowSource,
+  focusSource = read(focusHelperPath),
+) {
+  const result = runPopupAdapterProbe(flowSource, focusSource);
+  assert.equal(result.compile.status, 0,
+    `popup adapter mutant did not compile:\n${result.compile.stdout}${result.compile.stderr}`);
+  assert.ok(result.run, "popup adapter mutant did not run");
+  assert.notEqual(result.run.status, 0,
+    `popup adapter mutant survived:\n${result.run.stdout}${result.run.stderr}`);
+}
+
 function runNativeKeyCallsiteProbe(flowSource) {
   const sendMethod = method(flowSource, "sendNativeDpadKey");
   const probe = `
@@ -1046,7 +1595,10 @@ function assertNativeReadSourceContract(
   const surfaceCandidateReader = method(source, "readNativePlayerSurfaceCandidate");
   const reveal = method(source, "revealControls");
   const audio = method(source, "selectAudioTrack");
-  const nativeFocus = method(source, "focusNativeTarget");
+  const nativeFocusWrapper = method(source, "focusNativeTarget");
+  const nativeFocus = method(source, "focusNativeTargetInOwnershipScope");
+  const popupSettingsActivation = method(source, "activateNativeSettingsPopup");
+  const popupTargetActivation = method(source, "focusNativePopupAndActivate");
   const focusReader = method(source, "readNativeFocusSnapshot");
   const scopedFocusReader = method(source, "readCurrentNativeFocus");
   const targetOwnedFocusReader = method(source, "readTargetOwnedNativeFocus");
@@ -1055,6 +1607,8 @@ function assertNativeReadSourceContract(
   const nativeWait = method(source, "waitForNativePresence");
   const clock = method(source, "readPositionSeconds");
   const clockReader = method(source, "readPositionSecondsSnapshot");
+  const upperVideoRoiReader = method(source, "readUpperVideoRoiAdmission");
+  const upperVideoRoiNodeReader = method(source, "snapshotUpperVideoRoiNode");
   const flow = method(source, "runFlow");
 
   assert.match(surfaceWaiter,
@@ -1110,7 +1664,10 @@ function assertNativeReadSourceContract(
   }
   assert.equal((flow.match(/waitForNative\(playPauseSelector\(/g) ?? []).length, 4);
 
-  assert.match(nativeFocus, /observeFreshNative\(\(\) -> readNativeFocusSnapshot\(selector\)\)/);
+  assert.match(nativeFocus,
+    /observeFreshNative\(\s*\(\) -> readNativeFocusSnapshot\(selector, popupTransaction\)\)/s);
+  assert.match(nativeFocusWrapper,
+    /return focusNativeTargetInOwnershipScope\(selector, label, maxSteps, null\);/);
   assert.match(nativeFocus, /for \(int index = 0; index < maxSteps; index\+\+\)/);
   assert.match(nativeFocus, /SystemClock\.sleep\(180\);/);
   assert.match(nativeFocus, /RuntimeTvNativeFocus\.direction\(/);
@@ -1149,6 +1706,7 @@ function assertNativeReadSourceContract(
   assert.match(focusReader, /depth <= MAX_NATIVE_ACTIVATION_DEPTH/);
   assert.match(focusReader, /current = current\.getParent\(\);/);
   assert.match(focusReader, /RuntimeTvNativeFocus\.selectOwnership\(/);
+  assert.match(focusReader, /ownershipSnapshots,\s*popupTransaction\);/s);
   assert.match(focusReader,
     /UiObject2 focusScope = ownershipScopes\.get\(ownership\.ancestorIndex\);/);
   assert.match(focusReader,
@@ -1168,19 +1726,31 @@ function assertNativeReadSourceContract(
   assert.match(targetOwnedFocusReader, /focused\.getVisibleBounds\(\)/);
   assert.match(targetOwnedFocusReader, /RuntimeTvNativeFocus\.selectFocused\(/);
   assert.doesNotMatch(targetOwnedFocusReader, /device\.|WebView/);
-  assert.match(focusedRight, /observeFreshNative\(\(\) -> readNativeFocusSnapshot\(selector\)\)/);
+  assert.match(focusedRight,
+    /observeFreshNative\(\s*\(\) -> readNativeFocusSnapshot\(selector, null\)\)/s);
   assert.ok(focusedRight.indexOf("observeFreshNative")
     < focusedRight.indexOf("sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_RIGHT)"));
   assert.equal((flow.match(/pressNativeFocusedRight\(timeline, "timeline"\);/g) ?? []).length, 3);
 
   for (const marker of [
-    'focusNativeAndActivate(By.res(PRODUCT_PACKAGE, "exo_settings"), "Media3 settings", 18);',
+    'activateNativeSettingsPopup();',
     'waitForNative(By.text("Audio"), 10_000, "Audio settings row");',
-    'focusNativeAndActivate(By.text("Audio"), "Audio settings", 12);',
+    'By.text("Audio"), "Audio settings", 12, popupTransaction);',
     'waitForNative(english, 10_000, "English audio track");',
     'waitForNative(french, 10_000, "French audio track");',
-    'focusNativeAndActivate(audioLabel(language), language + " audio", 12);',
-  ]) assert.ok(audio.includes(marker), `missing fresh native audio observation: ${marker}`);
+    'audioLabel(language), language + " audio", 12, popupTransaction);',
+    'finally {',
+    'popupTransaction.close();',
+  ]) assert.ok(audio.includes(marker), `missing owned native audio observation: ${marker}`);
+  assert.equal((audio.match(/popupTransaction\.close\(\);/g) ?? []).length, 2);
+  assert.match(popupSettingsActivation,
+    /focusNativeTarget\(\s*By\.res\(PRODUCT_PACKAGE, "exo_settings"\), "Media3 settings", 18\)/s);
+  assert.ok(popupSettingsActivation.indexOf("sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER)")
+    < popupSettingsActivation.indexOf("beginSettingsPopupTransaction"));
+  assert.match(popupSettingsActivation,
+    /beginSettingsPopupTransaction\(\s*focused\.targetPresent, focused\.activationFocused, focused\.scopeKind\)/s);
+  assert.match(popupTargetActivation,
+    /focusNativeTargetInOwnershipScope\(\s*selector, label, steps, popupTransaction\)/s);
 
   assert.match(nativeWait,
     /boolean present = observeFreshNative\(\(\) -> device\.findObject\(selector\) != null\);/);
@@ -1189,6 +1759,9 @@ function assertNativeReadSourceContract(
   assert.match(clockReader, /timeBar -> !timeBar\.getVisibleBounds\(\)\.isEmpty\(\)/);
   assert.match(clockReader, /UiObject2::getContentDescription/);
   assert.match(clockReader, /RuntimeTvClock\.readUniqueVisibleTimeBar\(/);
+  assert.equal((flow.match(/observeFreshNative\(this::readUpperVideoRoiAdmission\)/g) ?? []).length, 2);
+  assert.match(upperVideoRoiReader,
+    /return RuntimeTvUpperVideoRoi\.admit\(foregroundPackage, candidateSnapshots\);/);
 
   for (const reader of [
     surfaceReader,
@@ -1197,6 +1770,8 @@ function assertNativeReadSourceContract(
     scopedFocusReader,
     targetOwnedFocusReader,
     clockReader,
+    upperVideoRoiReader,
+    upperVideoRoiNodeReader,
   ]) {
     assert.doesNotMatch(reader,
       /press(?:DPad|KeyCode|Back)|sendNativeDpadKey|\.click\s*\(|setText\(|capture\(|centerFrameHash\(|log\(|SystemClock\.sleep/);
@@ -1225,7 +1800,7 @@ function assertNativeReadSourceContract(
     assert.doesNotMatch(body, /UiObject2/);
     assert.doesNotMatch(body, /\bfinal\s+Rect\b/);
     for (const field of body.matchAll(
-      /^\s{8}(?:final\s+)?(?:boolean|int|long|String|BoundsSnapshot|NativeFocusSnapshot)\s+[A-Za-z][A-Za-z0-9_]*;$/gm,
+      /^\s{8}(?:final\s+)?(?:boolean|int|long|String|BoundsSnapshot|NativeFocusSnapshot|RuntimeTvNativeFocus\.ScopeKind)\s+[A-Za-z][A-Za-z0-9_]*;$/gm,
     )) {
       assert.match(field[0], /\bfinal\b/, `mutable snapshot field: ${field[0]}`);
     }
@@ -1243,7 +1818,12 @@ function assertNativeReadSourceContract(
   assert.match(focusSource, /static Selection select\(/);
   assert.match(focusSource, /static Direction direction\(/);
   assert.match(focusSource, /if \(!PRODUCT_PACKAGE\.equals\(foregroundPackage\)\)/);
-  assert.match(focusSource, /if \(admittedPlayerRoots\.size\(\) != 1\)/);
+  assert.match(focusSource, /if \(admittedPlayerRoots\.size\(\) > 1\)/);
+  assert.match(focusSource, /ScopeNode playerRoot = requireUniquePlayerRoot\(admittedPlayerRoots\);/);
+  assert.match(focusSource,
+    /boolean popupOwned = popupTransaction != null && popupTransaction\.isActive\(\);/);
+  assert.match(focusSource, /if \(!popupOwned\)/);
+  assert.match(focusSource, /static PopupObservationTransaction beginSettingsPopupTransaction\(/);
   assert.match(focusSource, /if \(settingsLists\.size\(\) > 1\)/);
   assert.match(focusSource, /if \(targets\.size\(\) != 1\)/);
   assert.match(focusSource, /SETTINGS_LIST_RESOURCE\.equals\(scope\.resourceName\)/);
@@ -1278,7 +1858,7 @@ function assertNativeReadSourceContract(
     'waitFor(closedStatus(), UI_WAIT, "second close event");',
     'waitFor(closedStatus(), UI_WAIT, "recovery close event");',
     'assertTrue("Playback position did not advance", second >= first + 1);',
-    'assertTrue("Decoded center frame did not change while playback advanced",',
+    'assertTrue("Decoded upper-video ROI did not change while playback advanced",',
     'assertTrue("Position advanced materially while paused", Math.abs(pausedEnd - pausedStart) <= 1);',
     'assertEquals("Decoded content changed while paused", pausedFrame, pausedFrameAfter);',
     'assertTrue("D-pad seek did not move by a meaningful delta", afterSeek >= beforeSeek + 10);',
@@ -1291,7 +1871,9 @@ function assertNativeReadSourceContract(
 function assertNativeKeySourceContract(flowSource, keySource) {
   const reveal = method(flowSource, "revealControls");
   const activate = method(flowSource, "focusNativeAndActivate");
-  const focus = method(flowSource, "focusNativeTarget");
+  const popupSettingsActivation = method(flowSource, "activateNativeSettingsPopup");
+  const popupTargetActivation = method(flowSource, "focusNativePopupAndActivate");
+  const focus = method(flowSource, "focusNativeTargetInOwnershipScope");
   const focusedRight = method(flowSource, "pressNativeFocusedRight");
   const adapter = method(flowSource, "sendNativeDpadKey");
 
@@ -1302,6 +1884,10 @@ function assertNativeKeySourceContract(flowSource, keySource) {
 
   assert.match(reveal, /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_DOWN\);/);
   assert.match(activate, /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_CENTER\);/);
+  assert.match(popupSettingsActivation,
+    /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_CENTER\);/);
+  assert.match(popupTargetActivation,
+    /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_CENTER\);/);
   assert.match(focus, /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_DOWN\);/);
   assert.match(focus, /switch \(RuntimeTvNativeFocus\.direction\(/);
   for (const direction of ["DOWN", "UP", "LEFT", "RIGHT"]) {
@@ -1310,11 +1896,19 @@ function assertNativeKeySourceContract(flowSource, keySource) {
   }
   assert.match(focus, /sendNativeDpadKey\(keyCode\);/);
   assert.match(focusedRight, /sendNativeDpadKey\(KeyEvent\.KEYCODE_DPAD_RIGHT\);/);
-  for (const nativeAction of [reveal, activate, focus, focusedRight]) {
+  for (const nativeAction of [
+    reveal, activate, popupSettingsActivation, popupTargetActivation, focus, focusedRight,
+  ]) {
     assert.doesNotMatch(nativeAction, /device\.press(?:DPad|KeyCode)/);
   }
   assert.ok(reveal.indexOf("observeFreshNative") < reveal.indexOf("sendNativeDpadKey"));
   assert.ok(activate.indexOf("focused.activationFocused") < activate.indexOf("sendNativeDpadKey"));
+  assert.ok(popupSettingsActivation.indexOf("focused.activationFocused")
+    < popupSettingsActivation.indexOf("sendNativeDpadKey"));
+  assert.ok(popupSettingsActivation.indexOf("sendNativeDpadKey")
+    < popupSettingsActivation.indexOf("beginSettingsPopupTransaction"));
+  assert.ok(popupTargetActivation.indexOf("focused.activationFocused")
+    < popupTargetActivation.indexOf("sendNativeDpadKey"));
   assert.ok(focusedRight.indexOf("snapshot.activationFocused")
     < focusedRight.indexOf("sendNativeDpadKey"));
 
@@ -1338,6 +1932,52 @@ function assertNativeKeySourceContract(flowSource, keySource) {
     "KEYCODE_DPAD_UP",
   ]);
 }
+
+test("actual popup adapter executes retained XML, scoped steering, dropped-token, zero-root, and cleanup behavior", () => {
+  assertProbePasses(runPopupAdapterProbe(read(flowPath)));
+});
+
+test("actual popup adapter kills the strict-PlayerView predecessor on retained popup XML", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "if (admittedPlayerRoots.size() > 1) {",
+    "if (admittedPlayerRoots.size() != 1) {",
+  );
+  assert.notEqual(mutant, source);
+  assertPopupAdapterMutantKilled(read(flowPath), mutant);
+});
+
+test("actual popup navigation kills a dropped transaction token", () => {
+  const source = read(flowPath);
+  const popupActivation = method(source, "focusNativePopupAndActivate");
+  const mutantActivation = popupActivation.replace(
+    "selector, label, steps, popupTransaction",
+    "selector, label, steps, null",
+  );
+  assert.notEqual(mutantActivation, popupActivation);
+  assertPopupAdapterMutantKilled(source.replace(popupActivation, mutantActivation));
+});
+
+test("actual popup adapter kills stale device-global focus selection", () => {
+  const source = read(flowPath);
+  const mutant = source.replace(
+    "focusScope.findObjects(By.focused(true))",
+    "device.findObjects(By.focused(true))",
+  );
+  assert.notEqual(mutant, source);
+  assertPopupAdapterMutantKilled(mutant);
+});
+
+test("actual selectAudioTrack callsite kills omitted transaction cleanup", () => {
+  const source = read(flowPath);
+  const audio = method(source, "selectAudioTrack");
+  const mutantAudio = audio.replace(
+    "        } finally {\n            popupTransaction.close();\n        }",
+    "        } finally {\n        }",
+  );
+  assert.notEqual(mutantAudio, audio);
+  assertPopupAdapterMutantKilled(source.replace(audio, mutantAudio));
+});
 
 test("native focus helper executes main and popup ownership, direction, zero, and rejection contracts", () => {
   assertProbePasses(runNativeFocusProbe());
@@ -1377,49 +2017,117 @@ test("native focus probe kills player-focus ambiguity, package, zero, and direct
   }
 });
 
-test("native focus probe kills popup ownership, scope, and foreground mutants", () => {
+test("retained zero-PlayerView popup kills the strict-root predecessor", () => {
   const source = read(focusHelperPath);
-  const mutants = [
-    source.replace(
-      "&& !SETTINGS_LIST_CLASS.equals(scope.className)) {",
-      "&& false && !SETTINGS_LIST_CLASS.equals(scope.className)) {",
-    ),
-    source.replace(
-      "if (!PRODUCT_PACKAGE.equals(foregroundPackage)) {",
-      "if (false && !PRODUCT_PACKAGE.equals(foregroundPackage)) {",
-    ),
-    source.replace(
-      "if (admittedPlayerRoots.size() != 1) {",
-      "if (false && admittedPlayerRoots.size() != 1) {",
-    ),
-    source.replace(
-      "if (settingsLists.size() > 1) {",
-      "if (false && settingsLists.size() > 1) {",
-    ).replace(
-      "if (settingsLists.size() != 1 || !sameScope(owner, settingsLists.get(0))) {",
-      "if (!sameScope(owner, settingsLists.get(0))) {",
-    ),
-    source.replace(
-      "if (targets.size() != 1) {",
-      "if (false && targets.size() != 1) {",
-    ),
-    source.replace(
-      "&& !SETTINGS_LIST_RESOURCE.equals(scope.resourceName)) {",
-      "&& false && !SETTINGS_LIST_RESOURCE.equals(scope.resourceName)) {",
-    ),
-    source.replace(
-      "if (settingsLists.size() != 1 || !sameScope(owner, settingsLists.get(0))) {",
-      "if (settingsLists.size() != 1) {",
-    ),
-    source.replace(
-      "if (focused.scopeKind != ownership.scopeKind) {",
-      "if (false && focused.scopeKind != ownership.scopeKind) {",
-    ),
-  ];
-  for (const mutant of mutants) {
-    assert.notEqual(mutant, source);
-    assertNativeFocusMutantKilled(mutant);
-  }
+  const mutant = source.replace(
+    "if (admittedPlayerRoots.size() > 1) {",
+    "if (admittedPlayerRoots.size() != 1) {",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("popup probe kills an omitted owned-transition gate", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "if (!popupOwned) {",
+    "if (false && !popupOwned) {",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("popup probe kills reuse after transaction close", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "popupTransaction != null && popupTransaction.isActive()",
+    "popupTransaction != null",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("popup probe kills omitted transaction failure cleanup", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "            active = false;",
+    "            active = true;",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("popup probe kills an invalid transition admission", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "                || !activationFocused",
+    "                || false",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("popup probe kills duplicate settings roots", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "if (settingsLists.size() > 1) {",
+    "if (false && settingsLists.size() > 1) {",
+  ).replace(
+    "if (settingsLists.size() != 1 || !sameScope(owner, settingsLists.get(0))) {",
+    "if (!sameScope(owner, settingsLists.get(0))) {",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("popup probe kills exact RecyclerView class bypass", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "&& !SETTINGS_LIST_CLASS.equals(scope.className)) {",
+    "&& false && !SETTINGS_LIST_CLASS.equals(scope.className)) {",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("popup probe kills exact settings resource bypass", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "&& !SETTINGS_LIST_RESOURCE.equals(scope.resourceName)) {",
+    "&& false && !SETTINGS_LIST_RESOURCE.equals(scope.resourceName)) {",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("popup probe kills visible-list and ancestor identity bypass", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "if (settingsLists.size() != 1 || !sameScope(owner, settingsLists.get(0))) {",
+    "if (settingsLists.size() != 1) {",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("popup probe kills focus escaping the chosen popup scope", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "if (focused.scopeKind != ownership.scopeKind) {",
+    "if (false && focused.scopeKind != ownership.scopeKind) {",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
+});
+
+test("actual retained Audio-below-Speed case kills inverted vertical steering", () => {
+  const source = read(focusHelperPath);
+  const mutant = source.replace(
+    "return vertical >= 0 ? Direction.DOWN : Direction.UP;",
+    "return vertical >= 0 ? Direction.UP : Direction.DOWN;",
+  );
+  assert.notEqual(mutant, source);
+  assertNativeFocusMutantKilled(mutant);
 });
 
 test("focus source guards kill admission, global-focus, popup-scope, target, and live-getter mutants", () => {
@@ -1450,8 +2158,10 @@ test("focus source guards kill admission, global-focus, popup-scope, target, and
     "return By.pkg(PRODUCT_PACKAGE)",
   );
   const liveGetterMutant = source.replace(
-    "            snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));",
-    "            snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));\n"
+    "            snapshot = observeFreshNative(\n"
+      + "                    () -> readNativeFocusSnapshot(selector, popupTransaction));",
+    "            snapshot = observeFreshNative(\n"
+      + "                    () -> readNativeFocusSnapshot(selector, popupTransaction));\n"
       + "            device.findObject(By.focused(true)).getVisibleBounds();",
   );
   for (const mutant of [
@@ -1465,6 +2175,58 @@ test("focus source guards kill admission, global-focus, popup-scope, target, and
     assert.notEqual(mutant, source);
     assert.throws(() => assertNativeReadSourceContract(mutant));
   }
+});
+
+test("source guard kills popup ownership-token bypass at the native adapter", () => {
+  const source = read(flowPath);
+  const mutant = source.replace(
+    "                ownershipSnapshots,\n                popupTransaction);",
+    "                ownershipSnapshots,\n                null);",
+  );
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertNativeReadSourceContract(mutant));
+});
+
+test("source guard kills popup navigation that drops the owned transaction", () => {
+  const source = read(flowPath);
+  const methodSource = method(source, "focusNativePopupAndActivate");
+  const mutant = source.replace(
+    methodSource,
+    methodSource.replace(
+      "selector, label, steps, popupTransaction",
+      "selector, label, steps, null",
+    ),
+  );
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertNativeReadSourceContract(mutant));
+});
+
+test("source guard kills transaction admission before the Settings key", () => {
+  const source = read(flowPath);
+  const activation = method(source, "activateNativeSettingsPopup");
+  const begin = [
+    "        return RuntimeTvNativeFocus.beginSettingsPopupTransaction(",
+    "                focused.targetPresent, focused.activationFocused, focused.scopeKind);",
+  ].join("\n");
+  const mutantActivation = activation.replace(begin, "").replace(
+    "        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER);",
+    `${begin}\n        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER);`,
+  );
+  const mutant = source.replace(activation, mutantActivation);
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertNativeReadSourceContract(mutant));
+});
+
+test("source guard kills omitted popup cleanup on failure", () => {
+  const source = read(flowPath);
+  const audio = method(source, "selectAudioTrack");
+  const mutantAudio = audio.replace(
+    "        } finally {\n            popupTransaction.close();\n        }",
+    "        } finally {\n        }",
+  );
+  const mutant = source.replace(audio, mutantAudio);
+  assert.notEqual(mutant, source);
+  assert.throws(() => assertNativeReadSourceContract(mutant));
 });
 
 test("fresh native helper executes zero-cache-query-restore and immutable snapshot contract", () => {

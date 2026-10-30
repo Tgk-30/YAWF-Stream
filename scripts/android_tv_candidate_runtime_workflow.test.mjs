@@ -12,6 +12,8 @@ const historical = readFileSync(
 );
 
 const runtimeMarker = "      - name: Set up JDK, Android SDK, and isolated Gradle\n";
+const upperRoiTestCommand =
+  "node --test scripts/android_tv_runtime_check.test.mjs scripts/runtime_tv_upper_video_roi.test.mjs";
 const classificationBlock = `          cat > "$EVIDENCE/run-1/proof-classification.txt" <<'EOF'\n` +
   `          classification=private-production-signed-candidate-fixture-proof\n` +
   `          publishedTvProof=false\n` +
@@ -93,6 +95,10 @@ function assertHistoricalRuntimeBodyPreserved(source) {
   assert.equal(actual, expected);
 }
 
+function assertUpperRoiTestContract(source) {
+  assert.equal(source.split(upperRoiTestCommand).length - 1, 1);
+}
+
 test("private TV31 runtime workflow is owner-only read-only and bootstrap-scoped", () => {
   assertCandidateContract(workflow);
 });
@@ -105,6 +111,21 @@ test("candidate binding and complete APK identity precede emulator image setup",
 
 test("historical API36 fixture harness media and cleanup runtime body is unchanged", () => {
   assertHistoricalRuntimeBodyPreserved(workflow);
+});
+
+test("both runtime workflows execute the exact upper-video ROI contract", () => {
+  for (const source of [workflow, historical]) assertUpperRoiTestContract(source);
+});
+
+test("rejects omission of the upper-video ROI contract from either runtime workflow", () => {
+  for (const source of [workflow, historical]) {
+    const mutant = source.replace(
+      " scripts/runtime_tv_upper_video_roi.test.mjs",
+      "",
+    );
+    assert.notEqual(mutant, source);
+    assert.throws(() => assertUpperRoiTestContract(mutant));
+  }
 });
 
 for (const [name, mutate] of [

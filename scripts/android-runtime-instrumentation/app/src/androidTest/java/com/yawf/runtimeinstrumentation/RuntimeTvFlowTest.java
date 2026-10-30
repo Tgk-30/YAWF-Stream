@@ -112,13 +112,15 @@ public final class RuntimeTvFlowTest {
         capture("native-player");
         checks.put("nativePlayerOpened", true);
         revealControls();
+        RuntimeTvUpperVideoRoi.Admission playingFrameRoi =
+                observeFreshNative(this::readUpperVideoRoiAdmission);
         long first = waitForPositionAtLeast(2, MEDIA_WAIT);
-        String firstFrame = centerFrameHash();
+        String firstFrame = upperVideoFrameHash(playingFrameRoi);
         SystemClock.sleep(2_500);
         long second = readPositionSeconds();
-        String secondFrame = centerFrameHash();
+        String secondFrame = upperVideoFrameHash(playingFrameRoi);
         assertTrue("Playback position did not advance", second >= first + 1);
-        assertTrue("Decoded center frame did not change while playback advanced",
+        assertTrue("Decoded upper-video ROI did not change while playback advanced",
                 !firstFrame.equals(secondFrame));
         checks.put("playingPositionAdvanced", true);
         checks.put("decodedFrameChanged", true);
@@ -128,11 +130,15 @@ public final class RuntimeTvFlowTest {
         waitForNative(playPauseSelector("Pause"), 5_000, "semantic Pause state before pausing");
         focusNativeAndActivate(playPauseSelector("Pause"), "Pause", 14);
         waitForNative(playPauseSelector("Play"), 5_000, "semantic Play state after pausing");
+        RuntimeTvUpperVideoRoi.Admission pausedFrameRoi =
+                observeFreshNative(this::readUpperVideoRoiAdmission);
         long pausedStart = readPositionSeconds();
-        String pausedFrame = centerFrameHash("pause-hash-before", pausedStart);
+        String pausedFrame = upperVideoFrameHash(
+                pausedFrameRoi, "pause-hash-before", pausedStart);
         SystemClock.sleep(3_000);
         long pausedEnd = readPositionSeconds();
-        String pausedFrameAfter = centerFrameHash("pause-hash-after", pausedEnd);
+        String pausedFrameAfter = upperVideoFrameHash(
+                pausedFrameRoi, "pause-hash-after", pausedEnd);
         assertTrue("Position advanced materially while paused", Math.abs(pausedEnd - pausedStart) <= 1);
         assertEquals("Decoded content changed while paused", pausedFrame, pausedFrameAfter);
         checks.put("pauseStable", true);
@@ -289,6 +295,12 @@ public final class RuntimeTvFlowTest {
         return By.clazz("android.view.SurfaceView").pkg(PRODUCT_PACKAGE);
     }
 
+    private BySelector nativeCenterControlsSelector() {
+        return By.res(PRODUCT_PACKAGE, "exo_center_controls")
+                .pkg(PRODUCT_PACKAGE)
+                .clazz("android.widget.LinearLayout");
+    }
+
     private BySelector nativeSettingsListSelector() {
         return By.res(PRODUCT_PACKAGE, "exo_settings_listview")
                 .pkg(PRODUCT_PACKAGE)
@@ -326,6 +338,7 @@ public final class RuntimeTvFlowTest {
                         ? BoundsSnapshot.from(currentFocus.bounds)
                         : null;
                 admittedFocus = NativeFocusSnapshot.present(
+                        RuntimeTvNativeFocus.ScopeKind.PLAYER_VIEW,
                         root.isFocused(),
                         BoundsSnapshot.from(root.getVisibleBounds()),
                         currentFocus.present,
@@ -398,6 +411,58 @@ public final class RuntimeTvFlowTest {
                 videoSurfaceVisible);
     }
 
+    private RuntimeTvUpperVideoRoi.Admission readUpperVideoRoiAdmission() {
+        String foregroundPackage = device.getCurrentPackageName();
+        List<RuntimeTvUpperVideoRoi.Candidate> candidateSnapshots = new ArrayList<>();
+        List<UiObject2> roots = device.findObjects(nativePlayerSurfaceRootSelector());
+        for (UiObject2 root : roots) {
+            RuntimeTvNativeSurface.Candidate nativeSurface =
+                    readNativePlayerSurfaceCandidate(root);
+
+            List<RuntimeTvUpperVideoRoi.Node> contentFrameSnapshots = new ArrayList<>();
+            List<RuntimeTvUpperVideoRoi.Node> videoSurfaceSnapshots = new ArrayList<>();
+            List<UiObject2> contentFrames = root.findObjects(nativeContentFrameSelector());
+            for (UiObject2 contentFrame : contentFrames) {
+                contentFrameSnapshots.add(snapshotUpperVideoRoiNode(contentFrame));
+                List<UiObject2> videoSurfaces = contentFrame.findObjects(
+                        nativeVideoSurfaceSelector());
+                for (UiObject2 videoSurface : videoSurfaces) {
+                    videoSurfaceSnapshots.add(snapshotUpperVideoRoiNode(videoSurface));
+                }
+            }
+
+            List<RuntimeTvUpperVideoRoi.Node> centerControlSnapshots = new ArrayList<>();
+            List<UiObject2> controllers = root.findObjects(nativePlayerControllerSelector());
+            if (controllers.size() == 1) {
+                UiObject2 controller = controllers.get(0);
+                List<UiObject2> centerControls = controller.findObjects(
+                        nativeCenterControlsSelector());
+                for (UiObject2 centerControl : centerControls) {
+                    centerControlSnapshots.add(snapshotUpperVideoRoiNode(centerControl));
+                }
+            }
+
+            candidateSnapshots.add(new RuntimeTvUpperVideoRoi.Candidate(
+                    RuntimeTvNativeSurface.admits(nativeSurface),
+                    snapshotUpperVideoRoiNode(root),
+                    contentFrameSnapshots,
+                    videoSurfaceSnapshots,
+                    centerControlSnapshots));
+        }
+        return RuntimeTvUpperVideoRoi.admit(foregroundPackage, candidateSnapshots);
+    }
+
+    private RuntimeTvUpperVideoRoi.Node snapshotUpperVideoRoiNode(UiObject2 node) {
+        Rect bounds = node.getVisibleBounds();
+        return new RuntimeTvUpperVideoRoi.Node(
+                node.getApplicationPackage(),
+                node.getResourceName(),
+                node.getClassName(),
+                !bounds.isEmpty(),
+                new RuntimeTvUpperVideoRoi.Bounds(
+                        bounds.left, bounds.top, bounds.right, bounds.bottom));
+    }
+
     private void revealControls() {
         NativeSurfaceSnapshot surface = observeFreshNative(
                 () -> readNativePlayerSurfaceSnapshot("native PlayerView before control reveal"));
@@ -412,16 +477,36 @@ public final class RuntimeTvFlowTest {
 
     private void selectAudioTrack(String language) {
         revealControls();
-        focusNativeAndActivate(By.res(PRODUCT_PACKAGE, "exo_settings"), "Media3 settings", 18);
-        waitForNative(By.text("Audio"), 10_000, "Audio settings row");
-        focusNativeAndActivate(By.text("Audio"), "Audio settings", 12);
-        BySelector english = audioLabel("English");
-        BySelector french = audioLabel("French");
-        waitForNative(english, 10_000, "English audio track");
-        waitForNative(french, 10_000, "French audio track");
-        focusNativeAndActivate(audioLabel(language), language + " audio", 12);
-        SystemClock.sleep(1_000);
-        log("Selected exact native audio label " + language);
+        RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction =
+                activateNativeSettingsPopup();
+        try {
+            waitForNative(By.text("Audio"), 10_000, "Audio settings row");
+            focusNativePopupAndActivate(
+                    By.text("Audio"), "Audio settings", 12, popupTransaction);
+            BySelector english = audioLabel("English");
+            BySelector french = audioLabel("French");
+            waitForNative(english, 10_000, "English audio track");
+            waitForNative(french, 10_000, "French audio track");
+            focusNativePopupAndActivate(
+                    audioLabel(language), language + " audio", 12, popupTransaction);
+            popupTransaction.close();
+            SystemClock.sleep(1_000);
+            log("Selected exact native audio label " + language);
+        } finally {
+            popupTransaction.close();
+        }
+    }
+
+    private RuntimeTvNativeFocus.PopupObservationTransaction activateNativeSettingsPopup() {
+        NativeFocusSnapshot focused = focusNativeTarget(
+                By.res(PRODUCT_PACKAGE, "exo_settings"), "Media3 settings", 18);
+        assertTrue("Could not focus target with bounded D-pad navigation: Media3 settings",
+                focused.activationFocused);
+        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER);
+        log("Activated Media3 settings with DPAD_CENTER");
+        SystemClock.sleep(350);
+        return RuntimeTvNativeFocus.beginSettingsPopupTransaction(
+                focused.targetPresent, focused.activationFocused, focused.scopeKind);
     }
 
     private BySelector audioLabel(String language) {
@@ -448,14 +533,38 @@ public final class RuntimeTvFlowTest {
         SystemClock.sleep(350);
     }
 
+    private void focusNativePopupAndActivate(
+            BySelector selector,
+            String label,
+            int steps,
+            RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction) {
+        NativeFocusSnapshot focused = focusNativeTargetInOwnershipScope(
+                selector, label, steps, popupTransaction);
+        assertTrue("Could not focus target with bounded D-pad navigation: " + label,
+                focused.activationFocused);
+        sendNativeDpadKey(KeyEvent.KEYCODE_DPAD_CENTER);
+        log("Activated " + label + " with DPAD_CENTER");
+        SystemClock.sleep(350);
+    }
+
     private NativeFocusSnapshot focusNativeTarget(
             BySelector selector,
             String label,
             int maxSteps) {
-        NativeFocusSnapshot snapshot = waitForNativeFocusSnapshot(selector, UI_WAIT, label);
+        return focusNativeTargetInOwnershipScope(selector, label, maxSteps, null);
+    }
+
+    private NativeFocusSnapshot focusNativeTargetInOwnershipScope(
+            BySelector selector,
+            String label,
+            int maxSteps,
+            RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction) {
+        NativeFocusSnapshot snapshot = waitForNativeFocusSnapshot(
+                selector, UI_WAIT, label, popupTransaction);
         if (snapshot.activationFocused) return snapshot;
         for (int index = 0; index < maxSteps; index++) {
-            snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));
+            snapshot = observeFreshNative(
+                    () -> readNativeFocusSnapshot(selector, popupTransaction));
             if (snapshot.activationFocused) {
                 log("Focused " + label + " using D-pad navigation");
                 return snapshot;
@@ -486,7 +595,8 @@ public final class RuntimeTvFlowTest {
             }
             SystemClock.sleep(180);
         }
-        snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));
+        snapshot = observeFreshNative(
+                () -> readNativeFocusSnapshot(selector, popupTransaction));
         assertTrue("Target disappeared while focusing: " + label, snapshot.targetPresent);
         assertTrue("Could not focus target with bounded D-pad navigation: " + label,
                 snapshot.activationFocused);
@@ -494,7 +604,8 @@ public final class RuntimeTvFlowTest {
     }
 
     private void pressNativeFocusedRight(BySelector selector, String label) {
-        NativeFocusSnapshot snapshot = observeFreshNative(() -> readNativeFocusSnapshot(selector));
+        NativeFocusSnapshot snapshot = observeFreshNative(
+                () -> readNativeFocusSnapshot(selector, null));
         assertTrue("Target disappeared before native key input: " + label,
                 snapshot.targetPresent);
         assertTrue("Native target was not focused before key input: " + label,
@@ -509,11 +620,12 @@ public final class RuntimeTvFlowTest {
     private NativeFocusSnapshot waitForNativeFocusSnapshot(
             BySelector selector,
             long timeout,
-            String label) {
+            String label,
+            RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction) {
         long deadline = SystemClock.uptimeMillis() + timeout;
         while (SystemClock.uptimeMillis() < deadline) {
             NativeFocusSnapshot snapshot = observeFreshNative(
-                    () -> readNativeFocusSnapshot(selector));
+                    () -> readNativeFocusSnapshot(selector, popupTransaction));
             if (snapshot.targetPresent) return snapshot;
             SystemClock.sleep(100);
         }
@@ -521,7 +633,9 @@ public final class RuntimeTvFlowTest {
         return null;
     }
 
-    private NativeFocusSnapshot readNativeFocusSnapshot(BySelector selector) {
+    private NativeFocusSnapshot readNativeFocusSnapshot(
+            BySelector selector,
+            RuntimeTvNativeFocus.PopupObservationTransaction popupTransaction) {
         String foregroundPackage = device.getCurrentPackageName();
 
         List<UiObject2> targets = device.findObjects(selector);
@@ -612,7 +726,8 @@ public final class RuntimeTvFlowTest {
                 targetSnapshots,
                 admittedRootSnapshots,
                 settingsListSnapshots,
-                ownershipSnapshots);
+                ownershipSnapshots,
+                popupTransaction);
         if (!ownership.targetPresent) {
             return NativeFocusSnapshot.missingTarget(false, null);
         }
@@ -633,10 +748,14 @@ public final class RuntimeTvFlowTest {
                 : null;
         if (!currentFocus.present) {
             return NativeFocusSnapshot.present(
-                    activationFocused, activationBounds, false, null);
+                    ownership.scopeKind, activationFocused, activationBounds, false, null);
         }
         return NativeFocusSnapshot.present(
-                activationFocused, activationBounds, true, currentFocusBounds);
+                ownership.scopeKind,
+                activationFocused,
+                activationBounds,
+                true,
+                currentFocusBounds);
     }
 
     private RuntimeTvNativeFocus.Selection readTargetOwnedNativeFocus(
@@ -843,6 +962,7 @@ public final class RuntimeTvFlowTest {
     }
 
     private static final class NativeFocusSnapshot {
+        final RuntimeTvNativeFocus.ScopeKind scopeKind;
         final boolean targetPresent;
         final boolean activationFocused;
         final BoundsSnapshot activationBounds;
@@ -850,11 +970,13 @@ public final class RuntimeTvFlowTest {
         final BoundsSnapshot currentFocusBounds;
 
         private NativeFocusSnapshot(
+                RuntimeTvNativeFocus.ScopeKind scopeKind,
                 boolean targetPresent,
                 boolean activationFocused,
                 BoundsSnapshot activationBounds,
                 boolean currentFocusPresent,
                 BoundsSnapshot currentFocusBounds) {
+            this.scopeKind = scopeKind;
             this.targetPresent = targetPresent;
             this.activationFocused = activationFocused;
             this.activationBounds = activationBounds;
@@ -866,15 +988,17 @@ public final class RuntimeTvFlowTest {
                 boolean currentFocusPresent,
                 BoundsSnapshot currentFocusBounds) {
             return new NativeFocusSnapshot(
-                    false, false, null, currentFocusPresent, currentFocusBounds);
+                    null, false, false, null, currentFocusPresent, currentFocusBounds);
         }
 
         static NativeFocusSnapshot present(
+                RuntimeTvNativeFocus.ScopeKind scopeKind,
                 boolean activationFocused,
                 BoundsSnapshot activationBounds,
                 boolean currentFocusPresent,
                 BoundsSnapshot currentFocusBounds) {
             return new NativeFocusSnapshot(
+                    scopeKind,
                     true,
                     activationFocused,
                     activationBounds,
@@ -883,19 +1007,25 @@ public final class RuntimeTvFlowTest {
         }
     }
 
-    private String centerFrameHash() throws Exception {
-        return centerFrameHash(null, -1);
+    private String upperVideoFrameHash(RuntimeTvUpperVideoRoi.Admission admission)
+            throws Exception {
+        return upperVideoFrameHash(admission, null, -1);
     }
 
-    private String centerFrameHash(String evidenceLabel, long observedPositionSeconds) throws Exception {
+    private String upperVideoFrameHash(
+            RuntimeTvUpperVideoRoi.Admission admission,
+            String evidenceLabel,
+            long observedPositionSeconds) throws Exception {
         long screenshotStartedAt = SystemClock.uptimeMillis();
         Bitmap image = instrumentation.getUiAutomation().takeScreenshot();
         long screenshotCompletedAt = SystemClock.uptimeMillis();
         assertNotNull("UiAutomation screenshot unavailable", image);
-        int left = image.getWidth() / 4;
-        int top = image.getHeight() / 4;
-        int width = image.getWidth() / 2;
-        int height = image.getHeight() / 2;
+        RuntimeTvUpperVideoRoi.Bounds roi = RuntimeTvUpperVideoRoi.validateScreenshot(
+                admission, image.getWidth(), image.getHeight());
+        int left = roi.left;
+        int top = roi.top;
+        int width = roi.width();
+        int height = roi.height();
         int[] pixels = new int[width * height];
         image.getPixels(pixels, 0, width, left, top, width, height);
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -912,15 +1042,27 @@ public final class RuntimeTvFlowTest {
             sample.put("screenshotStartedAtUptimeMillis", screenshotStartedAt);
             sample.put("screenshotCompletedAtUptimeMillis", screenshotCompletedAt);
             sample.put("precedingNativePositionSeconds", observedPositionSeconds);
-            sample.put("centerArgbSha256", hash);
+            sample.put("upperVideoArgbSha256", hash);
             sample.put("cropLeft", left);
             sample.put("cropTop", top);
             sample.put("cropWidth", width);
             sample.put("cropHeight", height);
-            sample.put("stateObservationScope", "Exact native Play required before first sample; sampler performs no additional UI reads");
+            sample.put("contentFrameBounds", boundsJson(admission.contentFrameBounds));
+            sample.put("videoSurfaceBounds", boundsJson(admission.videoSurfaceBounds));
+            sample.put("centerControlsBounds", boundsJson(admission.centerControlsBounds));
+            sample.put("stateObservationScope", "Exact native Play and upper-video ROI admission required before first sample; sampler performs no UI reads");
             writeText(evidenceLabel + ".json", sample.toString(2) + "\n");
         }
         return hash;
+    }
+
+    private JSONObject boundsJson(RuntimeTvUpperVideoRoi.Bounds bounds) throws Exception {
+        JSONObject value = new JSONObject();
+        value.put("left", bounds.left);
+        value.put("top", bounds.top);
+        value.put("right", bounds.right);
+        value.put("bottom", bounds.bottom);
+        return value;
     }
 
     private void capture(String label) throws Exception {
