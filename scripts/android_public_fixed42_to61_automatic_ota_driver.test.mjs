@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -5789,4 +5790,679 @@ test("instrumentation app alone declares one exact public MAIN HOME visibility q
     "query-only-test-manifest mutant left the app query intact");
   assert.equal(exactMainHomeIntent(appManifest), 1,
     "query-only-test-manifest control must keep the query in the app manifest");
+});
+
+function fixed42To61NativeGeometryContract(java) {
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const capture = methodBody(java, "captureFixed42To61NativeViewport");
+  const physical = methodBody(java, "fixed42SeedPhysicalBounds");
+  const policy = nestedClassDeclaration(java, "Fixed42To61NativeGeometryPolicy");
+  const branch = observe.indexOf('assertTrue("Fixed42-to61 main-content identity changed",');
+  const legacyExact = observe.indexOf("Fixed42MainGeometryPolicy.isExactRawBounds(", branch);
+  const inexact = observe.indexOf("if (!boundsMatch) {", legacyExact);
+  const nativeProof = observe.indexOf("captureFixed42To61NativeViewport(", inexact);
+  const exactQ = observe.indexOf("boundsMatch = measuredViewport.proof.matchesRawMain(", nativeProof);
+  const clipping = observe.indexOf("fixed42SeedPhysicalBounds(primary.bounds, nativeViewport)", exactQ);
+  const recheck = observe.indexOf("nodes, mainIndex, width, height, true)", clipping);
+  const unchanged = observe.indexOf("nativeViewport.assertUnchanged(freshViewport)", recheck);
+  const mismatch = observe.indexOf("throw new Fixed42MainGeometryMismatch", unchanged);
+  const phase = observe.indexOf("Fixed42SeedPolicy.phase(observation)", mismatch);
+  assert.ok(branch >= 0 && legacyExact > branch && inexact > legacyExact
+    && nativeProof > inexact && exactQ > nativeProof && clipping > exactQ
+    && recheck > clipping && unchanged > recheck && mismatch > unchanged && phase > mismatch,
+  "native physical clipping escaped profile, exact raw Q proof, or fresh end-of-observation check");
+  for (const token of [
+    "nodes, mainIndex, width, height, false)",
+    "if (boundsMatch) nativeViewport = measuredViewport;",
+    "main.bounds.left, main.bounds.top,",
+    "main.bounds.right, main.bounds.bottom)",
+    "bladeBounds = fixed42SeedPhysicalBounds(blade.bounds, nativeViewport)",
+    "nodes.get(railIndex).bounds, nativeViewport)",
+  ]) need(observe, token, `native observer lost ${token}`);
+  for (const token of [
+    "isFixed42To61AutomaticMode()", "new Fixed42To61NativeGeometryPolicy.Candidate[nodes.size()]",
+    "cached.info", "info.getBoundsInScreen(raw)", "info.getWindowId()",
+    "info.getPackageName()", "info.getClassName()", "info.isFocusable()", "info.isFocused()",
+    "info.getChildCount()", "info.refresh()", "info.getParent()", "parent.recycle()",
+    "parent.equals(nodes.get(cached.parentIndex).info)",
+    "nodes.get(mainIndex).info.getWindow()", "window.getRoot()",
+    "windowRoot.equals(nodes.get(0).info)", "window.getBoundsInScreen(windowBounds)",
+    "window.getDisplayId()", "window.getId()", "window.getType()",
+    "window.isActive(), window.isFocused()", "window.recycle()", "windowRoot.recycle()",
+    ".getSystemService(DisplayManager.class)", "manager.getDisplay(window.getDisplayId())",
+    "display.isValid()", "display.getRealMetrics(metrics)", "metrics.densityDpi > 0",
+    "metrics.widthPixels == width && metrics.heightPixels == height",
+    "device.getDisplayWidth() == width && device.getDisplayHeight() == height",
+    "metrics.density == metrics.densityDpi / 160.0f",
+    "WebView.getCurrentWebViewPackage()", "provider.packageName, provider.versionName",
+    "window.getDisplayId(), metrics.density", "display.getRotation(), metrics.densityDpi",
+  ]) need(capture, token, `independent native proof lost ${token}`);
+  assert.doesNotMatch(capture,
+    /getBoundsInWindow|getVisibleBounds|evaluateJavascript|loadUrl|executeShellCommand|getRootInActiveWindow|clearCache|SystemClock|performAction|\.click\(/,
+    "native proof used substituted bounds, hidden/DOM input, a new root, wait, or input");
+  need(physical, "if (nativeViewport != null)", "legacy visibility was changed");
+  need(physical, "nativeViewport.proof.rawMainExact", "clipping lost its exact raw gate");
+  need(physical, "visible.intersect(nativeViewport.physicalBounds)",
+    "visibility did not use independently proven native physical bounds");
+  assert.doesNotMatch(policy, /getVisibleBounds|intersect|Math\.abs|nativeExtent\s*\+\s*2/,
+    "native raw policy added tolerance or intersection-only acceptance");
+  const finalClick = methodBody(java, "clickFreshFixed42Blade");
+  for (const token of ["blade.getVisibleBounds()", "proof.bladeBounds, visibleBlade",
+    "fixed42VisibleAboveNavigation(", "device.getDisplayWidth()", "device.getDisplayHeight()"])
+    need(finalClick, token, `final click lost fresh physical proof ${token}`);
+}
+
+function runFixed42To61NativeGeometryHarness(java, focusCaseOnly = false) {
+  const policy = nestedClassDeclaration(java, "Fixed42To61NativeGeometryPolicy");
+  const harness = `
+public final class Fixed42To61NativeGeometryHarness {
+    private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
+    private static final int FIXED42_SEED_AX_CHILD_LIMIT = 128;
+    ${policy}
+    private static final String PRODUCT = "com.tgk30.debridstreamer";
+    private static final String PROVIDER = "com.google.android.webview";
+    private static final String VERSION = "133.0.6943.137";
+    private static final int[] PHYSICAL = {0, 0, 1080, 1920};
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+    private static void reject(Runnable operation, String message) {
+        try { operation.run(); } catch (AssertionError expected) { return; }
+        throw new AssertionError(message);
+    }
+    private static Fixed42To61NativeGeometryPolicy.Candidate node(
+            int parent, String role, boolean focusable, boolean focused,
+            boolean scrollable, int[] raw) {
+        return new Fixed42To61NativeGeometryPolicy.Candidate(
+                parent, 10, PRODUCT, role, true, true, focusable, focused,
+                scrollable, false, 1, raw);
+    }
+    private static Fixed42To61NativeGeometryPolicy.Candidate[] graph(double density) {
+        int width = Fixed42To61NativeGeometryPolicy.rendererExtent(1080, density);
+        int height = Fixed42To61NativeGeometryPolicy.rendererExtent(1920, density);
+        int[] renderer = {0, 0, width, height};
+        return new Fixed42To61NativeGeometryPolicy.Candidate[] {
+            node(-1, "android.widget.FrameLayout", false, false, false, PHYSICAL),
+            node(0, "android.webkit.WebView", false, false, false, PHYSICAL),
+            node(1, "android.webkit.WebView", true, true, false, renderer),
+            node(2, "android.view.View", false, false, false, renderer),
+            node(3, "android.view.View", true, false, true, renderer)
+        };
+    }
+    private static Fixed42To61NativeGeometryPolicy.Candidate altered(
+            Fixed42To61NativeGeometryPolicy.Candidate node,
+            int parent, int window, String product, String role,
+            boolean visible, boolean enabled, boolean focusable, boolean focused,
+            boolean scrollable, boolean clickable, int childCount, int[] raw) {
+        return new Fixed42To61NativeGeometryPolicy.Candidate(parent, window, product, role,
+                visible, enabled, focusable, focused, scrollable, clickable, childCount, raw);
+    }
+    private static Fixed42To61NativeGeometryPolicy.Candidate withBounds(
+            Fixed42To61NativeGeometryPolicy.Candidate node, int[] raw) {
+        return altered(node, node.parent, node.window, node.packageName, node.className,
+                node.visible, node.enabled, node.focusable, node.focused,
+                node.scrollable, node.clickable, node.childCount, raw);
+    }
+    private static Fixed42To61NativeGeometryPolicy.Proof prove(
+            Fixed42To61NativeGeometryPolicy.Candidate[] nodes, double density,
+            int display, String provider, String version, int window, int type,
+            boolean active, boolean focused, int[] bounds, boolean sameRoot, boolean complete) {
+        return Fixed42To61NativeGeometryPolicy.prove(nodes, 4, 1080, 1920,
+                display, density, provider, version, window, type, active, focused,
+                bounds, sameRoot, complete);
+    }
+    private static Fixed42To61NativeGeometryPolicy.Proof prove(
+            Fixed42To61NativeGeometryPolicy.Candidate[] nodes, double density) {
+        return prove(nodes, density, 0, PROVIDER, VERSION, 10, 1,
+                true, true, PHYSICAL, true, true);
+    }
+    private static void exact(Fixed42To61NativeGeometryPolicy.Candidate[] nodes,
+            double density) {
+        require(prove(nodes, density).rawMainExact, "raw main did not equal exact Q");
+    }
+    private static Fixed42To61NativeGeometryPolicy.Candidate withFocus(
+            Fixed42To61NativeGeometryPolicy.Candidate node, boolean focusable, boolean focused) {
+        return altered(node, node.parent, node.window, node.packageName, node.className,
+                node.visible, node.enabled, focusable, focused,
+                node.scrollable, node.clickable, node.childCount, node.bounds);
+    }
+    private static Fixed42To61NativeGeometryPolicy.Candidate[] actualFocusProjection() {
+        Fixed42To61NativeGeometryPolicy.Candidate[] nodes =
+                new Fixed42To61NativeGeometryPolicy.Candidate[6];
+        System.arraycopy(graph(2.625), 0, nodes, 0, 5);
+        // Run41602656199: native WebView false/false, renderer true/false,
+        // and a focused Discover descendant. Only focus ownership is projected here.
+        nodes[2] = withFocus(nodes[2], true, false);
+        nodes[5] = node(4, "android.view.View", true, true, false,
+                new int[] {0, 60, 1055, 1922});
+        return nodes;
+    }
+    private static void focusCases() {
+        Fixed42To61NativeGeometryPolicy.Candidate[] actual = actualFocusProjection();
+        exact(actual, 2.625);
+        Fixed42To61NativeGeometryPolicy.Proof before = prove(actual, 2.625);
+        require(!actual[1].focusable && !actual[1].focused
+                        && actual[2].focusable && !actual[2].focused
+                        && actual[5].focused && actual[5].parent == 4,
+                "actual unfocused-renderer/focused-Discover projection changed");
+        Fixed42To61NativeGeometryPolicy.assertUnchanged(
+                before, prove(actualFocusProjection(), 2.625), actual, actualFocusProjection());
+        for (int index : new int[] {2, 5}) {
+            Fixed42To61NativeGeometryPolicy.Candidate[] changed = actualFocusProjection();
+            changed[index] = withFocus(changed[index], changed[index].focusable,
+                    !changed[index].focused);
+            exact(changed, 2.625);
+            reject(() -> Fixed42To61NativeGeometryPolicy.assertUnchanged(
+                    before, prove(changed, 2.625), actual, changed),
+                    "changed observed renderer/Discover focus survived end check");
+        }
+        Fixed42To61NativeGeometryPolicy.Candidate[] wrongAncestry = actualFocusProjection();
+        Fixed42To61NativeGeometryPolicy.Candidate renderer = wrongAncestry[2];
+        wrongAncestry[2] = altered(renderer, 0, renderer.window, renderer.packageName,
+                renderer.className, renderer.visible, renderer.enabled,
+                renderer.focusable, renderer.focused, renderer.scrollable,
+                renderer.clickable, renderer.childCount, renderer.bounds);
+        reject(() -> exact(wrongAncestry, 2.625),
+                "unfocused renderer escaped its unique real native parent");
+        Fixed42To61NativeGeometryPolicy.Candidate[] wrongMain = actualFocusProjection();
+        Fixed42To61NativeGeometryPolicy.Candidate main = wrongMain[4];
+        wrongMain[4] = altered(main, 0, main.window, main.packageName, main.className,
+                main.visible, main.enabled, main.focusable, main.focused,
+                main.scrollable, main.clickable, main.childCount, main.bounds);
+        reject(() -> exact(wrongMain, 2.625), "unfocused renderer was unrelated to main");
+        for (boolean nativeRole : new boolean[] {false, true}) {
+            Fixed42To61NativeGeometryPolicy.Candidate[] ambiguous =
+                    new Fixed42To61NativeGeometryPolicy.Candidate[7];
+            System.arraycopy(actualFocusProjection(), 0, ambiguous, 0, 6);
+            ambiguous[6] = nativeRole
+                    ? node(0, "android.webkit.WebView", false, false, false, PHYSICAL)
+                    : node(1, "android.webkit.WebView", true, false, false,
+                            new int[] {0, 0, 1082, 1922});
+            reject(() -> exact(ambiguous, 2.625),
+                    "ambiguous native/unfocused renderer role survived");
+        }
+        for (int cyclicIndex : new int[] {1, 2, 3, 4, 5}) {
+            Fixed42To61NativeGeometryPolicy.Candidate[] cyclic = actualFocusProjection();
+            Fixed42To61NativeGeometryPolicy.Candidate node = cyclic[cyclicIndex];
+            cyclic[cyclicIndex] = altered(node, cyclicIndex, node.window, node.packageName,
+                    node.className, node.visible, node.enabled, node.focusable, node.focused,
+                    node.scrollable, node.clickable, node.childCount, node.bounds);
+            reject(() -> exact(cyclic, 2.625), "cyclic focus/viewport ancestry survived");
+        }
+        Fixed42To61NativeGeometryPolicy.Candidate[] wrongFocusable = actualFocusProjection();
+        wrongFocusable[2] = withFocus(wrongFocusable[2], false, false);
+        reject(() -> exact(wrongFocusable, 2.625), "renderer lost its focusable role identity");
+        reject(() -> prove(actual, 2.625, 0, PROVIDER, VERSION, 10, 1,
+                true, false, PHYSICAL, true, true),
+                "descendant focus substituted for application window focus");
+        reject(() -> prove(actual, 2.625, 0, PROVIDER, VERSION, 10, 1,
+                false, true, PHYSICAL, true, true),
+                "descendant focus substituted for active application window");
+    }
+    public static void main(String[] args) {
+        focusCases();
+        if (args.length == 1 && "focus-only".equals(args[0])) {
+            System.out.println("fixed42-to61-native-geometry-policy-ok");
+            return;
+        }
+        require(Fixed42To61NativeGeometryPolicy.rendererExtent(1080, 2.625) == 1082,
+                "density 2.625 width did not double-ceil");
+        require(Fixed42To61NativeGeometryPolicy.rendererExtent(1920, 2.625) == 1922,
+                "density 2.625 height did not double-ceil");
+        require(Fixed42To61NativeGeometryPolicy.rendererExtent(1080, 2.75) == 1081,
+                "density 2.75 width became a fixed two-pixel tolerance");
+        require(Fixed42To61NativeGeometryPolicy.rendererExtent(1920, 2.75) == 1923,
+                "density 2.75 height became a fixed two-pixel tolerance");
+        exact(graph(2.625), 2.625);
+        exact(graph(2.75), 2.75);
+        exact(graph(3.0), 3.0);
+        Fixed42To61NativeGeometryPolicy.Candidate[] baseline = graph(2.625);
+        Fixed42To61NativeGeometryPolicy.Proof proof = prove(baseline, 2.625);
+        require(proof.matchesRawMain(0, 0, 1082, 1922), "exact raw rectangle rejected");
+        for (int axis = 0; axis < 4; axis++) {
+            for (int delta : new int[] {-1, 1}) {
+                int[] raw = {0, 0, 1082, 1922};
+                raw[axis] += delta;
+                require(!proof.matchesRawMain(raw[0], raw[1], raw[2], raw[3]),
+                        "one-pixel edge mutant survived " + axis + ":" + delta);
+                Fixed42To61NativeGeometryPolicy.Candidate[] changed = graph(2.625);
+                changed[4] = withBounds(changed[4], raw);
+                reject(() -> exact(changed, 2.625), "inexact main survived");
+            }
+        }
+        for (int[] raw : new int[][] {{1, 1, 1083, 1923}, {-1, -1, 1081, 1921},
+                {0, 0, 2000, 3000}, {0, 0, 1080, 1920}}) {
+            Fixed42To61NativeGeometryPolicy.Candidate[] changed = graph(2.625);
+            changed[4] = withBounds(changed[4], raw);
+            reject(() -> exact(changed, 2.625), "shift, true overflow, or non-Q main survived");
+        }
+        for (double density : new double[] {0.0, -1.0, Double.NaN,
+                Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MIN_VALUE}) {
+            reject(() -> prove(baseline, density), "invalid independent density survived");
+        }
+        reject(() -> Fixed42To61NativeGeometryPolicy.rendererExtent(0, 2.625),
+                "zero native extent survived");
+        reject(() -> Fixed42To61NativeGeometryPolicy.rendererExtent(-1, 2.625),
+                "negative native extent survived");
+        for (String provider : new String[] {null, "", "com.android.webview", "foreign"}) {
+            reject(() -> prove(baseline, 2.625, 0, provider, VERSION, 10, 1,
+                    true, true, PHYSICAL, true, true), "unproven provider survived");
+        }
+        for (String version : new String[] {null, "", "133.0.6943.138", "134.0.0.0"}) {
+            reject(() -> prove(baseline, 2.625, 0, PROVIDER, version, 10, 1,
+                    true, true, PHYSICAL, true, true), "unproven version survived");
+        }
+        for (int[] bounds : new int[][] {{0,0,0,0}, {0,0,1082,1922},
+                {1,0,1080,1920}, {0,0,1081,1920}, {0,0,1080,1919}}) {
+            for (int index : new int[] {0, 1, 2}) {
+                Fixed42To61NativeGeometryPolicy.Candidate[] changed = graph(2.625);
+                changed[index] = withBounds(changed[index], bounds);
+                if (index == 2 && bounds[2] == 1082 && bounds[3] == 1922) continue;
+                reject(() -> exact(changed, 2.625), "wrong native/renderer bounds survived");
+            }
+            reject(() -> prove(baseline, 2.625, 0, PROVIDER, VERSION, 10, 1,
+                    true, true, bounds, true, true), "wrong physical window survived");
+        }
+        for (int index = 0; index < baseline.length; index++) {
+            for (int field = 0; field < 8; field++) {
+                Fixed42To61NativeGeometryPolicy.Candidate[] changed = graph(2.625);
+                Fixed42To61NativeGeometryPolicy.Candidate n = changed[index];
+                changed[index] = altered(n,
+                        field == 0 ? n.parent + 1 : n.parent,
+                        field == 1 ? 11 : n.window,
+                        field == 2 ? "foreign" : n.packageName,
+                        field == 3 ? "android.view.Foreign" : n.className,
+                        field == 4 ? false : n.visible,
+                        field == 5 ? false : n.enabled,
+                        field == 6 ? !n.focusable : n.focusable,
+                        field == 7 ? !n.focused : n.focused,
+                        n.scrollable, n.clickable, n.childCount, n.bounds);
+                // Intermediate DOM role/flags are not native identity evidence.
+                // Main focus flags and renderer-owned DOM focus are not role requirements.
+                if (index == 3 && field >= 3 || index == 4 && field >= 6
+                        || index == 2 && field == 7) continue;
+                reject(() -> exact(changed, 2.625), "native identity mutant survived");
+            }
+        }
+        reject(() -> prove(baseline, 2.625, 1, PROVIDER, VERSION, 10, 1,
+                true, true, PHYSICAL, true, true), "foreign display survived");
+        reject(() -> prove(baseline, 2.625, 0, PROVIDER, VERSION, 11, 1,
+                true, true, PHYSICAL, true, true), "foreign window survived");
+        reject(() -> prove(baseline, 2.625, 0, PROVIDER, VERSION, 10, 3,
+                true, true, PHYSICAL, true, true), "foreign window type survived");
+        reject(() -> prove(baseline, 2.625, 0, PROVIDER, VERSION, 10, 1,
+                false, true, PHYSICAL, true, true), "inactive window survived");
+        reject(() -> prove(baseline, 2.625, 0, PROVIDER, VERSION, 10, 1,
+                true, false, PHYSICAL, true, true), "unfocused window survived");
+        reject(() -> prove(baseline, 2.625, 0, PROVIDER, VERSION, 10, 1,
+                true, true, PHYSICAL, false, true), "unrelated window root survived");
+        reject(() -> prove(baseline, 2.625, 0, PROVIDER, VERSION, 10, 1,
+                true, true, PHYSICAL, true, false), "traversal truncation survived");
+        Fixed42To61NativeGeometryPolicy.Candidate[] missing = graph(2.625);
+        missing[1] = node(0, "android.view.View", false, false, false, PHYSICAL);
+        reject(() -> exact(missing, 2.625), "missing real WebView survived");
+        Fixed42To61NativeGeometryPolicy.Candidate[] duplicate =
+                new Fixed42To61NativeGeometryPolicy.Candidate[6];
+        System.arraycopy(baseline, 0, duplicate, 0, baseline.length);
+        duplicate[5] = node(0, "android.webkit.WebView", false, false, false, PHYSICAL);
+        reject(() -> exact(duplicate, 2.625), "ambiguous native WebView survived");
+        Fixed42To61NativeGeometryPolicy.Candidate[] unrelated = graph(2.625);
+        unrelated[4] = node(0, "android.view.View", true, false, true,
+                new int[] {0,0,1082,1922});
+        reject(() -> exact(unrelated, 2.625), "unrelated matching WebView survived");
+        Fixed42To61NativeGeometryPolicy.assertUnchanged(proof, prove(baseline, 2.625),
+                baseline, graph(2.625));
+        reject(() -> Fixed42To61NativeGeometryPolicy.assertUnchanged(
+                proof, prove(graph(2.75), 2.75), baseline, graph(2.75)),
+                "changed display density/viewport survived");
+        reject(() -> Fixed42To61NativeGeometryPolicy.assertUnchanged(
+                proof, prove(graph(2.6251), 2.6251), baseline, graph(2.6251)),
+                "changed density with same renderer extents survived");
+        Fixed42To61NativeGeometryPolicy.Candidate[] stale = graph(2.625);
+        stale[3] = withBounds(stale[3], new int[] {0,0,1082,1921});
+        reject(() -> Fixed42To61NativeGeometryPolicy.assertUnchanged(
+                proof, prove(stale, 2.625), baseline, stale), "stale raw geometry survived");
+        System.out.println("fixed42-to61-native-geometry-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-to61-native-geometry-"));
+  const sourceFile = path.join(directory, "Fixed42To61NativeGeometryHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `native geometry javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand,
+      ["-cp", directory, "Fixed42To61NativeGeometryHarness", ...(focusCaseOnly ? ["focus-only"] : [])],
+      { encoding: "utf8" });
+    assert.equal(run.status, 0, `native geometry policy failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-to61-native-geometry-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("fixed42-to61 exact native geometry observes independent physical ancestry before clipping", () => {
+  fixed42To61NativeGeometryContract(source);
+  const mutants = [
+    ["profile", "isFixed42To61AutomaticMode());", "true);"],
+    ["independent-native-bounds", "info.getBoundsInScreen(raw);", "raw.set(0, 0, width, height);"],
+    ["same-window-root", "windowRoot != null && windowRoot.equals(nodes.get(0).info)", "true"],
+    ["native-window-active", "window.isActive(), window.isFocused()", "true, true"],
+    ["independent-density", "window.getDisplayId(), metrics.density", "window.getDisplayId(), 2.625f"],
+    ["fresh-native", 'info.refresh()', 'true'],
+    ["native-ancestry", "parent.equals(nodes.get(cached.parentIndex).info)", "true"],
+  ];
+  const capture = methodBody(source, "captureFixed42To61NativeViewport");
+  for (const [label, from, to] of mutants) {
+    const changed = capture.replace(from, to);
+    assert.notEqual(changed, capture, `native adapter ${label} anchor absent`);
+    assert.throws(() => fixed42To61NativeGeometryContract(source.replace(capture, changed)),
+      `native adapter ${label} mutant survived`);
+  }
+  for (const [label, from, to] of [
+    ["raw-main", "boundsMatch = measuredViewport.proof.matchesRawMain(", "boundsMatch = true || measuredViewport.proof.matchesRawMain("],
+    ["viewport-recheck", "nativeViewport.assertUnchanged(freshViewport);", "// no recheck"],
+    ["pre-proof-clipping", "if (boundsMatch) nativeViewport = measuredViewport;", "nativeViewport = measuredViewport;"],
+  ]) {
+    const mutant = source.replace(from, to);
+    assert.notEqual(mutant, source, `native observation ${label} anchor absent`);
+    assert.throws(() => fixed42To61NativeGeometryContract(mutant),
+      `native observation ${label} mutant survived`);
+  }
+});
+
+test("fixed42-to61 exact native geometry executes density Q and adversarial native inputs", () => {
+  runFixed42To61NativeGeometryHarness(source);
+});
+
+test("fixed42-to61 exact native geometry rejects individual executable policy weakenings", (t) => {
+  const policy = nestedClassDeclaration(source, "Fixed42To61NativeGeometryPolicy");
+  for (const [label, from, to] of [
+    ["fixed-two-pixels", "Math.ceil(Math.ceil(nativeExtent / density) * density)", "nativeExtent + 2"],
+    ["single-ceil", "Math.ceil(Math.ceil(nativeExtent / density) * density)", "Math.ceil(nativeExtent / density) * density"],
+    ["width-plus-one", "right == rendererWidth", "right <= rendererWidth + 1"],
+    ["height-plus-one", "bottom == rendererHeight", "bottom <= rendererHeight + 1"],
+    ["shift-left", "left == 0 && top == 0", "left >= -1 && top == 0"],
+    ["provider", '"com.google.android.webview".equals(providerPackage)', "true"],
+    ["version", '"133.0.6943.137".equals(providerVersion)', "true"],
+    ["native-bounds", "!node.focusable && !node.focused && equal(node.bounds, physical)", "!node.focusable && !node.focused"],
+    ["root-bounds", "&& equal(root.bounds, physical)", ""],
+    ["native-window", "&& active && focused && sameWindowRoot", "&& true"],
+    ["window-bounds", "&& equal(windowBounds, physical)", ""],
+    ["unrelated-WebView", "&& ancestor(nodes, mainIndex, rendererIndex)", ""],
+    ["foreign-window", "&& node.window == window", ""],
+    ["traversal-truncation", "traversalComplete && nodes != null", "nodes != null"],
+    ["viewport-change", "&& before.density == after.density && before.window == after.window", "&& before.window == after.window"],
+    ["stale-raw", "original[index].same(current[index])", "true"],
+  ]) {
+    const changed = policy.replace(from, to);
+    assert.notEqual(changed, policy, `native policy ${label} mutant anchor absent`);
+    assert.throws(() => runFixed42To61NativeGeometryHarness(source.replace(policy, changed)),
+      `native policy ${label} mutant survived`);
+    t.diagnostic(`rejected executable native policy mutant: ${label}`);
+  }
+});
+
+function fixed42ProgressMarkerFailureDiagnosticContract(java) {
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const policy = methodBody(java, "fixed42SemanticPositions");
+  const diagnostic = methodBody(java, "logFixed42To61ProgressMarkerFailure");
+  const vertical = observe.indexOf("verticalTops = fixed42SemanticPositions(");
+  const caught = observe.indexOf("catch (AssertionError failure)", vertical);
+  const exactMode = observe.indexOf("isFixed42To61AutomaticMode()", caught);
+  const exactFailure = observe.indexOf('"Fixed42 progress marker became hidden or disabled"', exactMode);
+  const message = observe.indexOf(".equals(failure.getMessage())", exactFailure);
+  const log = observe.indexOf("logFixed42To61ProgressMarkerFailure(nodes)", message);
+  const rethrow = observe.indexOf("throw failure;", log);
+  const cards = observe.indexOf("int[] cardLefts = fixed42SemanticPositions(", rethrow);
+  assert.ok(vertical >= 0 && caught > vertical && exactMode > caught && exactFailure > exactMode
+    && message > exactFailure && log > message && rethrow > log && cards > rethrow,
+  "progress diagnostics escaped the exact vertical failure or swallowed the original assertion");
+  assert.equal(createHash("sha256").update(policy).digest("hex"),
+    "d06982d6f5ab8765f40e4099f8e896ac806c7d521eebed0a579460c7f5ddc330",
+    "progress-marker eligibility policy changed from frozen geometry9");
+  assert.equal((java.match(/logFixed42To61ProgressMarkerFailure\s*\(/g) ?? []).length, 2,
+    "progress diagnostics gained another trigger");
+  for (const token of [
+    "if (!isFixed42To61AutomaticMode()) return;", "4, FIXED42_VERTICAL_SEED_ANCHORS.length",
+    "new int[4]", "labelIndex < 4", "FIXED42_VERTICAL_SEED_ANCHORS[labelIndex]",
+    "nodes.get(nodeIndex)", "candidate.semanticEquals(label)", "counts[labelIndex]++",
+    "total++", "if (records.size() >= 4) continue;", "label.equals(candidate.text)",
+    "label.equals(candidate.description)", "OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName)",
+    '"android.view.View".equals(candidate.className)',
+    '"android.widget.TextView".equals(candidate.className)',
+    '"android.widget.Button".equals(candidate.className)',
+    "candidate.visible", "candidate.enabled", "candidate.scrollable", "candidate.clickable",
+    "candidate.info.isFocusable()", "candidate.info.isFocused()",
+    "candidate.info.isAccessibilityFocused()", "candidate.info.getLiveRegion()",
+    '"main-content".equals(candidate.resourceName)',
+    '" label=" + labelIndex', '" index=" + nodeIndex', '" parent=" + candidate.parentIndex',
+    '" window=" + candidate.info.getWindowId()', '" bounds=" + fixed42Bounds(candidate.bounds)',
+    '" flags=" + flags', '" total=" + total', '" omitted=" + (total - records.size())',
+    '" counts=" + counts[0]', "retainFixed42To61SeedFailureDiagnosticLines(lines)",
+    "catch (RuntimeException | AssertionError ignored)",
+  ]) need(diagnostic, token, `bounded cached progress diagnostic lost ${token}`);
+  assert.doesNotMatch(diagnostic,
+    /getRoot|clearCache|refresh\(|getParent\(|getChild|findObject|waitForIdle|SystemClock|performAction|\.click\(|device\./,
+    "progress diagnostic added a native query, recapture, wait, clock, or input");
+  assert.doesNotMatch(diagnostic,
+    /\+\s*(?:label\b(?!Index)|candidate\.(?:text|description|packageName|className|resourceName))|getText\(|getContentDescription\(/,
+    "progress diagnostic logs a raw label, package, class, resource, or dynamic text");
+}
+
+function runFixed42ProgressMarkerDiagnosticHarness(java) {
+  const diagnostic = methodBody(java, "logFixed42To61ProgressMarkerFailure");
+  const flags = methodBody(java, "fixed42ProgressMarkerDiagnosticFlags");
+  const retain = methodBody(java, "retainFixed42To61SeedFailureDiagnosticLines");
+  const log = methodBody(java, "log");
+  const safe = methodBody(java, "safe");
+  const bounds = methodBody(java, "fixed42Bounds");
+  const harness = `
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Pattern;
+public final class Fixed42ProgressMarkerDiagnosticHarness {
+    private static final int MAX_ACTION_LINES = 260;
+    private static final Pattern URL = Pattern.compile("https?://\\\\S+", Pattern.CASE_INSENSITIVE);
+    private static final List<String> actions = new ArrayList<>();
+    private static boolean exactMode = true;
+    private static final String[] FIXED42_VERTICAL_SEED_ANCHORS = {
+        "Sample catalog", "Top 10 Movies", "Top 10 TV Shows", "Popular Movies"
+    };
+    private static final class OtaFlowPolicy {
+        static final String PRODUCT_PACKAGE = "com.tgk30.debridstreamer";
+    }
+    private static final class android {
+        static final class view {
+            static final class View { static final int ACCESSIBILITY_LIVE_REGION_NONE = 0; }
+        }
+    }
+    private static final class Rect {
+        int left = 28, top = 1922, right = 1023, bottom = 1922;
+    }
+    private static final class Info {
+        boolean fail;
+        boolean isFocusable() { if (fail) throw new IllegalStateException(); return false; }
+        boolean isFocused() { return false; }
+        boolean isAccessibilityFocused() { return false; }
+        int getLiveRegion() { return 0; }
+        int getWindowId() { return 10; }
+    }
+    private static final class Fixed42AxNode {
+        String text, description = "https://private.invalid/description";
+        String packageName = OtaFlowPolicy.PRODUCT_PACKAGE;
+        String className, resourceName = "https://private.invalid/resource";
+        boolean visible, enabled = true, scrollable, clickable;
+        int parentIndex = 3;
+        Rect bounds = new Rect();
+        Info info = new Info();
+        boolean semanticEquals(String label) { return label.equals(text) || label.equals(description); }
+        Fixed42AxNode(int label, boolean visible) {
+            text = FIXED42_VERTICAL_SEED_ANCHORS[label];
+            className = label == 0 ? "android.view.View" : "android.widget.TextView";
+            this.visible = visible;
+        }
+    }
+    private static boolean isFixed42To61AutomaticMode() { return exactMode; }
+    private static void assertEquals(String message, int expected, int actual) {
+        if (expected != actual) throw new AssertionError(message);
+    }
+    private static void fail(String message) { throw new AssertionError(message); }
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+    private static void logFixed42To61ProgressMarkerFailure(List<Fixed42AxNode> nodes) {
+${diagnostic}
+    }
+    private static String fixed42ProgressMarkerDiagnosticFlags(boolean... flags) {
+${flags}
+    }
+    private static void retainFixed42To61SeedFailureDiagnosticLines(List<String> values) {
+${retain}
+    }
+    private static void log(String value) {
+${log}
+    }
+    private static String safe(String value) {
+${safe}
+    }
+    private static String fixed42Bounds(Rect bounds) {
+${bounds}
+    }
+    private static List<Fixed42AxNode> exact() {
+        List<Fixed42AxNode> nodes = new ArrayList<>();
+        for (int label = 0; label < 4; label++) nodes.add(new Fixed42AxNode(label, label != 2));
+        return nodes;
+    }
+    public static void main(String[] args) {
+        List<Fixed42AxNode> nodes = exact();
+        logFixed42To61ProgressMarkerFailure(nodes);
+        require(actions.size() == 5, "four cached markers were not retained within five lines");
+        require(actions.get(0).contains("nodes=4 records=4 total=4 omitted=0 counts=1,1,1,1"),
+                "progress diagnostic lost exact known-anchor counts");
+        for (int label = 0; label < 4; label++) {
+            String line = actions.get(label + 1);
+            require(line.contains("label=" + label + " index=" + label + " parent=3 window=10"),
+                    "safe label index or cached parent/window changed");
+            require(line.contains("bounds=[28,1922,1023,1922]"),
+                    "raw zero-height offscreen bounds were normalized");
+            String value = line.substring(line.indexOf("flags=") + 6);
+            require(value.length() == 15 && value.charAt(0) == '1' && value.charAt(1) == '0'
+                            && value.charAt(2) == '1' && value.charAt(label == 0 ? 3 : 4) == '1'
+                            && value.charAt(6) == (label == 2 ? '0' : '1') && value.charAt(7) == '1',
+                    "full marker role/visibility flags changed");
+        }
+        for (String line : actions) {
+            require(safe(line).equals(line) && line.length() < 500,
+                    "diagnostic was clipped or redacted");
+            require(!line.contains("http") && !line.contains("private")
+                            && !line.contains("com.tgk30") && !line.contains("android.view"),
+                    "raw dynamic identity leaked");
+            for (String label : FIXED42_VERTICAL_SEED_ANCHORS) {
+                require(!line.contains(label), "raw known semantic label leaked");
+            }
+        }
+        actions.clear();
+        nodes.addAll(exact());
+        logFixed42To61ProgressMarkerFailure(nodes);
+        require(actions.size() == 5
+                        && actions.get(0).contains("records=4 total=8 omitted=4 counts=2,2,2,2"),
+                "duplicates exceeded four records or were silently omitted");
+        actions.clear();
+        Fixed42AxNode foreign = new Fixed42AxNode(2, false);
+        foreign.packageName = "foreign"; foreign.className = "foreign"; foreign.enabled = false;
+        List<Fixed42AxNode> malformed = new ArrayList<>(); malformed.add(foreign);
+        logFixed42To61ProgressMarkerFailure(malformed);
+        require(actions.size() == 2 && actions.get(1).contains("flags=100000000000000"),
+                "foreign/unknown/disabled cached identity flags were lost");
+        actions.clear();
+        exactMode = false;
+        logFixed42To61ProgressMarkerFailure(exact());
+        require(actions.isEmpty(), "legacy profile gained diagnostic behavior");
+        exactMode = true;
+        List<Fixed42AxNode> stale = exact(); stale.get(0).info.fail = true;
+        logFixed42To61ProgressMarkerFailure(stale);
+        require(actions.isEmpty(), "partial failed diagnostic was retained");
+        for (int index = 0; index < MAX_ACTION_LINES - 1; index++) actions.add("retained");
+        logFixed42To61ProgressMarkerFailure(exact());
+        require(actions.size() == MAX_ACTION_LINES - 1,
+                "failure diagnostic expanded or partially consumed the action budget");
+        System.out.println("fixed42-progress-marker-diagnostic-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-progress-marker-diagnostic-"));
+  const sourceFile = path.join(directory, "Fixed42ProgressMarkerDiagnosticHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0, `progress diagnostic javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand, ["-cp", directory, "Fixed42ProgressMarkerDiagnosticHarness"],
+      { encoding: "utf8" });
+    assert.equal(run.status, 0, `progress diagnostic failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-progress-marker-diagnostic-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("fixed42-to61 failed vertical marker diagnostic preserves exact eligibility and rethrows", () => {
+  fixed42ProgressMarkerFailureDiagnosticContract(source);
+  for (const [label, from, to] of [
+    ["assertion-weakened", "node.visible && node.enabled);\n                if (useTop)", "node.enabled);\n                if (useTop)"],
+    ["rethrow", "                throw failure;\n            }\n            int[] cardLefts", "            }\n            int[] cardLefts"],
+    ["wrong-failure", '"Fixed42 progress marker became hidden or disabled"\n                                .equals(failure.getMessage())', '"other".equals(failure.getMessage())'],
+    ["raw-label", '" label=" + labelIndex', '" label=" + label'],
+  ]) {
+    const mutant = source.replace(from, to);
+    assert.notEqual(mutant, source, `progress diagnostic ${label} anchor absent`);
+    assert.throws(() => fixed42ProgressMarkerFailureDiagnosticContract(mutant),
+      `progress diagnostic ${label} mutant survived`);
+  }
+});
+
+test("fixed42-to61 failed vertical marker diagnostic executes bounded redacted cached records", (t) => {
+  runFixed42ProgressMarkerDiagnosticHarness(source);
+  const diagnostic = methodBody(source, "logFixed42To61ProgressMarkerFailure");
+  for (const [label, from, to] of [
+    ["record-cap", "records.size() >= 4", "records.size() >= 5"],
+    ["known-anchor-cap", "labelIndex < 4", "labelIndex < 3"],
+    ["omissions", '" omitted=" + (total - records.size())', '" omitted=" + 0'],
+    ["raw-bounds", "fixed42Bounds(candidate.bounds)", '"[0,0,1080,1920]"'],
+    ["scope", "if (!isFixed42To61AutomaticMode()) return;", ""],
+    ["retention", "retainFixed42To61SeedFailureDiagnosticLines(lines)", "actions.addAll(lines)"],
+  ]) {
+    const changed = diagnostic.replace(from, to);
+    assert.notEqual(changed, diagnostic, `progress diagnostic ${label} mutant anchor absent`);
+    assert.throws(() => runFixed42ProgressMarkerDiagnosticHarness(source.replace(diagnostic, changed)),
+      `progress diagnostic ${label} mutant survived`);
+    t.diagnostic(`rejected executable progress diagnostic mutant: ${label}`);
+  }
+});
+
+
+test("fixed42-to61 renderer focus follows the actual focused-Discover descendant without losing strict fences", (t) => {
+  runFixed42To61NativeGeometryHarness(source, true);
+  const policy = nestedClassDeclaration(source, "Fixed42To61NativeGeometryPolicy");
+  for (const [label, from, to] of [
+    ["restore-renderer-owned-focus", "node.focusable && equal(node.bounds, renderer)",
+      "node.focusable && node.focused && equal(node.bounds, renderer)"],
+    ["ignore-observed-focus-change", "&& focusable == other.focusable && focused == other.focused",
+      "&& focusable == other.focusable"],
+    ["ignore-renderer-focusability", "node.focusable && equal(node.bounds, renderer)",
+      "equal(node.bounds, renderer)"],
+  ]) {
+    const changed = policy.replace(from, to);
+    assert.notEqual(changed, policy, `renderer focus ${label} mutant anchor absent`);
+    assert.throws(() => runFixed42To61NativeGeometryHarness(source.replace(policy, changed), true),
+      `renderer focus ${label} mutant survived`);
+    t.diagnostic(`rejected executable renderer focus mutant: ${label}`);
+  }
 });

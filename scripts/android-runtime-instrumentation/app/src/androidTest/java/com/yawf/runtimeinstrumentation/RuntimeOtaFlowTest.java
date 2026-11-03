@@ -10,12 +10,17 @@ import android.app.Instrumentation;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.hardware.display.DisplayManager;
 import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.util.DisplayMetrics;
+import android.view.Display;
+import android.webkit.WebView;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 
@@ -1313,7 +1318,7 @@ public final class RuntimeOtaFlowTest {
                 if (phase == Fixed42SeedPolicy.PHASE_READY) {
                     ready = new Fixed42ReadyProof(
                             snapshot.bladeBounds,
-                            snapshot.railBounds,
+                            snapshot.physicalRailBounds,
                             snapshot.navigationTop);
                 } else {
                     assertTrue("Fixed42 seed exceeded its shared action or time bound",
@@ -1451,6 +1456,7 @@ public final class RuntimeOtaFlowTest {
             boolean enabled = main.enabled;
             Rect expectedMainBounds = new Rect(0, 0, width, height);
             boolean boundsMatch = main.bounds.equals(expectedMainBounds);
+            Fixed42To61NativeViewport nativeViewport = null;
             boolean mainIdentityMatches = packageMatch
                     && classMatch
                     && visible
@@ -1488,6 +1494,14 @@ public final class RuntimeOtaFlowTest {
                                 main.bounds.bottom,
                                 width,
                                 height));
+                if (!boundsMatch) {
+                    Fixed42To61NativeViewport measuredViewport = captureFixed42To61NativeViewport(
+                            nodes, mainIndex, width, height, false);
+                    boundsMatch = measuredViewport.proof.matchesRawMain(
+                            main.bounds.left, main.bounds.top,
+                            main.bounds.right, main.bounds.bottom);
+                    if (boundsMatch) nativeViewport = measuredViewport;
+                }
             }
             Fixed42MainGeometryDiagnostic mainGeometryDiagnostic = boundsMatch
                     ? null
@@ -1524,7 +1538,9 @@ public final class RuntimeOtaFlowTest {
             Fixed42AxNode primary = nodes.get(primaryIndex);
             assertTrue("Fixed42 Primary navigation identity changed",
                     primary.matches(product, "android.view.View", false, false)
-                            && fixed42FullBounds(primary.bounds, width, height));
+                            && fixed42FullBounds(
+                                    fixed42SeedPhysicalBounds(primary.bounds, nativeViewport),
+                                    width, height));
             int navigationTop = primary.bounds.top;
 
             int headingIndex = fixed42UniqueSemantic(nodes, "Popular Movies", false);
@@ -1576,9 +1592,11 @@ public final class RuntimeOtaFlowTest {
                                     && discover.bounds.contains(rail.bounds)
                                     && main.bounds.contains(rail.bounds));
                     railReady = fixed42VisibleAboveNavigation(
-                            heading.bounds, width, height, navigationTop)
+                            fixed42SeedPhysicalBounds(heading.bounds, nativeViewport),
+                            width, height, navigationTop)
                             && fixed42VisibleAboveNavigation(
-                                    rail.bounds, width, height, navigationTop);
+                                    fixed42SeedPhysicalBounds(rail.bounds, nativeViewport),
+                                    width, height, navigationTop);
                 } else {
                     assertEquals("Fixed42-to61 offscreen heading proof changed",
                             headingIndex, offscreenProof.headingIndex);
@@ -1607,21 +1625,31 @@ public final class RuntimeOtaFlowTest {
                         && fixed42IsDescendant(nodes, bladeIndex, railIndex);
                 assertTrue("Fixed42 Blade Runner escaped the Popular Movies rail",
                         bladeInRail);
-                bladeBounds = new Rect(blade.bounds);
+                bladeBounds = fixed42SeedPhysicalBounds(blade.bounds, nativeViewport);
                 bladeReady = railReady
                         && fixed42VisibleAboveNavigation(
-                                blade.bounds, width, height, navigationTop)
+                                bladeBounds, width, height, navigationTop)
                         && nodes.get(railIndex).bounds.contains(blade.bounds);
             }
 
-            int[] verticalTops = fixed42SemanticPositions(
-                    nodes,
-                    FIXED42_VERTICAL_SEED_ANCHORS,
-                    true,
-                    -1,
-                    product,
-                    fixed42To61OffscreenSemanticIndexes(
-                            FIXED42_VERTICAL_SEED_ANCHORS, offscreenProof));
+            int[] verticalTops;
+            try {
+                verticalTops = fixed42SemanticPositions(
+                        nodes,
+                        FIXED42_VERTICAL_SEED_ANCHORS,
+                        true,
+                        -1,
+                        product,
+                        fixed42To61OffscreenSemanticIndexes(
+                                FIXED42_VERTICAL_SEED_ANCHORS, offscreenProof));
+            } catch (AssertionError failure) {
+                if (isFixed42To61AutomaticMode()
+                        && "Fixed42 progress marker became hidden or disabled"
+                                .equals(failure.getMessage())) {
+                    logFixed42To61ProgressMarkerFailure(nodes);
+                }
+                throw failure;
+            }
             int[] cardLefts = fixed42SemanticPositions(
                     nodes,
                     FIXED42_POPULAR_SEED_CARDS,
@@ -1646,6 +1674,11 @@ public final class RuntimeOtaFlowTest {
                     bladeReady,
                     verticalTops,
                     cardLefts);
+            if (nativeViewport != null) {
+                Fixed42To61NativeViewport freshViewport = captureFixed42To61NativeViewport(
+                        nodes, mainIndex, width, height, true);
+                nativeViewport.assertUnchanged(freshViewport);
+            }
             if (mainGeometryDiagnostic != null) {
                 throw new Fixed42MainGeometryMismatch(mainGeometryDiagnostic);
             }
@@ -1656,6 +1689,8 @@ public final class RuntimeOtaFlowTest {
                     railIndex < 0 ? null : nodes.get(railIndex).info,
                     main.bounds,
                     railIndex < 0 ? null : nodes.get(railIndex).bounds,
+                    railIndex < 0 ? null : fixed42SeedPhysicalBounds(
+                            nodes.get(railIndex).bounds, nativeViewport),
                     bladeBounds,
                     navigationTop,
                     observation);
@@ -1664,6 +1699,94 @@ public final class RuntimeOtaFlowTest {
         } finally {
             if (!transferred) fixed42RecycleNodes(owned);
         }
+    }
+
+    private Fixed42To61NativeViewport captureFixed42To61NativeViewport(
+            List<Fixed42AxNode> nodes,
+            int mainIndex,
+            int width,
+            int height,
+            boolean recheck) {
+        assertTrue("Native viewport proof is restricted to fixed42-to61",
+                isFixed42To61AutomaticMode());
+        Fixed42To61NativeGeometryPolicy.Candidate[] candidates =
+                new Fixed42To61NativeGeometryPolicy.Candidate[nodes.size()];
+        for (int index = 0; index < nodes.size(); index++) {
+            Fixed42AxNode cached = nodes.get(index);
+            AccessibilityNodeInfo info = cached.info;
+            if (recheck && fixed42IsDescendant(nodes, mainIndex, index)) {
+                assertTrue("Fixed42-to61 native ancestry became stale", info.refresh());
+                AccessibilityNodeInfo parent = info.getParent();
+                try {
+                    assertTrue("Fixed42-to61 native ancestry changed",
+                            cached.parentIndex < 0 ? parent == null
+                                    : parent != null
+                                            && parent.equals(nodes.get(cached.parentIndex).info));
+                } finally {
+                    if (parent != null) parent.recycle();
+                }
+            }
+            Rect raw = new Rect();
+            info.getBoundsInScreen(raw);
+            candidates[index] = new Fixed42To61NativeGeometryPolicy.Candidate(
+                    cached.parentIndex, info.getWindowId(),
+                    fixed42NodeString(info.getPackageName()),
+                    fixed42NodeString(info.getClassName()),
+                    info.isVisibleToUser(), info.isEnabled(),
+                    info.isFocusable(), info.isFocused(),
+                    info.isScrollable(), info.isClickable(), info.getChildCount(),
+                    new int[] {raw.left, raw.top, raw.right, raw.bottom});
+        }
+        AccessibilityWindowInfo window = nodes.get(mainIndex).info.getWindow();
+        assertNotNull("Fixed42-to61 native window was unavailable", window);
+        AccessibilityNodeInfo windowRoot = null;
+        try {
+            windowRoot = window.getRoot();
+            Rect windowBounds = new Rect();
+            window.getBoundsInScreen(windowBounds);
+            DisplayManager manager = instrumentation.getTargetContext()
+                    .getSystemService(DisplayManager.class);
+            assertNotNull("Fixed42-to61 target display manager was unavailable", manager);
+            Display display = manager.getDisplay(window.getDisplayId());
+            assertNotNull("Fixed42-to61 target display was unavailable", display);
+            assertTrue("Fixed42-to61 target display was invalid", display.isValid());
+            DisplayMetrics metrics = new DisplayMetrics();
+            display.getRealMetrics(metrics);
+            PackageInfo provider = WebView.getCurrentWebViewPackage();
+            assertNotNull("Fixed42-to61 WebView provider was unavailable", provider);
+            assertTrue("Fixed42-to61 target physical display changed",
+                    device.getDisplayWidth() == width && device.getDisplayHeight() == height
+                            && metrics.widthPixels == width && metrics.heightPixels == height
+                            && metrics.densityDpi > 0
+                            && metrics.density == metrics.densityDpi / 160.0f);
+            Fixed42To61NativeGeometryPolicy.Proof proof =
+                    Fixed42To61NativeGeometryPolicy.prove(
+                            candidates, mainIndex, width, height,
+                            window.getDisplayId(), metrics.density,
+                            provider.packageName, provider.versionName,
+                            window.getId(), window.getType(),
+                            window.isActive(), window.isFocused(),
+                            new int[] {windowBounds.left, windowBounds.top,
+                                    windowBounds.right, windowBounds.bottom},
+                            windowRoot != null && windowRoot.equals(nodes.get(0).info),
+                            true);
+            return new Fixed42To61NativeViewport(
+                    proof, candidates, display.getRotation(), metrics.densityDpi);
+        } finally {
+            if (windowRoot != null) windowRoot.recycle();
+            window.recycle();
+        }
+    }
+
+    private static Rect fixed42SeedPhysicalBounds(
+            Rect raw, Fixed42To61NativeViewport nativeViewport) {
+        Rect visible = new Rect(raw);
+        if (nativeViewport != null) {
+            assertTrue("Physical clipping preceded exact raw renderer proof",
+                    nativeViewport.proof.rawMainExact);
+            if (!visible.intersect(nativeViewport.physicalBounds)) visible.setEmpty();
+        }
+        return visible;
     }
 
     private void clickFreshFixed42Blade(Fixed42ReadyProof proof, long startedAt) {
@@ -2259,6 +2382,71 @@ public final class RuntimeOtaFlowTest {
         }
         assertTrue("Popular Movies rail was absent", found >= 0);
         return found;
+    }
+
+    private void logFixed42To61ProgressMarkerFailure(List<Fixed42AxNode> nodes) {
+        if (!isFixed42To61AutomaticMode()) return;
+        try {
+            assertEquals("Fixed42 vertical diagnostic schema changed",
+                    4, FIXED42_VERTICAL_SEED_ANCHORS.length);
+            int[] counts = new int[4];
+            int total = 0;
+            List<String> records = new ArrayList<>();
+            for (int labelIndex = 0; labelIndex < 4; labelIndex++) {
+                String label = FIXED42_VERTICAL_SEED_ANCHORS[labelIndex];
+                for (int nodeIndex = 0; nodeIndex < nodes.size(); nodeIndex++) {
+                    Fixed42AxNode candidate = nodes.get(nodeIndex);
+                    if (!candidate.semanticEquals(label)) continue;
+                    counts[labelIndex]++;
+                    total++;
+                    if (records.size() >= 4) continue;
+                    String flags = fixed42ProgressMarkerDiagnosticFlags(
+                            label.equals(candidate.text),
+                            label.equals(candidate.description),
+                            OtaFlowPolicy.PRODUCT_PACKAGE.equals(candidate.packageName),
+                            "android.view.View".equals(candidate.className),
+                            "android.widget.TextView".equals(candidate.className),
+                            "android.widget.Button".equals(candidate.className),
+                            candidate.visible,
+                            candidate.enabled,
+                            candidate.scrollable,
+                            candidate.clickable,
+                            candidate.info.isFocusable(),
+                            candidate.info.isFocused(),
+                            candidate.info.isAccessibilityFocused(),
+                            candidate.info.getLiveRegion()
+                                    != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                            "main-content".equals(candidate.resourceName));
+                    records.add("Fixed42-to61 progress marker record"
+                            + " label=" + labelIndex
+                            + " index=" + nodeIndex
+                            + " parent=" + candidate.parentIndex
+                            + " window=" + candidate.info.getWindowId()
+                            + " bounds=" + fixed42Bounds(candidate.bounds)
+                            + " flags=" + flags);
+                }
+            }
+            List<String> lines = new ArrayList<>();
+            lines.add("Fixed42-to61 progress marker failure"
+                    + " nodes=" + nodes.size()
+                    + " records=" + records.size()
+                    + " total=" + total
+                    + " omitted=" + (total - records.size())
+                    + " counts=" + counts[0] + "," + counts[1]
+                            + "," + counts[2] + "," + counts[3]
+                    + " flagMap=t,d,pkg,v,tv,btn,vis,en,scr,clk,foc,fd,af,live,rm");
+            lines.addAll(records);
+            retainFixed42To61SeedFailureDiagnosticLines(lines);
+        } catch (RuntimeException | AssertionError ignored) {
+            // Diagnostic retention must never replace the original progress assertion.
+        }
+    }
+
+    private static String fixed42ProgressMarkerDiagnosticFlags(boolean... flags) {
+        assertEquals("Fixed42 progress diagnostic flag schema changed", 15, flags.length);
+        StringBuilder result = new StringBuilder(15);
+        for (boolean flag : flags) result.append(flag ? '1' : '0');
+        return result.toString();
     }
 
     private static int[] fixed42SemanticPositions(
@@ -4837,6 +5025,222 @@ public final class RuntimeOtaFlowTest {
         }
     }
 
+    private static final class Fixed42To61NativeGeometryPolicy {
+        static final class Candidate {
+            final int parent;
+            final int window;
+            final String packageName;
+            final String className;
+            final boolean visible;
+            final boolean enabled;
+            final boolean focusable;
+            final boolean focused;
+            final boolean scrollable;
+            final boolean clickable;
+            final int childCount;
+            final int[] bounds;
+
+            Candidate(int parent, int window, String packageName, String className,
+                    boolean visible, boolean enabled, boolean focusable, boolean focused,
+                    boolean scrollable, boolean clickable, int childCount, int[] bounds) {
+                this.parent = parent;
+                this.window = window;
+                this.packageName = packageName;
+                this.className = className;
+                this.visible = visible;
+                this.enabled = enabled;
+                this.focusable = focusable;
+                this.focused = focused;
+                this.scrollable = scrollable;
+                this.clickable = clickable;
+                this.childCount = childCount;
+                this.bounds = bounds.clone();
+            }
+
+            boolean same(Candidate other) {
+                return parent == other.parent && window == other.window
+                        && packageName.equals(other.packageName)
+                        && className.equals(other.className)
+                        && visible == other.visible && enabled == other.enabled
+                        && focusable == other.focusable && focused == other.focused
+                        && scrollable == other.scrollable && clickable == other.clickable
+                        && childCount == other.childCount && equal(bounds, other.bounds);
+            }
+        }
+
+        static final class Proof {
+            final int width;
+            final int height;
+            final int rendererWidth;
+            final int rendererHeight;
+            final double density;
+            final int window;
+            final boolean rawMainExact;
+
+            Proof(int width, int height, int rendererWidth, int rendererHeight,
+                    double density, int window, boolean rawMainExact) {
+                this.width = width;
+                this.height = height;
+                this.rendererWidth = rendererWidth;
+                this.rendererHeight = rendererHeight;
+                this.density = density;
+                this.window = window;
+                this.rawMainExact = rawMainExact;
+            }
+
+            boolean matchesRawMain(int left, int top, int right, int bottom) {
+                return rawMainExact && left == 0 && top == 0
+                        && right == rendererWidth && bottom == rendererHeight;
+            }
+        }
+
+        // Chromium 133.0.6943.137: ViewAndroid::OnSizeChanged rounds native/density up,
+        // then WebFrameWidgetImpl::Resize uses WidgetBase::DIPsToCeiledBlinkSpace.
+        // Keep this exact version gate until another provider has primary-source evidence.
+        static int rendererExtent(int nativeExtent, double density) {
+            require(nativeExtent > 0 && Double.isFinite(density) && density > 0.0,
+                    "Fixed42-to61 target density was invalid");
+            double result = Math.ceil(Math.ceil(nativeExtent / density) * density);
+            require(Double.isFinite(result) && result >= nativeExtent
+                            && result <= Integer.MAX_VALUE,
+                    "Fixed42-to61 renderer extent was invalid");
+            return (int) result;
+        }
+
+        static Proof prove(Candidate[] nodes, int mainIndex, int width, int height,
+                int displayId, double density, String providerPackage, String providerVersion,
+                int window, int windowType, boolean active, boolean focused,
+                int[] windowBounds, boolean sameWindowRoot, boolean traversalComplete) {
+            require(traversalComplete && nodes != null && nodes.length > 0
+                            && nodes.length <= FIXED42_SEED_AX_NODE_LIMIT
+                            && mainIndex > 0 && mainIndex < nodes.length,
+                    "Fixed42-to61 native traversal was incomplete");
+            require("com.google.android.webview".equals(providerPackage)
+                            && "133.0.6943.137".equals(providerVersion),
+                    "Fixed42-to61 renderer provider was not source-backed");
+            int rendererWidth = rendererExtent(width, density);
+            int rendererHeight = rendererExtent(height, density);
+            int[] physical = {0, 0, width, height};
+            int[] renderer = {0, 0, rendererWidth, rendererHeight};
+            require(displayId == 0 && window >= 0 && windowType == 1
+                            && active && focused && sameWindowRoot
+                            && equal(windowBounds, physical),
+                    "Fixed42-to61 native window identity changed");
+            int nativeIndex = -1;
+            int rendererIndex = -1;
+            int webViews = 0;
+            for (int index = 0; index < nodes.length; index++) {
+                Candidate node = nodes[index];
+                require(node != null && node.bounds != null && node.bounds.length == 4
+                                && node.childCount >= 0
+                                && node.childCount <= FIXED42_SEED_AX_CHILD_LIMIT
+                                && (index == 0 ? node.parent == -1
+                                        : node.parent >= 0 && node.parent < index),
+                        "Fixed42-to61 native parent graph changed");
+                if (!"android.webkit.WebView".equals(node.className)) continue;
+                webViews++;
+                require(product(node, window) && node.visible && node.enabled
+                                && !node.scrollable && !node.clickable,
+                        "Fixed42-to61 WebView identity changed");
+                if (!node.focusable && !node.focused && equal(node.bounds, physical)) {
+                    require(nativeIndex < 0, "Fixed42-to61 native WebView was ambiguous");
+                    nativeIndex = index;
+                } else if (node.focusable && equal(node.bounds, renderer)) {
+                    require(rendererIndex < 0, "Fixed42-to61 renderer WebView was ambiguous");
+                    rendererIndex = index;
+                } else {
+                    throw new AssertionError("Fixed42-to61 WebView raw geometry changed");
+                }
+            }
+            Candidate root = nodes[0];
+            require(webViews == 2 && nativeIndex > 0 && rendererIndex > nativeIndex
+                            && nodes[rendererIndex].parent == nativeIndex
+                            && ancestor(nodes, mainIndex, rendererIndex)
+                            && ancestor(nodes, nativeIndex, 0)
+                            && "android.widget.FrameLayout".equals(root.className)
+                            && product(root, window) && root.visible && root.enabled
+                            && !root.focusable && !root.focused
+                            && !root.scrollable && !root.clickable
+                            && equal(root.bounds, physical),
+                    "Fixed42-to61 native viewport ancestry changed");
+            for (int cursor = mainIndex; cursor >= 0; cursor = nodes[cursor].parent) {
+                require(product(nodes[cursor], window),
+                        "Fixed42-to61 native ancestry escaped the product window");
+            }
+            Candidate main = nodes[mainIndex];
+            require("android.view.View".equals(main.className)
+                            && main.visible && main.enabled && main.scrollable && !main.clickable,
+                    "Fixed42-to61 raw main identity changed");
+            return new Proof(width, height, rendererWidth, rendererHeight, density, window,
+                    equal(main.bounds, renderer));
+        }
+
+        static void assertUnchanged(Proof before, Proof after,
+                Candidate[] original, Candidate[] current) {
+            require(before.width == after.width && before.height == after.height
+                            && before.rendererWidth == after.rendererWidth
+                            && before.rendererHeight == after.rendererHeight
+                            && before.density == after.density && before.window == after.window
+                            && before.rawMainExact && after.rawMainExact
+                            && original.length == current.length,
+                    "Fixed42-to61 native viewport changed during observation");
+            for (int index = 0; index < original.length; index++) {
+                require(original[index].same(current[index]),
+                        "Fixed42-to61 cached raw geometry changed during observation");
+            }
+        }
+
+        private static boolean product(Candidate node, int window) {
+            return "com.tgk30.debridstreamer".equals(node.packageName) && node.window == window;
+        }
+
+        private static boolean ancestor(Candidate[] nodes, int child, int parent) {
+            for (int cursor = child; cursor >= 0; cursor = nodes[cursor].parent) {
+                if (cursor == parent) return true;
+            }
+            return false;
+        }
+
+        private static boolean equal(int[] first, int[] second) {
+            if (first == null || second == null || first.length != 4 || second.length != 4) {
+                return false;
+            }
+            for (int index = 0; index < 4; index++) {
+                if (first[index] != second[index]) return false;
+            }
+            return true;
+        }
+
+        private static void require(boolean condition, String message) {
+            if (!condition) throw new AssertionError(message);
+        }
+    }
+
+    private static final class Fixed42To61NativeViewport {
+        final Fixed42To61NativeGeometryPolicy.Proof proof;
+        final Fixed42To61NativeGeometryPolicy.Candidate[] candidates;
+        final Rect physicalBounds;
+        final int rotation;
+        final int densityDpi;
+
+        Fixed42To61NativeViewport(Fixed42To61NativeGeometryPolicy.Proof proof,
+                Fixed42To61NativeGeometryPolicy.Candidate[] candidates,
+                int rotation, int densityDpi) {
+            this.proof = proof;
+            this.candidates = candidates;
+            physicalBounds = new Rect(0, 0, proof.width, proof.height);
+            this.rotation = rotation;
+            this.densityDpi = densityDpi;
+        }
+
+        void assertUnchanged(Fixed42To61NativeViewport fresh) {
+            assertTrue("Fixed42-to61 target display configuration changed",
+                    rotation == fresh.rotation && densityDpi == fresh.densityDpi);
+            Fixed42To61NativeGeometryPolicy.assertUnchanged(
+                    proof, fresh.proof, candidates, fresh.candidates);
+        }
+    }
+
     private static final class Fixed42MainGeometryPolicy {
         static boolean isExactRawBounds(
                 int left,
@@ -5954,6 +6358,7 @@ public final class RuntimeOtaFlowTest {
         final AccessibilityNodeInfo popularRail;
         final Rect mainBounds;
         final Rect railBounds;
+        final Rect physicalRailBounds;
         final Rect bladeBounds;
         final int navigationTop;
         final Fixed42SeedPolicy.Observation observation;
@@ -5964,6 +6369,7 @@ public final class RuntimeOtaFlowTest {
                 AccessibilityNodeInfo popularRail,
                 Rect mainBounds,
                 Rect railBounds,
+                Rect physicalRailBounds,
                 Rect bladeBounds,
                 int navigationTop,
                 Fixed42SeedPolicy.Observation observation) {
@@ -5972,6 +6378,8 @@ public final class RuntimeOtaFlowTest {
             this.popularRail = popularRail;
             this.mainBounds = new Rect(mainBounds);
             this.railBounds = railBounds == null ? null : new Rect(railBounds);
+            this.physicalRailBounds = physicalRailBounds == null
+                    ? null : new Rect(physicalRailBounds);
             this.bladeBounds = bladeBounds == null ? null : new Rect(bladeBounds);
             this.navigationTop = navigationTop;
             this.observation = observation;
