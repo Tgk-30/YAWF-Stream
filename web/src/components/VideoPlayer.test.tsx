@@ -569,6 +569,7 @@ describe("VideoPlayer shell", () => {
       <VideoPlayer
         url="https://x/movie.mp4"
         title="Touch film"
+        upNext={{ label: "S1 E2" }}
         onPlayNext={onPlayNext}
         onClose={() => {}}
       />,
@@ -10107,8 +10108,67 @@ describe("ExternalPanel (Tauri)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Up next (auto-advance) overlay
+// Next-episode eligibility and Up next (auto-advance) overlay
 // ---------------------------------------------------------------------------
+
+describe.each([
+  ["desktop browser", "mac", false],
+  ["Android browser", "android", false],
+  ["Android app", "android", true],
+  ["iOS browser", "ios", false],
+] as const)("Next episode eligibility (%s)", (_label, kind, androidApp) => {
+  beforeEach(() => {
+    deviceKindMock.mockReturnValue(kind);
+    if (androidApp) {
+      isTauriMock.mockReturnValue(true);
+      Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+        configurable: true,
+        value: { getInsets: vi.fn() },
+      });
+    }
+  });
+
+  function renderWithNext(upNext: Parameters<typeof VideoPlayer>[0]["upNext"]) {
+    const onPlayNext = vi.fn();
+    render(
+      <VideoPlayer
+        url="https://x/video.mp4"
+        engine="webview-direct"
+        title={upNext == null ? "Movie" : "Episode"}
+        upNext={upNext}
+        onPlayNext={onPlayNext}
+        onClose={() => {}}
+      />,
+    );
+    return onPlayNext;
+  }
+
+  it("omits the Next episode button for a movie with a callback but no next item", () => {
+    renderWithNext(null);
+
+    expect(screen.queryByRole("button", { name: "Next episode" })).toBeNull();
+  });
+
+  it("ignores n and N for a movie with a callback but no next item", () => {
+    const onPlayNext = renderWithNext(null);
+
+    fireEvent.keyDown(window, { key: "n" });
+    fireEvent.keyDown(window, { key: "N" });
+
+    expect(onPlayNext).not.toHaveBeenCalled();
+  });
+
+  it("retains the Next episode button and n/N actions for a valid next item", () => {
+    const onPlayNext = renderWithNext({ label: "S1 E2" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Next episode" }));
+    expect(onPlayNext).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(window, { key: "n" });
+    expect(onPlayNext).toHaveBeenCalledTimes(2);
+    fireEvent.keyDown(window, { key: "N" });
+    expect(onPlayNext).toHaveBeenCalledTimes(3);
+  });
+});
 
 describe("Up next overlay", () => {
   function renderEnded(over: Partial<Parameters<typeof VideoPlayer>[0]> = {}) {

@@ -2697,7 +2697,7 @@ export function VideoPlayer({
             episode={episode ?? null}
             scrobbleContext={scrobbleContext}
             upNext={upNext}
-            onPlayNext={onPlayNext}
+            onPlayNext={upNext != null ? onPlayNext : undefined}
             onRemoteClose={onClose}
             autoCountdown={autoCountdown}
           />
