@@ -14,6 +14,10 @@ edition = "2021"
 name = "debridstreamer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Private Android lifecycle evidence only. Ordinary builds emit no probe.
+android-lifecycle-probe = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -115,6 +119,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
 # Read WindowInsets from the native WebView. Android WebView does not expose
 # these as CSS env(safe-area-inset-*) values, even with viewport-fit=cover.
 jni = "0.21"
