@@ -2595,14 +2595,14 @@ function fixed42MainGeometryReacquisitionContract(java) {
   const primary = observe.indexOf('fixed42UniqueSemantic(nodes, "Primary", true)', discover);
   const heading = observe.indexOf('fixed42UniqueSemantic(nodes, "Popular Movies", false)', primary);
   const semanticPositions = observe.indexOf("fixed42SemanticPositions(", heading);
-  const phase = observe.indexOf("Fixed42SeedPolicy.phase(observation)", semanticPositions);
-  const mismatchThrow = observe.indexOf("throw new Fixed42MainGeometryMismatch");
-  const transfer = observe.indexOf("transferred = true", mismatchThrow);
+  const mismatchThrow = observe.indexOf("throw new Fixed42MainGeometryMismatch", semanticPositions);
+  const phase = observe.indexOf("Fixed42SeedPolicy.phase(observation)", mismatchThrow);
+  const transfer = observe.indexOf("transferred = true", phase);
   const recycle = observe.indexOf("if (!transferred) fixed42RecycleNodes(owned)", transfer);
   assert.ok(childCap >= 0 && childCap < nullChild && nullChild < nodeCap
     && nodeCap < duplicate && duplicate < main && main < discover
     && discover < primary && primary < heading && heading < semanticPositions
-    && semanticPositions < phase && phase < mismatchThrow && mismatchThrow < transfer
+    && semanticPositions < mismatchThrow && mismatchThrow < phase && phase < transfer
     && transfer < recycle,
   "geometry-only retry occurs before a full guarded snapshot or after ownership transfer");
   for (const token of [
@@ -3377,9 +3377,13 @@ function fixed42SeedFailureDiagnosticContract(java) {
     'int headingIndex = fixed42UniqueSemantic(nodes, "Popular Movies", false);',
   );
   const match = observe.indexOf("boolean headingMatches = heading.matches(", headingLookup);
+  const sectionParent = observe.indexOf(
+    "popularSectionIndex = heading.parentIndex;",
+    match,
+  );
   const failureGate = observe.indexOf(
     "if (isFixed42To61AutomaticMode() && !headingMatches) {",
-    match,
+    sectionParent,
   );
   const diagnosticCall = observe.indexOf(
     "logFixed42To61SeedHeadingFailure(", failureGate,
@@ -3388,21 +3392,18 @@ function fixed42SeedFailureDiagnosticContract(java) {
     'assertTrue("Fixed42 Popular Movies heading identity changed",',
     diagnosticCall,
   );
-  const sectionParent = observe.indexOf(
-    "popularSectionIndex = heading.parentIndex;",
-    unchangedAssertion,
-  );
-  assert.ok(headingLookup >= 0 && match > headingLookup && failureGate > match
-      && diagnosticCall > failureGate && unchangedAssertion > diagnosticCall
-      && sectionParent > unchangedAssertion,
-  "seed-failure diagnostics are not exact-to61-only, failure-only, and before the unchanged guard");
-  need(observe.slice(match, sectionParent), "heading.matches(",
+  assert.ok(headingLookup >= 0 && match > headingLookup && sectionParent > match
+      && failureGate > sectionParent && diagnosticCall > failureGate
+      && unchangedAssertion > diagnosticCall,
+  "seed-failure diagnostics are not exact-to61-only and before the guarded classifier result");
+  need(observe.slice(match, unchangedAssertion), "heading.matches(",
     "heading failure no longer uses the original identity predicate");
-  need(observe.slice(match, sectionParent),
+  need(observe.slice(match, unchangedAssertion),
     'product, "android.widget.TextView", false, false);',
     "heading failure no longer uses every original identity field");
-  need(observe.slice(unchangedAssertion, sectionParent), "headingMatches",
-    "unchanged heading rejection no longer consumes the original predicate result");
+  need(observe.slice(unchangedAssertion, observe.indexOf(");", unchangedAssertion) + 2),
+    "headingMatches || offscreenProof != null",
+    "heading rejection no longer requires visible identity or the strict graph proof");
   assert.equal((observe.match(/logFixed42To61SeedHeadingFailure\(/g) ?? []).length, 1,
     "seed-failure diagnostic must have one call site");
   for (const token of [
@@ -3532,10 +3533,10 @@ function fixed42SeedFailureDiagnosticContract(java) {
     /textValue|descriptionValue|packageValue|classValue|resourceValue|https?:|credential|token|cookie|authorization/i,
     "seed-failure policy accepts raw identity or credential-bearing values");
 
-  const phase = observe.indexOf("Fixed42SeedPolicy.phase(observation)", sectionParent);
-  const geometryThrow = observe.indexOf("throw new Fixed42MainGeometryMismatch", phase);
-  assert.ok(phase > sectionParent && geometryThrow > phase,
-    "seed-failure logging changed the geometry mismatch type or ordering");
+  const geometryThrow = observe.indexOf("throw new Fixed42MainGeometryMismatch", sectionParent);
+  const phase = observe.indexOf("Fixed42SeedPolicy.phase(observation)", geometryThrow);
+  assert.ok(geometryThrow > sectionParent && phase > geometryThrow,
+    "offscreen phase can run before the exact raw-geometry gate");
 }
 
 function runFixed42SeedFailureDiagnosticHarness(java) {
@@ -3749,8 +3750,8 @@ function fixed42SeedSubtreeDiagnosticContract(java) {
     'if (isFixed42To61AutomaticMode() && !headingMatches) {',
     "logFixed42To61SeedHeadingFailure(",
     'assertTrue("Fixed42 Popular Movies heading identity changed",',
-    "headingMatches",
-  ]) need(observe, token, `seed subtree diagnostic changed original eligibility: ${token}`);
+    "headingMatches || offscreenProof != null",
+  ]) need(observe, token, `seed subtree diagnostic lost guarded eligibility: ${token}`);
   const failureGate = observe.indexOf(
     "if (isFixed42To61AutomaticMode() && !headingMatches) {",
   );
@@ -3758,11 +3759,11 @@ function fixed42SeedSubtreeDiagnosticContract(java) {
     'assertTrue("Fixed42 Popular Movies heading identity changed",', failureGate,
   );
   const parentAssignment = observe.indexOf(
-    "popularSectionIndex = heading.parentIndex;", originalAssertion,
+    "popularSectionIndex = heading.parentIndex;",
   );
-  assert.ok(failureGate >= 0 && originalAssertion > failureGate
-      && parentAssignment > originalAssertion,
-  "seed subtree diagnostic moved or weakened the unchanged heading assertion");
+  assert.ok(parentAssignment >= 0 && failureGate > parentAssignment
+      && originalAssertion > failureGate,
+  "seed subtree diagnostic escaped the failed-heading classifier path");
   assert.equal((observe.match(/retainFixed42To61SeedSubtreeDiagnostic\(/g) ?? []).length, 0,
     "subtree diagnostics escaped the failure-only diagnostic method");
 
@@ -4087,6 +4088,379 @@ ${retention}
   }
 }
 
+function fixed42To61OffscreenSeedContract(java) {
+  const observe = methodBody(java, "observeFixed42SeedSnapshot");
+  const adapter = methodBody(java, "fixed42To61OffscreenSeedCandidates");
+  const semanticKind = methodBody(java, "fixed42To61SeedSemanticKind");
+  const semanticIndexes = methodBody(java, "fixed42To61OffscreenSemanticIndexes");
+  const positions = methodBody(java, "fixed42SemanticPositions");
+  const policy = nestedClassDeclaration(java, "Fixed42To61OffscreenSeedPolicy");
+  const seedPolicy = nestedClassDeclaration(java, "Fixed42SeedPolicy");
+  const finalClick = methodBody(java, "clickFreshFixed42Blade");
+
+  for (const title of [
+    "Avengers: Infinity War",
+    "The Avengers",
+    "Mad Max: Fury Road",
+    "Blade Runner 2049",
+    "Harry Potter and the Deathly Hallows: Part 2",
+    "The Martian",
+    "Guardians of the Galaxy",
+    "Iron Man",
+  ]) need(java, `            "${title}"`, `fixed42-to61 source fixture lost ${title}`);
+  need(java, "private static final String[] FIXED42_TO61_POPULAR_FIXTURE_TITLES = {",
+    "fixed42-to61 classifier lost its source-derived fixture inventory");
+
+  const failedHeading = observe.indexOf(
+    "if (isFixed42To61AutomaticMode() && !headingMatches) {");
+  const diagnostic = observe.indexOf("logFixed42To61SeedHeadingFailure(", failedHeading);
+  const classify = observe.indexOf("Fixed42To61OffscreenSeedPolicy.classify(", diagnostic);
+  const headingGuard = observe.indexOf(
+    'assertTrue("Fixed42 Popular Movies heading identity changed",', classify);
+  const geometryThrow = observe.indexOf("throw new Fixed42MainGeometryMismatch", headingGuard);
+  const phase = observe.indexOf("Fixed42SeedPolicy.phase(observation)", geometryThrow);
+  assert.ok(failedHeading >= 0 && diagnostic > failedHeading && classify > diagnostic
+      && headingGuard > classify && geometryThrow > headingGuard && phase > geometryThrow,
+  "offscreen graph classification escaped failed-heading or exact-geometry ordering");
+  for (const token of [
+    "fixed42To61OffscreenSeedCandidates(nodes)",
+    "nodes.get(0).info.getWindowId()",
+    "mainIndex",
+    "discoverIndex",
+    "headingIndex",
+    "popularSectionIndex",
+    "main.bounds.left",
+    "main.bounds.top",
+    "main.bounds.right",
+    "main.bounds.bottom",
+    "discover.bounds.bottom",
+    "Fixed42To61OffscreenSeedPolicy.CARD_COUNT",
+    "FIXED42_TO61_POPULAR_FIXTURE_TITLES.length",
+    "headingMatches || offscreenProof != null",
+    "if (offscreenProof == null)",
+    "offscreenProof.railIndex",
+    "offscreenProof.cardIndexes[bladeFixtureIndex]",
+    "fixed42To61OffscreenSemanticIndexes(",
+    "offscreenProof != null",
+  ]) need(observe, token, `offscreen observer lost ${token}`);
+  assert.equal((observe.match(/Fixed42To61OffscreenSeedPolicy\.classify\(/g) ?? []).length, 1,
+    "offscreen classifier must have one exact-to61 failed-heading call site");
+  assert.doesNotMatch(observe.slice(classify, headingGuard),
+    /getRootInActiveWindow|clearCache|waitForIdle|SystemClock|\.click\(|performAction|device\.(?:click|swipe|press)/,
+    "offscreen classification added a query, wait, clock, or input");
+
+  for (const token of [
+    "new Fixed42To61OffscreenSeedPolicy.Candidate[nodes.size()]",
+    "for (int index = 0; index < nodes.size(); index++)",
+    "node.parentIndex",
+    "node.info.getWindowId()",
+    "fixed42To61SeedSemanticKind(node)",
+    "node.bounds.left",
+    "node.bounds.top",
+    "node.bounds.right",
+    "node.bounds.bottom",
+    "OtaFlowPolicy.PRODUCT_PACKAGE.equals(node.packageName)",
+    '"android.view.View".equals(node.className)',
+    '"android.widget.TextView".equals(node.className)',
+    '"android.widget.Button".equals(node.className)',
+    "node.visible",
+    "node.enabled",
+    "node.scrollable",
+    "node.clickable",
+    "node.info.isFocusable()",
+    "node.info.isFocused()",
+    "node.info.isAccessibilityFocused()",
+    "node.info.getLiveRegion()",
+    '"main-content".equals(node.resourceName)',
+  ]) need(adapter, token, `offscreen adapter lost cached primitive ${token}`);
+  assert.doesNotMatch(adapter,
+    /getRootInActiveWindow|clearCache|findObject|findObjects|waitForIdle|SystemClock|\.click\(|performAction/,
+    "offscreen adapter added observation, waiting, or input");
+
+  for (const token of [
+    'node.semanticEquals("Popular Movies")',
+    'node.semanticEquals("See all")',
+    "FIXED42_TO61_POPULAR_FIXTURE_TITLES.length",
+    "SEMANTIC_CARD_START + index",
+    'assertEquals("Fixed42-to61 seed semantic identity overlapped", 0, kind)',
+  ]) need(semanticKind, token, `offscreen semantic mapping lost ${token}`);
+
+  for (const token of [
+    "static final int SEMANTIC_NONE = 0;",
+    "static final int SEMANTIC_HEADING = 1;",
+    "static final int SEMANTIC_SEE_ALL = 2;",
+    "static final int SEMANTIC_CARD_START = 3;",
+    "static final int CARD_COUNT = 8;",
+    'private static final String SECTION_SHAPE = "1100010000000";',
+    'private static final String HEADING_SHAPE = "1010010000000";',
+    'private static final String BUTTON_SHAPE = "1001010110000";',
+    'private static final String RAIL_SHAPE = "1100011010000";',
+    "candidate.index == index",
+    "candidate.parentIndex >= 0 && candidate.parentIndex < index",
+    "semanticCounts[candidate.semanticKind]++",
+    "semanticCounts[SEMANTIC_HEADING] == 1",
+    "semanticCounts[semanticKind] == 1",
+    "nodes[sectionIndex].parentIndex == routeIndex",
+    "nodes[headingIndex].parentIndex == sectionIndex",
+    "candidate.parentIndex != sectionIndex",
+    "directChildren == 3",
+    "headingChildren == 1",
+    "headerChildren == 1",
+    "railChildren == 1",
+    "candidate.parentIndex == railIndex",
+    "cardChildren == CARD_COUNT",
+    "subtreeNodes == 4 + CARD_COUNT",
+    "candidate.windowId == rootWindowId",
+    "positiveZeroHeightAtRawBottom(",
+    "zeroHeightAtRawBottom(",
+    "candidate.top == candidate.bottom",
+    "candidate.top == mainBottom",
+    "mainBottom >= displayHeight",
+    "routeBottom == mainBottom",
+    'throw new AssertionError(\n                            "Fixed42-to61 offscreen section owned an unknown child")',
+    '"Fixed42-to61 offscreen rail owned an unknown descendant"',
+    "return new Proof(headingIndex, railIndex, cardIndexes);",
+  ]) need(policy, token, `whole-graph offscreen policy lost ${token}`);
+  assert.doesNotMatch(policy,
+    /\b(?:31|49|50|51|98|99|100|101|102|103|104|105)\b/,
+    "offscreen policy encoded retained node indices or capture order");
+  assert.doesNotMatch(policy,
+    /getRootInActiveWindow|clearCache|waitForIdle|SystemClock|\.click\(|performAction|device\./,
+    "offscreen policy performs observation, waiting, clock reads, or input");
+
+  for (const token of [
+    "validatedOffscreenIndexes == null",
+    "validatedOffscreenIndexes.length == labels.length",
+    "validatedOffscreenIndexes[labelIndex] == nodeIndex",
+    "!node.visible && node.enabled",
+    "positions[labelIndex] = Fixed42SeedPolicy.ABSENT",
+    "matches <= 1",
+    'assertEquals("Fixed42 validated offscreen marker was absent", 1, matches)',
+  ]) need(positions, token, `offscreen progress proof lost ${token}`);
+  need(semanticIndexes, '"Popular Movies".equals(labels[labelIndex])',
+    "offscreen progress mapping lost the exact heading");
+  need(semanticIndexes, "fixed42To61FixtureTitleIndex(labels[labelIndex])",
+    "offscreen progress mapping lost source fixture titles");
+
+  for (const token of [
+    "final boolean offscreenStructureValid;",
+    "if (observation.offscreenStructureValid)",
+    "observation.headingCount != 1",
+    "observation.railCount != 1",
+    "observation.bladeCount != 1",
+    "observation.railValid",
+    "observation.railReady",
+    "!observation.bladeInRail",
+    "observation.bladeReady",
+    "return PHASE_VERTICAL;",
+  ]) need(seedPolicy, token, `offscreen vertical phase guard lost ${token}`);
+  assert.doesNotMatch(finalClick, /offscreen|Fixed42To61OffscreenSeedPolicy/,
+    "offscreen presence weakened the final fresh visible click proof");
+}
+
+function runFixed42To61OffscreenSeedHarness(java) {
+  const policy = nestedClassDeclaration(java, "Fixed42To61OffscreenSeedPolicy");
+  const harness = `
+public final class Fixed42To61OffscreenSeedHarness {
+    private static final int FIXED42_SEED_AX_NODE_LIMIT = 512;
+    ${policy}
+
+    private static final String OTHER = "0000000000000";
+    private static final String SECTION = "1100010000000";
+    private static final String HEADING = "1010010000000";
+    private static final String BUTTON = "1001010110000";
+    private static final String RAIL = "1100011010000";
+
+    private static Fixed42To61OffscreenSeedPolicy.Candidate candidate(
+            int index, int parent, int window, int semantic,
+            int left, int right, String shape) {
+        int top = index <= 2 ? 0 : 1922;
+        int bottom = index <= 2 ? 1922 : 1922;
+        return new Fixed42To61OffscreenSeedPolicy.Candidate(
+                index, parent, window, semantic, left, top, right, bottom, shape);
+    }
+
+    private static Fixed42To61OffscreenSeedPolicy.Candidate[] exactGraph() {
+        Fixed42To61OffscreenSeedPolicy.Candidate[] nodes =
+                new Fixed42To61OffscreenSeedPolicy.Candidate[16];
+        nodes[0] = candidate(0, -1, 10, 0, 0, 1080, OTHER);
+        nodes[1] = candidate(1, 0, 10, 0, 0, 1082, OTHER);
+        nodes[2] = candidate(2, 1, 10, 0, 0, 1055, OTHER);
+        nodes[3] = candidate(3, 2, 10, 0, 28, 1023, SECTION);
+        nodes[4] = candidate(4, 3, 10, 1, 28, 443, HEADING);
+        nodes[5] = candidate(5, 3, 10, 2, 829, 1023, BUTTON);
+        nodes[6] = candidate(6, 3, 10, 0, 28, 1023, RAIL);
+        for (int slot = 0; slot < 8; slot++) {
+            int index = 7 + slot;
+            int left = slot < 3 ? 28 + slot * 525 : 1082;
+            int right = slot < 2 ? left + 489 : 1082;
+            nodes[index] = candidate(index, 6, 10, 3 + slot, left, right, BUTTON);
+        }
+        nodes[15] = candidate(15, 2, 10, 2, 0, 100, OTHER);
+        return nodes;
+    }
+
+    private static Fixed42To61OffscreenSeedPolicy.Proof classify(
+            Fixed42To61OffscreenSeedPolicy.Candidate[] nodes) {
+        return Fixed42To61OffscreenSeedPolicy.classify(
+                nodes, 10, 1, 2, 4, 3,
+                0, 0, 1082, 1922, 1922, 1920);
+    }
+
+    private static Fixed42To61OffscreenSeedPolicy.Candidate replace(
+            Fixed42To61OffscreenSeedPolicy.Candidate value,
+            int parent, int window, int semantic,
+            int left, int top, int right, int bottom, String shape) {
+        return new Fixed42To61OffscreenSeedPolicy.Candidate(
+                value.index, parent, window, semantic,
+                left, top, right, bottom, shape);
+    }
+
+    private static Fixed42To61OffscreenSeedPolicy.Candidate[] cloneGraph() {
+        return exactGraph().clone();
+    }
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static void reject(
+            Fixed42To61OffscreenSeedPolicy.Candidate[] nodes, String message) {
+        try {
+            classify(nodes);
+        } catch (AssertionError expected) {
+            return;
+        }
+        throw new AssertionError(message);
+    }
+
+    private static String flip(String value, int index) {
+        char[] chars = value.toCharArray();
+        chars[index] = chars[index] == '1' ? '0' : '1';
+        return new String(chars);
+    }
+
+    public static void main(String[] ignored) {
+        Fixed42To61OffscreenSeedPolicy.Candidate[] exact = exactGraph();
+        Fixed42To61OffscreenSeedPolicy.Proof proof = classify(exact);
+        require(proof.headingIndex == 4 && proof.railIndex == 6,
+                "exact failed graph did not produce structural proof");
+        for (int slot = 0; slot < 8; slot++) {
+            require(proof.cardIndexes[slot] == 7 + slot,
+                    "source fixture semantic mapping changed");
+        }
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] permuted = cloneGraph();
+        Fixed42To61OffscreenSeedPolicy.Candidate first = permuted[7];
+        Fixed42To61OffscreenSeedPolicy.Candidate fourth = permuted[10];
+        permuted[7] = replace(first, first.parentIndex, first.windowId, 6,
+                first.left, first.top, first.right, first.bottom, first.shape);
+        permuted[10] = replace(fourth, fourth.parentIndex, fourth.windowId, 3,
+                fourth.left, fourth.top, fourth.right, fourth.bottom, fourth.shape);
+        Fixed42To61OffscreenSeedPolicy.Proof permutedProof = classify(permuted);
+        require(permutedProof.cardIndexes[0] == 10
+                        && permutedProof.cardIndexes[3] == 7,
+                "classifier encoded capture index or card order");
+
+        for (int bit = 0; bit < 13; bit++) {
+            int[] roleIndexes = {3, 4, 5, 6, 7};
+            for (int roleIndex : roleIndexes) {
+                Fixed42To61OffscreenSeedPolicy.Candidate[] malformed = cloneGraph();
+                Fixed42To61OffscreenSeedPolicy.Candidate node = malformed[roleIndex];
+                malformed[roleIndex] = replace(
+                        node, node.parentIndex, node.windowId, node.semanticKind,
+                        node.left, node.top, node.right, node.bottom,
+                        flip(node.shape, bit));
+                reject(malformed, "malformed role shape survived bit " + bit);
+            }
+        }
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] foreign = cloneGraph();
+        Fixed42To61OffscreenSeedPolicy.Candidate foreignCard = foreign[8];
+        foreign[8] = replace(foreignCard, 6, 11, foreignCard.semanticKind,
+                foreignCard.left, foreignCard.top,
+                foreignCard.right, foreignCard.bottom, foreignCard.shape);
+        reject(foreign, "foreign-window card survived");
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] duplicate = cloneGraph();
+        Fixed42To61OffscreenSeedPolicy.Candidate duplicateCard = duplicate[8];
+        duplicate[8] = replace(duplicateCard, 6, 10, 3,
+                duplicateCard.left, duplicateCard.top,
+                duplicateCard.right, duplicateCard.bottom, duplicateCard.shape);
+        reject(duplicate, "duplicate and missing fixture semantics survived");
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] globalDuplicate = cloneGraph();
+        Fixed42To61OffscreenSeedPolicy.Candidate outside = globalDuplicate[15];
+        globalDuplicate[15] = replace(outside, 2, 10, 3,
+                outside.left, outside.top, outside.right, outside.bottom, outside.shape);
+        reject(globalDuplicate, "global semantic duplicate survived outside the section");
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] wrongParent = cloneGraph();
+        Fixed42To61OffscreenSeedPolicy.Candidate heading = wrongParent[4];
+        wrongParent[4] = replace(heading, 6, 10, heading.semanticKind,
+                heading.left, heading.top, heading.right, heading.bottom, heading.shape);
+        reject(wrongParent, "heading outside the direct section children survived");
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] wrongHeader = cloneGraph();
+        Fixed42To61OffscreenSeedPolicy.Candidate header = wrongHeader[5];
+        wrongHeader[5] = replace(header, 3, 10, 0,
+                header.left, header.top, header.right, header.bottom, header.shape);
+        reject(wrongHeader, "arbitrary header action semantic survived");
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] nested =
+                new Fixed42To61OffscreenSeedPolicy.Candidate[17];
+        System.arraycopy(exactGraph(), 0, nested, 0, 16);
+        nested[16] = candidate(16, 7, 10, 0, 1082, 1082, BUTTON);
+        reject(nested, "unknown nested card descendant survived");
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] unknownDirect =
+                new Fixed42To61OffscreenSeedPolicy.Candidate[17];
+        System.arraycopy(exactGraph(), 0, unknownDirect, 0, 16);
+        unknownDirect[16] = candidate(16, 3, 10, 0, 28, 1023, BUTTON);
+        reject(unknownDirect, "unknown direct section child survived");
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] extraRail =
+                new Fixed42To61OffscreenSeedPolicy.Candidate[17];
+        System.arraycopy(exactGraph(), 0, extraRail, 0, 16);
+        extraRail[16] = candidate(16, 3, 10, 0, 28, 1023, RAIL);
+        reject(extraRail, "extra direct scrollable rail survived");
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] nonzero = cloneGraph();
+        Fixed42To61OffscreenSeedPolicy.Candidate rail = nonzero[6];
+        nonzero[6] = replace(rail, 3, 10, 0,
+                rail.left, 1921, rail.right, 1922, rail.shape);
+        reject(nonzero, "nonzero-height offscreen rail survived");
+
+        Fixed42To61OffscreenSeedPolicy.Candidate[] missing = cloneGraph();
+        Fixed42To61OffscreenSeedPolicy.Candidate last = missing[14];
+        missing[14] = replace(last, 6, 10, 0,
+                last.left, last.top, last.right, last.bottom, last.shape);
+        reject(missing, "missing fixture card survived");
+
+        System.out.println("fixed42-to61-offscreen-seed-policy-ok");
+    }
+}
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fixed42-to61-offscreen-seed-"));
+  const sourceFile = path.join(directory, "Fixed42To61OffscreenSeedHarness.java");
+  fs.writeFileSync(sourceFile, harness);
+  const javaHome = process.env.JAVA_HOME;
+  const javac = javaHome == null ? "javac" : path.join(javaHome, "bin", "javac");
+  const javaCommand = javaHome == null ? "java" : path.join(javaHome, "bin", "java");
+  try {
+    const compile = spawnSync(javac, [sourceFile], { encoding: "utf8" });
+    assert.equal(compile.status, 0,
+      `fixed42-to61 offscreen classifier javac failed: ${compile.stderr}`);
+    const run = spawnSync(javaCommand,
+      ["-cp", directory, "Fixed42To61OffscreenSeedHarness"], { encoding: "utf8" });
+    assert.equal(run.status, 0,
+      `fixed42-to61 offscreen classifier failed: ${run.stderr}`);
+    assert.equal(run.stdout.trim(), "fixed42-to61-offscreen-seed-policy-ok");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function runFixed42MainGeometryPolicyHarness(java) {
   const policy = nestedClassDeclaration(java, "Fixed42MainGeometryPolicy");
   const harness = `
@@ -4230,6 +4604,17 @@ public final class Fixed42SeedPolicyHarness {
                 vertical, cards);
     }
 
+    private static Fixed42SeedPolicy.Observation offscreenObservation(
+            boolean railValid, boolean railReady,
+            boolean bladeInRail, boolean bladeReady, int bladeCount) {
+        int absent = Fixed42SeedPolicy.ABSENT;
+        return new Fixed42SeedPolicy.Observation(
+                true, 1, 1, 1, 1, bladeCount,
+                true, railValid, true, railReady, bladeInRail, bladeReady,
+                positions(334, 786, absent, absent),
+                positions(absent, absent, absent, absent));
+    }
+
     private static int[] positions(int a, int b, int c, int d) {
         return new int[] {a, b, c, d};
     }
@@ -4269,9 +4654,13 @@ public final class Fixed42SeedPolicyHarness {
                 true, 1, 1, 1, 1, 1, true, true, true, true, true,
                 positions(absent, absent, absent, 100),
                 positions(-516, -244, 28, 300));
+        Fixed42SeedPolicy.Observation offscreen = offscreenObservation(
+                false, false, true, false, 1);
 
         require(Fixed42SeedPolicy.phase(vertical) == Fixed42SeedPolicy.PHASE_VERTICAL,
                 "outer Discover root must start vertical");
+        require(Fixed42SeedPolicy.phase(offscreen) == Fixed42SeedPolicy.PHASE_VERTICAL,
+                "strict offscreen whole-graph proof must remain vertical only");
         require(Fixed42SeedPolicy.didAdvance(
                         Fixed42SeedPolicy.PHASE_VERTICAL, vertical, verticalMoved),
                 "upward content movement must be observable");
@@ -4326,6 +4715,18 @@ public final class Fixed42SeedPolicyHarness {
         reject(() -> Fixed42SeedPolicy.phase(observation(
                 true, 1, 1, 1, 1, 2, true, true, true, true, true,
                 ready.verticalTops, ready.cardLefts)), "ambiguous Blade must fail");
+        reject(() -> Fixed42SeedPolicy.phase(offscreenObservation(
+                true, false, true, false, 1)),
+                "offscreen proof must not fabricate visible rail validity");
+        reject(() -> Fixed42SeedPolicy.phase(offscreenObservation(
+                false, true, true, false, 1)),
+                "offscreen proof must not become horizontally ready");
+        reject(() -> Fixed42SeedPolicy.phase(offscreenObservation(
+                false, false, false, false, 1)),
+                "offscreen Blade must remain in the proven rail");
+        reject(() -> Fixed42SeedPolicy.phase(offscreenObservation(
+                false, false, true, false, 0)),
+                "offscreen proof must retain the observed Blade");
         reject(() -> Fixed42SeedPolicy.phase(observation(
                 true, 1, 1, 1, 1, 1, true, true, true, false, false,
                 horizontal.verticalTops, horizontal.cardLefts)), "Blade outside rail must fail");
@@ -5021,6 +5422,80 @@ test("fixed42-to61 heading failure retains the complete bounded cached section s
   }
 });
 
+test("fixed42-to61 admits only the exact source-backed offscreen Popular whole graph", () => {
+  fixed42To61OffscreenSeedContract(source);
+  runFixed42To61OffscreenSeedHarness(source);
+  runFixed42TwoAxisSeedPolicyHarness(source);
+
+  const policy = nestedClassDeclaration(source, "Fixed42To61OffscreenSeedPolicy");
+  const seedPolicy = nestedClassDeclaration(source, "Fixed42SeedPolicy");
+  const exactGeometryGate = `if (mainGeometryDiagnostic != null) {
+                throw new Fixed42MainGeometryMismatch(mainGeometryDiagnostic);
+            }
+            Fixed42SeedPolicy.phase(observation);`;
+  const mutants = [
+    ["profile-scope", source.replace(
+      "if (isFixed42To61AutomaticMode() && !headingMatches) {",
+      "if (isFixed42AutomaticMode() && !headingMatches) {",
+    )],
+    ["unknown-child", source.replace(policy, policy
+      .replace(
+        `throw new AssertionError(
+                            "Fixed42-to61 offscreen section owned an unknown child");`,
+        "continue;",
+      )
+      .replace("directChildren == 3", "directChildren >= 3")
+      .replace(
+        "subtreeNodes == 4 + CARD_COUNT",
+        "subtreeNodes >= 4 + CARD_COUNT",
+      ))],
+    ["global-duplicate", source.replace(policy, policy.replace(
+      "semanticCounts[semanticKind] == 1",
+      "semanticCounts[semanticKind] >= 1",
+    ))],
+    ["foreign-window", source.replace(policy, policy.replaceAll(
+      "candidate.windowId == rootWindowId",
+      "true",
+    ))],
+    ["shape", source.replace(policy, policy.replaceAll(
+      "BUTTON_SHAPE.equals(candidate.shape)",
+      "true",
+    ))],
+    ["header-index", source.replace(policy, policy.replace(
+      "candidate.semanticKind == SEMANTIC_SEE_ALL",
+      "candidate.index == 5",
+    ))],
+    ["raw-geometry-order", source.replace(
+      exactGeometryGate,
+      `Fixed42SeedPolicy.phase(observation);
+            if (mainGeometryDiagnostic != null) {
+                throw new Fixed42MainGeometryMismatch(mainGeometryDiagnostic);
+            }`,
+    )],
+    ["offscreen-ready", source.replace(seedPolicy, seedPolicy.replace(
+      `throw new AssertionError(
+                            "Fixed42-to61 offscreen seed proof was inconsistent");
+                }
+                return PHASE_VERTICAL;`,
+      `throw new AssertionError(
+                            "Fixed42-to61 offscreen seed proof was inconsistent");
+                }
+                return PHASE_READY;`,
+    ))],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, source, `offscreen whole-graph ${label} mutant anchor was absent`);
+    assert.throws(
+      () => label === "profile-scope" || label === "raw-geometry-order"
+        ? fixed42To61OffscreenSeedContract(mutant)
+        : label === "offscreen-ready"
+          ? runFixed42TwoAxisSeedPolicyHarness(mutant)
+          : runFixed42To61OffscreenSeedHarness(mutant),
+      `offscreen whole-graph ${label} mutant survived`,
+    );
+  }
+});
+
 test("fixed42-to61 geometry-only mismatch reacquires raw exact bounds without input", () => {
   fixed42MainProofDiagnosticContract(source);
   fixed42MainGeometryReacquisitionContract(source);
@@ -5106,14 +5581,15 @@ test("fixed42-to61 geometry retries retain full guards recycling and numeric dia
       "if (!transferred) fixed42RecycleNodes(owned);",
       "if (!transferred) owned.clear();",
     )],
-    ["early-retry", source.replace(
-      `            Fixed42SeedPolicy.phase(observation);
-            if (mainGeometryDiagnostic != null) {`,
+    ["late-retry", source.replace(
       `            if (mainGeometryDiagnostic != null) {
                 throw new Fixed42MainGeometryMismatch(mainGeometryDiagnostic);
             }
-            Fixed42SeedPolicy.phase(observation);
-            if (false) {`,
+            Fixed42SeedPolicy.phase(observation);`,
+      `            Fixed42SeedPolicy.phase(observation);
+            if (mainGeometryDiagnostic != null) {
+                throw new Fixed42MainGeometryMismatch(mainGeometryDiagnostic);
+            }`,
     )],
     ["terms", source.replace(
       "            assertNoBindingTerms();\n            Fixed42ReadyProof ready = null;",

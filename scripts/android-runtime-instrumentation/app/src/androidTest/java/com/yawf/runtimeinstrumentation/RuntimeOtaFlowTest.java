@@ -169,6 +169,16 @@ public final class RuntimeOtaFlowTest {
             "Avengers: Infinity War", "The Avengers", "Mad Max: Fury Road",
             "Blade Runner 2049"
     };
+    private static final String[] FIXED42_TO61_POPULAR_FIXTURE_TITLES = {
+            "Avengers: Infinity War",
+            "The Avengers",
+            "Mad Max: Fury Road",
+            "Blade Runner 2049",
+            "Harry Potter and the Deathly Hallows: Part 2",
+            "The Martian",
+            "Guardians of the Galaxy",
+            "Iron Man"
+    };
 
     private Instrumentation instrumentation;
     private UiDevice device;
@@ -1521,36 +1531,59 @@ public final class RuntimeOtaFlowTest {
             int popularSectionIndex = -1;
             int railIndex = -1;
             boolean railReady = false;
+            Fixed42To61OffscreenSeedPolicy.Proof offscreenProof = null;
             if (headingIndex >= 0) {
                 Fixed42AxNode heading = nodes.get(headingIndex);
                 boolean headingMatches = heading.matches(
                         product, "android.widget.TextView", false, false);
+                popularSectionIndex = heading.parentIndex;
                 if (isFixed42To61AutomaticMode() && !headingMatches) {
                     logFixed42To61SeedHeadingFailure(
                             nodes, mainIndex, discoverIndex, headingIndex,
                             width, height, boundsMatch);
+                    assertEquals("Fixed42-to61 fixture card schema changed",
+                            Fixed42To61OffscreenSeedPolicy.CARD_COUNT,
+                            FIXED42_TO61_POPULAR_FIXTURE_TITLES.length);
+                    offscreenProof = Fixed42To61OffscreenSeedPolicy.classify(
+                            fixed42To61OffscreenSeedCandidates(nodes),
+                            nodes.get(0).info.getWindowId(),
+                            mainIndex,
+                            discoverIndex,
+                            headingIndex,
+                            popularSectionIndex,
+                            main.bounds.left,
+                            main.bounds.top,
+                            main.bounds.right,
+                            main.bounds.bottom,
+                            discover.bounds.bottom,
+                            height);
                 }
                 assertTrue("Fixed42 Popular Movies heading identity changed",
-                        headingMatches);
-                popularSectionIndex = heading.parentIndex;
+                        headingMatches || offscreenProof != null);
                 assertTrue("Popular Movies heading lacked its section parent",
                         popularSectionIndex >= 0);
                 Fixed42AxNode section = nodes.get(popularSectionIndex);
-                assertTrue("Popular Movies section identity changed",
-                        section.matches(product, "android.view.View", false, false)
-                                && fixed42IsDescendant(
-                                        nodes, popularSectionIndex, discoverIndex));
-                railIndex = fixed42UniqueScrollableDescendant(
-                        nodes, popularSectionIndex, product);
-                Fixed42AxNode rail = nodes.get(railIndex);
-                assertTrue("Popular Movies rail escaped its visible section viewport",
-                        section.bounds.contains(rail.bounds)
-                                && discover.bounds.contains(rail.bounds)
-                                && main.bounds.contains(rail.bounds));
-                railReady = fixed42VisibleAboveNavigation(
-                        heading.bounds, width, height, navigationTop)
-                        && fixed42VisibleAboveNavigation(
-                                rail.bounds, width, height, navigationTop);
+                if (offscreenProof == null) {
+                    assertTrue("Popular Movies section identity changed",
+                            section.matches(product, "android.view.View", false, false)
+                                    && fixed42IsDescendant(
+                                            nodes, popularSectionIndex, discoverIndex));
+                    railIndex = fixed42UniqueScrollableDescendant(
+                            nodes, popularSectionIndex, product);
+                    Fixed42AxNode rail = nodes.get(railIndex);
+                    assertTrue("Popular Movies rail escaped its visible section viewport",
+                            section.bounds.contains(rail.bounds)
+                                    && discover.bounds.contains(rail.bounds)
+                                    && main.bounds.contains(rail.bounds));
+                    railReady = fixed42VisibleAboveNavigation(
+                            heading.bounds, width, height, navigationTop)
+                            && fixed42VisibleAboveNavigation(
+                                    rail.bounds, width, height, navigationTop);
+                } else {
+                    assertEquals("Fixed42-to61 offscreen heading proof changed",
+                            headingIndex, offscreenProof.headingIndex);
+                    railIndex = offscreenProof.railIndex;
+                }
             }
 
             int bladeIndex = fixed42UniqueSemantic(nodes, AUTOMATIC_SAMPLE_TITLE, false);
@@ -1559,8 +1592,17 @@ public final class RuntimeOtaFlowTest {
             Rect bladeBounds = null;
             if (bladeIndex >= 0) {
                 Fixed42AxNode blade = nodes.get(bladeIndex);
-                assertTrue("Fixed42 Blade Runner identity changed",
-                        blade.matches(product, "android.widget.Button", false, true));
+                if (offscreenProof == null) {
+                    assertTrue("Fixed42 Blade Runner identity changed",
+                            blade.matches(product, "android.widget.Button", false, true));
+                } else {
+                    int bladeFixtureIndex = fixed42To61FixtureTitleIndex(
+                            AUTOMATIC_SAMPLE_TITLE);
+                    assertTrue("Fixed42-to61 Blade Runner fixture identity was absent",
+                            bladeFixtureIndex >= 0);
+                    assertEquals("Fixed42-to61 offscreen Blade Runner proof changed",
+                            offscreenProof.cardIndexes[bladeFixtureIndex], bladeIndex);
+                }
                 bladeInRail = railIndex >= 0
                         && fixed42IsDescendant(nodes, bladeIndex, railIndex);
                 assertTrue("Fixed42 Blade Runner escaped the Popular Movies rail",
@@ -1573,9 +1615,21 @@ public final class RuntimeOtaFlowTest {
             }
 
             int[] verticalTops = fixed42SemanticPositions(
-                    nodes, FIXED42_VERTICAL_SEED_ANCHORS, true, -1, product);
+                    nodes,
+                    FIXED42_VERTICAL_SEED_ANCHORS,
+                    true,
+                    -1,
+                    product,
+                    fixed42To61OffscreenSemanticIndexes(
+                            FIXED42_VERTICAL_SEED_ANCHORS, offscreenProof));
             int[] cardLefts = fixed42SemanticPositions(
-                    nodes, FIXED42_POPULAR_SEED_CARDS, false, railIndex, product);
+                    nodes,
+                    FIXED42_POPULAR_SEED_CARDS,
+                    false,
+                    railIndex,
+                    product,
+                    fixed42To61OffscreenSemanticIndexes(
+                            FIXED42_POPULAR_SEED_CARDS, offscreenProof));
             Fixed42SeedPolicy.Observation observation = new Fixed42SeedPolicy.Observation(
                     true,
                     1,
@@ -1586,15 +1640,16 @@ public final class RuntimeOtaFlowTest {
                     headingIndex < 0 || popularSectionIndex >= 0,
                     railIndex < 0 || nodes.get(railIndex).matches(
                             product, "android.view.View", true, false),
+                    offscreenProof != null,
                     railReady,
                     bladeInRail,
                     bladeReady,
                     verticalTops,
                     cardLefts);
-            Fixed42SeedPolicy.phase(observation);
             if (mainGeometryDiagnostic != null) {
                 throw new Fixed42MainGeometryMismatch(mainGeometryDiagnostic);
             }
+            Fixed42SeedPolicy.phase(observation);
             Fixed42SeedSnapshot snapshot = new Fixed42SeedSnapshot(
                     owned,
                     main.info,
@@ -1765,6 +1820,85 @@ public final class RuntimeOtaFlowTest {
         }
         if (required) assertTrue("Fixed42 semantic identity was absent for " + exact, found >= 0);
         return found;
+    }
+
+    private static Fixed42To61OffscreenSeedPolicy.Candidate[]
+            fixed42To61OffscreenSeedCandidates(List<Fixed42AxNode> nodes) {
+        Fixed42To61OffscreenSeedPolicy.Candidate[] candidates =
+                new Fixed42To61OffscreenSeedPolicy.Candidate[nodes.size()];
+        for (int index = 0; index < nodes.size(); index++) {
+            Fixed42AxNode node = nodes.get(index);
+            candidates[index] = new Fixed42To61OffscreenSeedPolicy.Candidate(
+                    index,
+                    node.parentIndex,
+                    node.info.getWindowId(),
+                    fixed42To61SeedSemanticKind(node),
+                    node.bounds.left,
+                    node.bounds.top,
+                    node.bounds.right,
+                    node.bounds.bottom,
+                    Fixed42To61OffscreenSeedPolicy.shape(
+                            OtaFlowPolicy.PRODUCT_PACKAGE.equals(node.packageName),
+                            "android.view.View".equals(node.className),
+                            "android.widget.TextView".equals(node.className),
+                            "android.widget.Button".equals(node.className),
+                            node.visible,
+                            node.enabled,
+                            node.scrollable,
+                            node.clickable,
+                            node.info.isFocusable(),
+                            node.info.isFocused(),
+                            node.info.isAccessibilityFocused(),
+                            node.info.getLiveRegion()
+                                    != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE,
+                            "main-content".equals(node.resourceName)));
+        }
+        return candidates;
+    }
+
+    private static int fixed42To61SeedSemanticKind(Fixed42AxNode node) {
+        int kind = Fixed42To61OffscreenSeedPolicy.SEMANTIC_NONE;
+        if (node.semanticEquals("Popular Movies")) {
+            kind = Fixed42To61OffscreenSeedPolicy.SEMANTIC_HEADING;
+        }
+        if (node.semanticEquals("See all")) {
+            assertEquals("Fixed42-to61 seed semantic identity overlapped", 0, kind);
+            kind = Fixed42To61OffscreenSeedPolicy.SEMANTIC_SEE_ALL;
+        }
+        for (int index = 0;
+                index < FIXED42_TO61_POPULAR_FIXTURE_TITLES.length;
+                index++) {
+            if (!node.semanticEquals(FIXED42_TO61_POPULAR_FIXTURE_TITLES[index])) continue;
+            assertEquals("Fixed42-to61 seed semantic identity overlapped", 0, kind);
+            kind = Fixed42To61OffscreenSeedPolicy.SEMANTIC_CARD_START + index;
+        }
+        return kind;
+    }
+
+    private static int fixed42To61FixtureTitleIndex(String exact) {
+        for (int index = 0;
+                index < FIXED42_TO61_POPULAR_FIXTURE_TITLES.length;
+                index++) {
+            if (FIXED42_TO61_POPULAR_FIXTURE_TITLES[index].equals(exact)) return index;
+        }
+        return -1;
+    }
+
+    private static int[] fixed42To61OffscreenSemanticIndexes(
+            String[] labels,
+            Fixed42To61OffscreenSeedPolicy.Proof proof) {
+        if (proof == null) return null;
+        int[] indexes = new int[labels.length];
+        for (int labelIndex = 0; labelIndex < labels.length; labelIndex++) {
+            indexes[labelIndex] = -1;
+            if ("Popular Movies".equals(labels[labelIndex])) {
+                indexes[labelIndex] = proof.headingIndex;
+                continue;
+            }
+            int fixtureIndex = fixed42To61FixtureTitleIndex(labels[labelIndex]);
+            if (fixtureIndex >= 0) indexes[labelIndex] = proof.cardIndexes[fixtureIndex];
+        }
+        return indexes;
     }
 
     private int fixed42UniqueTo61DiscoverRoute(
@@ -2132,14 +2266,25 @@ public final class RuntimeOtaFlowTest {
             String[] labels,
             boolean useTop,
             int requiredAncestor,
-            String productPackage) {
+            String productPackage,
+            int[] validatedOffscreenIndexes) {
+        assertTrue("Fixed42 offscreen progress proof shape changed",
+                validatedOffscreenIndexes == null
+                        || validatedOffscreenIndexes.length == labels.length);
         int[] positions = new int[labels.length];
         for (int labelIndex = 0; labelIndex < labels.length; labelIndex++) {
             positions[labelIndex] = Fixed42SeedPolicy.ABSENT;
             int matches = 0;
-            for (Fixed42AxNode node : nodes) {
+            for (int nodeIndex = 0; nodeIndex < nodes.size(); nodeIndex++) {
+                Fixed42AxNode node = nodes.get(nodeIndex);
                 if (!node.semanticEquals(labels[labelIndex])) continue;
                 matches++;
+                if (validatedOffscreenIndexes != null
+                        && validatedOffscreenIndexes[labelIndex] == nodeIndex) {
+                    assertTrue("Fixed42 validated offscreen marker became visible",
+                            !node.visible && node.enabled);
+                    continue;
+                }
                 assertEquals("Fixed42 progress marker package changed",
                         productPackage, node.packageName);
                 assertTrue("Fixed42 progress marker became hidden or disabled",
@@ -2158,13 +2303,17 @@ public final class RuntimeOtaFlowTest {
                     assertTrue("Fixed42 rail progress marker escaped Popular Movies",
                             requiredAncestor >= 0
                                     && fixed42IsDescendant(
-                                            nodes, nodes.indexOf(node), requiredAncestor));
+                                            nodes, nodeIndex, requiredAncestor));
                 }
                 if (!node.bounds.isEmpty()) {
                     positions[labelIndex] = useTop ? node.bounds.top : node.bounds.left;
                 }
             }
             assertTrue("Fixed42 progress marker was ambiguous", matches <= 1);
+            if (validatedOffscreenIndexes != null
+                    && validatedOffscreenIndexes[labelIndex] >= 0) {
+                assertEquals("Fixed42 validated offscreen marker was absent", 1, matches);
+            }
         }
         return positions;
     }
@@ -4387,6 +4536,307 @@ public final class RuntimeOtaFlowTest {
         }
     }
 
+    private static final class Fixed42To61OffscreenSeedPolicy {
+        static final int SEMANTIC_NONE = 0;
+        static final int SEMANTIC_HEADING = 1;
+        static final int SEMANTIC_SEE_ALL = 2;
+        static final int SEMANTIC_CARD_START = 3;
+        static final int CARD_COUNT = 8;
+        private static final String SECTION_SHAPE = "1100010000000";
+        private static final String HEADING_SHAPE = "1010010000000";
+        private static final String BUTTON_SHAPE = "1001010110000";
+        private static final String RAIL_SHAPE = "1100011010000";
+
+        static final class Candidate {
+            final int index;
+            final int parentIndex;
+            final int windowId;
+            final int semanticKind;
+            final int left;
+            final int top;
+            final int right;
+            final int bottom;
+            final String shape;
+
+            Candidate(
+                    int index,
+                    int parentIndex,
+                    int windowId,
+                    int semanticKind,
+                    int left,
+                    int top,
+                    int right,
+                    int bottom,
+                    String shape) {
+                this.index = index;
+                this.parentIndex = parentIndex;
+                this.windowId = windowId;
+                this.semanticKind = semanticKind;
+                this.left = left;
+                this.top = top;
+                this.right = right;
+                this.bottom = bottom;
+                this.shape = shape;
+            }
+        }
+
+        static final class Proof {
+            final int headingIndex;
+            final int railIndex;
+            final int[] cardIndexes;
+
+            Proof(int headingIndex, int railIndex, int[] cardIndexes) {
+                this.headingIndex = headingIndex;
+                this.railIndex = railIndex;
+                this.cardIndexes = cardIndexes.clone();
+            }
+        }
+
+        static Proof classify(
+                Candidate[] nodes,
+                int rootWindowId,
+                int mainIndex,
+                int routeIndex,
+                int headingIndex,
+                int sectionIndex,
+                int mainLeft,
+                int mainTop,
+                int mainRight,
+                int mainBottom,
+                int routeBottom,
+                int displayHeight) {
+            require(nodes != null
+                            && nodes.length > 0
+                            && nodes.length <= FIXED42_SEED_AX_NODE_LIMIT
+                            && mainIndex > 0
+                            && mainIndex < nodes.length
+                            && routeIndex > 0
+                            && routeIndex < nodes.length
+                            && headingIndex > 0
+                            && headingIndex < nodes.length
+                            && sectionIndex > 0
+                            && sectionIndex < nodes.length
+                            && mainRight > mainLeft
+                            && mainBottom > mainTop
+                            && displayHeight > 0
+                            && mainBottom >= displayHeight
+                            && routeBottom == mainBottom,
+                    "Fixed42-to61 offscreen seed inputs were invalid");
+            int semanticLimit = SEMANTIC_CARD_START + CARD_COUNT;
+            int[] semanticCounts = new int[semanticLimit];
+            for (int index = 0; index < nodes.length; index++) {
+                Candidate candidate = nodes[index];
+                require(candidate != null
+                                && candidate.index == index
+                                && candidate.semanticKind >= SEMANTIC_NONE
+                                && candidate.semanticKind < semanticLimit
+                                && candidate.right >= candidate.left
+                                && candidate.bottom >= candidate.top
+                                && validShape(candidate.shape),
+                        "Fixed42-to61 offscreen seed candidate was invalid");
+                if (index == 0) {
+                    require(candidate.parentIndex == -1,
+                            "Fixed42-to61 seed root parent changed");
+                } else {
+                    require(candidate.parentIndex >= 0 && candidate.parentIndex < index,
+                            "Fixed42-to61 seed parent graph changed");
+                }
+                if (candidate.semanticKind != SEMANTIC_NONE
+                        && candidate.semanticKind != SEMANTIC_SEE_ALL) {
+                    semanticCounts[candidate.semanticKind]++;
+                }
+            }
+            require(nodes[0].windowId == rootWindowId
+                            && nodes[mainIndex].windowId == rootWindowId
+                            && nodes[routeIndex].windowId == rootWindowId
+                            && nodes[sectionIndex].windowId == rootWindowId
+                            && nodes[headingIndex].windowId == rootWindowId
+                            && isDescendant(nodes, routeIndex, mainIndex)
+                            && nodes[sectionIndex].parentIndex == routeIndex
+                            && nodes[headingIndex].parentIndex == sectionIndex
+                            && nodes[headingIndex].semanticKind == SEMANTIC_HEADING
+                            && semanticCounts[SEMANTIC_HEADING] == 1,
+                    "Fixed42-to61 offscreen seed ancestry changed");
+            for (int semanticKind = SEMANTIC_CARD_START;
+                    semanticKind < semanticLimit;
+                    semanticKind++) {
+                require(semanticCounts[semanticKind] == 1,
+                        "Fixed42-to61 fixture card identity was absent or ambiguous");
+            }
+
+            Candidate section = nodes[sectionIndex];
+            require(SECTION_SHAPE.equals(section.shape)
+                            && section.semanticKind == SEMANTIC_NONE
+                            && positiveZeroHeightAtRawBottom(
+                                    section,
+                                    mainLeft,
+                                    mainRight,
+                                    mainBottom),
+                    "Fixed42-to61 offscreen section changed");
+
+            int directChildren = 0;
+            int headingChildren = 0;
+            int headerChildren = 0;
+            int railChildren = 0;
+            int railIndex = -1;
+            for (Candidate candidate : nodes) {
+                if (candidate.parentIndex != sectionIndex) continue;
+                directChildren++;
+                require(candidate.windowId == rootWindowId
+                                && positiveZeroHeightAtRawBottom(
+                                        candidate,
+                                        mainLeft,
+                                        mainRight,
+                                        mainBottom),
+                        "Fixed42-to61 offscreen section child geometry changed");
+                if (candidate.index == headingIndex) {
+                    require(HEADING_SHAPE.equals(candidate.shape)
+                                    && candidate.semanticKind == SEMANTIC_HEADING,
+                            "Fixed42-to61 offscreen heading changed");
+                    headingChildren++;
+                } else if (candidate.semanticKind == SEMANTIC_SEE_ALL) {
+                    require(BUTTON_SHAPE.equals(candidate.shape),
+                            "Fixed42-to61 offscreen header action changed");
+                    headerChildren++;
+                } else if (candidate.semanticKind == SEMANTIC_NONE
+                        && RAIL_SHAPE.equals(candidate.shape)) {
+                    require(railIndex < 0,
+                            "Fixed42-to61 offscreen rail was ambiguous");
+                    railIndex = candidate.index;
+                    railChildren++;
+                } else {
+                    throw new AssertionError(
+                            "Fixed42-to61 offscreen section owned an unknown child");
+                }
+            }
+            require(directChildren == 3
+                            && headingChildren == 1
+                            && headerChildren == 1
+                            && railChildren == 1
+                            && railIndex >= 0,
+                    "Fixed42-to61 offscreen section cardinality changed");
+
+            int subtreeNodes = 0;
+            int cardChildren = 0;
+            int[] cardIndexes = new int[CARD_COUNT];
+            for (int index = 0; index < cardIndexes.length; index++) cardIndexes[index] = -1;
+            for (Candidate candidate : nodes) {
+                if (!isDescendant(nodes, candidate.index, sectionIndex)) continue;
+                subtreeNodes++;
+                require(candidate.windowId == rootWindowId
+                                && zeroHeightAtRawBottom(
+                                        candidate,
+                                        mainLeft,
+                                        mainRight,
+                                        mainBottom),
+                        "Fixed42-to61 offscreen subtree geometry changed");
+                if (candidate.index == sectionIndex
+                        || candidate.index == headingIndex
+                        || candidate.index == railIndex
+                        || candidate.parentIndex == sectionIndex) {
+                    continue;
+                }
+                require(candidate.parentIndex == railIndex
+                                && BUTTON_SHAPE.equals(candidate.shape)
+                                && candidate.semanticKind >= SEMANTIC_CARD_START
+                                && candidate.semanticKind < semanticLimit,
+                        "Fixed42-to61 offscreen rail owned an unknown descendant");
+                int cardSlot = candidate.semanticKind - SEMANTIC_CARD_START;
+                require(cardIndexes[cardSlot] < 0,
+                        "Fixed42-to61 offscreen card was duplicated");
+                cardIndexes[cardSlot] = candidate.index;
+                cardChildren++;
+            }
+            require(subtreeNodes == 4 + CARD_COUNT && cardChildren == CARD_COUNT,
+                    "Fixed42-to61 offscreen subtree cardinality changed");
+            for (int cardIndex : cardIndexes) {
+                require(cardIndex >= 0,
+                        "Fixed42-to61 offscreen card was absent");
+            }
+            return new Proof(headingIndex, railIndex, cardIndexes);
+        }
+
+        static String shape(
+                boolean productPackage,
+                boolean view,
+                boolean textView,
+                boolean button,
+                boolean visible,
+                boolean enabled,
+                boolean scrollable,
+                boolean clickable,
+                boolean focusable,
+                boolean focused,
+                boolean accessibilityFocused,
+                boolean liveRegion,
+                boolean mainResource) {
+            return new StringBuilder(13)
+                    .append(bit(productPackage))
+                    .append(bit(view))
+                    .append(bit(textView))
+                    .append(bit(button))
+                    .append(bit(visible))
+                    .append(bit(enabled))
+                    .append(bit(scrollable))
+                    .append(bit(clickable))
+                    .append(bit(focusable))
+                    .append(bit(focused))
+                    .append(bit(accessibilityFocused))
+                    .append(bit(liveRegion))
+                    .append(bit(mainResource))
+                    .toString();
+        }
+
+        private static boolean positiveZeroHeightAtRawBottom(
+                Candidate candidate,
+                int mainLeft,
+                int mainRight,
+                int mainBottom) {
+            return zeroHeightAtRawBottom(candidate, mainLeft, mainRight, mainBottom)
+                    && candidate.right > candidate.left;
+        }
+
+        private static boolean zeroHeightAtRawBottom(
+                Candidate candidate,
+                int mainLeft,
+                int mainRight,
+                int mainBottom) {
+            return candidate.left >= mainLeft
+                    && candidate.right >= candidate.left
+                    && candidate.right <= mainRight
+                    && candidate.top == candidate.bottom
+                    && candidate.top == mainBottom;
+        }
+
+        private static boolean isDescendant(
+                Candidate[] nodes, int childIndex, int ancestorIndex) {
+            int cursor = childIndex;
+            for (int depth = 0; cursor >= 0 && depth <= nodes.length; depth++) {
+                if (cursor == ancestorIndex) return true;
+                cursor = nodes[cursor].parentIndex;
+            }
+            require(cursor < 0, "Fixed42-to61 offscreen seed ancestry was cyclic");
+            return false;
+        }
+
+        private static boolean validShape(String value) {
+            if (value == null || value.length() != 13) return false;
+            for (int index = 0; index < value.length(); index++) {
+                char current = value.charAt(index);
+                if (current != '0' && current != '1') return false;
+            }
+            return true;
+        }
+
+        private static char bit(boolean value) {
+            return value ? '1' : '0';
+        }
+
+        private static void require(boolean condition, String message) {
+            if (!condition) throw new AssertionError(message);
+        }
+    }
+
     private static final class Fixed42MainGeometryPolicy {
         static boolean isExactRawBounds(
                 int left,
@@ -4445,6 +4895,7 @@ public final class RuntimeOtaFlowTest {
             final int bladeCount;
             final boolean sectionValid;
             final boolean railValid;
+            final boolean offscreenStructureValid;
             final boolean railReady;
             final boolean bladeInRail;
             final boolean bladeReady;
@@ -4465,6 +4916,38 @@ public final class RuntimeOtaFlowTest {
                     boolean bladeReady,
                     int[] verticalTops,
                     int[] cardLefts) {
+                this(
+                        routeValid,
+                        mainCount,
+                        discoverCount,
+                        headingCount,
+                        railCount,
+                        bladeCount,
+                        sectionValid,
+                        railValid,
+                        false,
+                        railReady,
+                        bladeInRail,
+                        bladeReady,
+                        verticalTops,
+                        cardLefts);
+            }
+
+            Observation(
+                    boolean routeValid,
+                    int mainCount,
+                    int discoverCount,
+                    int headingCount,
+                    int railCount,
+                    int bladeCount,
+                    boolean sectionValid,
+                    boolean railValid,
+                    boolean offscreenStructureValid,
+                    boolean railReady,
+                    boolean bladeInRail,
+                    boolean bladeReady,
+                    int[] verticalTops,
+                    int[] cardLefts) {
                 this.routeValid = routeValid;
                 this.mainCount = mainCount;
                 this.discoverCount = discoverCount;
@@ -4473,6 +4956,7 @@ public final class RuntimeOtaFlowTest {
                 this.bladeCount = bladeCount;
                 this.sectionValid = sectionValid;
                 this.railValid = railValid;
+                this.offscreenStructureValid = offscreenStructureValid;
                 this.railReady = railReady;
                 this.bladeInRail = bladeInRail;
                 this.bladeReady = bladeReady;
@@ -4494,6 +4978,20 @@ public final class RuntimeOtaFlowTest {
                     || observation.bladeCount < 0
                     || observation.bladeCount > 1) {
                 throw new AssertionError("Fixed42 seed identity was ambiguous");
+            }
+            if (observation.offscreenStructureValid) {
+                if (observation.headingCount != 1
+                        || observation.railCount != 1
+                        || observation.bladeCount != 1
+                        || !observation.sectionValid
+                        || observation.railValid
+                        || observation.railReady
+                        || !observation.bladeInRail
+                        || observation.bladeReady) {
+                    throw new AssertionError(
+                            "Fixed42-to61 offscreen seed proof was inconsistent");
+                }
+                return PHASE_VERTICAL;
             }
             if (observation.headingCount == 0) {
                 if (observation.railCount != 0 || observation.bladeCount != 0) {
