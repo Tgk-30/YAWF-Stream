@@ -1025,14 +1025,10 @@ function fullscreenGradleHook(packageName) {
 // YAWF_FULLSCREEN_BEGIN
 // Always validate after every scheduled Rust producer, even if Kotlin is up to
 // date. A compile doFirst alone is skipped after regeneration of its old inputs.
-val yawfFullscreenPatch = tasks.register("yawfPatchWebFullscreen") {
+val yawfFullscreenPatch = tasks.register<org.gradle.api.tasks.Exec>("yawfPatchWebFullscreen") {
     mustRunAfter(tasks.matching { it.name.startsWith("rustBuild") })
-    doLast {
-        project.exec {
-            commandLine("node", file("../../../../../scripts/patch_tauri_android.mjs").absolutePath,
-                "--fullscreen-only", file("src/main/java/${packageName.replaceAll('.', '/')}/generated/RustWebChromeClient.kt").absolutePath)
-        }
-    }
+    commandLine("node", file("../../../../../scripts/patch_tauri_android.mjs").absolutePath,
+        "--fullscreen-only", file("src/main/java/${packageName.replaceAll('.', '/')}/generated/RustWebChromeClient.kt").absolutePath)
 }
 tasks.configureEach {
     if (name.matches(Regex("compile(Universal|Arm64|Arm|X86|X86_64)(Debug|Release)Kotlin"))) {

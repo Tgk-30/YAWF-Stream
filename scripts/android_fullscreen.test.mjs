@@ -58,10 +58,11 @@ test('Gradle wires exact per-variant Rust producer before compile-time patch, no
   const patcher = readFileSync(new URL('./patch_tauri_android.mjs', import.meta.url), 'utf8');
   const hook = patcher.slice(patcher.indexOf('function fullscreenGradleHook'), patcher.indexOf('export function parseLeading'));
   assert.match(hook, /tasks.configureEach/);
-  assert.match(hook, /tasks.register\("yawfPatchWebFullscreen"\)/);
+  assert.match(hook, /tasks.register<org\.gradle\.api\.tasks\.Exec>\("yawfPatchWebFullscreen"\)/);
   assert.match(hook, /mustRunAfter\(tasks.matching \{ it.name.startsWith\("rustBuild"\) \}\)/);
   assert.match(hook, /dependsOn\("rustBuild" \+ rustVariant, yawfFullscreenPatch\)/);
-  assert.match(hook, /doLast \{/);
+  assert.match(hook, /commandLine\("node",/);
+  assert.doesNotMatch(hook, /project\.exec|doLast \{/);
   assert.doesNotMatch(hook, /doFirst \{/);
   assert.match(hook, /--fullscreen-only/);
   assert.match(hook, /generated\/RustWebChromeClient.kt/);
