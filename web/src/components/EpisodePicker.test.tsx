@@ -5,6 +5,7 @@
 // degraded stepper (no episode guide) with its min-clamp + onSelect payloads.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -335,6 +336,8 @@ describe("EpisodePicker - degraded stepper", () => {
       ),
     ).toBeInTheDocument();
 
+    expect(screen.queryByRole("combobox", { name: "Season" })).toBeNull();
+    expect(document.querySelector(".episode-season-select-label")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Next episode" }));
     expect(onSelect).toHaveBeenCalledWith({ season: 2, episode: 6 });
 
@@ -351,5 +354,93 @@ describe("EpisodePicker - degraded stepper", () => {
     expect(onSelect).toHaveBeenCalledWith({ season: 1, episode: 1 });
     await user.click(screen.getByRole("button", { name: "Previous episode" }));
     expect(onSelect).toHaveBeenCalledWith({ season: 1, episode: 1 });
+  });
+});
+
+describe("EpisodePicker - numbered season dropdown", () => {
+  const continuationTitle = "Bleach: Thousand-Year Blood War";
+
+  function mockManySeasons() {
+    const many = Array.from({ length: 19 }, (_, i) =>
+      season(i + 1, i >= 16 ? { name: continuationTitle, episodeCount: 13 } : {}),
+    );
+    mockUseSeasons.mockReturnValue({ seasons: many, loading: false, source: "live" });
+    mockUseEpisodes.mockImplementation((_id: number, browsed: number) => ({
+      episodes: [episode(browsed, 1)], loading: false, source: "live",
+    }));
+  }
+
+  it("keeps a long continuation season number ahead of the complete native option title", () => {
+    mockManySeasons();
+    renderPicker({ selected: { season: 17, episode: 1 } });
+
+    const select = screen.getByRole("combobox", { name: "Season" });
+    const label = screen.getByText("Season 17", { selector: ".episode-season-select-label" });
+    expect(label).toBeVisible();
+    expect(label.nextElementSibling).toBe(select);
+    expect(select).toHaveValue("17");
+    expect(within(select).getAllByRole("option", {
+      name: `${continuationTitle} · 13 eps`,
+    })).toHaveLength(3);
+    expect((select as HTMLSelectElement).selectedOptions[0]).toHaveTextContent(
+      `${continuationTitle} · 13 eps`,
+    );
+  });
+
+  it("shows the browsed continuation number without selecting an episode or changing watched state", async () => {
+    const user = userEvent.setup();
+    mockManySeasons();
+    const onToggleWatched = vi.fn();
+    const onToggleSeasonWatched = vi.fn();
+    const onToggleSeriesWatched = vi.fn();
+    const { onSelect } = renderPicker({
+      selected: { season: 2, episode: 7 },
+      onToggleWatched,
+      onToggleSeasonWatched,
+      onToggleSeriesWatched,
+    });
+    const select = screen.getByRole("combobox", { name: "Season" });
+    for (const browsed of [17, 18, 19]) {
+      await user.selectOptions(select, String(browsed));
+      expect(screen.getByText(`Season ${browsed}`, {
+        selector: ".episode-season-select-label",
+      })).toBeVisible();
+      expect(select).toHaveValue(String(browsed));
+      expect(mockUseEpisodes).toHaveBeenLastCalledWith(42, browsed, null, null);
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(onToggleWatched).not.toHaveBeenCalled();
+      expect(onToggleSeasonWatched).not.toHaveBeenCalled();
+      expect(onToggleSeriesWatched).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps the visible number separate from ordinary and fallback season names", () => {
+    const many = Array.from({ length: 7 }, (_, i) => season(i + 1));
+    many[2] = season(3, { name: "The Beginning" });
+    many[3] = season(4, { name: "" });
+    mockUseSeasons.mockReturnValue({ seasons: many, loading: false, source: "live" });
+    mockUseEpisodes.mockReturnValue({ episodes: [], loading: false, source: "live" });
+    renderPicker({ selected: { season: 3, episode: 1 } });
+
+    expect(screen.getByText("Season 3", { selector: ".episode-season-select-label" })).toBeVisible();
+    const select = screen.getByRole("combobox", { name: "Season" });
+    expect(within(select).getByRole("option", { name: "The Beginning · 8 eps" })).toHaveValue("3");
+    expect(within(select).getByRole("option", { name: "Season 4 · 8 eps" })).toHaveValue("4");
+  });
+
+  it("reserves the number while allowing the native title to shrink inside constrained headers", () => {
+    const css = readFileSync("src/components/EpisodePicker.css", "utf8");
+    const wrapper = css.match(/\.episode-season-select\s*\{([^}]*)\}/)?.[1];
+    const label = css.match(/\.episode-season-select-label\s*\{([^}]*)\}/)?.[1];
+    const input = css.match(/\.episode-season-select-input\s*\{([^}]*)\}/)?.[1];
+    expect(wrapper).toMatch(/box-sizing:\s*border-box/);
+    expect(wrapper).toMatch(/min-width:\s*0/);
+    expect(wrapper).toMatch(/max-width:\s*100%/);
+    expect(label).toMatch(/flex:\s*0 0 auto/);
+    expect(label).toMatch(/white-space:\s*nowrap/);
+    expect(input).toMatch(/flex:\s*1 1 auto/);
+    expect(input).toMatch(/min-width:\s*0/);
+    expect(input).toMatch(/overflow:\s*hidden/);
+    expect(input).toMatch(/text-overflow:\s*ellipsis/);
   });
 });
