@@ -203,7 +203,9 @@ export function EpisodePicker({
           // Many seasons → a compact dropdown so the head doesn't wrap into a
           // huge chip block. Still a real, keyboard-accessible season selector.
           <label className="episode-season-select glass-rest">
-            <span className="episode-season-select-label t-secondary">Season</span>
+            <span className="episode-season-select-label t-secondary">
+              Season {browseSeason}
+            </span>
             <select
               className="episode-season-select-input"
               value={browseSeason}
