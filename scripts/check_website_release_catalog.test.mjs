@@ -36,13 +36,23 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.64', tag: 'v2.3.64' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.65', tag: 'v2.3.65' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.64'",
+    from: "tag: 'v2.3.65'",
     to: "tag: 'v2.3.51'",
+  },
+  {
+    name: "stale server channel",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.65', tag: 'v2.3.65' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.64', tag: 'v2.3.64' };",
+  },
+  {
+    name: "unpublished future server channel",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.65', tag: 'v2.3.65' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.66', tag: 'v2.3.66' };",
   },
   {
     name: "server Debian filename",
