@@ -71,11 +71,14 @@
   color: var(--text-primary);
 }
 
-@media (max-width: 699px) {
+@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {
   .install-prompt {
+    z-index: 29;
     right: max(var(--sp-sm), var(--safe-area-right));
     left: max(var(--sp-sm), var(--safe-area-left));
     bottom: calc(var(--mobile-nav-bottom) + var(--mobile-nav-height) + var(--sp-sm));
+    max-height: calc(100vh - max(var(--sp-sm), var(--safe-area-top)) - var(--mobile-nav-bottom) - var(--mobile-nav-height) - var(--sp-sm));
+    overflow-y: auto;
     width: auto;
     gap: var(--sp-sm);
     padding: var(--sp-md);
@@ -83,11 +86,13 @@
   }
 
   .install-prompt-text {
-    padding-right: calc(32px * var(--density-scale));
+    padding-right: calc(max(44px, calc(44px * var(--density-scale))) + var(--sp-sm));
   }
 
   .install-prompt-dismiss {
     position: absolute;
+    width: 44px;
+    height: 44px;
     top: var(--sp-sm);
     right: var(--sp-sm);
   }
@@ -95,5 +100,12 @@
   .install-prompt-actions,
   .install-prompt-actions .btn {
     width: 100%;
+    min-height: 44px;
+  }
+
+  @supports (height: 100dvh) {
+    .install-prompt {
+      max-height: calc(100dvh - max(var(--sp-sm), var(--safe-area-top)) - var(--mobile-nav-bottom) - var(--mobile-nav-height) - var(--sp-sm));
+    }
   }
 }
