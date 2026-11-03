@@ -2315,7 +2315,10 @@ describe("WebviewPlayer", () => {
       native.resolve("External player opened.");
       await native.promise;
     });
-    expect(screen.getByText("External player opened.")).toBeInTheDocument();
+    expect(screen.getByText(
+      "Player chooser opened. If playback did not start, finish the selected player's setup and try again.",
+    )).toBeInTheDocument();
+    expect(screen.queryByText("External player opened.")).toBeNull();
     expect(recordDiagnosticMock).toHaveBeenCalledWith(
       "player",
       "external.chooser_opened",
@@ -2382,6 +2385,12 @@ describe("WebviewPlayer", () => {
     await userEvent.click(screen.getByRole("button", { name: /Open in external player/ }));
 
     expect(screen.getByText("External player request canceled.")).toBeInTheDocument();
+    expect(screen.queryByText(/Player chooser opened\./)).toBeNull();
+    expect(screen.queryByText("External player opened.")).toBeNull();
+    expect(recordDiagnosticMock).not.toHaveBeenCalledWith(
+      "player",
+      "external.chooser_opened",
+    );
     expect(recordDiagnosticMock).toHaveBeenCalledWith(
       "player",
       "external.chooser_cancelled",

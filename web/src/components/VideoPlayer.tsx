@@ -2127,7 +2127,11 @@ export function VideoPlayer({
           serverExternalRequestRef.current = null;
         }
         if (status == null || !ownsRequest()) return;
-        setExternalActionStatus(status);
+        setExternalActionStatus(
+          status === "External player opened."
+            ? "Player chooser opened. If playback did not start, finish the selected player's setup and try again."
+            : status,
+        );
         recordDiagnostic(
           "player",
           status === "External player opened."
