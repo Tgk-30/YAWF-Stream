@@ -913,7 +913,7 @@ private data class ServerPlayerOrigin(
     );
 }
 
-function patchedMainActivity(packageName) {
+function preFullscreenMainActivity(packageName) {
   return webViewCompatibleServerPlayerMainActivity(packageName)
     .replace(
       'class MainActivity : TauriActivity() {',
@@ -955,6 +955,93 @@ function patchedMainActivity(packageName) {
 
   override fun onDestroy() {
     if (::androidUpdater.isInitialized) androidUpdater.onDestroy()`);
+}
+
+// Keep the already-audited Activity generator byte-identical. Fullscreen adds
+// lifecycle hooks only; it never replaces Wry's WebChromeClient or JS bridges.
+function patchedMainActivity(packageName) {
+  return preFullscreenMainActivity(packageName)
+    .replace('class MainActivity : TauriActivity() {',
+      'class MainActivity : TauriActivity() {\n  private var fullscreenController: YawfFullscreenController? = null')
+    .replace('  override fun onWebViewCreate(webView: WebView) {', `  override fun onWebViewCreate(webView: WebView) {
+    fullscreenController?.destroy()
+    fullscreenController = null`)
+    .replace('    CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)',
+      '    fullscreenController = YawfFullscreenController(this, webView)\n    CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)')
+    .replace('    super.onConfigurationChanged(newConfig)',
+      '    super.onConfigurationChanged(newConfig)\n    fullscreenController?.onConfigurationChanged()')
+    .replace('  override fun onDestroy() {', `  override fun onDestroy() {
+    fullscreenController?.destroy()
+    fullscreenController = null`)
+    .replace('  private fun inspectWebViewCompatibility()', `  fun showWebFullscreen(view: View, callback: android.webkit.WebChromeClient.CustomViewCallback) {
+    val controller = fullscreenController
+    if (controller != null) controller.show(view, callback) else callback.onCustomViewHidden()
+  }
+
+  fun hideWebFullscreen() {
+    fullscreenController?.hide()
+  }
+
+  private fun inspectWebViewCompatibility()`);
+}
+
+const originalFullscreenShow = `  override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+    callback.onCustomViewHidden()
+    super.onShowCustomView(view, callback)
+  }`;
+const patchedFullscreenShow = `  override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+    val host = activity as? MainActivity
+    if (host != null) host.showWebFullscreen(view, callback) else callback.onCustomViewHidden()
+  }`;
+const originalFullscreenHide = `  override fun onHideCustomView() {
+    super.onHideCustomView()
+  }`;
+const patchedFullscreenHide = `  override fun onHideCustomView() {
+    (activity as? MainActivity)?.hideWebFullscreen()
+  }`;
+
+export function patchGeneratedFullscreenSource(source) {
+  const patchedShow = source.includes(patchedFullscreenShow);
+  const patchedHide = source.includes(patchedFullscreenHide);
+  if (patchedShow !== patchedHide) throw new Error("Unsupported generated Wry fullscreen partial patch.");
+  let output = source;
+  for (const [name, original, patched] of [
+    ['onShowCustomView', originalFullscreenShow, patchedFullscreenShow],
+    ['onHideCustomView', originalFullscreenHide, patchedFullscreenHide],
+  ]) {
+    // Fail closed on overloads, partial patches and upstream body drift.
+    const declarations = output.match(new RegExp('override fun ' + name + '\\(', 'g')) ?? [];
+    if (declarations.length !== 1 ||
+        (!output.includes(original) && !output.includes(patched))) {
+      throw new Error('Unsupported generated Wry fullscreen method: ' + name);
+    }
+    output = output.replace(original, patched);
+  }
+  return output;
+}
+
+function fullscreenGradleHook(packageName) {
+  return `
+// YAWF_FULLSCREEN_BEGIN
+// Always validate after every scheduled Rust producer, even if Kotlin is up to
+// date. A compile doFirst alone is skipped after regeneration of its old inputs.
+val yawfFullscreenPatch = tasks.register("yawfPatchWebFullscreen") {
+    mustRunAfter(tasks.matching { it.name.startsWith("rustBuild") })
+    doLast {
+        project.exec {
+            commandLine("node", file("../../../../../scripts/patch_tauri_android.mjs").absolutePath,
+                "--fullscreen-only", file("src/main/java/${packageName.replaceAll('.', '/')}/generated/RustWebChromeClient.kt").absolutePath)
+        }
+    }
+}
+tasks.configureEach {
+    if (name.matches(Regex("compile(Universal|Arm64|Arm|X86|X86_64)(Debug|Release)Kotlin"))) {
+        val rustVariant = name.removePrefix("compile").removeSuffix("Kotlin")
+        dependsOn("rustBuild" + rustVariant, yawfFullscreenPatch)
+    }
+}
+// YAWF_FULLSCREEN_END
+`;
 }
 
 export function parseLeadingWebViewMajorForTest(versionName) {
@@ -1100,7 +1187,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     activity === darkSystemBarActivity ||
     activity === safeAreaActivity ||
     activity === serverPlayerPatchedMainActivity(packageName) ||
-    activity === previousPatchedMainActivity(packageName);
+    activity === previousPatchedMainActivity(packageName) ||
+    activity === preFullscreenMainActivity(packageName);
   if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",
@@ -1144,10 +1232,25 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
   }
   const updaterChanged = !existsSync(updaterPath) || !existsSync(pathsPath);
 
+  const fullscreenPath = join(dirname(mainActivityPath), "YawfFullscreenController.kt");
+  const fullscreenSource = readFileSync(new URL("./android/YawfFullscreenController.kt", import.meta.url), "utf8")
+    .replace(/^package com\.tgk30\.debridstreamer$/m, `package ${packageName}`);
+  if (existsSync(fullscreenPath) && readFileSync(fullscreenPath, "utf8") !== fullscreenSource) {
+    throw new Error("Generated Android fullscreen controller has unrecognized changes. Refusing to overwrite.");
+  }
+  const fullscreenChanged = !existsSync(fullscreenPath);
+  const hook = fullscreenGradleHook(packageName);
+  const hasFullscreenHook = patchedGradleWithWebkit.includes(hook);
+  if (!hasFullscreenHook && /YAWF_FULLSCREEN|--fullscreen-only/.test(patchedGradleWithWebkit)) {
+    throw new Error("Generated Android fullscreen Gradle hook has unrecognized changes.");
+  }
+  const finalGradle = hasFullscreenHook ? patchedGradleWithWebkit : patchedGradleWithWebkit + hook;
+
   // Validate every generated template before the first write. A drifted
   // MainActivity or manifest must not leave a half-patched Gradle file behind.
-  const gradleChanged = gradle !== patchedGradleWithWebkit;
-  if (gradleChanged) writeFileSync(gradlePath, patchedGradleWithWebkit);
+  const gradleChanged = gradle !== finalGradle;
+  if (gradleChanged) writeFileSync(gradlePath, finalGradle);
+  if (fullscreenChanged) writeFileSync(fullscreenPath, fullscreenSource);
   if (activityChanged) writeFileSync(mainActivityPath, replacementActivity);
   if (manifestChanged) writeFileSync(manifestPath, patchedManifest);
   if (updaterChanged) {
@@ -1158,7 +1261,7 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
 
   return {
     androidRoot,
-    changed: gradleChanged || activityChanged || manifestChanged || updaterChanged,
+    changed: gradleChanged || activityChanged || manifestChanged || updaterChanged || fullscreenChanged,
     gradleChanged,
     activityChanged,
     manifestChanged,
@@ -1166,6 +1269,15 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  if (process.argv[2] === "--fullscreen-only") {
+    if (process.argv.length !== 4) throw new Error("Expected exactly one generated RustWebChromeClient.kt path.");
+    const path = process.argv[3];
+    const source = readFileSync(path, "utf8");
+    const patched = patchGeneratedFullscreenSource(source);
+    if (source !== patched) writeFileSync(path, patched);
+    console.log("Validated generated Wry fullscreen custom-view methods.");
+    process.exit(0);
+  }
   const result = patchTauriAndroidProject();
   console.log(
     result.changed

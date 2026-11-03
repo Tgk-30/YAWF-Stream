@@ -224,13 +224,14 @@ dependencies {
 test("migrates the exact previous fully patched activity and is a second-pass no-op", () => {
   const fixture = createPreviousPatchedFixture();
   try {
-    const preserved = [fixture.gradle, fixture.manifest, fixture.updater, fixture.updatePaths];
+    const preserved = [fixture.manifest, fixture.updater, fixture.updatePaths];
+    const previousGradle = readFileSync(fixture.gradle, "utf8");
     const before = new Map(preserved.map((path) => [path, readFileSync(path)]));
     const first = patchTauriAndroidProject({ root: fixture.root });
     assert.deepEqual(first, {
       androidRoot: join(fixture.root, "web/src-tauri/gen/android"),
       changed: true,
-      gradleChanged: false,
+      gradleChanged: true,
       activityChanged: true,
       manifestChanged: false,
     });
@@ -239,6 +240,31 @@ test("migrates the exact previous fully patched activity and is a second-pass no
       patchedMainActivityForWebViewCompatibilityTest(packageName),
     );
     for (const path of preserved) assert.deepEqual(readFileSync(path), before.get(path), path);
+
+    const migratedGradle = readFileSync(fixture.gradle, "utf8");
+    const hook = migratedGradle.slice(previousGradle.length);
+    assert.equal(migratedGradle.slice(0, previousGradle.length), previousGradle);
+    assert.equal(hook, `
+// YAWF_FULLSCREEN_BEGIN
+// Always validate after every scheduled Rust producer, even if Kotlin is up to
+// date. A compile doFirst alone is skipped after regeneration of its old inputs.
+val yawfFullscreenPatch = tasks.register("yawfPatchWebFullscreen") {
+    mustRunAfter(tasks.matching { it.name.startsWith("rustBuild") })
+    doLast {
+        project.exec {
+            commandLine("node", file("../../../../../scripts/patch_tauri_android.mjs").absolutePath,
+                "--fullscreen-only", file("src/main/java/com/tgk30/debridstreamer/generated/RustWebChromeClient.kt").absolutePath)
+        }
+    }
+}
+tasks.configureEach {
+    if (name.matches(Regex("compile(Universal|Arm64|Arm|X86|X86_64)(Debug|Release)Kotlin"))) {
+        val rustVariant = name.removePrefix("compile").removeSuffix("Kotlin")
+        dependsOn("rustBuild" + rustVariant, yawfFullscreenPatch)
+    }
+}
+// YAWF_FULLSCREEN_END
+`);
 
     const migrated = readFileSync(fixture.mainActivity);
     const second = patchTauriAndroidProject({ root: fixture.root });
@@ -250,6 +276,7 @@ test("migrates the exact previous fully patched activity and is a second-pass no
       manifestChanged: false,
     });
     assert.deepEqual(readFileSync(fixture.mainActivity), migrated);
+    assert.equal(readFileSync(fixture.gradle, "utf8"), migratedGradle);
     for (const path of preserved) assert.deepEqual(readFileSync(path), before.get(path), path);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
