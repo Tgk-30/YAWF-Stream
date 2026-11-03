@@ -16,14 +16,10 @@ import { seasonIsWatched } from "../data/watchedState";
 import { Icon } from "./Icon";
 import { ImgWithFallback } from "./ImgWithFallback";
 import { isNetworkAllowed } from "../lib/networkPolicy";
+import { episodeAirDateLabel } from "../lib/episodeAirDate";
 import "./EpisodePicker.css";
 
 const TMDB_STILL_BASE = "https://image.tmdb.org/t/p/w300";
-const DATE_FMT = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-});
 
 // Above this many seasons the chip row gets unwieldy (wraps into a big block),
 // so we switch to a compact "Season N" dropdown instead.
@@ -67,15 +63,8 @@ interface EpisodePickerProps {
   seriesWatched?: boolean;
 }
 
-function airDateLabel(airDate: string | null | undefined): string | null {
-  if (!airDate) return null;
-  const d = new Date(`${airDate}T00:00:00Z`);
-  if (Number.isNaN(d.getTime())) return null;
-  return DATE_FMT.format(d);
-}
-
 function metaLabel(ep: Episode): string {
-  const bits = [airDateLabel(ep.airDate), ep.runtime != null ? `${ep.runtime} min` : null];
+  const bits = [episodeAirDateLabel(ep.airDate), ep.runtime != null ? `${ep.runtime} min` : null];
   return bits.filter(Boolean).join(" · ");
 }
 

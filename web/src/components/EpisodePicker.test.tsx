@@ -275,12 +275,32 @@ describe("EpisodePicker - rich mode", () => {
       month: "short",
       day: "numeric",
       year: "numeric",
+      timeZone: "UTC",
     }).format(new Date("2022-03-15T00:00:00Z"));
     expect(screen.getByText(`Pilot`)).toBeInTheDocument();
     expect(screen.getByText("Pilot").closest(".episode-body")?.textContent).toContain(
       expectedDate,
     );
   });
+  it("renders calendar-only air dates without changing episode or watched selection", () => {
+    mockUseSeasons.mockReturnValue({ seasons: [season(17)], loading: false, source: "live" });
+    mockUseEpisodes.mockReturnValue({
+      episodes: [episode(17, 1, { airDate: "2022-10-09", title: "Synthetic air date", runtime: 24 })],
+      loading: false,
+      source: "live",
+    });
+    const onToggleWatched = vi.fn();
+    const { onSelect } = renderPicker({ selected: { season: 17, episode: 1 }, onToggleWatched });
+    const expectedDate = new Intl.DateTimeFormat(undefined, {
+      month: "short", day: "numeric", year: "numeric", timeZone: "UTC",
+    }).format(new Date("2022-10-09T00:00:00Z"));
+    const row = screen.getByRole("button", { name: /Synthetic air date/ });
+    expect(row).toHaveClass("is-selected");
+    expect(row.querySelector(".episode-meta")).toHaveTextContent(`${expectedDate} · 24 min`);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onToggleWatched).not.toHaveBeenCalled();
+  });
+
   it("makes the current season action primary and the entire-series action secondary", async () => {
     const user = userEvent.setup();
     mockUseSeasons.mockReturnValue({
