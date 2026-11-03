@@ -61,7 +61,7 @@ export function useModalA11y<T extends HTMLElement>(
     // Focus the dialog container itself (rather than auto-focusing the first
     // control, which could be a destructive button): the dialog is announced,
     // and the next Tab enters its controls.
-    ref.current?.focus?.();
+    ref.current?.focus?.({ preventScroll: true });
 
     const onKey = (e: KeyboardEvent) => {
       if (suspendedRef.current) return;
@@ -77,7 +77,7 @@ export function useModalA11y<T extends HTMLElement>(
       const focusable = focusableChildren(dialog);
       if (focusable.length === 0) {
         e.preventDefault();
-        dialog.focus();
+        dialog.focus({ preventScroll: true });
         return;
       }
 
@@ -101,7 +101,7 @@ export function useModalA11y<T extends HTMLElement>(
     return () => {
       window.removeEventListener("keydown", onKey);
       // Restore focus to the trigger so keyboard users aren't dumped at the top.
-      previouslyFocused?.focus?.();
+      previouslyFocused?.focus?.({ preventScroll: true });
     };
   }, [active]);
 

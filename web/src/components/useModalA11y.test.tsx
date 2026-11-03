@@ -7,14 +7,41 @@ import { describe, expect, it, vi } from "vitest";
 import { render, renderHook, screen } from "@testing-library/react";
 import { useModalA11y } from "./useModalA11y";
 
-function Dialog({ onClose }: { onClose: () => void }) {
+function Dialog({ onClose, empty = false }: { onClose: () => void; empty?: boolean }) {
   const ref = useModalA11y<HTMLDivElement>(onClose);
   return (
     <div ref={ref} role="dialog" aria-label="Test" tabIndex={-1}>
-      <button type="button">First</button>
-      <button type="button">Last</button>
+      {!empty && <>
+        <button type="button">First</button>
+        <button type="button">Last</button>
+      </>}
     </div>
   );
+}
+
+function ScrollableDialog({ open, empty = false }: { open: boolean; empty?: boolean }) {
+  return (
+    <main data-testid="scrollport">
+      <button type="button">Trigger</button>
+      {open && <Dialog onClose={() => {}} empty={empty} />}
+    </main>
+  );
+}
+
+// jsdom keeps real focus state but does not scroll ancestors when focus changes.
+// Model that default browser side effect only for the target under test.
+function modelAncestorFocusScroll(
+  scrollport: HTMLElement,
+  matches: (element: HTMLElement) => boolean,
+) {
+  const originalFocus = HTMLElement.prototype.focus;
+  return vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (
+    this: HTMLElement,
+    options?: FocusOptions,
+  ) {
+    originalFocus.call(this, options);
+    if (matches(this) && options?.preventScroll !== true) scrollport.scrollTop = 0;
+  });
 }
 
 function InactiveDialog({ onClose }: { onClose: () => void }) {
@@ -49,6 +76,59 @@ describe("useModalA11y", () => {
   it("focuses the dialog container on open", () => {
     render(<Dialog onClose={() => {}} />);
     expect(screen.getByRole("dialog")).toHaveFocus();
+  });
+
+  it("preserves the ancestor scroll position when focusing the opened dialog", () => {
+    const { rerender, unmount } = render(<ScrollableDialog open={false} />);
+    const scrollport = screen.getByTestId("scrollport");
+    screen.getByRole("button", { name: "Trigger" }).focus();
+    scrollport.scrollTop = 40;
+    const focus = modelAncestorFocusScroll(scrollport, (element) => element.getAttribute("role") === "dialog");
+    try {
+      rerender(<ScrollableDialog open />);
+      expect(screen.getByRole("dialog")).toHaveFocus();
+      expect(scrollport.scrollTop).toBe(40);
+    } finally {
+      unmount();
+      focus.mockRestore();
+    }
+  });
+
+  it("preserves the ancestor scroll position when restoring focus after close", () => {
+    const { rerender, unmount } = render(<ScrollableDialog open={false} />);
+    const scrollport = screen.getByTestId("scrollport");
+    const trigger = screen.getByRole("button", { name: "Trigger" });
+    trigger.focus();
+    rerender(<ScrollableDialog open />);
+    scrollport.scrollTop = 40;
+    const focus = modelAncestorFocusScroll(scrollport, (element) => element === trigger);
+    try {
+      rerender(<ScrollableDialog open={false} />);
+      expect(trigger).toHaveFocus();
+      expect(scrollport.scrollTop).toBe(40);
+    } finally {
+      unmount();
+      focus.mockRestore();
+    }
+  });
+
+  it.each([false, true])("keeps empty-dialog Tab trapping from scrolling ancestors (shift=%s)", (shiftKey) => {
+    const { unmount } = render(<ScrollableDialog open empty />);
+    const scrollport = screen.getByTestId("scrollport");
+    scrollport.scrollTop = 40;
+    const focus = modelAncestorFocusScroll(scrollport, (element) => element.getAttribute("role") === "dialog");
+    try {
+      const event = new KeyboardEvent("keydown", {
+        key: "Tab", shiftKey, bubbles: true, cancelable: true,
+      });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(screen.getByRole("dialog")).toHaveFocus();
+      expect(scrollport.scrollTop).toBe(40);
+    } finally {
+      unmount();
+      focus.mockRestore();
+    }
   });
 
   it("supports environments without document by skipping prior-focus capture", () => {

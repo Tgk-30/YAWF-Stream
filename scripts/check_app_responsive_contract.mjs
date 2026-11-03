@@ -207,6 +207,16 @@ const phoneSearchCss = atRuleBlock(
   "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {",
 );
 const globalSearchBaseRule = ruleBlock(globalSearchCss, ".global-search");
+const phoneSearchRule = ruleBlock(phoneSearchCss, ".global-search");
+const phoneAppContentRule = ruleBlock(
+  atRuleBlock(appCss, "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {"),
+  ".app-content",
+);
+const phoneProfileCss = atRuleBlock(
+  profileMenuCss,
+  "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {",
+);
+const phoneProfileRule = ruleBlock(phoneProfileCss, ".profile-menu");
 const libraryAbsoluteHeaderRule = ruleBlock(
   atRuleBlock(libraryScreensCss, `${trueDesktopNavQuery} {`),
   ".lib-screen",
@@ -216,6 +226,16 @@ const libraryPhoneRule = ruleBlock(
   ".lib-screen",
 );
 const coarseSearchCss = atRuleBlock(globalSearchCss, "@media (pointer: coarse) {");
+const coarseSearchRule = ruleBlock(coarseSearchCss, ".global-search");
+const nonPhoneCoarseSearchHeader = "@media (pointer: coarse) and (min-width: 951px),\n  (pointer: coarse) and (min-width: 700px) and (min-height: 501px) {";
+const nonPhoneCoarseSearchRule = ruleBlock(
+  atRuleBlock(globalSearchCss, nonPhoneCoarseSearchHeader),
+  ".global-search",
+);
+const coarseProfileRule = ruleBlock(
+  atRuleBlock(profileMenuCss, "@media (pointer: coarse) {"),
+  ".profile-menu",
+);
 const coarseSearchClearRule = ruleBlock(coarseSearchCss, ".global-search-clear");
 const coarseNavCss = atRuleBlock(navCss, "@media (pointer: coarse) {");
 const coarseNavCollapseRule = ruleBlock(coarseNavCss, ".nav-rail-collapse");
@@ -297,7 +317,7 @@ check(
 
 check(
   "mobile search composes profile clearance with both native side insets",
-  /\.global-search\s*\{[\s\S]{0,420}calc\(max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)\s*\+[\s\S]{0,180}max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(phoneSearchCss) &&
+  /margin:\s*var\(--sp-md\)\s+calc\(max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)\s*\+\s*calc\(44px\s*\*\s*var\(--density-scale\)\)\s*\+\s*var\(--sp-sm\)\)\s*0\s+max\(var\(--sp-lg\),\s*var\(--safe-area-left\)\)/.test(phoneSearchRule) &&
     /width:\s*min\(520px,\s*calc\(100% - 48px\)\)/.test(tabletSearchCss),
   "GlobalSearch.css must keep the input and profile clearance inside both native side insets on portrait and short-landscape phones.",
 );
@@ -305,9 +325,12 @@ check(
 check(
   "tablet search clears the native top inset without double-insetting mobile sticky search",
   /top:\s*calc\(max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*-\s*var\(--app-content-safe-top-consumed,\s*0rem\)\)/.test(globalSearchBaseRule) &&
-    /position:\s*sticky/.test(ruleBlock(phoneSearchCss, ".global-search")) &&
-    /top:\s*var\(--sp-sm\)/.test(ruleBlock(phoneSearchCss, ".global-search")),
-  "GlobalSearch.css must subtract the consumed inset from its complete max offset while mobile sticky search keeps its local offset.",
+    /position:\s*sticky/.test(phoneSearchRule) &&
+    /top:\s*var\(--sp-sm\);/.test(phoneSearchRule) &&
+    !/--safe-area-top/.test(phoneSearchRule) &&
+    /padding-top:\s*var\(--safe-area-top\);/.test(phoneAppContentRule) &&
+    /scroll-padding-top:\s*var\(--safe-area-top\);/.test(phoneAppContentRule),
+  "GlobalSearch.css must preserve the local phone sticky gap inside the already-inset app scrollport, while absolute fine-pointer tablet search keeps its consumed-inset correction.",
 );
 
 check(
@@ -494,6 +517,43 @@ check(
   "profile control clears native top and right insets",
   /\.profile-menu\s*\{[\s\S]{0,160}top:\s*calc\(max\(var\(--sp-md\),\s*var\(--safe-area-top\)\)\s*-\s*var\(--app-content-safe-top-consumed,\s*0rem\)\)[\s\S]{0,100}right:\s*max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)/.test(profileMenuCss),
   "ProfileMenu.css must subtract the consumed inset from its complete max offset, preserving normal spacing and the native right inset.",
+);
+
+check(
+  "profile avatar scaling stays anchored to its safe top-right edge",
+  /transform-origin:\s*top right;/.test(ruleBlock(profileMenuCss, ".profile-menu-avatar")) &&
+    /transform:\s*scale\(1\.05\);/.test(ruleBlock(profileMenuCss, ".profile-menu-avatar:focus-visible")),
+  "ProfileMenu.css must anchor the existing hover and focus scale at top right so the avatar does not expand into native top or right insets.",
+);
+
+check(
+  "phone profile action stays viewport-fixed while content scrolls",
+  /position:\s*fixed;/.test(phoneProfileRule) &&
+    /top:\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\);/.test(phoneProfileRule) &&
+    !/--app-content-safe-top-consumed/.test(phoneProfileRule),
+  "ProfileMenu.css must fix the phone and short-landscape action to the viewport and use the full trusted top inset, leaving the desktop/tablet consumed-inset rule unchanged.",
+);
+
+check(
+  "coarse headers use full safe viewport coordinates without changing phone sticky search",
+  [coarseProfileRule, coarseSearchRule].every((rule) =>
+    /position:\s*fixed;/.test(rule) &&
+    /top:\s*max\(var\(--sp-md\),\s*var\(--safe-area-top\)\);/.test(rule) &&
+    !/(?:--app-content-safe-top-consumed|(?:right|left|width|z-index)\s*:)/.test(rule)
+  ) &&
+    globalSearchCss.indexOf("@media (pointer: coarse) {") <
+      globalSearchCss.indexOf("@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {"),
+  "ProfileMenu.css and GlobalSearch.css must keep coarse-pointer headers viewport-fixed below native chrome; never subtract a scrollport inset from fixed coordinates, change horizontal sizing, or override the later phone sticky rule.",
+);
+
+check(
+  "non-phone coarse search width clears the live rail and safe profile reserve",
+  /--global-search-right-reserve:\s*calc\(max\(var\(--sp-lg\),\s*var\(--safe-area-right\)\)\s*\+\s*44px\s*\+\s*var\(--sp-md\)\);/.test(nonPhoneCoarseSearchRule) &&
+    /right:\s*var\(--global-search-right-reserve\);/.test(nonPhoneCoarseSearchRule) &&
+    /width:\s*min\(520px,\s*max\(0px,\s*calc\(100%\s*-\s*max\(var\(--nav-safe-left,\s*0px\),\s*var\(--sp-lg\),\s*var\(--safe-area-left\)\)\s*-\s*var\(--global-search-right-reserve\)\)\)\);/.test(nonPhoneCoarseSearchRule) &&
+    globalSearchCss.indexOf(nonPhoneCoarseSearchHeader) >
+      globalSearchCss.indexOf("@media (min-width: 700px) and (max-width: 1199px) and (min-height: 501px) {"),
+  "GlobalSearch.css must bound only non-phone coarse search by the current nav-safe-left and safe-left minimum, then align its safe-right reserve with the profile action; the later guard must win over the general tablet width.",
 );
 
 check(

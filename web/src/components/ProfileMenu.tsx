@@ -4,7 +4,7 @@
 // image is resized client-side to a small square data: URL and stored locally in
 // settings - nothing leaves the device.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../store/AppStore";
 import { isServerMode } from "../lib/serverMode";
 import { updateProfileRecord } from "../storage/ProfileRegistry";
@@ -55,6 +55,27 @@ export function ProfileMenu({ onSwitchProfile, showSwitch }: Props) {
   const [busy, setBusy] = useState(false);
   const [photoError, setPhotoError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const avatarRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
+      // A higher modal, such as the command palette, owns its own Escape.
+      const modal = event.target instanceof Element
+        ? event.target.closest('[aria-modal="true"]')
+        : null;
+      if (modal != null && modal !== popoverRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      avatarRef.current?.focus({ preventScroll: true });
+    };
+    // Capture before route shortcuts, but only while this popover is open.
+    document.addEventListener("keydown", onEscape, true);
+    return () => document.removeEventListener("keydown", onEscape, true);
+  }, [open]);
 
   const name = (settings.userName ?? "").trim();
   const avatar = settings.userAvatar ?? "";
@@ -95,6 +116,7 @@ export function ProfileMenu({ onSwitchProfile, showSwitch }: Props) {
       <button
         type="button"
         className="profile-menu-avatar"
+        ref={avatarRef}
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -111,7 +133,7 @@ export function ProfileMenu({ onSwitchProfile, showSwitch }: Props) {
             aria-label="Close"
             onClick={() => setOpen(false)}
           />
-          <div className="profile-menu-pop glass-raised glass-lit" role="dialog" aria-label="Profile">
+          <div ref={popoverRef} className="profile-menu-pop glass-raised glass-lit" role="dialog" aria-label="Profile">
             <div className="profile-menu-head">
               <div className="profile-menu-big">{avatarInner}</div>
               <input
