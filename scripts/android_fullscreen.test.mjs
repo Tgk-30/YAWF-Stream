@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { basename, delimiter, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -76,6 +76,26 @@ function filesBelow(root, match) {
     return entry.isDirectory() ? filesBelow(path, match) : match(path) ? [path] : [];
   });
 }
+
+function compilerRuntimeCoordinates(pom) {
+  // Published compiler POMs contain literal direct runtime dependencies. Do not
+  // impose an old compiler's dependency list on a newly generated template.
+  return [...pom.matchAll(/<dependency>([\s\S]*?)<\/dependency>/g)].flatMap(([, body]) => {
+    const field = (name) => new RegExp(`<${name}>([^<]+)</${name}>`).exec(body)?.[1].trim();
+    if (!['compile', 'runtime'].includes(field('scope') || 'compile')) return [];
+    const coordinate = ['groupId', 'artifactId', 'version'].map(field);
+    assert.ok(coordinate.every((value) => value && /^[\w.+-]+$/.test(value)), 'Unsupported Kotlin compiler POM dependency');
+    return [coordinate.join('/')];
+  });
+}
+
+test('compiler runtime follows published coordinates, including removed and newly required dependencies', () => {
+  const dependency = (group, artifact, version) => `<dependency><groupId>${group}</groupId><artifactId>${artifact}</artifactId><version>${version}</version><scope>runtime</scope></dependency>`;
+  const modern = dependency('org.jetbrains.kotlin', 'kotlin-daemon-embeddable', '2.2.10') + dependency('org.jetbrains.kotlinx', 'kotlinx-coroutines-core-jvm', '1.8.0');
+  assert.deepEqual(compilerRuntimeCoordinates(modern), ['org.jetbrains.kotlin/kotlin-daemon-embeddable/2.2.10', 'org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm/1.8.0']);
+  assert.deepEqual(compilerRuntimeCoordinates(dependency('org.jetbrains.intellij.deps', 'trove4j', '1.0.20200330')), ['org.jetbrains.intellij.deps/trove4j/1.0.20200330']);
+  assert.throws(() => compilerRuntimeCoordinates(dependency('org.jetbrains.kotlin', 'kotlin-stdlib', '${kotlin.version}')), /Unsupported Kotlin compiler POM dependency/);
+});
 
 // Minimal host doubles execute the actual production controller, not a JS model.
 const stubs = {
@@ -156,24 +176,33 @@ test('required behavior gate rejects missing toolchains while generic Node runs 
 
 test('actual Kotlin controller lifecycle, duplicate requests, callback-once, Back, configuration, failures and restoration', (t) => {
   const modules = join(process.env.GRADLE_USER_HOME || join(homedir(), '.gradle'), 'caches/modules-2/files-2.1');
-  const jar = (path) => filesBelow(join(modules, path), (file) => file.endsWith('.jar'))[0];
+  const jar = (path) => {
+    const [, artifact, version] = path.split('/');
+    return filesBelow(join(modules, path), (file) => version ? basename(file) === `${artifact}-${version}.jar` : file.endsWith('.jar'))[0];
+  };
+  const pom = (version) => filesBelow(join(modules, `org.jetbrains.kotlin/kotlin-compiler-embeddable/${version}`), (file) => file.endsWith(`kotlin-compiler-embeddable-${version}.pom`))[0];
   // CI warms the template's Kotlin version, which need not match this Mac's.
   const compiler = filesBelow(join(modules, 'org.jetbrains.kotlin/kotlin-compiler-embeddable'), (file) => /kotlin-compiler-embeddable-[^/]+\.jar$/.test(file))
+    .sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))
     .find((file) => {
       const version = /kotlin-compiler-embeddable-([^/]+)\.jar$/.exec(file)?.[1];
-      return version && jar(`org.jetbrains.kotlin/kotlin-stdlib/${version}`) && jar(`org.jetbrains.kotlin/kotlin-script-runtime/${version}`);
+      return version && pom(version) && jar(`org.jetbrains.kotlin/kotlin-stdlib/${version}`) && jar(`org.jetbrains.kotlin/kotlin-script-runtime/${version}`);
     });
   const version = compiler && /kotlin-compiler-embeddable-([^/]+)\.jar$/.exec(compiler)?.[1];
   const stdlib = version && jar(`org.jetbrains.kotlin/kotlin-stdlib/${version}`);
   const annotations = jar('org.jetbrains/annotations');
-  const coroutines = jar('org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm');
-  const runtime = [compiler, stdlib, version && jar(`org.jetbrains.kotlin/kotlin-script-runtime/${version}`), jar('org.jetbrains.kotlin/kotlin-reflect'), jar('org.jetbrains.intellij.deps/trove4j'), ...(coroutines ? [coroutines] : []), annotations];
+  const dependencies = version ? compilerRuntimeCoordinates(readFileSync(pom(version), 'utf8')) : [];
+  assert.ok(!compiler || dependencies.length > 0, 'Kotlin compiler POM must declare runtime dependencies');
+  const components = [['kotlin-compiler-embeddable with matching stdlib, script-runtime and POM', compiler], ['org.jetbrains/annotations', annotations], ...dependencies.map((coordinate) => [coordinate, jar(coordinate)])];
+  const runtime = components.map(([, file]) => file);
   const java = join(process.env.JAVA_HOME || '/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home', 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
-  if (runtime.some((file) => !file) || !existsSync(java)) {
+  const missing = [...components.filter(([, file]) => !file).map(([name]) => name), ...(!existsSync(java) ? ['JAVA_HOME/bin/java'] : [])];
+  if (missing.length) {
     assert.notEqual(process.env.YAWF_REQUIRE_ANDROID_FULLSCREEN_BEHAVIOR, '1',
-      'Required Android fullscreen behavior toolchain unavailable: warm the Kotlin Gradle cache and set JAVA_HOME');
+      `Required Android fullscreen behavior toolchain unavailable: missing ${missing.join(', ')}; warm the Kotlin Gradle cache and set JAVA_HOME`);
     return t.skip('Kotlin compiler cache or Java unavailable');
   }
+  t.diagnostic(`Kotlin compiler ${version}; runtime: ${dependencies.join(', ')}, org.jetbrains/annotations`);
   const root = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'yawf-fullscreen-kotlin-'));
   try {
     const paths = Object.entries(stubs).map(([name, text]) => { const path = join(root, name); writeFileSync(path, text); return path; });
