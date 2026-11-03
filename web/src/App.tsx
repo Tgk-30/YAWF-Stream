@@ -92,6 +92,7 @@ import {
   translate,
 } from "./lib/localization";
 import { useTheme } from "./theme/useTheme";
+import { useRouteScrollReset } from "./lib/useRouteScrollReset";
 import "./App.css";
 
 // First-paint screens stay eager. Discover is the landing screen; Watchlist and
@@ -353,6 +354,13 @@ export function App() {
     profiles = [],
     switchLocalProfile,
   } = useAppStore();
+  const session = useServerSession();
+  const mainContentRef = useRouteScrollReset(
+    route,
+    isServerMode()
+      ? `server:${session?.profileId ?? ""}`
+      : `local:${activeProfile?.id ?? ""}`,
+  );
   const playerMounted = usePlayerMounted();
   const interfaceLocale = resolveInterfaceLocale(settings.interfaceLanguage);
   const routeTitle = translate(
@@ -667,7 +675,7 @@ export function App() {
         interfaceLocale={interfaceLocale}
       />
 
-      <main id="main-content" className="app-content" tabIndex={-1}>
+      <main ref={mainContentRef} id="main-content" className="app-content" tabIndex={-1}>
         <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
           {routeTitle} {routePageLabel}
         </span>

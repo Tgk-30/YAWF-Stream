@@ -41,6 +41,13 @@
 }
 
 @media (pointer: coarse) {
+  /* Non-phone touch headers stay in viewport coordinates even without the
+     standalone scrollport inset. The later phone rule retains sticky search. */
+  .global-search {
+    position: fixed;
+    top: max(var(--sp-md), var(--safe-area-top));
+  }
+
   .global-search-clear {
     width: 44px;
     height: 44px;
@@ -50,7 +57,8 @@
 @media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {
   .global-search {
     position: sticky;
-    /* The mobile scrollport already pads content below the native top inset. */
+    /* The mobile scrollport supplies the native top inset. Keep the sticky
+       offset as a local gap rather than counting that inset again. */
     top: var(--sp-sm);
     right: auto;
     z-index: 8;
@@ -68,5 +76,16 @@
 @media (min-width: 700px) and (max-width: 1199px) and (min-height: 501px) {
   .global-search {
     width: min(520px, calc(100% - 48px));
+  }
+}
+
+/* Touch tablet search shares the viewport with the rail and profile action.
+   Keep this after the general tablet width rule, outside phone layouts. */
+@media (pointer: coarse) and (min-width: 951px),
+  (pointer: coarse) and (min-width: 700px) and (min-height: 501px) {
+  .global-search {
+    --global-search-right-reserve: calc(max(var(--sp-lg), var(--safe-area-right)) + 44px + var(--sp-md));
+    right: var(--global-search-right-reserve);
+    width: min(520px, max(0px, calc(100% - max(var(--nav-safe-left, 0px), var(--sp-lg), var(--safe-area-left)) - var(--global-search-right-reserve))));
   }
 }
