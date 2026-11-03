@@ -33,6 +33,9 @@ mod player;
 // in-window path is implemented in render_player.rs on macOS.
 mod render_player;
 
+#[cfg(any(target_os = "android", test))]
+mod android_exit_policy;
+
 #[cfg(target_os = "android")]
 mod mobile_android_update;
 
@@ -886,6 +889,64 @@ pub fn run() {
         cast::cast_set_volume,
     ]);
 
+    #[cfg(target_os = "android")]
+    {
+        let app = builder
+            .build(tauri::generate_context!())
+            .expect("error while running tauri application");
+        let mut exit_policy = android_exit_policy::NormalExitPolicy::default();
+        app.run(move |app, event| match event {
+            tauri::RunEvent::ExitRequested { code, .. } => {
+                // No product handler currently prevents exit. Future calls to
+                // api.prevent_exit() MUST also call exit_policy.exit_prevented();
+                // Tauri exposes no observed prevention flag for this callback.
+                exit_policy.exit_requested(code);
+                #[cfg(feature = "android-lifecycle-probe")]
+                match code {
+                    None => android_exit_policy::lifecycle_probe(
+                        c"request_none pid=%d status=%d",
+                        libc::EXIT_SUCCESS,
+                    ),
+                    Some(code) => {
+                        android_exit_policy::lifecycle_probe(c"request_some pid=%d code=%d", code)
+                    }
+                }
+            }
+            tauri::RunEvent::Exit => {
+                #[cfg(feature = "android-lifecycle-probe")]
+                android_exit_policy::lifecycle_probe(c"exit_event pid=%d reserved=%d", 0);
+                if exit_policy.take_normal_exit() {
+                    // Tauri invokes this callback before its own cleanup. Consume
+                    // eligibility first, then perform the same public cleanup once.
+                    #[cfg(feature = "android-lifecycle-probe")]
+                    android_exit_policy::lifecycle_probe(
+                        c"before_cleanup pid=%d status=%d",
+                        libc::EXIT_SUCCESS,
+                    );
+                    app.cleanup_before_exit();
+                    #[cfg(feature = "android-lifecycle-probe")]
+                    {
+                        android_exit_policy::lifecycle_probe(
+                            c"after_cleanup pid=%d status=%d",
+                            libc::EXIT_SUCCESS,
+                        );
+                        android_exit_policy::lifecycle_probe(
+                            c"termination_next pid=%d status=%d",
+                            libc::EXIT_SUCCESS,
+                        );
+                    }
+                    // Android request codes finish the Activity, not select the
+                    // process status. Skip atexit destructors only for accepted
+                    // final exits, with no further Tauri API use. Restarts stay
+                    // framework-owned and never enter this path.
+                    unsafe { libc::_exit(libc::EXIT_SUCCESS) }
+                }
+            }
+            _ => {}
+        });
+    }
+
+    #[cfg(not(target_os = "android"))]
     builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
