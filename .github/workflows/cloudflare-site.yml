@@ -52,7 +52,9 @@ jobs:
         run: npm ci && npm run lint && npm run build
 
       - name: YAWF Stream website QA
-        run: node scripts/check_website_app.mjs
+        run: |
+          node --test scripts/check_website_stream_picker_clip.test.mjs
+          node scripts/check_website_app.mjs
 
       - name: Website download logic
         run: node scripts/check_website_download_logic.mjs
@@ -126,7 +128,9 @@ jobs:
 
       - name: YAWF Stream website QA
         if: steps.gate.outputs.ready == 'true'
-        run: node scripts/check_website_app.mjs
+        run: |
+          node --test scripts/check_website_stream_picker_clip.test.mjs
+          node scripts/check_website_app.mjs
 
       - name: Website download logic
         if: steps.gate.outputs.ready == 'true'
