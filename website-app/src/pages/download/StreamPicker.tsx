@@ -177,7 +177,7 @@ export default function StreamPicker() {
               : 'Platform could not be detected. Choose the package manually.';
 
   return (
-    <section className="relative overflow-hidden py-[clamp(88px,12vw,152px)]">
+    <section className="relative overflow-hidden supports-[overflow:clip]:overflow-clip py-[clamp(88px,12vw,152px)]">
       {/* sonar stream-rings band behind the picker */}
       <BackgroundVideo src={asset('streamrings-loop.mp4')} poster={asset('streamrings-poster.jpg')} opacity={0.2} />
       <div
