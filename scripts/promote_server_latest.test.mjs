@@ -242,6 +242,70 @@ test("release qualification binds stable public assets, tag, package, image, and
   assert.equal(result.workflowRuns.debian.id, verificationValue().workflowRuns.debian);
 });
 
+function ciAuthoredFixture() {
+  const fixture = qualificationFixture();
+  fixture.release.author = { login: "github-actions[bot]", id: 41898282, type: "Bot" };
+  fixture.runs.debian.head_branch = TAG;
+  return fixture;
+}
+
+for (const event of ["push", "workflow_dispatch"]) {
+  test(`CI-authored release accepts exact bot and successful tag-ref ${event} with both guards`, () => {
+    const fixture = ciAuthoredFixture();
+    fixture.runs.debian.event = event;
+    const ownerFixture = qualificationFixture();
+    ownerFixture.runs.debian.event = event;
+    ownerFixture.runs.debian.head_branch = TAG;
+    assert.deepEqual(qualifyReleaseEvidence(fixture), qualifyReleaseEvidence(ownerFixture));
+  });
+}
+
+test("CI-authored release rejects each identity, guard, tag and provenance mutant", () => {
+  const mutations = [
+    ["bot ID", (v) => { v.release.author.id += 1; }],
+    ["bot ID type", (v) => { v.release.author.id = "41898282"; }],
+    ["bot type", (v) => { v.release.author.type = "User"; }],
+    ["bot login", (v) => { v.release.author.login = "another-bot[bot]"; }],
+    ["missing bot ID", (v) => { delete v.release.author.id; }],
+    ["missing bot type", (v) => { delete v.release.author.type; }],
+    ["missing source guard", (v) => { delete v.expectedSourceRevision; }],
+    ["missing image guard", (v) => { delete v.expectedImageDigest; }],
+    ["missing both guards", (v) => { delete v.expectedSourceRevision; delete v.expectedImageDigest; }],
+    ["wrong source guard", (v) => { v.expectedSourceRevision = "0".repeat(40); }],
+    ["wrong image guard", (v) => { v.expectedImageDigest = `sha256:${"0".repeat(64)}`; }],
+    ["dispatch branch", (v) => { v.runs.debian.head_branch = "main"; }],
+    ["dispatch other tag", (v) => { v.runs.debian.head_branch = "v2.3.35"; }],
+    ["dispatch empty tag", (v) => { v.runs.debian.head_branch = ""; }],
+    ["dispatch missing tag", (v) => { delete v.runs.debian.head_branch; }],
+    ["push wrong tag", (v) => { v.runs.debian.event = "push"; v.runs.debian.head_branch = "main"; }],
+    ["wrong event", (v) => { v.runs.debian.event = "pull_request"; }],
+    ["wrong workflow", (v) => { v.runs.debian.path = ".github/workflows/other.yml"; }],
+    ["wrong actor", (v) => { v.runs.debian.actor.login = "fork-owner"; }],
+    ["wrong source", (v) => { v.runs.debian.head_sha = "0".repeat(40); }],
+    ["wrong repository", (v) => { v.runs.debian.repository.full_name = "fork/YAWF-Stream"; }],
+    ["wrong head repository", (v) => { v.runs.debian.head_repository.full_name = "fork/YAWF-Stream"; }],
+    ["incomplete run", (v) => { v.runs.debian.status = "in_progress"; }],
+    ["failed run", (v) => { v.runs.debian.conclusion = "failure"; }],
+    ["draft", (v) => { v.release.draft = true; }],
+    ["prerelease", (v) => { v.release.prerelease = true; }],
+    ["asset digest", (v) => { v.release.assets[0].digest = `sha256:${"0".repeat(64)}`; }],
+    ["tag source", (v) => { v.resolvedTagCommit = "0".repeat(40); }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const fixture = ciAuthoredFixture();
+    mutate(fixture);
+    assert.throws(() => qualifyReleaseEvidence(fixture), ServerLatestPromotionError, label);
+  }
+});
+
+test("owner-authored release retains branch-dispatch admission without optional guards", () => {
+  const fixture = qualificationFixture();
+  const expected = qualifyReleaseEvidence(fixture);
+  delete fixture.expectedSourceRevision;
+  delete fixture.expectedImageDigest;
+  assert.deepEqual(qualifyReleaseEvidence(fixture), expected);
+});
+
 test("release qualification rejects each public-release and asset trust mutant", () => {
   const mutations = [
     ["draft", (v) => { v.release.draft = true; }],
@@ -318,8 +382,9 @@ function responseBytes(bytes, status = 200, headers = {}) {
   });
 }
 
-function collectionMock({ redirectManifestTo = null } = {}) {
+function collectionMock({ redirectManifestTo = null, mutateFixture = () => {} } = {}) {
   const fixture = qualificationFixture();
+  mutateFixture(fixture);
   const calls = [];
   const packageMetadata = {
     type: "file",
@@ -372,6 +437,23 @@ test("collector executes actual annotated-tag and public-byte path without forwa
   assert.equal(result.sourceRevision, SOURCE);
   assert.ok(mock.calls.some((call) => call.href === `${API}/git/tags/${TAG_OBJECT}`));
   assert.ok(mock.calls.filter((call) => call.href.startsWith(API)).every((call) => call.authorization === "Bearer test-token-never-returned"));
+  assert.ok(mock.calls.filter((call) => call.href.startsWith(WEB)).every((call) => call.authorization == null));
+  assert.doesNotMatch(JSON.stringify(result), /test-token/);
+});
+
+test("CI-authored collector qualifies a guarded direct-tag dispatch without token forwarding", async () => {
+  const mock = collectionMock({ mutateFixture: (fixture) => {
+    fixture.release.author = { login: "github-actions[bot]", id: 41898282, type: "Bot" };
+    fixture.runs.debian.head_branch = TAG;
+  } });
+  const result = await collectReleaseEvidence({
+    requestedVersion: VERSION,
+    expectedSourceRevision: SOURCE,
+    expectedImageDigest: IMAGE_DIGEST,
+    fetchImpl: mock.fetchImpl,
+    token: "test-token-never-returned",
+  });
+  assert.deepEqual(result, qualifyReleaseEvidence(qualificationFixture()));
   assert.ok(mock.calls.filter((call) => call.href.startsWith(WEB)).every((call) => call.authorization == null));
   assert.doesNotMatch(JSON.stringify(result), /test-token/);
 });
