@@ -4578,6 +4578,207 @@ describe("WebviewPlayer", () => {
     );
   });
 
+  it.each([
+    "metadata-before-inventory",
+    "inventory-before-metadata-before-activation",
+    "inventory-and-activation-before-metadata",
+    "ordinary-resume-before-metadata",
+    "ordinary-clock-before-activation",
+    "zero-during-preparation",
+    "backward-during-preparation",
+    "backward-before-clock-during-preparation",
+    "zero-before-clock-during-preparation",
+    "rebased-handoff-before-metadata",
+    "zero-offset-generation-before-metadata",
+    "ordinary-rebased-completed-before-metadata",
+    "ordinary-unknown-duration-before-metadata",
+    "ordinary-completed-before-metadata",
+    "startup-zero-before-inventory",
+    "ordinary-zero-before-inventory",
+    "resume-then-zero-before-inventory",
+    "pending-play-intent-before-metadata",
+    "advance-during-preparation",
+  ] as const)("preserves startup position and remembered audio intent: %s", async (order) => {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockImplementation((type) =>
+      type === "application/vnd.apple.mpegurl" ? "probably" : "",
+    );
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const ordinary = order.startsWith("ordinary-");
+    const completed = order === "ordinary-completed-before-metadata";
+    const explicitZero = order === "startup-zero-before-inventory" ||
+      order === "ordinary-zero-before-inventory" || order === "resume-then-zero-before-inventory" ||
+      order === "zero-during-preparation" || order === "zero-before-clock-during-preparation";
+    const backwardPreparation = order === "zero-during-preparation" || order === "backward-during-preparation" ||
+      order === "backward-before-clock-during-preparation" || order === "zero-before-clock-during-preparation";
+    const backwardTarget = order === "zero-during-preparation" || order === "zero-before-clock-during-preparation" ? 0 : 5;
+    const wantsPlay = order === "pending-play-intent-before-metadata";
+    const offset = order.includes("rebased") ? 10 : 0;
+    const expectedPosition = completed || order === "ordinary-rebased-completed-before-metadata" ? offset : explicitZero ? 0 : order === "advance-during-preparation" ? 18 : 16 + offset;
+    const tracks = [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "jpn", label: "Japanese", default: false },
+    ] satisfies ServerAudioTrack[];
+    const inventory = deferred<{ durationSeconds: number | null; tracks: ServerAudioTrack[] }>();
+    const loadSourceInfo = vi.fn(() => inventory.promise);
+    const prepared = deferred<{
+      url: string; timelineOffsetSeconds: number; startPositionSeconds: number;
+      quality: "480p"; audioTrack: number;
+    }>();
+    const request = vi.fn((_quality: ServerTranscodeQuality, _position: number, _audio?: number) => prepared.promise);
+    const master = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=854x480,CODECS=\"avc1.4d401f,mp4a.40.2\"\n480p.m3u8?generation=transcode-audio69\n";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(master, {
+      status: 200, headers: { "Content-Type": "application/vnd.apple.mpegurl", "x-yawf-transcode-audio": "1" },
+    })));
+    const onProgress = vi.fn();
+    render(<VideoPlayer
+      url="https://server.example/api/stream/session-1"
+      engine="webview-direct"
+      title="Paused remembered audio"
+      startPositionSeconds={completed ? 31 : 16}
+      timelineOffsetSeconds={offset}
+      initialHandoffState={ordinary ? null : { paused: !wantsPlay, volume: 0.35, muted: true, playbackRate: 1.25 }}
+      savedPrefs={{ preferredAudioId: "1", preferredAudioLang: "jpn" }}
+      serverOptimized={{ qualities: ["480p"], loadSourceInfo, request }}
+      onProgress={onProgress}
+      onClose={() => {}}
+    />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    // Model only public media observations. Before metadata, duration is unknown
+    // and currentTime is 0. Native HLS applies the actual product temporal fragment.
+    const media = (video: HTMLVideoElement, duration: number) => {
+      let time = 0;
+      let ready: number = HTMLMediaElement.HAVE_NOTHING;
+      let knownDuration = Number.NaN;
+      Object.defineProperties(video, {
+        currentTime: { configurable: true, get: () => time, set: (value: number) => { time = value; } },
+        duration: { configurable: true, get: () => knownDuration },
+        readyState: { configurable: true, get: () => ready },
+        paused: { configurable: true, value: true },
+        seekable: { configurable: true, get: () => ({ length: ready > 0 ? 1 : 0, start: () => 0, end: () => duration }) },
+      });
+      return () => {
+        knownDuration = duration;
+        ready = HTMLMediaElement.HAVE_METADATA;
+        const fragment = Number(new URL(video.src).hash.replace(/^#t=/, ""));
+        if (video.src.includes("#t=")) time = fragment <= 0.001 ? 0 : fragment;
+        fireEvent.loadedMetadata(video);
+        ready = HTMLMediaElement.HAVE_CURRENT_DATA;
+        fireEvent.loadedData(video);
+        fireEvent.canPlay(video);
+        fireEvent.seeked(video);
+        fireEvent.timeUpdate(video);
+      };
+    };
+    const originalMetadata = media(original, 36 - offset);
+    await waitFor(() => expect(loadSourceInfo).toHaveBeenCalledTimes(1));
+    const metadataFirst = order === "metadata-before-inventory" ||
+      order === "resume-then-zero-before-inventory" || order === "advance-during-preparation" ||
+      order === "backward-during-preparation" || order === "backward-before-clock-during-preparation" ||
+      order === "zero-before-clock-during-preparation";
+    if (metadataFirst) originalMetadata();
+    if (explicitZero && !backwardPreparation) {
+      const scrub = scrubBarMock.mock.calls.at(-1)?.[0];
+      if (scrub == null) throw new Error("Scrub bar props were not captured");
+      act(() => scrub.onSeek(0));
+    }
+    await act(async () => {
+      inventory.resolve({ durationSeconds: order === "ordinary-unknown-duration-before-metadata" ? null : 36, tracks });
+      await inventory.promise;
+    });
+    if (order === "ordinary-unknown-duration-before-metadata") {
+      expect(request).not.toHaveBeenCalled();
+      originalMetadata();
+    }
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    if (order === "inventory-before-metadata-before-activation") originalMetadata();
+    if (order === "ordinary-clock-before-activation") fireEvent.timeUpdate(original);
+    if (backwardPreparation) {
+      const scrub = scrubBarMock.mock.calls.at(-1)?.[0];
+      if (scrub == null) throw new Error("Scrub bar props were not captured");
+      act(() => scrub.onSeek(backwardTarget));
+      if (!order.includes("before-clock")) fireEvent.timeUpdate(original);
+    }
+    if (order === "advance-during-preparation") {
+      original.currentTime = 18;
+      fireEvent.timeUpdate(original);
+    }
+    const requestedPosition = request.mock.calls[0]![1];
+    const preparedOffset = order === "zero-offset-generation-before-metadata" ? 0 : requestedPosition;
+    const initialPlayCalls = vi.mocked(HTMLMediaElement.prototype.play).mock.calls.length;
+    if (backwardPreparation) {
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByText("Preparing optimized playback while the current stream continues…")).toBeInTheDocument();
+    }
+    await act(async () => {
+      prepared.resolve({
+        url: `https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=${preparedOffset}&audio=1`,
+        timelineOffsetSeconds: preparedOffset,
+        startPositionSeconds: 0,
+        quality: "480p", audioTrack: 1,
+      });
+      await prepared.promise;
+    });
+    if (backwardPreparation) {
+      await waitFor(() => expect(screen.queryByText("Preparing optimized playback while the current stream continues…")).not.toBeInTheDocument());
+      originalMetadata();
+      expect(document.querySelector("video.player-video")).toBe(original);
+      expect(original.currentTime).toBe(backwardTarget);
+      if (order === "zero-during-preparation") expect(onProgress.mock.calls.at(-1)?.[0]).toBe(0);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(initialPlayCalls);
+      return;
+    }
+    const switched = await waitFor(() => {
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(video).not.toBe(original);
+      return video;
+    });
+    media(switched, 36 - preparedOffset)();
+    if (wantsPlay) {
+      Object.defineProperty(switched, "paused", { configurable: true, value: false });
+      fireEvent.play(switched);
+      fireEvent.timeUpdate(switched);
+    }
+    const source = switched.src;
+    const progress = onProgress.mock.calls.at(-1);
+    // A removed source may still dispatch queued native events. They must not
+    // change the active source, position, request count, or retained audio.
+    originalMetadata();
+    expect(document.querySelector("video.player-video")).toBe(switched);
+    expect(switched.src).toBe(source);
+    expect(onProgress.mock.calls.at(-1)).toEqual(progress);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]?.[2]).toBe(1);
+    expect(hlsInstances).toHaveLength(0);
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(initialPlayCalls + (wantsPlay ? 1 : 0));
+    expect(switched.paused).toBe(!wantsPlay);
+    expect(switched.volume).toBeCloseTo(ordinary ? 1 : 0.35);
+    expect(switched.muted).toBe(!ordinary);
+    expect(switched.playbackRate).toBe(ordinary ? 1 : 1.25);
+    if (completed || order === "ordinary-rebased-completed-before-metadata") expect(requestedPosition).toBe(offset);
+    else if (explicitZero) expect(requestedPosition).toBe(0);
+    else if (metadataFirst || order === "ordinary-unknown-duration-before-metadata") expect(requestedPosition).toBe(16);
+    else expect([offset, 16 + offset]).toContain(requestedPosition);
+    expect({
+      requestedPosition,
+      timelineOffset: Number(new URL(source).searchParams.get("start")),
+      localPosition: switched.currentTime,
+      localDuration: switched.duration,
+      absolutePosition: progress?.[0],
+      absoluteDuration: progress?.[1],
+      audio: progress?.[2]?.preferredAudioLang,
+    }).toEqual({
+      requestedPosition,
+      timelineOffset: preparedOffset,
+      localPosition: expectedPosition - preparedOffset,
+      localDuration: 36 - preparedOffset,
+      absolutePosition: expectedPosition,
+      absoluteDuration: 36,
+      audio: "jpn",
+    });
+  });
+
   it("restores remembered server audio and does not persist a failed switch", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const loadAudioTracks = vi.fn(async () => [

@@ -1408,6 +1408,16 @@
   display: none;
 }
 
+/* Native range hit slop can extend beyond the painted track. Keep a real pan
+   surface outside the implicit labels instead of relying on visual edge space. */
+.player.is-touch-player .player-options-menu.is-touch-settings .player-options-sliders {
+  padding-inline-end: 44px;
+}
+.player.is-touch-player .player-options-menu.is-touch-settings .player-options-sliders input[type="range"] {
+  min-height: 44px;
+  margin-inline: 0;
+}
+
 .player.is-touch-player .player-options-menu,
 .player.is-touch-player .captions-menu {
   z-index: 18;
