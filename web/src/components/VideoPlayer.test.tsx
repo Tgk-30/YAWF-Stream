@@ -358,6 +358,14 @@ vi.mock("./Icon", () => ({
 // Built-in libmpv player - a native surface that can't render in jsdom, so stub
 // it. These tests only assert WHICH path VideoPlayer chooses (embedded vs the
 // external hand-off), not the player internals (covered by its own concerns).
+const embeddedModeIntentObserver = vi.hoisted(() => ({
+  enabled: false,
+  props: [] as Array<{
+    onSwitchServerOptimized?: (quality: ServerTranscodeQuality, position: number) => Promise<void>;
+    onSwitchDeviceOriginal?: (position: number) => void;
+    serverOptimizationPending?: boolean;
+  }>,
+}));
 vi.mock("./EmbeddedPlayer", () => ({
   EmbeddedPlayer: (props: {
     title: string;
@@ -367,7 +375,12 @@ vi.mock("./EmbeddedPlayer", () => ({
     onPlaybackError?: (error: Error) => boolean | Promise<boolean>;
     onOpenExternalPlayer?: () => void | Promise<void>;
     externalActionStatus?: string | null;
-  }) => (
+    onSwitchServerOptimized?: (quality: ServerTranscodeQuality, position: number) => Promise<void>;
+    onSwitchDeviceOriginal?: (position: number) => void;
+    serverOptimizationPending?: boolean;
+  }) => {
+    if (embeddedModeIntentObserver.enabled) embeddedModeIntentObserver.props.push(props);
+    return (
     <div
       data-testid="embedded-player"
       data-url={props.url}
@@ -390,7 +403,8 @@ vi.mock("./EmbeddedPlayer", () => ({
         <span data-testid="embedded-external-status">{props.externalActionStatus}</span>
       )}
     </div>
-  ),
+    );
+  },
 }));
 
 import { VideoPlayer } from "./VideoPlayer";
@@ -12589,5 +12603,188 @@ describe("mobile usability presentation and pinned settings", () => {
     await changePresentation();
     view.rerender(<VideoPlayer url="https://x/file-B.mp4" title="Same title" onClose={() => {}} />);
     expect(document.querySelector("video.player-video")).toHaveStyle({ objectFit: "contain", transform: "translate(0%, 0%) scale(1)" });
+  });
+});
+
+describe("explicit Device Original audio intent", () => {
+  const originalUrl = "https://server.example/api/stream/mode-original";
+  const position = 61.157115;
+  const tracks = [
+    { index: 0, language: "eng", label: "English", default: true },
+    { index: 1, language: "jpn", label: "Japanese", default: false },
+  ];
+  async function settleMode() {
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+  }
+  function readyMode(video: HTMLVideoElement, offset = 0) {
+    Object.defineProperties(video, {
+      duration: { configurable: true, value: 180 - offset },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, value: true },
+      seeking: { configurable: true, value: false },
+      seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 180 - offset } },
+    });
+    fireEvent.loadedMetadata(video); fireEvent.loadedData(video); fireEvent.seeked(video);
+    fireEvent.timeUpdate(video);
+  }
+  async function settingsMode() {
+    if (screen.queryByRole("button", { name: "Close playback settings" }) == null) {
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    }
+  }
+  async function setupMode() {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => new Response("#EXTM3U\n", {
+      headers: { "x-yawf-transcode-audio": new URL(String(input)).searchParams.get("audio") ?? "0" },
+    })));
+    const request = vi.fn(async (quality: ServerTranscodeQuality, absolute: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/mode-generation/index.m3u8?quality=${quality}&start=${absolute}&audio=${audioTrack ?? 0}`,
+      timelineOffsetSeconds: absolute, startPositionSeconds: 0, quality, audioTrack,
+    }));
+    const onProgress = vi.fn();
+    const props = {
+      url: originalUrl, title: "Mode intent film", sourceFileName: "Mode.Movie.mkv", imdbId: "tt0000001",
+      startPositionSeconds: position,
+      initialHandoffState: { paused: true, volume: 0.35, muted: true, playbackRate: 1.25 },
+      playerPreferences: { defaultAudioLanguage: "eng" },
+      serverOptimized: { qualities: ["480p", "360p"] as ServerTranscodeQuality[], loadSourceInfo: vi.fn(async () => ({ durationSeconds: 180, tracks })), request },
+      onProgress, onClose: vi.fn(),
+    };
+    const view = render(<VideoPlayer {...props} />);
+    readyMode(document.querySelector("video.player-video") as HTMLVideoElement);
+    await settleMode(); await settingsMode();
+    fireEvent.click(screen.getByRole("button", { name: "Japanese" }));
+    await settleMode();
+    expect(request).toHaveBeenCalledTimes(1);
+    readyMode(document.querySelector("video.player-video") as HTMLVideoElement, position);
+    await settleMode(); await settingsMode();
+    fireEvent.click(screen.getByRole("button", { name: "360p" }));
+    await settleMode();
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenLastCalledWith("360p", position, 1);
+    readyMode(document.querySelector("video.player-video") as HTMLVideoElement, position);
+    await settleMode(); await settingsMode();
+    fireEvent.click(screen.getByRole("button", { name: "Device Original" }));
+    await settleMode();
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    return { props, view, request, original, onProgress };
+  }
+
+  it("honors manual Japanese then quality then Original instead of automatically replacing Original again", async () => {
+    vi.useFakeTimers();
+    try {
+      const { request, original, onProgress } = await setupMode();
+      expect(original.src).toBe(originalUrl);
+      readyMode(original); await settleMode();
+      await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(document.querySelector("video.player-video")).toBe(original);
+      expect(original.currentTime).toBeCloseTo(position, 6);
+      await settingsMode();
+      expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "true");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(onProgress.mock.calls.some(([, , prefs]) => prefs?.preferredAudioLang === "jpn")).toBe(true);
+      expect(recordDiagnosticMock.mock.calls.filter(([, code]) => code === "webview.playback_failed")).toHaveLength(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["Japanese", "360p"])("admits fresh explicit %s after Original without erasing retained Japanese", async (choice) => {
+    const { request, original } = await setupMode();
+    readyMode(original); await settleMode();
+    expect(request).toHaveBeenCalledTimes(2);
+    await settingsMode(); fireEvent.click(screen.getByRole("button", { name: choice }));
+    await settleMode();
+    expect(request.mock.calls.length).toBeGreaterThan(2);
+    // Quality keeps the actual Original track; it must not rewrite the
+    // retained semantic preference merely because that source defaults to English.
+    expect(request).toHaveBeenLastCalledWith(choice === "360p" ? "360p" : "480p", position, choice === "360p" ? 0 : 1);
+    expect(document.querySelector("video.player-video")).not.toBe(original);
+  });
+
+  it("releases the Original fence on a committed revision while keeping the same-file Japanese preference", async () => {
+    const { request, original, view, props } = await setupMode();
+    readyMode(original); await settleMode();
+    expect(request).toHaveBeenCalledTimes(2);
+    view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+    const next = document.querySelector("video.player-video") as HTMLVideoElement;
+    readyMode(next); await settleMode();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenLastCalledWith("480p", position, 1);
+  });
+
+  it("permits explicit Retry after Original to restore the retained language", async () => {
+    const { request, original } = await setupMode();
+    readyMode(original); await settleMode();
+    expect(request).toHaveBeenCalledTimes(2);
+    fireMediaError(original, 4);
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    await settleMode();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenLastCalledWith("480p", position, 1);
+  });
+});
+
+
+describe("Original pending-generation cancellation contract", () => {
+  it("allows Original during pending preparation and rejects its late same-owner manifest", async () => {
+    isTauriMock.mockReturnValue(true);
+    embeddedModeIntentObserver.enabled = true;
+    embeddedModeIntentObserver.props.length = 0;
+    const pending = deferred<Response>();
+    const fetcher = vi.fn(() => pending.promise);
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.stubGlobal("fetch", fetcher);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/late-mode/index.m3u8",
+      timelineOffsetSeconds: 0, startPositionSeconds: 0, quality: "480p" as const,
+    }));
+    try {
+      render(<VideoPlayer url="https://server.example/api/stream/original.mkv" engine="native-mpv"
+        title="Pending mode" serverOptimized={{ qualities: ["480p"], request }} onClose={() => {}} />);
+      const original = embeddedModeIntentObserver.props.at(-1)!;
+      act(() => { void original.onSwitchServerOptimized!("480p", 51); });
+      await act(async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      const signal = (fetcher.mock.calls[0] as unknown as [string, RequestInit])[1].signal!;
+      expect(signal.aborted).toBe(false);
+      expect(embeddedModeIntentObserver.props.at(-1)!.serverOptimizationPending).toBe(true);
+      act(() => { original.onSwitchDeviceOriginal!(51); });
+      expect(signal.aborted).toBe(true);
+      expect(embeddedModeIntentObserver.props.at(-1)!.serverOptimizationPending).toBe(false);
+      await act(async () => { pending.resolve(new Response("#EXTM3U\n")); await pending.promise; for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+      expect(screen.getByTestId("embedded-player")).toHaveAttribute("data-url", "https://server.example/api/stream/original.mkv");
+      expect(document.querySelector("video.player-video")).toBeNull();
+    } finally { embeddedModeIntentObserver.enabled = false; }
+  });
+
+  it("does not let a stale Original callback cancel a newer committed owner", async () => {
+    isTauriMock.mockReturnValue(true);
+    embeddedModeIntentObserver.enabled = true;
+    embeddedModeIntentObserver.props.length = 0;
+    const pending = deferred<Response>();
+    const fetcher = vi.fn(() => pending.promise);
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.stubGlobal("fetch", fetcher);
+    const props = { title: "New owner mode", engine: "native-mpv" as const, serverOptimized: { qualities: ["480p"] as ServerTranscodeQuality[], request: vi.fn(async () => ({ url: "https://server.example/api/stream/new-mode/index.m3u8", timelineOffsetSeconds: 0, startPositionSeconds: 0, quality: "480p" as const })) }, onClose: vi.fn() };
+    try {
+      const view = render(<VideoPlayer {...props} url="https://server.example/api/stream/A.mkv" />);
+      const staleOriginal = embeddedModeIntentObserver.props.at(-1)!.onSwitchDeviceOriginal!;
+      view.rerender(<VideoPlayer {...props} url="https://server.example/api/stream/B.mkv" sourceRevision={1} />);
+      act(() => { void embeddedModeIntentObserver.props.at(-1)!.onSwitchServerOptimized!("480p", 51); });
+      await act(async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+      const signal = (fetcher.mock.calls[0] as unknown as [string, RequestInit])[1].signal!;
+      act(() => { staleOriginal(8); });
+      expect(signal.aborted).toBe(false);
+      expect(embeddedModeIntentObserver.props.at(-1)!.serverOptimizationPending).toBe(true);
+      await act(async () => { pending.resolve(new Response("#EXTM3U\n")); await pending.promise; for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+      await waitFor(() => expect(hlsInstances.some((instance) => instance.loadSource.mock.calls.some(
+        ([source]) => source === "https://server.example/api/stream/new-mode/index.m3u8",
+      ))).toBe(true));
+      const committed = document.querySelector("video.player-video");
+      act(() => { staleOriginal(8); });
+      expect(document.querySelector("video.player-video")).toBe(committed);
+    } finally { embeddedModeIntentObserver.enabled = false; }
   });
 });

@@ -1141,7 +1141,9 @@ export function VideoPlayer({
   const recoveryPendingRef = useRef<{ owner: string; request: number } | null>(null);
   const optimizationRequestSequenceRef = useRef(0);
   const explicitOptimizationIntentRef = useRef(0);
-  const failedOptimizationIntentRef = useRef<{ owner: string; intentEpoch: number } | null>(null);
+  // Failure recovery and an explicit Original choice both suppress automatic
+  // audio replacement until a fresh user intent or committed owner reset.
+  const automaticAudioIntentFenceRef = useRef<{ owner: string; intentEpoch: number } | null>(null);
   const optimizationPendingRef = useRef<{
     owner: string;
     request: number;
@@ -1207,7 +1209,7 @@ export function VideoPlayer({
     setServerOptimizationError(null);
     autoOptimizationAttemptedRef.current = null;
     explicitOptimizationIntentRef.current = 0;
-    failedOptimizationIntentRef.current = null;
+    automaticAudioIntentFenceRef.current = null;
     setWebRecoveryPending(false);
     setExternalActionStatus(null);
     setExternalError(null);
@@ -1730,9 +1732,9 @@ export function VideoPlayer({
       ) {
         return false;
       }
-      const failedIntent = failedOptimizationIntentRef.current;
-      if (purpose === "remembered-audio" && failedIntent?.owner === owner &&
-        failedIntent.intentEpoch === explicitOptimizationIntentRef.current) return false;
+      const blockedIntent = automaticAudioIntentFenceRef.current;
+      if (purpose === "remembered-audio" && blockedIntent?.owner === owner &&
+        blockedIntent.intentEpoch === explicitOptimizationIntentRef.current) return false;
       if (optimizationPendingRef.current?.owner === owner) {
         if (purpose === "native-hls-seek") {
           setServerOptimizationError(
@@ -1992,8 +1994,21 @@ export function VideoPlayer({
     handoffState?: PlaybackHandoffState,
   ) => {
     if (!claimExplicitServerOptimizationChoice()) return;
+    automaticAudioIntentFenceRef.current = {
+      owner: playbackOwner,
+      intentEpoch: ++explicitOptimizationIntentRef.current,
+    };
+    // Original is also cancellation, so it must remain admissible while a
+    // generation is pending. Late completion cannot replace this newer choice.
+    const pending = optimizationPendingRef.current;
+    if (pending?.owner === playbackOwner) {
+      optimizationRequestSequenceRef.current += 1;
+      pending.controller.abort();
+      optimizationPendingRef.current = null;
+      setServerOptimizationPending(false);
+    }
     switchToDeviceOriginal(absolutePositionSeconds, handoffState);
-  }, [claimExplicitServerOptimizationChoice, switchToDeviceOriginal]);
+  }, [claimExplicitServerOptimizationChoice, playbackOwner, switchToDeviceOriginal]);
 
   const updatePendingHandoffPaused = useCallback((paused: boolean) => {
     if (
@@ -2042,7 +2057,7 @@ export function VideoPlayer({
       if (activeOptimized != null) {
         // Fence the failed intent before restoring/remounting its original
         // source. A remembered preference is not permission to retry failure.
-        failedOptimizationIntentRef.current = { owner, intentEpoch: activeOptimized.intentEpoch };
+        automaticAudioIntentFenceRef.current = { owner, intentEpoch: activeOptimized.intentEpoch };
         autoOptimizationAttemptedRef.current = owner;
         const latestElementState = currentWebviewHandoffState(activeSourceSwitchState);
         const restoredState = latestElementState == null
