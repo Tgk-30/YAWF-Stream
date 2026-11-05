@@ -8904,10 +8904,11 @@ describe("WebviewPlayer", () => {
       await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
       expect(screen.getByText("System fullscreen uses your device's controls instead of YAWF controls.")).toBeInTheDocument();
       expect(screen.queryByRole("link", { name: /Open YAWF in browser/ })).toBeNull();
+      expect(screen.queryByText("YAWF fullscreen in Safari")).toBeNull();
     } finally { restores.reverse().forEach((restore) => restore()); }
   });
 
-  it.each(["iPad", "Macintosh"])("[71] offers only a safe explicit same-page Safari link for %s PWA", async (ua) => {
+  it.each(["iPad", "Macintosh"])("[71] displays safe manual Safari guidance without browser handoff for %s PWA", async (ua) => {
     deviceKindMock.mockReturnValue("ios");
     vi.stubGlobal("location", new URL("https://user:password@server.example/yawf/watch?session=omit#capability-omit"));
     const restores = [replaceProperty(navigator, "userAgent", ua), replaceProperty(navigator, "platform", "MacIntel"),
@@ -8920,14 +8921,18 @@ describe("WebviewPlayer", () => {
       render(<VideoPlayer url="https://provider.example/api/stream/capability.m3u8?token=omit" title="Safari page" onClose={close} />);
       const video = document.querySelector("video") as HTMLVideoElement;
       const src = video.src; video.currentTime = 23;
+      vi.mocked(video.pause).mockClear();
       await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
-      const link = screen.getByRole("link", { name: /Open YAWF in browser/ });
-      expect(link).toHaveAttribute("href", "https://server.example/yawf/watch");
-      expect(link).toHaveAttribute("target", "_blank"); expect(link).toHaveAttribute("rel", "noopener noreferrer");
-      expect(link).toHaveTextContent("For YAWF fullscreen controls, open this page in Safari. If an in-app browser opens, use its Open in Safari action. Resume playback there; sign-in may be required.");
+      expect(screen.getByText("YAWF fullscreen in Safari")).toBeInTheDocument();
+      expect(screen.getByText("For fullscreen with YAWF controls, open Safari and enter this server address. Sign in and resume playback there if needed.")).toBeInTheDocument();
+      const address = screen.getByText("https://server.example/yawf/watch");
+      expect(address.tagName).toBe("CODE");
+      expect(address).toHaveStyle({ display: "block", overflowWrap: "anywhere" });
+      expect(address.closest("a, button")).toBeNull();
+      expect(address.parentElement).not.toHaveTextContent(/password|session=|capability|provider\.example/);
+      expect(screen.queryByRole("link", { name: /Open YAWF in browser/ })).toBeNull();
       expect(open).not.toHaveBeenCalled();
-      vi.mocked(video.pause).mockClear(); fireEvent.click(link);
-      expect(video.pause).toHaveBeenCalledTimes(1);
+      expect(video.pause).not.toHaveBeenCalled();
       expect(video.currentTime).toBe(23); expect(video.src).toBe(src);
       expect(document.querySelector("video")).toBe(video); expect(close).not.toHaveBeenCalled();
     } finally { open.mockRestore(); restores.reverse().forEach((restore) => restore()); }
@@ -8938,7 +8943,7 @@ describe("WebviewPlayer", () => {
     { label: "iPad Safari", ua: "iPad", touch: 5, standalone: false, container: false },
     { label: "desktop Mac PWA", ua: "Macintosh", touch: 0, standalone: true, container: false },
     { label: "prefixed container iPad PWA", ua: "iPad", touch: 5, standalone: true, container: true },
-  ])("[71] withholds the Safari promise for $label", async ({ ua, touch, standalone, container }) => {
+  ])("[71] withholds manual Safari guidance for $label", async ({ ua, touch, standalone, container }) => {
     deviceKindMock.mockReturnValue("ios"); vi.stubGlobal("location", new URL("https://server.example/"));
     const restores = [replaceProperty(navigator, "userAgent", ua), replaceProperty(navigator, "platform", "MacIntel"),
       replaceProperty(navigator, "maxTouchPoints", touch), replaceProperty(navigator, "standalone", standalone),
@@ -8948,6 +8953,8 @@ describe("WebviewPlayer", () => {
       render(<VideoPlayer url="https://x/test.mp4" title="No promise" onClose={() => {}} />);
       await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
       expect(screen.queryByRole("link", { name: /Open YAWF in browser/ })).toBeNull();
+      expect(screen.queryByText("YAWF fullscreen in Safari")).toBeNull();
+      expect(screen.queryByText("https://server.example/")).toBeNull();
     } finally { restores.reverse().forEach((restore) => restore()); }
   });
 

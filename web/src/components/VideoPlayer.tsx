@@ -6999,18 +6999,11 @@ function WebviewPlayer({
                 </p>
               )}
               {safariPageUrl != null && (
-                <a
-                  className="player-options-action"
-                  href={safariPageUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={() => requestPlaybackState(false)}
-                >
-                  <span>
-                    <strong>Open YAWF in browser</strong>
-                    <small>For YAWF fullscreen controls, open this page in Safari. If an in-app browser opens, use its Open in Safari action. Resume playback there; sign-in may be required.</small>
-                  </span>
-                </a>
+                <div className="player-options-status">
+                  <strong>YAWF fullscreen in Safari</strong>
+                  <p>For fullscreen with YAWF controls, open Safari and enter this server address. Sign in and resume playback there if needed.</p>
+                  <code style={{ display: "block", overflowWrap: "anywhere" }}>{safariPageUrl}</code>
+                </div>
               )}
             </div>
           )}
