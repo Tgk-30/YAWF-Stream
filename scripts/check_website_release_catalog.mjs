@@ -29,8 +29,8 @@ export function validateWebsiteReleaseCatalog(source) {
   for (const [name, version, tag] of [
     ["DESKTOP_RELEASE", "2.3.58", "v2.3.58-web"],
     ["ANDROID_TV_RELEASE", "2.3.38", "v2.3.38-web"],
-    ["ANDROID_PHONE_RELEASE", "2.3.68", "android-v2.3.68"],
-    ["SERVER_RELEASE", "2.3.68", "v2.3.68"],
+    ["ANDROID_PHONE_RELEASE", "2.3.69", "android-v2.3.69"],
+    ["SERVER_RELEASE", "2.3.69", "v2.3.69"],
   ]) {
     includes(
       source,
