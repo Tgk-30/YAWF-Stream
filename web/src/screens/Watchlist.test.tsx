@@ -534,6 +534,31 @@ describe("Watchlist - Trakt pull", () => {
 });
 
 describe("Watchlist - folder organization", () => {
+  it.each(["create", "rename"])("keeps watchlist %s actions paired beside its input", async (mode) => {
+    mockWatchlist = [preview("m1", "Tenet")];
+    listWatchlistFolders.mockResolvedValue([{ id: "folder-2", name: "Queue" }]);
+    listWatchlistRows.mockResolvedValue([]);
+    render(<Watchlist />);
+    if (mode === "create") {
+      await userEvent.click(screen.getByRole("button", { name: /\+ New folder/i }));
+    } else {
+      await userEvent.click(await screen.findByRole("button", { name: "Queue" }));
+      await userEvent.click(screen.getByRole("button", { name: "Rename folder" }));
+    }
+    const input = screen.getByRole("textbox", { name: mode === "create" ? "New watchlist folder name" : "Rename watchlist folder" });
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(input.parentElement).toHaveClass("lib-folder-new");
+    expect(cancel.parentElement).toHaveClass("lib-folder-actions");
+    expect(save.parentElement).toBe(cancel.parentElement);
+    expect(cancel.parentElement?.parentElement).toBe(input.parentElement);
+    expect(cancel.parentElement).not.toContainElement(input);
+    await userEvent.click(cancel);
+    expect(screen.queryByLabelText(input.getAttribute("aria-label")!)).not.toBeInTheDocument();
+    expect(createWatchlistFolder).not.toHaveBeenCalled();
+    expect(renameWatchlistFolder).not.toHaveBeenCalled();
+  });
+
   it("creates a folder and selects it", async () => {
     mockWatchlist = [preview("m1", "Tenet")];
     createWatchlistFolder.mockResolvedValue({ id: "folder-2", name: "Queue" });

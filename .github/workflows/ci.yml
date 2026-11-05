@@ -288,7 +288,9 @@ jobs:
         run: node scripts/check_website_path_mount.mjs
 
       - name: App responsive contract
-        run: node scripts/check_app_responsive_contract.mjs
+        run: |
+          node --test scripts/check_app_responsive_folder_contract.test.mjs scripts/check_folder_editor_keyboard_contract.test.mjs
+          node scripts/check_app_responsive_contract.mjs
 
       # The server's esbuild bundle imports web TypeScript that pulls 3rd-party
       # deps (e.g. subsrt-ts) which esbuild resolves from web/node_modules - so

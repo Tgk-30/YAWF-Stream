@@ -430,12 +430,14 @@ export function Watchlist() {
                   aria-label="New watchlist folder name"
                   autoFocus
                 />
-                <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void createFolder()}>
-                  Save
-                </button>
-                <button type="button" className="btn btn-sm" onClick={() => setCreating(false)}>
-                  Cancel
-                </button>
+                <span className="lib-folder-actions">
+                  <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void createFolder()}>
+                    Save
+                  </button>
+                  <button type="button" className="btn btn-sm" onClick={() => setCreating(false)}>
+                    Cancel
+                  </button>
+                </span>
               </span>
             ) : (
               <button type="button" className="chip lib-folder-chip lib-folder-add" onClick={() => setCreating(true)}>
@@ -482,12 +484,14 @@ export function Watchlist() {
                   aria-label="Rename watchlist folder"
                   autoFocus
                 />
-                <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void renameFolder()}>
-                  Save
-                </button>
-                <button type="button" className="btn btn-sm" onClick={() => setRenaming(false)}>
-                  Cancel
-                </button>
+                <span className="lib-folder-actions">
+                  <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void renameFolder()}>
+                    Save
+                  </button>
+                  <button type="button" className="btn btn-sm" onClick={() => setRenaming(false)}>
+                    Cancel
+                  </button>
+                </span>
               </span>
             )}
             {confirmDelete && selectedFolderRecord != null && (
