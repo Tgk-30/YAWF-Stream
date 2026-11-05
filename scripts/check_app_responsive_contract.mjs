@@ -726,13 +726,22 @@ check(
 check(
   "shared touch player is host-gated and keeps supported actions scroll-reachable",
   /const sharedTouchPlayer\s*=\s*[\s\S]{0,180}mode === "webview"[\s\S]{0,140}!androidTVNative[\s\S]{0,180}dk === "ios" && !underTauri[\s\S]{0,80}\|\| androidAppUi/.test(playerSource) &&
-    /className="player-touch-actions"[\s\S]{0,120}role="toolbar"/.test(playerSource) &&
+    /className="player-touch-action-row"[\s\S]{0,120}role="toolbar"/.test(playerSource) &&
     /\.player-touch-actions\s*\{[\s\S]{0,260}overflow-x:\s*auto[\s\S]{0,180}touch-action:\s*pan-x/.test(playerCss) &&
     /\.player-touch-actions \.player-mobile-optional\s*\{[\s\S]{0,80}display:\s*inline-flex/.test(playerCss) &&
-    /\.player-touch-actions \.player-touch-action\s*\{[\s\S]{0,180}min-height:\s*46px/.test(playerCss) &&
+    /\.player-touch-actions \.player-touch-action,\s*\.player-touch-more\s*\{[\s\S]{0,180}min-height:\s*46px/.test(playerCss) &&
     /\.player-touch-skip\s*\{[\s\S]{0,160}min-height:\s*56px/.test(playerCss) &&
     /\.player-touch-play\s*\{[\s\S]{0,120}clamp\(64px,\s*9vw,\s*72px\)/.test(playerCss),
   "VideoPlayer must select touch chrome from iOS browser or marked Android app identity after the TV escape, use 44px-plus controls, and scroll rather than hide supported actions.",
+);
+
+check(
+  "touch settings stay pinned outside secondary action scrolling",
+  /className="player-touch-action-row"[\s\S]{0,150}className="player-touch-actions"/.test(playerSource) &&
+    /<\/div>\s*<button\s+ref=\{optionsTriggerRef\}[\s\S]{0,130}player-touch-more/.test(playerSource) &&
+    /\.player-touch-more\s*\{\s*flex:\s*0 0 auto;/.test(playerCss) &&
+    /\.player-touch-actions\s*\{[^}]*flex:\s*1 1 0%;[^}]*min-width:\s*0;[^}]*overflow-x:\s*auto;/s.test(playerCss),
+  "Touch More must be a nonshrinking sibling of the shrinkable secondary scrollport, not its offscreen final action. Source checks do not establish rendered geometry.",
 );
 
 check(

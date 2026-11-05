@@ -18,6 +18,27 @@ import type {
 
 // ---- Mocks for heavy / environment-bound deps -----------------------------
 
+// A gated observer for one callback ownership test. Every useRef invocation
+// always forwards its original arguments to the real hook unchanged.
+const failureRefObserver = vi.hoisted(() => ({
+  enabled: false,
+  refs: [] as Array<{ current: (message: string, exactHandoffPending: boolean) => void }>,
+}));
+vi.mock("react", async (original) => {
+  const actual = await original<typeof import("react")>();
+  return {
+    ...actual,
+    useRef: ((...args: unknown[]) => {
+      const ref = Reflect.apply(actual.useRef, undefined, args);
+      const initial = args[0];
+      if (failureRefObserver.enabled && typeof initial === "function" && initial.name === "onPlaybackError" && !failureRefObserver.refs.includes(ref)) {
+        failureRefObserver.refs.push(ref);
+      }
+      return ref;
+    }) as typeof actual.useRef,
+  };
+});
+
 // hls.js: default export with the static helpers the source touches. The shared
 // state is created via vi.hoisted so the hoisted vi.mock factory can close over
 // it without a temporal-dead-zone error.
@@ -337,6 +358,14 @@ vi.mock("./Icon", () => ({
 // Built-in libmpv player - a native surface that can't render in jsdom, so stub
 // it. These tests only assert WHICH path VideoPlayer chooses (embedded vs the
 // external hand-off), not the player internals (covered by its own concerns).
+const embeddedModeIntentObserver = vi.hoisted(() => ({
+  enabled: false,
+  props: [] as Array<{
+    onSwitchServerOptimized?: (quality: ServerTranscodeQuality, position: number) => Promise<void>;
+    onSwitchDeviceOriginal?: (position: number) => void;
+    serverOptimizationPending?: boolean;
+  }>,
+}));
 vi.mock("./EmbeddedPlayer", () => ({
   EmbeddedPlayer: (props: {
     title: string;
@@ -346,7 +375,12 @@ vi.mock("./EmbeddedPlayer", () => ({
     onPlaybackError?: (error: Error) => boolean | Promise<boolean>;
     onOpenExternalPlayer?: () => void | Promise<void>;
     externalActionStatus?: string | null;
-  }) => (
+    onSwitchServerOptimized?: (quality: ServerTranscodeQuality, position: number) => Promise<void>;
+    onSwitchDeviceOriginal?: (position: number) => void;
+    serverOptimizationPending?: boolean;
+  }) => {
+    if (embeddedModeIntentObserver.enabled) embeddedModeIntentObserver.props.push(props);
+    return (
     <div
       data-testid="embedded-player"
       data-url={props.url}
@@ -369,7 +403,8 @@ vi.mock("./EmbeddedPlayer", () => ({
         <span data-testid="embedded-external-status">{props.externalActionStatus}</span>
       )}
     </div>
-  ),
+    );
+  },
 }));
 
 import { VideoPlayer } from "./VideoPlayer";
@@ -1071,6 +1106,7 @@ describe("VideoPlayer shell", () => {
     deviceKindMock.mockReturnValue("ios");
     try {
       render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      fireEvent.canPlay(document.querySelector("video.player-video")!);
       const osd = document.querySelector(".player-osd") as HTMLElement;
       const scrubber = screen.getByTestId("scrub-bar");
       fireEvent.pointerDown(scrubber);
@@ -4776,6 +4812,218 @@ describe("WebviewPlayer", () => {
       absolutePosition: expectedPosition,
       absoluteDuration: 36,
       audio: "jpn",
+    });
+  });
+
+  describe("failed optimized audio recovery intent fence", () => {
+    const resumePosition = 54.817215;
+    const originalUrl = "https://server.example/api/stream/recovery-original";
+    const tracks = [
+      { index: 0, language: "eng", label: "English", default: true },
+      { index: 1, language: "jpn", label: "Japanese", default: false },
+    ];
+    async function flushRecovery() {
+      await act(async () => { for (let i = 0; i < 16; i += 1) await Promise.resolve(); });
+    }
+    function readyOriginal(video: HTMLVideoElement) {
+      Object.defineProperties(video, {
+        duration: { configurable: true, value: 180 },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+        paused: { configurable: true, value: true },
+        seeking: { configurable: true, value: false },
+        seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 180 } },
+      });
+      fireEvent.loadedMetadata(video);
+      fireEvent.loadedData(video);
+      fireEvent.seeked(video);
+      fireEvent.timeUpdate(video);
+    }
+    async function setupRecovery(remembered = false) {
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => new Response("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n", {
+        headers: { "x-yawf-transcode-audio": new URL(String(input)).searchParams.get("audio") ?? "0" },
+      })));
+      const request = vi.fn(async (_quality: ServerTranscodeQuality, position: number, audioTrack?: number) => ({
+        url: `https://server.example/api/stream/recovery-jp/index.m3u8?quality=480p&start=${position}${audioTrack == null ? "" : `&audio=${audioTrack}`}`,
+        timelineOffsetSeconds: position,
+        startPositionSeconds: 0,
+        audioTrack,
+        quality: "480p" as const,
+      }));
+      const loadSourceInfo = vi.fn(async () => ({ durationSeconds: 180, tracks }));
+      const serverOptimized = { qualities: ["480p"] as ServerTranscodeQuality[], loadSourceInfo, request };
+      const props = {
+        url: originalUrl, title: "Recovery fixture", sourceFileName: "Synthetic.Fixture.Movie.mkv",
+        startPositionSeconds: resumePosition,
+        initialHandoffState: { paused: true, volume: 0.35, muted: true, playbackRate: 1.25 },
+        savedPrefs: remembered ? { preferredAudioId: "1", preferredAudioLang: "jpn" } : undefined,
+        serverOptimized, onClose: vi.fn(),
+      };
+      const view = render(<VideoPlayer {...props} />);
+      const original = document.querySelector("video.player-video") as HTMLVideoElement;
+      readyOriginal(original);
+      await flushRecovery();
+      if (!remembered) {
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+        fireEvent.click(screen.getByRole("button", { name: "Japanese" }));
+        await flushRecovery();
+      }
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenLastCalledWith("480p", resumePosition, 1);
+      const optimized = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(optimized).not.toBe(original);
+      expect(optimized.src).toContain("/recovery-jp/index.m3u8");
+      return { view, props, request, optimized };
+    }
+
+    it.each(["immediate-error", "startup-timeout", "deferred-default"])("restores once and blocks automatic remembered audio after %s", async (failure) => {
+      vi.useFakeTimers();
+      try {
+        const { view, props, request, optimized } = await setupRecovery(failure === "deferred-default");
+        if (failure === "deferred-default") view.rerender(<VideoPlayer {...props}
+          serverOptimized={{ ...props.serverOptimized, defaultQuality: "480p" }} />);
+        vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+        if (failure === "startup-timeout") {
+          await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+        } else fireMediaError(optimized, 4);
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(1);
+        const restored = document.querySelector("video.player-video") as HTMLVideoElement;
+        expect(restored).not.toBe(optimized);
+        expect(restored.src).toBe(originalUrl);
+        readyOriginal(restored);
+        await flushRecovery();
+        expect(restored.currentTime).toBeCloseTo(resumePosition, 6);
+        expect(restored.volume).toBe(0.35);
+        expect(restored.muted).toBe(true);
+        expect(restored.playbackRate).toBe(1.25);
+        expect(screen.getByText("Playback paused")).toBeInTheDocument();
+        expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+        fireEvent.pointerMove(restored);
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+        expect(screen.getByRole("alert")).toHaveTextContent("Device Original was restored");
+        expect(screen.getByRole("button", { name: "Japanese" })).toBeEnabled();
+        expect(screen.getByRole("button", { name: "480p" })).toBeEnabled();
+        await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+        expect(request).toHaveBeenCalledTimes(1);
+        expect(document.querySelector("video.player-video")).toBe(restored);
+        expect(recordDiagnosticMock.mock.calls.filter(([, code]) => code === "server_optimized.disabled")).toHaveLength(1);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("allows one fresh explicit Japanese retry without erasing the failure fence intent", async () => {
+      vi.useFakeTimers();
+      try {
+        const { request, optimized } = await setupRecovery();
+        fireMediaError(optimized, 4);
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(1);
+        const restored = document.querySelector("video.player-video") as HTMLVideoElement;
+        readyOriginal(restored);
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+        expect(screen.getByRole("alert")).toHaveTextContent("Device Original was restored");
+        fireEvent.click(screen.getByRole("button", { name: "Japanese" }));
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(request).toHaveBeenLastCalledWith("480p", resumePosition, 1);
+        const retried = document.querySelector("video.player-video") as HTMLVideoElement;
+        fireMediaError(retried, 4);
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(2);
+        expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toBe(originalUrl);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("allows explicit playback Retry to reapply retained Japanese only once", async () => {
+      vi.useFakeTimers();
+      try {
+        const { request, optimized } = await setupRecovery();
+        fireMediaError(optimized, 4);
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(1);
+        const restored = document.querySelector("video.player-video") as HTMLVideoElement;
+        readyOriginal(restored);
+        fireMediaError(restored, 4);
+        fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(request).toHaveBeenLastCalledWith("480p", resumePosition, 1);
+        const retried = document.querySelector("video.player-video") as HTMLVideoElement;
+        fireMediaError(retried, 4);
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(2);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("rejects a captured prior-attempt parent error callback after a newer attempt commits", async () => {
+      vi.useFakeTimers();
+      failureRefObserver.enabled = true;
+      failureRefObserver.refs.length = 0;
+      const captured = failureRefObserver.refs;
+      try {
+        const { request } = await setupRecovery();
+        expect(captured).toHaveLength(2); // Original child, then optimized child.
+        const previousRef = captured[1]!;
+        const previousError = previousRef.current;
+        expect(previousError).toEqual(expect.any(Function));
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+        fireEvent.click(screen.getByRole("button", { name: "Japanese" }));
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(captured).toHaveLength(3);
+        const currentRef = captured[2]!;
+        expect(currentRef).not.toBe(previousRef);
+        const current = document.querySelector("video.player-video");
+        await act(async () => { previousError("Previous attempt failed", true); });
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(document.querySelector("video.player-video")).toBe(current);
+        expect(screen.queryByText(/Device Original was restored/)).toBeNull();
+        // The current callback still owns normal failure recovery and fencing.
+        await act(async () => { currentRef.current("Current attempt failed", true); });
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(2);
+        expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toBe(originalUrl);
+      } finally { failureRefObserver.enabled = false; vi.useRealTimers(); }
+    });
+
+    it("gives identical-URL manual attempts separate media ownership before old errors arrive", async () => {
+      vi.useFakeTimers();
+      try {
+        const { request, optimized } = await setupRecovery();
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+        fireEvent.click(screen.getByRole("button", { name: "Japanese" }));
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(2);
+        const current = document.querySelector("video.player-video") as HTMLVideoElement;
+        expect(current.src).toBe(optimized.src);
+        expect(current).not.toBe(optimized);
+        fireMediaError(optimized, 4);
+        await flushRecovery();
+        expect(document.querySelector("video.player-video")).toBe(current);
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(screen.queryByText(/Device Original was restored/)).toBeNull();
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("releases a failed owner only for a genuinely committed new source", async () => {
+      vi.useFakeTimers();
+      try {
+        const { view, props, request, optimized } = await setupRecovery();
+        fireMediaError(optimized, 4);
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(1);
+        view.rerender(<VideoPlayer {...props} url="https://server.example/api/stream/new-owner" sourceRevision={1} />);
+        const nextOriginal = document.querySelector("video.player-video") as HTMLVideoElement;
+        readyOriginal(nextOriginal);
+        fireMediaError(optimized, 4);
+        await flushRecovery();
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(request).toHaveBeenLastCalledWith("480p", resumePosition, 1);
+        expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toContain("/recovery-jp/index.m3u8");
+      } finally { vi.useRealTimers(); }
     });
   });
 
@@ -8781,6 +9029,251 @@ describe("WebviewPlayer", () => {
     expect(document.querySelector(".player-time")).toHaveTextContent("0:15 / 2:00");
   });
 
+  describe("current-source readiness chrome", () => {
+    it.each(["waiting", "canplay"])("keeps committed %s readiness authoritative during an uncommitted replacement", async (event) => {
+      vi.useFakeTimers();
+      try {
+        let choose: (pending: boolean) => void = () => { throw new Error("Scenario not mounted"); };
+        let speculativeRenders = 0;
+        const pendingRender = new Promise<void>(() => {});
+        function Gate({ pending }: { pending: boolean }) {
+          if (pending) { speculativeRenders += 1; throw pendingRender; }
+          return null;
+        }
+        function Scenario() {
+          const [pending, setPending] = useState(false);
+          choose = setPending;
+          return <Suspense fallback={<div>Readiness replacement pending</div>}>
+            <VideoPlayer url={pending ? "https://x/speculative.mp4" : "https://x/committed.mp4"}
+              title="Committed readiness" onClose={() => {}} />
+            <Gate pending={pending} />
+          </Suspense>;
+        }
+        render(<Scenario />);
+        const committed = document.querySelector("video.player-video") as HTMLVideoElement;
+        if (event === "waiting") {
+          fireEvent.canPlay(committed);
+          act(() => vi.advanceTimersByTime(3_200));
+          expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+        }
+        act(() => { startTransition(() => choose(true)); });
+        await act(async () => { await Promise.resolve(); });
+        expect(speculativeRenders).toBeGreaterThan(0);
+        expect(document.querySelector("video.player-video")).toBe(committed);
+        expect(committed.isConnected).toBe(true);
+        expect(screen.queryByText("Readiness replacement pending")).toBeNull();
+        fireEvent(committed, new Event(event));
+        act(() => vi.advanceTimersByTime(4_000));
+        if (event === "waiting") {
+          expect(screen.getByRole("status")).toHaveTextContent("Buffering");
+          expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+        } else {
+          expect(screen.queryByText("Starting playback…")).toBeNull();
+          expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+        }
+        act(() => choose(false));
+        expect(document.querySelector("video.player-video")).toBe(committed);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("does not turn buffered stalled progress into false permanent buffering", () => {
+      vi.useFakeTimers();
+      try {
+        render(<VideoPlayer url="https://x/buffered.mp4" title="Buffered" onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        Object.defineProperties(video, {
+          duration: { configurable: true, value: 120 },
+          readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+          paused: { configurable: true, value: false },
+          seeking: { configurable: true, value: false },
+        });
+        fireEvent.loadedMetadata(video);
+        fireEvent.canPlay(video);
+        fireEvent.play(video);
+        video.currentTime = 1;
+        fireEvent.timeUpdate(video);
+        act(() => vi.advanceTimersByTime(3_200));
+        expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+        vi.mocked(video.play).mockClear();
+        vi.mocked(video.pause).mockClear();
+        fireEvent.stalled(video);
+        // Buffered media continues advancing without another canplay/playing.
+        for (const time of [2, 3, 4]) {
+          video.currentTime = time;
+          fireEvent.timeUpdate(video);
+          act(() => vi.advanceTimersByTime(1_200));
+        }
+        expect(screen.queryByText("Buffering…")).toBeNull();
+        expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+        expect(screen.getByText("Playback playing")).toBeInTheDocument();
+        expect(video.currentTime).toBe(4);
+        expect(video.play).not.toHaveBeenCalled();
+        expect(video.pause).not.toHaveBeenCalled();
+        Object.defineProperty(video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA });
+        fireEvent.waiting(video);
+        act(() => vi.advanceTimersByTime(4_000));
+        expect(screen.getByRole("status")).toHaveTextContent("Buffering");
+        expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+        fireEvent.canPlay(video);
+        act(() => vi.advanceTimersByTime(3_200));
+        expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("keeps startup controls available without changing playing or paused intent", () => {
+      vi.useFakeTimers();
+      try {
+        render(<VideoPlayer url="https://x/slow.mp4" title="Slow" onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        const bar = document.querySelector(".player-bar")!;
+        expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Playing Slow" }));
+        fireEvent.play(video);
+        vi.mocked(video.play).mockClear();
+        vi.mocked(video.pause).mockClear();
+        fireEvent.stalled(video);
+        act(() => vi.advanceTimersByTime(4_000));
+        expect(screen.getByRole("status")).toHaveTextContent("Starting playback");
+        expect(bar).toHaveClass("is-visible");
+        expect(screen.getByRole("button", { name: "Close player" })).toBeInTheDocument();
+        expect(screen.getByText("Playback playing")).toBeInTheDocument();
+        expect(video.pause).not.toHaveBeenCalled();
+        fireEvent.pause(video);
+        fireEvent.canPlay(video);
+        vi.mocked(video.play).mockClear();
+        act(() => vi.advanceTimersByTime(3_200));
+        expect(bar).toHaveClass("is-visible");
+        expect(screen.getByText("Playback paused")).toBeInTheDocument();
+        expect(video.play).not.toHaveBeenCalled();
+        fireEvent.play(video);
+        act(() => vi.advanceTimersByTime(3_200));
+        expect(bar).not.toHaveClass("is-visible");
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("keeps native HLS controls pending until the exact handoff target is confirmed", () => {
+      vi.useFakeTimers();
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+      try {
+        render(<VideoPlayer url="https://x/native.m3u8" title="Native readiness"
+          startPositionSeconds={9}
+          initialHandoffState={{ paused: false, volume: 0.6, muted: false, playbackRate: 1.25 }}
+          onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        Object.defineProperties(video, {
+          duration: { configurable: true, value: 30 },
+          readyState: { configurable: true, value: HTMLMediaElement.HAVE_METADATA },
+          seeking: { configurable: true, value: false },
+          seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 30 } },
+        });
+        fireEvent.loadedMetadata(video);
+        fireEvent.canPlay(video);
+        fireEvent.stalled(video);
+        act(() => vi.advanceTimersByTime(4_000));
+        expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+        expect(document.querySelector(".player-touch-transport")).toHaveClass("is-visible");
+        expect(screen.getByText("Playback playing")).toBeInTheDocument();
+        markCurrentMediaDataReady(video);
+        video.currentTime = 0;
+        fireEvent.timeUpdate(video);
+        act(() => vi.advanceTimersByTime(4_000));
+        expect(document.querySelector(".player-touch-transport")).toHaveClass("is-visible");
+        expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+        video.currentTime = 9;
+        fireEvent.seeked(video);
+        expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+        expect(video.volume).toBe(0.6);
+        expect(video.playbackRate).toBe(1.25);
+        act(() => vi.advanceTimersByTime(3_200));
+        expect(document.querySelector(".player-touch-transport")).not.toHaveClass("is-visible");
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("keeps controls available through waiting without a pause event", () => {
+      vi.useFakeTimers();
+      try {
+        deviceKindMock.mockReturnValue("ios");
+        render(<VideoPlayer url="https://x/buffer.mp4" title="Buffer" onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        fireEvent.canPlay(video);
+        fireEvent.play(video);
+        act(() => vi.advanceTimersByTime(3_200));
+        expect(document.querySelector(".player-touch-transport")).not.toHaveClass("is-visible");
+        vi.mocked(video.pause).mockClear();
+        fireEvent.waiting(video);
+        act(() => vi.advanceTimersByTime(4_000));
+        expect(screen.getByRole("status")).toHaveTextContent("Buffering");
+        expect(document.querySelector(".player-touch-transport")).toHaveClass("is-visible");
+        expect(screen.getByText("Playback playing")).toBeInTheDocument();
+        expect(video.pause).not.toHaveBeenCalled();
+        fireEvent.playing(video);
+        act(() => vi.advanceTimersByTime(3_199));
+        expect(document.querySelector(".player-touch-transport")).toHaveClass("is-visible");
+        act(() => vi.advanceTimersByTime(1));
+        expect(document.querySelector(".player-touch-transport")).not.toHaveClass("is-visible");
+      } finally { vi.useRealTimers(); }
+    });
+
+    it.each(["url", "revision"])("pins a pending replacement after a hidden ready %s source", (replacement) => {
+      vi.useFakeTimers();
+      try {
+        const props = { url: "https://x/first.mp4", sourceRevision: 0, title: "Replacement", onClose: () => {} };
+        const view = render(<VideoPlayer {...props} />);
+        const oldVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+        fireEvent.canPlay(oldVideo);
+        act(() => vi.advanceTimersByTime(3_200));
+        expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+        view.rerender(<VideoPlayer {...props} {...(replacement === "url" ? { url: "https://x/second.mp4" } : { sourceRevision: 1 })} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        expect(video).not.toBe(oldVideo);
+        act(() => vi.advanceTimersByTime(4_000));
+        expect(screen.getByRole("status")).toHaveTextContent("Starting playback");
+        expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+        fireEvent.canPlay(video);
+        act(() => vi.advanceTimersByTime(3_200));
+        expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("ignores old source readiness callbacks in both directions, including a returned URL", () => {
+      vi.useFakeTimers();
+      const add = vi.spyOn(HTMLVideoElement.prototype, "addEventListener");
+      try {
+        const props = { url: "https://x/first.mp4", title: "Ownership", onClose: () => {} };
+        const view = render(<VideoPlayer {...props} />);
+        const oldVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+        const oldCallbacks = ["canplay", "waiting"].map((event) => {
+          const name = event === "canplay" ? "onCanPlay" : "onWaiting";
+          const listener = add.mock.calls.find(([type, handler], index) =>
+            type === event && add.mock.contexts[index] === oldVideo && typeof handler === "function" && handler.name === name,
+          )?.[1];
+          expect(listener).toEqual(expect.any(Function));
+          return listener as EventListener;
+        });
+        fireEvent.canPlay(oldVideo);
+        act(() => vi.advanceTimersByTime(3_200));
+        view.rerender(<VideoPlayer {...props} url="https://x/second.mp4" />);
+        view.rerender(<VideoPlayer {...props} />);
+        const current = document.querySelector("video.player-video") as HTMLVideoElement;
+        expect(current).not.toBe(oldVideo);
+        act(() => {
+          oldCallbacks[0]!(new Event("canplay"));
+          fireEvent.canPlay(oldVideo);
+          vi.advanceTimersByTime(4_000);
+        });
+        expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+        fireEvent.canPlay(current);
+        act(() => {
+          oldCallbacks[1]!(new Event("waiting"));
+          fireEvent.waiting(oldVideo);
+          vi.advanceTimersByTime(3_200);
+        });
+        expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+        expect(screen.queryByText("Buffering…")).toBeNull();
+      } finally { add.mockRestore(); vi.useRealTimers(); }
+    });
+  });
+
   it("hides inactive web chrome, preserves it for pause or menus, and reveals it on pointer activity", () => {
     vi.useFakeTimers();
     try {
@@ -8789,6 +9282,7 @@ describe("WebviewPlayer", () => {
       const osd = document.querySelector(".player-osd") as HTMLElement;
       const player = document.querySelector(".player") as HTMLElement;
       const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      fireEvent.canPlay(video);
 
       act(() => vi.advanceTimersByTime(3200));
       expect(bar).not.toHaveClass("is-visible");
@@ -8817,6 +9311,7 @@ describe("WebviewPlayer", () => {
     try {
       render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
       const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      fireEvent.canPlay(video);
       const play = vi.mocked(video.play);
       play.mockClear();
       act(() => vi.advanceTimersByTime(3200));
@@ -8841,6 +9336,7 @@ describe("WebviewPlayer", () => {
     try {
       render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
       const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      fireEvent.canPlay(video);
       video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
       const play = vi.mocked(video.play);
       play.mockClear();
@@ -8978,6 +9474,7 @@ describe("WebviewPlayer", () => {
       render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
       const player = document.querySelector(".player") as HTMLElement;
       const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      fireEvent.canPlay(video);
       act(() => vi.advanceTimersByTime(3200));
       scrubBarMock.mockClear();
       Object.defineProperty(video, "currentTime", { configurable: true, value: 42 });
@@ -11367,6 +11864,7 @@ describe("webview caption layout", () => {
     render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
     const { currentCue } = addCaption();
     expect(currentCue.line).toBeCloseTo(55.25);
+    fireEvent.canPlay(document.querySelector("video")!);
     fireEvent.play(document.querySelector("video")!);
     await act(async () => { await vi.advanceTimersByTimeAsync(3300); });
     expect(document.querySelector(".player-osd")).not.toHaveClass("is-visible");
@@ -11983,4 +12481,310 @@ describe("server generation HEAD retention", () => {
     expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
   });
 
+});
+
+describe("mobile usability presentation and pinned settings", () => {
+  it("pins touch More outside the secondary scrollport without hiding Audio or CC", () => {
+    deviceKindMock.mockReturnValue("ios");
+    render(<VideoPlayer url="https://x/movie.mp4" title="Pinned settings" onClose={() => {}} />);
+    const more = screen.getByRole("button", { name: "Playback settings" });
+    const toolbar = screen.getByRole("toolbar", { name: "Playback actions" });
+    const secondary = toolbar.querySelector<HTMLElement>(".player-touch-actions")!;
+    expect(more).toHaveClass("player-touch-more");
+    expect(more.parentElement).toBe(toolbar);
+    expect(more.closest(".player-touch-actions")).toBeNull();
+    expect(more.previousElementSibling).toBe(secondary);
+    expect(within(secondary).getByRole("button", { name: "Subtitles" })).toBeInTheDocument();
+    expect(within(secondary).getByRole("button", { name: /Audio/ })).toBeInTheDocument();
+    expect(within(secondary).queryByRole("button", { name: "Playback settings" })).toBeNull();
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    expect(css).toMatch(/\.player-touch-action-row\s*\{[^}]*display:\s*flex;[^}]*box-sizing:\s*border-box;/s);
+    expect(css).toMatch(/\.player-touch-more\s*\{\s*flex:\s*0 0 auto;/);
+    expect(css).toMatch(/\.player-touch-actions\s*\{[^}]*flex:\s*1 1 0%;[^}]*min-width:\s*0;[^}]*overflow-x:\s*auto;/s);
+    expect(css).toMatch(/\.player-touch-actions \.player-touch-action,\s*\.player-touch-more\s*\{[^}]*min-height:\s*46px;/s);
+  });
+
+  async function changePresentation() {
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fill screen" }));
+    fireEvent.change(screen.getByRole("slider", { name: /Zoom/ }), { target: { value: "1.35" } });
+    fireEvent.change(screen.getByRole("slider", { name: /Pan horizontally/ }), { target: { value: "12" } });
+    fireEvent.change(screen.getByRole("slider", { name: /Pan vertically/ }), { target: { value: "-8" } });
+  }
+  function expectPresentation() {
+    expect(document.querySelector("video.player-video")).toHaveStyle({ objectFit: "cover", transform: "translate(12%, -8%) scale(1.35)" });
+  }
+  async function expectPresentationControls() {
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("button", { name: "Fill screen" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("slider", { name: /Zoom/ })).toHaveValue("1.35");
+    expect(screen.getByRole("slider", { name: /Pan horizontally/ })).toHaveValue("12");
+    expect(screen.getByRole("slider", { name: /Pan vertically/ })).toHaveValue("-8");
+  }
+
+  it("retains actual presentation controls and video style across quality replacements and fallback", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (quality: ServerTranscodeQuality) => ({
+      url: `https://server.example/api/stream/session-1/index.m3u8?quality=${quality}`,
+      timelineOffsetSeconds: 0, startPositionSeconds: 0, quality,
+    }));
+    render(<VideoPlayer url="https://server.example/api/stream/session-1" title="Presentation film" sourceFileName="Film.mp4" imdbId="tt0000001" serverOptimized={{ qualities: ["480p", "720p"], request }} onClose={() => {}} />);
+    await changePresentation();
+    expectPresentation();
+    let old = document.querySelector("video.player-video");
+    fireEvent.click(screen.getByRole("button", { name: "480p" }));
+    await waitFor(() => expect(document.querySelector("video.player-video")).not.toBe(old));
+    expectPresentation();
+    await expectPresentationControls();
+    old = document.querySelector("video.player-video");
+    fireEvent.click(screen.getByRole("button", { name: "720p" }));
+    await waitFor(() => expect(document.querySelector("video.player-video")).not.toBe(old));
+    expectPresentation();
+    await waitFor(() => expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(
+      "https://server.example/api/stream/session-1/index.m3u8?quality=720p",
+    ));
+    act(() => hlsInstances.at(-1)!.emit("hlsError", { fatal: true, type: "otherError" }));
+    await waitFor(() => expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toBe("https://server.example/api/stream/session-1"));
+    expectPresentation();
+    await expectPresentationControls();
+  });
+
+  it("retains presentation values and styles when manual audio replaces the video child", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/session-audio/index.m3u8?quality=480p&audio=1",
+      timelineOffsetSeconds: 0, startPositionSeconds: 0, quality: "480p" as const, audioTrack: 1,
+    }));
+    const loadAudioTracks = vi.fn(async () => [
+      { index: 0, label: "English", language: "eng", default: true },
+      { index: 1, label: "Japanese", language: "jpn", default: false },
+    ]);
+    render(<VideoPlayer url="https://server.example/api/stream/session-audio" title="Audio presentation" sourceFileName="Film.mp4" imdbId="tt0000001" serverOptimized={{ qualities: ["480p"], request, loadAudioTracks }} onClose={() => {}} />);
+    await changePresentation();
+    const original = document.querySelector("video.player-video");
+    fireEvent.click(await screen.findByRole("button", { name: "Japanese" }));
+    await waitFor(() => expect(document.querySelector("video.player-video")).not.toBe(original));
+    expectPresentation();
+    await expectPresentationControls();
+    expect(request).toHaveBeenCalledWith("480p", 0, 1);
+  });
+
+  it("retains presentation through an explicit Retry child remount", async () => {
+    render(<VideoPlayer url="https://x/retry.mp4" title="Retry presentation" sourceFileName="Film.mp4" onClose={() => {}} />);
+    await changePresentation();
+    fireEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireMediaError(original);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry playback" }));
+    await waitFor(() => expect(document.querySelector("video.player-video")).not.toBe(original));
+    expectPresentation();
+    await expectPresentationControls();
+  });
+
+  it("retains same-file refreshed URLs but resets different file or content owners without cross-file history", async () => {
+    const base = { title: "Presentation film", sourceFileName: "Film-A.mp4", imdbId: "tt0000001", onClose: () => {} };
+    const view = render(<VideoPlayer {...base} url="https://x/generation-A.mp4" />);
+    await changePresentation();
+    view.rerender(<VideoPlayer {...base} url="https://x/generation-B.mp4" sourceRevision={1} />);
+    expectPresentation();
+    await expectPresentationControls();
+    view.rerender(<VideoPlayer {...base} sourceFileName="Film-B.mp4" url="https://x/generation-B.mp4" />);
+    expect(document.querySelector("video.player-video")).toHaveStyle({ objectFit: "contain", transform: "translate(0%, 0%) scale(1)" });
+    await changePresentation();
+    view.rerender(<VideoPlayer {...base} url="https://x/generation-A.mp4" />);
+    expect(document.querySelector("video.player-video")).toHaveStyle({ objectFit: "contain", transform: "translate(0%, 0%) scale(1)" });
+    await changePresentation();
+    view.rerender(<VideoPlayer {...base} imdbId="tt0000002" url="https://x/generation-A.mp4" />);
+    expect(document.querySelector("video.player-video")).toHaveStyle({ objectFit: "contain", transform: "translate(0%, 0%) scale(1)" });
+  });
+
+  it("uses original playback identity conservatively when no file identity is available", async () => {
+    const view = render(<VideoPlayer url="https://x/file-A.mp4" title="Same title" onClose={() => {}} />);
+    await changePresentation();
+    view.rerender(<VideoPlayer url="https://x/file-B.mp4" title="Same title" onClose={() => {}} />);
+    expect(document.querySelector("video.player-video")).toHaveStyle({ objectFit: "contain", transform: "translate(0%, 0%) scale(1)" });
+  });
+});
+
+describe("explicit Device Original audio intent", () => {
+  const originalUrl = "https://server.example/api/stream/mode-original";
+  const position = 61.157115;
+  const tracks = [
+    { index: 0, language: "eng", label: "English", default: true },
+    { index: 1, language: "jpn", label: "Japanese", default: false },
+  ];
+  async function settleMode() {
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+  }
+  function readyMode(video: HTMLVideoElement, offset = 0) {
+    Object.defineProperties(video, {
+      duration: { configurable: true, value: 180 - offset },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, value: true },
+      seeking: { configurable: true, value: false },
+      seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 180 - offset } },
+    });
+    fireEvent.loadedMetadata(video); fireEvent.loadedData(video); fireEvent.seeked(video);
+    fireEvent.timeUpdate(video);
+  }
+  async function settingsMode() {
+    if (screen.queryByRole("button", { name: "Close playback settings" }) == null) {
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    }
+  }
+  async function setupMode() {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => new Response("#EXTM3U\n", {
+      headers: { "x-yawf-transcode-audio": new URL(String(input)).searchParams.get("audio") ?? "0" },
+    })));
+    const request = vi.fn(async (quality: ServerTranscodeQuality, absolute: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/mode-generation/index.m3u8?quality=${quality}&start=${absolute}&audio=${audioTrack ?? 0}`,
+      timelineOffsetSeconds: absolute, startPositionSeconds: 0, quality, audioTrack,
+    }));
+    const onProgress = vi.fn();
+    const props = {
+      url: originalUrl, title: "Mode intent film", sourceFileName: "Mode.Movie.mkv", imdbId: "tt0000001",
+      startPositionSeconds: position,
+      initialHandoffState: { paused: true, volume: 0.35, muted: true, playbackRate: 1.25 },
+      playerPreferences: { defaultAudioLanguage: "eng" },
+      serverOptimized: { qualities: ["480p", "360p"] as ServerTranscodeQuality[], loadSourceInfo: vi.fn(async () => ({ durationSeconds: 180, tracks })), request },
+      onProgress, onClose: vi.fn(),
+    };
+    const view = render(<VideoPlayer {...props} />);
+    readyMode(document.querySelector("video.player-video") as HTMLVideoElement);
+    await settleMode(); await settingsMode();
+    fireEvent.click(screen.getByRole("button", { name: "Japanese" }));
+    await settleMode();
+    expect(request).toHaveBeenCalledTimes(1);
+    readyMode(document.querySelector("video.player-video") as HTMLVideoElement, position);
+    await settleMode(); await settingsMode();
+    fireEvent.click(screen.getByRole("button", { name: "360p" }));
+    await settleMode();
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenLastCalledWith("360p", position, 1);
+    readyMode(document.querySelector("video.player-video") as HTMLVideoElement, position);
+    await settleMode(); await settingsMode();
+    fireEvent.click(screen.getByRole("button", { name: "Device Original" }));
+    await settleMode();
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    return { props, view, request, original, onProgress };
+  }
+
+  it("honors manual Japanese then quality then Original instead of automatically replacing Original again", async () => {
+    vi.useFakeTimers();
+    try {
+      const { request, original, onProgress } = await setupMode();
+      expect(original.src).toBe(originalUrl);
+      readyMode(original); await settleMode();
+      await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(document.querySelector("video.player-video")).toBe(original);
+      expect(original.currentTime).toBeCloseTo(position, 6);
+      await settingsMode();
+      expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "true");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(onProgress.mock.calls.some(([, , prefs]) => prefs?.preferredAudioLang === "jpn")).toBe(true);
+      expect(recordDiagnosticMock.mock.calls.filter(([, code]) => code === "webview.playback_failed")).toHaveLength(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["Japanese", "360p"])("admits fresh explicit %s after Original without erasing retained Japanese", async (choice) => {
+    const { request, original } = await setupMode();
+    readyMode(original); await settleMode();
+    expect(request).toHaveBeenCalledTimes(2);
+    await settingsMode(); fireEvent.click(screen.getByRole("button", { name: choice }));
+    await settleMode();
+    expect(request.mock.calls.length).toBeGreaterThan(2);
+    // Quality keeps the actual Original track; it must not rewrite the
+    // retained semantic preference merely because that source defaults to English.
+    expect(request).toHaveBeenLastCalledWith(choice === "360p" ? "360p" : "480p", position, choice === "360p" ? 0 : 1);
+    expect(document.querySelector("video.player-video")).not.toBe(original);
+  });
+
+  it("releases the Original fence on a committed revision while keeping the same-file Japanese preference", async () => {
+    const { request, original, view, props } = await setupMode();
+    readyMode(original); await settleMode();
+    expect(request).toHaveBeenCalledTimes(2);
+    view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+    const next = document.querySelector("video.player-video") as HTMLVideoElement;
+    readyMode(next); await settleMode();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenLastCalledWith("480p", position, 1);
+  });
+
+  it("permits explicit Retry after Original to restore the retained language", async () => {
+    const { request, original } = await setupMode();
+    readyMode(original); await settleMode();
+    expect(request).toHaveBeenCalledTimes(2);
+    fireMediaError(original, 4);
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    await settleMode();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenLastCalledWith("480p", position, 1);
+  });
+});
+
+
+describe("Original pending-generation cancellation contract", () => {
+  it("allows Original during pending preparation and rejects its late same-owner manifest", async () => {
+    isTauriMock.mockReturnValue(true);
+    embeddedModeIntentObserver.enabled = true;
+    embeddedModeIntentObserver.props.length = 0;
+    const pending = deferred<Response>();
+    const fetcher = vi.fn(() => pending.promise);
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.stubGlobal("fetch", fetcher);
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/late-mode/index.m3u8",
+      timelineOffsetSeconds: 0, startPositionSeconds: 0, quality: "480p" as const,
+    }));
+    try {
+      render(<VideoPlayer url="https://server.example/api/stream/original.mkv" engine="native-mpv"
+        title="Pending mode" serverOptimized={{ qualities: ["480p"], request }} onClose={() => {}} />);
+      const original = embeddedModeIntentObserver.props.at(-1)!;
+      act(() => { void original.onSwitchServerOptimized!("480p", 51); });
+      await act(async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      const signal = (fetcher.mock.calls[0] as unknown as [string, RequestInit])[1].signal!;
+      expect(signal.aborted).toBe(false);
+      expect(embeddedModeIntentObserver.props.at(-1)!.serverOptimizationPending).toBe(true);
+      act(() => { original.onSwitchDeviceOriginal!(51); });
+      expect(signal.aborted).toBe(true);
+      expect(embeddedModeIntentObserver.props.at(-1)!.serverOptimizationPending).toBe(false);
+      await act(async () => { pending.resolve(new Response("#EXTM3U\n")); await pending.promise; for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+      expect(screen.getByTestId("embedded-player")).toHaveAttribute("data-url", "https://server.example/api/stream/original.mkv");
+      expect(document.querySelector("video.player-video")).toBeNull();
+    } finally { embeddedModeIntentObserver.enabled = false; }
+  });
+
+  it("does not let a stale Original callback cancel a newer committed owner", async () => {
+    isTauriMock.mockReturnValue(true);
+    embeddedModeIntentObserver.enabled = true;
+    embeddedModeIntentObserver.props.length = 0;
+    const pending = deferred<Response>();
+    const fetcher = vi.fn(() => pending.promise);
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.stubGlobal("fetch", fetcher);
+    const props = { title: "New owner mode", engine: "native-mpv" as const, serverOptimized: { qualities: ["480p"] as ServerTranscodeQuality[], request: vi.fn(async () => ({ url: "https://server.example/api/stream/new-mode/index.m3u8", timelineOffsetSeconds: 0, startPositionSeconds: 0, quality: "480p" as const })) }, onClose: vi.fn() };
+    try {
+      const view = render(<VideoPlayer {...props} url="https://server.example/api/stream/A.mkv" />);
+      const staleOriginal = embeddedModeIntentObserver.props.at(-1)!.onSwitchDeviceOriginal!;
+      view.rerender(<VideoPlayer {...props} url="https://server.example/api/stream/B.mkv" sourceRevision={1} />);
+      act(() => { void embeddedModeIntentObserver.props.at(-1)!.onSwitchServerOptimized!("480p", 51); });
+      await act(async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+      const signal = (fetcher.mock.calls[0] as unknown as [string, RequestInit])[1].signal!;
+      act(() => { staleOriginal(8); });
+      expect(signal.aborted).toBe(false);
+      expect(embeddedModeIntentObserver.props.at(-1)!.serverOptimizationPending).toBe(true);
+      await act(async () => { pending.resolve(new Response("#EXTM3U\n")); await pending.promise; for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+      await waitFor(() => expect(hlsInstances.some((instance) => instance.loadSource.mock.calls.some(
+        ([source]) => source === "https://server.example/api/stream/new-mode/index.m3u8",
+      ))).toBe(true));
+      const committed = document.querySelector("video.player-video");
+      act(() => { staleOriginal(8); });
+      expect(document.querySelector("video.player-video")).toBe(committed);
+    } finally { embeddedModeIntentObserver.enabled = false; }
+  });
 });

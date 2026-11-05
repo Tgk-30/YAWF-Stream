@@ -37,6 +37,7 @@ const SERVER_OPTIMIZED_RETRY_BASE_MS = 500;
 const SERVER_OPTIMIZED_RETRY_MAX_MS = 4_000;
 const TOUCH_DOUBLE_TAP_MS = 320;
 import { Icon } from "./Icon";
+import { useVideoPresentation, type VideoPresentation } from "./useVideoPresentation";
 import {
   isTauri,
   isDesktopTauri,
@@ -909,6 +910,8 @@ export function VideoPlayer({
   }, [serverAudioRetentionScope]);
   type ScopedOptimizedSource = ServerOptimizedSource & {
     originOwner: string;
+    requestSequence: number;
+    intentEpoch: number;
     audioPreference?: AudioPreference;
     partialTimeline: boolean;
     leaseTarget: string | null;
@@ -942,6 +945,11 @@ export function VideoPlayer({
   const autoOptimizationAttemptedRef = useRef<string | null>(null);
   const [verifiedPlaybackProgressOwner, setVerifiedPlaybackProgressOwner] = useState<string | null>(null);
   const playbackOwner = `${requestedEngine}\u0000${sourceRevision}\u0000${url}`;
+  // Stable content/file identity survives internal generations and fresh URLs.
+  // Without a file identity, retain only within the original playback owner.
+  const [videoPresentation, changeVideoPresentation] = useVideoPresentation(
+    serverAudioRetentionScope ?? playbackOwner,
+  );
   // The original URL, engine, and caller-issued revision define media identity.
   // Internal optimized/fallback URLs never change this owner, while a fresh
   // external resolution cannot inherit duration from an older file by accident.
@@ -1100,6 +1108,28 @@ export function VideoPlayer({
     );
   }, [externalTarget, playbackOwner]);
   const [playbackAttempt, setPlaybackAttempt] = useState(0);
+  const webviewSourceKey = `${effectiveUrl}:${sourceRevision}:${playbackAttempt}:${activeSourceSwitchPosition ?? "initial"}:${activeOptimized?.requestSequence ?? "original"}`;
+  // A new keyed media owner starts pending, even before its effects run. Use
+  // an identity token so callbacks from an earlier visit to the same URL cannot
+  // change the current source's presentation readiness.
+  const webviewSource = useMemo(() => ({ key: webviewSourceKey }), [webviewSourceKey]);
+  const currentWebviewSourceRef = useRef(webviewSource);
+  useLayoutEffect(() => {
+    currentWebviewSourceRef.current = webviewSource;
+  }, [webviewSource]);
+  const [webviewReadiness, setWebviewReadiness] = useState<{
+    source: typeof webviewSource;
+    pending: boolean;
+  } | null>(null);
+  const reportWebviewPending = useCallback((pending: boolean) => {
+    if (currentWebviewSourceRef.current !== webviewSource) return;
+    setWebviewReadiness((current) =>
+      current?.source === webviewSource && current.pending === pending
+        ? current
+        : { source: webviewSource, pending },
+    );
+  }, [webviewSource]);
+  const webviewPending = webviewReadiness?.source !== webviewSource || webviewReadiness.pending;
   const [serverLeaseExpired, setServerLeaseExpired] = useState(false);
   const activeWebSourceRef = useRef(effectiveUrl);
   const [activeSubtitleUrl, setActiveSubtitleUrl] = useState<string | null>(null);
@@ -1110,6 +1140,10 @@ export function VideoPlayer({
   const recoveryRequestSequenceRef = useRef(0);
   const recoveryPendingRef = useRef<{ owner: string; request: number } | null>(null);
   const optimizationRequestSequenceRef = useRef(0);
+  const explicitOptimizationIntentRef = useRef(0);
+  // Failure recovery and an explicit Original choice both suppress automatic
+  // audio replacement until a fresh user intent or committed owner reset.
+  const automaticAudioIntentFenceRef = useRef<{ owner: string; intentEpoch: number } | null>(null);
   const optimizationPendingRef = useRef<{
     owner: string;
     request: number;
@@ -1174,6 +1208,8 @@ export function VideoPlayer({
     setServerOptimizationPending(false);
     setServerOptimizationError(null);
     autoOptimizationAttemptedRef.current = null;
+    explicitOptimizationIntentRef.current = 0;
+    automaticAudioIntentFenceRef.current = null;
     setWebRecoveryPending(false);
     setExternalActionStatus(null);
     setExternalError(null);
@@ -1195,9 +1231,11 @@ export function VideoPlayer({
   const chromeHideTimer = useRef<number | undefined>(undefined);
   const lastChromeNudgeAt = useRef(Number.NEGATIVE_INFINITY);
   const chromePinned =
-    webviewPaused || webScrubbing || captionsOpen || webMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
+    webviewPending || webviewPaused || webScrubbing || captionsOpen || webMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
   const chromePinnedRef = useRef(chromePinned);
-  chromePinnedRef.current = chromePinned;
+  useLayoutEffect(() => {
+    chromePinnedRef.current = chromePinned;
+  }, [chromePinned]);
   const playerDialogRef = useModalA11y<HTMLDivElement>(
     onClose,
     !useEmbedded,
@@ -1694,6 +1732,9 @@ export function VideoPlayer({
       ) {
         return false;
       }
+      const blockedIntent = automaticAudioIntentFenceRef.current;
+      if (purpose === "remembered-audio" && blockedIntent?.owner === owner &&
+        blockedIntent.intentEpoch === explicitOptimizationIntentRef.current) return false;
       if (optimizationPendingRef.current?.owner === owner) {
         if (purpose === "native-hls-seek") {
           setServerOptimizationError(
@@ -1706,6 +1747,7 @@ export function VideoPlayer({
         ? Math.max(0, absolutePositionSeconds)
         : 0;
       const request = ++optimizationRequestSequenceRef.current;
+      const intentEpoch = explicitOptimizationIntentRef.current;
       const controller = new AbortController();
       optimizationPendingRef.current?.controller.abort();
       optimizationPendingRef.current = { owner, request, controller, purpose };
@@ -1854,6 +1896,8 @@ export function VideoPlayer({
           partialTimeline: /(?:^|\n)#EXT-X-PLAYLIST-TYPE:EVENT(?:\r?$|\s)/m.test(manifest),
           startPositionSeconds: activationStart,
           originOwner: owner,
+          requestSequence: request,
+          intentEpoch,
         });
         recordDiagnostic("player", "server_optimized.ready", "info", quality);
         return true;
@@ -1907,14 +1951,18 @@ export function VideoPlayer({
   }, [playbackOwner]);
 
   // The deferred default is a startup policy, not a command. Only a current
-  // owner's explicit quality or mode control consumes it. Automatic seek,
-  // audio, and error-recovery switches continue through the raw callbacks.
-  const claimExplicitServerOptimizationChoice = useCallback(() => {
+  // owner's explicit quality, audio or mode control consumes it. Automatic
+  // seek, remembered audio and recovery continue through the raw callbacks.
+  const claimExplicitServerOptimizationChoice = useCallback((freshAttempt = false) => {
     if (
       !playerMountedRef.current ||
       playbackOwnerRef.current !== playbackOwner
     ) {
       return false;
+    }
+    if (freshAttempt) {
+      if (optimizationPendingRef.current?.owner === playbackOwner) return false;
+      explicitOptimizationIntentRef.current += 1;
     }
     autoOptimizationAttemptedRef.current = playbackOwner;
     return true;
@@ -1927,8 +1975,9 @@ export function VideoPlayer({
     audioTrack?: number,
     audioPreference?: AudioPreference,
     positionIntent: ServerOptimizedPositionIntent = "follow-current",
+    retainAudioPreference = false,
   ): Promise<void> => {
-    if (!claimExplicitServerOptimizationChoice()) return Promise.resolve();
+    if (!claimExplicitServerOptimizationChoice(true)) return Promise.resolve();
     return switchToServerOptimized(
       quality,
       absolutePositionSeconds,
@@ -1936,6 +1985,7 @@ export function VideoPlayer({
       audioTrack,
       audioPreference,
       positionIntent,
+      retainAudioPreference,
     ).then(() => undefined);
   }, [claimExplicitServerOptimizationChoice, switchToServerOptimized]);
 
@@ -1944,8 +1994,21 @@ export function VideoPlayer({
     handoffState?: PlaybackHandoffState,
   ) => {
     if (!claimExplicitServerOptimizationChoice()) return;
+    automaticAudioIntentFenceRef.current = {
+      owner: playbackOwner,
+      intentEpoch: ++explicitOptimizationIntentRef.current,
+    };
+    // Original is also cancellation, so it must remain admissible while a
+    // generation is pending. Late completion cannot replace this newer choice.
+    const pending = optimizationPendingRef.current;
+    if (pending?.owner === playbackOwner) {
+      optimizationRequestSequenceRef.current += 1;
+      pending.controller.abort();
+      optimizationPendingRef.current = null;
+      setServerOptimizationPending(false);
+    }
     switchToDeviceOriginal(absolutePositionSeconds, handoffState);
-  }, [claimExplicitServerOptimizationChoice, switchToDeviceOriginal]);
+  }, [claimExplicitServerOptimizationChoice, playbackOwner, switchToDeviceOriginal]);
 
   const updatePendingHandoffPaused = useCallback((paused: boolean) => {
     if (
@@ -1988,9 +2051,14 @@ export function VideoPlayer({
   const handleWebviewPlaybackError = useCallback(
     async (message: string, exactHandoffPending: boolean) => {
       const owner = playbackOwner;
-      if (!playerMountedRef.current || playbackOwnerRef.current !== owner) return;
+      if (!playerMountedRef.current || playbackOwnerRef.current !== owner ||
+        currentWebviewSourceRef.current !== webviewSource) return;
       recordDiagnostic("player", "webview.playback_failed", "error", message);
       if (activeOptimized != null) {
+        // Fence the failed intent before restoring/remounting its original
+        // source. A remembered preference is not permission to retry failure.
+        automaticAudioIntentFenceRef.current = { owner, intentEpoch: activeOptimized.intentEpoch };
+        autoOptimizationAttemptedRef.current = owner;
         const latestElementState = currentWebviewHandoffState(activeSourceSwitchState);
         const restoredState = latestElementState == null
           ? activeSourceSwitchState ?? undefined
@@ -2067,6 +2135,7 @@ export function VideoPlayer({
       requestWebviewFallback,
       setExternalActionStatus,
       switchToDeviceOriginal,
+      webviewSource,
     ],
   );
 
@@ -2630,7 +2699,9 @@ export function VideoPlayer({
 
         {mode === "webview" && externalError == null ? (
           <WebviewPlayer
-            key={`${effectiveUrl}:${sourceRevision}:${playbackAttempt}:${activeSourceSwitchPosition ?? "initial"}`}
+            key={webviewSourceKey}
+            presentation={videoPresentation}
+            onPresentationChange={changeVideoPresentation}
             url={effectiveUrl}
             engine={effectiveEngine}
             title={title}
@@ -2645,6 +2716,7 @@ export function VideoPlayer({
             onChromeBlur={blurChrome}
             onActivity={nudgeChrome}
             onPausedChange={setWebviewPaused}
+            onPlaybackPendingChange={reportWebviewPending}
             onPendingHandoffPausedChange={updatePendingHandoffPaused}
             onVerifiedPlaybackProgress={reportVerifiedPlaybackProgress}
             onCaptionsOpenChange={setCaptionsOpen}
@@ -2745,6 +2817,7 @@ export function VideoPlayer({
                   : () => {
                       recordDiagnostic("player", "webview.retry_requested");
                       setExternalError(null);
+                      explicitOptimizationIntentRef.current += 1;
                       setPlaybackAttempt((attempt) => attempt + 1);
                     }
                 : undefined
@@ -2769,6 +2842,8 @@ export function VideoPlayer({
  * OSD. Split out so the subtitle/thumbnail hooks mount only on this path (never
  * for the external mpv/VLC hand-off, where there's no frame source). */
 function WebviewPlayer({
+  presentation,
+  onPresentationChange,
   url,
   engine,
   title,
@@ -2783,6 +2858,7 @@ function WebviewPlayer({
   onChromeBlur,
   onActivity,
   onPausedChange,
+  onPlaybackPendingChange,
   onPendingHandoffPausedChange,
   onVerifiedPlaybackProgress,
   onCaptionsOpenChange,
@@ -2846,6 +2922,8 @@ function WebviewPlayer({
   onSelectDeviceOriginal,
   onAbsolutePositionChange,
 }: {
+  presentation: VideoPresentation;
+  onPresentationChange: (patch: Partial<VideoPresentation>) => void;
   url: string;
   engine: PlaybackEngine;
   title: string;
@@ -2860,6 +2938,7 @@ function WebviewPlayer({
   onChromeBlur: (event: React.FocusEvent<HTMLElement>) => void;
   onActivity: () => void;
   onPausedChange: (paused: boolean) => void;
+  onPlaybackPendingChange: (pending: boolean) => void;
   onPendingHandoffPausedChange: (paused: boolean) => void;
   onVerifiedPlaybackProgress: () => void;
   onCaptionsOpenChange: (open: boolean) => void;
@@ -2951,6 +3030,7 @@ function WebviewPlayer({
     audioTrack?: number,
     audioPreference?: AudioPreference,
     positionIntent?: ServerOptimizedPositionIntent,
+    retainAudioPreference?: boolean,
   ) => Promise<void>;
   onSelectDeviceOriginal: (
     absolutePositionSeconds: number,
@@ -3021,10 +3101,7 @@ function WebviewPlayer({
   const nestedDialogOpen = optionsOpen || captionsOpen || detailsOpen;
   const audioOptionsRequestedRef = useRef(false);
   const audioHeadingRef = useRef<HTMLSpanElement | null>(null);
-  const [videoFit, setVideoFit] = useState<"contain" | "cover" | "fill">("contain");
-  const [videoZoom, setVideoZoom] = useState(1);
-  const [videoPanX, setVideoPanX] = useState(0);
-  const [videoPanY, setVideoPanY] = useState(0);
+  const { fit: videoFit, zoom: videoZoom, panX: videoPanX, panY: videoPanY } = presentation;
   const [subtitlePosition, setSubtitlePosition] = useState(
     () => savedPrefs?.subtitlePosition ?? 90,
   );
@@ -3063,6 +3140,12 @@ function WebviewPlayer({
   const [playbackStatus, setPlaybackStatus] = useState<"starting" | "buffering" | "seeking" | null>(
     requiresExactHandoff ? "seeking" : "starting",
   );
+  // Loading presentation is independent of the requested Play/Pause intent.
+  // Reuse the status cleared by current-data/confirmed-handoff paths, not a
+  // successful play() request or an initial metadata event alone.
+  useEffect(() => {
+    onPlaybackPendingChange(playbackStatus != null);
+  }, [onPlaybackPendingChange, playbackStatus]);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const [playbackRate, setPlaybackRate] = useState(() => {
@@ -4863,6 +4946,8 @@ function WebviewPlayer({
     const onLoadStart = () => setPlaybackStatus(
       exactHandoffPendingRef.current ? "seeking" : "starting",
     );
+    // Network stalled can occur while buffered media is still playing. Keep
+    // readiness unchanged until waiting actually reports buffer starvation.
     const onWaiting = () => setPlaybackStatus(
       exactHandoffPendingRef.current ? "seeking" : "buffering",
     );
@@ -6085,7 +6170,7 @@ function WebviewPlayer({
       language: selected.language,
       label: selected.logicalLabel,
     };
-    void onSwitchServerOptimized(
+    void onSelectServerOptimized(
       quality,
       absolutePlaybackPosition(),
       playbackHandoffState,
@@ -6660,122 +6745,124 @@ function WebviewPlayer({
               disabled={!chromeVisible}
               touchPresentation
             />
-            <div className="player-touch-actions" role="toolbar" aria-label="Playback actions">
-              {audioShortcutAvailable && (
+            <div className="player-touch-action-row" role="toolbar" aria-label="Playback actions">
+              <div className="player-touch-actions">
+                {audioShortcutAvailable && (
+                  <button
+                    ref={audioShortcutRef}
+                    type="button"
+                    className={`chip player-touch-action${optionsOpen && optionsOriginRef.current === "audio" ? " is-active" : ""}`}
+                    onClick={openAudioOptions}
+                    aria-label={audioShortcutLabel}
+                    aria-haspopup="dialog"
+                    aria-expanded={optionsOpen && optionsOriginRef.current === "audio"}
+                    tabIndex={chromeVisible ? undefined : -1}
+                  >
+                    <Icon name="audio" size={18} />
+                    <span className="player-touch-action-label">Audio</span>
+                  </button>
+                )}
                 <button
-                  ref={audioShortcutRef}
                   type="button"
-                  className={`chip player-touch-action${optionsOpen && optionsOriginRef.current === "audio" ? " is-active" : ""}`}
-                  onClick={openAudioOptions}
-                  aria-label={audioShortcutLabel}
+                  className={`chip player-touch-action${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
+                  onClick={(event) => {
+                    touchMenuTriggerRef.current = event.currentTarget;
+                    setOptionsOpen(false);
+                    setCaptionsOpen((open) => !open);
+                  }}
+                  aria-label="Subtitles"
                   aria-haspopup="dialog"
-                  aria-expanded={optionsOpen && optionsOriginRef.current === "audio"}
+                  aria-expanded={captionsOpen}
                   tabIndex={chromeVisible ? undefined : -1}
                 >
-                  <Icon name="audio" size={18} />
-                  <span className="player-touch-action-label">Audio</span>
+                  <Icon name="captions" size={18} />
+                  <span className="player-touch-action-label">CC</span>
                 </button>
-              )}
-              <button
-                type="button"
-                className={`chip player-touch-action${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
-                onClick={(event) => {
-                  touchMenuTriggerRef.current = event.currentTarget;
-                  setOptionsOpen(false);
-                  setCaptionsOpen((open) => !open);
-                }}
-                aria-label="Subtitles"
-                aria-haspopup="dialog"
-                aria-expanded={captionsOpen}
-                tabIndex={chromeVisible ? undefined : -1}
-              >
-                <Icon name="captions" size={18} />
-                <span className="player-touch-action-label">CC</span>
-              </button>
-              <label className="chip player-touch-action player-touch-speed">
-                <span className="player-touch-action-label">Speed</span>
-                <select
-                  aria-label="Playback speed"
-                  value={playbackRate}
-                  onChange={(event) => changePlaybackRate(Number(event.target.value))}
-                  tabIndex={chromeVisible ? undefined : -1}
-                >
-                  {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => (
-                    <option value={speed} key={speed}>{speed}×</option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                className="chip player-touch-action"
-                onClick={() => setVideoFit((fit) => fit === "contain" ? "cover" : fit === "cover" ? "fill" : "contain")}
-                aria-label={`Video fit, ${videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}`}
-                tabIndex={chromeVisible ? undefined : -1}
-              >
-                <Icon name="sliders" size={18} />
-                <span className="player-touch-action-label">Screen</span>
-                <span className="player-touch-action-value">{videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}</span>
-              </button>
-              {underTauri ? (
-                <CastControls
-                  media={{ url, title, subtitleUrl: castSubtitleUrl }}
-                  buttonClassName="chip player-touch-action player-mobile-optional player-touch-cast"
-                  onLocalPlaybackChange={onCastLocalPlaybackChange}
-                />
-              ) : browserCastAvailable ? (
-                <button
-                  type="button"
-                  className="chip player-touch-action player-mobile-optional"
-                  onClick={showBrowserCastPicker}
-                  aria-label={airPlayAvailable ? "AirPlay" : "Cast to a device"}
-                  tabIndex={chromeVisible ? undefined : -1}
-                >
-                  <Icon name="cast" size={18} />
-                  <span className="player-touch-action-label">{airPlayAvailable ? "AirPlay" : "Cast"}</span>
-                </button>
-              ) : null}
-              {pictureInPictureSupported && (
-                <button
-                  type="button"
-                  className={`chip player-touch-action player-mobile-optional${isPictureInPicture ? " is-active" : ""}`}
-                  onClick={togglePictureInPicture}
-                  aria-label={isPictureInPicture ? "Exit picture in picture" : "Picture in picture"}
-                  aria-pressed={isPictureInPicture}
-                  tabIndex={chromeVisible ? undefined : -1}
-                >
-                  <Icon name="picture-in-picture" size={18} />
-                  <span className="player-touch-action-label">PiP</span>
-                </button>
-              )}
-              {fullscreenSupported && (
-                <button
-                  type="button"
-                  className={`chip player-touch-action${isFullscreen ? " is-active" : ""}`}
-                  onClick={togglePlayerFullscreen}
-                  aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-                  aria-pressed={isFullscreen}
-                  tabIndex={chromeVisible ? undefined : -1}
-                >
-                  <Icon name={isFullscreen ? "fullscreen-exit" : "fullscreen"} size={18} />
-                  <span className="player-touch-action-label">Fullscreen</span>
-                </button>
-              )}
-              {onPlayNext != null && (
+                <label className="chip player-touch-action player-touch-speed">
+                  <span className="player-touch-action-label">Speed</span>
+                  <select
+                    aria-label="Playback speed"
+                    value={playbackRate}
+                    onChange={(event) => changePlaybackRate(Number(event.target.value))}
+                    tabIndex={chromeVisible ? undefined : -1}
+                  >
+                    {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((speed) => (
+                      <option value={speed} key={speed}>{speed}×</option>
+                    ))}
+                  </select>
+                </label>
                 <button
                   type="button"
                   className="chip player-touch-action"
-                  onClick={onPlayNext}
-                  aria-label="Next episode"
+                  onClick={() => onPresentationChange({ fit: videoFit === "contain" ? "cover" : videoFit === "cover" ? "fill" : "contain" })}
+                  aria-label={`Video fit, ${videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}`}
                   tabIndex={chromeVisible ? undefined : -1}
                 >
-                  <Icon name="skip-next" size={18} />
-                  <span className="player-touch-action-label">Next</span>
+                  <Icon name="sliders" size={18} />
+                  <span className="player-touch-action-label">Screen</span>
+                  <span className="player-touch-action-value">{videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}</span>
                 </button>
-              )}
+                {underTauri ? (
+                  <CastControls
+                    media={{ url, title, subtitleUrl: castSubtitleUrl }}
+                    buttonClassName="chip player-touch-action player-mobile-optional player-touch-cast"
+                    onLocalPlaybackChange={onCastLocalPlaybackChange}
+                  />
+                ) : browserCastAvailable ? (
+                  <button
+                    type="button"
+                    className="chip player-touch-action player-mobile-optional"
+                    onClick={showBrowserCastPicker}
+                    aria-label={airPlayAvailable ? "AirPlay" : "Cast to a device"}
+                    tabIndex={chromeVisible ? undefined : -1}
+                  >
+                    <Icon name="cast" size={18} />
+                    <span className="player-touch-action-label">{airPlayAvailable ? "AirPlay" : "Cast"}</span>
+                  </button>
+                ) : null}
+                {pictureInPictureSupported && (
+                  <button
+                    type="button"
+                    className={`chip player-touch-action player-mobile-optional${isPictureInPicture ? " is-active" : ""}`}
+                    onClick={togglePictureInPicture}
+                    aria-label={isPictureInPicture ? "Exit picture in picture" : "Picture in picture"}
+                    aria-pressed={isPictureInPicture}
+                    tabIndex={chromeVisible ? undefined : -1}
+                  >
+                    <Icon name="picture-in-picture" size={18} />
+                    <span className="player-touch-action-label">PiP</span>
+                  </button>
+                )}
+                {fullscreenSupported && (
+                  <button
+                    type="button"
+                    className={`chip player-touch-action${isFullscreen ? " is-active" : ""}`}
+                    onClick={togglePlayerFullscreen}
+                    aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                    aria-pressed={isFullscreen}
+                    tabIndex={chromeVisible ? undefined : -1}
+                  >
+                    <Icon name={isFullscreen ? "fullscreen-exit" : "fullscreen"} size={18} />
+                    <span className="player-touch-action-label">Fullscreen</span>
+                  </button>
+                )}
+                {onPlayNext != null && (
+                  <button
+                    type="button"
+                    className="chip player-touch-action"
+                    onClick={onPlayNext}
+                    aria-label="Next episode"
+                    tabIndex={chromeVisible ? undefined : -1}
+                  >
+                    <Icon name="skip-next" size={18} />
+                    <span className="player-touch-action-label">Next</span>
+                  </button>
+                )}
+              </div>
               <button
                 ref={optionsTriggerRef}
                 type="button"
-                className={`chip player-touch-action${optionsOpen && optionsOriginRef.current === "settings" ? " is-active" : ""}`}
+                className={`chip player-touch-action player-touch-more${optionsOpen && optionsOriginRef.current === "settings" ? " is-active" : ""}`}
                 onClick={toggleOptions}
                 aria-label="Playback settings"
                 aria-haspopup="dialog"
@@ -6985,7 +7072,7 @@ function WebviewPlayer({
                   type="button"
                   className={`chip${videoFit === fit ? " is-active" : ""}`}
                   aria-pressed={videoFit === fit}
-                  onClick={() => setVideoFit(fit)}
+                  onClick={() => onPresentationChange({ fit })}
                   key={fit}
                 >
                   {fit === "contain" ? "Fit" : fit === "cover" ? "Fill screen" : "Stretch"}
@@ -7043,7 +7130,7 @@ function WebviewPlayer({
                 max={2.5}
                 step={0.05}
                 value={videoZoom}
-                onChange={(event) => setVideoZoom(Number(event.currentTarget.value))}
+                onChange={(event) => onPresentationChange({ zoom: Number(event.currentTarget.value) })}
               />
             </label>
             <label>
@@ -7055,7 +7142,7 @@ function WebviewPlayer({
                 max={50}
                 step={1}
                 value={videoPanX}
-                onChange={(event) => setVideoPanX(Number(event.currentTarget.value))}
+                onChange={(event) => onPresentationChange({ panX: Number(event.currentTarget.value) })}
               />
             </label>
             <label>
@@ -7067,7 +7154,7 @@ function WebviewPlayer({
                 max={50}
                 step={1}
                 value={videoPanY}
-                onChange={(event) => setVideoPanY(Number(event.currentTarget.value))}
+                onChange={(event) => onPresentationChange({ panY: Number(event.currentTarget.value) })}
               />
             </label>
             <label>
