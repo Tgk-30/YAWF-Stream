@@ -289,7 +289,7 @@ jobs:
 
       - name: App responsive contract
         run: |
-          node --test scripts/check_app_responsive_folder_contract.test.mjs scripts/check_folder_editor_keyboard_contract.test.mjs
+          node --test scripts/check_app_responsive_folder_contract.test.mjs scripts/check_folder_editor_keyboard_contract.test.mjs scripts/check_first_run_scroll_contract.test.mjs
           node scripts/check_app_responsive_contract.mjs
 
       # The server's esbuild bundle imports web TypeScript that pulls 3rd-party
