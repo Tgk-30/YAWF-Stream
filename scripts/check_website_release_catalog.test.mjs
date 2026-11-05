@@ -21,7 +21,7 @@ for (const { name, from, to } of [
   },
   {
     name: "Android phone tag",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.69', tag: 'android-v2.3.69' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.70', tag: 'android-v2.3.70' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.13' };",
   },
   {
@@ -36,23 +36,23 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.69', tag: 'v2.3.69' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.70', tag: 'v2.3.70' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.69'",
+    from: "tag: 'v2.3.70'",
     to: "tag: 'v2.3.51'",
   },
   {
     name: "stale server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.69', tag: 'v2.3.69' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.70', tag: 'v2.3.70' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.66', tag: 'v2.3.66' };",
   },
   {
     name: "unpublished future server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.69', tag: 'v2.3.69' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.70', tag: 'v2.3.70' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.70', tag: 'v2.3.70' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.71', tag: 'v2.3.71' };",
   },
   {
     name: "server Debian filename",
