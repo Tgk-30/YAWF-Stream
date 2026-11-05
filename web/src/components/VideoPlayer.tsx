@@ -402,7 +402,14 @@ function unlockOrientation(): void {
   }
 }
 
-/** Toggle fullscreen on the player stage. iPhone Safari exposes its video-only
+/** Fullscreen must include the header, transport and sibling player dialogs,
+ * not just the video stage. Keep every entry point on the same DOM owner. */
+function playerFullscreenContainer(video: HTMLVideoElement): HTMLElement | null {
+  const container = video.closest(".player");
+  return container instanceof HTMLElement ? container : null;
+}
+
+/** Toggle fullscreen on the complete player pane. iPhone Safari exposes its video-only
  * WebKit API instead of the standard container fullscreen API. */
 function toggleFullscreen(el: HTMLElement, video?: HTMLVideoElement): void {
   const d = document as WebKitDocument;
@@ -4147,10 +4154,10 @@ function WebviewPlayer({
 
   useEffect(() => {
     const video = videoRef.current;
-    const stage = video?.closest(".player-stage");
-    if (video == null || !(stage instanceof HTMLElement)) return;
+    const container = video == null ? null : playerFullscreenContainer(video);
+    if (video == null || container == null) return;
     const webkitVideo = video as WebKitVideoElement;
-    const supportsContainerFullscreen = typeof stage.requestFullscreen === "function";
+    const supportsContainerFullscreen = typeof container.requestFullscreen === "function";
     const supportsWebKitFullscreen =
       webkitVideo.webkitSupportsFullscreen === true &&
       typeof webkitVideo.webkitEnterFullscreen === "function";
@@ -4164,7 +4171,7 @@ function WebviewPlayer({
     const syncFullscreenState = () => {
       const doc = document as WebKitDocument;
       const fullscreenElement = document.fullscreenElement ?? doc.webkitFullscreenElement;
-      setFullscreenState(fullscreenElement === stage || fullscreenElement === video);
+      setFullscreenState(fullscreenElement === container || fullscreenElement === video);
     };
     const onWebKitBeginFullscreen = () => setFullscreenState(true);
     const onWebKitEndFullscreen = () => setFullscreenState(false);
@@ -5612,8 +5619,8 @@ function WebviewPlayer({
   const togglePlayerFullscreen = () => {
     const video = videoRef.current;
     if (video == null) return;
-    const stage = video.closest(".player-stage");
-    toggleFullscreen(stage instanceof HTMLElement ? stage : video, video);
+    const container = playerFullscreenContainer(video);
+    if (container != null) toggleFullscreen(container, video);
   };
 
   const togglePictureInPicture = () => {
@@ -5798,8 +5805,8 @@ function WebviewPlayer({
         case "f":
         case "F": {
           e.preventDefault();
-          const stage = video.closest(".player-stage");
-          toggleFullscreen(stage instanceof HTMLElement ? stage : video, video);
+          const container = playerFullscreenContainer(video);
+          if (container != null) toggleFullscreen(container, video);
           break;
         }
         case "Home":

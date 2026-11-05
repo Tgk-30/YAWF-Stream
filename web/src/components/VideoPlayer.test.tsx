@@ -8029,31 +8029,129 @@ describe("WebviewPlayer", () => {
     }
   });
 
-  it("shows a fullscreen control and reflects fullscreenchange state", async () => {
-    const requestFullscreen = vi.fn().mockResolvedValue(undefined);
-    const restoreRequestFullscreen = replaceProperty(
-      HTMLElement.prototype,
-      "requestFullscreen",
-      requestFullscreen,
-    );
-    const restoreFullscreenElement = replaceProperty(document, "fullscreenElement", null);
+  function mockPlayerFullscreen() {
+    const request = vi.fn(function(this: HTMLElement) {
+      Object.defineProperty(document, "fullscreenElement", { configurable: true, value: this });
+      document.dispatchEvent(new Event("fullscreenchange"));
+      return Promise.resolve();
+    });
+    const exit = vi.fn(() => {
+      Object.defineProperty(document, "fullscreenElement", { configurable: true, value: null });
+      document.dispatchEvent(new Event("fullscreenchange"));
+      return Promise.resolve();
+    });
+    const restores = [
+      replaceProperty(HTMLElement.prototype, "requestFullscreen", request),
+      replaceProperty(document, "fullscreenElement", null),
+      replaceProperty(document, "exitFullscreen", exit),
+    ];
+    return { request, exit, restore: () => restores.reverse().forEach((restore) => restore()) };
+  }
+
+  it("fullscreens the complete desktop player pane without replacing or reloading the media", async () => {
+    const fullscreen = mockPlayerFullscreen();
     try {
       render(<VideoPlayer url="https://x/test.mp4" title="T" onClose={() => {}} />);
-      const stage = document.querySelector(".player-stage") as HTMLElement;
-      const enter = screen.getByRole("button", { name: "Enter fullscreen" });
-      await userEvent.click(enter);
-      expect(requestFullscreen).toHaveBeenCalledWith();
+      const pane = screen.getByRole("dialog", { name: "Playing T" });
+      const video = pane.querySelector("video.player-video") as HTMLVideoElement;
+      await waitFor(() => expect(video.src).toBe("https://x/test.mp4"));
+      video.currentTime = 42;
+      const restorePaused = replaceProperty(video, "paused", false);
+      fireEvent.play(video);
+      const src = video.src;
+      vi.mocked(HTMLMediaElement.prototype.load).mockClear();
+      vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+      vi.mocked(HTMLMediaElement.prototype.pause).mockClear();
+      try {
+        await userEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+        expect(fullscreen.request.mock.instances[0], "fullscreen receiver must own all HTML player controls").toBe(pane);
+        expect(document.fullscreenElement).toBe(pane);
+        expect(pane).toContainElement(pane.querySelector(".player-stage"));
+        expect(pane).toContainElement(pane.querySelector(".player-osd"));
+        for (const name of ["Close player", "Player details and shortcuts", "Back 10 seconds", "Forward 10 seconds", "Subtitles", "Playback settings", "Mute", "Exit fullscreen"]) {
+          expect(document.fullscreenElement, `fullscreen must include ${name}`).toContainElement(screen.getByRole("button", { name }));
+        }
+        await userEvent.click(screen.getByRole("button", { name: "Exit fullscreen" }));
+        expect(fullscreen.exit).toHaveBeenCalledTimes(1);
+        expect(document.fullscreenElement).toBeNull();
+        expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+        expect(document.querySelector("video.player-video")).toBe(video);
+        expect(video.src).toBe(src);
+        expect(video.currentTime).toBe(42);
+        expect(video.paused).toBe(false);
+        expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+        expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+        expect(HTMLMediaElement.prototype.pause).not.toHaveBeenCalled();
+      } finally { restorePaused(); }
+    } finally { fullscreen.restore(); }
+  });
 
-      Object.defineProperty(document, "fullscreenElement", {
-        configurable: true,
-        value: stage,
-      });
-      fireEvent(document, new Event("fullscreenchange"));
+  it("keeps touch transport, audio, settings, captions and details inside the fullscreen pane", async () => {
+    deviceKindMock.mockReturnValue("android");
+    Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+      configurable: true, value: { getInsets: vi.fn() },
+    });
+    const fullscreen = mockPlayerFullscreen();
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Touch T" onClose={() => {}}
+        serverOptimized={{
+          qualities: ["480p"],
+          loadAudioTracks: vi.fn(async () => [
+            { index: 0, label: "English", language: "eng", default: true },
+            { index: 1, label: "French", language: "fra", default: false },
+          ] satisfies ServerAudioTrack[]),
+          request: vi.fn(async () => ({ url: "https://x/optimized.m3u8", quality: "480p" as const, timelineOffsetSeconds: 0, startPositionSeconds: 0 })),
+        }} />);
+      const pane = screen.getByRole("dialog", { name: "Playing Touch T" });
+      await userEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+      expect(fullscreen.request.mock.instances[0], "touch fullscreen must own header and custom transport").toBe(pane);
+      expect(document.fullscreenElement).toContainElement(pane.querySelector(".player-touch-controls"));
+      for (const name of ["Close player", "Back 10 seconds", "Forward 10 seconds", "Audio tracks", "Subtitles", "Playback settings", "Exit fullscreen"]) {
+        expect(document.fullscreenElement, `fullscreen must include ${name}`).toContainElement(screen.getByRole("button", { name }));
+      }
+      await userEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+      expect(document.fullscreenElement).toContainElement(await screen.findByRole("dialog", { name: "Audio tracks" }));
+      await userEvent.click(screen.getByRole("button", { name: "Close audio tracks" }));
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(document.fullscreenElement).toContainElement(screen.getByRole("dialog", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+      expect(document.fullscreenElement).toContainElement(screen.getByTestId("captions-menu"));
+      await userEvent.click(screen.getByText("close-captions"));
+      await userEvent.click(screen.getByRole("button", { name: "Player details and shortcuts" }));
+      expect(document.fullscreenElement).toContainElement(screen.getByRole("dialog", { name: "Player details and shortcuts" }));
+    } finally { fullscreen.restore(); }
+  });
+
+  it("uses the full player pane for keyboard fullscreen and tracks browser exit without changing media", () => {
+    const fullscreen = mockPlayerFullscreen();
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Keyboard T" onClose={() => {}} />);
+      const pane = screen.getByRole("dialog", { name: "Playing Keyboard T" });
+      const video = pane.querySelector("video.player-video");
+      fireEvent.keyDown(document, { key: "f" });
+      expect(fullscreen.request.mock.instances[0], "keyboard fullscreen must use the same full-pane owner").toBe(pane);
       expect(screen.getByRole("button", { name: "Exit fullscreen" })).toBeInTheDocument();
-    } finally {
-      restoreRequestFullscreen();
-      restoreFullscreenElement();
-    }
+      act(() => { void fullscreen.exit(); });
+      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      expect(document.querySelector("video.player-video")).toBe(video);
+    } finally { fullscreen.restore(); }
+  });
+
+  it("detects fullscreen capability on the full player pane rather than the video-only stage", async () => {
+    const fullscreen = mockPlayerFullscreen();
+    Object.defineProperty(HTMLElement.prototype, "requestFullscreen", {
+      configurable: true,
+      get() { return this.classList.contains("player") ? fullscreen.request : undefined; },
+    });
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Capability T" onClose={() => {}} />);
+      const pane = screen.getByRole("dialog", { name: "Playing Capability T" });
+      const enter = screen.queryByRole("button", { name: "Enter fullscreen" });
+      expect(enter, "fullscreen capability must be detected on the full pane, not its stage").not.toBeNull();
+      await userEvent.click(enter!);
+      expect(fullscreen.request.mock.instances[0], "capability and request must agree on the full-pane target").toBe(pane);
+    } finally { fullscreen.restore(); }
   });
 
   it("uses the iPhone WebKit fullscreen fallback when container fullscreen is unavailable", async () => {
