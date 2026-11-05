@@ -144,7 +144,7 @@ export interface PlaybackHandoffState {
 }
 
 type ServerOptimizedPositionIntent = "follow-current" | "fixed";
-type ServerOptimizationPurpose = "ordinary" | "native-hls-seek";
+type ServerOptimizationPurpose = "ordinary" | "native-hls-seek" | "remembered-audio";
 type PendingNativeHlsSeek = {
   sequence: number;
   absoluteTarget: number;
@@ -1799,6 +1799,11 @@ export function VideoPlayer({
         const activationPosition = positionIntent === "fixed"
           ? position
           : latestAbsolutePositionRef.current;
+        // A user seek can move before an already-prepared audio generation.
+        // Keep the original source rather than clamp that newer intent forward.
+        if (purpose === "remembered-audio" && activationPosition < next.timelineOffsetSeconds) {
+          return false;
+        }
         latestAbsolutePositionRef.current = activationPosition;
         const activationStart = Math.max(
           0,
@@ -1810,7 +1815,8 @@ export function VideoPlayer({
         if (!ownsRequest()) return false;
         const currentHandoffState = currentWebviewHandoffState(requestedHandoffState);
         const activationHandoffState =
-          purpose === "native-hls-seek" && requestedHandoffState != null && currentHandoffState != null
+          (purpose === "native-hls-seek" || purpose === "remembered-audio") &&
+          requestedHandoffState != null && currentHandoffState != null
             ? { ...currentHandoffState, paused: requestedHandoffState.paused }
             : currentHandoffState;
         const requestedAudioConfirmed =
@@ -4333,6 +4339,17 @@ function WebviewPlayer({
       : null;
   };
   const didSeekRef = useRef(false);
+  const explicitInitialSeekRef = useRef<number | null>(null);
+  const claimInitialSeek = useCallback((localTarget: number) => {
+    onAbsolutePositionChange(localTarget + timelineOffsetRef.current);
+    if (didSeekRef.current) return;
+    if (exactHandoffPendingRef.current) {
+      explicitInitialSeekRef.current = localTarget;
+      nativeExactHlsFragmentRef.current = false;
+    } else {
+      didSeekRef.current = true;
+    }
+  }, [onAbsolutePositionChange]);
   const invalidatePendingNativeHlsSeek = useCallback(() => {
     pendingNativeHlsSeekSequenceRef.current += 1;
     const pending = pendingNativeHlsSeekRef.current;
@@ -4510,6 +4527,7 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     didSeekRef.current = false;
+    explicitInitialSeekRef.current = null;
     exactHandoffPendingRef.current = requiresExactHandoffRef.current;
     pendingHandoffPlaybackIntentRef.current = null;
     verifiedPlaybackProgressReportedRef.current = false;
@@ -4535,7 +4553,7 @@ function WebviewPlayer({
         },
       );
     };
-    const exactTarget = () => Math.max(0, startPositionRef.current ?? 0);
+    const exactTarget = () => Math.max(0, explicitInitialSeekRef.current ?? startPositionRef.current ?? 0);
     const targetIsAvailable = (target: number) => {
       for (let index = 0; index < video.seekable.length; index += 1) {
         if (
@@ -4595,6 +4613,9 @@ function WebviewPlayer({
         video.pause();
         return;
       }
+      // An initial media clock is not yet the saved resume decision. A
+      // committed user seek claims that decision, including an explicit zero.
+      if (!didSeekRef.current && (startPositionRef.current ?? 0) > 5) return;
       // Actual clock progress is stronger readiness evidence than a successful
       // play() dispatch and covers WebViews that omit an early canplay event.
       if (video.currentTime > 0) {
@@ -4650,7 +4671,7 @@ function WebviewPlayer({
     // since we'd have marked it done, would never resume.
     const applyResume = () => {
       if (didSeekRef.current) return;
-      const start = startPositionRef.current ?? 0;
+      const start = explicitInitialSeekRef.current ?? startPositionRef.current ?? 0;
       const recoveryHandoff = requiresExactHandoffRef.current;
       if (recoveryHandoff) {
         if (confirmExactHandoff()) return;
@@ -5479,6 +5500,7 @@ function WebviewPlayer({
         ? video.duration
         : Number.POSITIVE_INFINITY;
       const localTarget = Math.min(Math.max(t, 0), localDuration);
+      if (allowPreparation) claimInitialSeek(localTarget);
       if (!beginConfirmedNativeHlsSeek(video, localTarget, localTarget, allowPreparation)) {
         video.currentTime = localTarget;
       }
@@ -5520,6 +5542,7 @@ function WebviewPlayer({
           : windowDuration != null && localTarget <= windowDuration)
       )
     ) {
+      if (allowPreparation) claimInitialSeek(localTarget);
       if (!beginConfirmedNativeHlsSeek(video, localTarget, absoluteTarget, allowPreparation)) {
         video.currentTime = localTarget;
       }
@@ -5594,6 +5617,7 @@ function WebviewPlayer({
       ? video.duration
       : Number.POSITIVE_INFINITY;
     const localTarget = Math.min(Math.max(t, 0), localDuration);
+    if (allowPreparation) claimInitialSeek(localTarget);
     const absoluteTarget = localTarget + (
       optimizedTimelineIsPartialRef.current ? timelineOffsetRef.current : 0
     );
@@ -6131,20 +6155,51 @@ function WebviewPlayer({
       ) ??
       serverAudioTracks.find((track) => track.isDefault) ??
       serverAudioTracks[0];
+    if (selected.index === resolvedServerAudioTrack || serverOptimized == null) {
+      appliedServerAudioPreferenceRef.current = true;
+      return;
+    }
+    const video = videoRef.current;
+    let position = absolutePlaybackPosition();
+    if (!didSeekRef.current) {
+      const start = explicitInitialSeekRef.current ?? startPositionRef.current ?? 0;
+      const offset = timelineOffsetRef.current;
+      if (exactHandoffPendingRef.current) {
+        position = Math.max(0, start + offset);
+      } else if (start > 5) {
+        const localDuration = video != null && Number.isFinite(video.duration) && video.duration > 0
+          ? video.duration
+          : knownAbsoluteDurationSeconds == null ? 0 : knownAbsoluteDurationSeconds - offset;
+        // The ordinary resume policy must decide whether this is a completed
+        // item before remembered audio can replace its initial source.
+        if (localDuration <= 0) return;
+        position = (start >= localDuration - 10 ? 0 : start) + offset;
+      }
+    }
     appliedServerAudioPreferenceRef.current = true;
-    if (selected.index === resolvedServerAudioTrack || serverOptimized == null) return;
     const quality = activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
     void onSwitchServerOptimized(
       quality,
-      absolutePlaybackPosition(),
-      playbackHandoffState,
+      position,
+      () => {
+        const state = playbackHandoffState();
+        if (!exactHandoffPendingRef.current) return state;
+        const intent = pendingHandoffPlaybackIntentRef.current;
+        return { ...state, paused: intent === "play" ? false : intent === "pause" ? true
+          : sourceSwitchStateRef.current?.paused ?? state.paused };
+      },
       selected.index,
       { id: selected.id, language: selected.language, label: selected.logicalLabel },
+      "follow-current",
+      false,
+      "remembered-audio",
     );
   }, [
     resolvedServerAudioTrack,
     activeServerOptimizedQuality,
     matchedRetainedServerAudio,
+    duration,
+    knownAbsoluteDurationSeconds,
     onSwitchServerOptimized,
     savedPrefs,
     serverAudioInventoryStatus,
