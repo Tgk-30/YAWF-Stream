@@ -177,6 +177,12 @@ describe("History - watch stats card", () => {
 });
 
 describe("History - empty", () => {
+  it("uses a storage-neutral empty-state note for Local and Server Mode", () => {
+    render(<History />);
+    expect(screen.getByText("Pick up where you left off")).toBeInTheDocument();
+    expect(screen.queryByText("Resume positions stay local")).not.toBeInTheDocument();
+  });
+
   it("renders the empty-state with Browse + Search CTAs when nothing watched", async () => {
     render(<History />);
     expect(screen.getByText("Nothing here yet")).toBeInTheDocument();

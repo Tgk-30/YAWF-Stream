@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -21,6 +22,16 @@ const ALL = new Set([
 ]);
 
 describe("SettingsSearch", () => {
+  it("backs floating search results with an opaque theme surface and 44px actions", () => {
+    const css = readFileSync("src/components/SettingsSearch.css", "utf8");
+    const surface = css.match(/\.settings-search-results\.glass-raised\s*\{([^}]+)\}/)?.[1] ?? "";
+    expect(surface, "floating search results must obscure underlying category labels without blur").toMatch(/background:\s*var\(--bg-1\)\s*;/);
+    for (const selector of [".settings-search-result", ".settings-search-empty button"]) {
+      const block = css.slice(css.indexOf(`${selector} {`)).split("}")[0];
+      expect(block, `${selector} must retain a 44px minimum action target`).toMatch(/min-height:\s*44px/);
+    }
+  });
+
   it("surfaces matches and jumps to the setting's tab on click", async () => {
     const onJump = vi.fn();
     const user = userEvent.setup();
@@ -82,4 +93,29 @@ describe("SettingsSearch", () => {
     expect(input).toHaveValue("");
     expect(screen.queryByText(/No settings match/)).toBeNull();
   });
+
+  it.each([
+    ["audio", "Default audio language"],
+    ["subtitle", "Default subtitles"],
+    ["speed", "Default playback speed"],
+    ["volume", "Default volume"],
+    ["remember", "Remember audio and subtitle choices per title"],
+  ])("finds the real %s playback setting and jumps to the reachable Playback tab", async (query, label) => {
+    const onJump = vi.fn();
+    render(<SettingsSearch onJump={onJump} visibleTabs={ALL} />);
+    await userEvent.type(screen.getByLabelText("Search settings"), query);
+    const result = screen.getByRole("button", { name: `${label}Playback` });
+    expect(readFileSync("src/screens/Settings.tsx", "utf8")).toContain(label);
+    await userEvent.click(result);
+    expect(onJump).toHaveBeenCalledWith("playback");
+  });
+
+  it.each(["audio", "subtitle"])("does not expose %s matches when Playback is unreachable", async (query) => {
+    const onJump = vi.fn();
+    render(<SettingsSearch onJump={onJump} visibleTabs={new Set(["appearance"])} />);
+    await userEvent.type(screen.getByLabelText("Search settings"), query);
+    expect(screen.getByText(`No settings match “${query}”`)).toBeInTheDocument();
+    expect(onJump).not.toHaveBeenCalled();
+  });
+
 });

@@ -78,7 +78,7 @@ export function History() {
           icon="history"
           title="Nothing here yet"
           subtitle="Open a title and it'll show up here so you can jump back in."
-          note="Resume positions stay local"
+          note="Pick up where you left off"
           actions={
             <>
               <button
