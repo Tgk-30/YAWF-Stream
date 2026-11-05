@@ -1216,8 +1216,19 @@
   pointer-events: auto;
 }
 
+/* Keep the status pill above the unchanged 72px transport, not underneath it. */
+.webview-player.is-touch-player .player-playback-status {
+  inset: auto max(12px, var(--safe-area-right)) calc(50% + 52px) max(12px, var(--safe-area-left));
+  width: max-content;
+  max-width: calc(100% - max(12px, var(--safe-area-left)) - max(12px, var(--safe-area-right)));
+  box-sizing: border-box;
+  margin-inline: auto;
+  transform: none;
+}
+
 .player-touch-transport .chip,
-.player-touch-actions .chip {
+.player-touch-actions .chip,
+.player-touch-more {
   border: 1px solid rgba(255, 255, 255, 0.15);
   background: linear-gradient(145deg, rgba(18, 21, 33, 0.88), rgba(7, 9, 17, 0.76));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 10px 28px rgba(0, 0, 0, 0.34);
@@ -1256,13 +1267,27 @@
     max(calc(12px * var(--density-scale)), var(--safe-area-left));
 }
 
-.player-touch-osd.is-visible .player-touch-actions,
+.player-touch-osd.is-visible .player-touch-action-row,
 .player-touch-osd.is-visible .scrubbar-wrap {
   pointer-events: auto;
 }
 
-.player-touch-actions {
+.player-touch-action-row {
   width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: calc(7px * var(--density-scale));
+  box-sizing: border-box;
+  padding: calc(2px * var(--density-scale)) 1px calc(4px * var(--density-scale));
+}
+
+.player-touch-more {
+  flex: 0 0 auto;
+}
+
+.player-touch-actions {
+  flex: 1 1 0%;
   min-width: 0;
   display: flex;
   align-items: stretch;
@@ -1272,14 +1297,15 @@
   overscroll-behavior-inline: contain;
   scrollbar-width: none;
   touch-action: pan-x;
-  padding: calc(2px * var(--density-scale)) 1px calc(4px * var(--density-scale));
+  padding: 0;
 }
 
 .player-touch-actions::-webkit-scrollbar {
   display: none;
 }
 
-.player-touch-actions .player-touch-action {
+.player-touch-actions .player-touch-action,
+.player-touch-more {
   flex: 0 0 auto;
   min-width: 58px;
   min-height: 46px;
@@ -1403,9 +1429,13 @@
 
 .player-options-menu.is-touch-audio-sheet > :not(.player-options-head):not(.player-audio-options-section):not(.player-options-external),
 .player-options-menu.is-touch-audio-sheet:not(.has-audio-fallback) > .player-options-external,
-.player-options-menu.is-touch-settings .player-audio-options-section,
-.player-options-menu.is-touch-settings .player-fit-options-section {
+.player-options-menu.is-touch-settings .player-audio-options-section {
   display: none;
+}
+
+.player.is-touch-player .player-options-menu.is-touch-settings .player-fit-options-section button.chip {
+  min-width: 44px;
+  min-height: 44px;
 }
 
 /* Native range hit slop can extend beyond the painted track. Keep a real pan
@@ -1520,7 +1550,8 @@
     min-width: 62px;
   }
 
-  .player-touch-actions .player-touch-action {
+  .player-touch-actions .player-touch-action,
+  .player-touch-more {
     min-width: 54px;
     padding-inline: calc(8px * var(--density-scale));
   }
@@ -1540,6 +1571,10 @@
     top: 45%;
   }
 
+  .webview-player.is-touch-player .player-playback-status {
+    bottom: calc(55% + 42px);
+  }
+
   .player-touch-play {
     width: 60px;
     height: 60px;
@@ -1554,7 +1589,8 @@
     padding-bottom: max(calc(6px * var(--density-scale)), var(--safe-area-bottom));
   }
 
-  .player-touch-actions .player-touch-action {
+  .player-touch-actions .player-touch-action,
+  .player-touch-more {
     min-height: 44px;
   }
 }
