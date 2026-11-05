@@ -1430,6 +1430,27 @@
   background: rgba(12, 14, 22, 1);
 }
 
+.player.is-touch-player .captions-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.player.is-touch-player .captions-search-row > input {
+  grid-column: 1 / -1;
+}
+
+.player.is-touch-player .captions-search-row > input,
+.player.is-touch-player .captions-search-row > select,
+.player.is-touch-player .captions-search-row > button {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+}
+
 .player.is-touch-player .player-options-menu.is-touch-audio-sheet {
   top: auto;
   bottom: max(calc(12px * var(--density-scale)), var(--safe-area-bottom));

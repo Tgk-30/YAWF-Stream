@@ -1327,6 +1327,21 @@ describe("VideoPlayer shell", () => {
     );
   });
 
+  it("fits touch caption search into two shrinkable rows without changing desktop layout", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    const row = css.match(/\.player\.is-touch-player \.captions-search-row\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(row).toMatch(/display:\s*grid;/);
+    expect(row).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\) auto;/);
+    expect(row).toMatch(/width:\s*100%;/);
+    expect(row).toMatch(/min-width:\s*0;/);
+    expect(css).toMatch(/\.player\.is-touch-player \.captions-search-row > input\s*\{[^}]*grid-column:\s*1 \/ -1;/s);
+    const controls = css.match(/\.player\.is-touch-player \.captions-search-row > input,\s*\.player\.is-touch-player \.captions-search-row > select,\s*\.player\.is-touch-player \.captions-search-row > button\s*\{([^}]*)\}/)?.[1] ?? "";
+    for (const declaration of ["box-sizing: border-box;", "width: 100%;", "min-width: 0;", "max-width: 100%;", "min-height: 44px;"]) {
+      expect(controls.split("\n").map((line) => line.trim())).toContain(declaration);
+    }
+    expect(css.match(/\n\.captions-search-row\s*\{([^}]*)\}/)?.[1]).toMatch(/display:\s*flex;/);
+  });
+
   it("keeps only the focused touch Audio sheet content-height and safe-area bounded", () => {
     const css = readFileSync("src/components/VideoPlayer.css", "utf8");
     expect(css).toMatch(
@@ -8250,9 +8265,113 @@ describe("WebviewPlayer", () => {
       const pane = screen.getByRole("dialog", { name: "Playing Capability T" });
       const enter = screen.queryByRole("button", { name: "Enter fullscreen" });
       expect(enter, "fullscreen capability must be detected on the full pane, not its stage").not.toBeNull();
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      for (const event of ["loadedmetadata", "canplay", "emptied"]) {
+        fireEvent(video, new Event(event));
+        expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      }
+      expect(fullscreen.request).not.toHaveBeenCalled();
       await userEvent.click(enter!);
       expect(fullscreen.request.mock.instances[0], "capability and request must agree on the full-pane target").toBe(pane);
     } finally { fullscreen.restore(); }
+  });
+
+  it.each(["loadedmetadata", "canplay"])("refreshes delayed WebKit fullscreen support on %s without remount", async (event) => {
+    deviceKindMock.mockReturnValue("ios");
+    const enter = vi.fn();
+    const restores = [
+      replaceProperty(HTMLElement.prototype, "requestFullscreen", undefined),
+      replaceProperty(HTMLVideoElement.prototype, "webkitSupportsFullscreen", false),
+      replaceProperty(HTMLVideoElement.prototype, "webkitEnterFullscreen", enter),
+    ];
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Delayed fullscreen" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      const src = video.src;
+      expect(screen.queryByRole("button", { name: "Enter fullscreen" })).toBeNull();
+      Object.defineProperty(video, "webkitSupportsFullscreen", { configurable: true, value: true });
+      fireEvent(video, new Event(event));
+      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      expect(document.querySelector("video.player-video")).toBe(video);
+      expect(video.src).toBe(src);
+      expect(enter).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+      expect(enter).toHaveBeenCalledTimes(1);
+      expect(enter.mock.instances[0]).toBe(video);
+    } finally { restores.reverse().forEach((restore) => restore()); }
+  });
+
+  it("refreshes WebKit fullscreen support when a source empties and metadata returns", () => {
+    const enter = vi.fn();
+    const restores = [
+      replaceProperty(HTMLElement.prototype, "requestFullscreen", undefined),
+      replaceProperty(HTMLVideoElement.prototype, "webkitSupportsFullscreen", true),
+      replaceProperty(HTMLVideoElement.prototype, "webkitEnterFullscreen", enter),
+    ];
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Changing fullscreen" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      Object.defineProperty(video, "webkitSupportsFullscreen", { configurable: true, value: false });
+      fireEvent.emptied(video);
+      expect(screen.queryByRole("button", { name: "Enter fullscreen" })).toBeNull();
+      Object.defineProperty(video, "webkitSupportsFullscreen", { configurable: true, value: true });
+      fireEvent.loadedMetadata(video);
+      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      expect(enter).not.toHaveBeenCalled();
+    } finally { restores.reverse().forEach((restore) => restore()); }
+  });
+
+  it("cleans fullscreen readiness listeners before a later player owns capability", () => {
+    let available = false;
+    const reads = vi.fn(() => available);
+    const enter = vi.fn();
+    const restores = [
+      replaceProperty(HTMLElement.prototype, "requestFullscreen", undefined),
+      replaceProperty(HTMLVideoElement.prototype, "webkitSupportsFullscreen", false),
+      replaceProperty(HTMLVideoElement.prototype, "webkitEnterFullscreen", enter),
+    ];
+    Object.defineProperty(HTMLVideoElement.prototype, "webkitSupportsFullscreen", { configurable: true, get: reads });
+    const add = vi.spyOn(HTMLVideoElement.prototype, "addEventListener");
+    const view = render(<VideoPlayer url="https://x/first.mp4" title="First" onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const remove = vi.spyOn(video, "removeEventListener");
+    try {
+      const registrations = ["loadedmetadata", "canplay", "emptied"].map((event) => {
+        const listener = add.mock.calls.find(([name, handler], index) =>
+          name === event && add.mock.contexts[index] === video &&
+          typeof handler === "function" && handler.name === "syncFullscreenSupport",
+        )?.[1];
+        expect(listener).toEqual(expect.any(Function));
+        return [event, listener] as const;
+      });
+      view.rerender(<VideoPlayer url="https://x/second.mp4" title="Second" onClose={() => {}} />);
+      for (const [event, listener] of registrations) expect(remove).toHaveBeenCalledWith(event, listener);
+      const next = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(next).not.toBe(video);
+      reads.mockClear();
+      available = true;
+      act(() => { video.dispatchEvent(new Event("loadedmetadata")); });
+      expect(reads).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Enter fullscreen" })).toBeNull();
+      fireEvent.loadedMetadata(next);
+      expect(reads).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      expect(enter).not.toHaveBeenCalled();
+      const nextRemove = vi.spyOn(next, "removeEventListener");
+      const nextRegistrations = add.mock.calls.filter(([name, handler], index) =>
+        ["loadedmetadata", "canplay", "emptied"].includes(name) && add.mock.contexts[index] === next &&
+        typeof handler === "function" && handler.name === "syncFullscreenSupport",
+      );
+      view.unmount();
+      for (const [event, listener] of nextRegistrations) expect(nextRemove).toHaveBeenCalledWith(event, listener);
+      nextRemove.mockRestore();
+    } finally {
+      view.unmount();
+      remove.mockRestore();
+      add.mockRestore();
+      restores.reverse().forEach((restore) => restore());
+    }
   });
 
   it("uses the iPhone WebKit fullscreen fallback when container fullscreen is unavailable", async () => {

@@ -4162,11 +4162,16 @@ function WebviewPlayer({
     const container = video == null ? null : playerFullscreenContainer(video);
     if (video == null || container == null) return;
     const webkitVideo = video as WebKitVideoElement;
-    const supportsContainerFullscreen = typeof container.requestFullscreen === "function";
-    const supportsWebKitFullscreen =
-      webkitVideo.webkitSupportsFullscreen === true &&
-      typeof webkitVideo.webkitEnterFullscreen === "function";
-    setFullscreenSupported(supportsContainerFullscreen || supportsWebKitFullscreen);
+    const syncFullscreenSupport = () => {
+      const supportsContainerFullscreen = typeof container.requestFullscreen === "function";
+      const supportsWebKitFullscreen =
+        webkitVideo.webkitSupportsFullscreen === true &&
+        typeof webkitVideo.webkitEnterFullscreen === "function";
+      setFullscreenSupported(supportsContainerFullscreen || supportsWebKitFullscreen);
+    };
+    const readinessEvents = ["loadedmetadata", "canplay", "emptied"];
+    readinessEvents.forEach((event) => video.addEventListener(event, syncFullscreenSupport));
+    syncFullscreenSupport();
 
     const setFullscreenState = (next: boolean) => {
       setIsFullscreen(next);
@@ -4187,6 +4192,7 @@ function WebviewPlayer({
     video.addEventListener("webkitendfullscreen", onWebKitEndFullscreen);
     syncFullscreenState();
     return () => {
+      readinessEvents.forEach((event) => video.removeEventListener(event, syncFullscreenSupport));
       document.removeEventListener("fullscreenchange", syncFullscreenState);
       document.removeEventListener("webkitfullscreenchange", syncFullscreenState);
       video.removeEventListener("webkitbeginfullscreen", onWebKitBeginFullscreen);
