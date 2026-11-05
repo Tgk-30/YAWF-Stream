@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -62,6 +62,67 @@ function mediaBlocks(css) {
     }
   }
   return blocks;
+}
+
+// Source-cascade contract, not a browser layout/visibility substitute. Evaluate
+// the actual reminder rules at both sides of the nav's width/height boundaries.
+export function validateReminderNavigationCss({ navCss, setupNudgeCss, installPromptCss }) {
+  const navMobile = mediaBlocks(navCss).find((block) =>
+    block.css.includes(".nav-rail-more-sheet {") &&
+    ruleBlock(block.css, ".nav-rail").includes("grid-template-columns")
+  );
+  if (navMobile == null) return ["Missing mobile navigation media rule"];
+  const matches = (header, width, height) => header.replace(/^@media\s+/, "").split(",").some((branch) => {
+    const dimensions = [...branch.matchAll(/\((min|max)-(width|height):\s*(\d+)px\)/g)];
+    const remainder = branch.replace(/\((min|max)-(width|height):\s*\d+px\)/g, "").replace(/\band\b/g, "").trim();
+    return dimensions.length > 0 && remainder === "" && dimensions.every(([, bound, axis, limit]) =>
+      bound === "max" ? (axis === "width" ? width : height) <= Number(limit) :
+        (axis === "width" ? width : height) >= Number(limit));
+  });
+  const declarations = (css, selector, dynamicViewport) => {
+    const dynamic = atRuleBlock(css, "@supports (height: 100dvh)");
+    const blocks = [css.replace(dynamic, ""), ...(dynamicViewport ? [dynamic] : [])];
+    return Object.fromEntries(blocks.flatMap((block) =>
+      [...ruleBlock(block, selector).matchAll(/([a-z-]+)\s*:\s*([^;{}]+);/g)]
+        .map(([, property, value]) => [property, value.replace(/\s+/g, "")])
+    ));
+  };
+  const prepare = (css) => {
+    const media = mediaBlocks(css);
+    const base = media.reduce((text, block) => text.replace(block.css, ""), css);
+    return (selector, width, height, dynamicViewport) => [base, ...media.filter((block) => matches(block.header, width, height)).map((block) => block.css)]
+      .reduce((result, block) => Object.assign(result, declarations(block, selector, dynamicViewport)), {});
+  };
+  const bottom = "calc(var(--mobile-nav-bottom)+var(--mobile-nav-height)+var(--sp-sm))";
+  const maxHeight = (unit) => `calc(100${unit}-max(var(--sp-sm),var(--safe-area-top))-var(--mobile-nav-bottom)-var(--mobile-nav-height)-var(--sp-sm))`;
+  const failures = [];
+  for (const [name, css] of [["setup-nudge", setupNudgeCss], ["install-prompt", installPromptCss]]) {
+    const effective = prepare(css);
+    for (const width of [320, 640, 641, 699, 700, 914, 950, 951, 1024]) {
+      for (const height of [320, 411, 500, 501, 800]) {
+        for (const dynamicViewport of [false, true]) {
+          const card = effective(`.${name}`, width, height, dynamicViewport);
+          if (!matches(navMobile.header, width, height)) {
+            if (card["z-index"] !== "40" || card.bottom === bottom) failures.push(`${name} ${width}x${height}: mobile layout leaked into desktop`);
+            continue;
+          }
+          const expected = { bottom, "max-height": maxHeight(dynamicViewport ? "dvh" : "vh"), "overflow-y": "auto", "z-index": "29",
+            left: "max(var(--sp-sm),var(--safe-area-left))", right: "max(var(--sp-sm),var(--safe-area-right))", width: "auto", transform: "none" };
+          const missing = Object.keys(expected).filter((key) => card[key] !== expected[key]);
+          const dismiss = effective(`.${name}-dismiss`, width, height, dynamicViewport);
+          if (dismiss.width !== "44px" || dismiss.height !== "44px") missing.push("44px dismiss");
+          const button = effective(`.${name}-actions .btn`, width, height, dynamicViewport);
+          if (button["min-height"] !== "44px" || button.width !== "100%") missing.push("44px actions");
+          if (name === "setup-nudge") {
+            const actions = effective(".setup-nudge-actions", width, height, dynamicViewport);
+            if (actions.display !== "grid" || actions["grid-template-columns"] !== "repeat(2,minmax(0,1fr))") missing.push("compact guided actions");
+          }
+          if (missing.length > 0) failures.push(`${name} ${width}x${height}: ${missing.join(", ")} (${dynamicViewport ? "dynamic" : "legacy"} viewport)`);
+        }
+      }
+    }
+  }
+  return failures;
 }
 
 const checks = [];
@@ -412,11 +473,11 @@ check(
   "SetupNudge.css must center the fixed reminder between the current nav-safe left edge and the right content edge without a viewport-centered transform.",
 );
 
+const reminderLayoutFailures = validateReminderNavigationCss({ navCss, setupNudgeCss, installPromptCss });
 check(
   "mobile setup and install cards stay above navigation without clipping",
-  /@media\s*\(max-width:\s*640px\)[\s\S]*right:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-right\)\)[\s\S]{0,120}left:\s*max\(var\(--sp-sm\),\s*var\(--safe-area-left\)\)[\s\S]{0,160}bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)[\s\S]{0,260}width:\s*auto[\s\S]{0,180}margin-inline:\s*0[\s\S]{0,100}transform:\s*none[\s\S]{0,800}grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[\s\S]{0,500}min-height:\s*44px/.test(setupNudgeCss) &&
-    /@media\s*\(max-width:\s*699px\)[\s\S]*bottom:\s*calc\(var\(--mobile-nav-bottom\)\s*\+\s*var\(--mobile-nav-height\)/.test(installPromptCss),
-  "SetupNudge.css and InstallPrompt.css must clear the floating nav, reset desktop centering inside native phone insets, and keep 44px phone actions within their cards.",
+  reminderLayoutFailures.length === 0,
+  reminderLayoutFailures.join("; ") || "Reminder layout must follow the floating-nav breakpoint, native insets and reachable44px actions.",
 );
 
 check(
@@ -626,21 +687,31 @@ check(
 
 check(
   "touch sheets keep full settings, compact audio, and bounded tablet panels",
-  /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(touchSheetBaseRule) &&
+  /top:\s*max\(calc\(66px \* var\(--density-scale\)\),\s*var\(--safe-area-top\)\)/.test(touchSheetBaseRule) &&
+    /right:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-right\)\)/.test(touchSheetBaseRule) &&
+    /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(touchSheetBaseRule) &&
     /left:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-left\)\)/.test(touchSheetBaseRule) &&
     /width:\s*auto;/.test(touchSheetBaseRule) &&
     /max-height:\s*none;/.test(touchSheetBaseRule) &&
-    /bottom:\s*auto;/.test(touchAudioSheetRule) &&
+    /overflow-y:\s*auto;/.test(touchSheetBaseRule) &&
+    /top:\s*auto;/.test(touchAudioSheetRule) &&
+    /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(touchAudioSheetRule) &&
     /height:\s*auto;/.test(touchAudioSheetRule) &&
     /max-height:\s*calc\([\s\S]*100%[\s\S]*var\(--safe-area-top\)[\s\S]*var\(--safe-area-bottom\)/.test(touchAudioSheetRule) &&
     /overflow-y:\s*auto;/.test(touchAudioSheetRule) &&
-    /bottom:\s*auto;/.test(tabletTouchSheetRule) &&
-    /left:\s*auto;/.test(tabletTouchSheetRule) &&
+    /top:\s*auto;/.test(tabletTouchSheetRule) &&
+    /right:\s*auto;/.test(tabletTouchSheetRule) &&
+    /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(tabletTouchSheetRule) &&
+    /left:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-left\)\)/.test(tabletTouchSheetRule) &&
     /width:\s*min\(\s*440px,[\s\S]*var\(--safe-area-left\)[\s\S]*var\(--safe-area-right\)[\s\S]*24px \* var\(--density-scale\)/.test(tabletTouchSheetRule) &&
     /height:\s*auto;/.test(tabletTouchSheetRule) &&
     /max-height:\s*calc\([\s\S]*100%[\s\S]*66px \* var\(--density-scale\)[\s\S]*var\(--safe-area-top\)[\s\S]*12px \* var\(--density-scale\)[\s\S]*var\(--safe-area-bottom\)/.test(tabletTouchSheetRule) &&
-    /overflow-y:\s*auto;/.test(tabletTouchSheetRule),
-  "Phone settings and subtitles must keep full safe-edge coverage, focused Audio must use safe-area-bounded content height, and tablet touch layouts must retain the intrinsic 440px right panel.",
+    /overflow-y:\s*auto;/.test(tabletTouchSheetRule) &&
+    /position:\s*sticky;/.test(ruleBlock(playerCss, ".player-options-head")) &&
+    /position:\s*sticky;/.test(ruleBlock(playerCss, ".player.is-touch-player .captions-head")) &&
+    /min-width:\s*44px;[\s\S]*height:\s*44px;/.test(ruleBlock(playerCss,
+      ".player.is-touch-player .player-close,\n.player.is-touch-player .player-info-button")),
+  "Phone settings and subtitles must keep full safe-edge coverage; Audio and intrinsic440px tablet sheets must anchor bottom-left with bounded height, scrolling and sticky44px Close controls.",
 );
 
 check(
@@ -766,16 +837,18 @@ check(
   ".github/workflows/ci.yml must run this checker.",
 );
 
-const failures = checks.filter((entry) => !entry.condition);
-if (failures.length > 0) {
-  for (const failure of failures) {
-    console.error(`fail ${failure.label}`);
-    console.error(`     ${failure.fix}`);
+if (process.argv[1] != null && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const failures = checks.filter((entry) => !entry.condition);
+  if (failures.length > 0) {
+    for (const failure of failures) {
+      console.error(`fail ${failure.label}`);
+      console.error(`     ${failure.fix}`);
+    }
+    process.exit(1);
   }
-  process.exit(1);
-}
 
-for (const entry of checks) {
-  console.log(`ok   ${entry.label}`);
+  for (const entry of checks) {
+    console.log(`ok   ${entry.label}`);
+  }
+  console.log("\nApp responsive contract checks passed.");
 }
-console.log("\nApp responsive contract checks passed.");

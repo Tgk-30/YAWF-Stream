@@ -1150,6 +1150,25 @@
   gap: calc(8px * var(--density-scale));
 }
 
+.player.is-touch-player.has-touch-menu > .player-bar,
+.webview-player.is-touch-player.has-touch-menu .player-touch-controls {
+  visibility: hidden;
+}
+
+.player-touch-menu-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 17;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.68);
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  cursor: pointer;
+  touch-action: none;
+}
+
 .player.is-touch-player .player-close,
 .player.is-touch-player .player-info-button {
   width: auto;
@@ -1391,6 +1410,7 @@
 
 .player.is-touch-player .player-options-menu,
 .player.is-touch-player .captions-menu {
+  z-index: 18;
   top: max(calc(66px * var(--density-scale)), var(--safe-area-top));
   right: max(calc(12px * var(--density-scale)), var(--safe-area-right));
   bottom: max(calc(12px * var(--density-scale)), var(--safe-area-bottom));
@@ -1401,8 +1421,39 @@
   overscroll-behavior: contain;
 }
 
+.player.is-touch-player .captions-head {
+  position: sticky;
+  top: calc(-1 * var(--sp-md));
+  z-index: 2;
+  margin: calc(-1 * var(--sp-md)) calc(-1 * var(--sp-md)) var(--sp-md);
+  padding: var(--sp-md);
+  background: rgba(12, 14, 22, 1);
+}
+
+.player.is-touch-player .captions-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.player.is-touch-player .captions-search-row > input {
+  grid-column: 1 / -1;
+}
+
+.player.is-touch-player .captions-search-row > input,
+.player.is-touch-player .captions-search-row > select,
+.player.is-touch-player .captions-search-row > button {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+}
+
 .player.is-touch-player .player-options-menu.is-touch-audio-sheet {
-  bottom: auto;
+  top: auto;
+  bottom: max(calc(12px * var(--density-scale)), var(--safe-area-bottom));
   height: auto;
   max-height: calc(
     100%
@@ -1415,8 +1466,10 @@
 @media (min-width: 768px) and (min-height: 501px) {
   .player.is-touch-player .player-options-menu:is(.is-touch-audio-sheet, .is-touch-settings),
   .player.is-touch-player .captions-menu {
-    bottom: auto;
-    left: auto;
+    top: auto;
+    right: auto;
+    bottom: max(calc(12px * var(--density-scale)), var(--safe-area-bottom));
+    left: max(calc(12px * var(--density-scale)), var(--safe-area-left));
     width: min(
       440px,
       calc(

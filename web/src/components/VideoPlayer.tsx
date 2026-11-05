@@ -402,7 +402,14 @@ function unlockOrientation(): void {
   }
 }
 
-/** Toggle fullscreen on the player stage. iPhone Safari exposes its video-only
+/** Fullscreen must include the header, transport and sibling player dialogs,
+ * not just the video stage. Keep every entry point on the same DOM owner. */
+function playerFullscreenContainer(video: HTMLVideoElement): HTMLElement | null {
+  const container = video.closest(".player");
+  return container instanceof HTMLElement ? container : null;
+}
+
+/** Toggle fullscreen on the complete player pane. iPhone Safari exposes its video-only
  * WebKit API instead of the standard container fullscreen API. */
 function toggleFullscreen(el: HTMLElement, video?: HTMLVideoElement): void {
   const d = document as WebKitDocument;
@@ -1178,6 +1185,7 @@ export function VideoPlayer({
     mode === "webview" &&
     !androidTVNative &&
     ((dk === "ios" && !underTauri) || androidAppUi);
+  const touchMenuOpen = sharedTouchPlayer && (captionsOpen || webMenuOpen);
   const androidOnCloseRef = useRef(onClose);
   const androidOnProgressRef = useRef(onProgress);
   androidOnCloseRef.current = onClose;
@@ -2127,7 +2135,11 @@ export function VideoPlayer({
           serverExternalRequestRef.current = null;
         }
         if (status == null || !ownsRequest()) return;
-        setExternalActionStatus(status);
+        setExternalActionStatus(
+          status === "External player opened."
+            ? "Player chooser opened. If playback did not start, finish the selected player's setup and try again."
+            : status,
+        );
         recordDiagnostic(
           "player",
           status === "External player opened."
@@ -2523,7 +2535,7 @@ export function VideoPlayer({
     <div className="player-backdrop" onClick={onClose}>
       <div
         ref={playerDialogRef}
-        className={`player${sharedTouchPlayer ? " is-touch-player" : ""}`}
+        className={`player${sharedTouchPlayer ? " is-touch-player" : ""}${touchMenuOpen ? " has-touch-menu" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={`Playing ${title}`}
@@ -2543,8 +2555,9 @@ export function VideoPlayer({
                 : "Opening native playback"}
         </span>
         <div
+          ref={(element) => element?.toggleAttribute("inert", touchMenuOpen)}
           className={`player-bar${webChromeShown ? " is-visible" : ""}`}
-          aria-hidden={hiddenWebChrome || undefined}
+          aria-hidden={hiddenWebChrome || touchMenuOpen || undefined}
           onPointerEnter={holdChrome}
           onPointerLeave={releaseChrome}
           onFocusCapture={focusChrome}
@@ -2988,6 +3001,9 @@ function WebviewPlayer({
   const previousPositionRef = useRef(0);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const touchMenuOpen = touchPlayer && (optionsOpen || captionsOpen);
+  const touchMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const touchMenuWasOpenRef = useRef(false);
   const optionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const audioShortcutRef = useRef<HTMLButtonElement | null>(null);
   const optionsOriginRef = useRef<"settings" | "audio" | null>(null);
@@ -3452,7 +3468,7 @@ function WebviewPlayer({
   // than merely while the player is open or autoplay is being attempted.
   useWakeLock(playing && !suspended);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onCaptionsOpenChange(captionsOpen);
   }, [captionsOpen, onCaptionsOpenChange]);
 
@@ -4143,14 +4159,19 @@ function WebviewPlayer({
 
   useEffect(() => {
     const video = videoRef.current;
-    const stage = video?.closest(".player-stage");
-    if (video == null || !(stage instanceof HTMLElement)) return;
+    const container = video == null ? null : playerFullscreenContainer(video);
+    if (video == null || container == null) return;
     const webkitVideo = video as WebKitVideoElement;
-    const supportsContainerFullscreen = typeof stage.requestFullscreen === "function";
-    const supportsWebKitFullscreen =
-      webkitVideo.webkitSupportsFullscreen === true &&
-      typeof webkitVideo.webkitEnterFullscreen === "function";
-    setFullscreenSupported(supportsContainerFullscreen || supportsWebKitFullscreen);
+    const syncFullscreenSupport = () => {
+      const supportsContainerFullscreen = typeof container.requestFullscreen === "function";
+      const supportsWebKitFullscreen =
+        webkitVideo.webkitSupportsFullscreen === true &&
+        typeof webkitVideo.webkitEnterFullscreen === "function";
+      setFullscreenSupported(supportsContainerFullscreen || supportsWebKitFullscreen);
+    };
+    const readinessEvents = ["loadedmetadata", "canplay", "emptied"];
+    readinessEvents.forEach((event) => video.addEventListener(event, syncFullscreenSupport));
+    syncFullscreenSupport();
 
     const setFullscreenState = (next: boolean) => {
       setIsFullscreen(next);
@@ -4160,7 +4181,7 @@ function WebviewPlayer({
     const syncFullscreenState = () => {
       const doc = document as WebKitDocument;
       const fullscreenElement = document.fullscreenElement ?? doc.webkitFullscreenElement;
-      setFullscreenState(fullscreenElement === stage || fullscreenElement === video);
+      setFullscreenState(fullscreenElement === container || fullscreenElement === video);
     };
     const onWebKitBeginFullscreen = () => setFullscreenState(true);
     const onWebKitEndFullscreen = () => setFullscreenState(false);
@@ -4171,6 +4192,7 @@ function WebviewPlayer({
     video.addEventListener("webkitendfullscreen", onWebKitEndFullscreen);
     syncFullscreenState();
     return () => {
+      readinessEvents.forEach((event) => video.removeEventListener(event, syncFullscreenSupport));
       document.removeEventListener("fullscreenchange", syncFullscreenState);
       document.removeEventListener("webkitfullscreenchange", syncFullscreenState);
       video.removeEventListener("webkitbeginfullscreen", onWebKitBeginFullscreen);
@@ -5599,6 +5621,7 @@ function WebviewPlayer({
 
   const toggleOptions = () => {
     optionsTriggerRef.current?.focus({ preventScroll: true });
+    if (touchPlayer && !optionsOpen) touchMenuTriggerRef.current = optionsTriggerRef.current;
     if (!optionsOpen) optionsOriginRef.current = "settings";
     audioOptionsRequestedRef.current = false;
     setCaptionsOpen(false);
@@ -5608,8 +5631,8 @@ function WebviewPlayer({
   const togglePlayerFullscreen = () => {
     const video = videoRef.current;
     if (video == null) return;
-    const stage = video.closest(".player-stage");
-    toggleFullscreen(stage instanceof HTMLElement ? stage : video, video);
+    const container = playerFullscreenContainer(video);
+    if (container != null) toggleFullscreen(container, video);
   };
 
   const togglePictureInPicture = () => {
@@ -5794,8 +5817,8 @@ function WebviewPlayer({
         case "f":
         case "F": {
           e.preventDefault();
-          const stage = video.closest(".player-stage");
-          toggleFullscreen(stage instanceof HTMLElement ? stage : video, video);
+          const container = playerFullscreenContainer(video);
+          if (container != null) toggleFullscreen(container, video);
           break;
         }
         case "Home":
@@ -6179,6 +6202,7 @@ function WebviewPlayer({
 
   const openAudioOptions = () => {
     audioShortcutRef.current?.focus({ preventScroll: true });
+    if (touchPlayer) touchMenuTriggerRef.current = audioShortcutRef.current;
     optionsOriginRef.current = "audio";
     audioOptionsRequestedRef.current = true;
     setCaptionsOpen(false);
@@ -6195,12 +6219,22 @@ function WebviewPlayer({
       optionsTriggerRef.current?.focus({ preventScroll: true });
     }
   }, [audioShortcutAvailable, optionsOpen]);
+  useEffect(() => {
+    // Restore after modal cleanup and after the background controls are no longer
+    // inert. Touch browsers need not focus a button when it is tapped.
+    if (touchMenuWasOpenRef.current && !touchMenuOpen) {
+      const trigger = touchMenuTriggerRef.current;
+      const fallback = optionsTriggerRef.current;
+      (trigger?.isConnected ? trigger : fallback)?.focus({ preventScroll: true });
+    }
+    touchMenuWasOpenRef.current = touchMenuOpen;
+  }, [touchMenuOpen]);
   const touchAudioSheet = touchPlayer && optionsOriginRef.current === "audio";
   const touchAudioFallbackSheet = touchAudioSheet && touchUnavailableAudioShortcut;
 
   return (
     <div
-      className={`webview-player${touchPlayer ? " is-touch-player" : ""}${suspended ? " is-casting" : ""}`}
+      className={`webview-player${touchPlayer ? " is-touch-player" : ""}${touchMenuOpen ? " has-touch-menu" : ""}${suspended ? " is-casting" : ""}`}
       ref={captionViewportRef}
       onPointerMove={onActivity}
     >
@@ -6503,7 +6537,11 @@ function WebviewPlayer({
         </div>
       </div>
       ) : (
-        <div className="player-touch-controls">
+        <div
+          className="player-touch-controls"
+          ref={(element) => element?.toggleAttribute("inert", touchMenuOpen)}
+          aria-hidden={touchMenuOpen || undefined}
+        >
           <div
             className={`player-touch-transport${chromeVisible ? " is-visible" : ""}`}
             aria-hidden={!chromeVisible || undefined}
@@ -6586,7 +6624,8 @@ function WebviewPlayer({
               <button
                 type="button"
                 className={`chip player-touch-action${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
-                onClick={() => {
+                onClick={(event) => {
+                  touchMenuTriggerRef.current = event.currentTarget;
                   setOptionsOpen(false);
                   setCaptionsOpen((open) => !open);
                 }}
@@ -6694,6 +6733,24 @@ function WebviewPlayer({
             </div>
           </div>
         </div>
+      )}
+
+      {touchMenuOpen && (
+        <button
+          type="button"
+          className="player-touch-menu-scrim"
+          aria-label="Dismiss player menu"
+          tabIndex={-1}
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.stopPropagation();
+            setOptionsOpen(false);
+            setCaptionsOpen(false);
+          }}
+        />
       )}
 
       {optionsOpen && (

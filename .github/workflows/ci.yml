@@ -420,6 +420,11 @@ jobs:
         working-directory: web/src-tauri/gen/android
         run: ./gradlew --no-daemon :app:compileArmDebugKotlin -x :app:rustBuildArmDebug
 
+      - name: Require actual Android fullscreen controller behavior
+        env:
+          YAWF_REQUIRE_ANDROID_FULLSCREEN_BEHAVIOR: "1"
+        run: node --test scripts/android_fullscreen.test.mjs
+
       # The desktop target is checked by the `rust` job on macOS. Repeating it on
       # this Linux runner would need the GTK development headers the Tauri Linux
       # backend links against, which are not installed here and are not what this
