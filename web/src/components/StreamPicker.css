@@ -345,6 +345,36 @@
 }
 
 @media (max-width: 620px) {
+  /* Let release names and metadata use the whole row, not the narrow space
+     between fixed quality and cache-status chips. Keep both chips visible. */
+  .stream-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "main main" "quality status";
+    align-items: start;
+    gap: var(--sp-sm);
+  }
+  .stream-main {
+    grid-area: main;
+  }
+  .stream-quality,
+  .stream-quality-skel {
+    grid-area: quality;
+    justify-self: start;
+  }
+  .stream-badge,
+  .stream-badge-skel {
+    grid-area: status;
+    justify-self: end;
+  }
+  .stream-title-line {
+    flex-wrap: wrap;
+  }
+  .stream-name {
+    flex-basis: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
   .streams-cache-warning {
     align-items: flex-start;
     flex-wrap: wrap;

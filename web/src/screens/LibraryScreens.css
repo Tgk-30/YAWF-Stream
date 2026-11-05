@@ -181,13 +181,19 @@
 .lib-folder-add {
   border-style: dashed;
 }
+/* Create and Watchlist rename editors must wrap within the folder strip. */
 .lib-folder-new {
   display: inline-flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
   align-items: center;
   gap: calc(6px * var(--density-scale));
 }
 .lib-folder-input {
   min-width: 140px;
+  max-width: 100%;
+  min-height: 44px;
   padding: calc(7px * var(--density-scale)) calc(11px * var(--density-scale));
   font: inherit;
   font-size: 0.8125rem;

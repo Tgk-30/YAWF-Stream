@@ -1024,7 +1024,8 @@ export function Settings() {
 const DEB_REMOVE_COMMAND = "sudo apt remove yawf-stream";
 
 function ResetAndUninstall() {
-  const desktop = isTauri();
+  const android = isAndroidAppUiContext();
+  const desktop = isTauri() && !android;
   const serverMode = configuredServerURL() != null;
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmation, setConfirmation] = useState("");
@@ -1096,7 +1097,14 @@ function ResetAndUninstall() {
         </button>
       </div>
 
-      {!desktop ? (
+      {android ? (
+        <div className="settings-reset-uninstall">
+          <p className="settings-hint t-secondary">
+            To uninstall YAWF Stream, open Android Settings, choose Apps, then YAWF Stream and Uninstall.
+          </p>
+          {serverMode && <p className="settings-hint t-secondary">Uninstalling this Android app does not delete your server profile or its saved server data.</p>}
+        </div>
+      ) : !desktop ? (
         <p className="settings-hint t-secondary">
           Installed as a browser app? Remove it from your browser&apos;s app menu. Use Erase all data above to clear what it stored.
         </p>

@@ -41,12 +41,18 @@
   max-height: 320px;
   overflow-y: auto;
 }
+/* Floating results need a readable theme surface even without backdrop blur. */
+.settings-search-results.glass-raised {
+  background: var(--bg-1);
+}
+
 .settings-search-result {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: calc(12px * var(--density-scale));
   width: 100%;
+  min-height: 44px;
   padding: calc(9px * var(--density-scale)) calc(12px * var(--density-scale));
   border: 0;
   border-radius: var(--r-sm, calc(10px * var(--radius-scale)));
@@ -93,7 +99,7 @@
 
 .settings-search-empty button {
   flex: 0 0 auto;
-  min-height: 30px;
+  min-height: 44px;
   padding: 0 calc(10px * var(--density-scale));
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-pill);

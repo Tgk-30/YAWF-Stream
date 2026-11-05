@@ -70,6 +70,12 @@
   box-shadow: 0 28px 60px -20px rgba(0, 0, 0, 0.66);
   animation: profileMenuIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 }
+/* Keep names and actions legible without relying on backdrop blur support.
+   The compound selector wins over the shared translucent glass surface. */
+.profile-menu-pop.glass-raised {
+  background: var(--bg-1);
+}
+
 @keyframes profileMenuIn {
   from { opacity: 0; transform: translateY(-6px) scale(0.98); }
   to { opacity: 1; transform: none; }

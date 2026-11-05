@@ -7,6 +7,7 @@
 // and the "no debrid configured" guard.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   act,
   cleanup,
@@ -109,6 +110,22 @@ afterEach(() => {
 });
 
 describe("StreamPicker", () => {
+  it("gives mobile stream title and metadata full width while retaining chip rows and desktop flex", () => {
+    const css = readFileSync("src/components/StreamPicker.css", "utf8");
+    const mobile = css.match(/@media \(max-width: 620px\) \{([\s\S]*?)\n\}\n/)?.[1] ?? "";
+    expect(mobile, "mobile streams must allocate the full first grid row to title and metadata").toMatch(/grid-template-areas:\s*"main main"\s*"quality status"/);
+    expect(mobile).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) auto/);
+    expect(mobile).toMatch(/\.stream-main\s*\{[^}]*grid-area:\s*main/);
+    expect(mobile).toMatch(/\.stream-quality,[^}]*grid-area:\s*quality/);
+    expect(mobile).toMatch(/\.stream-badge,[^}]*grid-area:\s*status/);
+    expect(mobile).toMatch(/\.stream-title-line\s*\{[^}]*flex-wrap:\s*wrap/);
+    expect(mobile).toMatch(/\.stream-name\s*\{[^}]*white-space:\s*normal/);
+    expect(mobile).toMatch(/\.stream-name\s*\{[^}]*overflow-wrap:\s*anywhere/);
+    const desktop = css.slice(0, css.indexOf("@media (max-width: 620px)"));
+    expect(desktop).toMatch(/\.stream-row\s*\{[^}]*display:\s*flex/);
+    expect(mobile).not.toMatch(/display:\s*none/);
+  });
+
   it("renders the loading skeleton when state.loading is true", () => {
     const { container } = render(
       <StreamPicker

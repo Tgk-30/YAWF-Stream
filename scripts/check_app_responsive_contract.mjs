@@ -125,6 +125,31 @@ export function validateReminderNavigationCss({ navCss, setupNudgeCss, installPr
   return failures;
 }
 
+// Source-level guard for shared inline folder editors, not browser geometry proof.
+export function validateFolderFormsCss(libraryCss, themeCss) {
+  const editor = ruleBlock(libraryCss, ".lib-folder-new");
+  const input = ruleBlock(libraryCss, ".lib-folder-input");
+  const tools = ruleBlock(libraryCss, ".lib-folder-tools");
+  const button = ruleBlock(themeCss, ".btn");
+  const compactButton = ruleBlock(libraryCss, ".btn-sm");
+  const failures = [];
+  if (!/display:\s*inline-flex/.test(editor) || !/flex-wrap:\s*wrap/.test(editor)) {
+    failures.push("shared folder editors must wrap Create/Save and Cancel instead of clipping");
+  }
+  if (!/min-width:\s*0\s*;/.test(editor) || !/max-width:\s*100%/.test(editor) ||
+      !/max-width:\s*100%/.test(input)) {
+    failures.push("shared folder editors and their input must stay bounded by the available strip width");
+  }
+  if (!/min-height:\s*44px/.test(input) || !/min-height:\s*44px/.test(button) ||
+      /(?:min-height|height):/.test(compactButton)) {
+    failures.push("folder inputs and compact actions must retain at least 44px touch targets");
+  }
+  if (!/flex-wrap:\s*wrap/.test(tools)) {
+    failures.push("Library rename tools must retain their existing wrapping layout");
+  }
+  return failures;
+}
+
 const checks = [];
 
 function check(label, condition, fix) {
@@ -149,6 +174,8 @@ const playerInfoCss = read("web/src/components/player/PlayerInfoPopover.css");
 const setupNudgeCss = read("web/src/components/SetupNudge.css");
 const installPromptCss = read("web/src/components/InstallPrompt.css");
 const profileMenuCss = read("web/src/components/ProfileMenu.css");
+const settingsSearchCss = read("web/src/components/SettingsSearch.css");
+const streamPickerCss = read("web/src/components/StreamPicker.css");
 const welcomeCss = read("web/src/components/WelcomeGuide.css");
 const appSource = read("web/src/App.tsx");
 const setupCredentials = read("web/src/lib/serverSetupCredentials.ts");
@@ -408,6 +435,39 @@ check(
     /padding-top:\s*calc\(64px\s*\*\s*var\(--density-scale\)\)/.test(ruleBlock(libraryScreensCss, ".lib-screen")) &&
     /padding-top:\s*var\(--sp-lg\)/.test(libraryPhoneRule),
   "LibraryScreens.css must reserve the unconsumed safe offset, 44px search/profile control, field padding/border and a gap only in absolute-search layouts; phone and short-landscape in-flow spacing must stay unchanged.",
+);
+
+check(
+  "shared folder editors wrap within narrow Library and Watchlist strips",
+  validateFolderFormsCss(libraryScreensCss, themeCss).length === 0,
+  "LibraryScreens.css must bound and wrap inline folder editors without shrinking their 44px controls or removing Library rename wrapping.",
+);
+
+check(
+  "profile dialog has a reliable theme background without backdrop blur",
+  /background:\s*var\(--bg-1\)\s*;/.test(ruleBlock(profileMenuCss, ".profile-menu-pop.glass-raised")),
+  "ProfileMenu.css must give the floating dialog an opaque theme background above the shared translucent glass style.",
+);
+
+check(
+  "floating settings search results have an opaque theme surface and touch-sized actions",
+  /background:\s*var\(--bg-1\)\s*;/.test(ruleBlock(settingsSearchCss, ".settings-search-results.glass-raised")) &&
+    /min-height:\s*44px/.test(ruleBlock(settingsSearchCss, ".settings-search-result")) &&
+    /min-height:\s*44px/.test(ruleBlock(settingsSearchCss, ".settings-search-empty button")),
+  "SettingsSearch.css must keep floating results readable without blur and every result/Clear action at least 44px tall.",
+);
+
+const mobileStreamsCss = atRuleBlock(streamPickerCss, "@media (max-width: 620px) {");
+check(
+  "mobile stream titles use a full-width row above quality and cache status",
+  /display:\s*grid/.test(ruleBlock(mobileStreamsCss, ".stream-row")) &&
+    /grid-template-areas:\s*"main main"\s*"quality status"/.test(ruleBlock(mobileStreamsCss, ".stream-row")) &&
+    /grid-area:\s*main/.test(ruleBlock(mobileStreamsCss, ".stream-main")) &&
+    /flex-wrap:\s*wrap/.test(ruleBlock(mobileStreamsCss, ".stream-title-line")) &&
+    /white-space:\s*normal/.test(ruleBlock(mobileStreamsCss, ".stream-name")) &&
+    /display:\s*flex/.test(ruleBlock(streamPickerCss, ".stream-row")) &&
+    !/display:\s*none/.test(mobileStreamsCss),
+  "StreamPicker.css must reserve full mobile title/metadata width without hiding quality/status labels or changing desktop rows.",
 );
 
 check(

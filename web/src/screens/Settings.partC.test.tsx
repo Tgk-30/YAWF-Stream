@@ -176,6 +176,22 @@ beforeEach(() => {
 });
 
 describe("Settings · Desktop uninstall guidance", () => {
+  it.each([false, true])("gives Android app-settings uninstall guidance without desktop retention claims (server=%s)", (connected) => {
+    mockDeviceKind = "android";
+    mockAndroidAppUi = true;
+    mockIsDesktopTauri = false;
+    mockServerURL = connected ? "https://server.example" : null;
+    renderAt();
+    expect(screen.getByText("To uninstall YAWF Stream, open Android Settings, choose Apps, then YAWF Stream and Uninstall.")).toBeInTheDocument();
+    expect(screen.queryByText(/Uninstalling does not remove your data/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/this desktop's normal app management/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Installed as a browser app/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Windows app settings" })).not.toBeInTheDocument();
+    expect(getAppInstallInfo).not.toHaveBeenCalled();
+    expect(openExternalURL).not.toHaveBeenCalled();
+    expect(screen.queryByText("Uninstalling this Android app does not delete your server profile or its saved server data.") != null).toBe(connected);
+  });
+
   it("renders Windows uninstall guidance and opens the Windows app settings URI", async () => {
     const user = userEvent.setup();
     renderAt();

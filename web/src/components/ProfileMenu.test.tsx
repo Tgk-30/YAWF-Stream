@@ -12,6 +12,11 @@ import { readFileSync } from "node:fs";
 
 const profileMenuCss = readFileSync("src/components/ProfileMenu.css", "utf8");
 
+it("backs the floating profile dialog with an opaque theme surface without blur", () => {
+  const rule = profileMenuCss.match(/\.profile-menu-pop\.glass-raised\s*\{([^}]+)\}/)?.[1] ?? "";
+  expect(rule, "profile dialog needs its own reliable theme background above shared glass").toMatch(/background:\s*var\(--bg-1\)\s*;/);
+});
+
 const updateSettings = vi.fn();
 const updateProfileRecord = vi.fn();
 let activeProfile: { id: string } | null = { id: "profile-1" };
