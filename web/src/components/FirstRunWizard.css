@@ -6,12 +6,15 @@
   z-index: 80;
   display: grid;
   place-items: center;
+  /* A definite, shrinkable track bounds the card inside the safe-area padding.
+     The card owns scrolling, not an oversized child of a scrolling grid. */
+  grid-template-rows: minmax(0, 1fr);
   padding:
     max(var(--sp-xl), var(--safe-area-top))
     max(var(--sp-xl), var(--safe-area-right))
     max(var(--sp-xl), var(--safe-area-bottom))
     max(var(--sp-xl), var(--safe-area-left));
-  overflow-y: auto;
+  overflow-y: hidden;
   background:
     radial-gradient(120% 120% at 50% 0%, rgba(var(--accent-rgb), 0.16), transparent 60%),
     rgba(6, 8, 14, 0.55);
@@ -29,6 +32,11 @@
   display: flex;
   flex-direction: column;
   width: min(680px, 100%);
+  min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: clamp(var(--sp-xl), 4.5vw, calc(52px * var(--density-scale)));
   border-radius: var(--r-lg);
   background: var(--glass-tint-hero);
@@ -259,6 +267,8 @@
 }
 .first-run-primary,
 .first-run-secondary {
+  min-width: 44px;
+  min-height: 44px;
   font-size: 0.9375rem;
   font-weight: 650;
   font-family: inherit;

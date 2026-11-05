@@ -367,6 +367,29 @@ describe("Library - folder management", () => {
     ];
   };
 
+  it.each(["create", "rename"])("keeps %s actions paired beside a separately shrinkable input", async (mode) => {
+    withEntries();
+    render(<Library />);
+    if (mode === "create") {
+      await userEvent.click(await screen.findByRole("button", { name: /new folder/i }));
+    } else {
+      await userEvent.click(await screen.findByRole("button", { name: "Action" }));
+      await userEvent.click(screen.getByRole("button", { name: "Rename" }));
+    }
+    const input = screen.getByRole("textbox", { name: mode === "create" ? "New folder name" : "Rename folder Action" });
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    const submit = screen.getByRole("button", { name: mode === "create" ? "Create" : "Save" });
+    expect(input.parentElement).toHaveClass("lib-folder-new");
+    expect(cancel.parentElement).toHaveClass("lib-folder-actions");
+    expect(submit.parentElement).toBe(cancel.parentElement);
+    expect(cancel.parentElement?.parentElement).toBe(input.parentElement);
+    expect(cancel.parentElement).not.toContainElement(input);
+    await userEvent.click(cancel);
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(createFolderFn).not.toHaveBeenCalled();
+    expect(saveFolderFn).not.toHaveBeenCalled();
+  });
+
   it("creates a folder from the inline creator", async () => {
     withEntries();
     render(<Library />);

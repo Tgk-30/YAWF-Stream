@@ -190,6 +190,13 @@
   align-items: center;
   gap: calc(6px * var(--density-scale));
 }
+.lib-folder-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  gap: calc(6px * var(--density-scale));
+}
 .lib-folder-input {
   min-width: 140px;
   max-width: 100%;
@@ -213,6 +220,20 @@
   align-items: center;
   gap: var(--sp-sm);
   margin-bottom: var(--sp-md);
+}
+
+/* Wrapping uses hypothetical widths before flex shrinking. Let the input take
+   the actual remaining space, including scrollbar reserves, rather than a
+   140px row reservation. Keep its 44px target and the actions together. */
+@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {
+  .lib-folder-new {
+    flex: 1 1 100%;
+  }
+  .lib-folder-new > .lib-folder-input {
+    flex: 1 1 0;
+    width: 0;
+    min-width: 44px;
+  }
 }
 
 /* Organize mode - one manageable row per saved title. */

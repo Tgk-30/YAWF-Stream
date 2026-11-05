@@ -8737,14 +8737,14 @@ describe("WebviewPlayer", () => {
       render(<VideoPlayer url="https://x/test.mp4" title="Delayed fullscreen" onClose={() => {}} />);
       const video = document.querySelector("video.player-video") as HTMLVideoElement;
       const src = video.src;
-      expect(screen.queryByRole("button", { name: "Enter fullscreen" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Enter system fullscreen" })).toBeNull();
       Object.defineProperty(video, "webkitSupportsFullscreen", { configurable: true, value: true });
       fireEvent(video, new Event(event));
-      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Enter system fullscreen" })).toBeInTheDocument();
       expect(document.querySelector("video.player-video")).toBe(video);
       expect(video.src).toBe(src);
       expect(enter).not.toHaveBeenCalled();
-      await userEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+      await userEvent.click(screen.getByRole("button", { name: "Enter system fullscreen" }));
       expect(enter).toHaveBeenCalledTimes(1);
       expect(enter.mock.instances[0]).toBe(video);
     } finally { restores.reverse().forEach((restore) => restore()); }
@@ -8760,13 +8760,13 @@ describe("WebviewPlayer", () => {
     try {
       render(<VideoPlayer url="https://x/test.mp4" title="Changing fullscreen" onClose={() => {}} />);
       const video = document.querySelector("video.player-video") as HTMLVideoElement;
-      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Enter system fullscreen" })).toBeInTheDocument();
       Object.defineProperty(video, "webkitSupportsFullscreen", { configurable: true, value: false });
       fireEvent.emptied(video);
-      expect(screen.queryByRole("button", { name: "Enter fullscreen" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Enter system fullscreen" })).toBeNull();
       Object.defineProperty(video, "webkitSupportsFullscreen", { configurable: true, value: true });
       fireEvent.loadedMetadata(video);
-      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Enter system fullscreen" })).toBeInTheDocument();
       expect(enter).not.toHaveBeenCalled();
     } finally { restores.reverse().forEach((restore) => restore()); }
   });
@@ -8802,10 +8802,10 @@ describe("WebviewPlayer", () => {
       available = true;
       act(() => { video.dispatchEvent(new Event("loadedmetadata")); });
       expect(reads).not.toHaveBeenCalled();
-      expect(screen.queryByRole("button", { name: "Enter fullscreen" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Enter system fullscreen" })).toBeNull();
       fireEvent.loadedMetadata(next);
       expect(reads).toHaveBeenCalledTimes(1);
-      expect(screen.getByRole("button", { name: "Enter fullscreen" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Enter system fullscreen" })).toBeInTheDocument();
       expect(enter).not.toHaveBeenCalled();
       const nextRemove = vi.spyOn(next, "removeEventListener");
       const nextRegistrations = add.mock.calls.filter(([name, handler], index) =>
@@ -8837,12 +8837,125 @@ describe("WebviewPlayer", () => {
     );
     try {
       render(<VideoPlayer url="https://x/test.mp4" title="T" onClose={() => {}} />);
-      await userEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+      await userEvent.click(screen.getByRole("button", { name: "Enter system fullscreen" }));
       expect(enterWebKitFullscreen).toHaveBeenCalledWith();
     } finally {
       restoreSupportsFullscreen();
       restoreEnterFullscreen();
     }
+  });
+
+  it("[71] uses the full player for prefixed container entry and exit", async () => {
+    const request = vi.fn(function(this: HTMLElement) {
+      Object.defineProperty(document, "webkitFullscreenElement", { configurable: true, value: this });
+      document.dispatchEvent(new Event("webkitfullscreenchange"));
+    });
+    const exit = vi.fn(() => {
+      Object.defineProperty(document, "webkitFullscreenElement", { configurable: true, value: null });
+      document.dispatchEvent(new Event("webkitfullscreenchange"));
+    });
+    const restores = [replaceProperty(HTMLElement.prototype, "requestFullscreen", undefined),
+      replaceProperty(HTMLElement.prototype, "webkitRequestFullscreen", request),
+      replaceProperty(document, "exitFullscreen", undefined), replaceProperty(document, "webkitExitFullscreen", exit),
+      replaceProperty(document, "webkitFullscreenElement", null)];
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Prefix owner" onClose={() => {}} />);
+      const pane = screen.getByRole("dialog", { name: "Playing Prefix owner" });
+      const video = pane.querySelector("video") as HTMLVideoElement;
+      const src = video.src;
+      await userEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+      expect(request.mock.instances[0]).toBe(pane);
+      expect(pane).toContainElement(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "Exit fullscreen" }));
+      expect(exit).toHaveBeenCalledTimes(1);
+      expect(document.querySelector("video")).toBe(video);
+      expect(video.src).toBe(src);
+    } finally { restores.reverse().forEach((restore) => restore()); }
+  });
+
+  it("[71] keeps standard priority without retrying another API after rejection", async () => {
+    const standard = vi.fn().mockRejectedValue(new Error("gesture rejected"));
+    const prefix = vi.fn(), native = vi.fn();
+    const restores = [replaceProperty(HTMLElement.prototype, "requestFullscreen", standard),
+      replaceProperty(HTMLElement.prototype, "webkitRequestFullscreen", prefix),
+      replaceProperty(HTMLVideoElement.prototype, "webkitSupportsFullscreen", true),
+      replaceProperty(HTMLVideoElement.prototype, "webkitEnterFullscreen", native)];
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Priority" onClose={() => {}} />);
+      await userEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+      expect(standard).toHaveBeenCalledTimes(1);
+      expect(prefix).not.toHaveBeenCalled(); expect(native).not.toHaveBeenCalled();
+    } finally { restores.reverse().forEach((restore) => restore()); }
+  });
+
+  it("[71] explains genuine video-only System fullscreen without promising Safari on iPhone", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    const enter = vi.fn();
+    const restores = [replaceProperty(HTMLElement.prototype, "requestFullscreen", undefined),
+      replaceProperty(HTMLElement.prototype, "webkitRequestFullscreen", undefined),
+      replaceProperty(HTMLVideoElement.prototype, "webkitSupportsFullscreen", true),
+      replaceProperty(HTMLVideoElement.prototype, "webkitEnterFullscreen", enter),
+      replaceProperty(navigator, "userAgent", "iPhone"), replaceProperty(navigator, "standalone", true)];
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="System" onClose={() => {}} />);
+      expect(screen.getByRole("button", { name: "Enter system fullscreen" })).toHaveTextContent("System fullscreen");
+      await userEvent.click(screen.getByRole("button", { name: "Enter system fullscreen" }));
+      expect(enter.mock.instances[0]).toBe(document.querySelector("video"));
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByText("System fullscreen uses your device's controls instead of YAWF controls.")).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: /Open YAWF in browser/ })).toBeNull();
+      expect(screen.queryByText("YAWF fullscreen in Safari")).toBeNull();
+    } finally { restores.reverse().forEach((restore) => restore()); }
+  });
+
+  it.each(["iPad", "Macintosh"])("[71] displays safe manual Safari guidance without browser handoff for %s PWA", async (ua) => {
+    deviceKindMock.mockReturnValue("ios");
+    vi.stubGlobal("location", new URL("https://user:password@server.example/yawf/watch?session=omit#capability-omit"));
+    const restores = [replaceProperty(navigator, "userAgent", ua), replaceProperty(navigator, "platform", "MacIntel"),
+      replaceProperty(navigator, "maxTouchPoints", 5), replaceProperty(navigator, "standalone", true),
+      replaceProperty(HTMLElement.prototype, "requestFullscreen", undefined),
+      replaceProperty(HTMLElement.prototype, "webkitRequestFullscreen", undefined)];
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const close = vi.fn();
+    try {
+      render(<VideoPlayer url="https://provider.example/api/stream/capability.m3u8?token=omit" title="Safari page" onClose={close} />);
+      const video = document.querySelector("video") as HTMLVideoElement;
+      const src = video.src; video.currentTime = 23;
+      vi.mocked(video.pause).mockClear();
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByText("YAWF fullscreen in Safari")).toBeInTheDocument();
+      expect(screen.getByText("For fullscreen with YAWF controls, open Safari and enter this server address. Sign in and resume playback there if needed.")).toBeInTheDocument();
+      const address = screen.getByText("https://server.example/yawf/watch");
+      expect(address.tagName).toBe("CODE");
+      expect(address).toHaveStyle({ display: "block", overflowWrap: "anywhere" });
+      expect(address.closest("a, button")).toBeNull();
+      expect(address.parentElement).not.toHaveTextContent(/password|session=|capability|provider\.example/);
+      expect(screen.queryByRole("link", { name: /Open YAWF in browser/ })).toBeNull();
+      expect(open).not.toHaveBeenCalled();
+      expect(video.pause).not.toHaveBeenCalled();
+      expect(video.currentTime).toBe(23); expect(video.src).toBe(src);
+      expect(document.querySelector("video")).toBe(video); expect(close).not.toHaveBeenCalled();
+    } finally { open.mockRestore(); restores.reverse().forEach((restore) => restore()); }
+  });
+
+  it.each([
+    { label: "iPhone PWA", ua: "iPhone", touch: 5, standalone: true, container: false },
+    { label: "iPad Safari", ua: "iPad", touch: 5, standalone: false, container: false },
+    { label: "desktop Mac PWA", ua: "Macintosh", touch: 0, standalone: true, container: false },
+    { label: "prefixed container iPad PWA", ua: "iPad", touch: 5, standalone: true, container: true },
+  ])("[71] withholds manual Safari guidance for $label", async ({ ua, touch, standalone, container }) => {
+    deviceKindMock.mockReturnValue("ios"); vi.stubGlobal("location", new URL("https://server.example/"));
+    const restores = [replaceProperty(navigator, "userAgent", ua), replaceProperty(navigator, "platform", "MacIntel"),
+      replaceProperty(navigator, "maxTouchPoints", touch), replaceProperty(navigator, "standalone", standalone),
+      replaceProperty(HTMLElement.prototype, "requestFullscreen", undefined),
+      replaceProperty(HTMLElement.prototype, "webkitRequestFullscreen", container ? vi.fn() : undefined)];
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="No promise" onClose={() => {}} />);
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.queryByRole("link", { name: /Open YAWF in browser/ })).toBeNull();
+      expect(screen.queryByText("YAWF fullscreen in Safari")).toBeNull();
+      expect(screen.queryByText("https://server.example/")).toBeNull();
+    } finally { restores.reverse().forEach((restore) => restore()); }
   });
 
   it("offers Picture-in-Picture only with a supported API and tracks its active state", async () => {

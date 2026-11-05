@@ -260,24 +260,26 @@ export function Library() {
                 }
               }}
             />
-            <button
-              type="button"
-              className="btn btn-sm btn-prominent"
-              disabled={busy || newName.trim().length === 0}
-              onClick={() => void createFolder()}
-            >
-              Create
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm"
-              onClick={() => {
-                setCreating(false);
-                setNewName("");
-              }}
-            >
-              Cancel
-            </button>
+            <span className="lib-folder-actions">
+              <button
+                type="button"
+                className="btn btn-sm btn-prominent"
+                disabled={busy || newName.trim().length === 0}
+                onClick={() => void createFolder()}
+              >
+                Create
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => {
+                  setCreating(false);
+                  setNewName("");
+                }}
+              >
+                Cancel
+              </button>
+            </span>
           </span>
         ) : (
           <button
@@ -294,7 +296,7 @@ export function Library() {
       {selected != null && (
         <div className="lib-folder-tools">
           {renamingId === selected.id ? (
-            <>
+            <span className="lib-folder-new">
               <input
                 autoFocus
                 type="text"
@@ -308,18 +310,20 @@ export function Library() {
                   if (e.key === "Escape") setRenamingId(null);
                 }}
               />
-              <button
-                type="button"
-                className="btn btn-sm btn-prominent"
-                disabled={busy || renameName.trim().length === 0}
-                onClick={() => void renameFolder()}
-              >
-                Save
-              </button>
-              <button type="button" className="btn btn-sm" onClick={() => setRenamingId(null)}>
-                Cancel
-              </button>
-            </>
+              <span className="lib-folder-actions">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-prominent"
+                  disabled={busy || renameName.trim().length === 0}
+                  onClick={() => void renameFolder()}
+                >
+                  Save
+                </button>
+                <button type="button" className="btn btn-sm" onClick={() => setRenamingId(null)}>
+                  Cancel
+                </button>
+              </span>
+            </span>
           ) : confirmDelete ? (
             <>
               <span className="t-secondary">

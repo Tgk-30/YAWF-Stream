@@ -46,6 +46,7 @@ import {
   mpvStop,
 } from "../lib/tauri";
 import { deviceKind, isStandaloneDisplay } from "../lib/platform";
+import { containerFullscreenExit, containerFullscreenRequest, ipadSafariPageUrl } from "../lib/playerFullscreen";
 import {
   isAndroidAppUiContext,
   isAndroidExternalPlayerEligible,
@@ -410,21 +411,27 @@ function playerFullscreenContainer(video: HTMLVideoElement): HTMLElement | null 
   return container instanceof HTMLElement ? container : null;
 }
 
-/** Toggle fullscreen on the complete player pane. iPhone Safari exposes its video-only
- * WebKit API instead of the standard container fullscreen API. */
+/** Prefer complete-player fullscreen; keep genuine video-only WebKit fallback. */
 function toggleFullscreen(el: HTMLElement, video?: HTMLVideoElement): void {
   const d = document as WebKitDocument;
   const active = document.fullscreenElement ?? d.webkitFullscreenElement ?? null;
   if (active != null) {
-    const exit = document.exitFullscreen?.();
-    if (exit != null) void exit.catch(() => {});
-    return;
-  }
-  if (typeof el.requestFullscreen === "function") {
     try {
-      void el.requestFullscreen().then(lockLandscapeOrientation).catch(() => {});
+      const exit = containerFullscreenExit(d)?.();
+      if (exit != null) void exit.catch(() => {});
     } catch {
       // Browser rejected the gesture or exposes a partial fullscreen API.
+    }
+    return;
+  }
+  const request = containerFullscreenRequest(el);
+  if (request != null) {
+    try {
+      const result = request();
+      if (result != null) void result.then(lockLandscapeOrientation).catch(() => {});
+      else lockLandscapeOrientation();
+    } catch {
+      // Do not switch APIs after a rejected request or leave this user gesture.
     }
     return;
   }
@@ -3206,6 +3213,8 @@ function WebviewPlayer({
     return () => window.removeEventListener("keydown", dismiss);
   }, [endPrediction.show, ended]);
   const [fullscreenSupported, setFullscreenSupported] = useState(false);
+  const [systemFullscreen, setSystemFullscreen] = useState(false);
+  const [safariPageUrl, setSafariPageUrl] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [pictureInPictureSupported, setPictureInPictureSupported] = useState(false);
   const [isPictureInPicture, setIsPictureInPicture] = useState(false);
@@ -4252,11 +4261,16 @@ function WebviewPlayer({
     if (video == null || container == null) return;
     const webkitVideo = video as WebKitVideoElement;
     const syncFullscreenSupport = () => {
-      const supportsContainerFullscreen = typeof container.requestFullscreen === "function";
+      const supportsContainerFullscreen = containerFullscreenRequest(container) != null;
       const supportsWebKitFullscreen =
         webkitVideo.webkitSupportsFullscreen === true &&
         typeof webkitVideo.webkitEnterFullscreen === "function";
       setFullscreenSupported(supportsContainerFullscreen || supportsWebKitFullscreen);
+      setSystemFullscreen(!supportsContainerFullscreen && supportsWebKitFullscreen);
+      setSafariPageUrl(supportsContainerFullscreen ? null : ipadSafariPageUrl(
+        window.location, navigator, isStandaloneDisplay(),
+        deviceKind() === "ios" && !isTauri() && !isAndroidAppUiContext(),
+      ));
     };
     const readinessEvents = ["loadedmetadata", "canplay", "emptied"];
     readinessEvents.forEach((event) => video.addEventListener(event, syncFullscreenSupport));
@@ -6665,9 +6679,9 @@ function WebviewPlayer({
                 type="button"
                 className={`chip player-osd-icon-button${isFullscreen ? " is-active" : ""}`}
                 onClick={togglePlayerFullscreen}
-                aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                aria-label={systemFullscreen ? (isFullscreen ? "Exit system fullscreen" : "Enter system fullscreen") : (isFullscreen ? "Exit fullscreen" : "Enter fullscreen")}
                 aria-pressed={isFullscreen}
-                title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                title={systemFullscreen ? "System fullscreen uses device controls instead of YAWF controls" : (isFullscreen ? "Exit fullscreen" : "Enter fullscreen")}
                 tabIndex={chromeVisible ? undefined : -1}
               >
                 <Icon name={isFullscreen ? "fullscreen-exit" : "fullscreen"} size={17} />
@@ -6838,12 +6852,12 @@ function WebviewPlayer({
                     type="button"
                     className={`chip player-touch-action${isFullscreen ? " is-active" : ""}`}
                     onClick={togglePlayerFullscreen}
-                    aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                    aria-label={systemFullscreen ? (isFullscreen ? "Exit system fullscreen" : "Enter system fullscreen") : (isFullscreen ? "Exit fullscreen" : "Enter fullscreen")}
                     aria-pressed={isFullscreen}
                     tabIndex={chromeVisible ? undefined : -1}
                   >
                     <Icon name={isFullscreen ? "fullscreen-exit" : "fullscreen"} size={18} />
-                    <span className="player-touch-action-label">Fullscreen</span>
+                    <span className="player-touch-action-label">{systemFullscreen ? "System fullscreen" : "Fullscreen"}</span>
                   </button>
                 )}
                 {onPlayNext != null && (
@@ -6976,6 +6990,23 @@ function WebviewPlayer({
               </p>
             ) : null}
           </div>
+          {(systemFullscreen || safariPageUrl != null) && (
+            <div className="player-options-section" aria-label="Fullscreen options">
+              <span className="t-secondary">Fullscreen</span>
+              {systemFullscreen && (
+                <p className="player-options-status">
+                  System fullscreen uses your device's controls instead of YAWF controls.
+                </p>
+              )}
+              {safariPageUrl != null && (
+                <div className="player-options-status">
+                  <strong>YAWF fullscreen in Safari</strong>
+                  <p>For fullscreen with YAWF controls, open Safari and enter this server address. Sign in and resume playback there if needed.</p>
+                  <code style={{ display: "block", overflowWrap: "anywhere" }}>{safariPageUrl}</code>
+                </div>
+              )}
+            </div>
+          )}
           <div
             className="player-options-section player-options-external"
             aria-labelledby="player-external-heading"
