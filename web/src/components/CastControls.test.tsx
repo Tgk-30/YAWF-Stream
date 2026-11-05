@@ -313,4 +313,99 @@ describe("CastControls", () => {
       screen.queryByRole("button", { name: "Cast to a device" }),
     ).toBeNull();
   });
+
+  function expectNoReceiverCommands() {
+    for (const command of [discover, load, control, setVolume, stop, dismissPicker]) {
+      expect(command, "portal ownership must not mutate a cast receiver").not.toHaveBeenCalled();
+    }
+  }
+
+  it.each([false, true])("owns an already-casting mount inside the player pane (fullscreen=%s)", (fullscreen) => {
+    resetState({ phase: "casting", device: devices[0] });
+    const pane = document.createElement("div");
+    pane.className = "player";
+    document.body.append(pane);
+    const previousFullscreen = Object.getOwnPropertyDescriptor(document, "fullscreenElement");
+    Object.defineProperty(document, "fullscreenElement", { configurable: true, value: fullscreen ? pane : null });
+    const onLocalPlaybackChange = vi.fn();
+    const { unmount } = render(<CastControls media={media} buttonClassName="cast-test-button" onLocalPlaybackChange={onLocalPlaybackChange} />, { container: pane });
+    try {
+      const bar = screen.getByRole("complementary", { name: "Casting to Living Room TV" });
+      expect(bar.parentElement, "initial casting bar must belong to its enclosing player, not body").toBe(pane);
+      expect(document.querySelectorAll(".casting-bar")).toHaveLength(1);
+      expect(document.querySelector(".cast-picker-scrim")).toBeNull();
+      expect(onLocalPlaybackChange).toHaveBeenLastCalledWith(true);
+      expectNoReceiverCommands();
+    } finally {
+      unmount();
+      if (previousFullscreen) Object.defineProperty(document, "fullscreenElement", previousFullscreen);
+      else delete (document as unknown as Record<string, unknown>).fullscreenElement;
+      pane.remove();
+    }
+    expect(document.querySelector(".casting-bar")).toBeNull();
+    expect(onLocalPlaybackChange).toHaveBeenLastCalledWith(false);
+    expectNoReceiverCommands();
+  });
+
+  it("keeps picker-to-casting-to-idle transitions in one mounted player owner without duplicates", () => {
+    resetState({ phase: "selecting", devices });
+    const onLocalPlaybackChange = vi.fn();
+    const player = () => <div className="player" data-testid="cast-player"><CastControls media={media} buttonClassName="cast-test-button" onLocalPlaybackChange={onLocalPlaybackChange} /></div>;
+    const { rerender, unmount } = render(player());
+    const pane = screen.getByTestId("cast-player");
+    expect(screen.getByRole("dialog", { name: "Cast to a device" }).closest(".player"), "picker must use the attached parent, not an early null parent ref").toBe(pane);
+    expect(document.querySelectorAll(".cast-picker-scrim")).toHaveLength(1);
+    expect(document.querySelectorAll(".casting-bar")).toHaveLength(0);
+
+    resetState({ phase: "loading", devices, device: devices[0] });
+    rerender(player());
+    expect(screen.getByRole("dialog", { name: "Cast to a device" }).closest(".player")).toBe(pane);
+    expect(document.querySelectorAll(".cast-picker-scrim")).toHaveLength(1);
+    expect(onLocalPlaybackChange).toHaveBeenLastCalledWith(true);
+
+    resetState({ phase: "casting", device: devices[0] });
+    rerender(player());
+    expect(screen.getByRole("complementary", { name: "Casting to Living Room TV" }).parentElement).toBe(pane);
+    expect(document.querySelectorAll(".cast-picker-scrim")).toHaveLength(0);
+    expect(document.querySelectorAll(".casting-bar")).toHaveLength(1);
+
+    resetState();
+    rerender(player());
+    expect(document.querySelectorAll(".cast-picker-scrim")).toHaveLength(0);
+    expect(document.querySelectorAll(".casting-bar")).toHaveLength(0);
+    expect(onLocalPlaybackChange).toHaveBeenLastCalledWith(false);
+    unmount();
+    expectNoReceiverCommands();
+  });
+
+  it.each(["selecting", "casting"] as const)("cleans up the player-owned %s portal when its owner unmounts", (phase) => {
+    resetState({ phase, devices, device: devices[0] });
+    const { unmount } = render(<div className="player" data-testid="cast-player"><CastControls media={media} buttonClassName="cast-test-button" /></div>);
+    const pane = screen.getByTestId("cast-player");
+    const surface = phase === "casting"
+      ? screen.getByRole("complementary", { name: "Casting to Living Room TV" })
+      : screen.getByRole("dialog", { name: "Cast to a device" });
+    expect(pane, "active cast surface must be owned before owner cleanup").toContainElement(surface);
+    unmount();
+    expect(surface.isConnected).toBe(false);
+    expect(document.querySelector(".cast-picker-scrim")).toBeNull();
+    expect(document.querySelector(".casting-bar")).toBeNull();
+    expectNoReceiverCommands();
+  });
+
+  it("retains body fallback for generic cast controls through picker and casting phases", () => {
+    resetState({ phase: "selecting", devices });
+    const { rerender, unmount } = render(<CastControls media={media} buttonClassName="cast-test-button" />);
+    expect(screen.getByRole("dialog", { name: "Cast to a device" }).parentElement?.parentElement).toBe(document.body);
+    expect(document.querySelectorAll(".cast-picker-scrim")).toHaveLength(1);
+    resetState({ phase: "casting", device: devices[0] });
+    rerender(<CastControls media={media} buttonClassName="cast-test-button" />);
+    expect(screen.getByRole("complementary", { name: "Casting to Living Room TV" }).parentElement).toBe(document.body);
+    expect(document.querySelector(".cast-picker-scrim")).toBeNull();
+    expect(document.querySelectorAll(".casting-bar")).toHaveLength(1);
+    unmount();
+    expect(document.querySelector(".casting-bar")).toBeNull();
+    expectNoReceiverCommands();
+  });
+
 });

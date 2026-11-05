@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   castController,
@@ -214,6 +214,17 @@ export function CastControls({
   const state = useCastState();
   const available = isTauri();
   const localSuspended = state.phase === "loading" || state.phase === "casting";
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [portalOwner, setPortalOwner] = useState<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!available) return;
+    // Resolve after mount: an already-active cast must not escape a player pane
+    // whose parent ref was still null during render. The same owner works before
+    // and during standard fullscreen, without moving or duplicating controls.
+    const player = buttonRef.current?.closest(".player");
+    setPortalOwner(player instanceof HTMLElement ? player : document.body);
+  }, [available]);
 
   useEffect(() => {
     onLocalPlaybackChange?.(localSuspended);
@@ -232,6 +243,7 @@ export function CastControls({
   return (
     <>
       <button
+        ref={buttonRef}
         type="button"
         className={`${buttonClassName}${state.phase === "casting" ? " is-active" : ""}`}
         onClick={() => {
@@ -248,7 +260,7 @@ export function CastControls({
         <Icon name="cast" size={18} />
       </button>
 
-      {pickerPhase != null &&
+      {pickerPhase != null && portalOwner != null &&
         createPortal(
           <CastDevicePicker
             phase={pickerPhase}
@@ -259,11 +271,11 @@ export function CastControls({
             onRetry={() => void castController.discover()}
             onClose={() => castController.dismissPicker()}
           />,
-          document.body,
+          portalOwner,
         )}
 
-      {state.phase === "casting" &&
-        createPortal(<CastingBar />, document.body)}
+      {state.phase === "casting" && portalOwner != null &&
+        createPortal(<CastingBar />, portalOwner)}
     </>
   );
 }

@@ -549,6 +549,106 @@ describe("VideoPlayer shell", () => {
     expect(document.querySelector(".player-pause-screen")).not.toBeNull();
   });
 
+  it.each([
+    ["ios", "Audio tracks", "Close audio tracks"],
+    ["ios", "Playback settings", "Close playback settings"],
+    ["ios", "Subtitles", "Close subtitles menu"],
+    ["android", "Audio tracks", "Close audio tracks"],
+    ["android", "Playback settings", "Close playback settings"],
+    ["android", "Subtitles", "Close subtitles menu"],
+  ] as const)("isolates %s touch %s menus without changing playback", async (device, menuName, closeName) => {
+    deviceKindMock.mockReturnValue(device);
+    if (device === "android") {
+      Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+        configurable: true, value: { getInsets: vi.fn() },
+      });
+    }
+    captionMenuMode.actual = true;
+    const onClose = vi.fn();
+    const view = render(<VideoPlayer url="https://x/movie.mp4" title="Touch modal" onClose={onClose}
+      serverOptimized={{
+        qualities: ["480p"],
+        loadAudioTracks: vi.fn(async () => [
+          { index: 0, label: "English", language: "eng", default: true },
+          { index: 1, label: "Japanese", language: "jpn", default: false },
+        ] satisfies ServerAudioTrack[]),
+        request: vi.fn(),
+      }} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireEvent.canPlay(video);
+    expect(video.play).toHaveBeenCalledTimes(1);
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, value: 42, writable: true },
+      paused: { configurable: true, value: device === "android" },
+    });
+    const src = video.src;
+    const playCalls = vi.mocked(video.play).mock.calls.length;
+    const pauseCalls = vi.mocked(video.pause).mock.calls.length;
+    const loadCalls = vi.mocked(video.load).mock.calls.length;
+    const pane = screen.getByRole("dialog", { name: "Playing Touch modal" });
+    const header = pane.querySelector(".player-bar")!;
+    const controls = pane.querySelector(".player-touch-controls")!;
+    const trigger = screen.getByRole("button", { name: menuName });
+    const assertMediaUnchanged = () => {
+      expect(document.querySelector("video.player-video")).toBe(video);
+      expect(video.src).toBe(src);
+      expect(video.currentTime).toBe(42);
+      expect(video.paused).toBe(device === "android");
+      expect(video.play).toHaveBeenCalledTimes(playCalls);
+      expect(video.pause).toHaveBeenCalledTimes(pauseCalls);
+      expect(video.load).toHaveBeenCalledTimes(loadCalls);
+      expect(onClose).not.toHaveBeenCalled();
+    };
+    for (const dismiss of ["outside", "Escape", "Close"]) {
+      await userEvent.click(trigger);
+      const dialog = screen.getByRole("dialog", { name: menuName });
+      expect(pane).toHaveClass("has-touch-menu");
+      expect(header).toHaveAttribute("inert");
+      expect(header).toHaveAttribute("aria-hidden", "true");
+      expect(controls).toHaveAttribute("inert");
+      expect(controls).toHaveAttribute("aria-hidden", "true");
+      expect(screen.queryByRole("button", { name: "Close player" })).toBeNull();
+      const scrim = screen.getByRole("button", { name: "Dismiss player menu" });
+      expect(scrim).toHaveAttribute("tabindex", "-1");
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+      await userEvent.tab();
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+      fireEvent.pointerDown(scrim, { pointerType: "touch" });
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+      if (dismiss === "outside") await userEvent.click(scrim);
+      else if (dismiss === "Escape") fireEvent.keyDown(window, { key: "Escape" });
+      else await userEvent.click(within(dialog).getByRole("button", { name: closeName }));
+      expect(screen.queryByRole("dialog", { name: menuName })).toBeNull();
+      expect(pane).not.toHaveClass("has-touch-menu");
+      expect(header).not.toHaveAttribute("inert");
+      expect(controls).not.toHaveAttribute("inert");
+      expect(trigger).toHaveFocus();
+      expect(screen.queryByRole("button", { name: "Dismiss player menu" })).toBeNull();
+      assertMediaUnchanged();
+    }
+    view.unmount();
+    delete (window as unknown as Record<string, unknown>).__YAWF_NATIVE_SAFE_AREA__;
+    deviceKindMock.mockReturnValue("mac");
+    render(<VideoPlayer url="https://x/desktop.mp4" title="Desktop modal" onClose={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    expect(screen.getByRole("dialog", { name: "Playback settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close player" })).toBeInTheDocument();
+    expect(document.querySelector(".player-bar")).not.toHaveAttribute("inert");
+    expect(document.querySelector(".player")).not.toHaveClass("has-touch-menu");
+    expect(screen.queryByRole("button", { name: "Dismiss player menu" })).toBeNull();
+  });
+
+  it("layers touch menu isolation and bottom-left tablet sheets without changing desktop rules", () => {
+    const css = readFileSync("src/components/VideoPlayer.css", "utf8");
+    expect(css).toMatch(/\.player-touch-menu-scrim\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;[^}]*z-index:\s*17;[^}]*background:\s*rgba\(0, 0, 0, 0\.6[0-9]\)/s);
+    expect(css).toMatch(/\.player\.is-touch-player\.has-touch-menu > \.player-bar,[^{}]*\.webview-player\.is-touch-player\.has-touch-menu \.player-touch-controls\s*\{[^}]*visibility:\s*hidden;/s);
+    expect(css).toMatch(/\.player\.is-touch-player \.player-options-menu,\s*\.player\.is-touch-player \.captions-menu\s*\{[^}]*z-index:\s*18;/s);
+    expect(css.match(/\.player-touch-menu-scrim\s*\{[^}]*\}/s)?.[0]).not.toMatch(/(?:backdrop-)?filter:/);
+    expect(css).toMatch(/\.player\.is-touch-player \.player-options-menu\.is-touch-audio-sheet\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/s);
+    expect(css).toMatch(/@media \(min-width: 768px\) and \(min-height: 501px\)\s*\{[^{}]*\.player\.is-touch-player \.player-options-menu:is\(\.is-touch-audio-sheet, \.is-touch-settings\),[^{}]*\.player\.is-touch-player \.captions-menu\s*\{[^}]*top:\s*auto;[^}]*right:\s*auto;[^}]*bottom:\s*max\([^}]*left:\s*max\([^}]*width:\s*min\(\s*440px/s);
+    expect(css).not.toContain(":has(");
+  });
+
   it("labels the touch fit category separately from its current value", async () => {
     deviceKindMock.mockReturnValue("ios");
     render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
@@ -752,6 +852,7 @@ describe("VideoPlayer shell", () => {
     await userEvent.click(audio);
     await userEvent.click(screen.getByRole("button", { name: "Retry audio tracks" }));
     expect(await screen.findByRole("button", { name: "French" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Close audio tracks" }));
     expect(screen.getByRole("button", { name: "Audio track, English" })).toBeInTheDocument();
     expect(loadAudioTracks).toHaveBeenCalledTimes(2);
     expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
@@ -1229,7 +1330,7 @@ describe("VideoPlayer shell", () => {
   it("keeps only the focused touch Audio sheet content-height and safe-area bounded", () => {
     const css = readFileSync("src/components/VideoPlayer.css", "utf8");
     expect(css).toMatch(
-      /\.player\.is-touch-player \.player-options-menu\.is-touch-audio-sheet\s*\{[^}]*bottom:\s*auto;[^}]*height:\s*auto;[^}]*max-height:\s*calc\([^}]*100%[^}]*var\(--safe-area-top\)[^}]*var\(--safe-area-bottom\)[^}]*\);[^}]*overflow-y:\s*auto;/s,
+      /\.player\.is-touch-player \.player-options-menu\.is-touch-audio-sheet\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\);[^}]*height:\s*auto;[^}]*max-height:\s*calc\([^}]*100%[^}]*var\(--safe-area-top\)[^}]*var\(--safe-area-bottom\)[^}]*\);[^}]*overflow-y:\s*auto;/s,
     );
     expect(css).toMatch(
       /\.player\.is-touch-player \.player-options-menu,\s*\.player\.is-touch-player \.captions-menu\s*\{[^}]*bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\);[^}]*max-height:\s*none;/s,
@@ -2255,7 +2356,7 @@ describe("WebviewPlayer", () => {
       expect(pause).not.toHaveBeenCalled();
       expect(screen.getByText(/Stream link copied/)).toBeInTheDocument();
 
-      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
       fireMediaError(document.querySelector("video.player-video") as HTMLVideoElement);
       expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /Open in external player/ })).toBeNull();

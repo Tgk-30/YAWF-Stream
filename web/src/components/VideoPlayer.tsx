@@ -1185,6 +1185,7 @@ export function VideoPlayer({
     mode === "webview" &&
     !androidTVNative &&
     ((dk === "ios" && !underTauri) || androidAppUi);
+  const touchMenuOpen = sharedTouchPlayer && (captionsOpen || webMenuOpen);
   const androidOnCloseRef = useRef(onClose);
   const androidOnProgressRef = useRef(onProgress);
   androidOnCloseRef.current = onClose;
@@ -2534,7 +2535,7 @@ export function VideoPlayer({
     <div className="player-backdrop" onClick={onClose}>
       <div
         ref={playerDialogRef}
-        className={`player${sharedTouchPlayer ? " is-touch-player" : ""}`}
+        className={`player${sharedTouchPlayer ? " is-touch-player" : ""}${touchMenuOpen ? " has-touch-menu" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={`Playing ${title}`}
@@ -2554,8 +2555,9 @@ export function VideoPlayer({
                 : "Opening native playback"}
         </span>
         <div
+          ref={(element) => element?.toggleAttribute("inert", touchMenuOpen)}
           className={`player-bar${webChromeShown ? " is-visible" : ""}`}
-          aria-hidden={hiddenWebChrome || undefined}
+          aria-hidden={hiddenWebChrome || touchMenuOpen || undefined}
           onPointerEnter={holdChrome}
           onPointerLeave={releaseChrome}
           onFocusCapture={focusChrome}
@@ -2999,6 +3001,9 @@ function WebviewPlayer({
   const previousPositionRef = useRef(0);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const touchMenuOpen = touchPlayer && (optionsOpen || captionsOpen);
+  const touchMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const touchMenuWasOpenRef = useRef(false);
   const optionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const audioShortcutRef = useRef<HTMLButtonElement | null>(null);
   const optionsOriginRef = useRef<"settings" | "audio" | null>(null);
@@ -3463,7 +3468,7 @@ function WebviewPlayer({
   // than merely while the player is open or autoplay is being attempted.
   useWakeLock(playing && !suspended);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onCaptionsOpenChange(captionsOpen);
   }, [captionsOpen, onCaptionsOpenChange]);
 
@@ -5610,6 +5615,7 @@ function WebviewPlayer({
 
   const toggleOptions = () => {
     optionsTriggerRef.current?.focus({ preventScroll: true });
+    if (touchPlayer && !optionsOpen) touchMenuTriggerRef.current = optionsTriggerRef.current;
     if (!optionsOpen) optionsOriginRef.current = "settings";
     audioOptionsRequestedRef.current = false;
     setCaptionsOpen(false);
@@ -6190,6 +6196,7 @@ function WebviewPlayer({
 
   const openAudioOptions = () => {
     audioShortcutRef.current?.focus({ preventScroll: true });
+    if (touchPlayer) touchMenuTriggerRef.current = audioShortcutRef.current;
     optionsOriginRef.current = "audio";
     audioOptionsRequestedRef.current = true;
     setCaptionsOpen(false);
@@ -6206,12 +6213,22 @@ function WebviewPlayer({
       optionsTriggerRef.current?.focus({ preventScroll: true });
     }
   }, [audioShortcutAvailable, optionsOpen]);
+  useEffect(() => {
+    // Restore after modal cleanup and after the background controls are no longer
+    // inert. Touch browsers need not focus a button when it is tapped.
+    if (touchMenuWasOpenRef.current && !touchMenuOpen) {
+      const trigger = touchMenuTriggerRef.current;
+      const fallback = optionsTriggerRef.current;
+      (trigger?.isConnected ? trigger : fallback)?.focus({ preventScroll: true });
+    }
+    touchMenuWasOpenRef.current = touchMenuOpen;
+  }, [touchMenuOpen]);
   const touchAudioSheet = touchPlayer && optionsOriginRef.current === "audio";
   const touchAudioFallbackSheet = touchAudioSheet && touchUnavailableAudioShortcut;
 
   return (
     <div
-      className={`webview-player${touchPlayer ? " is-touch-player" : ""}${suspended ? " is-casting" : ""}`}
+      className={`webview-player${touchPlayer ? " is-touch-player" : ""}${touchMenuOpen ? " has-touch-menu" : ""}${suspended ? " is-casting" : ""}`}
       ref={captionViewportRef}
       onPointerMove={onActivity}
     >
@@ -6514,7 +6531,11 @@ function WebviewPlayer({
         </div>
       </div>
       ) : (
-        <div className="player-touch-controls">
+        <div
+          className="player-touch-controls"
+          ref={(element) => element?.toggleAttribute("inert", touchMenuOpen)}
+          aria-hidden={touchMenuOpen || undefined}
+        >
           <div
             className={`player-touch-transport${chromeVisible ? " is-visible" : ""}`}
             aria-hidden={!chromeVisible || undefined}
@@ -6597,7 +6618,8 @@ function WebviewPlayer({
               <button
                 type="button"
                 className={`chip player-touch-action${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
-                onClick={() => {
+                onClick={(event) => {
+                  touchMenuTriggerRef.current = event.currentTarget;
                   setOptionsOpen(false);
                   setCaptionsOpen((open) => !open);
                 }}
@@ -6705,6 +6727,24 @@ function WebviewPlayer({
             </div>
           </div>
         </div>
+      )}
+
+      {touchMenuOpen && (
+        <button
+          type="button"
+          className="player-touch-menu-scrim"
+          aria-label="Dismiss player menu"
+          tabIndex={-1}
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.stopPropagation();
+            setOptionsOpen(false);
+            setCaptionsOpen(false);
+          }}
+        />
       )}
 
       {optionsOpen && (

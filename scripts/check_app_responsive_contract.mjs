@@ -687,21 +687,31 @@ check(
 
 check(
   "touch sheets keep full settings, compact audio, and bounded tablet panels",
-  /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(touchSheetBaseRule) &&
+  /top:\s*max\(calc\(66px \* var\(--density-scale\)\),\s*var\(--safe-area-top\)\)/.test(touchSheetBaseRule) &&
+    /right:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-right\)\)/.test(touchSheetBaseRule) &&
+    /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(touchSheetBaseRule) &&
     /left:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-left\)\)/.test(touchSheetBaseRule) &&
     /width:\s*auto;/.test(touchSheetBaseRule) &&
     /max-height:\s*none;/.test(touchSheetBaseRule) &&
-    /bottom:\s*auto;/.test(touchAudioSheetRule) &&
+    /overflow-y:\s*auto;/.test(touchSheetBaseRule) &&
+    /top:\s*auto;/.test(touchAudioSheetRule) &&
+    /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(touchAudioSheetRule) &&
     /height:\s*auto;/.test(touchAudioSheetRule) &&
     /max-height:\s*calc\([\s\S]*100%[\s\S]*var\(--safe-area-top\)[\s\S]*var\(--safe-area-bottom\)/.test(touchAudioSheetRule) &&
     /overflow-y:\s*auto;/.test(touchAudioSheetRule) &&
-    /bottom:\s*auto;/.test(tabletTouchSheetRule) &&
-    /left:\s*auto;/.test(tabletTouchSheetRule) &&
+    /top:\s*auto;/.test(tabletTouchSheetRule) &&
+    /right:\s*auto;/.test(tabletTouchSheetRule) &&
+    /bottom:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-bottom\)\)/.test(tabletTouchSheetRule) &&
+    /left:\s*max\(calc\(12px \* var\(--density-scale\)\),\s*var\(--safe-area-left\)\)/.test(tabletTouchSheetRule) &&
     /width:\s*min\(\s*440px,[\s\S]*var\(--safe-area-left\)[\s\S]*var\(--safe-area-right\)[\s\S]*24px \* var\(--density-scale\)/.test(tabletTouchSheetRule) &&
     /height:\s*auto;/.test(tabletTouchSheetRule) &&
     /max-height:\s*calc\([\s\S]*100%[\s\S]*66px \* var\(--density-scale\)[\s\S]*var\(--safe-area-top\)[\s\S]*12px \* var\(--density-scale\)[\s\S]*var\(--safe-area-bottom\)/.test(tabletTouchSheetRule) &&
-    /overflow-y:\s*auto;/.test(tabletTouchSheetRule),
-  "Phone settings and subtitles must keep full safe-edge coverage, focused Audio must use safe-area-bounded content height, and tablet touch layouts must retain the intrinsic 440px right panel.",
+    /overflow-y:\s*auto;/.test(tabletTouchSheetRule) &&
+    /position:\s*sticky;/.test(ruleBlock(playerCss, ".player-options-head")) &&
+    /position:\s*sticky;/.test(ruleBlock(playerCss, ".player.is-touch-player .captions-head")) &&
+    /min-width:\s*44px;[\s\S]*height:\s*44px;/.test(ruleBlock(playerCss,
+      ".player.is-touch-player .player-close,\n.player.is-touch-player .player-info-button")),
+  "Phone settings and subtitles must keep full safe-edge coverage; Audio and intrinsic440px tablet sheets must anchor bottom-left with bounded height, scrolling and sticky44px Close controls.",
 );
 
 check(
