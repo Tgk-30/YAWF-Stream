@@ -155,8 +155,10 @@ function validateRelease(release, requestedVersion) {
   exact(release.url, `${API_ROOT}/releases/${id}`, "release API URL");
   exact(release.assets_url, `${API_ROOT}/releases/${id}/assets`, "release assets URL");
   exact(release.html_url, `${WEB_ROOT}/releases/tag/${tag}`, "release public URL");
-  exact(release.author?.login, CANONICAL_OWNER, "release author");
-  return { id, tag, url: release.html_url, publishedAt: release.published_at };
+  const automatedAuthor = release.author?.login === "github-actions[bot]" &&
+    release.author?.id === 41898282 && release.author?.type === "Bot";
+  if (release.author?.login !== CANONICAL_OWNER && !automatedAuthor) reject("release author mismatch");
+  return { id, tag, url: release.html_url, publishedAt: release.published_at, automatedAuthor };
 }
 
 function validatePackageBytes(bytes, expectedVersion, label = "source package") {
@@ -333,6 +335,13 @@ export function qualifyReleaseEvidence(input) {
     sourceRevision: manifest.sourceRevision,
     tag: release.tag,
   });
+  if (release.automatedAuthor) {
+    if (expectedSourceRevision == null || expectedImageDigest == null) {
+      reject("CI-authored releases require explicit source and image guards");
+    }
+    // Tag-ref dispatches can create drafts too. Branch-only test runs cannot.
+    exact(input.runs.debian.head_branch, release.tag, "CI-authored Debian workflow tag");
+  }
 
   return Object.freeze({
     schemaVersion: 1,
