@@ -376,11 +376,21 @@
     overflow-wrap: anywhere;
   }
   .streams-cache-warning {
-    align-items: flex-start;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+  .streams-cache-warning > span {
+    min-width: 0;
   }
   .streams-cache-warning .btn {
-    margin-left: calc(24px * var(--density-scale));
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    min-height: 44px;
+    max-width: 100%;
+    margin-left: 0;
+    white-space: normal;
   }
 }
 
