@@ -10074,6 +10074,143 @@ describe("WebviewPlayer", () => {
 });
 
 describe("post-start webview stall recovery", () => {
+  function playingMedia(video: HTMLVideoElement) {
+    // jsdom does not update readonly media state when playing is dispatched.
+    const state = { paused: false, seeking: false, ended: false };
+    for (const key of ["paused", "seeking", "ended"] as const) {
+      Object.defineProperty(video, key, { configurable: true, get: () => state[key] });
+    }
+    fireEvent.playing(video);
+    return state;
+  }
+
+  it("keeps advancing live media when progress events are delayed past the watchdog", async () => {
+    vi.useFakeTimers();
+    const refreshCurrentSource = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/movie.mp4" title="T" refreshCurrentSource={refreshCurrentSource} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    video.currentTime = 40;
+    playingMedia(video);
+    const originalSrc = video.src;
+    const pauseCalls = vi.mocked(video.pause).mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1); });
+    video.currentTime = 60;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(video.src).toBe(originalSrc);
+    expect(video.pause).toHaveBeenCalledTimes(pauseCalls);
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1); });
+    video.currentTime = 80;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+    // Re-arming must not disable a later genuine unchanged-clock stall.
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS); });
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(1);
+    expect(refreshCurrentSource).toHaveBeenLastCalledWith(80, expect.objectContaining({ paused: false }));
+  });
+
+  it("re-arms on real clock progress in a playing event just before the stall deadline", async () => {
+    vi.useFakeTimers();
+    const refreshCurrentSource = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/movie.mp4" title="T" refreshCurrentSource={refreshCurrentSource} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    video.currentTime = 40;
+    playingMedia(video);
+    const originalSrc = video.src;
+    const pauseCalls = vi.mocked(video.pause).mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1); });
+    video.currentTime = 60;
+    fireEvent.playing(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(video.src).toBe(originalSrc);
+    expect(video.pause).toHaveBeenCalledTimes(pauseCalls);
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 2); });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(1);
+    expect(refreshCurrentSource).toHaveBeenLastCalledWith(60, expect.objectContaining({ paused: false }));
+  });
+
+  it("does not let unchanged playing-event noise defer a true 30-second stall", async () => {
+    vi.useFakeTimers();
+    const refreshCurrentSource = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/movie.mp4" title="T" refreshCurrentSource={refreshCurrentSource} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    video.currentTime = 40;
+    playingMedia(video);
+    for (const delay of [10_000, 10_000, POST_START_STALL_TIMEOUT_MS - 20_001]) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(delay); });
+      fireEvent.playing(video);
+      expect(refreshCurrentSource).not.toHaveBeenCalled();
+    }
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(1);
+    expect(refreshCurrentSource).toHaveBeenLastCalledWith(40, expect.objectContaining({ paused: false }));
+  });
+
+  it.each(["paused", "seeking", "ended"] as const)("checks live %s before delayed media events reach the watchdog", async (key) => {
+    vi.useFakeTimers();
+    const refreshCurrentSource = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/movie.mp4" title="T" refreshCurrentSource={refreshCurrentSource} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    video.currentTime = 40;
+    const state = playingMedia(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1); });
+    state[key] = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+  });
+
+  it("keeps the watchdog suspended during cast ownership and restarts its full window on return", async () => {
+    vi.useFakeTimers();
+    isTauriMock.mockReturnValue(true);
+    deviceKindMock.mockReturnValue("android");
+    const refreshCurrentSource = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/movie.mp4" title="T" refreshCurrentSource={refreshCurrentSource} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    video.currentTime = 40;
+    playingMedia(video);
+    fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS * 2); });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("test resume playback"));
+    playingMedia(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1); });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a replaced video's timer or late events recover its successor", async () => {
+    vi.useFakeTimers();
+    const refreshCurrentSource = vi.fn(async () => {});
+    const props = { title: "T", refreshCurrentSource, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://x/old.mp4" />);
+    const oldVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    oldVideo.currentTime = 40;
+    playingMedia(oldVideo);
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1); });
+    view.rerender(<VideoPlayer {...props} url="https://x/new.mp4" />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(video).not.toBe(oldVideo);
+    video.currentTime = 80;
+    playingMedia(video);
+    const pauseCalls = vi.mocked(video.pause).mock.calls.length;
+    fireEvent.timeUpdate(oldVideo);
+    fireEvent.pause(oldVideo);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(refreshCurrentSource).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(video.pause).toHaveBeenCalledTimes(pauseCalls);
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1); });
+    expect(refreshCurrentSource).toHaveBeenCalledTimes(1);
+    expect(refreshCurrentSource).toHaveBeenLastCalledWith(80, expect.objectContaining({ paused: false }));
+  });
+
   it("freshly resolves once, resumes at the absolute position, then requires manual Retry", async () => {
     vi.useFakeTimers();
     let bumpRevision: (() => void) | null = null;
@@ -10100,7 +10237,7 @@ describe("post-start webview stall recovery", () => {
     const originalVideo = video;
     Object.defineProperty(video, "currentTime", { configurable: true, value: 40, writable: true });
     Object.defineProperty(video, "volume", { configurable: true, value: 0.4, writable: true });
-    fireEvent.playing(video);
+    playingMedia(video);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS);
     });
@@ -10113,7 +10250,7 @@ describe("post-start webview stall recovery", () => {
     video = document.querySelector("video.player-video") as HTMLVideoElement;
     expect(video).not.toBe(originalVideo);
     Object.defineProperty(video, "currentTime", { configurable: true, value: 65, writable: true });
-    fireEvent.playing(video);
+    playingMedia(video);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS);
     });
@@ -10150,7 +10287,7 @@ describe("post-start webview stall recovery", () => {
         end: () => bufferedEnd,
       },
     });
-    fireEvent.playing(video);
+    playingMedia(video);
     fireEvent.progress(video);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1_000);
@@ -10182,7 +10319,7 @@ describe("post-start webview stall recovery", () => {
       configurable: true,
       value: { length: 1, start: () => 0, end: () => 50 },
     });
-    fireEvent.playing(video);
+    playingMedia(video);
     fireEvent.progress(video);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS - 1_000);
@@ -10205,7 +10342,7 @@ describe("post-start webview stall recovery", () => {
       />,
     );
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
-    fireEvent.playing(video);
+    playingMedia(video);
     fireEvent.seeking(video);
     const scrubber = screen.getByTestId("scrub-bar");
     fireEvent.pointerDown(scrubber);
@@ -10227,7 +10364,7 @@ describe("post-start webview stall recovery", () => {
         onClose={() => {}}
       />,
     );
-    fireEvent.playing(document.querySelector("video.player-video") as HTMLVideoElement);
+    playingMedia(document.querySelector("video.player-video") as HTMLVideoElement);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(
         POST_START_STALL_TIMEOUT_MS + FRESH_STREAM_RESOLUTION_TIMEOUT_MS,

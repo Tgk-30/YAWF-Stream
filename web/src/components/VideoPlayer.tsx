@@ -95,6 +95,7 @@ import { captionLayout, type CaptionRect } from "../lib/captionLayout";
 import { configuredServerURL } from "../lib/serverMode";
 import {
   PlaybackStallWatchdog,
+  playbackExpectedToAdvance,
   type PlaybackStallState,
   withFreshStreamResolutionTimeout,
 } from "../lib/playbackStall";
@@ -4518,10 +4519,32 @@ function WebviewPlayer({
   useEffect(() => {
     const video = videoRef.current;
     if (video == null) return;
+    let active = true;
     let lastPosition = Number.isFinite(video.currentTime) ? video.currentTime : 0;
     let lastBufferedFrontier = Number.NaN;
     const watchdog = new PlaybackStallWatchdog(() => {
-      const position = Math.max(0, video.currentTime + timelineOffsetRef.current);
+      if (!active || videoRef.current !== video || stallWatchdogRef.current !== watchdog) return;
+      const liveState = {
+        ...stallStateRef.current,
+        paused: video.paused,
+        seeking: video.seeking || rendererSeekingRef.current || scrubbingRef.current,
+        suspended: suspendedRef.current,
+        ended: video.ended,
+      };
+      stallStateRef.current = liveState;
+      if (!playbackExpectedToAdvance(liveState)) {
+        watchdog.update(liveState);
+        return;
+      }
+      // Media events can be delayed while the renderer clock keeps advancing.
+      // Re-check the owned element before replacing an otherwise healthy source.
+      const livePosition = video.currentTime;
+      if (Number.isFinite(livePosition) && Math.abs(livePosition - lastPosition) >= 0.05) {
+        lastPosition = livePosition;
+        watchdog.update(liveState);
+        return;
+      }
+      const position = Math.max(0, livePosition + timelineOffsetRef.current);
       const handoff: PlaybackHandoffState = {
         paused: false,
         volume: video.volume,
@@ -4556,7 +4579,13 @@ function WebviewPlayer({
       }
       return Number.NaN;
     };
-    const onPlaying = () => sync({ started: true, paused: false });
+    const onPlaying = () => {
+      const next = video.currentTime;
+      const advanced = Number.isFinite(next) && Math.abs(next - lastPosition) >= 0.05;
+      if (advanced) lastPosition = next;
+      sync({ started: true, paused: false });
+      if (advanced) watchdog.noteProgress();
+    };
     const onPause = () => sync({ paused: true });
     const onEndedForWatchdog = () => sync({ ended: true, paused: true });
     const onSeeking = () => {
@@ -4607,6 +4636,7 @@ function WebviewPlayer({
     video.addEventListener("timeupdate", onClockProgress);
     video.addEventListener("progress", onBufferProgress);
     return () => {
+      active = false;
       sync({ tearingDown: true });
       watchdog.stop();
       if (stallWatchdogRef.current === watchdog) stallWatchdogRef.current = null;
