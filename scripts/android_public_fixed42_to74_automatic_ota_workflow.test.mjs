@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -194,4 +196,168 @@ test("failure trap always retains bounded host health before conditional device 
   assert.equal(source.includes("adb start-server"), false);
   assert.equal(/\bps\s+(?:aux|-[a-z]*e)/.test(source), false, "failure evidence must not enumerate processes");
   assert.equal(/\benv\b\s*>/.test(source), false, "failure evidence must not dump environment values");
+});
+
+function fixtureScript(phase, yaml = source) {
+  const first = `          # BEGIN EXACT480 ${phase}`;
+  const last = `          # END EXACT480 ${phase}`;
+  const start = yaml.indexOf(first);
+  const end = yaml.indexOf(last, start);
+  assert.ok(start >= 0 && end > start, `missing actual ${phase} fixture policy`);
+  return yaml.slice(start, end + last.length).split("\n")
+    .map((line) => line.startsWith("          ") ? line.slice(10) : line).join("\n");
+}
+
+function withDisplayFixture(run) {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "yawf-480dpi-policy-"));
+  const root = fs.realpathSync(temporary);
+  const name = "yawf-public-fixed42-to74-automatic-ota-api36-480dpi";
+  const home = path.join(root, "yawf-public-fixed42-to74-480dpi-android", "avd");
+  const directory = path.join(home, name);
+  const config = path.join(directory, "config.ini");
+  const evidence = path.join(root, "evidence");
+  fs.mkdirSync(directory, { recursive: true });
+  fs.mkdirSync(evidence);
+  const original = "# Unrelated420 remains byte-identical\r\n"
+    + "hw.device.name=pixel\r\nhw.lcd.width=1080\r\nhw.lcd.height=1920\r\n"
+    + "hw.lcd.density = 420  \r\nhw.keyboard=yes\r\nhw.cpu.arch=x86_64\r\n";
+  fs.writeFileSync(config, original);
+  const env = {
+    ...process.env, RUNNER_TEMP: root, AVD_NAME: name, ANDROID_AVD_HOME: home,
+    AVD_CONFIG: config, RUN_EVIDENCE: evidence,
+  };
+  try { run({ root, config, evidence, original, env }); }
+  finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+}
+
+function runFixturePolicy(phase, env, yaml = source) {
+  return spawnSync("python3", ["-c", fixtureScript(phase, yaml)], {
+    env, encoding: "utf8", timeout: 10_000,
+  });
+}
+
+test("480dpi is an explicitly named preboot-only functional fixture, not a420dpi UI qualification", () => {
+  for (const token of [
+    "AVD_NAME: yawf-public-fixed42-to74-automatic-ota-api36-480dpi",
+    "EVIDENCE: android-public-fixed42-to74-automatic-ota-runtime-480dpi-evidence",
+    "name: android-public-fixed42-to74-automatic-ota-api36-480dpi-evidence",
+    'echo "functionalOtaFixtureDensityDpi=480"',
+    'echo "expectedUnzoomedDpr=3"',
+    'echo "domDprMeasured=false"',
+    'echo "original420DpiObserverGapOpen=true"',
+    'echo "fullUiQualificationClaimed=false"',
+    'adb -s "$EMULATOR_SERIAL" shell wm size >',
+    'adb -s "$EMULATOR_SERIAL" shell wm density >',
+  ]) need(source, token, `density fixture lost ${token}`);
+  const preboot = source.indexOf("# BEGIN EXACT480 PREBOOT FIXTURE");
+  const boot = source.indexOf("nohup emulator");
+  const readback = source.indexOf("# BEGIN EXACT480 POSTBOOT READBACK");
+  const flow = source.indexOf('--flow-timeout 720');
+  assert.ok(preboot > source.indexOf("avdmanager create avd") && preboot < boot
+    && boot < readback && readback < flow, "density configuration/readback order changed");
+  assert.doesNotMatch(source, /-dpi-device|shell wm density\s+\d|shell wm size\s+\d/);
+});
+
+test("actual preboot policy changes only density inside one fresh owned Pixel configuration", () => {
+  withDisplayFixture(({ config, evidence, original, env }) => {
+    const result = runFixturePolicy("PREBOOT FIXTURE", env);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const expected = original.replace("hw.lcd.density = 420", "hw.lcd.density = 480");
+    assert.equal(fs.readFileSync(config, "utf8"), expected);
+    assert.equal(fs.readFileSync(path.join(evidence, "avd-config-before.ini"), "utf8"), original);
+    assert.equal(fs.readFileSync(path.join(evidence, "avd-config-480dpi.ini"), "utf8"), expected);
+    const receipt = JSON.parse(fs.readFileSync(path.join(evidence, "preboot-display-fixture.json")));
+    assert.equal(receipt.configuredDensityDpi, 480);
+    assert.equal(receipt.expectedUnzoomedDpr, 3);
+    assert.equal(receipt.domDprMeasured, false);
+    assert.equal(receipt.original420DpiObserverGapOpen, true);
+    assert.equal(receipt.fullUiQualificationClaimed, false);
+  });
+});
+
+for (const [name, change] of [
+  ["wrong physical size", (f) => fs.writeFileSync(f.config, f.original.replace("width=1080", "width=1079"))],
+  ["wrong Pixel identity", (f) => fs.writeFileSync(f.config, f.original.replace("name=pixel", "name=other"))],
+  ["nonfresh density", (f) => fs.writeFileSync(f.config, f.original.replace("density = 420", "density = 480"))],
+  ["duplicate density", (f) => fs.appendFileSync(f.config, "hw.lcd.density=420\n")],
+  ["duplicate width", (f) => fs.appendFileSync(f.config, "hw.lcd.width=1080\n")],
+  ["missing hardware", (f) => fs.writeFileSync(f.config, f.original.replace("hw.lcd.height=1920\r\n", ""))],
+  ["wrong configuration path", (f) => { f.env.AVD_CONFIG = path.join(f.root, "foreign.ini"); fs.writeFileSync(f.env.AVD_CONFIG, f.original); }],
+  ["wrong owned AVD root", (f) => { f.env.ANDROID_AVD_HOME = path.join(f.root, "other-avds"); }],
+  ["wrong owned AVD name", (f) => { f.env.AVD_NAME = "another-avd"; }],
+  ["symlinked configuration", (f) => { const target = path.join(f.root, "aliased.ini"); fs.renameSync(f.config, target); fs.symlinkSync(target, f.config); }],
+]) {
+  test(`actual preboot policy rejects ${name} before any configuration write`, () => {
+    withDisplayFixture((f) => {
+      change(f);
+      const before = fs.readFileSync(f.config);
+      const requestedBefore = fs.existsSync(f.env.AVD_CONFIG) ? fs.readFileSync(f.env.AVD_CONFIG) : null;
+      const result = runFixturePolicy("PREBOOT FIXTURE", f.env);
+      assert.notEqual(result.status, 0, `${name} was admitted`);
+      assert.deepEqual(fs.readFileSync(f.config), before);
+      if (requestedBefore != null) assert.deepEqual(fs.readFileSync(f.env.AVD_CONFIG), requestedBefore);
+      assert.equal(fs.existsSync(path.join(f.evidence, "preboot-display-fixture.json")), false);
+    });
+  });
+}
+
+for (const [name, size, density, accepted] of [
+  ["exact480dpi", "Physical size: 1080x1920\n", "Physical density: 480\n", true],
+  ["wrong420dpi", "Physical size: 1080x1920\n", "Physical density: 420\n", false],
+  ["different physical size", "Physical size: 1079x1920\n", "Physical density: 480\n", false],
+  ["density override", "Physical size: 1080x1920\n", "Physical density: 420\nOverride density: 480\n", false],
+  ["size override", "Physical size: 1080x1920\nOverride size: 1080x1920\n", "Physical density: 480\n", false],
+]) {
+  test(`actual postboot policy ${accepted ? "admits" : "rejects"} ${name}`, () => {
+    withDisplayFixture(({ evidence, env }) => {
+      fs.writeFileSync(path.join(evidence, "effective-display-size.txt"), size);
+      fs.writeFileSync(path.join(evidence, "effective-display-density.txt"), density);
+      const result = runFixturePolicy("POSTBOOT READBACK", env);
+      assert.equal(result.status === 0, accepted, result.stdout + result.stderr);
+      const receipt = path.join(evidence, "effective-display-fixture.json");
+      assert.equal(fs.existsSync(receipt), accepted);
+      if (accepted) {
+        const value = JSON.parse(fs.readFileSync(receipt));
+        assert.equal(value.expectedUnzoomedDpr, 3);
+        assert.equal(value.domDprMeasured, false);
+        assert.equal(value.original420DpiObserverGapOpen, true);
+      }
+    });
+  });
+}
+
+test("individual executable fixture-policy mutants are rejected by their causal controls", () => {
+  const mutants = [
+    ["wrong-size admission", "PREBOOT FIXTURE", '"hw.lcd.width": "1080"', '"hw.lcd.width": "1079"',
+      (f) => fs.writeFileSync(f.config, f.original.replace("width=1080", "width=1079")), "reject"],
+    ["duplicate-key admission", "PREBOOT FIXTURE", 'assert key not in indices, "Duplicate hardware property: " + key', "assert True",
+      (f) => fs.appendFileSync(f.config, "hw.lcd.density=420\n"), "reject"],
+    ["wrong-root admission", "PREBOOT FIXTURE", 'assert Path(os.environ["ANDROID_AVD_HOME"]) == owned, "Unexpected owned AVD root"', "assert True",
+      (f) => { f.env.ANDROID_AVD_HOME = path.join(f.root, "other-avds"); }, "reject"],
+    ["missing density write", "PREBOOT FIXTURE", "config.write_bytes(configured)", "config.write_bytes(original)",
+      () => {}, "density-only"],
+    ["unrelated-field mutation", "PREBOOT FIXTURE", 'configured = "".join(lines).encode("utf-8")', 'configured = "".join(lines).replace("hw.keyboard=yes", "hw.keyboard=no").encode("utf-8")',
+      () => {}, "density-only"],
+    ["wrong effective density", "POSTBOOT READBACK", 'r"Physical density: 480\\n?"', 'r"Physical density: 420\\n?"',
+      (f) => {
+        fs.writeFileSync(path.join(f.evidence, "effective-display-size.txt"), "Physical size: 1080x1920\n");
+        fs.writeFileSync(path.join(f.evidence, "effective-display-density.txt"), "Physical density: 420\n");
+      }, "reject"],
+  ];
+  for (const [name, phase, before, after, prepare, control] of mutants) {
+    assert.equal(source.split(before).length - 1, 1, `${name} mutation site`);
+    withDisplayFixture((f) => {
+      prepare(f);
+      const mutated = source.replace(before, after);
+      const result = runFixturePolicy(phase, f.env, mutated);
+      assert.equal(result.status, 0, `${name} mutant must remain executable: ${result.stderr}`);
+      if (control === "reject") {
+        assert.throws(() => assert.notEqual(result.status, 0), `${name} control did not become RED`);
+      } else {
+        const expected = f.original.replace("hw.lcd.density = 420", "hw.lcd.density = 480");
+        assert.throws(() => assert.equal(fs.readFileSync(f.config, "utf8"), expected),
+          `${name} density-only control did not become RED`);
+      }
+    });
+  }
 });
