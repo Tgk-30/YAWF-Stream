@@ -15,12 +15,22 @@ vi.mock("@tauri-apps/plugin-updater", () => ({
   check: (...args: unknown[]) => checkMock(...args),
 }));
 
+const admissionState = vi.hoisted(() => ({ player: false, installing: false, releases: 0 }));
+vi.mock("./attention", () => ({
+  getPlayerMounted: () => admissionState.player,
+  tryAcquireUpdateInstallation: () => {
+    if (admissionState.player || admissionState.installing) return null;
+    admissionState.installing = true;
+    return () => { admissionState.installing = false; admissionState.releases += 1; };
+  },
+}));
+
 const relaunchMock = vi.fn();
 vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: (...args: unknown[]) => relaunchMock(...args),
 }));
 
-import { checkForUpdates, type PendingUpdate } from "./updater";
+import { checkForUpdates, UpdateDeferredError, UpdateRestartRequiredError, type PendingUpdate } from "./updater";
 import { setNetworkMode } from "./networkPolicy";
 
 /** Put a fake Tauri window in place so isTauri() returns true. */
@@ -37,6 +47,7 @@ async function availableUpdate(): Promise<PendingUpdate> {
 }
 
 beforeEach(() => {
+  admissionState.player = false; admissionState.installing = false; admissionState.releases = 0;
   checkMock.mockReset();
   relaunchMock.mockReset();
   vi.spyOn(console, "info").mockImplementation(() => {});
@@ -102,7 +113,7 @@ describe("checkForUpdates (under Tauri)", () => {
       version: "1.2.0",
       currentVersion: "1.1.0",
       body: "Fixes and stuff",
-      downloadAndInstall: vi.fn(),
+      download: vi.fn(),
     });
     const pending = await availableUpdate();
     expect(pending.version).toBe("1.2.0");
@@ -117,7 +128,7 @@ describe("checkForUpdates (under Tauri)", () => {
       version: "2.0.0",
       currentVersion: "1.9.0",
       body: undefined,
-      downloadAndInstall: vi.fn(),
+      download: vi.fn(),
     });
     const pending = await availableUpdate();
     expect(pending.notes).toBeNull();
@@ -127,9 +138,9 @@ describe("checkForUpdates (under Tauri)", () => {
 describe("PendingUpdate.install - progress translation + relaunch", () => {
   it("reports a 0..1 fraction when a content length is known, then relaunches", async () => {
     enterTauri();
-    // downloadAndInstall drives a sequence of progress events through the
+    // download drives a sequence of progress events through the
     // callback the updater passes it; capture the callback and emit events.
-    const downloadAndInstall = vi.fn(
+    const download = vi.fn(
       async (cb: (event: unknown) => void) => {
         cb({ event: "Started", data: { contentLength: 100 } });
         cb({ event: "Progress", data: { chunkLength: 25 } });
@@ -141,7 +152,9 @@ describe("PendingUpdate.install - progress translation + relaunch", () => {
       version: "1.2.0",
       currentVersion: "1.1.0",
       body: null,
-      downloadAndInstall,
+      download,
+      install: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
     });
     relaunchMock.mockResolvedValue(undefined);
 
@@ -151,13 +164,13 @@ describe("PendingUpdate.install - progress translation + relaunch", () => {
 
     // Started (len>0 → 0), Progress 25/100, Progress 50/100, Finished → 1.
     expect(fractions).toEqual([0, 0.25, 0.5, 1]);
-    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(download).toHaveBeenCalledTimes(1);
     expect(relaunchMock).toHaveBeenCalledTimes(1);
   });
 
   it("reports null fractions when no content length is sent", async () => {
     enterTauri();
-    const downloadAndInstall = vi.fn(
+    const download = vi.fn(
       async (cb: (event: unknown) => void) => {
         cb({ event: "Started", data: { contentLength: 0 } });
         cb({ event: "Progress", data: { chunkLength: 10 } });
@@ -167,7 +180,9 @@ describe("PendingUpdate.install - progress translation + relaunch", () => {
       version: "1.2.0",
       currentVersion: "1.1.0",
       body: null,
-      downloadAndInstall,
+      download,
+      install: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
     });
     relaunchMock.mockResolvedValue(undefined);
 
@@ -182,7 +197,7 @@ describe("PendingUpdate.install - progress translation + relaunch", () => {
 
   it("treats a missing contentLength in Started as unknown size", async () => {
     enterTauri();
-    const downloadAndInstall = vi.fn(
+    const download = vi.fn(
       async (cb: (event: unknown) => void) => {
         cb({ event: "Started", data: {} });
       },
@@ -191,7 +206,9 @@ describe("PendingUpdate.install - progress translation + relaunch", () => {
       version: "1.2.0",
       currentVersion: "1.1.0",
       body: null,
-      downloadAndInstall,
+      download,
+      install: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
     });
     relaunchMock.mockResolvedValue(undefined);
 
@@ -200,13 +217,13 @@ describe("PendingUpdate.install - progress translation + relaunch", () => {
     await pending.install((f) => fractions.push(f));
 
     expect(fractions).toEqual([null]);
-    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(download).toHaveBeenCalledTimes(1);
     expect(relaunchMock).toHaveBeenCalledTimes(1);
   });
 
   it("install works without an onProgress callback", async () => {
     enterTauri();
-    const downloadAndInstall = vi.fn(
+    const download = vi.fn(
       async (cb: (event: unknown) => void) => {
         cb({ event: "Started", data: { contentLength: 100 } });
         cb({ event: "Progress", data: { chunkLength: 100 } });
@@ -217,7 +234,9 @@ describe("PendingUpdate.install - progress translation + relaunch", () => {
       version: "1.2.0",
       currentVersion: "1.1.0",
       body: null,
-      downloadAndInstall,
+      download,
+      install: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
     });
     relaunchMock.mockResolvedValue(undefined);
 
@@ -246,5 +265,104 @@ describe("mobile updater separation", () => {
     vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Linux; Android 11; wv)", platform: "Linux armv8", maxTouchPoints: 5 });
     await expect(checkForUpdates()).resolves.toEqual({ status: "unsupported" });
     expect(checkMock).not.toHaveBeenCalled();
+  });
+});
+
+function deferredUpdate<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+function stagedNativeUpdate() {
+  enterTauri();
+  const native = { version: "9.0.0", currentVersion: "8.0.0", body: null,
+    download: vi.fn(async () => {}), install: vi.fn(async () => {}), close: vi.fn(async () => {}) };
+  checkMock.mockResolvedValue(native); relaunchMock.mockResolvedValue(undefined);
+  return native;
+}
+describe("split native update admission", () => {
+  it("does not download or install while any player is already mounted", async () => {
+    const native = stagedNativeUpdate(); const candidate = await availableUpdate();
+    admissionState.player = true;
+    await expect(candidate.install()).rejects.toBeInstanceOf(UpdateDeferredError);
+    expect(native.download).not.toHaveBeenCalled(); expect(native.install).not.toHaveBeenCalled();
+  });
+  it.each(["player", "policy"] as const)("retains downloaded bytes when %s changes during download and retries without downloading twice", async (reason) => {
+    const native = stagedNativeUpdate(); const download = deferredUpdate<void>(); native.download.mockImplementationOnce(() => download.promise);
+    const candidate = await availableUpdate(); let allowed = true; const started = vi.fn();
+    const operation = candidate.install(undefined, { canProceed: () => allowed, onInstallStarted: started });
+    const rejected = expect(operation).rejects.toBeInstanceOf(UpdateDeferredError);
+    if (reason === "player") admissionState.player = true; else allowed = false;
+    download.resolve(); await rejected;
+    expect(native.install).not.toHaveBeenCalled(); expect(relaunchMock).not.toHaveBeenCalled(); expect(started).not.toHaveBeenCalled();
+    admissionState.player = false; allowed = true;
+    await candidate.install(undefined, { canProceed: () => allowed, onInstallStarted: started });
+    expect(native.download).toHaveBeenCalledTimes(1); expect(native.install).toHaveBeenCalledTimes(1);
+    expect(started).toHaveBeenCalledTimes(1); expect(admissionState.installing).toBe(true);
+  });
+  it("checks privacy again at the split download boundary", async () => {
+    const native = stagedNativeUpdate(); const download = deferredUpdate<void>(); native.download.mockImplementationOnce(() => download.promise);
+    const candidate = await availableUpdate(); const operation = candidate.install();
+    const rejected = expect(operation).rejects.toBeInstanceOf(UpdateDeferredError);
+    setNetworkMode("fullLocal"); download.resolve(); await rejected;
+    expect(native.install).not.toHaveBeenCalled(); expect(relaunchMock).not.toHaveBeenCalled();
+  });
+  it("shares one in-flight operation and holds admission through native installation and relaunch", async () => {
+    const native = stagedNativeUpdate(); const installed = deferredUpdate<void>(); const restarted = deferredUpdate<void>();
+    native.install.mockImplementationOnce(() => installed.promise); relaunchMock.mockImplementationOnce(() => restarted.promise);
+    const candidate = await availableUpdate(); const started = vi.fn(); let allowed = true;
+    const first = candidate.install(undefined, { canProceed: () => allowed, onInstallStarted: started });
+    expect(candidate.install()).toBe(first);
+    await vi.waitFor(() => expect(started).toHaveBeenCalledTimes(1));
+    expect(admissionState.installing).toBe(true);
+    allowed = false; setNetworkMode("fullLocal"); await candidate.close?.();
+    expect(native.close).not.toHaveBeenCalled(); installed.resolve();
+    await vi.waitFor(() => expect(relaunchMock).toHaveBeenCalledTimes(1));
+    expect(admissionState.installing).toBe(true);
+    restarted.resolve(); await first; expect(admissionState.releases).toBe(0);
+  });
+  it("releases physical admission after native install fails before success", async () => {
+    const native = stagedNativeUpdate();
+    native.install.mockRejectedValueOnce(new Error("Native apply failed"));
+    const candidate = await availableUpdate(); await expect(candidate.install()).rejects.toThrow("Native apply failed");
+    expect(admissionState.installing).toBe(false); expect(admissionState.releases).toBe(1);
+  });
+  it("disposes a cancelled in-flight download once and never installs its late bytes", async () => {
+    const native = stagedNativeUpdate(); const download = deferredUpdate<void>(); native.download.mockImplementationOnce(() => download.promise);
+    const candidate = await availableUpdate(); const operation = candidate.install();
+    const rejected = expect(operation).rejects.toBeInstanceOf(UpdateDeferredError);
+    const closed = candidate.close!(); expect(candidate.close!()).toBe(closed); expect(native.close).not.toHaveBeenCalled();
+    download.resolve(); await rejected; await closed;
+    expect(native.close).toHaveBeenCalledTimes(1); expect(native.install).not.toHaveBeenCalled(); expect(relaunchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("applied update restart-only recovery", () => {
+  it.each(["restart", "stale install"] as const)("uses only %s after apply succeeds but restart fails despite disabled network policy", async (retry) => {
+    const native = stagedNativeUpdate(); relaunchMock.mockRejectedValueOnce(new Error("Restart failed"));
+    const candidate = await availableUpdate();
+    await expect(candidate.install()).rejects.toBeInstanceOf(UpdateRestartRequiredError);
+    expect(candidate.applied).toBe(true); expect(admissionState.installing).toBe(true); expect(admissionState.releases).toBe(0);
+    setNetworkMode("fullLocal"); await candidate.close?.(); expect(native.close).not.toHaveBeenCalled();
+    if (retry === "restart") await candidate.restart!(); else await candidate.install(undefined, { canProceed: () => false });
+    expect(native.download).toHaveBeenCalledTimes(1); expect(native.install).toHaveBeenCalledTimes(1);
+    expect(relaunchMock).toHaveBeenCalledTimes(2); expect(admissionState.installing).toBe(true); expect(admissionState.releases).toBe(0);
+  });
+  it("deduplicates restart-only retries and remains restart-required after another failure", async () => {
+    const native = stagedNativeUpdate(); relaunchMock.mockRejectedValueOnce(new Error("First restart failed"));
+    const candidate = await availableUpdate(); await expect(candidate.install()).rejects.toBeInstanceOf(UpdateRestartRequiredError);
+    const restarted = deferredUpdate<void>(); relaunchMock.mockImplementationOnce(() => restarted.promise);
+    const first = candidate.restart!(); expect(candidate.restart!()).toBe(first); expect(candidate.install()).toBe(first);
+    const rejected = expect(first).rejects.toBeInstanceOf(UpdateRestartRequiredError);
+    restarted.reject(new Error("Second restart failed")); await rejected;
+    expect(candidate.applied).toBe(true); expect(admissionState.installing).toBe(true);
+    await candidate.restart!(); expect(native.download).toHaveBeenCalledTimes(1); expect(native.install).toHaveBeenCalledTimes(1);
+    expect(relaunchMock).toHaveBeenCalledTimes(3); expect(admissionState.releases).toBe(0);
+  });
+  it("does not offer a local restart before native apply success", async () => {
+    const native = stagedNativeUpdate(); const candidate = await availableUpdate();
+    await expect(candidate.restart!()).rejects.toThrow("has not been installed");
+    expect(candidate.applied).toBe(false); expect(native.install).not.toHaveBeenCalled(); expect(relaunchMock).not.toHaveBeenCalled();
   });
 });

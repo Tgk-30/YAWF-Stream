@@ -8,6 +8,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Suspense, startTransition, useState } from "react";
+import { getPlayerMounted, registerPlayerMount, tryAcquireUpdateInstallation } from "../lib/attention";
+import { UpdateDeferredError, UpdateRestartRequiredError } from "../lib/updater";
 import type { PendingUpdate, UpdateCheckResult } from "../lib/updater";
 import type { NetworkMode } from "../lib/networkPolicy";
 
@@ -442,7 +445,10 @@ describe("UpdateBanner", () => {
   });
 
   it("does not claim a privacy change cancelled an install already admitted to the plugin", async () => {
-    const install = vi.fn(() => new Promise<void>(() => {}));
+    const install = vi.fn<PendingUpdate["install"]>((_progress, admission) => {
+      admission?.onInstallStarted?.();
+      return new Promise<void>(() => {});
+    });
     checkForUpdates.mockResolvedValue(availableUpdate("2.0.4", install));
     const { rerender } = render(
       <UpdateBanner
@@ -697,4 +703,146 @@ it("does not compare Android APK versions against the hosted server or call the 
   expect(getNativeAppVersion).not.toHaveBeenCalled();
   expect(checkForUpdates).not.toHaveBeenCalled();
   expect(container).toBeEmptyDOMElement();
+});
+
+function deferredBanner<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const releaseActivity: Array<() => void> = [];
+afterEach(() => { for (const release of releaseActivity.splice(0)) release(); });
+function mountReader() { const release = registerPlayerMount(); releaseActivity.push(release); return release; }
+async function flushUpdate() { await act(async () => { for (let i = 0; i < 15; i += 1) await Promise.resolve(); }); }
+function stagedBannerUpdate() {
+  const downloaded = deferredBanner<void>(); const nativeInstall = vi.fn(); let downloads = 0; let hasBytes = false;
+  const candidate = makeUpdate("9.0.0", vi.fn<PendingUpdate["install"]>(async (_progress, admission) => {
+    if (!hasBytes) { downloads += 1; await downloaded.promise; hasBytes = true; }
+    if (admission?.canProceed() === false || getPlayerMounted()) throw new UpdateDeferredError();
+    const release = tryAcquireUpdateInstallation(); if (release == null) throw new UpdateDeferredError();
+    releaseActivity.push(release); admission?.onInstallStarted?.(); nativeInstall();
+    await new Promise<void>(() => {});
+  }));
+  candidate.close = vi.fn(async () => {});
+  return { candidate, downloaded, nativeInstall, downloads: () => downloads };
+}
+describe("desktop update playback deferral", () => {
+  it("checks quietly but waits until the last of multiple players closes", async () => {
+    const first = mountReader(); const last = mountReader(); const install = vi.fn(() => new Promise<void>(() => {}));
+    checkForUpdates.mockResolvedValue(availableUpdate("9.0.0", install));
+    render(<UpdateBanner autoCheck autoInstall />); await flushUpdate();
+    expect(checkForUpdates).toHaveBeenCalledTimes(1); expect(install).not.toHaveBeenCalled();
+    expect(screen.getByText(/Close all players/)).toBeInTheDocument();
+    act(() => { first(); first(); }); await flushUpdate(); expect(install).not.toHaveBeenCalled();
+    act(() => last()); await flushUpdate(); expect(install).toHaveBeenCalledTimes(1);
+  });
+  it.each(["feed result", "queued microtask"] as const)("admits playback before installation at the %s race", async (race) => {
+    const feed = deferredBanner<UpdateCheckResult>(); const install = vi.fn(() => new Promise<void>(() => {}));
+    checkForUpdates.mockReturnValue(feed.promise); render(<UpdateBanner autoCheck autoInstall />); await flushUpdate();
+    let release = () => {};
+    if (race === "feed result") act(() => { release = mountReader(); });
+    await act(async () => {
+      feed.resolve(availableUpdate("9.0.0", install));
+      if (race === "queued microtask") queueMicrotask(() => { release = mountReader(); });
+      for (let i = 0; i < 15; i += 1) await Promise.resolve();
+    });
+    expect(install).not.toHaveBeenCalled(); act(() => release()); await flushUpdate(); expect(install).toHaveBeenCalledTimes(1);
+  });
+  it.each(["autoInstall", "autoCheck", "privacy", "dismiss", "unmount"] as const)("does not apply a deferred candidate after %s cancellation", async (reason) => {
+    const release = mountReader(); const install = vi.fn(() => new Promise<void>(() => {}));
+    const candidate = makeUpdate("9.0.0", install); candidate.close = vi.fn(async () => {});
+    checkForUpdates.mockResolvedValue({ status: "available", update: candidate });
+    const view = render(<UpdateBanner autoCheck autoInstall />); await flushUpdate();
+    if (reason === "dismiss") fireEvent.click(screen.getByRole("button", { name: "Dismiss update notification" }));
+    else if (reason === "unmount") view.unmount();
+    else view.rerender(<UpdateBanner autoCheck={reason !== "autoCheck"} autoInstall={reason !== "autoInstall"} networkMode={reason === "privacy" ? "fullLocal" : "standard"} />);
+    act(() => release()); await flushUpdate(); expect(install).not.toHaveBeenCalled();
+    if (reason === "dismiss" || reason === "unmount") expect(candidate.close).toHaveBeenCalledTimes(1);
+  });
+  it("defers an in-flight download when playback starts and reuses its bytes after close", async () => {
+    const f = stagedBannerUpdate(); checkForUpdates.mockResolvedValue({ status: "available", update: f.candidate });
+    render(<UpdateBanner autoCheck autoInstall />); await flushUpdate(); expect(f.downloads()).toBe(1);
+    let release = () => {}; act(() => { release = mountReader(); }); f.downloaded.resolve(); await flushUpdate();
+    expect(f.nativeInstall).not.toHaveBeenCalled(); expect(screen.getByText(/Close all players/)).toBeInTheDocument();
+    act(() => release()); await flushUpdate(); expect(f.nativeInstall).toHaveBeenCalledTimes(1); expect(f.downloads()).toBe(1);
+  });
+  it.each(["autoInstall", "autoCheck", "privacy", "unmount", "dismiss"] as const)("rechecks committed %s after download before physical installation", async (reason) => {
+    const f = stagedBannerUpdate(); checkForUpdates.mockResolvedValue({ status: "available", update: f.candidate });
+    const view = render(<UpdateBanner autoCheck autoInstall={reason !== "dismiss"} />); await flushUpdate();
+    let dismiss: (() => void) | undefined;
+    if (reason === "dismiss") {
+      dismiss = retainReactClick(screen.getByRole("button", { name: "Dismiss update notification" }));
+      fireEvent.click(screen.getByRole("button", { name: "Install" })); await flushUpdate();
+    }
+    expect(f.downloads()).toBe(1);
+    if (reason === "unmount") view.unmount();
+    else if (reason === "dismiss") act(() => dismiss!());
+    else view.rerender(<UpdateBanner autoCheck={reason !== "autoCheck"} autoInstall={reason !== "autoInstall"} networkMode={reason === "privacy" ? "fullLocal" : "standard"} />);
+    f.downloaded.resolve(); await flushUpdate(); expect(f.nativeInstall).not.toHaveBeenCalled();
+  });
+  it.each(["privacy", "autoInstall"] as const)("does not let an abandoned %s render cancel current download admission", async (policy) => {
+    const f = stagedBannerUpdate(); checkForUpdates.mockResolvedValue({ status: "available", update: f.candidate });
+    const blocked = new Promise<void>(() => {}); let choose = (_value: boolean) => {}; let speculative = 0;
+    function Gate({ pending }: { pending: boolean }) { if (pending) { speculative += 1; throw blocked; } return null; }
+    function Scenario() {
+      const [pending, setPending] = useState(false); choose = setPending;
+      return <Suspense fallback={<div>Uncommitted policy</div>}>
+        <UpdateBanner autoCheck autoInstall={!pending || policy !== "autoInstall"} networkMode={pending && policy === "privacy" ? "fullLocal" : "standard"} />
+        <Gate pending={pending} />
+      </Suspense>;
+    }
+    render(<Scenario />); await flushUpdate();
+    act(() => { startTransition(() => choose(true)); }); expect(speculative).toBeGreaterThan(0);
+    f.downloaded.resolve(); await flushUpdate(); expect(f.nativeInstall).toHaveBeenCalledTimes(1);
+    act(() => choose(false));
+  });
+  it("keeps mandatory compatibility reasons nonblocking while an existing player must close", async () => {
+    const release = mountReader(); const install = vi.fn(() => new Promise<void>(() => {}));
+    getNativeAppVersion.mockResolvedValue("2.0.0"); checkForUpdates.mockResolvedValue(availableUpdate("3.0.0", install));
+    render(<UpdateBanner autoCheck autoInstall nativeCompatibilityFloor="2.3.0" />); await flushUpdate();
+    expect(screen.queryByRole("alertdialog")).toBeNull(); expect(document.querySelector(".update-compatibility-backdrop")).toBeNull();
+    expect(screen.getByText(/native compatibility floor v2.3.0/)).toBeInTheDocument(); expect(install).not.toHaveBeenCalled();
+    act(() => release()); await flushUpdate(); expect(install).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("installed desktop update restart UI", () => {
+  it.each([false, true])("keeps applied state and local restart available with mandatory=%s after privacy and auto-install are disabled", async (mandatory) => {
+    let applied = false;
+    const restart = vi.fn(async () => {});
+    const candidate: PendingUpdate = { version: "9.0.0", currentVersion: "2.0.0", notes: null,
+      get applied() { return applied; }, restart, close: vi.fn(async () => {}),
+      install: vi.fn<PendingUpdate["install"]>(async (_progress, admission) => {
+        admission?.onInstallStarted?.(); applied = true; throw new UpdateRestartRequiredError();
+      }) };
+    if (mandatory) getNativeAppVersion.mockResolvedValue("2.0.0");
+    checkForUpdates.mockResolvedValue({ status: "available", update: candidate });
+    const view = render(<UpdateBanner autoCheck autoInstall nativeCompatibilityFloor={mandatory ? "2.3.0" : "0.9.24"} />);
+    await flushUpdate(); expect(screen.getByText("Update v9.0.0 installed")).toBeInTheDocument();
+    view.rerender(<UpdateBanner autoCheck={false} autoInstall={false} networkMode="fullLocal" nativeCompatibilityFloor={mandatory ? "2.3.0" : "0.9.24"} />);
+    expect(screen.queryByRole("button", { name: "Install" })).toBeNull(); expect(screen.queryByRole("button", { name: "Dismiss update notification" })).toBeNull();
+    if (mandatory) expect(screen.getByText(/meets native compatibility floor v2.3.0 after restart/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Restart app" })); await flushUpdate();
+    expect(restart).toHaveBeenCalledTimes(1); expect(candidate.install).toHaveBeenCalledTimes(1); expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    view.unmount(); expect(candidate.close).not.toHaveBeenCalled();
+  });
+  it("deduplicates explicit local Restart and never returns to Install after restart failure", async () => {
+    let applied = false; const pending = deferredBanner<void>();
+    const restart = vi.fn(() => pending.promise);
+    const candidate: PendingUpdate = { version: "9.0.0", currentVersion: "2.0.0", notes: null, get applied() { return applied; }, restart,
+      install: vi.fn<PendingUpdate["install"]>(async (_progress, admission) => { admission?.onInstallStarted?.(); applied = true; throw new UpdateRestartRequiredError(); }) };
+    checkForUpdates.mockResolvedValue({ status: "available", update: candidate });
+    render(<UpdateBanner autoCheck autoInstall />); await flushUpdate();
+    const button = screen.getByRole("button", { name: "Restart app" });
+    act(() => { button.click(); button.click(); }); expect(restart).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Restarting…" })).toBeDisabled();
+    // Model another restart failure without pretending native apply was undone.
+    pending.reject(new UpdateRestartRequiredError()); await flushUpdate();
+    expect(screen.getByRole("button", { name: "Restart app" })).toBeEnabled();
+    restart.mockResolvedValueOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Restart app" })); await flushUpdate();
+    expect(restart).toHaveBeenCalledTimes(2);
+    expect(candidate.install).toHaveBeenCalledTimes(1); expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
+  });
 });

@@ -11,6 +11,7 @@
 
 import { assertNetworkAllowed, isRequestExempt } from "./networkPolicy";
 import { deviceKind } from "./platform";
+import { tryAcquireReaderWork } from "./attention";
 
 /** True when running inside the Tauri webview. Tauri v2 injects
  * `__TAURI_INTERNALS__` on the window; we also tolerate the older flag. */
@@ -57,12 +58,16 @@ export async function openInExternalPlayer(
   }
   // Imported dynamically so the browser bundle never tries to resolve the Tauri
   // runtime at module-eval time (it's only present in the desktop webview).
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<string>("open_in_external_player", {
-    url,
-    preferred: preferred != null && preferred.length > 0 ? preferred : null,
-    streamAuthorization: streamAuthorization ?? null,
-  });
+  const release = tryAcquireReaderWork();
+  if (release == null) throw new Error("An update is being installed. Reopen playback after restart.");
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return await invoke<string>("open_in_external_player", {
+      url,
+      preferred: preferred != null && preferred.length > 0 ? preferred : null,
+      streamAuthorization: streamAuthorization ?? null,
+    });
+  } finally { release(); }
 }
 
 /** Reveal a completed local download in Finder, Explorer, or the Linux file
@@ -239,9 +244,10 @@ function requireDesktopTauri(feature: string): void {
  * raw VLC hand-off (which relies on a user-installed VLC). Throws if not under
  * Tauri or if the sidecar isn't bundled / fails to spawn - callers should fall
  * back to {@link openInExternalPlayer} (VLC) in that case. */
-export async function playWithMpv(
+async function playWithMpv(
   url: string,
   streamAuthorization?: string | null,
+  onInvoke?: () => void,
 ): Promise<MpvPlayResult> {
   if (/^https?:\/\//i.test(url) && !isRequestExempt(url)) {
     assertNetworkAllowed("streaming", "mpv");
@@ -250,6 +256,7 @@ export async function playWithMpv(
     throw new Error("Bundled mpv is available only in the desktop app.");
   }
   const { invoke } = await import("@tauri-apps/api/core");
+  onInvoke?.();
   return invoke<MpvPlayResult>("mpv_play", {
     url,
     streamAuthorization: streamAuthorization ?? null,
@@ -257,39 +264,95 @@ export async function playWithMpv(
 }
 
 /** Pause the bundled-mpv playback. */
-export async function mpvPause(): Promise<void> {
+async function mpvPause(): Promise<void> {
   requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("mpv_pause");
 }
 
 /** Resume the bundled-mpv playback. */
-export async function mpvResume(): Promise<void> {
+async function mpvResume(): Promise<void> {
   requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("mpv_resume");
 }
 
 /** Seek the bundled-mpv playback to an absolute position (seconds). */
-export async function mpvSeek(seconds: number): Promise<void> {
+async function mpvSeek(seconds: number): Promise<void> {
   requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("mpv_seek", { seconds });
 }
 
 /** Current bundled-mpv playback position in seconds (0 if not yet known). */
-export async function mpvGetPosition(): Promise<number> {
+async function mpvGetPosition(): Promise<number> {
   requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<number>("mpv_get_position");
 }
 
 /** Stop bundled-mpv playback and kill the process. */
-export async function mpvStop(): Promise<void> {
+async function mpvStop(): Promise<void> {
   requireDesktopTauri("Bundled mpv");
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("mpv_stop");
 }
+
+type MpvOwner = { closed: boolean; issued: boolean; release: (() => void) | null };
+let mpvOwner: MpvOwner | null = null;
+let mpvLifecycleTail: Promise<void> = Promise.resolve();
+function queueMpv<T>(operation: () => Promise<T>): Promise<T> {
+  const next = mpvLifecycleTail.then(operation, operation);
+  mpvLifecycleTail = next.then(() => {}, () => {});
+  return next;
+}
+async function retireMpv(owner: MpvOwner): Promise<void> {
+  owner.closed = true;
+  if (mpvOwner === owner) {
+    if (owner.issued) await mpvStop();
+    mpvOwner = null;
+  }
+  owner.release?.(); owner.release = null;
+}
+
+/** One owner for global sidecar commands; stale cleanup cannot stop a successor. */
+export function createMpvSession() {
+  const owner: MpvOwner = { closed: false, issued: false, release: null };
+  let start: Promise<MpvPlayResult> | null = null;
+  let stop: Promise<void> | null = null;
+  const control = <T>(operation: () => Promise<T>): Promise<T | undefined> => queueMpv(async () => {
+    if (owner.closed || mpvOwner !== owner) return undefined;
+    return operation();
+  });
+  return {
+    start: (url: string, streamAuthorization?: string | null): Promise<MpvPlayResult> => {
+      if (start != null) return start;
+      if (owner.closed) return Promise.reject(new Error("This playback session is closed."));
+      owner.release = tryAcquireReaderWork();
+      if (owner.release == null) return Promise.reject(new Error("An update is being installed. Reopen playback after restart."));
+      start = queueMpv(async () => {
+        if (owner.closed) throw new Error("This playback session is closed.");
+        if (mpvOwner != null && mpvOwner !== owner) await retireMpv(mpvOwner);
+        mpvOwner = owner;
+        try { return await playWithMpv(url, streamAuthorization, () => { owner.issued = true; }); }
+        catch (error) { await retireMpv(owner); throw error; }
+      });
+      return start;
+    },
+    stop: (): Promise<void> => {
+      owner.closed = true;
+      if (stop != null) return stop;
+      const active = queueMpv(() => retireMpv(owner)).catch((error: unknown) => { stop = null; throw error; });
+      stop = active;
+      return active;
+    },
+    pause: () => control(mpvPause),
+    resume: () => control(mpvResume),
+    seek: (seconds: number) => control(() => mpvSeek(seconds)),
+    getPosition: () => control(mpvGetPosition),
+  };
+}
+export type MpvSession = ReturnType<typeof createMpvSession>;
 
 export interface DesktopServerStatus {
   available: boolean;

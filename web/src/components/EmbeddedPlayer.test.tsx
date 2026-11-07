@@ -6,6 +6,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const renderPlayerMock = vi.hoisted(() => ({
+  actualSession: false,
+  nativeInvoke: vi.fn(),
   callback: null as ((ev: { name: string; data: unknown }) => void) | null,
   init: vi.fn(),
   destroy: vi.fn(),
@@ -23,7 +25,18 @@ const tauriWindowMock = vi.hoisted(() => ({
   onResized: vi.fn(async (_callback: () => void) => () => {}),
 }));
 
-vi.mock("../lib/renderPlayer", () => ({
+vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => renderPlayerMock.nativeInvoke(...args) }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
+vi.mock("../lib/renderPlayer", async (original) => {
+  const actual = await original<typeof import("../lib/renderPlayer")>();
+  return ({
+  createRenderPlayerSession: () => renderPlayerMock.actualSession ? actual.createRenderPlayerSession() : ({
+    init: async (config: unknown, setup?: () => Promise<void>) => { await renderPlayerMock.init(config); await setup?.(); },
+    destroy: renderPlayerMock.destroy,
+    command: renderPlayerMock.command, setProperty: renderPlayerMock.setProperty, getProperty: renderPlayerMock.getProperty,
+    observeProperties: renderPlayerMock.observeProperties, setVideoMarginRatio: async () => {},
+    addSubtitleTrack: async () => 0, setAudioPassthrough: async () => {}, setHdrPolicy: async () => {},
+  }),
   init: renderPlayerMock.init,
   destroy: renderPlayerMock.destroy,
   command: renderPlayerMock.command,
@@ -31,7 +44,7 @@ vi.mock("../lib/renderPlayer", () => ({
   getProperty: renderPlayerMock.getProperty,
   observeProperties: renderPlayerMock.observeProperties,
   setVideoMarginRatio: vi.fn(async () => {}),
-}));
+}); });
 
 vi.mock("@tauri-apps/api/window", () => {
   return { getCurrentWindow: () => tauriWindowMock };
@@ -47,6 +60,7 @@ vi.mock("./Icon", () => ({
 }));
 
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
+import { getPlayerMounted, tryAcquireUpdateInstallation } from "../lib/attention";
 import { POST_START_STALL_TIMEOUT_MS } from "../lib/playbackStall";
 
 const initialViewport = {
@@ -80,6 +94,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  renderPlayerMock.actualSession = false; renderPlayerMock.nativeInvoke.mockReset(); renderPlayerMock.nativeInvoke.mockResolvedValue(undefined);
   renderPlayerMock.callback = null;
   renderPlayerMock.init.mockReset();
   renderPlayerMock.init.mockResolvedValue(undefined);
@@ -2144,5 +2159,26 @@ describe("EmbeddedPlayer predictive up next", () => {
     emitProperty("pause", false);
     emitProperty("time-pos", 700);
     expect(screen.getByText("Up next")).toBeTruthy();
+  });
+});
+
+describe("actual embedded owner admission integration", () => {
+  it.each(["init", "loadfile"] as const)("keeps native %s work after unmount until owned destroy acknowledges", async (stage) => {
+    renderPlayerMock.actualSession = true;
+    const pending = deferred<void>(); const stopped = deferred<void>();
+    renderPlayerMock.nativeInvoke.mockImplementation((name: string) => name === "player_destroy" ? stopped.promise :
+      (stage === "init" && name === "player_init") || (stage === "loadfile" && name === "player_command") ? pending.promise : Promise.resolve());
+    const view = render(<EmbeddedPlayer url="https://x/native.mkv" title="Owned native drain" onClose={() => {}} />);
+    try {
+      await waitFor(() => expect(renderPlayerMock.nativeInvoke.mock.calls.some(([name]) => name === (stage === "init" ? "player_init" : "player_command"))).toBe(true));
+      view.unmount(); expect(getPlayerMounted()).toBe(true);
+      const denied = tryAcquireUpdateInstallation(); try { expect(denied).toBeNull(); } finally { denied?.(); }
+      pending.resolve(); await waitFor(() => expect(renderPlayerMock.nativeInvoke).toHaveBeenCalledWith("player_destroy"));
+      expect(getPlayerMounted()).toBe(true); stopped.resolve();
+      await waitFor(() => expect(getPlayerMounted()).toBe(false));
+      const before = renderPlayerMock.nativeInvoke.mock.calls.length;
+      await act(async () => { for (let i = 0; i < 15; i += 1) await Promise.resolve(); });
+      expect(renderPlayerMock.nativeInvoke).toHaveBeenCalledTimes(before);
+    } finally { pending.resolve(); stopped.resolve(); view.unmount(); renderPlayerMock.actualSession = false; }
   });
 });

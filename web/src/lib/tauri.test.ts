@@ -31,12 +31,7 @@ import {
   isTauri,
   listExternalPlayers,
   openInExternalPlayer,
-  playWithMpv,
-  mpvPause,
-  mpvResume,
-  mpvSeek,
-  mpvGetPosition,
-  mpvStop,
+  createMpvSession,
   desktopServerStatus,
   detectTunnelTools,
   startDesktopServer,
@@ -66,6 +61,16 @@ import {
   type MpvPlayResult,
 } from "./tauri";
 import * as networkPolicy from "./networkPolicy";
+import { getPlayerMounted, tryAcquireUpdateInstallation } from "./attention";
+const testSessions: Array<ReturnType<typeof createMpvSession>> = [];
+let testSession = createMpvSession();
+const playWithMpv = (url: string, authorization?: string) => testSession.start(url, authorization);
+const mpvPause = () => testSession.pause();
+const mpvResume = () => testSession.resume();
+const mpvSeek = (seconds: number) => testSession.seek(seconds);
+const mpvGetPosition = () => testSession.getPosition();
+const mpvStop = () => testSession.stop();
+
 
 /** Put a fake Tauri window in place so isTauri() returns true. */
 function enterTauri(): void {
@@ -82,12 +87,15 @@ function enterAndroidTauri(): void {
 }
 
 beforeEach(() => {
+  testSession = createMpvSession(); testSessions.push(testSession);
   invokeMock.mockReset();
   listenMock.mockReset();
   openUrlMock.mockReset();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  enterTauri(); vi.stubGlobal("navigator", { userAgent: "Macintosh", platform: "MacIntel", maxTouchPoints: 0 });
+  for (const session of testSessions.splice(0)) await session.stop().catch(() => {});
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -412,8 +420,10 @@ describe("playWithMpv", () => {
 });
 
 describe("mpv control commands", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     enterTauri();
+    invokeMock.mockResolvedValue({ embedded: false, status: "playing" });
+    await playWithMpv("http://x/control.mkv"); invokeMock.mockClear();
   });
 
   it("mpvPause invokes mpv_pause", async () => {
@@ -808,5 +818,52 @@ describe("openExternalURL", () => {
     openUrlMock.mockResolvedValue(undefined);
     await openExternalURL("https://example.com");
     expect(openUrlMock).toHaveBeenCalledWith("https://example.com");
+  });
+});
+
+function deferredNative<T>() {
+  let resolve!: (value: T) => void; let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject };
+}
+describe("owned native reader drain", () => {
+  it("keeps external native invocation work until its acknowledgement", async () => {
+    enterTauri(); const native = deferredNative<string>(); invokeMock.mockReturnValue(native.promise);
+    const request = openInExternalPlayer("https://x/video.mkv");
+    expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("open_in_external_player", expect.any(Object)));
+    expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+    native.resolve("Opened"); await request; expect(getPlayerMounted()).toBe(false);
+  });
+  it("drains a sidecar start acknowledged after close and retains work until exact stop acknowledgement", async () => {
+    enterTauri(); const play = deferredNative<MpvPlayResult>(); const stopped = deferredNative<void>();
+    invokeMock.mockImplementation((command: string) => command === "mpv_play" ? play.promise : stopped.promise);
+    const session = createMpvSession(); testSessions.push(session); const started = session.start("https://x/video.mkv");
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("mpv_play", expect.any(Object)));
+    const stop = session.stop(); expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+    play.resolve({ embedded: false, status: "Started late" }); await started;
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("mpv_stop"));
+    expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+    stopped.resolve(); await stop; expect(getPlayerMounted()).toBe(false);
+  });
+  it("cancels an unissued sidecar start without importing or invoking native playback", async () => {
+    enterTauri(); const session = createMpvSession(); testSessions.push(session);
+    const started = session.start("https://x/video.mkv"); const rejected = expect(started).rejects.toThrow("closed");
+    const stopped = session.stop(); await rejected; await stopped;
+    expect(invokeMock).not.toHaveBeenCalled(); expect(getPlayerMounted()).toBe(false);
+  });
+  it("does not let a stale stop or pause mutate a successor sidecar owner", async () => {
+    enterTauri(); invokeMock.mockResolvedValue({ embedded: false, status: "Started" });
+    const old = createMpvSession(); const next = createMpvSession(); testSessions.push(old, next);
+    await old.start("https://x/old.mkv"); await next.start("https://x/new.mkv"); invokeMock.mockClear();
+    await old.stop(); await old.pause(); expect(invokeMock).not.toHaveBeenCalled(); expect(getPlayerMounted()).toBe(true);
+    await next.stop(); expect(invokeMock).toHaveBeenCalledExactlyOnceWith("mpv_stop"); expect(getPlayerMounted()).toBe(false);
+  });
+  it("fails closed on unknown sidecar teardown and releases only after an acknowledged retry", async () => {
+    enterTauri(); invokeMock.mockResolvedValue({ embedded: false, status: "Started" });
+    const session = createMpvSession(); testSessions.push(session); await session.start("https://x/video.mkv");
+    invokeMock.mockRejectedValueOnce(new Error("Stop acknowledgement lost"));
+    await expect(session.stop()).rejects.toThrow("acknowledgement lost");
+    expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+    await session.stop(); expect(getPlayerMounted()).toBe(false);
   });
 });

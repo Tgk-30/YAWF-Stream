@@ -7,6 +7,11 @@ import {
   installAttentionGate,
   setIdleGateSuppressed,
   subscribeAttention,
+  getPlayerMounted,
+  getUpdateInstallationActive,
+  tryRegisterPlayerMount,
+  tryAcquireUpdateInstallation,
+  tryAcquireReaderWork,
 } from "./attention";
 
 let cleanup: (() => void) | undefined;
@@ -72,4 +77,32 @@ describe("installAttentionGate", () => {
     vi.advanceTimersByTime(IDLE_MS);
     expect(document.documentElement).toHaveAttribute("data-input-idle");
   });
+});
+
+describe("exclusive playback and physical update admission", () => {
+  it("admits only one installer and denies new playback until its exact release", () => {
+    const release = tryAcquireUpdateInstallation(); expect(release).not.toBeNull();
+    try {
+      expect(getUpdateInstallationActive()).toBe(true);
+      expect(tryAcquireUpdateInstallation()).toBeNull(); expect(tryRegisterPlayerMount()).toBeNull();
+    } finally { release!(); release!(); }
+    expect(getUpdateInstallationActive()).toBe(false);
+    const player = tryRegisterPlayerMount(); expect(player).not.toBeNull();
+    player!(); expect(getPlayerMounted()).toBe(false);
+  });
+  it("waits for the last of multiple players and ignores repeated close callbacks", () => {
+    const first = tryRegisterPlayerMount()!; const second = tryRegisterPlayerMount()!;
+    expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+    first(); first(); expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+    second(); expect(getPlayerMounted()).toBe(false);
+    const release = tryAcquireUpdateInstallation(); expect(release).not.toBeNull(); release!();
+  });
+});
+
+it("retains playback activity for issued native work after the last mount closes", () => {
+  const mount = tryRegisterPlayerMount()!; const work = tryAcquireReaderWork()!; mount();
+  expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+  work(); work(); expect(getPlayerMounted()).toBe(false);
+  const installation = tryAcquireUpdateInstallation()!;
+  expect(tryAcquireReaderWork()).toBeNull(); installation();
 });

@@ -19,6 +19,7 @@ import { isDesktopTauri } from "./tauri";
 import { isNetworkAllowed } from "./networkPolicy";
 import type { NetworkMode } from "./networkPolicy";
 import { recordDiagnostic } from "./diagnostics";
+import { getPlayerMounted, tryAcquireUpdateInstallation } from "./attention";
 
 const LAST_CHECK_KEY = "ds_last_update_check";
 
@@ -52,15 +53,34 @@ export const WEEKLY_UPDATE_CHECK_MS = 7 * 24 * 60 * 60 * 1000;
 /** A pending desktop update, with the version + an install action. The install
  * action downloads + applies the update (reporting byte progress) and then
  * relaunches the app; it never resolves on success (the process restarts). */
+export interface UpdateInstallAdmission {
+  canProceed: () => boolean;
+  onInstallStarted?: () => void;
+}
+
+/** The candidate remains available, including any verified downloaded bytes. */
+export class UpdateDeferredError extends Error {
+  constructor() { super("Close all players before installing this update."); this.name = "UpdateDeferredError"; }
+}
+
+/** Native apply succeeded. Only a local process restart remains. */
+export class UpdateRestartRequiredError extends Error {
+  constructor() { super("The update is installed. Restart the app to finish."); this.name = "UpdateRestartRequiredError"; }
+}
+
 export interface PendingUpdate {
   version: string;
   currentVersion: string;
   /** Release notes, when the `latest.json` carried a `notes` field. */
   notes: string | null;
+  readonly applied?: boolean;
+  restart?: () => Promise<void>;
   /** Download + install the update, then relaunch. `onProgress` (0..1, or null
    * when the total size is unknown) is called as bytes arrive. Rejects on
    * failure; on success the app relaunches and this never resolves. */
-  install: (onProgress?: (fraction: number | null) => void) => Promise<void>;
+  install: (onProgress?: (fraction: number | null) => void, admission?: UpdateInstallAdmission) => Promise<void>;
+  /** Dispose an unused candidate. A physical installation cannot be cancelled. */
+  close?: () => Promise<void>;
 }
 
 /** A desktop feed check keeps absence, privacy policy, and transport failure
@@ -100,50 +120,95 @@ export async function checkForUpdates(
       update.body ?? "",
     );
 
-    return {
-      status: "available",
-      update: {
-        version: update.version,
-        currentVersion: update.currentVersion,
-        notes: update.body ?? null,
-        install: async (onProgress) => {
-          let downloaded = 0;
-          let contentLength = 0;
-          // downloadAndInstall streams progress events; translate them to a 0..1
-          // fraction (or null when the server didn't send a content length).
-          try {
-            await update.downloadAndInstall((event) => {
-              switch (event.event) {
-                case "Started":
-                  contentLength = event.data.contentLength ?? 0;
-                  onProgress?.(contentLength > 0 ? 0 : null);
-                  break;
-                case "Progress":
-                  downloaded += event.data.chunkLength;
-                  onProgress?.(
-                    contentLength > 0 ? downloaded / contentLength : null,
-                  );
-                  break;
-                case "Finished":
-                  onProgress?.(1);
-                  break;
-              }
+    let applied = false;
+    let restartOperation: Promise<void> | null = null;
+    let downloaded = false;
+    let disposed = false;
+    let physicalInstallStarted = false;
+    let operation: Promise<void> | null = null;
+    let download: Promise<void> | null = null;
+    let close: Promise<void> | null = null;
+    const restart = (): Promise<void> => {
+      if (!applied) return Promise.reject(new Error("The update has not been installed."));
+      if (restartOperation != null) return restartOperation;
+      const active = (async () => {
+        const { relaunch } = await import("@tauri-apps/plugin-process");
+        await relaunch();
+      })().catch((error: unknown) => {
+        recordDiagnostic("update", "restart.failed", "error", error instanceof Error ? error.message : String(error));
+        throw new UpdateRestartRequiredError();
+      }).finally(() => { if (restartOperation === active) restartOperation = null; });
+      restartOperation = active;
+      return active;
+    };
+    const pending: PendingUpdate = {
+      version: update.version,
+      currentVersion: update.currentVersion,
+      notes: update.body ?? null,
+      get applied() { return applied; },
+      restart,
+      install: (onProgress, admission) => {
+        if (operation != null) return operation;
+        if (applied) return restart();
+        const allowed = () => !disposed && isNetworkAllowed("updates") && admission?.canProceed() !== false;
+        const run = async () => {
+          if (!allowed() || getPlayerMounted()) throw new UpdateDeferredError();
+          if (!downloaded) {
+            let bytes = 0;
+            let contentLength = 0;
+            download = update.download((event) => {
+              if (event.event === "Started") {
+                contentLength = event.data.contentLength ?? 0;
+                onProgress?.(contentLength > 0 ? 0 : null);
+              } else if (event.event === "Progress") {
+                bytes += event.data.chunkLength;
+                onProgress?.(contentLength > 0 ? bytes / contentLength : null);
+              } else onProgress?.(1);
             });
+            await download;
+            downloaded = true;
+          }
+          // Resolve code before the atomic activity check: there is no await
+          // between admission and the irreversible native installer invocation.
+          await import("@tauri-apps/plugin-process");
+          if (!allowed()) throw new UpdateDeferredError();
+          const release = tryAcquireUpdateInstallation();
+          if (release == null) throw new UpdateDeferredError();
+          physicalInstallStarted = true;
+          try {
+            admission?.onInstallStarted?.();
+            await update.install();
           } catch (error) {
-            recordDiagnostic(
-              "update",
-              "install.failed",
-              "error",
-              error instanceof Error ? error.message : String(error),
-            );
+            physicalInstallStarted = false;
+            downloaded = false;
+            release();
             throw error;
           }
-          // Apply by relaunching the freshly-installed binary.
-          const { relaunch } = await import("@tauri-apps/plugin-process");
-          await relaunch();
-        },
+          // Native bytes are consumed. A restart error must never reapply them
+          // or release exclusion against the already-replaced on-disk app.
+          applied = true;
+          downloaded = false;
+          await restart();
+        };
+        const active = run().catch((error: unknown) => {
+          if (!(error instanceof UpdateDeferredError) && !(error instanceof UpdateRestartRequiredError)) recordDiagnostic(
+            "update", "install.failed", "error", error instanceof Error ? error.message : String(error),
+          );
+          throw error;
+        }).finally(() => { if (operation === active) operation = null; });
+        operation = active;
+        return active;
+      },
+      close: () => {
+        if (physicalInstallStarted) return Promise.resolve();
+        disposed = true;
+        return close ??= (async () => {
+          await download?.catch(() => {});
+          await update.close();
+        })();
       },
     };
+    return { status: "available", update: pending };
   } catch (err) {
     recordDiagnostic(
       "update",

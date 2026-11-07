@@ -1,0 +1,58 @@
+name: Desktop updater native runtime
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/desktop-update-runtime/**'
+      - '.github/workflows/desktop-update-runtime.yml'
+  workflow_dispatch:
+
+# No production signing material or write token enters these disposable tests.
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-update-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: macOS ${{ matrix.arch }} actual updater and player IPC
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'web/src-tauri -> target'
+      - name: Install locked frontend dependencies
+        working-directory: web
+        run: npm ci
+      - name: Validate disposable qualification contracts
+        run: node --test scripts/desktop-update-runtime/*.test.mjs
+      - name: Exercise native playback and an actual signed two-version update
+        run: node scripts/desktop-update-runtime/run_macos.mjs --run
+      - name: Preserve bounded native evidence, never ephemeral private keys
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-update-runtime-${{ matrix.arch }}
+          path: ${{ runner.temp }}/desktop-update-runtime-evidence
+          if-no-files-found: warn
+          retention-days: 14
