@@ -240,3 +240,15 @@ test("behavior predicates pass baseline and kill each focused mutant individuall
     assert.equal(entry.mutantKilled, true, `${entry.test} mutant survived`);
   });
 });
+
+test("visible launcher helper admits fresh workspace or drawer and avoids the system gesture edge", () => {
+  const checker = fileURLToPath(new URL("./runtime_ota_visible_launcher.test.py", import.meta.url));
+  const result = spawnSync("python3", [checker], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.deepEqual(report.individualCausalMutants.map((entry) => entry.mutant), [
+    "gestureEdge", "defaultPackage", "overviewAdmission", "foregroundAdmission", "rootBounds",
+    "freshCache", "iconClass", "iconEnabled", "drawerDeadline", "freshBounds",
+  ]);
+  report.individualCausalMutants.forEach((entry) => assert.equal(entry.killed, true));
+});

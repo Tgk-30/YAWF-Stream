@@ -155,7 +155,7 @@ jobs:
           assert release.get("name") == os.environ["CANDIDATE_RELEASE_NAME"], "Public release name changed"
           assert release.get("draft") is False and release.get("prerelease") is False, "Public release state changed"
           assert release.get("published_at") == os.environ["CANDIDATE_RELEASE_PUBLISHED_AT"], "Public release timestamp changed"
-          assert release.get("target_commitish") == "main", "Public release target changed"
+          assert release.get("target_commitish") == source, "Public release target changed"
           assert release.get("immutable") is False, "Public release immutability state changed"
 
           expected_assets = {
@@ -1011,7 +1011,7 @@ jobs:
           assert release.get("name") == os.environ["CANDIDATE_RELEASE_NAME"], "Public release name changed"
           assert release.get("draft") is False and release.get("prerelease") is False, "Public release state changed"
           assert release.get("published_at") == os.environ["CANDIDATE_RELEASE_PUBLISHED_AT"], "Public release timestamp changed"
-          assert release.get("target_commitish") == "main", "Public release target changed"
+          assert release.get("target_commitish") == source, "Public release target changed"
           assert release.get("immutable") is False, "Public release immutability state changed"
 
           expected_assets = {

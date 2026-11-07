@@ -88,7 +88,7 @@ function parseExactChecksums(text, pin, observed) {
   for (const [name, digest] of expected) exact(parsed.get(name), digest, `${pin.version} ${name} checksum`);
 }
 
-function admitExactArtifact(artifact, pin, label) {
+export function admitExactArtifact(artifact, pin, label) {
   exactKeys(
     artifact,
     ["checksums", "manifest", "observed", "release", "updaterSourceSha256", "verification"],

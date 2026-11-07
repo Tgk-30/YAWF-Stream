@@ -48,6 +48,10 @@ FIXED42_TO61_AUTOMATIC_OTA_PROFILE = (
     "public-fixed42-to61-initial-cancel-due-resume-v1"
 )
 FIXED42_TO61_EVIDENCE_SUBDIR = "fixed42-to61-automatic-public-ota-flow"
+FIXED42_TO74_AUTOMATIC_OTA_PROFILE = (
+    "public-fixed42-to74-initial-cancel-due-resume-v1"
+)
+FIXED42_TO74_EVIDENCE_SUBDIR = "fixed42-to74-automatic-public-ota-flow"
 EVIDENCE_SUBDIR = "persistent-ota-flow"
 BASELINE_VERSION = "2.3.25"
 BASELINE_CODE = 2_003_025
@@ -100,6 +104,18 @@ FIXED42_TO61_TARGET_MANIFEST_SHA256 = (
 )
 FIXED42_TO61_TARGET_VERIFICATION_SHA256 = (
     "25afa6bca5261b02a0372eb0fc88934573ae2bce0091bd526007f963fe5b26b2"
+)
+FIXED42_TO74_TARGET_VERSION = "2.3.74"
+FIXED42_TO74_TARGET_CODE = 2_003_074
+FIXED42_TO74_TARGET_SHA256 = "d6eda3e15aca6005ea9be32b793339cd22469b4802b39326f3ee9ab17b47b7ae"
+FIXED42_TO74_TARGET_SIZE = 88_669_057
+FIXED42_TO74_TARGET_SOURCE = "6eff963227ef58adc508c35abb56c58a615a8a96"
+FIXED42_TO74_TARGET_BUILD_RUN = 42_365_613_314
+FIXED42_TO74_TARGET_MANIFEST_SHA256 = (
+    "0493b4ba62722d38b7223648d6c2ca4423d8f6934df735316f17da7285491984"
+)
+FIXED42_TO74_TARGET_VERIFICATION_SHA256 = (
+    "c74413a7a4a0591df1407b9483d00e98f1919b538c1fbb6b009439121a750130"
 )
 FIXED42_TO61_INITIAL_ENABLE_QUERY_TIMING_LIMIT = 32
 FIXED42_TO61_INITIAL_ENABLE_QUERY_TIMING_MAX_BYTES = 256
@@ -358,10 +374,77 @@ def _load_fixed42_to61_automatic_binding(value: object) -> RuntimeBinding:
     )
 
 
+def _load_fixed42_to74_automatic_binding(value: object) -> RuntimeBinding:
+    """Load the exact output of the separate fixed 2.3.42 to 2.3.74 admission."""
+    expected = {
+        "profile": FIXED42_TO74_AUTOMATIC_OTA_PROFILE,
+        "evidenceSubdir": FIXED42_TO74_EVIDENCE_SUBDIR,
+        "otaMode": FIXED42_TO74_AUTOMATIC_OTA_PROFILE,
+        "baselineVersion": FIXED42_BASELINE_VERSION,
+        "baselineVersionCode": str(FIXED42_BASELINE_CODE),
+        "baselineTag": "android-v2.3.42",
+        "baselineApkName": "YAWF.Stream_Android_2.3.42.apk",
+        "baselineSha256": FIXED42_BASELINE_SHA256,
+        "baselineSize": str(FIXED42_BASELINE_SIZE),
+        "baselineSourceRevision": FIXED42_BASELINE_SOURCE,
+        "baselineManifestSha256": FIXED42_BASELINE_MANIFEST_SHA256,
+        "baselineVerificationSha256": FIXED42_BASELINE_VERIFICATION_SHA256,
+        "baselineBuildRun": str(FIXED42_BASELINE_BUILD_RUN),
+        "targetVersion": FIXED42_TO74_TARGET_VERSION,
+        "targetVersionCode": str(FIXED42_TO74_TARGET_CODE),
+        "targetTag": "android-v2.3.74",
+        "targetApkName": "YAWF.Stream_Android_2.3.74.apk",
+        "targetSha256": FIXED42_TO74_TARGET_SHA256,
+        "targetSize": str(FIXED42_TO74_TARGET_SIZE),
+        "signerSha256": SIGNER_PIN,
+        "targetSourceRevision": FIXED42_TO74_TARGET_SOURCE,
+        "targetManifestSha256": FIXED42_TO74_TARGET_MANIFEST_SHA256,
+        "targetVerificationSha256": FIXED42_TO74_TARGET_VERIFICATION_SHA256,
+        "targetBuildRun": str(FIXED42_TO74_TARGET_BUILD_RUN),
+        "updaterSourceSha256": FIXED42_UPDATER_SHA256,
+        "targetPublicRelease": "true",
+    }
+    if not isinstance(value, dict) or set(value) != set(expected):
+        raise RuntimeGateError("Fixed42-to74 automatic admission keys are not exact")
+    for key, wanted in expected.items():
+        if value.get(key) != wanted:
+            raise RuntimeGateError(f"Fixed42-to74 automatic admission {key} mismatch")
+    return RuntimeBinding(
+        automatic=True,
+        ota_mode=FIXED42_TO74_AUTOMATIC_OTA_PROFILE,
+        evidence_subdir=FIXED42_TO74_EVIDENCE_SUBDIR,
+        baseline_version=FIXED42_BASELINE_VERSION,
+        baseline_code=FIXED42_BASELINE_CODE,
+        baseline_sha256=FIXED42_BASELINE_SHA256,
+        baseline_size=FIXED42_BASELINE_SIZE,
+        baseline_source=FIXED42_BASELINE_SOURCE,
+        baseline_tag="android-v2.3.42",
+        baseline_apk_name="YAWF.Stream_Android_2.3.42.apk",
+        target_version=FIXED42_TO74_TARGET_VERSION,
+        target_code=FIXED42_TO74_TARGET_CODE,
+        target_sha256=FIXED42_TO74_TARGET_SHA256,
+        target_size=FIXED42_TO74_TARGET_SIZE,
+        target_source=FIXED42_TO74_TARGET_SOURCE,
+        target_build_run=FIXED42_TO74_TARGET_BUILD_RUN,
+        target_tag="android-v2.3.74",
+        target_apk_name="YAWF.Stream_Android_2.3.74.apk",
+        target_verification_name="Android_2.3.74_verification.json",
+        signer_pin=SIGNER_PIN,
+        target_manifest_sha256=FIXED42_TO74_TARGET_MANIFEST_SHA256,
+        target_verification_sha256=FIXED42_TO74_TARGET_VERIFICATION_SHA256,
+        profile=FIXED42_TO74_AUTOMATIC_OTA_PROFILE,
+        baseline_manifest_sha256=FIXED42_BASELINE_MANIFEST_SHA256,
+        baseline_verification_sha256=FIXED42_BASELINE_VERIFICATION_SHA256,
+        baseline_build_run=FIXED42_BASELINE_BUILD_RUN,
+        updater_source_sha256=FIXED42_UPDATER_SHA256,
+    )
+
+
 def is_fixed42_binding(binding: RuntimeBinding | None) -> bool:
     return binding is not None and binding.profile in {
         FIXED42_AUTOMATIC_OTA_PROFILE,
         FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+        FIXED42_TO74_AUTOMATIC_OTA_PROFILE,
     }
 
 
@@ -377,6 +460,8 @@ def load_automatic_binding(path: Path) -> RuntimeBinding:
         return _load_fixed42_automatic_binding(value)
     if isinstance(value, dict) and value.get("profile") == FIXED42_TO61_AUTOMATIC_OTA_PROFILE:
         return _load_fixed42_to61_automatic_binding(value)
+    if isinstance(value, dict) and value.get("profile") == FIXED42_TO74_AUTOMATIC_OTA_PROFILE:
+        return _load_fixed42_to74_automatic_binding(value)
     expected_keys = {
         "evidenceSubdir", "otaMode", "baselineVersion", "baselineVersionCode",
         "baselineSha256", "baselineSize", "targetVersion", "targetVersionCode",
@@ -655,6 +740,7 @@ def collect_fixed42_host_failure_diagnostics(
     if profile not in {
         FIXED42_AUTOMATIC_OTA_PROFILE,
         FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+        FIXED42_TO74_AUTOMATIC_OTA_PROFILE,
     }:
         raise RuntimeGateError("Fixed42 host diagnostic profile is invalid")
 
@@ -1514,15 +1600,21 @@ def validate_receipt(
     elif ota_mode in {
         FIXED42_AUTOMATIC_OTA_PROFILE,
         FIXED42_TO61_AUTOMATIC_OTA_PROFILE,
+        FIXED42_TO74_AUTOMATIC_OTA_PROFILE,
     }:
         if binding.profile != ota_mode:
             raise RuntimeGateError("Fixed42 receipt requires the exact admitted profile")
+        is_to74 = ota_mode == FIXED42_TO74_AUTOMATIC_OTA_PROFILE
         is_to61 = ota_mode == FIXED42_TO61_AUTOMATIC_OTA_PROFILE
         postinstall_result_key = (
-            "postInstallExactUpToDate61Observed"
-            if is_to61 else "postInstallExactUpToDate59Observed"
+            "postInstallExactUpToDate74Observed" if is_to74 else (
+                "postInstallExactUpToDate61Observed"
+                if is_to61 else "postInstallExactUpToDate59Observed"
+            )
         )
-        profile_marker = "Fixed42OTA61Marker" if is_to61 else "Fixed42OTA59Marker"
+        profile_marker = "Fixed42OTA74Marker" if is_to74 else (
+            "Fixed42OTA61Marker" if is_to61 else "Fixed42OTA59Marker"
+        )
         for key, expected_value in expected.items():
             actual = value.get(key)
             if type(actual) is not type(expected_value) or actual != expected_value:
@@ -1593,7 +1685,7 @@ def validate_receipt(
             if type(actual) is not type(expected_value) or actual != expected_value:
                 raise RuntimeGateError(f"Fixed42 instrumentation receipt {key} mismatch")
         diagnostic_keys: set[str] = set()
-        if is_to61:
+        if is_to61 or is_to74:
             diagnostic_keys = {
                 "initialEnableQueryGroupTimings",
                 "initialEnableQueryGroupTimingDrops",
@@ -1710,7 +1802,7 @@ class AdmittedAdb:
         if not is_fixed42_binding(binding):
             return
         assert binding is not None
-        target_sha256 = (
+        target_sha256 = binding.target_sha256 if binding.profile == FIXED42_TO74_AUTOMATIC_OTA_PROFILE else (
             FIXED42_TO61_TARGET_SHA256
             if binding.profile == FIXED42_TO61_AUTOMATIC_OTA_PROFILE
             else FIXED42_TARGET_SHA256
