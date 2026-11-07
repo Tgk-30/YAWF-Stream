@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -10,6 +10,7 @@ import {
   acquireDatabaseLease,
   databaseLockPath,
   DatabaseLeaseFormatError,
+  DatabaseLeaseBusyError,
 } from "../src/db.js";
 import { createDatabaseBackup } from "../src/recovery.js";
 
@@ -30,14 +31,23 @@ const FOREIGN_WAL_FIXTURE = fileURLToPath(
 );
 const CHILD_TIMEOUT_MS = 10_000;
 
-interface LeaseChild {
-  child: ChildProcessWithoutNullStreams;
-  acquired: Promise<void>;
-  exit: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+interface ChildExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+interface FixtureChild {
+  child: ChildProcess;
+  exit: Promise<ChildExit>;
+  closed: Promise<ChildExit>;
   output(): { stdout: string; stderr: string };
 }
 
-const children = new Set<LeaseChild>();
+interface LeaseChild extends FixtureChild {
+  acquired: Promise<void>;
+}
+
+const children = new Set<FixtureChild>();
 const tempDirs: string[] = [];
 
 function temporaryDatabasePath(): string {
@@ -61,9 +71,9 @@ function fileInventory(directory: string): Array<{
   });
 }
 
-function timeout<T>(promise: Promise<T>, message: string): Promise<T> {
+function timeout<T>(promise: Promise<T>, message: string, milliseconds = CHILD_TIMEOUT_MS): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), CHILD_TIMEOUT_MS);
+    const timer = setTimeout(() => reject(new Error(message)), milliseconds);
     promise.then(
       (value) => {
         clearTimeout(timer);
@@ -77,70 +87,82 @@ function timeout<T>(promise: Promise<T>, message: string): Promise<T> {
   });
 }
 
-function spawnLeaseChild(databasePath: string): LeaseChild {
-  const child = spawn(
-    process.execPath,
-    ["--import", "tsx", CHILD_FIXTURE, databasePath],
-    { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
-  );
+function spawnFixture(args: string[], ipc = false): FixtureChild {
+  const child = spawn(process.execPath, args, {
+    cwd: process.cwd(),
+    stdio: ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
+  });
   let stdout = "";
   let stderr = "";
-  let acquired = false;
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolve) => {
-      child.once("exit", (code, signal) => resolve({ code, signal }));
-    },
-  );
-  const acquiredPromise = new Promise<void>((resolve, reject) => {
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-      if (!acquired && stdout.includes("acquired\n")) {
-        acquired = true;
-        resolve();
-      }
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    void exit.then(({ code, signal }) => {
-      if (!acquired) {
-        reject(new Error(
-          `Lease child exited before acquisition (code=${code}, signal=${signal}): ${stderr}`,
-        ));
-      }
+  const exit = new Promise<ChildExit>((resolve, reject) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+    child.once("error", reject);
+  });
+  const closed = new Promise<ChildExit>((resolve) => {
+    child.once("close", (code, signal) => {
+      children.delete(fixture);
+      resolve({ code, signal });
     });
   });
-  const leaseChild: LeaseChild = {
-    child,
-    acquired: timeout(acquiredPromise, "Lease child did not acquire in time."),
-    exit: timeout(exit, "Lease child did not exit in time."),
-    output: () => ({ stdout, stderr }),
-  };
-  children.add(leaseChild);
-  void leaseChild.acquired.catch(() => {});
-  void leaseChild.exit.then(
-    () => children.delete(leaseChild),
-    () => children.delete(leaseChild),
-  );
-  return leaseChild;
+  const fixture: FixtureChild = { child, exit, closed, output: () => ({ stdout, stderr }) };
+  // Track every fixture immediately. A caller's deadline cannot establish that
+  // the OS process or its handles have closed, so never untrack on timeout.
+  children.add(fixture);
+  void exit.catch(() => {});
+  child.stdout!.setEncoding("utf8");
+  child.stderr!.setEncoding("utf8");
+  child.stdout!.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
+  return fixture;
 }
 
-async function stopChild(
-  leaseChild: LeaseChild,
-  signal: NodeJS.Signals,
-): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  leaseChild.child.kill(signal);
-  return leaseChild.exit;
+function waitForOutput(fixture: FixtureChild, marker: string): Promise<void> {
+  if (fixture.output().stdout.includes(marker)) return Promise.resolve();
+  let onData: () => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    onData = () => {
+      if (fixture.output().stdout.includes(marker)) resolve();
+    };
+    fixture.child.stdout!.on("data", onData);
+    void fixture.closed.then(({ code, signal }) => {
+      if (!fixture.output().stdout.includes(marker)) {
+        reject(new Error(`Fixture exited before ${marker.trim()} (code=${code}, signal=${signal}): ${fixture.output().stderr}`));
+      }
+    }, reject);
+  });
+  return timeout(ready, `Fixture did not report ${marker.trim()} in time.`)
+    .finally(() => fixture.child.stdout!.removeListener("data", onData));
+}
+
+function spawnLeaseChild(databasePath: string): LeaseChild {
+  const fixture = spawnFixture(["--import", "tsx", CHILD_FIXTURE, databasePath], true);
+  const acquired = waitForOutput(fixture, "acquired\n");
+  void acquired.catch(() => {});
+  return Object.assign(fixture, { acquired });
+}
+
+async function stopChild(fixture: FixtureChild, signal: NodeJS.Signals): Promise<ChildExit> {
+  if (fixture.child.exitCode == null && fixture.child.signalCode == null) fixture.child.kill(signal);
+  return timeout(fixture.closed, "Fixture did not close after termination.");
+}
+
+function closeChildOverIpc(fixture: FixtureChild): Promise<ChildExit> {
+  if (!fixture.child.connected) throw new Error("Lease fixture has no IPC channel.");
+  fixture.child.send!("close");
+  return timeout(fixture.closed, "Lease fixture did not close after IPC shutdown.");
 }
 
 afterEach(async () => {
   const running = [...children];
-  for (const leaseChild of running) leaseChild.child.kill("SIGKILL");
-  await Promise.allSettled(running.map((leaseChild) => leaseChild.exit));
+  for (const fixture of running) {
+    if (fixture.child.exitCode == null && fixture.child.signalCode == null) fixture.child.kill("SIGKILL");
+  }
+  // A failed close deadline must fail cleanup and preserve the directories,
+  // rather than deleting files that a fixture may still have open on Windows.
+  await Promise.all(running.map((fixture) => timeout(fixture.closed, "Fixture did not close during cleanup.")));
+  expect(children.size).toBe(0);
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+}, CHILD_TIMEOUT_MS + 1000);
 
 describe("database lease process lifecycle", () => {
   it("allows exactly one child to win an initially absent-file race", async () => {
@@ -196,15 +218,75 @@ describe("database lease process lifecycle", () => {
     const owner = spawnLeaseChild(databasePath);
     await owner.acquired;
 
-    await expect(stopChild(owner, "SIGTERM")).resolves.toEqual({
-      code: 0,
-      signal: null,
-    });
-    expect(owner.output().stdout).toContain("released\n");
+    const lockPath = databaseLockPath(databasePath);
+    const before = readFileSync(lockPath);
+    if (process.platform === "win32") {
+      // Windows kill(SIGTERM) is forceful; it does not invoke the close handler.
+      await expect(stopChild(owner, "SIGTERM")).resolves.toEqual({ code: null, signal: "SIGTERM" });
+      expect(owner.output().stdout).not.toContain("released\n");
+    } else {
+      await expect(stopChild(owner, "SIGTERM")).resolves.toEqual({ code: 0, signal: null });
+      expect(owner.output().stdout).toContain("released\n");
+    }
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(lockPath)).toEqual(before);
 
     const replacement = spawnLeaseChild(databasePath);
     await replacement.acquired;
     await stopChild(replacement, "SIGTERM");
+  });
+
+  it("releases gracefully over IPC before the owning process exits", async () => {
+    const databasePath = temporaryDatabasePath();
+    const lockPath = databaseLockPath(databasePath);
+    const owner = spawnLeaseChild(databasePath);
+    await owner.acquired;
+    const before = readFileSync(lockPath);
+    const released = waitForOutput(owner, "released\n");
+    owner.child.send!("release");
+    await released;
+    expect(owner.child.exitCode).toBeNull();
+    expect(owner.child.signalCode).toBeNull();
+    expect(children.has(owner)).toBe(true);
+
+    // A different real process must acquire while the original remains alive.
+    // Merely exiting with code zero would not prove the explicit close path.
+    const replacement = spawnLeaseChild(databasePath);
+    await replacement.acquired;
+    expect(owner.child.exitCode).toBeNull();
+    expect(() => acquireDatabaseLease(databasePath)).toThrow(DatabaseLeaseBusyError);
+    expect(readFileSync(lockPath)).toEqual(before);
+    await expect(Promise.all([closeChildOverIpc(owner), closeChildOverIpc(replacement)]))
+      .resolves.toEqual([{ code: 0, signal: null }, { code: 0, signal: null }]);
+    const lease = acquireDatabaseLease(databasePath);
+    lease.release();
+  }, CHILD_TIMEOUT_MS * 4);
+
+  it("keeps a fixture tracked after a phase deadline until actual close", async () => {
+    const fixture = spawnFixture(["-e", "setInterval(() => {}, 60_000)"]);
+    try {
+      await expect(timeout(fixture.closed, "injected phase deadline", 5))
+        .rejects.toThrow("injected phase deadline");
+      expect(children.has(fixture)).toBe(true);
+      expect(fixture.child.exitCode).toBeNull();
+      await expect(stopChild(fixture, "SIGKILL")).resolves.toEqual({ code: null, signal: "SIGKILL" });
+      expect(children.has(fixture)).toBe(false);
+    } finally {
+      if (fixture.child.exitCode == null && fixture.child.signalCode == null) fixture.child.kill("SIGKILL");
+      await timeout(fixture.closed, "Phase-deadline control did not close.");
+    }
+  });
+
+  it("closes an open-file fixture before the cleanup hook removes its directory", async () => {
+    const path = temporaryDatabasePath();
+    const fixture = spawnFixture(["-e", `
+      require("node:fs").openSync(process.argv[1], "w");
+      process.stdout.write("file-held\\n");
+      setInterval(() => {}, 60_000);
+    `, path]);
+    await waitForOutput(fixture, "file-held\n");
+    expect(children.has(fixture)).toBe(true);
+    // Deliberately leave this real handle/process to the tracked cleanup hook.
   });
 
   it("keeps online backup compatible while the application lease is held", async () => {
@@ -246,26 +328,10 @@ describe("database lease process lifecycle", () => {
 
   it("does not release the lease when constructor cleanup leaves its database open", async () => {
     const databasePath = temporaryDatabasePath();
-    const child = spawn(
-      process.execPath,
-      ["--import", "tsx", CONSTRUCTOR_FAILURE_FIXTURE, databasePath],
-      { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
-    );
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-
-    const result = await timeout(
-      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      }),
-      "Constructor cleanup child did not exit in time.",
-    );
-    expect(result, stderr).toEqual({ code: 0, signal: null });
-    expect(stdout).toContain("constructor-cleanup-held\n");
+    const fixture = spawnFixture(["--import", "tsx", CONSTRUCTOR_FAILURE_FIXTURE, databasePath]);
+    const result = await timeout(fixture.closed, "Constructor cleanup child did not exit in time.");
+    expect(result, fixture.output().stderr).toEqual({ code: 0, signal: null });
+    expect(fixture.output().stdout).toContain("constructor-cleanup-held\n");
 
     const lease = acquireDatabaseLease(databasePath);
     lease.release();
@@ -273,26 +339,10 @@ describe("database lease process lifecycle", () => {
 
   it("retains a failed build database through forced garbage collection", async () => {
     const databasePath = temporaryDatabasePath();
-    const child = spawn(
-      process.execPath,
-      ["--expose-gc", "--import", "tsx", BUILD_FAILURE_GC_FIXTURE, databasePath],
-      { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
-    );
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-
-    const result = await timeout(
-      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      }),
-      "Failed-build garbage-collection child did not exit in time.",
-    );
-    expect(result, stderr).toEqual({ code: 0, signal: null });
-    expect(stdout).toContain("build-cleanup-held-after-gc\n");
+    const fixture = spawnFixture(["--expose-gc", "--import", "tsx", BUILD_FAILURE_GC_FIXTURE, databasePath]);
+    const result = await timeout(fixture.closed, "Failed-build garbage-collection child did not exit in time.");
+    expect(result, fixture.output().stderr).toEqual({ code: 0, signal: null });
+    expect(fixture.output().stdout).toContain("build-cleanup-held-after-gc\n");
 
     const lease = acquireDatabaseLease(databasePath);
     lease.release();
@@ -302,35 +352,11 @@ describe("database lease process lifecycle", () => {
     const databasePath = temporaryDatabasePath();
     const lockPath = databaseLockPath(databasePath);
     const journalPath = `${lockPath}-journal`;
-    const child = spawn(
-      process.execPath,
-      ["--import", "tsx", HOT_JOURNAL_FIXTURE, lockPath],
-      { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
-    );
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolve) => child.once("exit", (code, signal) => resolve({ code, signal })),
-    );
-    const ready = new Promise<void>((resolve, reject) => {
-      child.stdout.on("data", (chunk: string) => {
-        stdout += chunk;
-        if (stdout.includes("hot-journal-ready\n")) resolve();
-      });
-      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-      void exit.then(({ code, signal }) => {
-        if (!stdout.includes("hot-journal-ready\n")) {
-          reject(new Error(`Hot-journal child exited ${code}/${signal}: ${stderr}`));
-        }
-      });
-    });
+    const fixture = spawnFixture(["--import", "tsx", HOT_JOURNAL_FIXTURE, lockPath]);
 
     try {
-      await timeout(ready, "Hot-journal child did not become ready in time.");
-      child.kill("SIGKILL");
-      await timeout(exit, "Hot-journal child did not exit after SIGKILL.");
+      await waitForOutput(fixture, "hot-journal-ready\n");
+      await stopChild(fixture, "SIGKILL");
 
       const databaseBefore = readFileSync(lockPath);
       const journalBefore = readFileSync(journalPath);
@@ -338,9 +364,10 @@ describe("database lease process lifecycle", () => {
       expect(readFileSync(lockPath).equals(databaseBefore)).toBe(true);
       expect(readFileSync(journalPath).equals(journalBefore)).toBe(true);
     } finally {
-      if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
+      await stopChild(fixture, "SIGKILL");
     }
-  });
+    // Readiness, termination and finally cleanup each have a ten-second bound.
+  }, CHILD_TIMEOUT_MS * 3);
 
   it("rejects a foreign WAL lease without creating or changing sidecars", async () => {
     const databasePath = temporaryDatabasePath();
@@ -348,26 +375,10 @@ describe("database lease process lifecycle", () => {
     const originDir = mkdtempSync(join(tmpdir(), "yawf-foreign-wal-origin-"));
     tempDirs.push(originDir);
     const sourcePath = join(originDir, "foreign.sqlite");
-    const child = spawn(
-      process.execPath,
-      ["--import", "tsx", FOREIGN_WAL_FIXTURE, sourcePath, lockPath],
-      { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
-    );
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-
-    const result = await timeout(
-      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      }),
-      "Foreign-WAL fixture child did not exit in time.",
-    );
-    expect(result, stderr).toEqual({ code: 0, signal: null });
-    expect(stdout).toContain("foreign-wal-copied\n");
+    const fixture = spawnFixture(["--import", "tsx", FOREIGN_WAL_FIXTURE, sourcePath, lockPath]);
+    const result = await timeout(fixture.closed, "Foreign-WAL fixture child did not exit in time.");
+    expect(result, fixture.output().stderr).toEqual({ code: 0, signal: null });
+    expect(fixture.output().stdout).toContain("foreign-wal-copied\n");
 
     const before = fileInventory(dirname(lockPath));
     expect(before.map((entry) => entry.name)).toEqual([
