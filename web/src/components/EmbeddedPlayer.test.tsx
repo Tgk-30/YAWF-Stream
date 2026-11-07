@@ -15,6 +15,14 @@ const renderPlayerMock = vi.hoisted(() => ({
   getProperty: vi.fn(),
 }));
 const iconMock = vi.hoisted(() => vi.fn(({ name }: { name: string }) => <span data-icon={name} />));
+const embeddedCastObserver = vi.hoisted(() => ({ enabled: false, urls: [] as string[] }));
+vi.mock("./CastControls", () => ({
+  CastControls: ({ media }: { media: { url: string } }) => {
+    if (!embeddedCastObserver.enabled) return null;
+    embeddedCastObserver.urls.push(media.url);
+    return <button type="button" aria-label="Cast to a device">Cast</button>;
+  },
+}));
 const openInExternalPlayerMock = vi.hoisted(() => vi.fn(async () => "opened"));
 
 const tauriWindowMock = vi.hoisted(() => ({
@@ -2144,5 +2152,28 @@ describe("EmbeddedPlayer predictive up next", () => {
     emitProperty("pause", false);
     emitProperty("time-pos", 700);
     expect(screen.getByText("Up next")).toBeTruthy();
+  });
+});
+
+
+describe("EmbeddedPlayer opaque cast target", () => {
+  beforeEach(() => { embeddedCastObserver.enabled = true; embeddedCastObserver.urls.length = 0; });
+  afterEach(() => { embeddedCastObserver.enabled = false; });
+  it.each([
+    { label: "null fence", target: null },
+    { label: "independent capability", target: "https://server.example/api/external-stream/native/" + "A".repeat(43) },
+    { label: "undefined local fallback", target: undefined },
+  ])("preserves the $label without changing the native media source", async ({ target }) => {
+    const url = "https://server.example/api/stream/native-source";
+    render(<EmbeddedPlayer url={url} title="Opaque native cast" castPlaybackUrl={target} onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.command.mock.calls.some(([command]) => command === "loadfile")).toBe(true));
+    expect(renderPlayerMock.command.mock.calls.find(([command]) => command === "loadfile")?.[1]?.[0]).toBe(url);
+    if (target === null) {
+      expect(screen.queryByRole("button", { name: "Cast to a device" })).toBeNull();
+      expect(embeddedCastObserver.urls).toEqual([]);
+    } else {
+      expect(screen.getByRole("button", { name: "Cast to a device" })).toBeInTheDocument();
+      expect(embeddedCastObserver.urls.at(-1)).toBe(target ?? url);
+    }
   });
 });

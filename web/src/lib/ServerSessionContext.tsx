@@ -46,6 +46,8 @@ export interface ServerTranscodeCapabilities {
   /** Supported server-optimized playback qualities. Empty on older servers. */
   qualities: Array<"auto" | "1080p" | "720p" | "480p" | "360p">;
   seekOffset: boolean;
+  /** Explicit issued-preparation lifecycle support. Absent on older servers. */
+  preparationOwnership?: boolean;
   subtitleSidecar: boolean;
   hardwareEncoder: string;
   availableVideoEncoders: string[];

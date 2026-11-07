@@ -192,6 +192,7 @@ function normalizedTranscodeCapabilities(
     adaptive: raw.adaptive === true,
     qualities,
     seekOffset: raw.seekOffset === true,
+    preparationOwnership: raw.preparationOwnership === true,
     subtitleSidecar: raw.subtitleSidecar === true,
     hardwareEncoder: typeof raw.hardwareEncoder === "string" ? raw.hardwareEncoder : "libx264",
     availableVideoEncoders: Array.isArray(raw.availableVideoEncoders)

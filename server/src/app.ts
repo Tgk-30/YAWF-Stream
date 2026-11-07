@@ -2655,6 +2655,7 @@ function registerRoutes(
           ? ["auto", "1080p", "720p", "480p", "360p"]
           : [],
         seekOffset: transcode.ready,
+        preparationOwnership: transcode.ready,
         subtitleSidecar:
           transcode.ready && transcode.subtitleSidecarAvailable,
         audioTrackSelection:
@@ -6066,6 +6067,44 @@ function registerRoutes(
         throw httpError(404, "Stream session not found.");
       }
 
+      // The receiver reads the already activated output, never a new job. Its
+      // URL is the same stream-scoped capability as the original-media bridge.
+      // Relative references preserve the capability path and exact owner.
+      const ownedQuery = request.query as { generation?: unknown; preparation?: unknown };
+      if (params.asset === "index.m3u8" || ownedQuery.generation != null || ownedQuery.preparation != null) {
+        if (!transcode.ready || row.source_kind === "direct_torrent") {
+          throw httpError(404, "Transcode asset not found.");
+        }
+        const query = parseBody(z.object({
+          generation: preparationGenerationSchema,
+          preparation: preparationIdSchema,
+        }).strict(), request.query);
+        const ownedAsset = params.asset === "index.m3u8" ? MANIFEST_NAME : params.asset;
+        if (ownedAsset == null || (ownedAsset !== MANIFEST_NAME && !isTranscodeAssetName(ownedAsset))) {
+          throw httpError(404, "Transcode asset not found.");
+        }
+        const reader = transcode.registry.acquirePreparationAsset(row.id, query.preparation, query.generation, ownedAsset);
+        if (reader == null) throw httpError(404, "Transcode asset not found.");
+        holdPreparationReader(reply, reader.release);
+        const path = join(reader.dir, ownedAsset);
+        if (!existsSync(path)) throw httpError(404, "Transcode asset not ready.");
+        reply.header("cache-control", "private, no-store");
+        reply.header("referrer-policy", "no-referrer");
+        const manifest = ownedAsset.endsWith(".m3u8");
+        const subtitle = ownedAsset.endsWith(".vtt");
+        reply.type(manifest ? "application/vnd.apple.mpegurl" : subtitle ? "text/vtt; charset=utf-8" : "video/mp2t");
+        if (subtitle && !transcode.registry.subtitleReadyForAsset(row.id, query.generation)) {
+          throw httpError(404, "Transcode asset not found.");
+        }
+        if (request.method === "HEAD") return reply.status(200).send();
+        if (manifest) return reply.send(rewriteTranscodeManifest(await readFile(path, "utf8"), query.generation, query.preparation));
+        if (subtitle) return reply.send(rewriteGeneratedWebVttForTimeline(await readFile(path, "utf8")));
+        return reply.send(countedStream(db, {
+          sessionId: row.id, profileId: row.profile_id, status: 200,
+          body: Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>, markComplete: false,
+        }));
+      }
+
       // Lookup is deliberately after the unchanged database/HMAC checks. A
       // caller cannot supply a URL, host, path traversal, or another graph ID.
       const asset = params.asset == null ? null : externalAssets.get(row.id, params.asset);
@@ -6290,6 +6329,75 @@ function registerRoutes(
     return cookieAuthorized || bearerAuthorized ? row : null;
   };
 
+  const preparationIdSchema = z.string().regex(/^prep_[0-9a-f]{32}$/);
+  const preparationGenerationSchema = z.string().regex(/^transcode-[A-Za-z0-9_-]{1,100}$/);
+  const preparationActionSchema = z.object({
+    action: z.enum(["activate", "cancel", "release"]),
+    generation: preparationGenerationSchema.optional(),
+  }).strict();
+  const loadOwnedTranscodeSession = (request: FastifyRequest) => {
+    const auth = requireAuth(db, request);
+    const row = loadTranscodeSession(request);
+    if (row == null || row.profile_id !== auth.profileId) {
+      throw httpError(404, "Stream session not found.");
+    }
+    return row;
+  };
+  const preparationFor = (request: FastifyRequest): string | undefined =>
+    parseBody(z.object({ preparation: preparationIdSchema.optional() }), request.query).preparation;
+  const holdPreparationReader = (reply: FastifyReply, release: () => void) => {
+    const finish = () => {
+      reply.raw.off("finish", finish);
+      reply.raw.off("close", finish);
+      release();
+    };
+    reply.raw.once("finish", finish);
+    reply.raw.once("close", finish);
+    if (reply.raw.destroyed) finish();
+  };
+
+  // Issuance allocates bounded metadata only. Unknown IDs never create work,
+  // including delayed GETs after cancellation or a server restart.
+  app.post("/api/stream/:id/preparations", async (request, reply) => {
+    reply.header("Cache-Control", "private, no-store");
+    if (!transcode.ready) throw httpError(404, "Transcoding is not available.");
+    const row = loadOwnedTranscodeSession(request);
+    requireCsrf(request);
+    if (row.source_kind === "direct_torrent") {
+      throw httpError(409, "Transcoding is not available for Direct P2P playback.");
+    }
+    parseBody(z.object({}).strict(), request.body ?? {});
+    rateLimit(request, `stream-preparation-create:${row.profile_id}`, 120, 60_000);
+    const preparationId = randomId("prep");
+    transcode.registry.registerPreparation(row.id, preparationId);
+    return { preparationId };
+  });
+
+  app.post("/api/stream/:id/preparations/:preparationId", async (request, reply) => {
+    reply.header("Cache-Control", "private, no-store");
+    if (!transcode.ready) throw httpError(404, "Transcoding is not available.");
+    const row = loadOwnedTranscodeSession(request);
+    requireCsrf(request);
+    const id = parseBody(preparationIdSchema, (request.params as { preparationId: string }).preparationId);
+    const body = parseBody(preparationActionSchema, request.body);
+    if (body.action !== "cancel" && body.generation == null) {
+      throw httpError(400, "An exact playback generation is required.");
+    }
+    rateLimit(request, `stream-preparation-action:${row.profile_id}`, 600, 60_000);
+    const result = body.action === "activate"
+      ? transcode.registry.activatePreparation(row.id, id, body.generation!)
+      : body.action === "release"
+        ? await transcode.registry.releasePreparation(row.id, id, body.generation!)
+        : await transcode.registry.cancelPreparation(row.id, id, body.generation);
+    if (result === "generation-mismatch" || result === "not-ready" || result === "active") {
+      throw httpError(409, "Playback preparation state does not match this action.");
+    }
+    if (body.action === "activate" && result === "gone") {
+      throw httpError(410, "Playback preparation is no longer available.");
+    }
+    return { status: result, ...(body.action === "activate" ? { generation: body.generation } : {}) };
+  });
+
   // Source audio inventory for the already-authorized stream session. The
   // registry coalesces this with the job's bounded ffprobe, so opening the
   // player menu cannot repeatedly consume a short-lived provider URL.
@@ -6339,6 +6447,25 @@ function registerRoutes(
     if (row == null) throw httpError(404, "Stream session not found.");
     if (row.source_kind === "direct_torrent") {
       throw httpError(409, "Transcoding is not available for Direct P2P playback.");
+    }
+    reply.header("Cache-Control", "private, no-store");
+    const preparationId = preparationFor(request);
+    if (preparationId != null) {
+      loadOwnedTranscodeSession(request);
+      if (!transcode.registry.isPreparationRegistered(row.id, preparationId)) {
+        throw httpError(410, "Playback preparation is no longer available.");
+      }
+      const requestedGeneration = (request.query as { generation?: string }).generation;
+      if (requestedGeneration != null) {
+        const generation = parseBody(preparationGenerationSchema, requestedGeneration);
+        const reader = transcode.registry.acquirePreparationAsset(row.id, preparationId, generation, MANIFEST_NAME);
+        if (reader == null) throw httpError(404, "Playback generation not found.");
+        holdPreparationReader(reply, reader.release);
+        reply.header("content-type", "application/vnd.apple.mpegurl");
+        reply.header("x-yawf-transcode-generation", generation);
+        reply.header("x-yawf-transcode-preparation", preparationId);
+        return reply.send(rewriteTranscodeManifest(await readFile(join(reader.dir, MANIFEST_NAME), "utf8"), generation, preparationId));
+      }
     }
     const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
     // A disconnected warmup releases only its own unpublished preparation.
@@ -6447,19 +6574,19 @@ function registerRoutes(
       (await transcode.registry.subtitleAvailableFor(row.id, upstreamUrl, {
         signal: controller.signal,
       })) === true;
-    const dir = await transcode.registry.ensureJob(row.id, upstreamUrl, {
-      profile,
-      quality,
-      startSeconds,
-      hdrPolicy,
-      preserveSubtitles,
-      audioTrack,
-    }, { signal: controller.signal });
-    const manifest = await readFile(join(dir, MANIFEST_NAME), "utf8");
-    const rewritten = rewriteTranscodeManifest(
-      manifest,
-      transcode.registry.generationFor(row.id, dir) ?? undefined,
+    const options = { profile, quality, startSeconds, hdrPolicy, preserveSubtitles, audioTrack };
+    const prepared = preparationId == null ? null : await transcode.registry.acquirePreparation(
+      row.id, preparationId, upstreamUrl, options, { signal: controller.signal },
     );
+    if (prepared != null) holdPreparationReader(reply, prepared.release);
+    const dir = prepared?.dir ?? await transcode.registry.ensureJob(row.id, upstreamUrl, options, { signal: controller.signal });
+    const generation = prepared?.generation ?? transcode.registry.generationFor(row.id, dir) ?? undefined;
+    const manifest = await readFile(join(dir, MANIFEST_NAME), "utf8");
+    const rewritten = rewriteTranscodeManifest(manifest, generation, preparationId);
+    if (preparationId != null) {
+      reply.header("x-yawf-transcode-generation", generation);
+      reply.header("x-yawf-transcode-preparation", preparationId);
+    }
     reply.header("content-type", "application/vnd.apple.mpegurl");
     reply.header("cache-control", "no-store");
     reply.header("x-yawf-playback-decision", "transcode");
@@ -6481,17 +6608,29 @@ function registerRoutes(
     const row = loadTranscodeSession(request);
     if (row == null) throw httpError(404, "Stream session not found.");
     const generation = (request.query as { generation?: string }).generation;
+    const preparationId = preparationFor(request);
+    if (preparationId != null) {
+      loadOwnedTranscodeSession(request);
+      parseBody(preparationGenerationSchema, generation);
+    }
     if (request.method === "HEAD" && /^(?:1080p|720p|480p|360p)\.m3u8$/.test(asset) && generation != null) {
       reply.header("cache-control", "private, no-store");
       rateLimit(request, `stream-retention:${row.id}`, 12, 60_000);
       if (
         typeof generation !== "string" ||
         !/^transcode-[A-Za-z0-9_-]{1,100}$/.test(generation) ||
-        !transcode.registry.touchCurrentGeneration(row.id, asset, generation)
+        !(preparationId == null
+          ? transcode.registry.touchCurrentGeneration(row.id, asset, generation)
+          : transcode.registry.touchPreparationGeneration(row.id, preparationId, generation, asset))
       ) throw httpError(404, "Transcode asset not found.");
       return reply.status(200).send();
     }
-    const dir = transcode.registry.dirForAsset(row.id, asset, generation);
+    const reader = preparationId == null ? null : transcode.registry.acquirePreparationAsset(
+      row.id, preparationId, generation!, asset,
+    );
+    if (preparationId != null && reader == null) throw httpError(404, "Transcode asset not found.");
+    if (reader != null) holdPreparationReader(reply, reader.release);
+    const dir = reader?.dir ?? transcode.registry.dirForAsset(row.id, asset, generation);
     if (dir == null) throw httpError(404, "Transcode asset not found.");
     const path = join(dir, asset);
     if (!existsSync(path)) throw httpError(404, "Transcode asset not ready.");
@@ -6499,7 +6638,7 @@ function registerRoutes(
     if (asset.endsWith(".m3u8")) {
       const manifest = await readFile(path, "utf8");
       reply.header("content-type", "application/vnd.apple.mpegurl");
-      return reply.send(rewriteTranscodeManifest(manifest, generation));
+      return reply.send(rewriteTranscodeManifest(manifest, generation, preparationId));
     }
     if (asset.endsWith(".vtt")) {
       reply.header("content-type", "text/vtt; charset=utf-8");
@@ -6693,6 +6832,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     if (allowedOrigin != null) {
       reply.header("access-control-allow-origin", allowedOrigin);
       reply.header("access-control-allow-credentials", "true");
+      reply.header("access-control-expose-headers",
+        "x-yawf-playback-decision, x-yawf-transcode-profile, x-yawf-transcode-quality, x-yawf-transcode-start, x-yawf-transcode-audio, x-yawf-transcode-generation, x-yawf-transcode-preparation");
       reply.header("vary", "Origin");
       reply.header(
         "access-control-allow-headers",

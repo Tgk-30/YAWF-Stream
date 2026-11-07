@@ -16,10 +16,14 @@ export function isTranscodeAssetName(asset: string): boolean {
 export function rewriteTranscodeManifest(
   manifest: string,
   generation?: string,
+  preparationId?: string,
 ): string {
+  if (preparationId != null && generation == null) {
+    throw new Error("Owned HLS references require an exact generation.");
+  }
   const suffix = generation == null
     ? ""
-    : `?generation=${encodeURIComponent(generation)}`;
+    : `?generation=${encodeURIComponent(generation)}${preparationId == null ? "" : `&preparation=${encodeURIComponent(preparationId)}`}`;
   let rewritten = manifest
     .replace(
       TRANSCODE_ASSET_LINE,

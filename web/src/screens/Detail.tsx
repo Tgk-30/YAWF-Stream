@@ -67,6 +67,8 @@ import type { StreamRow } from "../data/streams";
 import { rankSources } from "../data/sourceIntelligence";
 import {
   createRequest,
+  createServerHlsPreparation,
+  serverOwnedBrowserPlaybackURL,
   resolveServerStream,
   serverOptimizedSource,
   serverStreamAudioTracks,
@@ -2401,6 +2403,14 @@ export function Detail() {
               serverOptimizedQualities.length > 0
                 ? {
                     qualities: serverOptimizedQualities,
+                    ...(transcodeCapabilities.preparationOwnership === true
+                      ? { ownership: {
+                          create: createServerHlsPreparation,
+                          browserPlaybackURL: (ownedURL: string) => serverOwnedBrowserPlaybackURL(
+                            ownedURL, serverExternalPlaybackURL(player.fallbackStream!),
+                          ),
+                        } }
+                      : {}),
                     loadAudioTracks: (options) =>
                       serverStreamAudioTracks(player.fallbackStream!, options),
                     loadSourceInfo: (options) =>

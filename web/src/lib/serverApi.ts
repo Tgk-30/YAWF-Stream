@@ -528,14 +528,28 @@ export function serverHlsLeaseTarget(manifestURL: string, manifest: string): str
       !source.pathname.startsWith(`${prefix}/api/stream/`) ||
       !/^([^/]+)\/index\.m3u8$/.test(source.pathname.slice(`${prefix}/api/stream/`.length)) ||
       !manifest.startsWith("#EXTM3U") || manifest.length > 65_536) return null;
+    const preparation = source.searchParams.get("preparation");
+    const pinnedGeneration = source.searchParams.get("generation");
+    if ((preparation != null && !/^prep_[0-9a-f]{32}$/.test(preparation)) ||
+      source.searchParams.getAll("preparation").length > 1 ||
+      source.searchParams.getAll("generation").length > 1) return null;
     const children = manifest.split(/\r?\n/).filter((line) => line.length > 0 && !line.startsWith("#"));
     if (children.length === 0) return null;
     let target: string | null = null;
     let generation: string | null = null;
     for (const line of children) {
-      const match = /^(?:1080p|720p|480p|360p)\.m3u8\?generation=(transcode-[A-Za-z0-9_-]{1,100})$/.exec(line);
-      if (match == null || (generation != null && generation !== match[1])) return null;
-      generation = match[1]!;
+      const match = /^(?:1080p|720p|480p|360p)\.m3u8\?([^#]+)$/.exec(line);
+      if (match == null) return null;
+      const params = new URLSearchParams(match[1]);
+      const current = params.get("generation");
+      if (current == null || !/^transcode-[A-Za-z0-9_-]{1,100}$/.test(current) ||
+        params.getAll("generation").length !== 1 ||
+        params.getAll("preparation").length !== (preparation == null ? 0 : 1) ||
+        params.get("preparation") !== preparation ||
+        [...params.keys()].some((key) => key !== "generation" && key !== "preparation") ||
+        (generation != null && generation !== current) ||
+        (pinnedGeneration != null && pinnedGeneration !== current)) return null;
+      generation = current;
       target ??= new URL(line, source).href;
     }
     return target;
@@ -549,7 +563,12 @@ export function serverHlsLeaseTarget(manifestURL: string, manifest: string): str
  * Never follow a redirect carrying the application cookie jar elsewhere. */
 export async function renewServerHlsLease(target: string, signal: AbortSignal): Promise<number> {
   const parsed = new URL(target);
-  const master = new URL("index.m3u8", parsed).href;
+  const masterURL = new URL("index.m3u8", parsed);
+  for (const key of ["preparation", "generation"]) {
+    const value = parsed.searchParams.get(key);
+    if (value != null) masterURL.searchParams.set(key, value);
+  }
+  const master = masterURL.href;
   if (serverHlsLeaseTarget(master, `#EXTM3U\n${parsed.pathname.split("/").pop()}${parsed.search}\n`) !== target) {
     throw new Error("Untrusted stream retention target.");
   }
@@ -561,6 +580,156 @@ export async function renewServerHlsLease(target: string, signal: AbortSignal): 
     signal,
   });
   return response.status;
+}
+
+/** An issued preparation is stream-scoped correlation, never authorization.
+ * Before transfer to a media reader, cancel also cleans up an ambiguous
+ * activation. After transfer, only reader-confirmed release may end ownership. */
+export interface ServerHlsPreparation {
+  readonly url: string;
+  generationFromResponse(response: Response): string;
+  activate(generation: string, manifest: string, signal?: AbortSignal): Promise<{
+    url: string;
+    leaseTarget: string | null;
+  }>;
+  cancel(): Promise<void>;
+  release(generation: string): Promise<void>;
+}
+
+const PREPARATION_ID = /^prep_[0-9a-f]{32}$/;
+const PREPARATION_GENERATION = /^transcode-[A-Za-z0-9_-]{1,100}$/;
+
+function preparationAbort(): Error {
+  return Object.assign(new Error("Server playback preparation was cancelled."), { name: "AbortError" });
+}
+
+/** Allocate metadata first, so a delayed or cancelled master GET can never
+ * manufacture a new owner. All requests remain confined to the exact server
+ * and stream selected at allocation, including after configuration changes. */
+export async function createServerHlsPreparation(
+  masterURL: string,
+  signal: AbortSignal,
+): Promise<ServerHlsPreparation> {
+  const configured = configuredServerURL();
+  const base = new URL(configured ?? window.location.origin);
+  const prefix = base.pathname.replace(/\/+$/, "");
+  const source = new URL(masterURL);
+  const match = /^\/api\/stream\/([A-Za-z0-9_-]{1,128})\/index\.m3u8$/.exec(source.pathname.slice(prefix.length));
+  const allowed = new Set(["profile", "quality", "start", "hdr", "subtitles", "audio"]);
+  if (source.origin !== base.origin || source.username || source.password ||
+    !source.pathname.startsWith(`${prefix}/api/stream/`) || match == null ||
+    [...source.searchParams.keys()].some((key) => !allowed.has(key))) {
+    throw new Error("Untrusted stream preparation target.");
+  }
+  source.hash = "";
+  const csrf = readCsrfToken();
+  if (csrf == null) throw new Error("Refresh your server session before preparing playback.");
+  const endpoint = `${base.origin}${prefix}/api/stream/${match[1]}/preparations`;
+  const request = async (url: string, body: unknown, parentSignal?: AbortSignal): Promise<JsonObject> => {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    parentSignal?.addEventListener("abort", abort, { once: true });
+    if (parentSignal?.aborted) abort();
+    const timeout = setTimeout(abort, 10_000);
+    try {
+      const response = await fetch(url, {
+        method: "POST", credentials: "include", cache: "no-store", redirect: "error",
+        headers: { accept: "application/json", "content-type": "application/json", "x-csrf-token": csrf },
+        body: JSON.stringify(body), signal: controller.signal,
+      });
+      if (!response.ok) {
+        if (response.status === 401 && configuredServerURL() === configured) notifyUnauthorized();
+        throw new Error(`Server playback ownership request failed (${response.status}).`);
+      }
+      const text = await response.text();
+      if (text.length > 65_536) throw new Error("Invalid server playback ownership response.");
+      const value: unknown = JSON.parse(text);
+      if (value == null || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("Invalid server playback ownership response.");
+      }
+      return value as JsonObject;
+    } finally {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener("abort", abort);
+    }
+  };
+  if (signal.aborted) throw preparationAbort();
+  const allocated = await request(endpoint, {}, signal);
+  const id = allocated.preparationId;
+  if (typeof id !== "string" || !PREPARATION_ID.test(id)) {
+    throw new Error("The server did not issue a valid playback preparation.");
+  }
+  source.searchParams.set("preparation", id);
+  const ownedURL = source.href;
+  const actionURL = `${endpoint}/${id}`;
+  let cancelled = false;
+  let activationGeneration: string | null = null;
+  let activation: Promise<{ url: string; leaseTarget: string | null }> | null = null;
+  let terminal: Promise<void> | null = null;
+  const terminate = (action: "cancel" | "release", generation?: string): Promise<void> => {
+    if (terminal != null) return terminal;
+    cancelled = true;
+    terminal = request(actionURL, { action, ...(generation == null ? {} : { generation }) }).then((result) => {
+      if (result.status !== "applied" && result.status !== "gone") {
+        throw new Error("The server did not confirm playback preparation cleanup.");
+      }
+    }).catch((error: unknown) => {
+      terminal = null;
+      throw error;
+    });
+    return terminal;
+  };
+  const handle: ServerHlsPreparation = {
+    url: ownedURL,
+    generationFromResponse(response) {
+      const generation = response.headers.get("x-yawf-transcode-generation");
+      if (response.headers.get("x-yawf-transcode-preparation") !== id ||
+        generation == null || !PREPARATION_GENERATION.test(generation)) {
+        throw new Error("The server did not confirm owned playback preparation.");
+      }
+      return generation;
+    },
+    activate(generation, manifest, parentSignal) {
+      if (cancelled || parentSignal?.aborted) return Promise.reject(preparationAbort());
+      if (!PREPARATION_GENERATION.test(generation)) {
+        return Promise.reject(new Error("Invalid playback preparation generation."));
+      }
+      if (activationGeneration != null && activationGeneration !== generation) {
+        return Promise.reject(new Error("Playback preparation changed generation."));
+      }
+      const pinned = new URL(ownedURL);
+      pinned.searchParams.set("generation", generation);
+      const leaseTarget = serverHlsLeaseTarget(pinned.href, manifest);
+      if (leaseTarget == null) return Promise.reject(new Error("Invalid owned playback manifest."));
+      if (activation != null) return activation;
+      activationGeneration = generation;
+      activation = request(actionURL, { action: "activate", generation }, parentSignal).then((result) => {
+        if (result.status !== "applied" || result.generation !== generation) {
+          throw new Error("The server did not activate the requested playback generation.");
+        }
+        if (cancelled || parentSignal?.aborted) throw preparationAbort();
+        return { url: pinned.href, leaseTarget };
+      });
+      return activation;
+    },
+    cancel() {
+      return activationGeneration == null
+        ? terminate("cancel")
+        : terminate("release", activationGeneration);
+    },
+    release(generation) {
+      if (!PREPARATION_GENERATION.test(generation) ||
+        (activationGeneration != null && activationGeneration !== generation)) {
+        return Promise.reject(new Error("Invalid playback preparation release generation."));
+      }
+      return terminate("release", generation);
+    },
+  };
+  if (signal.aborted) {
+    await handle.cancel();
+    throw preparationAbort();
+  }
+  return handle;
 }
 
 export interface ServerAudioTrack {
@@ -767,6 +936,36 @@ export function serverExternalPlaybackURL(stream: StreamInfo): string | null {
   }
   const mountPrefix = streamUrl.pathname.slice(0, pathMatch.index);
   return `${streamUrl.origin}${mountPrefix}/api/external-stream/${encodeURIComponent(sessionId)}/${encodeURIComponent(match[1])}`;
+}
+
+/** Select a cookie-free transport for the same activated HLS generation before
+ * attaching media. No receiver sees an account cookie or provider URL. */
+export function serverOwnedBrowserPlaybackURL(ownedURL: string, externalURL: string | null): string | null {
+  if (externalURL == null) return null;
+  try {
+    const base = new URL(configuredServerURL() ?? window.location.origin);
+    const prefix = base.pathname.replace(/\/+$/, "");
+    const source = new URL(ownedURL);
+    const external = new URL(externalURL);
+    const sourcePath = source.pathname.slice(prefix.length);
+    const match = /^\/api\/stream\/([A-Za-z0-9_-]{1,128})\/index\.m3u8$/.exec(sourcePath);
+    const preparation = source.searchParams.get("preparation");
+    const generation = source.searchParams.get("generation");
+    const allowed = new Set(["profile", "quality", "start", "hdr", "subtitles", "audio", "generation", "preparation"]);
+    if (match == null || !source.pathname.startsWith(`${prefix}/api/stream/`) ||
+      source.origin !== base.origin || external.origin !== base.origin ||
+      source.username || source.password || source.hash || external.username || external.password || external.hash || external.search ||
+      preparation == null || !PREPARATION_ID.test(preparation) || generation == null || !PREPARATION_GENERATION.test(generation) ||
+      [...source.searchParams.keys()].some((key) => !allowed.has(key) || source.searchParams.getAll(key).length !== 1) ||
+      !external.pathname.startsWith(`${prefix}/api/external-stream/${match[1]}/`) ||
+      !/^[A-Za-z0-9_-]{32,128}$/.test(external.pathname.slice(`${prefix}/api/external-stream/${match[1]}/`.length))) return null;
+    external.pathname += "/index.m3u8";
+    external.searchParams.set("generation", generation);
+    external.searchParams.set("preparation", preparation);
+    return external.href;
+  } catch {
+    return null;
+  }
 }
 
 export async function searchServerMedia(input: {
