@@ -73,6 +73,7 @@ def fixed42_to61_java_receipt_fields() -> set[str]:
     end = source.index("private static void writeBounded(", start)
     fields = set(re.findall(r'receipt\.put\(\s*"([^"]+)"', source[start:end]))
     fields.remove("postInstallExactUpToDate59Observed")
+    fields.remove("postInstallExactUpToDate74Observed")
     return fields
 
 

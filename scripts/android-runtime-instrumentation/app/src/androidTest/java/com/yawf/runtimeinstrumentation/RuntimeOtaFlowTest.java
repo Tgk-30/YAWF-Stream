@@ -74,6 +74,10 @@ public final class RuntimeOtaFlowTest {
             "public-fixed42-to61-initial-cancel-due-resume-v1";
     private static final String FIXED42_TO61_EVIDENCE_SUBDIR =
             "fixed42-to61-automatic-public-ota-flow";
+    private static final String FIXED42_TO74_AUTOMATIC_OTA_PROFILE =
+            "public-fixed42-to74-initial-cancel-due-resume-v1";
+    private static final String FIXED42_TO74_EVIDENCE_SUBDIR =
+            "fixed42-to74-automatic-public-ota-flow";
     private static final String FIXED42_BASELINE_VERSION = "2.3.42";
     private static final long FIXED42_BASELINE_VERSION_CODE = 2_003_042L;
     private static final String FIXED42_BASELINE_SHA256 =
@@ -112,6 +116,18 @@ public final class RuntimeOtaFlowTest {
     private static final String FIXED42_TO61_TARGET_VERIFICATION_SHA256 =
             "25afa6bca5261b02a0372eb0fc88934573ae2bce0091bd526007f963fe5b26b2";
     private static final long FIXED42_TO61_TARGET_BUILD_RUN = 40_238_512_551L;
+    private static final String FIXED42_TO74_TARGET_VERSION = "2.3.74";
+    private static final long FIXED42_TO74_TARGET_VERSION_CODE = 2_003_074L;
+    private static final String FIXED42_TO74_TARGET_SHA256 =
+            "d6eda3e15aca6005ea9be32b793339cd22469b4802b39326f3ee9ab17b47b7ae";
+    private static final long FIXED42_TO74_TARGET_SIZE = 88_669_057L;
+    private static final String FIXED42_TO74_TARGET_SOURCE =
+            "6eff963227ef58adc508c35abb56c58a615a8a96";
+    private static final String FIXED42_TO74_TARGET_MANIFEST_SHA256 =
+            "0493b4ba62722d38b7223648d6c2ca4423d8f6934df735316f17da7285491984";
+    private static final String FIXED42_TO74_TARGET_VERIFICATION_SHA256 =
+            "c74413a7a4a0591df1407b9483d00e98f1919b538c1fbb6b009439121a750130";
+    private static final long FIXED42_TO74_TARGET_BUILD_RUN = 42_365_613_314L;
     private static final String AUTOMATIC_BASELINE_VERSION = "2.3.27";
     private static final long AUTOMATIC_BASELINE_VERSION_CODE = 2_003_027L;
     private static final String AUTOMATIC_BASELINE_SHA256 =
@@ -225,6 +241,7 @@ public final class RuntimeOtaFlowTest {
     private int postInstallManualInspectionChecks;
     private boolean postInstallExactUpToDate59Observed;
     private boolean postInstallExactUpToDate61Observed;
+    private boolean postInstallExactUpToDate74Observed;
     private boolean weeklyOnAfterUpdate;
     private int postInstallNativeOkClosures;
     private int postInstallNativeCancelClosures;
@@ -251,7 +268,9 @@ public final class RuntimeOtaFlowTest {
         device = UiDevice.getInstance(instrumentation);
         Bundle arguments = InstrumentationRegistry.getArguments();
         otaMode = arguments.getString("otaMode", "strict");
-        String expectedSubdir = isFixed42To61AutomaticMode()
+        String expectedSubdir = isFixed42To74AutomaticMode()
+                ? FIXED42_TO74_EVIDENCE_SUBDIR
+                : isFixed42To61AutomaticMode()
                 ? FIXED42_TO61_EVIDENCE_SUBDIR
                 : (isFixed42AutomaticMode()
                         ? FIXED42_EVIDENCE_SUBDIR
@@ -259,7 +278,8 @@ public final class RuntimeOtaFlowTest {
         if (isFixed42AutomaticMode()) {
             assertTrue("Fixed42 evidence profile dispatch was inconsistent",
                     FIXED42_EVIDENCE_SUBDIR.equals(expectedSubdir)
-                            || FIXED42_TO61_EVIDENCE_SUBDIR.equals(expectedSubdir));
+                            || FIXED42_TO61_EVIDENCE_SUBDIR.equals(expectedSubdir)
+                            || FIXED42_TO74_EVIDENCE_SUBDIR.equals(expectedSubdir));
         }
         String subdir = arguments.getString("evidenceSubdir", expectedSubdir);
         assertTrue("Unsafe evidence subdirectory", SAFE_SUBDIR.matcher(subdir).matches());
@@ -336,6 +356,7 @@ public final class RuntimeOtaFlowTest {
     }
 
     private boolean isFixed42AutomaticMode() {
+        if (isFixed42To74AutomaticMode()) return true;
         return isFixed42To59AutomaticMode() || isFixed42To61AutomaticMode();
     }
 
@@ -347,9 +368,14 @@ public final class RuntimeOtaFlowTest {
         return FIXED42_TO61_AUTOMATIC_OTA_PROFILE.equals(otaMode);
     }
 
+    private boolean isFixed42To74AutomaticMode() {
+        return FIXED42_TO74_AUTOMATIC_OTA_PROFILE.equals(otaMode);
+    }
+
     private String fixed42ProfileName() {
         assertTrue("Fixed42 marker requested outside an exact fixed42 profile",
                 isFixed42AutomaticMode());
+        if (isFixed42To74AutomaticMode()) return "Fixed42OTA74Marker";
         return isFixed42To61AutomaticMode()
                 ? FIXED42_TO61_PROFILE_NAME : FIXED42_PROFILE_NAME;
     }
@@ -364,6 +390,11 @@ public final class RuntimeOtaFlowTest {
         admittedTargetManifestSha256 = arguments.getString("targetManifestSha256", "");
         admittedTargetVerificationSha256 = arguments.getString("targetVerificationSha256", "");
         admittedTargetBuildRun = parseLongArgument(arguments, "targetBuildRun");
+
+        if (isFixed42To74AutomaticMode()) {
+            admitFixed42To74TargetIdentity(arguments);
+            return;
+        }
 
         if (isFixed42AutomaticMode()) {
             boolean fixed42To61 = isFixed42To61AutomaticMode();
@@ -480,6 +511,61 @@ public final class RuntimeOtaFlowTest {
         assertTrue("Automatic target build run was not independently supplied",
                 admittedTargetBuildRun > 0L);
         assertEquals("Automatic public release admission was not explicit",
+                "true", arguments.getString("targetPublicRelease", ""));
+        targetIdentityAdmitted = true;
+    }
+
+    private void admitFixed42To74TargetIdentity(Bundle arguments) {
+        admittedBaselineSourceRevision = arguments.getString("baselineSourceRevision", "");
+        admittedBaselineManifestSha256 = arguments.getString("baselineManifestSha256", "");
+        admittedBaselineVerificationSha256 =
+                arguments.getString("baselineVerificationSha256", "");
+        admittedBaselineBuildRun = parseLongArgument(arguments, "baselineBuildRun");
+        admittedUpdaterSourceSha256 = arguments.getString("updaterSourceSha256", "");
+        assertEquals("Fixed42 runtime profile mismatch", FIXED42_TO74_AUTOMATIC_OTA_PROFILE,
+                arguments.getString("runtimeProfile", ""));
+        assertEquals("Fixed42 baseline version mismatch",
+                FIXED42_BASELINE_VERSION, admittedBaselineVersion);
+        assertEquals("Fixed42 baseline versionCode mismatch",
+                FIXED42_BASELINE_VERSION_CODE,
+                parseLongArgument(arguments, "baselineVersionCode"));
+        assertEquals("Fixed42 baseline APK digest mismatch",
+                FIXED42_BASELINE_SHA256, arguments.getString("baselineSha256", ""));
+        assertEquals("Fixed42 baseline APK size mismatch",
+                FIXED42_BASELINE_SIZE, parseLongArgument(arguments, "baselineSize"));
+        assertEquals("Fixed42 baseline source mismatch",
+                FIXED42_BASELINE_SOURCE, admittedBaselineSourceRevision);
+        assertEquals("Fixed42 baseline manifest digest mismatch",
+                FIXED42_BASELINE_MANIFEST_SHA256, admittedBaselineManifestSha256);
+        assertEquals("Fixed42 baseline verification digest mismatch",
+                FIXED42_BASELINE_VERIFICATION_SHA256, admittedBaselineVerificationSha256);
+        assertEquals("Fixed42 baseline build run mismatch",
+                FIXED42_BASELINE_BUILD_RUN, admittedBaselineBuildRun);
+        assertEquals("Fixed42-to74 target version mismatch",
+                FIXED42_TO74_TARGET_VERSION, admittedTargetVersion);
+        assertEquals("Fixed42-to74 target versionCode mismatch",
+                FIXED42_TO74_TARGET_VERSION_CODE, admittedTargetVersionCode);
+        assertEquals("Fixed42-to74 target APK name mismatch",
+                "YAWF.Stream_Android_2.3.74.apk",
+                arguments.getString("targetApkName", ""));
+        assertEquals("Fixed42-to74 target APK digest mismatch",
+                FIXED42_TO74_TARGET_SHA256, admittedTargetSha256);
+        assertEquals("Fixed42-to74 target APK size mismatch",
+                FIXED42_TO74_TARGET_SIZE, admittedTargetSize);
+        assertEquals("Fixed42-to74 target source mismatch",
+                FIXED42_TO74_TARGET_SOURCE, admittedTargetSourceRevision);
+        assertEquals("Fixed42-to74 target manifest digest mismatch",
+                FIXED42_TO74_TARGET_MANIFEST_SHA256, admittedTargetManifestSha256);
+        assertEquals("Fixed42-to74 target verification digest mismatch",
+                FIXED42_TO74_TARGET_VERIFICATION_SHA256,
+                admittedTargetVerificationSha256);
+        assertEquals("Fixed42-to74 target build run mismatch",
+                FIXED42_TO74_TARGET_BUILD_RUN, admittedTargetBuildRun);
+        assertEquals("Fixed42 updater source digest mismatch",
+                FIXED42_UPDATER_SHA256, admittedUpdaterSourceSha256);
+        assertEquals("Fixed42 signer continuity mismatch",
+                OtaFlowPolicy.SIGNER_SHA256, arguments.getString("signerSha256", ""));
+        assertEquals("Fixed42 public release admission was not explicit",
                 "true", arguments.getString("targetPublicRelease", ""));
         targetIdentityAdmitted = true;
     }
@@ -1661,7 +1747,9 @@ public final class RuntimeOtaFlowTest {
                 "fixed42 exact postinstall up-to-date title");
         waitFor(nativeDialogText(resultMessage), SHORT_WAIT_MS,
                 "fixed42 exact postinstall up-to-date message");
-        if (isFixed42To61AutomaticMode()) {
+        if (isFixed42To74AutomaticMode()) {
+            postInstallExactUpToDate74Observed = true;
+        } else if (isFixed42To61AutomaticMode()) {
             postInstallExactUpToDate61Observed = true;
         } else {
             postInstallExactUpToDate59Observed = true;
@@ -2301,6 +2389,11 @@ public final class RuntimeOtaFlowTest {
     }
 
     private int returnToProductThroughVisibleLauncher(String phase) {
+        if (isFixed42To74AutomaticMode()) {
+            launchVisibleAppFromLauncher("YAWF Stream", OtaFlowPolicy.PRODUCT_PACKAGE, phase);
+            visibleLauncherReturnOrdinal++;
+            return visibleLauncherReturnOrdinal;
+        }
         if (!isFixed42To61AutomaticMode()) {
             device.pressHome();
             assertTrue("Home did not hide product before " + phase,
@@ -2312,6 +2405,10 @@ public final class RuntimeOtaFlowTest {
     }
 
     private void launchProductFromVisibleLauncher(String phase) {
+        if (isFixed42To74AutomaticMode()) {
+            launchVisibleAppFromLauncher("YAWF Stream", OtaFlowPolicy.PRODUCT_PACKAGE, phase);
+            return;
+        }
         if (isFixed42AutomaticMode()) {
             launchFixed42ProductFromVisibleLauncher(phase);
             return;
@@ -4759,7 +4856,10 @@ public final class RuntimeOtaFlowTest {
                 receipt.put("postInstallInspectionOrdinal", postInstallInspectionOrdinal);
                 receipt.put("postInstallManualInspectionChecks",
                         postInstallManualInspectionChecks);
-                if (isFixed42To61AutomaticMode()) {
+                if (isFixed42To74AutomaticMode()) {
+                    receipt.put("postInstallExactUpToDate74Observed",
+                            postInstallExactUpToDate74Observed);
+                } else if (isFixed42To61AutomaticMode()) {
                     receipt.put("postInstallExactUpToDate61Observed",
                             postInstallExactUpToDate61Observed);
                 } else {
