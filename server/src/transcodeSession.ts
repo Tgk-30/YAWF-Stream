@@ -906,7 +906,7 @@ export class TranscodeRegistry {
     };
     const fingerprint = JSON.stringify(normalizedOptions);
     const existing = this.jobs.get(sessionId);
-    if (existing != null && existing.fingerprint === fingerprint) {
+    if (existing != null && !existing.failed && existing.fingerprint === fingerprint) {
       existing.lastAccess = Date.now();
       return existing.dir;
     }

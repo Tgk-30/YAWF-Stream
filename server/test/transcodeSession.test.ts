@@ -783,6 +783,86 @@ describe("transcode pre-spawn lifecycle ownership", () => {
 });
 
 describe("transcode process capacity", () => {
+  it.each(["exit", "error"] as const)("replaces same-options output after a ready job reports %s", async (failure) => {
+    const fixture = capacityRegistryFixture(2);
+    try {
+      const original = await fixture.registry.ensureJob("recover", "https://provider.example/source");
+      const originalGeneration = fixture.registry.generationFor("recover", original)!;
+      if (failure === "exit") fixture.children[0]!.finish(1);
+      else fixture.children[0]!.child.emit("error", new Error("post-readiness failure"));
+
+      const [replacement, coalesced] = await Promise.all([
+        fixture.registry.ensureJob("recover", "https://provider.example/source"),
+        fixture.registry.ensureJob("recover", "https://provider.example/source"),
+      ]);
+      expect(replacement).not.toBe(original);
+      expect(coalesced).toBe(replacement);
+      expect(fixture.children).toHaveLength(2);
+      expect(fixture.registry.dirFor("recover")).toBe(replacement);
+      expect(fixture.registry.generationFor("recover", replacement)).not.toBe(originalGeneration);
+      expect(fixture.registry.dirForAsset("recover", "stream.m3u8", originalGeneration)).toBe(original);
+      expect(fixture.children[0]!.kills).toBeGreaterThan(0);
+      expect(await fixture.registry.ensureJob("recover", "https://provider.example/source")).toBe(replacement);
+      expect(fixture.children).toHaveLength(2);
+    } finally {
+      fixture.children.forEach((record) => record.finish(0));
+      await fixture.registry.stop();
+      expect(fixture.children.every((record) => !existsSync(record.dir))).toBe(true);
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a failed live child's slot until close before coalescing recovery", async () => {
+    const fixture = capacityRegistryFixture(1);
+    try {
+      const original = await fixture.registry.ensureJob("recover", "https://provider.example/source");
+      fixture.children[0]!.child.emit("error", new Error("post-readiness failure"));
+      await expect(fixture.registry.ensureJob("recover", "https://provider.example/source"))
+        .rejects.toMatchObject({ statusCode: 503 });
+      expect(fixture.children).toHaveLength(1);
+      expect(fixture.children[0]!.running).toBe(true);
+      fixture.children[0]!.finish(1);
+      const [replacement, coalesced] = await Promise.all([
+        fixture.registry.ensureJob("recover", "https://provider.example/source"),
+        fixture.registry.ensureJob("recover", "https://provider.example/source"),
+      ]);
+      expect(replacement).not.toBe(original);
+      expect(coalesced).toBe(replacement);
+      expect(fixture.children).toHaveLength(2);
+      await expect(fixture.registry.ensureJob("overflow", "https://provider.example/other"))
+        .rejects.toMatchObject({ statusCode: 503 });
+      expect(fixture.children).toHaveLength(2);
+    } finally {
+      fixture.children.forEach((record) => record.finish(0));
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels a coalesced failed-job replacement without leaking its staged output", async () => {
+    const fixture = stagedRegistryFixture();
+    try {
+      const original = await fixture.registry.ensureJob("recover", "https://provider.example/source");
+      fixture.children[0]!.child.emit("exit", 1);
+      const first = observe(fixture.registry.ensureJob("recover", "https://provider.example/source"));
+      const second = observe(fixture.registry.ensureJob("recover", "https://provider.example/source"));
+      await vi.waitFor(() => expect(fixture.children).toHaveLength(2), { timeout: 300 });
+      await fixture.registry.kill("recover");
+      expect(await first).toMatchObject({ status: "rejected", error: { statusCode: 410 } });
+      expect(await second).toMatchObject({ status: "rejected", error: { statusCode: 410 } });
+      expect(fixture.registry.dirFor("recover")).toBeNull();
+      expect(fixture.children).toHaveLength(2);
+      expect(existsSync(original)).toBe(false);
+      expect(fixture.children.every((record) => record.kills > 0 && !existsSync(record.dir))).toBe(true);
+    } finally {
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("frees admission after normal FFmpeg exit while cached output remains playable", async () => {
     const fixture = capacityRegistryFixture(1);
     try {
@@ -791,6 +871,8 @@ describe("transcode process capacity", () => {
         "https://provider.example/first",
       );
       fixture.children[0]!.finish(0);
+      expect(await fixture.registry.ensureJob("completed", "https://provider.example/first")).toBe(cached);
+      expect(fixture.children).toHaveLength(1);
       expect(existsSync(join(cached, "stream.m3u8"))).toBe(true);
       expect(fixture.registry.dirFor("completed")).toBe(cached);
 
