@@ -135,12 +135,13 @@ function exactPids(executable) {
   });
 }
 
-export async function runMacosQualification() {
+export async function runMacosQualification(readerType = 'native-mpv') {
+  if (!['native-mpv', 'wkwebview-html5'].includes(readerType)) throw new Error('Unknown qualification reader');
   const temporaryRoot = disposableRunnerTemp();
   if (!pinnedMedia[process.arch]) throw new Error('Unsupported native test architecture');
   const workspace = await mkdtemp(join(temporaryRoot, 'yawf-update-runtime-'));
   if (!workspace.startsWith(`${temporaryRoot}${sep}`)) throw new Error('Invalid disposable test directory');
-  const evidence = join(temporaryRoot, 'desktop-update-runtime-evidence');
+  const evidence = join(temporaryRoot, readerType === 'native-mpv' ? 'desktop-update-runtime-evidence' : 'desktop-update-runtime-wkwebview-evidence');
   await mkdir(evidence, { recursive: true });
   const privateDirectory = join(workspace, 'private');
   await mkdir(privateDirectory, { mode: 0o700 });
@@ -149,10 +150,10 @@ export async function runMacosQualification() {
   const cleanEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !inheritedSigning.test(name)));
   let service, executable, child, stdout, stderr, ownsNativeDebugLog = false;
   const nativeDebugLog = '/tmp/ds-rp-debug.log';
-  const receipt = { schemaVersion: 1, classification: 'disposable-native-qualification-not-release', source: run('git', ['rev-parse', 'HEAD']), candidateHead: process.env.QUALIFICATION_SOURCE_HEAD ?? null, arch: process.arch, baseVersion, nextVersion, startedAt: new Date().toISOString(), passed: false };
+  const receipt = { schemaVersion: 1, readerType, classification: 'disposable-native-qualification-not-release', source: run('git', ['rev-parse', 'HEAD']), candidateHead: process.env.QUALIFICATION_SOURCE_HEAD ?? null, arch: process.arch, baseVersion, nextVersion, startedAt: new Date().toISOString(), passed: false };
   try {
     let graphicsProbe;
-    try { graphicsProbe = JSON.parse(await readFile(join(evidence, 'cgl-probe.json'), 'utf8')); }
+    try { graphicsProbe = JSON.parse(await readFile(join(temporaryRoot, 'desktop-update-runtime-evidence', 'cgl-probe.json'), 'utf8')); }
     catch (error) { if (error.code !== 'ENOENT') throw error; graphicsProbe = await runCglCapabilityProbe(); }
     if (graphicsProbe.source !== receipt.source || graphicsProbe.arch !== receipt.arch || graphicsProbe.candidateHead !== receipt.candidateHead || !graphicsProbe.observation?.executionSucceeded || graphicsProbe.error) throw new Error('Fresh same-source CGL probe is required');
     validateCglProbe(graphicsProbe.observation);
@@ -190,11 +191,12 @@ export async function runMacosQualification() {
     let signature = '';
     const archivePath = join(workspace, 'update.tar.gz');
     const runId = randomUUID();
-    service = await startRuntimeService({ runId, mediaPath, archivePath, signature: () => signature, baseVersion, nextVersion });
+    service = await startRuntimeService({ runId, mediaPath, archivePath, signature: () => signature, baseVersion, nextVersion, readerType });
     await writeFile(runtimeConfig, `${JSON.stringify({ runId, baseUrl: service.address, baseVersion, nextVersion })}\n`);
-    const fixtureRoot = join(web, '.build/desktop-update-runtime');
+    const driver = readerType === 'native-mpv' ? 'fixture-driver.tsx' : 'webview-fixture-driver.tsx';
+    const fixtureRoot = join(web, '.build/desktop-update-runtime', readerType);
     await mkdir(fixtureRoot, { recursive: true });
-    await writeFile(join(fixtureRoot, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"><title>Disposable update qualification</title></head><body><div id="root"></div><script type="module" src="../../../scripts/desktop-update-runtime/fixture-driver.tsx"></script></body></html>');
+    await writeFile(join(fixtureRoot, 'index.html'), `<!doctype html><html><head><meta charset="utf-8"><title>Disposable update qualification</title></head><body><div id="root"></div><script type="module" src="../../../../scripts/desktop-update-runtime/${driver}"></script></body></html>`);
     const frontend = join(workspace, 'frontend');
     const vite = await import(pathToFileURL(join(web, 'node_modules/vite/dist/node/index.js')).href);
     await vite.build({ configFile: false, root: fixtureRoot, publicDir: false,
@@ -241,14 +243,14 @@ export async function runMacosQualification() {
     const deadline = Date.now() + 150_000;
     while (Date.now() < deadline && !service.events.some((event) => ['completed', 'failed'].includes(event.stage))) await sleep(200);
     receipt.frontendFailure = service.events.find((event) => event.stage === 'failed')?.detail ?? null;
-    const verification = verifyRuntimeEvents(service.events, service.requests, baseVersion, nextVersion);
+    const verification = verifyRuntimeEvents(service.events, service.requests, baseVersion, nextVersion, readerType);
     const running = exactPids(executable);
     if (!oldExit || running.length !== 1 || running[0] === child.pid) throw new Error('No independently observed old-process exit and successor process');
     if (digest(await readFile(executable)) !== targetExecutableHash) throw new Error('Installed native executable is not the signed target');
     const installedVersion = run('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', join(installed, 'Contents/Info.plist')]);
     if (installedVersion !== nextVersion || await readFile(marker, 'utf8') !== runId) throw new Error('Native installed version or preserved user-data marker mismatch');
     run('/usr/bin/codesign', ['--verify', '--deep', '--strict', installed]);
-    Object.assign(receipt, { passed: true, verification, initialExecutableHash, targetExecutableHash, archiveSha256: digest(await readFile(archivePath)), mediaPackageSha256: pinned.sha256, oldExit, successorPid: running[0], installedVersion, isolatedDataPreserved: true, scope: 'Real AppKit/libmpv IPC and ephemeral-key-signed updater apply/relaunch in a disposable test identity. Not Developer ID, notarization, physical media output, or user-installed update qualification.' });
+    Object.assign(receipt, { passed: true, verification, initialExecutableHash, targetExecutableHash, archiveSha256: digest(await readFile(archivePath)), mediaPackageSha256: pinned.sha256, oldExit, successorPid: running[0], installedVersion, isolatedDataPreserved: true, scope: readerType === 'native-mpv' ? 'Real AppKit/libmpv IPC and ephemeral-key-signed updater apply/relaunch in a disposable test identity. Not Developer ID, notarization, physical media output, or user-installed update qualification.' : 'Actual production VideoPlayer HTML5 WKWebView reader, manual UpdateBanner install, native updater apply/relaunch and exact PID/hash/version/home checks. Not MPV, issued-native-command teardown, automatic queued intent, physical output, Developer ID or user-installed update qualification.' });
   } catch (error) { receipt.error = String(error.message).slice(0, 2000); throw error; }
   finally {
     receipt.finishedAt = new Date().toISOString();
@@ -281,7 +283,7 @@ export async function runMacosQualification() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  if (process.argv.length !== 3 || !['--run', '--probe-only'].includes(process.argv[2])) throw new Error('Usage: node scripts/desktop-update-runtime/run_macos.mjs --run|--probe-only (disposable hosted macOS runner only)');
+  if (process.argv.length !== 3 || !['--run', '--run-wkwebview', '--probe-only'].includes(process.argv[2])) throw new Error('Usage: node scripts/desktop-update-runtime/run_macos.mjs --run|--run-wkwebview|--probe-only (disposable hosted macOS runner only)');
   if (process.argv[2] === '--probe-only') await runCglCapabilityProbe();
-  else await runMacosQualification();
+  else await runMacosQualification(process.argv[2] === '--run-wkwebview' ? 'wkwebview-html5' : 'native-mpv');
 }

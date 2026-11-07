@@ -47,3 +47,29 @@ UI action, provider playback, Developer ID/notarized release installation, or
 the update transaction across a destroyed WebView document. Those remain
 separate qualification requirements. In particular, a successful ordinary
 transaction must not be used to waive the cross-document admission defect.
+
+## Separate WKWebView HTML5 reader lane
+
+The four-job matrix keeps both strict MPV jobs and adds independently labeled
+`wkwebview-html5` jobs on both architectures. `--run` remains the MPV lane;
+`--run-wkwebview` selects the separate production `VideoPlayer` HTML5 reader and
+real `UpdateBanner`. The hosted runner guard, native updater, ephemeral signing,
+exact process-exit/successor PID, installed hash/version, signature, and preserved
+isolated-home checks are shared unchanged. Evidence and artifacts identify the
+reader type and cannot be combined into an MPV pass.
+
+The WKWebView lane requires actual muted H264 clock progress and decoded
+`videoWidth`, real Pause and Play controls, production keyboard seeking, and a
+real Close button followed by React unmount, released activity, paused detached
+media and a stopped media clock. While paused, an independent real
+`PendingUpdate.install()` must reject with production `UpdateDeferredError` and
+its unused candidate is closed. The Banner then performs a manual installation
+only after the host has acknowledged reader closure. The host requires exactly
+one archive request after that acknowledgement and installation request, then a
+new native process and repeated actual playback/control observations. This does
+not claim automatic queued intent or MPV issued-command teardown coverage.
+
+A graphics-limited runner may pass the separate WKWebView lane while the MPV
+lane still fails. A working default CGL2.1 control does not replace the production
+accelerated core3.2 profile, and neither CGL capability nor HTML5 playback waives
+strict MPV rendering readiness or proves physical audio/video output.

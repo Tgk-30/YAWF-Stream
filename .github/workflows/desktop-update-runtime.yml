@@ -41,7 +41,7 @@ concurrency:
 
 jobs:
   native:
-    name: macOS ${{ matrix.arch }} actual updater and player IPC
+    name: macOS ${{ matrix.arch }} ${{ matrix.reader }} actual updater
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -49,8 +49,24 @@ jobs:
         include:
           - runner: macos-15
             arch: arm64
+            reader: native-mpv
+            command: --run
+            evidence: desktop-update-runtime-evidence
           - runner: macos-15-intel
             arch: x86_64
+            reader: native-mpv
+            command: --run
+            evidence: desktop-update-runtime-evidence
+          - runner: macos-15
+            arch: arm64
+            reader: wkwebview-html5
+            command: --run-wkwebview
+            evidence: desktop-update-runtime-wkwebview-evidence
+          - runner: macos-15-intel
+            arch: x86_64
+            reader: wkwebview-html5
+            command: --run-wkwebview
+            evidence: desktop-update-runtime-wkwebview-evidence
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
     env:
@@ -78,17 +94,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-cgl-probe-${{ matrix.arch }}
+          name: desktop-cgl-probe-${{ matrix.arch }}-${{ matrix.reader }}
           path: ${{ runner.temp }}/desktop-update-runtime-evidence/cgl-probe.json
           if-no-files-found: warn
           retention-days: 14
-      - name: Exercise native playback and an actual signed two-version update
-        run: node scripts/desktop-update-runtime/run_macos.mjs --run
+      - name: Exercise the selected actual reader and signed two-version update
+        run: node scripts/desktop-update-runtime/run_macos.mjs ${{ matrix.command }}
       - name: Preserve bounded native evidence, never ephemeral private keys
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-update-runtime-${{ matrix.arch }}
-          path: ${{ runner.temp }}/desktop-update-runtime-evidence
+          name: desktop-update-runtime-${{ matrix.arch }}-${{ matrix.reader }}
+          path: ${{ runner.temp }}/${{ matrix.evidence }}
           if-no-files-found: warn
           retention-days: 14
