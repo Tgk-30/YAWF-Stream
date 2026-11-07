@@ -94,8 +94,8 @@ export default function Updates() {
             viewport={{ once: true, amount: 0.8 }}
             transition={{ duration: reduced ? 0.2 : 0.6, ease: EASE_EXPO, delay: 0.3 }}
           >
-            The in-app updater downloads, installs, and relaunches. Movie night never dies mid-film: checks are
-            quiet, installs are one click, and auto-check can be turned off entirely.
+            The in-app updater downloads, installs, and relaunches. Finish playback before installing an
+            update. Automatic checks can be turned off in Settings.
           </motion.p>
 
           {/* functional demo toggle */}
