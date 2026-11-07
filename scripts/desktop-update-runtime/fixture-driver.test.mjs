@@ -1,18 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 import vm from 'node:vm';
 import ts from '../../web/node_modules/typescript/lib/typescript.js';
 import { requiredBaseStages } from './runtime-service.mjs';
 
 const source = await readFile(new URL('./fixture-driver.tsx', import.meta.url), 'utf8');
 const tree = ts.createSourceFile('fixture-driver.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-const names = new Set(['validateRuntimeConfig', 'sanitizeFailure', 'bounded']);
+const names = new Set(['validateRuntimeConfig', 'sanitizeFailure', 'bounded', 'observedClock', 'summarizeAudioDevices']);
 const helpers = tree.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text)).map((node) => node.getText(tree)).join('\n');
 const javascript = ts.transpileModule(helpers, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const context = { exports: {}, URL, Error, window: { setTimeout, clearTimeout } };
 vm.runInNewContext(javascript, context);
-const { validateRuntimeConfig, sanitizeFailure, bounded } = context.exports;
+const { validateRuntimeConfig, sanitizeFailure, bounded, observedClock, summarizeAudioDevices } = context.exports;
 const config = { baseUrl: 'http://127.0.0.1:43210', baseVersion: '2.3.101', nextVersion: '2.3.102', runId: 'b8b467df-7ec6-4bd3-b5df-a9a465c8de12' };
 
 test('fixture config permits only a loopback origin, exact versions and public run correlation', () => {
@@ -64,7 +66,7 @@ test('only next boot after real play/pause/seek/resume/destruction may report co
   for (const text of ['session.command("seek", [target, "absolute"])', 'native-seek-observation', 'native-resume-observation', 'await closeReader();']) assert.ok(source.indexOf(text, next) < completed);
   assert.match(source.slice(0, next), /await bounded\(new Promise<void>\(\(\) => \{\}\), 15_000, "await-real-process-relaunch"\)/);
   assert.equal((source.match(/emit\("completed"/g) ?? []).length, 1);
-  assert.match(source, /emit\("failed", \{ message \}\)/);
+  assert.match(source, /emit\("failed", \{ message, diagnostic: \{ \.\.\.diagnostic, audioDevices \} \}\)/);
   assert.match(source, /runId: config\.runId, stage: name, version/);
   const parsed = ts.transpileModule(source, { reportDiagnostics: true, compilerOptions: { jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
   assert.equal((parsed.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error).length, 0);
@@ -101,4 +103,91 @@ test('fixture init keys are admitted by actual Rust validation and match the pro
   assert.ok(source.indexOf('await session.setProperty("mute", true)') < load);
   assert.ok(source.indexOf('await session.setProperty("pause", true)') < load);
   assert.match(source, /const target = seekFrom < 3 \? 5 : 1/);
+});
+
+test('native failure snapshots retain actual clock fields and observation counts without mutable aliases', () => {
+  const clock = observedClock();
+  const initial = clock.snapshot();
+  assert.equal(initial.eventCount, 0);
+  for (const name of ['position', 'duration', 'paused', 'seeking', 'width']) assert.equal(initial[name], null);
+  for (const [name, data] of [['time-pos', 0.2], ['duration', 10], ['pause', false], ['seeking', true], ['video-params/w', 640]]) clock.event({ name, data });
+  const snapshot = clock.snapshot();
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), {
+    position: 0.2, duration: 10, paused: false, seeking: true, width: 640, eventCount: 5,
+    propertyEventCounts: { 'time-pos': 1, duration: 1, pause: 1, seeking: 1, 'video-params/w': 1 },
+    recentEvents: ['time-pos', 'duration', 'pause', 'seeking', 'video-params/w'], recentErrors: [],
+  });
+  clock.event({ name: 'time-pos', data: 0.4 });
+  clock.event({ name: 'dwidth', data: NaN });
+  assert.equal(snapshot.position, 0.2); assert.equal(snapshot.eventCount, 5);
+  assert.equal(snapshot.propertyEventCounts['time-pos'], 1); assert.equal(snapshot.recentEvents.length, 5);
+  assert.equal(clock.snapshot().position, 0.4); assert.equal(clock.snapshot().width, 640);
+});
+
+test('native event diagnostics bound history and retain only safe names and numeric end-file errors', () => {
+  const clock = observedClock();
+  for (let index = 0; index < 30; index++) clock.event({ name: 'end-file', data: { error: true, code: -index, source: 'https://private.invalid/media' } });
+  clock.event({ name: 'https://private.invalid/property', data: 'Bearer private-value' });
+  clock.event({ name: 'end-file', data: { error: 'not-a-boolean', code: Infinity, description: '/Users/example/device' } });
+  const snapshot = clock.snapshot();
+  assert.equal(snapshot.eventCount, 32); assert.equal(snapshot.propertyEventCounts['end-file'], 31);
+  assert.equal(snapshot.propertyEventCounts.other, 1); assert.equal(snapshot.recentEvents.length, 12);
+  assert.equal(snapshot.recentEvents.at(-2), 'other'); assert.equal(snapshot.recentErrors.length, 4);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.recentErrors.at(-1))), { name: 'end-file', error: false, code: null });
+  assert.equal(snapshot.recentErrors[0].code, -27);
+  clock.event({ name: 'end-file', data: { error: true, code: -9 } });
+  assert.equal(snapshot.recentErrors.at(-1).code, null);
+  const serialized = JSON.stringify(snapshot);
+  for (const value of ['https:', 'private', 'Bearer', '/Users', 'description', 'source']) assert.ok(!serialized.includes(value));
+});
+
+test('audio inventory diagnostics report counts only and never expose device identities or choose a fallback', () => {
+  const summary = summarizeAudioDevices([{ name: 'auto', description: 'Default' }, { name: 'coreaudio/private-device-uid', description: 'Personal device' }, { name: 'other/private-output' }, null]);
+  assert.deepEqual(JSON.parse(JSON.stringify(summary)), { status: 'observed', deviceCount: 4, automaticDevicePresent: true, coreAudioDeviceCount: 1 });
+  assert.deepEqual(JSON.parse(JSON.stringify(summarizeAudioDevices(null))), { status: 'unexpected-shape' });
+  assert.deepEqual(JSON.parse(JSON.stringify(summarizeAudioDevices([]))), { status: 'observed', deviceCount: 0, automaticDevicePresent: false, coreAudioDeviceCount: 0 });
+  assert.doesNotMatch(JSON.stringify(summary), /private|Personal|Default|uid/);
+});
+
+test('failed receipt adds bounded diagnostics without changing native playback requirements or polling forbidden properties', () => {
+  const failure = source.slice(source.indexOf('    const diagnostic = { nativeClock:'));
+  assert.match(failure, /nativeClock: clock\.snapshot\(\), activity: getPlayerMounted\(\), installation: getUpdateInstallationActive\(\)/);
+  assert.match(failure, /bounded\(session\.getProperty\("audio-device-list"\), DIAGNOSTIC_TIMEOUT_MS, "diagnostic-audio-devices"\)/);
+  assert.match(failure, /message: sanitizeFailure\(diagnosticError\)/);
+  assert.match(failure, /await emit\("failed", \{ message, diagnostic: \{ \.\.\.diagnostic, audioDevices \} \}\)/);
+  assert.ok(failure.indexOf('await emit("failed"') < failure.indexOf('session.destroy()'));
+  assert.equal((source.match(/session\.getProperty\(/g) ?? []).length, 1);
+  assert.match(source, /const DIAGNOSTIC_TIMEOUT_MS = 2_000/);
+  assert.match(source, /const NATIVE_TIMEOUT_MS = 25_000/);
+  assert.match(source, /value\.position >= 0\.75 && value\.duration != null && value\.paused === false && \(value\.width \?\? 0\) > 0/);
+  assert.match(source, /Math\.abs\(value\.position - target\) <= 0\.35 && value\.seeking !== true/);
+  assert.match(source, /value\.position >= resumedFrom \+ 0\.5/);
+  assert.doesNotMatch(source, /session\.(?:setProperty|command)\("(?:ao|audio-device|aid|vid|vo|gpu-context)"/);
+});
+
+test('entire fixture and imported production graph pass strict TypeScript with only generated JSON virtualized', () => {
+  const web = fileURLToPath(new URL('../../web/', import.meta.url));
+  const driver = fileURLToPath(new URL('./fixture-driver.tsx', import.meta.url));
+  const generated = fileURLToPath(new URL('./runtime-config.json', import.meta.url));
+  const configuration = join(web, 'tsconfig.json');
+  const input = ts.readConfigFile(configuration, ts.sys.readFile); assert.equal(input.error, undefined);
+  const parsed = ts.parseJsonConfigFileContent(input.config, ts.sys, web, { resolveJsonModule: true }, configuration);
+  assert.deepEqual(parsed.errors, []);
+  // Mirror the fixture Vite aliases, with the installed React declaration
+  // packages supplying types for the actual runtime React modules.
+  const options = { ...parsed.options, baseUrl: web, paths: {
+    react: ['node_modules/@types/react/index.d.ts'], 'react/*': ['node_modules/@types/react/*'],
+    'react-dom/*': ['node_modules/@types/react-dom/*'], '@tauri-apps/*': ['node_modules/@tauri-apps/*'],
+  } };
+  const host = ts.createCompilerHost(options);
+  const originalExists = host.fileExists.bind(host), originalRead = host.readFile.bind(host), originalSource = host.getSourceFile.bind(host);
+  host.fileExists = (path) => resolve(path) === generated || originalExists(path);
+  host.readFile = (path) => resolve(path) === generated ? JSON.stringify(config) : originalRead(path);
+  host.getSourceFile = (path, languageVersion, onError, shouldCreateNewSourceFile) => resolve(path) === generated
+    ? ts.createSourceFile(path, JSON.stringify(config), languageVersion, true, ts.ScriptKind.JSON)
+    : originalSource(path, languageVersion, onError, shouldCreateNewSourceFile);
+  const program = ts.createProgram({ rootNames: [...parsed.fileNames, driver], options, host });
+  assert.ok(program.getSourceFile(driver)); assert.ok(program.getSourceFile(generated));
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.equal(diagnostics.length, 0, ts.formatDiagnosticsWithColorAndContext(diagnostics, { getCanonicalFileName: (path) => path, getCurrentDirectory: () => web, getNewLine: () => '\n' }));
 });

@@ -70,6 +70,8 @@ jobs:
       - name: Validate disposable qualification contracts
         run: node --test scripts/desktop-update-runtime/*.test.mjs
       - name: Exercise native playback and an actual signed two-version update
+        env:
+          QUALIFICATION_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node scripts/desktop-update-runtime/run_macos.mjs --run
       - name: Preserve bounded native evidence, never ephemeral private keys
         if: always()

@@ -23,6 +23,10 @@ It independently checks the installed executable hash, bundle version and
 signature, plus preservation of a marker in the isolated test home. It records
 HTTP requests, frontend stage receipts and bounded build/process logs. Private
 keys are removed before launch and never included in evidence artifacts.
+The existing native debug tracer is enabled only after exclusively claiming its
+fixed log path on the disposable runner. A bounded head/tail snapshot is retained
+after exact fixture-process cleanup, then the owned log is removed. An existing
+unrelated log is never read or overwritten.
 
 Run the fixture contracts with:
 

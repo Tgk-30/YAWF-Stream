@@ -11,6 +11,7 @@ export const BASE_STAGES = ["boot", "playing", "paused-update-deferred", "destro
 const NATIVE_TIMEOUT_MS = 25_000;
 const EVENT_TIMEOUT_MS = 5_000;
 const INSTALL_TIMEOUT_MS = 180_000;
+const DIAGNOSTIC_TIMEOUT_MS = 2_000;
 
 export function validateRuntimeConfig(value: unknown): RuntimeConfig {
   if (value == null || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid runtime configuration.");
@@ -40,12 +41,31 @@ export function bounded<T>(operation: Promise<T>, timeoutMs: number, stage: stri
   });
 }
 interface NativeClock { position: number | null; duration: number | null; paused: boolean | null; seeking: boolean | null; width: number | null }
-function observedClock() {
+export function observedClock() {
   const state: NativeClock = { position: null, duration: null, paused: null, seeking: null, width: null };
   const listeners = new Set<() => void>();
+  const allowedNames = new Set(["time-pos", "duration", "pause", "seeking", "video-params/w", "dwidth", "end-file"]);
+  let eventCount = 0;
+  const propertyEventCounts: Record<string, number> = {};
+  const recentEvents: string[] = [];
+  const recentErrors: Array<{ name: "end-file"; error: boolean; code: number | null }> = [];
   return {
     state,
+    snapshot() {
+      return { ...state, eventCount, propertyEventCounts: { ...propertyEventCounts }, recentEvents: [...recentEvents], recentErrors: recentErrors.map((error) => ({ ...error })) };
+    },
     event(event: { name: string; data: unknown }) {
+      // Native values can contain source/device strings. Retain only fixed
+      // property names, finite clock values and the bridge's numeric end code.
+      const name = allowedNames.has(event.name) ? event.name : "other";
+      eventCount += 1;
+      propertyEventCounts[name] = (propertyEventCounts[name] ?? 0) + 1;
+      recentEvents.push(name); if (recentEvents.length > 12) recentEvents.shift();
+      if (name === "end-file" && event.data != null && typeof event.data === "object") {
+        const data = event.data as Record<string, unknown>;
+        recentErrors.push({ name, error: data.error === true, code: typeof data.code === "number" && Number.isSafeInteger(data.code) ? data.code : null });
+        if (recentErrors.length > 4) recentErrors.shift();
+      }
       if (event.name === "time-pos" && typeof event.data === "number" && Number.isFinite(event.data)) state.position = event.data;
       if (event.name === "duration" && typeof event.data === "number" && Number.isFinite(event.data)) state.duration = event.data;
       if (event.name === "pause" && typeof event.data === "boolean") state.paused = event.data;
@@ -61,6 +81,19 @@ function observedClock() {
       });
     },
   };
+}
+export function summarizeAudioDevices(value: unknown) {
+  if (!Array.isArray(value)) return { status: "unexpected-shape" as const };
+  let automaticDevicePresent = false, coreAudioDeviceCount = 0;
+  for (const device of value) {
+    if (device == null || typeof device !== "object") continue;
+    const name = (device as Record<string, unknown>).name;
+    if (name === "auto") automaticDevicePresent = true;
+    if (typeof name === "string" && name.startsWith("coreaudio/")) coreAudioDeviceCount += 1;
+  }
+  // Device names/descriptions can contain personal identifiers. Counts are
+  // diagnostic only: never select a device or alter the fixture's audio path.
+  return { status: "observed" as const, deviceCount: value.length, automaticDevicePresent, coreAudioDeviceCount };
 }
 const OBSERVED: readonly MpvObservableProperty[] = [["time-pos", "double", "none"], ["duration", "double", "none"], ["pause", "flag"], ["seeking", "flag"], ["video-params/w", "int64", "none"], ["dwidth", "int64", "none"]];
 
@@ -157,7 +190,13 @@ async function runFixture(config: RuntimeConfig, status: (value: string) => void
     status("completed");
   } catch (error) {
     const message = `${stage}: ${sanitizeFailure(error)}`.slice(0, 240); status(`failed: ${message}`);
-    try { await emit("failed", { message }); } catch { /* The host independently rejects missing/invalid completion. */ }
+    const diagnostic = { nativeClock: clock.snapshot(), activity: getPlayerMounted(), installation: getUpdateInstallationActive() };
+    let audioDevices: ReturnType<typeof summarizeAudioDevices> | { status: "unavailable"; message: string } = { status: "unavailable", message: "Native reader already destroyed." };
+    if (!destroyed) {
+      try { audioDevices = summarizeAudioDevices(await bounded(session.getProperty("audio-device-list"), DIAGNOSTIC_TIMEOUT_MS, "diagnostic-audio-devices")); }
+      catch (diagnosticError) { audioDevices = { status: "unavailable", message: sanitizeFailure(diagnosticError) }; }
+    }
+    try { await emit("failed", { message, diagnostic: { ...diagnostic, audioDevices } }); } catch { /* The host independently rejects missing/invalid completion. */ }
     if (!destroyed) {
       try { await bounded(session.destroy(), NATIVE_TIMEOUT_MS, "failed-run-native-cleanup"); unlisten?.(); } catch { /* Unknown lifetime is never reported as acknowledged. */ }
     }

@@ -27,6 +27,36 @@ export async function prepareLinkerDirectory(workspace, mpv) {
   return linkerDirectory;
 }
 
+export async function snapshotOwnedNativeLog(source, destination, limit = 2 * 1024 * 1024) {
+  const { open } = await import('node:fs/promises');
+  const file = await open(source, 'r');
+  try {
+    const { size } = await file.stat();
+    const captured = Math.min(size, limit), headLength = size > limit ? Math.floor(limit / 2) : captured;
+    const readPart = async (length, position) => {
+      const buffer = Buffer.alloc(length);
+      let offset = 0;
+      while (offset < length) {
+        const { bytesRead } = await file.read(buffer, offset, length - offset, position + offset);
+        if (!bytesRead) break;
+        offset += bytesRead;
+      }
+      return buffer.subarray(0, offset);
+    };
+    const head = await readPart(headLength, 0);
+    let output = head;
+    let capturedBytes = head.length;
+    if (size > limit) {
+      const tailLength = limit - headLength;
+      const tail = await readPart(tailLength, size - tailLength);
+      capturedBytes += tail.length;
+      output = Buffer.concat([head, Buffer.from('\n[bounded native log omitted middle bytes]\n'), tail]);
+    }
+    await writeFile(destination, output, { mode: 0o600 });
+    return { originalBytes: size, capturedBytes, middleTruncated: size > limit };
+  } finally { await file.close(); }
+}
+
 export function fixtureConfig({ version, publicKey, baseUrl, frontend, frameworks }) {
   const url = new URL(baseUrl);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.pathname !== '/' || url.username || url.password || url.search || url.hash) throw new Error('Only the disposable loopback feed is allowed');
@@ -76,14 +106,16 @@ export async function runMacosQualification() {
   const runtimeConfig = join(root, 'scripts/desktop-update-runtime/runtime-config.json');
   const inheritedSigning = /^(APPLE_|TAURI_SIGNING_|GH_TOKEN$|GITHUB_TOKEN$)/;
   const cleanEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !inheritedSigning.test(name)));
-  let service, executable, child, stdout, stderr;
-  const receipt = { schemaVersion: 1, classification: 'disposable-native-qualification-not-release', source: run('git', ['rev-parse', 'HEAD']), arch: process.arch, baseVersion, nextVersion, startedAt: new Date().toISOString(), passed: false };
+  let service, executable, child, stdout, stderr, ownsNativeDebugLog = false;
+  const nativeDebugLog = '/tmp/ds-rp-debug.log';
+  const receipt = { schemaVersion: 1, classification: 'disposable-native-qualification-not-release', source: run('git', ['rev-parse', 'HEAD']), candidateHead: process.env.QUALIFICATION_SOURCE_HEAD ?? null, arch: process.arch, baseVersion, nextVersion, startedAt: new Date().toISOString(), passed: false };
   try {
     const pinned = pinnedMedia[process.arch];
     const release = await fetch(`https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.58-web/${pinned.name}`, { signal: AbortSignal.timeout(120_000) });
     if (!release.ok) throw new Error(`Pinned public media package returned ${release.status}`);
     const bytes = Buffer.from(await release.arrayBuffer());
     if (digest(bytes) !== pinned.sha256) throw new Error('Pinned media package hash mismatch');
+    receipt.mediaPackageSha256 = pinned.sha256;
     const mediaArchive = join(workspace, 'media.tar.gz'); await writeFile(mediaArchive, bytes);
     const mediaRoot = join(workspace, 'media'); await mkdir(mediaRoot);
     const listing = run('/usr/bin/tar', ['-tzf', mediaArchive]).split('\n');
@@ -138,6 +170,8 @@ export async function runMacosQualification() {
     run('/usr/bin/tar', ['-czf', archivePath, '-C', dirname(nextApp), `${fixtureName}.app`]);
     run(process.execPath, [cli, 'signer', 'sign', '--private-key-path', key, '--password', '', '--app-version', nextVersion, archivePath], { cwd: web, env: cleanEnvironment });
     signature = (await readFile(`${archivePath}.sig`, 'utf8')).trim();
+    receipt.archiveSha256 = digest(await readFile(archivePath));
+    receipt.nativeFixtureBundlesBuilt = 2;
     await rm(privateDirectory, { recursive: true, force: true });
     const home = join(workspace, 'home'), installed = join(workspace, 'Applications', `${fixtureName}.app`);
     await mkdir(home); await mkdir(dirname(installed));
@@ -146,14 +180,20 @@ export async function runMacosQualification() {
     executable = join(installed, 'Contents/MacOS/debridstreamer');
     const targetExecutableHash = digest(await readFile(join(nextApp, 'Contents/MacOS/debridstreamer')));
     const initialExecutableHash = digest(await readFile(executable));
+    receipt.initialExecutableHash = initialExecutableHash;
+    receipt.targetExecutableHash = targetExecutableHash;
     if (initialExecutableHash === targetExecutableHash) throw new Error('Two native versions unexpectedly have identical executables');
     stdout = createWriteStream(join(evidence, 'native-stdout.log')); stderr = createWriteStream(join(evidence, 'native-stderr.log'));
-    child = spawn(executable, [], { cwd: workspace, env: { ...cleanEnvironment, HOME: home, CFFIXED_USER_HOME: home, TMPDIR: `${workspace}/`, XDG_DATA_HOME: join(home, 'data'), XDG_CONFIG_HOME: join(home, 'config') }, stdio: ['ignore', 'pipe', 'pipe'] });
+    // The existing native tracer has a fixed path. Claim it exclusively on this
+    // fresh CI host, never read or overwrite an unrelated pre-existing log.
+    await writeFile(nativeDebugLog, '', { flag: 'wx', mode: 0o600 }); ownsNativeDebugLog = true;
+    child = spawn(executable, [], { cwd: workspace, env: { ...cleanEnvironment, HOME: home, CFFIXED_USER_HOME: home, TMPDIR: `${workspace}/`, XDG_DATA_HOME: join(home, 'data'), XDG_CONFIG_HOME: join(home, 'config'), DS_MPV_DEBUG: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.pipe(stdout); child.stderr.pipe(stderr);
     receipt.initialPid = child.pid;
     let oldExit = null; child.on('exit', (code, signal) => { oldExit = { code, signal, observedAt: new Date().toISOString() }; });
     const deadline = Date.now() + 150_000;
     while (Date.now() < deadline && !service.events.some((event) => ['completed', 'failed'].includes(event.stage))) await sleep(200);
+    receipt.frontendFailure = service.events.find((event) => event.stage === 'failed')?.detail ?? null;
     const verification = verifyRuntimeEvents(service.events, service.requests, baseVersion, nextVersion);
     const running = exactPids(executable);
     if (!oldExit || running.length !== 1 || running[0] === child.pid) throw new Error('No independently observed old-process exit and successor process');
@@ -176,6 +216,11 @@ export async function runMacosQualification() {
       if (receipt.remainingFixtureProcesses) { receipt.passed = false; receipt.cleanupError = 'Disposable native processes remained alive'; }
     }
     child?.stdout?.destroy(); child?.stderr?.destroy(); stdout?.end(); stderr?.end();
+    if (ownsNativeDebugLog) {
+      try { receipt.nativeDebugLog = await snapshotOwnedNativeLog(nativeDebugLog, join(evidence, 'native-player-debug.log')); }
+      catch (error) { receipt.nativeDebugLogError = String(error.message).slice(0, 240); }
+      finally { await rm(nativeDebugLog, { force: true }); }
+    }
     if (service) {
       await writeFile(join(evidence, 'events.json'), JSON.stringify(service.events, null, 2));
       await writeFile(join(evidence, 'requests.json'), JSON.stringify(service.requests, null, 2));

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fixtureConfig, fixtureIdentifier, pinnedMedia, prepareLinkerDirectory, runMacosQualification } from './run_macos.mjs';
+import { fixtureConfig, fixtureIdentifier, pinnedMedia, prepareLinkerDirectory, runMacosQualification, snapshotOwnedNativeLog } from './run_macos.mjs';
 
 test('native fixture cannot be mistaken for or configure the production updater', () => {
   const inputs = { version: '2.3.101', publicKey: 'test-only-public-key', baseUrl: 'http://127.0.0.1:12345', frontend: '/test/frontend', frameworks: ['/test/libmpv.2.dylib'] };
@@ -42,5 +42,22 @@ test('development linker alias does not mutate the verified runtime bundle', asy
     assert.equal(await readFile(join(linker, 'libmpv.dylib'), 'utf8'), 'unchanged-runtime-fixture');
     assert.deepEqual(await readdir(frameworks), ['libmpv.2.dylib']);
     assert.equal(await readFile(mpv, 'utf8'), 'unchanged-runtime-fixture');
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+test('owned native diagnostics retain bounded head and tail without mutating the log', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'yawf-native-log-'));
+  try {
+    const input = join(workspace, 'owned.log'), output = join(workspace, 'snapshot.log');
+    const bytes = Buffer.concat([Buffer.alloc(64, 'a'), Buffer.alloc(1024, 'b'), Buffer.alloc(64, 'z')]);
+    await writeFile(input, bytes);
+    const receipt = await snapshotOwnedNativeLog(input, output, 128);
+    const captured = await readFile(output, 'utf8');
+    assert.deepEqual(receipt, { originalBytes: bytes.length, capturedBytes: 128, middleTruncated: true });
+    assert.ok(captured.startsWith('a'.repeat(64)) && captured.endsWith('z'.repeat(64)));
+    assert.ok(!captured.includes('bbb')); assert.deepEqual(await readFile(input), bytes);
+    await writeFile(input, 'small');
+    assert.equal((await snapshotOwnedNativeLog(input, output, 128)).middleTruncated, false);
+    assert.equal(await readFile(output, 'utf8'), 'small');
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });
