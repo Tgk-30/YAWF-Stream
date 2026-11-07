@@ -6341,6 +6341,32 @@ function registerRoutes(
       throw httpError(409, "Transcoding is not available for Direct P2P playback.");
     }
     const upstreamUrl = decryptSecret(row.encrypted_upstream_url, config.secretKey);
+    // A disconnected warmup releases only its own unpublished preparation.
+    // Completed manifests and other coalesced viewers remain protected.
+    const controller = new AbortController();
+    const cleanupCancellation = () => {
+      request.raw.off("aborted", cancelPreparation);
+      reply.raw.off("close", cancelPreparation);
+      reply.raw.off("finish", cleanupCancellation);
+    };
+    const cancelPreparation = () => {
+      controller.abort();
+      cleanupCancellation();
+    };
+    request.raw.once("aborted", cancelPreparation);
+    reply.raw.once("close", cancelPreparation);
+    reply.raw.once("finish", cleanupCancellation);
+    if (request.raw.aborted || request.raw.destroyed || reply.raw.destroyed) {
+      cancelPreparation();
+    }
+    const assertConnected = () => {
+      if (controller.signal.aborted) {
+        throw Object.assign(new Error("The transcode preparation was cancelled."), {
+          statusCode: 499,
+        });
+      }
+    };
+    assertConnected();
     // SSRF: validate the FIRST hop before handing the URL to ffmpeg (private
     // addresses blocked unless the operator opted into raw URLs). Residual,
     // accepted for now (consistent with the DNS-rebinding note in ssrf.ts): ffmpeg
@@ -6350,6 +6376,7 @@ function registerRoutes(
     // terminal URL is deferred because it would re-fetch (and could consume)
     // single-use debrid links. Hardening follow-up: resolve+pin the final hop.
     await assertSafeUpstream(upstreamUrl, config.allowRawStreamUrls);
+    assertConnected();
     const query = request.query as {
       profile?: string;
       quality?: string;
@@ -6393,7 +6420,10 @@ function registerRoutes(
     let audioTrack = 0;
     let audioTracks: Awaited<ReturnType<TranscodeRegistry["audioTracksFor"]>> | null = null;
     if (transcode.audioTrackSelectionAvailable) {
-      audioTracks = await transcode.registry.audioTracksFor(row.id, upstreamUrl);
+      audioTracks = (await transcode.registry.sourceInfoFor(row.id, upstreamUrl, {
+        signal: controller.signal,
+      })).audioTracks;
+      assertConnected();
       audioTrack = audioTracks?.find((track) => track.default)?.index ?? 0;
     }
     if (query.audio != null) {
@@ -6414,7 +6444,9 @@ function registerRoutes(
     const preserveSubtitles =
       preserveSubtitlesRequested &&
       transcode.subtitleSidecarAvailable &&
-      (await transcode.registry.subtitleAvailableFor(row.id, upstreamUrl)) === true;
+      (await transcode.registry.subtitleAvailableFor(row.id, upstreamUrl, {
+        signal: controller.signal,
+      })) === true;
     const dir = await transcode.registry.ensureJob(row.id, upstreamUrl, {
       profile,
       quality,
@@ -6422,7 +6454,7 @@ function registerRoutes(
       hdrPolicy,
       preserveSubtitles,
       audioTrack,
-    });
+    }, { signal: controller.signal });
     const manifest = await readFile(join(dir, MANIFEST_NAME), "utf8");
     const rewritten = rewriteTranscodeManifest(
       manifest,

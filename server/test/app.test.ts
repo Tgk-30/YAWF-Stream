@@ -4877,6 +4877,160 @@ describe("DebridStreamer server", () => {
     }
   });
 
+  it("transcode: a disconnected manifest cannot start an audio probe or HLS job", async () => {
+    const base = makeFakeTranscoder();
+    const probeStreams = vi.fn(async () => ({ audio: true, subtitle: false, audioTracks: [] }));
+    const spawnHls = vi.fn(base.spawnHls);
+    const on = await buildTranscodeApp({}, {
+      ...base,
+      async capabilities() {
+        return { toneMapping: false, subtitleSidecar: true, audioTrackSelection: true };
+      },
+      probeStreams,
+      spawnHls,
+    });
+    on.addHook("preHandler", (request, _reply, done) => {
+      if (/^\/api\/stream\/[^/]+\/index\.m3u8(?:\?|$)/.test(request.url)) {
+        queueMicrotask(() => request.raw.emit("aborted"));
+      }
+      done();
+    });
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const response = await request(owner, {
+        method: "GET", url: `/api/stream/${session.id}/index.m3u8?subtitles=preserve`,
+      });
+      expect(response.statusCode).toBe(499);
+      expect(probeStreams).not.toHaveBeenCalled();
+      expect(spawnHls).not.toHaveBeenCalled();
+    } finally { await on.close(); }
+  });
+
+  it("transcode: one disconnected manifest leaves its coalesced viewer and published output alive", async () => {
+    const base = makeFakeTranscoder({ writeOutput: false });
+    let dir: string | undefined;
+    let child: ReturnType<Transcoder["spawnHls"]> | undefined;
+    let kill: ReturnType<typeof vi.spyOn> | undefined;
+    const aborts: Array<() => void> = [];
+    const signals: AbortSignal[] = [];
+    const originalEnsure = TranscodeRegistry.prototype.ensureJob;
+    const ensure = vi.spyOn(TranscodeRegistry.prototype, "ensureJob")
+      .mockImplementation(function (this: TranscodeRegistry, ...args) {
+        if (args[3]?.signal != null) signals.push(args[3].signal);
+        return originalEnsure.apply(this, args);
+      });
+    const on = await buildTranscodeApp({ maxTranscodes: 1 }, {
+      ...base,
+      spawnHls(args) {
+        dir = dirname(args.at(-1)!);
+        child = base.spawnHls(args);
+        kill = vi.spyOn(child, "kill");
+        return child;
+      },
+    });
+    on.addHook("preHandler", (request, _reply, done) => {
+      if (/^\/api\/stream\/[^/]+\/index\.m3u8(?:\?|$)/.test(request.url)) {
+        aborts.push(() => { request.raw.emit("aborted"); });
+      }
+      done();
+    });
+    let first: Promise<LightMyRequestResponse> | undefined;
+    let second: Promise<LightMyRequestResponse> | undefined;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const url = `/api/stream/${session.id}/index.m3u8?quality=360p`;
+      first = request(owner, { method: "GET", url });
+      second = request(owner, { method: "GET", url });
+      await vi.waitFor(() => {
+        expect(signals).toHaveLength(2);
+        expect(dir).toEqual(expect.any(String));
+      });
+      aborts[0]!();
+      expect((await first).statusCode).toBe(499);
+      expect(signals[0]!.aborted).toBe(true);
+      expect(signals[1]!.aborted).toBe(false);
+      expect(kill).not.toHaveBeenCalled();
+      writeFileSync(join(dir!, "stream.m3u8"), "#EXTM3U\n360p.m3u8\n");
+      writeFileSync(join(dir!, "360p.m3u8"), FAKE_MANIFEST);
+      writeFileSync(join(dir!, "360p_seg_00000.ts"), "coalesced-viewer-segment");
+      expect((await second).statusCode).toBe(200);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      // Normal response completion is not abandonment of the published job.
+      expect(signals[1]!.aborted).toBe(false);
+      expect(kill).not.toHaveBeenCalled();
+      expect((await request(owner, {
+        method: "GET", url: `/api/stream/${session.id}/360p_seg_00000.ts`,
+      })).body).toBe("coalesced-viewer-segment");
+    } finally {
+      for (const abort of aborts) abort();
+      if (dir != null) {
+        writeFileSync(join(dir, "stream.m3u8"), "#EXTM3U\n");
+        writeFileSync(join(dir, "360p_seg_00000.ts"), "cleanup");
+      }
+      await Promise.allSettled([first, second].filter((value) => value != null));
+      await on.close();
+      ensure.mockRestore();
+    }
+  });
+
+  it("transcode: actual HTTP disconnect releases max1 only after the old child exits", async () => {
+    const base = makeFakeTranscoder();
+    let spawns = 0;
+    let oldExited = false;
+    let oldChild: (EventEmitter & { kill: ReturnType<typeof vi.fn>; stderr: null }) | undefined;
+    const on = await buildTranscodeApp({ maxTranscodes: 1, transcodeStartTimeoutMs: 30_000 }, {
+      ...base,
+      spawnHls(args) {
+        spawns++;
+        if (spawns > 1) {
+          expect(oldExited).toBe(true);
+          return base.spawnHls(args);
+        }
+        const child = new EventEmitter() as NonNullable<typeof oldChild>;
+        let terminating = false;
+        child.kill = vi.fn(() => {
+          if (!terminating) {
+            terminating = true;
+            setTimeout(() => {
+              oldExited = true;
+              child.emit("exit", 0); child.emit("close", 0);
+            }, 40);
+          }
+          return true;
+        });
+        child.stderr = null;
+        oldChild = child;
+        return child as unknown as ReturnType<Transcoder["spawnHls"]>;
+      },
+    });
+    const controller = new AbortController();
+    let warmup: Promise<unknown> | undefined;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const baseUrl = await on.listen({ port: 0, host: "127.0.0.1" });
+      const url = `${baseUrl}/api/stream/${session.id}/index.m3u8?quality=360p`;
+      warmup = fetch(url, { headers: { cookie: cookieHeader(owner) }, signal: controller.signal })
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => expect(spawns).toBe(1));
+      controller.abort();
+      await warmup;
+      await vi.waitFor(() => expect(oldChild?.kill).toHaveBeenCalledWith("SIGTERM"));
+      const recovery = await fetch(`${url}&start=75`, { headers: { cookie: cookieHeader(owner) } });
+      expect(recovery.status).toBe(200);
+      expect(recovery.headers.get("x-yawf-transcode-start")).toBe("75");
+      expect((await recovery.text()).startsWith("#EXTM3U")).toBe(true);
+      expect(spawns).toBe(2);
+      expect(oldExited).toBe(true);
+    } finally {
+      controller.abort();
+      await warmup;
+      await on.close();
+    }
+  });
+
   it("transcode: promotes a replacement only after it is playable", async () => {
     const on = await buildTranscodeApp({ enableTranscode: true, maxTranscodes: 2 });
     try {

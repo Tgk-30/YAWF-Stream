@@ -987,6 +987,284 @@ describe("transcode process capacity", () => {
   });
 });
 
+describe("owned pending transcode cancellation", () => {
+  function fixture(options: {
+    max?: number;
+    readyFirst?: boolean;
+    holdSpawn?: number;
+    probe?: Transcoder["probeStreams"];
+    onSpawn?: (index: number) => void;
+  } = {}) {
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-owned-preparation-"));
+    const database = new AppDatabase(":memory:");
+    const children: Array<{
+      child: ChildProcess; dir: string; signals: unknown[]; running: boolean;
+      ready: () => void; finish: () => void;
+    }> = [];
+    let maximum = 0;
+    const registry = new TranscodeRegistry(database, {
+      dataDir, maxTranscodes: options.max ?? 1,
+      transcodeVideoEncoder: "libx264", transcodeStartTimeoutMs: 60_000,
+    } as ServerConfig, {
+      async detect() { return true; },
+      probeStreams: options.probe,
+      spawnHls(args) {
+        const dir = dirname(args.at(-1)!);
+        const emitter = new EventEmitter() as EventEmitter & { kill: (signal?: unknown) => boolean; stderr: null };
+        const record = {
+          child: emitter as unknown as ChildProcess, dir, signals: [] as unknown[], running: true,
+          ready: () => {
+            writeFileSync(join(dir, "stream.m3u8"), "#EXTM3U\n");
+            for (const quality of ["1080p", "720p", "480p", "360p"]) {
+              writeFileSync(join(dir, `${quality}_seg_00000.ts`), "segment");
+            }
+          },
+          finish: () => {
+            if (!record.running) return;
+            record.running = false;
+            emitter.emit("exit", 0); emitter.emit("close", 0);
+          },
+        };
+        emitter.kill = (signal) => { record.signals.push(signal); return record.running; };
+        emitter.stderr = null;
+        children.push(record);
+        maximum = Math.max(maximum, children.filter((child) => child.running).length);
+        if (children.length !== options.holdSpawn && (options.readyFirst || children.length > 1)) record.ready();
+        options.onSpawn?.(children.length);
+        return record.child;
+      },
+    });
+    const cleanup = async () => {
+      children.forEach((child) => child.finish());
+      await registry.stop(); database.close(); rmSync(dataDir, { recursive: true, force: true });
+    };
+    return { registry, children, dataDir, cleanup, maximum: () => maximum };
+  }
+
+  function captured(promise: Promise<string>) {
+    let result: Awaited<ReturnType<typeof observe<string>>> | undefined;
+    const settled = observe(promise).then((value) => { result = value; return value; });
+    return { settled, result: () => result };
+  }
+
+  async function cancelled(outcome: ReturnType<typeof captured>) {
+    await vi.waitFor(() => expect(outcome.result()).toMatchObject({
+      status: "rejected", error: { name: "AbortError", code: "TRANSCODE_PREPARATION_CANCELLED", statusCode: 499 },
+    }), { timeout: 400 });
+  }
+
+  it.each([0, 75])("recovers max1 after abandoned startup exits at successor offset %s", async (offset) => {
+    const f = fixture(); const owner = new AbortController();
+    try {
+      const first = captured(f.registry.ensureJob("owned", "https://provider.example/video", {}, { signal: owner.signal }));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      owner.abort(); await cancelled(first);
+      const next = captured(f.registry.ensureJob("owned", "https://provider.example/video", { startSeconds: offset }));
+      await vi.waitFor(() => expect(f.children[0]!.signals).toContain("SIGTERM"));
+      expect(f.children).toHaveLength(1); expect(next.result()).toBeUndefined();
+      f.children[0]!.finish();
+      await expect(next.settled).resolves.toMatchObject({ status: "fulfilled" });
+      expect(f.children).toHaveLength(2); expect(f.maximum()).toBe(1);
+      expect(existsSync(f.children[0]!.dir)).toBe(false);
+      // Late duplicate terminal callbacks must not release the new child's slot.
+      f.children[0]!.child.emit("exit", 0); owner.abort();
+      await expect(f.registry.ensureJob("other", "https://provider.example/other"))
+        .rejects.toMatchObject({ statusCode: 503 });
+    } finally { await f.cleanup(); }
+  });
+
+  it("detaches one signal owner without cancelling another coalesced owner", async () => {
+    const f = fixture(); const a = new AbortController(); const b = new AbortController();
+    try {
+      const first = captured(f.registry.ensureJob("shared", "https://provider.example/video", {}, { signal: a.signal }));
+      const second = captured(f.registry.ensureJob("shared", "https://provider.example/video", {}, { signal: b.signal }));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      a.abort(); await cancelled(first);
+      expect(f.children[0]!.signals).toEqual([]);
+      f.children[0]!.ready(); const dir = f.children[0]!.dir;
+      await expect(second.settled).resolves.toMatchObject({ status: "fulfilled", value: dir });
+      b.abort(); expect(f.children[0]!.signals).toEqual([]);
+      expect(f.registry.dirFor("shared")).toBe(dir);
+    } finally { await f.cleanup(); }
+  });
+
+  it("cancels staged work only after both coalesced signal owners abort", async () => {
+    const f = fixture(); const a = new AbortController(); const b = new AbortController();
+    try {
+      const first = captured(f.registry.ensureJob("shared", "https://provider.example/video", {}, { signal: a.signal }));
+      const second = captured(f.registry.ensureJob("shared", "https://provider.example/video", {}, { signal: b.signal }));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      a.abort(); await cancelled(first);
+      expect(second.result()).toBeUndefined(); expect(f.children[0]!.signals).toEqual([]);
+      b.abort(); await cancelled(second);
+      await vi.waitFor(() => expect(f.children[0]!.signals).toContain("SIGTERM"));
+      const successor = captured(f.registry.ensureJob("shared", "https://provider.example/video", { startSeconds: 90 }));
+      expect(successor.result()).toBeUndefined(); expect(f.children).toHaveLength(1);
+      f.children[0]!.finish();
+      await expect(successor.settled).resolves.toMatchObject({ status: "fulfilled" });
+      expect(f.children).toHaveLength(2); expect(f.maximum()).toBe(1);
+    } finally { await f.cleanup(); }
+  });
+
+  it("protects a coalesced signal-less legacy owner", async () => {
+    const f = fixture(); const owner = new AbortController();
+    try {
+      const first = captured(f.registry.ensureJob("shared", "https://provider.example/video", {}, { signal: owner.signal }));
+      const legacy = captured(f.registry.ensureJob("shared", "https://provider.example/video"));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      owner.abort(); await cancelled(first);
+      expect(f.children[0]!.signals).toEqual([]);
+      f.children[0]!.ready();
+      await expect(legacy.settled).resolves.toMatchObject({ status: "fulfilled", value: f.children[0]!.dir });
+    } finally { await f.cleanup(); }
+  });
+
+  it("cancels a mismatched queued request without cancelling older owners", async () => {
+    const f = fixture(); const queuedOwner = new AbortController();
+    try {
+      const older = captured(f.registry.ensureJob("queued", "https://provider.example/video"));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      const queued = captured(f.registry.ensureJob("queued", "https://provider.example/video", { startSeconds: 90 }, { signal: queuedOwner.signal }));
+      queuedOwner.abort(); await cancelled(queued);
+      expect(f.children[0]!.signals).toEqual([]);
+      f.children[0]!.ready();
+      await expect(older.settled).resolves.toMatchObject({ status: "fulfilled", value: f.children[0]!.dir });
+      expect(f.children).toHaveLength(1);
+    } finally { await f.cleanup(); }
+  });
+
+  it.each(["already-aborted", "mkdir-pending"])("does not spawn for %s cancellation", async (stage) => {
+    const f = fixture(); const owner = new AbortController();
+    try {
+      if (stage === "already-aborted") owner.abort();
+      const pending = captured(f.registry.ensureJob("early", "https://provider.example/video", {}, { signal: owner.signal }));
+      owner.abort(); await cancelled(pending);
+      await f.registry.stop(); expect(f.children).toHaveLength(0);
+    } finally { await f.cleanup(); }
+  });
+
+  it("detaches only the creation's shared probe waiter and suppresses late spawn", async () => {
+    let settle!: (value: { audio: boolean; subtitle: boolean; audioTracks: [] }) => void;
+    let sharedSignal: AbortSignal | undefined;
+    const probe: NonNullable<Transcoder["probeStreams"]> = (_url, options) => {
+      sharedSignal = options?.signal;
+      return new Promise((resolve) => { settle = resolve; });
+    };
+    const f = fixture({ max: 2, probe }); const owner = new AbortController();
+    const calls = vi.spyOn(f.registry as unknown as { probeStreams: (...args: unknown[]) => Promise<unknown> }, "probeStreams");
+    try {
+      const inventory = f.registry.sourceInfoFor("probe", "https://provider.example/video");
+      const pending = captured(f.registry.ensureJob("probe", "https://provider.example/video", {}, { signal: owner.signal }));
+      await vi.waitFor(() => expect(calls).toHaveBeenCalledTimes(2));
+      owner.abort(); await cancelled(pending);
+      expect(sharedSignal?.aborted).toBe(false);
+      settle({ audio: false, subtitle: false, audioTracks: [] });
+      await inventory; await f.registry.stop();
+      expect(f.children).toHaveLength(0);
+    } finally { calls.mockRestore(); await f.cleanup(); }
+  });
+
+  it("cancels at spawn without publishing or retiring the active previous assets", async () => {
+    const owner = new AbortController();
+    const f = fixture({ max: 2, readyFirst: true, onSpawn: (index) => { if (index === 2) owner.abort(); } });
+    try {
+      const original = await f.registry.ensureJob("active", "https://provider.example/video");
+      const generation = f.registry.generationFor("active", original);
+      const replacement = captured(f.registry.ensureJob("active", "https://provider.example/video", { quality: "360p" }, { signal: owner.signal }));
+      await cancelled(replacement);
+      await vi.waitFor(() => expect(f.children[1]!.signals).toContain("SIGTERM"));
+      f.children[1]!.finish();
+      await f.registry.ensureJob("active", "https://provider.example/video");
+      expect(f.registry.dirFor("active")).toBe(original);
+      expect(f.registry.generationFor("active", original)).toBe(generation);
+      expect(f.children[0]!.signals).toEqual([]);
+      expect(existsSync(join(original, "stream.m3u8"))).toBe(true);
+    } finally { await f.cleanup(); }
+  });
+
+  it("handles a late child error during synchronous spawn-abort disposal", async () => {
+    const owner = new AbortController();
+    const f = fixture({ onSpawn: () => owner.abort() });
+    try {
+      const pending = captured(f.registry.ensureJob("spawn-abort", "https://provider.example/video", {}, { signal: owner.signal }));
+      await cancelled(pending);
+      await vi.waitFor(() => expect(f.children[0]!.signals).toContain("SIGTERM"));
+      expect(() => f.children[0]!.child.emit("error", new Error("late spawn failure"))).not.toThrow();
+      expect(f.registry.dirFor("spawn-abort")).toBeNull();
+      f.children[0]!.finish();
+      await expect(f.registry.ensureJob("spawn-abort", "https://provider.example/video", { startSeconds: 90 }))
+        .resolves.toEqual(expect.any(String));
+      expect(f.maximum()).toBe(1);
+    } finally { await f.cleanup(); }
+  });
+
+  it("reclaims only the abandoned session without interrupting another viewer", async () => {
+    const owner = new AbortController(); const f = fixture({ max: 2, readyFirst: true, holdSpawn: 2 });
+    try {
+      const other = await f.registry.ensureJob("other-viewer", "https://provider.example/other");
+      const pending = captured(f.registry.ensureJob("abandoned", "https://provider.example/video", {}, { signal: owner.signal }));
+      await vi.waitFor(() => expect(f.children).toHaveLength(2));
+      owner.abort(); await cancelled(pending);
+      await vi.waitFor(() => expect(f.children[1]!.signals).toContain("SIGTERM"));
+      expect(f.children[0]!.signals).toEqual([]);
+      f.children[1]!.finish();
+      await f.registry.ensureJob("abandoned", "https://provider.example/video", { startSeconds: 90 });
+      expect(f.registry.dirFor("other-viewer")).toBe(other);
+      expect(f.children[0]!.signals).toEqual([]); expect(f.maximum()).toBe(2);
+    } finally { await f.cleanup(); }
+  });
+
+  it("detaches an aborted subtitle waiter without cancelling shared inventory", async () => {
+    let settle!: (value: { audio: boolean; subtitle: boolean; audioTracks: [] }) => void;
+    let sharedSignal: AbortSignal | undefined;
+    const f = fixture({ probe: (_url, options) => {
+      sharedSignal = options?.signal;
+      return new Promise((resolve) => { settle = resolve; });
+    } });
+    const owner = new AbortController();
+    try {
+      const inventory = f.registry.sourceInfoFor("subtitle", "https://provider.example/video");
+      let subtitle: boolean | null | undefined;
+      const pending = f.registry.subtitleAvailableFor("subtitle", "https://provider.example/video", { signal: owner.signal })
+        .then((value) => { subtitle = value; });
+      owner.abort();
+      await vi.waitFor(() => expect(subtitle).toBeNull(), { timeout: 400 });
+      expect(sharedSignal?.aborted).toBe(false);
+      settle({ audio: false, subtitle: true, audioTracks: [] });
+      await inventory; await pending; expect(f.children).toHaveLength(0);
+    } finally { await f.cleanup(); }
+  });
+
+  // The production disposal wait is bounded at four seconds; allow CI margin
+  // without weakening the invariant that an unreported exit retains capacity.
+  it("keeps a stubborn cancelled child's permit through bounded cleanup", async () => {
+    const f = fixture(); const owner = new AbortController();
+    try {
+      const first = captured(f.registry.ensureJob("stubborn", "https://provider.example/video", {}, { signal: owner.signal }));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      owner.abort(); await cancelled(first);
+      await expect(f.registry.ensureJob("stubborn", "https://provider.example/video", { startSeconds: 90 }))
+        .rejects.toMatchObject({ statusCode: 503 });
+      expect(f.children[0]!.signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(f.children[0]!.running).toBe(true); expect(f.children).toHaveLength(1);
+      f.children[0]!.finish();
+      await expect(f.registry.ensureJob("stubborn", "https://provider.example/video", { startSeconds: 90 })).resolves.toEqual(expect.any(String));
+      expect(f.maximum()).toBe(1);
+    } finally { await f.cleanup(); }
+  }, 8000);
+
+  it("does not reclaim a published generation after a late owner abort", async () => {
+    const f = fixture({ readyFirst: true }); const owner = new AbortController();
+    try {
+      const original = await f.registry.ensureJob("published", "https://provider.example/video", {}, { signal: owner.signal });
+      owner.abort();
+      await expect(f.registry.ensureJob("published", "https://provider.example/video", { startSeconds: 90 })).rejects.toMatchObject({ statusCode: 503 });
+      expect(f.registry.dirFor("published")).toBe(original);
+      expect(f.children[0]!.signals).toEqual([]);
+    } finally { await f.cleanup(); }
+  });
+});
+
 describe("transcode stream probe admission", () => {
   function probeRegistry(
     probeStreams: NonNullable<Transcoder["probeStreams"]>,
