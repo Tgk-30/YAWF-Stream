@@ -6439,7 +6439,7 @@ function WebviewPlayer({
             objectFit: videoFit,
             transform: `translate(${videoPanX}%, ${videoPanY}%) scale(${videoZoom})`,
           }}
-          autoPlay
+          autoPlay={sourceSwitchState?.paused !== true}
           playsInline
           crossOrigin={isTrustedServerStreamURL(url) ? "use-credentials" : undefined}
           x-webkit-airplay="allow"
