@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { MIGRATIONS } from "./schema.js";
+import { assertPrivateWindowsStorage } from "./privateStorage.js";
 
 const AUDIT_LOG_RETENTION_DAYS = 90;
 const AUDIT_LOG_MINIMUM_ROWS = 50_000;
@@ -489,6 +490,8 @@ export function acquireDatabaseLease(databasePath: string): DatabaseLeaseHandle 
     });
   }
   const lockPath = databaseLockPath(databasePath);
+  assertPrivateWindowsStorage([databasePath, lockPath, `${databasePath}-wal`, `${databasePath}-shm`, `${databasePath}-journal`,
+    `${dirname(databasePath)}/backups/${randomUUID()}.private-admission`]);
   try {
     mkdirSync(dirname(databasePath), { recursive: true });
   } catch (error) {
@@ -539,10 +542,11 @@ export function createPreUpgradeSnapshotIfNeeded(
   if (currentVersion >= latestVersion) return null;
 
   const backupDir = `${dirname(databasePath)}/backups`;
-  mkdirSync(backupDir, { recursive: true });
   const timestamp = now.toISOString().replaceAll(":", "-").replaceAll(".", "-");
   const outputPath =
     `${backupDir}/pre-upgrade-v${currentVersion}-to-v${latestVersion}-${timestamp}.sqlite`;
+  assertPrivateWindowsStorage([outputPath]);
+  mkdirSync(backupDir, { recursive: true });
   sqlite.exec(`VACUUM INTO ${sqlStringLiteral(outputPath)}`);
   chmodSync(outputPath, 0o600);
   return outputPath;

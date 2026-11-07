@@ -15,13 +15,26 @@ try {
   process.exit();
 }
 
+let released = false;
+const release = () => {
+  if (released) return;
+  database.close();
+  released = true;
+  process.stdout.write("released\n");
+};
 let closing = false;
 const close = () => {
   if (closing) return;
   closing = true;
-  database.close();
-  process.stdout.write("released\n", () => process.exit(0));
+  release();
+  process.stdout.write("closed\n", () => process.exit(0));
 };
+// IPC permits graceful release on Windows without treating kill(SIGTERM) as a
+// delivered POSIX signal. Release can be observed while this process stays alive.
+process.on("message", (message) => {
+  if (message === "release") release();
+  if (message === "close") close();
+});
 process.once("SIGINT", close);
 process.once("SIGTERM", close);
 process.stdout.write("acquired\n");

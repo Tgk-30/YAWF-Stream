@@ -14,6 +14,7 @@ import {
   migrateDatabase,
 } from "../src/db.js";
 import { MIGRATIONS } from "../src/schema.js";
+import { assertPrivateWindowsStorage } from "../src/privateStorage.js";
 import {
   createLegacyServerFixture,
   LEGACY_SERVER_FIXTURES,
@@ -41,19 +42,21 @@ describe("AppDatabase", () => {
     const path = temporaryDatabasePath(tempDirs);
     const db = new AppDatabase(path);
     const lockPath = databaseLockPath(path);
-    expect(existsSync(lockPath)).toBe(true);
-    expect(statSync(lockPath).mode & 0o777).toBe(0o600);
-    expect(isDatabaseServerRunning(path)).toBe(true);
-    expect(() => acquireDatabaseLease(path)).toThrow(DatabaseLeaseBusyError);
+    try {
+      expect(existsSync(lockPath)).toBe(true);
+      if (process.platform === "win32") assertPrivateWindowsStorage([lockPath]);
+      else expect(statSync(lockPath).mode & 0o777).toBe(0o600);
+      expect(isDatabaseServerRunning(path)).toBe(true);
+      expect(() => acquireDatabaseLease(path)).toThrow(DatabaseLeaseBusyError);
 
-    db.close();
-    db.close();
-    expect(existsSync(lockPath)).toBe(true);
-    expect(isDatabaseServerRunning(path)).toBe(false);
+      db.close();
+      db.close();
+      expect(existsSync(lockPath)).toBe(true);
+      expect(isDatabaseServerRunning(path)).toBe(false);
 
-    const reopened = new AppDatabase(path);
-    reopened.close();
-    expect(existsSync(lockPath)).toBe(true);
+      const reopened = new AppDatabase(path);
+      try { expect(existsSync(lockPath)).toBe(true); } finally { reopened.close(); }
+    } finally { db.close(); }
   });
 
   it("keeps the lease held until a failed application database close is retried", () => {
@@ -210,7 +213,8 @@ describe("AppDatabase", () => {
         expect.stringMatching(/^pre-upgrade-v11-to-v12-.*\.sqlite$/),
       ]);
       const snapshotPath = join(path, "..", "backups", snapshots[0]!);
-      expect(statSync(snapshotPath).mode & 0o777).toBe(0o600);
+      if (process.platform === "win32") assertPrivateWindowsStorage([snapshotPath]);
+      else expect(statSync(snapshotPath).mode & 0o777).toBe(0o600);
       const snapshot = new DatabaseSync(snapshotPath);
       try {
         const snapshotColumns = snapshot.prepare("PRAGMA table_info(watch_history)")
