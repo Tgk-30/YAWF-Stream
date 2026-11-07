@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { requiredBaseStages, requiredNextStages, startRuntimeService, verifyRuntimeEvents } from './runtime-service.mjs';
 
 test('runtime observer requires an ordered, single-payload two-version transaction', () => {
-  const details = { playing: { position: 1, duration: 40, width: 320, activity: true }, 'destroy-acknowledged': { actualNativePromise: true, activity: false }, seeked: { target: 3, position: 3, paused: true }, resumed: { resumedFrom: 3, position: 3.75 } };
+  const details = { playing: { position: 1, duration: 40, width: 320, activity: true }, 'destroy-acknowledged': { actualNativePromise: true, activity: false }, seeked: { target: 5, seekFrom: 1, position: 5, paused: true }, resumed: { resumedFrom: 5, position: 5.75 } };
   const events = requiredBaseStages.map((stage, index) => ({ stage, version: '1.0.0', sequence: index + 1, detail: details[stage] }));
   events.push(...requiredNextStages.map((stage, index) => ({ stage, version: '1.0.1', sequence: index + 9, detail: details[stage] })));
   const request = { path: '/update.tar.gz', sequence: 8 };
@@ -15,10 +15,25 @@ test('runtime observer requires an ordered, single-payload two-version transacti
   for (const stage of requiredBaseStages) assert.throws(() => verifyRuntimeEvents(events.filter((event) => event.stage !== stage || event.version !== '1.0.0'), [request], '1.0.0', '1.0.1'));
   for (const stage of requiredNextStages) assert.throws(() => verifyRuntimeEvents(events.filter((event) => event.stage !== stage || event.version !== '1.0.1'), [request], '1.0.0', '1.0.1'));
   for (const stage of ['playing', 'destroy-acknowledged', 'seeked', 'resumed']) assert.throws(() => verifyRuntimeEvents(events.map((event) => event.stage === stage ? { ...event, detail: {} } : event), [request], '1.0.0', '1.0.1'));
+  for (const patch of [{ target: 50 }, { target: NaN }, { seekFrom: 5 }, { position: 1 }, { paused: false }]) assert.throws(() => verifyRuntimeEvents(events.map((event) => event.stage === 'seeked' ? { ...event, detail: { ...event.detail, ...patch } } : event), [request], '1.0.0', '1.0.1'));
   assert.throws(() => verifyRuntimeEvents(events, [{ ...request, sequence: 5 }], '1.0.0', '1.0.1'));
   assert.throws(() => verifyRuntimeEvents(events, [request, request], '1.0.0', '1.0.1'));
   assert.throws(() => verifyRuntimeEvents(events.slice(0, -1), [request], '1.0.0', '1.0.1'));
   assert.throws(() => verifyRuntimeEvents([...events, { stage: 'failed', version: '1.0.1' }], [request], '1.0.0', '1.0.1'));
+});
+
+test('observer accepts both actual driver seek branches and rejects no-op observations', async () => {
+  const driver = await readFile(new URL('./fixture-driver.tsx', import.meta.url), 'utf8');
+  const selection = /const target = seekFrom < (\d+) \? (\d+) : (\d+);/.exec(driver);
+  assert.ok(selection, 'Review the observer seam when the actual driver seek policy changes');
+  for (const seekFrom of [1, 4]) {
+    const target = seekFrom < Number(selection[1]) ? Number(selection[2]) : Number(selection[3]);
+    const details = { playing: { position: 1, duration: 40, width: 320, activity: true }, 'destroy-acknowledged': { actualNativePromise: true, activity: false }, seeked: { target, seekFrom, position: target, paused: true }, resumed: { resumedFrom: target, position: target + 0.75 } };
+    const events = [...requiredBaseStages.map((stage, index) => ({ stage, version: '1.0.0', sequence: index + 1, detail: details[stage] })), ...requiredNextStages.map((stage, index) => ({ stage, version: '1.0.1', sequence: index + 9, detail: details[stage] }))];
+    const payload = [{ path: '/update.tar.gz', sequence: 8 }];
+    assert.equal(verifyRuntimeEvents(events, payload, '1.0.0', '1.0.1').nextVersionPlaybackCompleted, true);
+    assert.throws(() => verifyRuntimeEvents(events.map((event) => event.stage === 'seeked' ? { ...event, detail: { ...event.detail, position: seekFrom } } : event), payload, '1.0.0', '1.0.1'));
+  }
 });
 
 test('disposable service confines data, rejects foreign events, and serves byte ranges', async () => {

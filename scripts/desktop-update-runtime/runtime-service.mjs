@@ -29,8 +29,9 @@ export function verifyRuntimeEvents(events, requests, baseVersion, nextVersion) 
   }
   const seek = next.find((event) => event.stage === 'seeked').detail;
   const resume = next.find((event) => event.stage === 'resumed').detail;
-  if (!seek || !Number.isFinite(seek.position) || seek.target !== 3 || Math.abs(seek.position - seek.target) > 0.35 || seek.paused !== true) throw new Error('No actual paused native seek observation');
-  if (!resume || !Number.isFinite(resume.position) || !Number.isFinite(resume.resumedFrom) || resume.position < resume.resumedFrom + 0.5) throw new Error('No actual advancing native resume observation');
+  const duration = next.find((event) => event.stage === 'playing').detail?.duration;
+  if (!seek || !Number.isFinite(seek.position) || !Number.isFinite(seek.target) || !Number.isFinite(seek.seekFrom) || seek.target < 0 || seek.target >= duration || Math.abs(seek.target - seek.seekFrom) < 1 || Math.abs(seek.position - seek.target) > 0.35 || seek.paused !== true) throw new Error('No actual changed-position paused native seek observation');
+  if (!resume || !Number.isFinite(resume.position) || !Number.isFinite(resume.resumedFrom) || Math.abs(resume.resumedFrom - seek.position) > 0.35 || resume.position < resume.resumedFrom + 0.5) throw new Error('No actual advancing native resume observation');
   for (const event of events.filter((event) => event.stage === 'playing')) {
     if (!(event.detail?.position >= 0.75 && event.detail?.duration >= 8 && event.detail?.width > 0 && event.detail?.activity === true)) throw new Error('Native playback observation is incomplete');
   }
