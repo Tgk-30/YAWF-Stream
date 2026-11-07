@@ -1340,15 +1340,35 @@ export function VideoPlayer({
 
   const automaticStallRecoveryAttemptedRef = useRef(false);
   const stallRecoveryPendingRef = useRef(false);
+  const freshStreamRequestRef = useRef<{ owner: string; source: typeof webviewSource } | null>(null);
   const lastStallContextRef = useRef<{
     position: number;
     handoff: PlaybackHandoffState;
   } | null>(null);
 
+  useLayoutEffect(() => {
+    // Only a committed media replacement retires an in-flight resolution.
+    // A suspended render must leave the current source's request authoritative.
+    freshStreamRequestRef.current = null;
+    stallRecoveryPendingRef.current = false;
+    lastStallContextRef.current = null;
+    setWebRecoveryPending(false);
+    setManualRecoveryPending(false);
+    return () => {
+      freshStreamRequestRef.current = null;
+      stallRecoveryPendingRef.current = false;
+    };
+  }, [playbackOwner, webviewSource]);
+
   const recoverPostStartStall = useCallback(async (
     absolutePositionSeconds: number,
     handoff: PlaybackHandoffState,
   ): Promise<boolean> => {
+    const owner = playbackOwner;
+    const source = webviewSource;
+    const ownsSource = () => playerMountedRef.current && playbackOwnerRef.current === owner &&
+      currentWebviewSourceRef.current === source;
+    if (!ownsSource()) return false;
     const position = Number.isFinite(absolutePositionSeconds)
       ? Math.max(0, absolutePositionSeconds)
       : latestAbsolutePositionRef.current;
@@ -1364,54 +1384,67 @@ export function VideoPlayer({
       );
       return false;
     }
+    const request = { owner, source };
+    freshStreamRequestRef.current = request;
+    const ownsRequest = () => ownsSource() && freshStreamRequestRef.current === request;
     automaticStallRecoveryAttemptedRef.current = true;
     stallRecoveryPendingRef.current = true;
     setWebRecoveryPending(true);
     recordDiagnostic("player", "stall.refresh_started", "warning");
     try {
       await withFreshStreamResolutionTimeout(refreshCurrentSource(position, handoff));
-      recordDiagnostic("player", "stall.refresh_ready");
+      if (ownsRequest()) recordDiagnostic("player", "stall.refresh_ready");
       return true;
     } catch {
+      if (!ownsRequest()) return false;
       setExternalError(
         "A fresh stream could not be prepared. Retry, or choose another source.",
       );
       recordDiagnostic("player", "stall.refresh_failed", "error");
       return false;
     } finally {
-      stallRecoveryPendingRef.current = false;
-      setWebRecoveryPending(false);
+      if (ownsRequest()) {
+        freshStreamRequestRef.current = null;
+        stallRecoveryPendingRef.current = false;
+        setWebRecoveryPending(false);
+      }
     }
-  }, [refreshCurrentSource]);
+  }, [playbackOwner, refreshCurrentSource, webviewSource]);
 
   const retryFreshStream = useCallback(async (): Promise<void> => {
     const context = lastStallContextRef.current;
-    if (refreshCurrentSource == null || context == null || manualRecoveryPending) return;
-    const owner = playbackOwnerRef.current;
-    const source = activeWebSourceRef.current;
-    const ownsLeaseRecovery = () => !serverLeaseExpired || (playerMountedRef.current &&
-      playbackOwnerRef.current === owner && activeWebSourceRef.current === source);
+    const owner = playbackOwner;
+    const source = webviewSource;
+    const ownsSource = () => playerMountedRef.current && playbackOwnerRef.current === owner &&
+      currentWebviewSourceRef.current === source;
+    if (!ownsSource() || refreshCurrentSource == null || context == null || manualRecoveryPending || freshStreamRequestRef.current != null) return;
+    const request = { owner, source };
+    freshStreamRequestRef.current = request;
+    const ownsRequest = () => ownsSource() && freshStreamRequestRef.current === request;
     setManualRecoveryPending(true);
     recordDiagnostic("player", "stall.manual_retry_started");
     try {
       await withFreshStreamResolutionTimeout(
         refreshCurrentSource(context.position, context.handoff),
       );
-      if (!ownsLeaseRecovery()) return;
+      if (!ownsRequest()) return;
       // A successful resolver must publish a new source owner. Until then an
       // expired generation cannot be remounted under its old URL.
       if (!serverLeaseExpired) setExternalError(null);
       recordDiagnostic("player", "stall.manual_retry_ready");
     } catch {
-      if (!ownsLeaseRecovery()) return;
+      if (!ownsRequest()) return;
       setExternalError(
         "A fresh stream could not be prepared. Retry, or choose another source.",
       );
       recordDiagnostic("player", "stall.manual_retry_failed", "error");
     } finally {
-      if (ownsLeaseRecovery()) setManualRecoveryPending(false);
+      if (ownsRequest()) {
+        freshStreamRequestRef.current = null;
+        setManualRecoveryPending(false);
+      }
     }
-  }, [manualRecoveryPending, refreshCurrentSource, serverLeaseExpired]);
+  }, [manualRecoveryPending, playbackOwner, refreshCurrentSource, serverLeaseExpired, webviewSource]);
 
   const expireServerGeneration = useCallback((
     source: string,
