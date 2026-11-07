@@ -1,0 +1,43 @@
+name: windows-private-storage
+on:
+  push:
+    branches: [codex/windows76-lifecycle]
+  pull_request:
+    paths:
+      - server/src/privateStorage.ts
+      - server/test/privateStorage*.test.ts
+      - scripts/windows_storage_acl_test_fixture.ps1
+      - .github/workflows/windows-private-storage.yml
+permissions:
+  contents: read
+jobs:
+  private-storage:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci --no-audit --no-fund
+      - name: Native private storage and writer checks
+        working-directory: server
+        env:
+          DS_SERVER_SECRET_KEY: ''
+        run: node node_modules/vitest/vitest.mjs run test/privateStorage.test.ts test/privateStorage.windows.test.ts --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-results.json"
+      - name: Retain exact native results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-private-storage-${{ matrix.os }}
+          path: ${{ runner.temp }}/windows-private-storage-results.json
+          if-no-files-found: error
+          retention-days: 14
