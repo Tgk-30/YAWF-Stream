@@ -3020,6 +3020,158 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  describe("quality handoff browser autoplay", () => {
+    // jsdom does not run HTML's native autoplay algorithm. Model its permitted
+    // HAVE_ENOUGH_DATA action separately from script play(): new media starts
+    // eligible, and both play() and pause() clear the can-autoplay flag.
+    // https://html.spec.whatwg.org/multipage/media.html#ready-states
+    function observeBrowserAutoplay() {
+      const states = new WeakMap<HTMLMediaElement, {
+        paused: boolean;
+        canAutoplay: boolean;
+        readyState: number;
+        currentTime: number;
+      }>();
+      const observe = (video: HTMLVideoElement) => {
+        const state = { paused: true, canAutoplay: true, readyState: 0, currentTime: 0 };
+        states.set(video, state);
+        Object.defineProperties(video, {
+          paused: { configurable: true, get: () => state.paused },
+          readyState: { configurable: true, get: () => state.readyState },
+          currentTime: {
+            configurable: true,
+            get: () => state.currentTime,
+            set: (value: number) => { state.currentTime = value; },
+          },
+          duration: { configurable: true, get: () => state.readyState > 0 ? 600 : Number.NaN },
+          seeking: { configurable: true, value: false },
+          seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 600 } },
+        });
+        return state;
+      };
+      vi.mocked(HTMLMediaElement.prototype.play).mockImplementation(function (this: HTMLMediaElement) {
+        const state = states.get(this);
+        if (state == null) throw new Error("Unobserved media play");
+        state.canAutoplay = false;
+        if (state.paused) {
+          state.paused = false;
+          fireEvent.play(this);
+          fireEvent.playing(this);
+        }
+        return Promise.resolve();
+      });
+      vi.mocked(HTMLMediaElement.prototype.pause).mockImplementation(function (this: HTMLMediaElement) {
+        const state = states.get(this);
+        if (state == null) throw new Error("Unobserved media pause");
+        state.canAutoplay = false;
+        if (!state.paused) {
+          state.paused = true;
+          fireEvent.pause(this);
+        }
+      });
+      const enoughData = (video: HTMLVideoElement) => {
+        const state = states.get(video);
+        if (state == null) throw new Error("Unobserved media readiness");
+        state.readyState = HTMLMediaElement.HAVE_ENOUGH_DATA;
+        // This is the allowed browser-native action, not video.play().
+        if (state.canAutoplay && state.paused && video.autoplay) {
+          state.paused = false;
+          fireEvent.play(video);
+          fireEvent.playing(video);
+        }
+        fireEvent.canPlay(video);
+        fireEvent.canPlayThrough(video);
+      };
+      return { observe, enoughData };
+    }
+
+    async function prepareQualityHandoff(nativeHls: boolean, initiallyPaused: boolean) {
+      deviceKindMock.mockReturnValue(nativeHls ? "ios" : "android");
+      if (!nativeHls) {
+        Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+          configurable: true, value: { getInsets: vi.fn() },
+        });
+      }
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue(nativeHls ? "probably" : "");
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      const browser = observeBrowserAutoplay();
+      const request = vi.fn(async () => ({
+        url: "https://server.example/api/stream/session-1/index.m3u8?quality=480p&start=339",
+        timelineOffsetSeconds: 339,
+        startPositionSeconds: 0,
+        quality: "480p" as const,
+      }));
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(
+        "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n", { status: 200 },
+      )));
+      render(<VideoPlayer
+        url="https://server.example/api/stream/session-1"
+        title="Quality autoplay"
+        serverOptimized={{ qualities: ["480p"], request }}
+        onClose={() => {}}
+      />);
+      const original = document.querySelector("video.player-video") as HTMLVideoElement;
+      const originalState = browser.observe(original);
+      // Positive control: ordinary startup still permits browser autoplay.
+      expect(original.autoplay).toBe(true);
+      browser.enoughData(original);
+      fireEvent.loadedMetadata(original);
+      expect(original.paused).toBe(false);
+      originalState.currentTime = 339;
+      fireEvent.timeUpdate(original);
+      if (initiallyPaused) await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+      expect(original.paused).toBe(initiallyPaused);
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "480p" }));
+      const video = await waitFor(() => {
+        const current = document.querySelector("video.player-video") as HTMLVideoElement;
+        expect(current).not.toBe(original);
+        return current;
+      });
+      expect(request).toHaveBeenCalledWith("480p", 339);
+      if (nativeHls) expect(hlsInstances).toHaveLength(0);
+      else await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      const state = browser.observe(video);
+      return { browser, video, state };
+    }
+
+    it.each([false, true])("holds paused explicit quality selection after exact sync and later native autoplay readiness (native HLS: %s)", async (nativeHls) => {
+      const { browser, video, state } = await prepareQualityHandoff(nativeHls, true);
+      // A queued metadata event can arrive with current data already ready.
+      // Exact zero is confirmed without a pause() call on already-paused media.
+      state.readyState = HTMLMediaElement.HAVE_CURRENT_DATA;
+      fireEvent.loadedMetadata(video);
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+      expect(state.canAutoplay).toBe(true);
+      expect(video.paused).toBe(true);
+      browser.enoughData(video);
+      expect(video.paused).toBe(true);
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+    });
+
+    it.each(["playing", "explicit-play", "explicit-pause", "early-autoplay"] as const)("preserves %s quality handoff controls", async (intent) => {
+      const { browser, video, state } = await prepareQualityHandoff(false, intent !== "playing");
+      if (intent === "early-autoplay") browser.enoughData(video);
+      if (intent === "explicit-play" || intent === "explicit-pause") {
+        await userEvent.click(screen.getByRole("button", { name: "Play" }));
+        expect(video.paused).toBe(true);
+        if (intent === "explicit-pause") await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+      }
+      state.readyState = HTMLMediaElement.HAVE_CURRENT_DATA;
+      fireEvent.loadedMetadata(video);
+      browser.enoughData(video);
+      const shouldPlay = intent === "playing" || intent === "explicit-play";
+      expect(video.paused).toBe(!shouldPlay);
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+      if (shouldPlay) {
+        await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+        browser.enoughData(video);
+        expect(video.paused).toBe(true);
+        expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+      }
+    });
+  });
+
   it("defaults to Device Original and exposes Server Optimized qualities only when supported", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const request = vi.fn(async () => ({
