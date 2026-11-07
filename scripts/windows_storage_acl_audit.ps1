@@ -84,6 +84,7 @@ foreach ($entry in $inputData.files) {
   $ownerAdmitted = $owner -in @($current.Value, $system.Value, $administrators.Value)
   $results += [ordered]@{
     artifact = $entry.artifact
+    observerPowerShellVersion = $PSVersionTable.PSVersion.ToString()
     daclPresent = $present
     daclNull = $null -eq $raw.DiscretionaryAcl
     ownerAdmitted = $ownerAdmitted

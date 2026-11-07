@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AppDatabase, databaseLockPath } from '../../src/db.js';
 import { createLegacyServerFixture } from './migrationFixtures.js';
@@ -19,7 +19,8 @@ function inspect(input: object, mode = 'inspect'): AclResult[] {
   const inventory = join(root, 'inventory.json');
   writeFileSync(inventory, JSON.stringify({ root, ...input }));
   const run = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script,
-    '-InputPath', inventory, '-Mode', mode], { encoding: 'utf8', timeout: 20_000, maxBuffer: 512_000 });
+    '-InputPath', inventory, '-Mode', mode], { encoding: 'utf8', timeout: 20_000, maxBuffer: 512_000,
+    env: { ...process.env, PSModulePath: join(dirname(powershell), 'Modules') } });
   if (run.error != null || run.status !== 0) throw new Error(`Disposable ACL observer failed: ${run.error?.message ?? run.stderr}`);
   return JSON.parse(run.stdout.replace(/^\uFEFF/, '').trim()) as AclResult[];
 }
