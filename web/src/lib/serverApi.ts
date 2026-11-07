@@ -550,7 +550,7 @@ export function serverHlsLeaseTarget(manifestURL: string, manifest: string): str
 export async function renewServerHlsLease(target: string, signal: AbortSignal): Promise<number> {
   const parsed = new URL(target);
   const master = new URL("index.m3u8", parsed).href;
-  if (serverHlsLeaseTarget(master, `#EXTM3U\n${parsed.pathname.split("/").at(-1)}${parsed.search}\n`) !== target) {
+  if (serverHlsLeaseTarget(master, `#EXTM3U\n${parsed.pathname.split("/").pop()}${parsed.search}\n`) !== target) {
     throw new Error("Untrusted stream retention target.");
   }
   const response = await fetch(target, {
