@@ -96,6 +96,16 @@ export interface TranscodeSourceInfoOptions {
   signal?: AbortSignal;
 }
 
+export interface TranscodeJobLifecycle {
+  signal?: AbortSignal;
+}
+
+function preparationCancelled(): Error {
+  return Object.assign(new Error("The transcode preparation was cancelled."), {
+    name: "AbortError", code: "TRANSCODE_PREPARATION_CANCELLED", statusCode: 499,
+  });
+}
+
 function encoderArgs(
   encoder: TranscodeVideoEncoder,
   bitrates: readonly string[],
@@ -345,6 +355,7 @@ interface Job {
   failed: boolean;
   cancelled: boolean;
   disposed: boolean;
+  disposal?: Promise<void>;
   assetGeneration: string;
   startSeconds: number;
   subtitleVideoMpegTsTimestamp: number | null;
@@ -353,6 +364,10 @@ interface Job {
 interface PendingJob {
   fingerprint: string;
   promise: Promise<string>;
+  controller: AbortController;
+  waiters: Set<symbol>;
+  cancelled: boolean;
+  published: boolean;
   /** Assigned immediately after FFmpeg has spawned so lifecycle operations own it. */
   job?: Job;
 }
@@ -378,6 +393,7 @@ export class TranscodeRegistry {
    * an execution slot. Conversely, a disposed child still consumes a slot
    * until the OS has actually reported its termination. */
   private readonly liveChildren = new Set<ChildProcess>();
+  private readonly childExits = new WeakMap<ChildProcess, Promise<void>>();
   // In-flight job creations keyed by session, so concurrent ensureJob() calls
   // for the same session share ONE creation instead of racing (which would
   // orphan an ffmpeg + temp dir and bypass the maxTranscodes cap).
@@ -410,11 +426,14 @@ export class TranscodeRegistry {
 
   private trackChild(child: ChildProcess): void {
     this.liveChildren.add(child);
+    let resolveExit!: () => void;
+    this.childExits.set(child, new Promise<void>((resolve) => { resolveExit = resolve; }));
     let finished = false;
     const finish = () => {
       if (finished) return;
       finished = true;
       this.liveChildren.delete(child);
+      resolveExit();
     };
     // `exit` is the process-capacity boundary. `close` follows after stdio is
     // closed and is also emitted after a spawn error. An `error` alone can mean
@@ -662,8 +681,9 @@ export class TranscodeRegistry {
   async subtitleAvailableFor(
     sessionId: string,
     upstreamUrl: string,
+    options: TranscodeSourceInfoOptions = {},
   ): Promise<boolean | null> {
-    const probe = await this.probeStreams(sessionId, upstreamUrl);
+    const probe = await this.probeStreams(sessionId, upstreamUrl, options);
     return probe == null ? null : probe.subtitle === true;
   }
 
@@ -759,13 +779,19 @@ export class TranscodeRegistry {
   /** Stop one job and remove its staging/output directory. A replacement calls
    * this only after its successor has become the active job, so the database
    * pointer is never cleared while a new manifest is serving. */
-  private async disposeJob(
+  private disposeJob(
     sessionId: string,
     job: Job,
     clearSessionDir: boolean,
   ): Promise<void> {
-    if (job.disposed) return;
+    if (job.disposal != null) return job.disposal;
     job.disposed = true;
+    job.disposal = this.finishDisposal(sessionId, job, clearSessionDir);
+    return job.disposal;
+  }
+
+  private async finishDisposal(sessionId: string, job: Job, clearSessionDir: boolean): Promise<void> {
+    const exited = Promise.all(job.children.map((child) => this.childExits.get(child)));
     try {
       for (const child of job.children) child.kill("SIGTERM");
     } catch {
@@ -773,12 +799,29 @@ export class TranscodeRegistry {
     }
     const force = setTimeout(() => {
       try {
-        for (const child of job.children) child.kill("SIGKILL");
+        for (const child of job.children) {
+          if (this.liveChildren.has(child)) child.kill("SIGKILL");
+        }
       } catch {
         /* ignore */
       }
     }, KILL_GRACE_MS);
     force.unref?.();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const stopped = await Promise.race([
+      exited.then(() => true),
+      new Promise<boolean>((resolve) => {
+        deadline = setTimeout(() => resolve(false), KILL_GRACE_MS + 1000);
+      }),
+    ]);
+    clearTimeout(force);
+    clearTimeout(deadline);
+    if (!stopped) {
+      // A signal is not process exit. Keep admission charged and remove output
+      // only after a later actual exit, without holding callers indefinitely.
+      void exited.then(() => rm(job.dir, { recursive: true, force: true })).catch(() => {});
+      return;
+    }
     await rm(job.dir, { recursive: true, force: true }).catch(() => {});
     if (clearSessionDir) {
       try {
@@ -887,7 +930,9 @@ export class TranscodeRegistry {
     sessionId: string,
     upstreamUrl: string,
     options: HlsTranscodeOptions = {},
+    lifecycle: TranscodeJobLifecycle = {},
   ): Promise<string> {
+    if (lifecycle.signal?.aborted === true) throw preparationCancelled();
     if (this.lifecycle !== "open") {
       throw Object.assign(new Error("The transcode registry is closed."), { statusCode: 410 });
     }
@@ -913,23 +958,33 @@ export class TranscodeRegistry {
     // Coalesce concurrent creations for the same session into one promise.
     const inflight = this.pending.get(sessionId);
     if (inflight != null) {
-      if (inflight.fingerprint === fingerprint) return inflight.promise;
+      if (!inflight.cancelled && inflight.fingerprint === fingerprint) {
+        return this.waitForCreation(sessionId, inflight, lifecycle.signal, true);
+      }
       // A request changed profile/offset while the first FFmpeg startup was in
       // flight. Let that creation settle, then re-evaluate and replace it so we
       // never return a manifest for the wrong playback timeline.
-      await inflight.promise.catch(() => undefined);
+      try {
+        await this.waitForCreation(sessionId, inflight, lifecycle.signal, false);
+      } catch {
+        if (lifecycle.signal?.aborted) throw preparationCancelled();
+      }
       if (
         this.lifecycle !== "open" ||
         (this.generations.get(sessionId) ?? 0) !== requestGeneration
       ) {
         throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
       }
-      return this.ensureJob(sessionId, upstreamUrl, options);
+      return this.ensureJob(sessionId, upstreamUrl, options, lifecycle);
     }
     const generation = requestGeneration;
     const pendingEntry: PendingJob = {
       fingerprint,
       promise: Promise.resolve(""),
+      controller: new AbortController(),
+      waiters: new Set(),
+      cancelled: false,
+      published: false,
     };
     const created = this.createJob(
       sessionId,
@@ -938,6 +993,7 @@ export class TranscodeRegistry {
       fingerprint,
       existing,
       generation,
+      pendingEntry,
       (job) => {
         pendingEntry.job = job;
         if (
@@ -948,14 +1004,47 @@ export class TranscodeRegistry {
           void this.disposeJob(sessionId, job, false);
         }
       },
-    ).finally(() => {
+    ).finally(async () => {
+      if (pendingEntry.cancelled && pendingEntry.job != null) {
+        await this.disposeJob(sessionId, pendingEntry.job, false);
+      }
       if (this.pending.get(sessionId) === pendingEntry) {
         this.pending.delete(sessionId);
       }
     });
     pendingEntry.promise = created;
     this.pending.set(sessionId, pendingEntry);
-    return created;
+    return this.waitForCreation(sessionId, pendingEntry, lifecycle.signal, true);
+  }
+
+  private waitForCreation(sessionId: string, entry: PendingJob, signal: AbortSignal | undefined, owns: boolean): Promise<string> {
+    const waiter = Symbol();
+    if (owns) entry.waiters.add(waiter);
+    return new Promise((resolve, reject) => {
+      let finished = false;
+      const finish = (aborted: boolean, value?: string, error?: unknown) => {
+        if (finished) return;
+        finished = true;
+        signal?.removeEventListener("abort", abort);
+        if (owns) entry.waiters.delete(waiter);
+        if (aborted && owns && entry.waiters.size === 0 && !entry.published &&
+          this.pending.get(sessionId) === entry) {
+          entry.cancelled = true;
+          entry.controller.abort();
+          if (entry.job != null) {
+            entry.job.cancelled = true;
+            void this.disposeJob(sessionId, entry.job, false);
+          }
+        }
+        if (aborted) reject(preparationCancelled());
+        else if (error != null) reject(error);
+        else resolve(value!);
+      };
+      const abort = () => finish(true);
+      signal?.addEventListener("abort", abort, { once: true });
+      void entry.promise.then((value) => finish(false, value), (error: unknown) => finish(false, undefined, error));
+      if (signal?.aborted === true) abort();
+    });
   }
 
   private async createJob(
@@ -965,8 +1054,16 @@ export class TranscodeRegistry {
     fingerprint: string,
     previous: Job | undefined,
     generation: number,
+    creation: PendingJob,
     registerStaged: (job: Job) => void,
   ): Promise<string> {
+    const assertCurrent = () => {
+      if (creation.cancelled) throw preparationCancelled();
+      if (this.lifecycle !== "open" || (this.generations.get(sessionId) ?? 0) !== generation) {
+        throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
+      }
+    };
+    assertCurrent();
     // Count actual live ffmpeg work, including a staged replacement. A quality
     // switch at a saturated cap fails honestly while the current job remains
     // playable, rather than exceeding the operator's process limit.
@@ -975,6 +1072,7 @@ export class TranscodeRegistry {
     }
 
     await mkdir(this.config.dataDir, { recursive: true });
+    assertCurrent();
     if (
       this.lifecycle !== "open" ||
       (this.generations.get(sessionId) ?? 0) !== generation
@@ -982,6 +1080,10 @@ export class TranscodeRegistry {
       throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
     }
     const dir = await mkdtemp(join(this.config.dataDir, "transcode-"));
+    if (creation.cancelled) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw preparationCancelled();
+    }
     if (
       this.lifecycle !== "open" ||
       (this.generations.get(sessionId) ?? 0) !== generation
@@ -990,7 +1092,11 @@ export class TranscodeRegistry {
       throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
     }
     let child: ChildProcess;
-    const streamProbe = await this.probeStreams(sessionId, upstreamUrl);
+    const streamProbe = await this.probeStreams(sessionId, upstreamUrl, { signal: creation.controller.signal });
+    if (creation.cancelled) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw preparationCancelled();
+    }
     if (
       this.lifecycle !== "open" ||
       (this.generations.get(sessionId) ?? 0) !== generation
@@ -1040,6 +1146,11 @@ export class TranscodeRegistry {
         if (code !== 0) job.failed = true;
       });
     }
+    if (creation.cancelled) {
+      job.cancelled = true;
+      await this.disposeJob(sessionId, job, false);
+      throw preparationCancelled();
+    }
 
     const manifest = join(dir, MANIFEST_NAME);
     const quality = options.quality ?? qualityForProfile(options.profile ?? "adaptive");
@@ -1057,6 +1168,7 @@ export class TranscodeRegistry {
     while (Date.now() < deadline) {
       if (job.cancelled) {
         await this.disposeJob(sessionId, job, false);
+        if (creation.cancelled) throw preparationCancelled();
         throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
       }
       if (
@@ -1079,12 +1191,14 @@ export class TranscodeRegistry {
         // old process and files are touched. A failed warm-up never changes the
         // active map entry or session directory.
         if (
-          this.lifecycle !== "open" ||
+          creation.cancelled || job.cancelled || this.lifecycle !== "open" ||
           (this.generations.get(sessionId) ?? 0) !== generation
         ) {
           await this.disposeJob(sessionId, job, false);
+          if (creation.cancelled) throw preparationCancelled();
           throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
         }
+        creation.published = true;
         this.jobs.set(sessionId, job);
         this.db.sqlite
           .prepare("UPDATE stream_sessions SET transcode_dir = ? WHERE id = ?")
