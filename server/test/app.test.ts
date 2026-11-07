@@ -5031,6 +5031,286 @@ describe("DebridStreamer server", () => {
     }
   });
 
+  async function issuePreparation(owner: TestClient, sessionId: string): Promise<string> {
+    const response = await request(owner, {
+      method: "POST", url: `/api/stream/${sessionId}/preparations`, csrf: true, payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    const id = json<{ preparationId: string }>(response).preparationId;
+    expect(id).toMatch(/^prep_[0-9a-f]{32}$/);
+    return id;
+  }
+
+  async function preparationAction(owner: TestClient, sessionId: string, id: string,
+    action: "activate" | "cancel" | "release", generation?: string) {
+    return request(owner, { method: "POST", url: `/api/stream/${sessionId}/preparations/${id}`,
+      csrf: true, payload: { action, ...(generation == null ? {} : { generation }) } });
+  }
+
+  it("owned transcode: issuance is cookie-profile scoped, CSRF protected and metadata only", async () => {
+    const fake = makeFakeTranscoder(); const spawn = vi.spyOn(fake, "spawnHls");
+    const probe = vi.fn(async () => ({ audio: true, subtitle: false, audioTracks: [] }));
+    fake.probeStreams = probe;
+    const on = await buildTranscodeApp({}, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const otherId = await createProfile(owner, "other-viewer", "other-password");
+      expect(otherId).toEqual(expect.any(String));
+      const other = await login(on, "other-viewer", "other-password");
+      const url = `/api/stream/${session.id}/preparations`;
+      expect((await on.inject({ method: "POST", url, payload: {} })).statusCode).toBe(401);
+      expect((await on.inject({ method: "POST", url, payload: {},
+        headers: { authorization: session.playbackAuthorization } })).statusCode).toBe(401);
+      expect((await request(other, { method: "POST", url, csrf: true, payload: {} })).statusCode).toBe(404);
+      expect((await request(owner, { method: "POST", url, payload: {} })).statusCode).toBe(403);
+      await issuePreparation(owner, session.id);
+      expect(probe).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled();
+      const bootstrap = json<{ transcodeCapabilities: { preparationOwnership: boolean } }>(
+        await request(owner, { method: "GET", url: "/api/bootstrap" }));
+      expect(bootstrap.transcodeCapabilities.preparationOwnership).toBe(true);
+    } finally { await on.close(); }
+  });
+
+  it("owned transcode: cancelled and unknown tickets cannot initiate source probing or HLS", async () => {
+    const fake = makeFakeTranscoder(); const spawn = vi.spyOn(fake, "spawnHls");
+    const probe = vi.fn(async () => ({ audio: true, subtitle: false, audioTracks: [] }));
+    fake.probeStreams = probe;
+    fake.capabilities = async () => ({ toneMapping: false, subtitleSidecar: true, audioTrackSelection: true });
+    const on = await buildTranscodeApp({}, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const id = await issuePreparation(owner, session.id);
+      expect((await preparationAction(owner, session.id, id, "cancel")).statusCode).toBe(200);
+      for (const candidate of [id, `prep_${"f".repeat(32)}`]) {
+        const response = await request(owner, { method: "GET",
+          url: `/api/stream/${session.id}/index.m3u8?preparation=${candidate}&subtitles=preserve` });
+        expect(response.statusCode).toBe(410);
+      }
+      expect((await preparationAction(owner, session.id, id, "cancel")).statusCode).toBe(200);
+      expect(probe).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled();
+    } finally { await on.close(); }
+  });
+
+  it("owned transcode: exact activation gates media and pinned master reload never starts new work", async () => {
+    const fake = makeFakeTranscoder(); const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 1 }, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const id = await issuePreparation(owner, session.id);
+      const url = `/api/stream/${session.id}/index.m3u8?quality=360p&start=73&preparation=${id}`;
+      const prepared = await request(owner, { method: "GET", url });
+      expect(prepared.statusCode).toBe(200);
+      const generation = String(prepared.headers["x-yawf-transcode-generation"]);
+      expect(generation).toMatch(/^transcode-[A-Za-z0-9_-]+$/);
+      expect(prepared.headers["x-yawf-transcode-preparation"]).toBe(id);
+      expect(prepared.body).toContain(`360p.m3u8?generation=${generation}&preparation=${id}`);
+      const child = `/api/stream/${session.id}/360p_seg_00000.ts?generation=${generation}&preparation=${id}`;
+      expect((await request(owner, { method: "GET", url: child })).statusCode).toBe(404);
+      const retention = `/api/stream/${session.id}/360p.m3u8?generation=${generation}&preparation=${id}`;
+      expect((await request(owner, { method: "HEAD", url: retention })).statusCode).toBe(404);
+      expect((await request(owner, { method: "POST", url: `/api/stream/${session.id}/preparations/${id}`,
+        payload: { action: "activate", generation } })).statusCode).toBe(403);
+      expect((await preparationAction(owner, session.id, id, "activate")).statusCode).toBe(400);
+      expect((await preparationAction(owner, session.id, id, "activate", "transcode-wrong")).statusCode).toBe(409);
+      expect((await preparationAction(owner, session.id, id, "activate", generation)).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: retention })).statusCode).toBe(200);
+      expect((await request(owner, { method: "GET", url: child })).statusCode).toBe(200);
+      const reload = await request(owner, { method: "GET", url: `${url}&generation=${generation}` });
+      expect(reload.statusCode).toBe(200);
+      expect(reload.body).toBe(prepared.body);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect((await preparationAction(owner, session.id, id, "cancel", generation)).statusCode).toBe(409);
+      expect((await preparationAction(owner, session.id, id, "release", "transcode-wrong")).statusCode).toBe(409);
+      expect((await request(owner, { method: "GET", url: child })).statusCode).toBe(200);
+      expect((await preparationAction(owner, session.id, id, "release", generation)).statusCode).toBe(200);
+      expect((await request(owner, { method: "GET", url: child })).statusCode).toBe(404);
+      expect((await request(owner, { method: "GET", url })).statusCode).toBe(410);
+    } finally { await on.close(); }
+  });
+
+  it("owned transcode: abandoned ready output frees max1 and preserves the successor's exact offset", async () => {
+    const fake = makeFakeTranscoder(); const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 1 }, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const first = await issuePreparation(owner, session.id);
+      expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${first}` })).statusCode).toBe(200);
+      expect((await preparationAction(owner, session.id, first, "cancel")).statusCode).toBe(200);
+      const next = await issuePreparation(owner, session.id);
+      const response = await request(owner, { method: "GET",
+        url: `/api/stream/${session.id}/index.m3u8?quality=480p&start=75&preparation=${next}` });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["x-yawf-transcode-start"]).toBe("75");
+      expect(spawn).toHaveBeenCalledTimes(2);
+    } finally { await on.close(); }
+  });
+
+  it("owned receiver: cookie-free manifest and children read only the active exact generation", async () => {
+    const fake = makeFakeTranscoder(); const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 1 }, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const id = await issuePreparation(owner, session.id);
+      const prepared = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${id}` });
+      const generation = String(prepared.headers["x-yawf-transcode-generation"]);
+      const base = `/api/external-stream/${session.id}/${session.playbackAuthorization.slice("Bearer ".length)}/`;
+      const query = `?generation=${generation}&preparation=${id}`;
+      expect((await on.inject(`${base}index.m3u8${query}`)).statusCode).toBe(404);
+      expect((await preparationAction(owner, session.id, id, "activate", generation)).statusCode).toBe(200);
+      const master = await on.inject(`${base}index.m3u8${query}`);
+      expect(master.statusCode).toBe(200);
+      expect(master.headers["referrer-policy"]).toBe("no-referrer");
+      expect(master.headers["cache-control"]).toBe("private, no-store");
+      expect(master.body).toContain(`360p.m3u8${query}`);
+      const media = await on.inject(`${base}360p.m3u8${query}`);
+      expect(media.statusCode).toBe(200);
+      expect(media.body).toContain(`360p_seg_00000.ts${query}`);
+      expect((await on.inject(`${base}360p_seg_00000.ts${query}`)).rawPayload).toEqual(fakeMpegTsSegment(0));
+      const head = await on.inject({ method: "HEAD", url: `${base}360p.m3u8${query}` });
+      expect(head.statusCode).toBe(200); expect(head.body).toBe("");
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect((await preparationAction(owner, session.id, id, "release", generation)).statusCode).toBe(200);
+      expect((await on.inject(`${base}index.m3u8${query}`)).statusCode).toBe(404);
+      // Receiver reads do not convert ownership into permanent legacy use.
+      const next = await issuePreparation(owner, session.id);
+      expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=480p&preparation=${next}` })).statusCode).toBe(200);
+      expect(spawn).toHaveBeenCalledTimes(2);
+    } finally { await on.close(); }
+  });
+
+  it("owned receiver: existing HMAC, stream revocation and strict selectors gate aliases before media lookup", async () => {
+    const fake = makeFakeTranscoder(); const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({}, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const id = await issuePreparation(owner, session.id);
+      const prepared = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${id}` });
+      const generation = String(prepared.headers["x-yawf-transcode-generation"]);
+      await preparationAction(owner, session.id, id, "activate", generation);
+      const capability = session.playbackAuthorization.slice("Bearer ".length);
+      const base = `/api/external-stream/${session.id}/${capability}/`;
+      const query = `?generation=${generation}&preparation=${id}`;
+      expect((await on.inject(`${base}index.m3u8${query}`)).statusCode).toBe(200);
+      expect((await on.inject(`/api/external-stream/${session.id}/${"A".repeat(43)}/index.m3u8${query}`)).statusCode).toBe(404);
+      const other = await createRawSession(owner);
+      expect((await on.inject(`/api/external-stream/${other.id}/${capability}/index.m3u8${query}`)).statusCode).toBe(404);
+      for (const bad of [
+        `${query}&quality=480p`, `${query}&generation=${generation}`, `${query}&preparation=${id}`,
+        `?generation=${generation}`, `?preparation=${id}`, `?generation=wrong&preparation=${id}`,
+      ]) expect((await on.inject(`${base}index.m3u8${bad}`)).statusCode).toBe(400);
+      expect((await on.inject(`${base}360p.m3u8?generation=transcode-wrong&preparation=${id}`)).statusCode).toBe(404);
+      expect((await on.inject(`${base}index.m3u8?generation=${generation}&preparation=prep_${"f".repeat(32)}`)).statusCode).toBe(404);
+      expect((await on.inject(`${base}passwd${query}`)).statusCode).toBe(404);
+      expect((await request(owner, { method: "POST", url: `/api/admin/streams/${session.id}/revoke`, csrf: true })).statusCode).toBe(200);
+      expect((await on.inject(`${base}index.m3u8${query}`)).statusCode).toBe(404);
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally { await on.close(); }
+  });
+
+  it("owned receiver: unknown tickets cannot probe, allocate, activate or start transcodes", async () => {
+    const fake = makeFakeTranscoder(); const spawn = vi.spyOn(fake, "spawnHls");
+    const probe = vi.fn(async () => ({ audio: true, subtitle: false, audioTracks: [] })); fake.probeStreams = probe;
+    const on = await buildTranscodeApp({}, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const base = `/api/external-stream/${session.id}/${session.playbackAuthorization.slice("Bearer ".length)}/`;
+      const id = await issuePreparation(owner, session.id);
+      const prepared = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${id}` });
+      const generation = String(prepared.headers["x-yawf-transcode-generation"]);
+      await preparationAction(owner, session.id, id, "activate", generation);
+      expect((await on.inject(`${base}index.m3u8?generation=${generation}&preparation=${id}`)).statusCode).toBe(200);
+      probe.mockClear(); spawn.mockClear();
+      const query = `?generation=transcode-never&preparation=prep_${"e".repeat(32)}`;
+      for (const asset of ["index.m3u8", "360p.m3u8", "360p_seg_00000.ts"]) {
+        expect((await on.inject(`${base}${asset}${query}`)).statusCode).toBe(404);
+      }
+      expect(probe).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled();
+    } finally { await on.close(); }
+  });
+
+  it("owned transcode: cancelling one ready ticket preserves a shared activated viewer", async () => {
+    const fake = makeFakeTranscoder(); const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 1 }, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const first = await issuePreparation(owner, session.id); const second = await issuePreparation(owner, session.id);
+      const one = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${first}` });
+      const two = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${second}` });
+      const generation = String(one.headers["x-yawf-transcode-generation"]);
+      expect(two.headers["x-yawf-transcode-generation"]).toBe(generation);
+      expect((await preparationAction(owner, session.id, second, "activate", generation)).statusCode).toBe(200);
+      expect((await preparationAction(owner, session.id, first, "cancel")).statusCode).toBe(200);
+      expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/360p_seg_00000.ts?generation=${generation}&preparation=${second}` })).statusCode).toBe(200);
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally { await on.close(); }
+  });
+
+  it("owned transcode: a prepared and activated replacement never retires a legacy viewer", async () => {
+    const fake = makeFakeTranscoder(); const children: ReturnType<Transcoder["spawnHls"]>[] = [];
+    const spawn = fake.spawnHls;
+    fake.spawnHls = (args) => { const child = spawn(args); vi.spyOn(child, "kill"); children.push(child); return child; };
+    const on = await buildTranscodeApp({ maxTranscodes: 2 }, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const legacy = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=480p` });
+      const oldGeneration = legacy.body.match(/generation=(transcode-[A-Za-z0-9_-]+)/)![1];
+      const id = await issuePreparation(owner, session.id);
+      const prepared = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&start=73&preparation=${id}` });
+      expect(prepared.statusCode).toBe(200);
+      const generation = String(prepared.headers["x-yawf-transcode-generation"]);
+      expect((await preparationAction(owner, session.id, id, "activate", generation)).statusCode).toBe(200);
+      expect(children[0]!.kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/480p_seg_00000.ts?generation=${oldGeneration}` })).statusCode).toBe(200);
+      expect((await preparationAction(owner, session.id, id, "release", generation)).statusCode).toBe(200);
+      expect(children[0]!.kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/480p_seg_00000.ts?generation=${oldGeneration}` })).statusCode).toBe(200);
+    } finally { await on.close(); }
+  });
+
+  it("owned transcode: a bearer or another profile cannot activate, release or fetch an owned ticket", async () => {
+    const on = await buildTranscodeApp();
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const id = await issuePreparation(owner, session.id);
+      const prepared = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${id}` });
+      const generation = String(prepared.headers["x-yawf-transcode-generation"]);
+      await createProfile(owner, "other-viewer", "other-password");
+      const other = await login(on, "other-viewer", "other-password");
+      // Positive control: this exact native bearer is valid for legacy media.
+      expect((await on.inject({ method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p`,
+        headers: { authorization: session.playbackAuthorization } })).statusCode).toBe(200);
+      for (const action of ["activate", "cancel", "release"] as const) {
+        expect((await preparationAction(other, session.id, id, action, generation)).statusCode).toBe(404);
+        expect((await on.inject({ method: "POST", url: `/api/stream/${session.id}/preparations/${id}`,
+          headers: { authorization: session.playbackAuthorization }, payload: { action, generation } })).statusCode).toBe(401);
+      }
+      expect((await request(other, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${id}` })).statusCode).toBe(404);
+      expect((await on.inject({ method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${id}`,
+        headers: { authorization: session.playbackAuthorization } })).statusCode).toBe(401);
+      expect((await preparationAction(owner, session.id, id, "activate", generation)).statusCode).toBe(200);
+    } finally { await on.close(); }
+  });
+
+  it("owned transcode: permitted cross-origin clients can read only nonsecret playback headers", async () => {
+    const on = await buildTranscodeApp({ corsOrigin: "https://client.example" });
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const id = await issuePreparation(owner, session.id);
+      const url = `/api/stream/${session.id}/index.m3u8?quality=360p&preparation=${id}`;
+      const allowed = await request(owner, { method: "GET", url, headers: { origin: "https://client.example" } });
+      expect(allowed.statusCode).toBe(200);
+      expect(allowed.headers["access-control-allow-origin"]).toBe("https://client.example");
+      const exposed = String(allowed.headers["access-control-expose-headers"]);
+      expect(exposed).toContain("x-yawf-transcode-generation");
+      expect(exposed).toContain("x-yawf-transcode-preparation");
+      expect(exposed).toContain("x-yawf-transcode-audio");
+      expect(exposed).not.toMatch(/cookie|authorization|csrf/i);
+      const denied = await request(owner, { method: "GET", url, headers: { origin: "https://foreign.example" } });
+      expect(denied.headers["access-control-allow-origin"]).toBeUndefined();
+      expect(denied.headers["access-control-expose-headers"]).toBeUndefined();
+    } finally { await on.close(); }
+  });
+
   it("transcode: promotes a replacement only after it is playable", async () => {
     const on = await buildTranscodeApp({ enableTranscode: true, maxTranscodes: 2 });
     try {

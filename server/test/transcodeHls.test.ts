@@ -6,6 +6,23 @@ import {
 } from "../src/transcodeHls.js";
 
 describe("transcode HLS assets", () => {
+  it("binds all owned video and subtitle references to the same ticket and generation", () => {
+    const id = `prep_${"a".repeat(32)}`;
+    const generation = "transcode-owned";
+    const source = '#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,URI="360p_subtitles.m3u8"\n360p.m3u8\n360p_seg_00000.ts\n360p0.vtt\n';
+    const result = rewriteTranscodeManifest(source, generation, id);
+    for (const asset of ["360p_subtitles.m3u8", "360p.m3u8", "360p_seg_00000.ts", "360p0.vtt"]) {
+      expect(result).toContain(`${asset}?generation=${generation}&preparation=${id}`);
+    }
+  });
+
+  it("never emits unpinned owned references or rewrites remote and already attributed media", () => {
+    const id = `prep_${"a".repeat(32)}`;
+    expect(() => rewriteTranscodeManifest("#EXTM3U\n360p.m3u8\n", undefined, id)).toThrow("exact generation");
+    const lookalikes = "#EXTM3U\nhttps://foreign.example/360p.m3u8\n360p.m3u8?generation=transcode-old\n";
+    expect(rewriteTranscodeManifest(lookalikes, "transcode-owned", id)).toBe(lookalikes);
+  });
+
   it("generation-binds the subtitle playlist and its exact WebVTT segments", () => {
     const master = [
       "#EXTM3U",

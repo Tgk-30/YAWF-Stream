@@ -30,6 +30,7 @@ let mockCached: any = null;
 let mockContinueWatching: any[] = [];
 let serverModeOn = false;
 let transcodeAvailable = false;
+let preparationOwnership: boolean | undefined;
 let transcodeQualities: Array<"480p" | "360p"> = [];
 let pickerSelection = { season: 1, episode: 3 };
 let mockActiveProfile: { id: string } | null = null;
@@ -168,6 +169,7 @@ vi.mock("../lib/ServerSessionContext", () => ({
   useTranscodeAvailable: () => transcodeAvailable,
   useDirectTorrentAvailable: () => false,
   useTranscodeCapabilities: () => ({
+    preparationOwnership,
     adaptive: transcodeAvailable,
     qualities: transcodeQualities,
     seekOffset: transcodeAvailable,
@@ -203,6 +205,7 @@ const serverOptimizedSource = vi.fn((stream: any, options: any) => {
     quality: options.quality,
   };
 });
+const serverOwnedBrowserPlaybackURL = vi.fn((_ownedURL: string, _externalURL: string | null) => "https://server.example/opaque-native-hls");
 const serverExternalPlaybackURL = vi.fn(
   (stream: any) => `${stream.streamURL}/external-test` as string | null,
 );
@@ -217,6 +220,8 @@ const serverStreamSourceInfo = vi.fn(async (
   tracks: [], durationSeconds: 600,
 }));
 vi.mock("../lib/serverApi", () => ({
+  createServerHlsPreparation: vi.fn(),
+  serverOwnedBrowserPlaybackURL: (ownedURL: string, externalURL: string | null) => serverOwnedBrowserPlaybackURL(ownedURL, externalURL),
   asServerTranscodeStream: (stream: any) => ({
     ...stream,
     streamURL: `${stream.streamURL.replace(/\/+$/, "")}/index.m3u8`,
@@ -525,10 +530,14 @@ vi.mock("../components/VideoPlayer", () => ({
       data-external-playback-url={externalPlaybackUrl ?? ""}
       data-handoff-rate={String(initialHandoffState?.playbackRate ?? "")}
       data-has-source-info={String(serverOptimized?.loadSourceInfo != null)}
+      data-has-preparation-ownership={String(serverOptimized?.ownership?.create != null)}
       data-scrobble-tmdb={scrobbleContext?.tmdbId ?? ""}
       data-scrobble-season={scrobbleContext?.season ?? ""}
       data-scrobble-episode={scrobbleContext?.episode ?? ""}
     >
+      {serverOptimized?.ownership?.browserPlaybackURL != null && (
+        <button type="button" onClick={() => serverOptimized.ownership.browserPlaybackURL("https://server.example/opaque-owned-master")}>derive-browser-playback</button>
+      )}
       {serverOptimized?.loadSourceInfo != null && (
         <>
           <button type="button" onClick={() => void serverOptimized.loadSourceInfo()}>
@@ -714,6 +723,7 @@ beforeEach(() => {
   mockContinueWatching = [];
   serverModeOn = false;
   transcodeAvailable = false;
+  preparationOwnership = undefined;
   transcodeQualities = [];
   tauriState.on = false;
   tauriState.desktop = false;
@@ -2582,6 +2592,32 @@ describe("Detail play", () => {
       transcode: true,
       transcodeOptions: { profile: "data-saver" },
     });
+  });
+
+  it.each([true, false, undefined])("injects issued preparation ownership only for advertised capability=%s", async (advertised) => {
+    serverModeOn = true; transcodeAvailable = true; transcodeQualities = ["480p"];
+    preparationOwnership = advertised;
+    resolveServerStream.mockResolvedValue({ fileName: "show.mkv", streamURL: "https://server.example/api/stream/session-1", codec: "H.265" });
+    mockDetailItem = preview("s1", { type: "series", title: "Obsession", tmdbId: 200 });
+    mockDetail = detailState({ item: mediaItem({ id: "s1", type: "series", title: "Obsession", tmdbId: 200 }) });
+    mockServices.tmdb = { getEpisodes: vi.fn(async () => []), getSeasons: vi.fn(async () => []) };
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await userEvent.click(screen.getByTestId("resolve-and-play-stream"));
+    const player = await screen.findByTestId("player");
+    expect(player).toHaveAttribute("data-has-preparation-ownership", String(advertised === true));
+  });
+
+  it("binds the browser playback helper to the current independent server capability", async () => {
+    serverModeOn = true; transcodeAvailable = true; transcodeQualities = ["480p"]; preparationOwnership = true;
+    resolveServerStream.mockResolvedValue({ fileName: "show.mkv", streamURL: "https://server.example/api/stream/session-1", codec: "H.265" });
+    mockDetailItem = preview("s1", { type: "series", title: "Obsession", tmdbId: 200 });
+    mockDetail = detailState({ item: mediaItem({ id: "s1", type: "series", title: "Obsession", tmdbId: 200 }) });
+    mockServices.tmdb = { getEpisodes: vi.fn(async () => []), getSeasons: vi.fn(async () => []) };
+    render(<Detail />); await userEvent.click(screen.getByTestId("pick-episode"));
+    await userEvent.click(screen.getByTestId("resolve-and-play-stream"));
+    await userEvent.click(await screen.findByRole("button", { name: "derive-browser-playback" }));
+    expect(serverOwnedBrowserPlaybackURL).toHaveBeenCalledWith("https://server.example/opaque-owned-master", "https://server.example/api/stream/session-1/external-test");
   });
 
   it("automatically uses server HLS for an incompatible source in the hosted web app", async () => {

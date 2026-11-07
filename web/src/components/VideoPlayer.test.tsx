@@ -9,6 +9,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode, Suspense, startTransition, useState } from "react";
+import { flushSync } from "react-dom";
 import { readFileSync } from "node:fs";
 import type {
   ServerAudioInventoryLoadOptions,
@@ -20,14 +21,36 @@ import type {
 
 // A gated observer for one callback ownership test. Every useRef invocation
 // always forwards its original arguments to the real hook unchanged.
+const ownedCommitObserver = vi.hoisted(() => ({ enabled: false, commits: 0 }));
 const failureRefObserver = vi.hoisted(() => ({
   enabled: false,
   refs: [] as Array<{ current: (message: string, exactHandoffPending: boolean) => void }>,
 }));
 vi.mock("react", async (original) => {
   const actual = await original<typeof import("react")>();
+  const stateSetters = new WeakMap<Function, { value: unknown; setter: (next: unknown) => void }>();
   return {
     ...actual,
+    useState: ((...args: unknown[]) => {
+      const [value, setter] = Reflect.apply(actual.useState, undefined, args);
+      let observed = stateSetters.get(setter);
+      if (observed == null) {
+        observed = { value, setter: () => {} };
+        const entry = observed;
+        entry.setter = (next: unknown) => {
+          const sourceCommit = next != null && typeof next === "object" && "claim" in next;
+          const clearsFailure = next === null && entry.value === "The server could not prepare 480p playback (500).";
+          const commit = () => Reflect.apply(setter, undefined, [next]);
+          if (ownedCommitObserver.enabled && (sourceCommit || clearsFailure)) {
+            if (sourceCommit) ownedCommitObserver.commits += 1;
+            flushSync(commit);
+          } else commit();
+        };
+        stateSetters.set(setter, observed);
+      }
+      observed.value = value;
+      return [value, observed.setter];
+    }) as typeof actual.useState,
     useRef: ((...args: unknown[]) => {
       const ref = Reflect.apply(actual.useRef, undefined, args);
       const initial = args[0];
@@ -42,6 +65,7 @@ vi.mock("react", async (original) => {
 // hls.js: default export with the static helpers the source touches. The shared
 // state is created via vi.hoisted so the hoisted vi.mock factory can close over
 // it without a temporal-dead-zone error.
+const hlsBlobAttachment = vi.hoisted(() => ({ enabled: false, automatic: true, managed: false }));
 const { hlsInstances, hlsIsSupported } = vi.hoisted(() => ({
   hlsInstances: [] as Array<{
     config: {
@@ -102,12 +126,20 @@ vi.mock("../data/traktScrobble", () => ({
   scrobblePlaybackPause: (...args: unknown[]) => scrobblePauseMock(...args),
   scrobblePlaybackStop: (...args: unknown[]) => scrobbleStopMock(...args),
 }));
+const nativeCastStateMock = vi.hoisted(() => ({ phase: "idle", listeners: new Set<() => void>() }));
+vi.mock("../lib/cast", () => ({ castController: {
+  getSnapshot: () => ({ phase: nativeCastStateMock.phase }),
+  subscribe: (listener: () => void) => { nativeCastStateMock.listeners.add(listener); return () => nativeCastStateMock.listeners.delete(listener); },
+} }));
+const castMediaObserver = vi.hoisted(() => ({ enabled: false, urls: [] as string[] }));
 vi.mock("./CastControls", () => ({
-  CastControls: ({ onLocalPlaybackChange, buttonClassName }: {
+  CastControls: ({ onLocalPlaybackChange, buttonClassName, media }: {
+    media: { url: string };
     onLocalPlaybackChange: (suspended: boolean) => void;
     buttonClassName: string;
-  }) => (
-    <>
+  }) => {
+    if (castMediaObserver.enabled) castMediaObserver.urls.push(media.url);
+    return <>
       <button type="button" className={buttonClassName} aria-label="Cast to a device">
         <span>Cast</span>
       </button>
@@ -117,14 +149,15 @@ vi.mock("./CastControls", () => ({
       <button type="button" onClick={() => onLocalPlaybackChange(false)}>
         test resume playback
       </button>
-    </>
-  ),
+    </>;
+  },
 }));
 vi.mock("hls.js", () => {
   class FakeHls {
     static isSupported = hlsIsSupported;
     static Events = {
       ERROR: "hlsError",
+      MEDIA_ATTACHED: "mediaAttached",
       MANIFEST_PARSED: "manifestParsed",
       LEVEL_SWITCHED: "levelSwitched",
       AUDIO_TRACKS_UPDATED: "audioTracksUpdated",
@@ -185,6 +218,14 @@ vi.mock("hls.js", () => {
       // Real media attachment runs the media load algorithm, which resets the
       // current speed to defaultPlaybackRate on affected Android WebViews.
       media.playbackRate = media.defaultPlaybackRate;
+      if (hlsBlobAttachment.enabled) {
+        if (hlsBlobAttachment.managed) {
+          media.removeAttribute("src"); media.disableRemotePlayback = true;
+          const primary = document.createElement("source"); primary.src = "blob:https://server.example/owned-media";
+          media.appendChild(primary); media.load();
+        } else media.src = "blob:https://server.example/owned-media";
+        if (hlsBlobAttachment.automatic) this.emit("mediaAttached");
+      }
     });
     destroy = vi.fn();
     on = vi.fn((event: string, callback: (event: string, data: unknown) => void) => {
@@ -364,6 +405,7 @@ const embeddedModeIntentObserver = vi.hoisted(() => ({
     onSwitchServerOptimized?: (quality: ServerTranscodeQuality, position: number) => Promise<void>;
     onSwitchDeviceOriginal?: (position: number) => void;
     serverOptimizationPending?: boolean;
+    castPlaybackUrl?: string | null;
   }>,
 }));
 vi.mock("./EmbeddedPlayer", () => ({
@@ -375,6 +417,7 @@ vi.mock("./EmbeddedPlayer", () => ({
     onPlaybackError?: (error: Error) => boolean | Promise<boolean>;
     onOpenExternalPlayer?: () => void | Promise<void>;
     externalActionStatus?: string | null;
+    castPlaybackUrl?: string | null;
     onSwitchServerOptimized?: (quality: ServerTranscodeQuality, position: number) => Promise<void>;
     onSwitchDeviceOriginal?: (position: number) => void;
     serverOptimizationPending?: boolean;
@@ -476,6 +519,11 @@ beforeEach(() => {
   scrobbleStopMock.mockClear();
   globalThis.__DEBRIDSTREAMER_SERVER_URL__ = undefined;
   hlsInstances.length = 0;
+  nativeCastStateMock.phase = "idle";
+  nativeCastStateMock.listeners.clear();
+  hlsBlobAttachment.enabled = false;
+  hlsBlobAttachment.automatic = true;
+  hlsBlobAttachment.managed = false;
   hlsIsSupported.mockReturnValue(true);
   isTauriMock.mockReturnValue(false);
   playWithMpvMock.mockResolvedValue({ embedded: false, status: "ok" });
@@ -13867,5 +13915,922 @@ describe("Original pending-generation cancellation contract", () => {
       act(() => { staleOriginal(8); });
       expect(document.querySelector("video.player-video")).toBe(committed);
     } finally { embeddedModeIntentObserver.enabled = false; }
+  });
+});
+
+describe("issued HLS preparation ownership", () => {
+  const master = "https://server.example/api/stream/owned/index.m3u8?quality=480p";
+  const manifest = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment0.ts\n";
+  function fixture() {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const handles: Array<{
+      url: string; generationFromResponse: ReturnType<typeof vi.fn>;
+      activate: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn>;
+      activatedURL: string;
+    }> = [];
+    const create = vi.fn(async (url: string, _signal: AbortSignal) => {
+      const number = handles.length + 1;
+      const ownedURL = `${url}${url.includes("?") ? "&" : "?"}preparation=ticket${number}`;
+      const activatedURL = `${ownedURL}&generation=transcode-${number}`;
+      const handle = {
+        url: ownedURL, activatedURL,
+        generationFromResponse: vi.fn((_response: Response) => `transcode-${number}`),
+        activate: vi.fn(async (_generation: string, _manifest: string, _signal?: AbortSignal): Promise<{ url: string; leaseTarget: string | null }> => ({ url: activatedURL, leaseTarget: null })),
+        cancel: vi.fn(async () => {}), release: vi.fn(async (_generation: string) => {}),
+      };
+      handles.push(handle);
+      return handle;
+    });
+    const request = vi.fn(async (quality: ServerTranscodeQuality, position: number, audioTrack?: number) => ({
+      url: `${master.replace("480p", quality)}&start=${position}`, quality, timelineOffsetSeconds: position, startPositionSeconds: 0, audioTrack,
+    }));
+    const optimized = { qualities: ["480p", "720p"] as const, ownership: { create }, request, loadSourceInfo: vi.fn(async () => ({ durationSeconds: 7200, tracks: [] })) };
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(manifest));
+    vi.stubGlobal("fetch", fetcher);
+    return { handles, create, request, optimized, fetcher };
+  }
+  async function flush() { await act(async () => { for (let i = 0; i < 30; i += 1) await Promise.resolve(); }); }
+  function video() { return document.querySelector("video.player-video") as HTMLVideoElement; }
+  function setClock(element: HTMLVideoElement, position: number, paused = true) {
+    Object.defineProperties(element, {
+      currentTime: { configurable: true, writable: true, value: position },
+      duration: { configurable: true, value: 7200 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, writable: true, value: paused },
+    });
+    fireEvent.loadedMetadata(element);
+    fireEvent.timeUpdate(element);
+    if (paused) fireEvent.pause(element); else fireEvent.play(element);
+  }
+  async function selectQuality(quality = "720p") {
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    fireEvent.click(screen.getByRole("button", { name: quality }));
+    await flush();
+  }
+  describe("owned browser playback transport", () => {
+    const capability = "https://server.example/api/external-stream/owned/" + "A".repeat(43);
+    const prep = (n: number) => "prep_" + String(n).padStart(32, "0");
+    const alias = (n = 1) => `${capability}/index.m3u8?generation=transcode-${n}&preparation=${prep(n)}`;
+    const lease = (n = 1) => `https://server.example/api/stream/owned/480p.m3u8?generation=transcode-${n}&preparation=${prep(n)}`;
+    function setup(native = true) {
+      const f = fixture();
+      deviceKindMock.mockReturnValue(native ? "ios" : "mac");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue(native ? "probably" : "");
+      hlsBlobAttachment.enabled = !native;
+      const prompt = deferred<void>();
+      const remote = Object.assign(new EventTarget(), {
+        state: "disconnected" as RemotePlaybackState,
+        prompt: vi.fn(() => prompt.promise),
+        watchAvailability: vi.fn(async (callback: RemotePlaybackAvailabilityCallback) => { callback(true); return 1; }),
+        cancelWatchAvailability: vi.fn(async () => {}),
+      });
+      const picker = vi.fn();
+      const restores = [replaceProperty(HTMLMediaElement.prototype, "remote", remote),
+        replaceProperty(HTMLVideoElement.prototype, "webkitShowPlaybackTargetPicker", picker),
+        replaceProperty(HTMLVideoElement.prototype, "webkitCurrentPlaybackTargetIsWireless", false),
+        replaceProperty(HTMLVideoElement.prototype, "webkitPresentationMode", "inline")];
+      const originalCreate = f.create.getMockImplementation()!;
+      f.create.mockImplementation(async (...args) => {
+        const handle = await originalCreate(...args); const n = f.handles.length;
+        handle.url = handle.url.replace(`ticket${n}`, prep(n));
+        handle.activatedURL = handle.activatedURL.replace(`ticket${n}`, prep(n));
+        handle.activate.mockResolvedValue({ url: handle.activatedURL, leaseTarget: lease(n) });
+        return handle;
+      });
+      const browserPlaybackURL = vi.fn((ownedURL: string) => alias(f.handles.findIndex((handle) => handle.activatedURL === ownedURL) + 1));
+      const optimized = { ...f.optimized, ownership: { create: f.create, browserPlaybackURL } };
+      const props = { url: master, title: "Owned browser transport", engine: "webview-hls-transcode" as const,
+        externalPlaybackUrl: capability, serverOptimized: optimized, onClose: () => {} };
+      const availability = (element: HTMLVideoElement) => {
+        const event = new Event("webkitplaybacktargetavailabilitychanged") as Event & { availability: string };
+        event.availability = "available"; fireEvent(element, event);
+      };
+      const wireless = (element: HTMLVideoElement, active: boolean) => {
+        Object.defineProperty(HTMLVideoElement.prototype, "webkitCurrentPlaybackTargetIsWireless", { configurable: true, value: active });
+        fireEvent(element, new Event("webkitcurrentplaybacktargetiswirelesschanged"));
+      };
+      const webkitPip = (element: HTMLVideoElement, active: boolean) => {
+        Object.defineProperty(HTMLVideoElement.prototype, "webkitPresentationMode", { configurable: true, value: active ? "picture-in-picture" : "inline" });
+        fireEvent(element, new Event("webkitpresentationmodechanged"));
+      };
+      return { ...f, props, browserPlaybackURL, remote, prompt, picker, availability, wireless, webkitPip,
+        dispose: () => restores.reverse().forEach((restore) => restore()) };
+    }
+    const cast = () => screen.getByRole("button", { name: /^(Cast to a device|AirPlay)$/ });
+    it.each(["native iOS", "unsupported MSE native fallback"])("prebinds the same-generation alias for %s without gesture source changes", async (path) => {
+      const f = setup(path === "native iOS");
+      if (path !== "native iOS") { hlsIsSupported.mockReturnValue(false); vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably"); }
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video();
+        expect(element.src).toBe(alias()); expect(f.browserPlaybackURL).toHaveBeenCalledExactlyOnceWith(f.handles[0].activatedURL);
+        setClock(element, 73.1); element.playbackRate = 1.25; element.volume = 0.4; element.muted = true;
+        f.availability(element); const source = element.src;
+        const load = vi.mocked(HTMLMediaElement.prototype.load); load.mockClear();
+        f.picker.mockImplementation(() => { expect(element.src).toBe(source); expect(element.currentTime).toBe(73.1); });
+        fireEvent.click(cast()); expect(f.picker).toHaveBeenCalledTimes(1); expect(load).not.toHaveBeenCalled();
+        expect(element.src).toBe(source); expect(element.currentTime).toBe(73.1); expect(element.playbackRate).toBe(1.25);
+        expect(element.volume).toBe(0.4); expect(element.muted).toBe(true);
+        view.rerender(<VideoPlayer {...f.props} serverOptimized={{ ...f.props.serverOptimized, ownership: { ...f.props.serverOptimized.ownership } }} />); await flush();
+        expect(video()).toBe(element); expect(f.browserPlaybackURL).toHaveBeenCalledTimes(1); view.unmount(); await flush();
+      } finally { f.dispose(); }
+    });
+    it("adds a later native HLS alternative after MSE attachment without reloading its blob", async () => {
+      const f = setup(false);
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video();
+        expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(f.handles[0].activatedURL);
+        expect(element.src).toBe("blob:https://server.example/owned-media");
+        const alternative = element.querySelector("source")!;
+        expect(alternative.src).toBe(alias()); expect(alternative.type).toBe("application/vnd.apple.mpegurl");
+        setClock(element, 73.1); const load = vi.mocked(HTMLMediaElement.prototype.load); load.mockClear();
+        fireEvent.click(cast()); expect(f.remote.prompt).toHaveBeenCalledTimes(1);
+        expect(element.src).toBe("blob:https://server.example/owned-media"); expect(element.currentTime).toBe(73.1);
+        expect(load).not.toHaveBeenCalled(); f.prompt.reject(new DOMException("Cancelled", "NotAllowedError")); await flush();
+        expect(element.src).toBe("blob:https://server.example/owned-media"); expect(element.currentTime).toBe(73.1);
+        expect(hlsInstances[0].destroy).not.toHaveBeenCalled(); expect(f.handles[0].release).not.toHaveBeenCalled();
+        view.unmount(); await flush(); expect(hlsInstances[0].destroy).toHaveBeenCalledTimes(1);
+      } finally { f.dispose(); }
+    });
+    it("binds the MMS alias after its primary blob and rediscovers RemotePlayback only after enabling it", async () => {
+      const f = setup(false); hlsBlobAttachment.managed = true; hlsBlobAttachment.automatic = false;
+      f.remote.watchAvailability.mockImplementation(async (callback) => {
+        const element = video();
+        if (element?.disableRemotePlayback || ![...element?.querySelectorAll("source") ?? []].some((source) => source.src === alias())) throw new DOMException("Unavailable before alias", "NotSupportedError");
+        callback(true); return 2;
+      });
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video();
+        expect(element.getAttribute("src")).toBeNull(); expect(element.disableRemotePlayback).toBe(true);
+        expect([...element.querySelectorAll("source")].map((source) => source.src)).toEqual(["blob:https://server.example/owned-media"]);
+        const watches = f.remote.watchAvailability.mock.calls.length;
+        const load = vi.mocked(HTMLMediaElement.prototype.load); load.mockClear();
+        act(() => { hlsInstances[0].emit("mediaAttached"); }); await flush();
+        expect([...element.querySelectorAll("source")].map((source) => source.src)).toEqual(["blob:https://server.example/owned-media", alias()]);
+        expect(element.getAttribute("src")).toBeNull(); expect(element.disableRemotePlayback).toBe(false); expect(load).not.toHaveBeenCalled();
+        expect(f.remote.watchAvailability.mock.calls.length).toBeGreaterThan(watches);
+        fireEvent.click(cast()); expect(f.remote.prompt).toHaveBeenCalledTimes(1);
+        f.prompt.reject(new DOMException("Cancelled", "NotAllowedError")); await flush(); view.unmount(); await flush();
+      } finally { f.dispose(); }
+    });
+    it("removes the captured native alternative before foreground retirement destroys MSE or invokes load", async () => {
+      const f = setup(false);
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const old = video(); setClock(old, 73.1);
+        expect(old.querySelector("source")?.src).toBe(alias());
+        const sourceAtDestroy: string[][] = []; const sourceAtLoad: string[][] = [];
+        hlsInstances[0].destroy.mockImplementation(() => {
+          sourceAtDestroy.push([...old.querySelectorAll("source")].map((source) => source.src));
+          old.removeAttribute("src"); old.load();
+        });
+        Object.defineProperty(old, "load", { configurable: true, value: vi.fn(() => { sourceAtLoad.push([...old.querySelectorAll("source")].map((source) => source.src)); }) });
+        let gets = 0;
+        f.fetcher.mockImplementation(async (_url, init) => init?.method === "HEAD" ? new Response(null) : ++gets === 1 ? new Response(null, { status: 503 }) : new Response(manifest));
+        await selectQuality();
+        expect(sourceAtDestroy).toEqual([[]]); expect(sourceAtLoad.length).toBeGreaterThan(0); expect(sourceAtLoad.every((sources) => sources.length === 0)).toBe(true);
+        expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+        expect(hlsInstances.at(-1)!.loadSource).toHaveBeenCalledWith(f.handles[1].activatedURL);
+        view.unmount(); await flush();
+      } finally { f.dispose(); }
+    });
+    it("withholds MSE casting until the exact current alias alternative is actually bound", async () => {
+      const f = setup(false); hlsBlobAttachment.automatic = false;
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video();
+        expect(element.querySelector("source")).toBeNull(); expect(screen.queryByRole("button", { name: "Cast to a device" })).toBeNull();
+        act(() => { hlsInstances[0].emit("mediaAttached"); }); await flush();
+        expect(cast()).toBeInTheDocument();
+        element.querySelector("source")!.remove();
+        fireEvent.click(cast()); expect(f.remote.prompt).not.toHaveBeenCalled();
+        view.unmount(); await flush();
+      } finally { f.dispose(); }
+    });
+    it.each(["missing helper", "null alias", "null external fence"])("never offers an owned native picker with %s", async (mode) => {
+      const f = setup();
+      try {
+        const ownership = { ...f.props.serverOptimized.ownership, browserPlaybackURL: mode === "missing helper" ? undefined : mode === "null alias" ? vi.fn(() => null) : f.browserPlaybackURL };
+        const view = render(<VideoPlayer {...f.props} externalPlaybackUrl={mode === "null external fence" ? null : capability}
+          serverOptimized={{ ...f.props.serverOptimized, ownership }} />); await flush(); f.availability(video());
+        expect(video().src).toBe(f.handles[0].activatedURL);
+        expect(screen.queryByRole("button", { name: /^(Cast to a device|AirPlay)$/ })).toBeNull();
+        expect(f.picker).not.toHaveBeenCalled(); expect(f.remote.prompt).not.toHaveBeenCalled(); view.unmount(); await flush();
+      } finally { f.dispose(); }
+    });
+    it.each(["connecting", "connected"] as const)("retains captured hls.js after React unmount while RemotePlayback is %s", async (state) => {
+      const f = setup(false);
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video();
+        f.remote.state = state; act(() => { f.remote.dispatchEvent(new Event(state === "connected" ? "connect" : "connecting")); });
+        view.unmount(); await flush(); expect(hlsInstances[0].destroy).not.toHaveBeenCalled();
+        expect(element.src).toBe("blob:https://server.example/owned-media"); expect(f.handles[0].release).not.toHaveBeenCalled();
+        f.remote.state = "disconnected"; act(() => { f.remote.dispatchEvent(new Event("disconnect")); }); await flush();
+        expect(hlsInstances[0].destroy).toHaveBeenCalledTimes(1); expect(element.getAttribute("src")).toBeNull();
+        expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+      } finally { f.dispose(); }
+    });
+    it("retains native AirPlay until a captured wireless-disconnect event after React unmount", async () => {
+      const f = setup();
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video();
+        f.wireless(element, true); view.unmount(); await flush();
+        expect(element.src).toBe(alias()); expect(f.handles[0].release).not.toHaveBeenCalled();
+        f.wireless(element, false); await flush(); expect(element.getAttribute("src")).toBeNull();
+        expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+      } finally { f.dispose(); }
+    });
+    it.each(["standard PiP", "WebKit PiP"])("retains captured MSE and closes only after terminal %s exit", async (mode) => {
+      const f = setup(false); const restorePip = replaceProperty(document, "pictureInPictureElement", null);
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video();
+        if (mode === "standard PiP") {
+          Object.defineProperty(document, "pictureInPictureElement", { configurable: true, value: element }); fireEvent(element, new Event("enterpictureinpicture"));
+          Object.defineProperty(document, "pictureInPictureElement", { configurable: true, value: null }); fireEvent(element, new Event("leavepictureinpicture"));
+          Object.defineProperty(document, "pictureInPictureElement", { configurable: true, value: element }); fireEvent(element, new Event("enterpictureinpicture"));
+        } else f.webkitPip(element, true);
+        view.unmount(); await flush(); expect(hlsInstances[0].destroy).not.toHaveBeenCalled(); expect(f.handles[0].release).not.toHaveBeenCalled();
+        if (mode === "standard PiP") { Object.defineProperty(document, "pictureInPictureElement", { configurable: true, value: null }); fireEvent(element, new Event("leavepictureinpicture")); }
+        else f.webkitPip(element, false);
+        await flush(); expect(hlsInstances[0].destroy).toHaveBeenCalledTimes(1); expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+      } finally { restorePip(); f.dispose(); }
+    });
+    it("retains a pending native prompt after React unmount until genuine cancellation settles", async () => {
+      const f = setup(false);
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video(); setClock(element, 73.1);
+        fireEvent.click(cast()); view.unmount(); await flush();
+        expect(f.remote.prompt).toHaveBeenCalledTimes(1); expect(hlsInstances[0].destroy).not.toHaveBeenCalled(); expect(f.handles[0].release).not.toHaveBeenCalled();
+        f.prompt.reject(new DOMException("Cancelled", "NotAllowedError")); await flush();
+        expect(hlsInstances[0].destroy).toHaveBeenCalledTimes(1); expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+      } finally { f.dispose(); }
+    });
+    it.each(["remote", "wireless", "WebKit PiP"])("renews only the same captured lease beyond idle after unmount for %s", async (mode) => {
+      vi.useFakeTimers(); const f = setup(mode !== "remote");
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video(); setClock(element, 73.1);
+        if (mode === "remote") { f.remote.state = "connected"; act(() => { f.remote.dispatchEvent(new Event("connect")); }); }
+        else if (mode === "wireless") f.wireless(element, true); else f.webkitPip(element, true);
+        view.unmount(); await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(150_001); }); await flush();
+        const heads = () => f.fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD");
+        expect(heads()).toHaveLength(6); expect(heads().every(([target]) => target === lease())).toBe(true);
+        expect(f.create).toHaveBeenCalledTimes(1); expect(f.handles[0].release).not.toHaveBeenCalled();
+        if (mode === "remote") { f.remote.state = "disconnected"; act(() => { f.remote.dispatchEvent(new Event("disconnect")); }); }
+        else if (mode === "wireless") f.wireless(element, false); else f.webkitPip(element, false);
+        await flush(); expect(f.handles[0].release).toHaveBeenCalledTimes(1);
+        await act(async () => { await vi.advanceTimersByTimeAsync(90_000); }); expect(heads()).toHaveLength(6);
+      } finally { f.dispose(); }
+    });
+    it("stops captured native-cast lease renewal and releases after global Stop following unmount", async () => {
+      vi.useFakeTimers(); const f = setup(); isTauriMock.mockReturnValue(true); nativeCastStateMock.phase = "casting";
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); setClock(video(), 73.1);
+        fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+        view.unmount(); await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(150_001); }); await flush();
+        const heads = () => f.fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD");
+        expect(heads()).toHaveLength(6); expect(heads().every(([target]) => target === lease())).toBe(true);
+        expect(f.handles[0].release).not.toHaveBeenCalled();
+        nativeCastStateMock.phase = "idle"; act(() => { for (const listener of nativeCastStateMock.listeners) listener(); }); await flush();
+        expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1"); expect(nativeCastStateMock.listeners.size).toBe(0);
+        await act(async () => { await vi.advanceTimersByTimeAsync(90_000); }); expect(heads()).toHaveLength(6);
+      } finally { nativeCastStateMock.phase = "idle"; f.dispose(); }
+    });
+    it("never tears down a successor when an old retained remote reader eventually disconnects", async () => {
+      const f = setup(false);
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const old = video();
+        f.remote.state = "connected"; act(() => { f.remote.dispatchEvent(new Event("connect")); });
+        view.rerender(<VideoPlayer url="https://x/successor.mp4" title="Successor" onClose={() => {}} />); await flush();
+        const successor = video(); expect(hlsInstances[0].destroy).not.toHaveBeenCalled(); expect(successor.src).toBe("https://x/successor.mp4");
+        f.remote.state = "disconnected"; act(() => { f.remote.dispatchEvent(new Event("disconnect")); }); await flush();
+        expect(hlsInstances[0].destroy).toHaveBeenCalledTimes(1); expect(old.getAttribute("src")).toBeNull();
+        expect(successor.src).toBe("https://x/successor.mp4"); expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1"); view.unmount();
+      } finally { f.dispose(); }
+    });
+    it.each(["standard PiP", "WebKit PiP", "pending picker", "connecting"])("keeps local pause and recovery snapshot authoritative during %s", async (mode) => {
+      const f = setup(); const restorePip = replaceProperty(document, "pictureInPictureElement", null);
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video(); setClock(element, 73.1, false);
+        element.playbackRate = 1.25; element.volume = 0.4; element.muted = true;
+        if (mode === "standard PiP") { Object.defineProperty(document, "pictureInPictureElement", { configurable: true, value: element }); fireEvent(element, new Event("enterpictureinpicture")); }
+        else if (mode === "WebKit PiP") f.webkitPip(element, true);
+        else if (mode === "pending picker") fireEvent.click(cast());
+        else { f.remote.state = "connecting"; act(() => { f.remote.dispatchEvent(new Event("connecting")); }); }
+        Object.defineProperty(element, "paused", { configurable: true, value: true }); fireEvent.pause(element);
+        expect(document.querySelector("button[aria-label='Play']")).not.toBeNull();
+        const ready = deferred<Response>(); f.fetcher.mockImplementationOnce(() => ready.promise);
+        fireMediaError(element); await flush(); expect(f.request).toHaveBeenCalledWith("480p", 73.1);
+        Object.defineProperty(document, "pictureInPictureElement", { configurable: true, value: null });
+        if (mode === "standard PiP") fireEvent(element, new Event("leavepictureinpicture"));
+        else if (mode === "WebKit PiP") f.webkitPip(element, false);
+        else if (mode === "pending picker") f.prompt.reject(new DOMException("Cancelled", "NotAllowedError"));
+        else { f.remote.state = "disconnected"; act(() => { f.remote.dispatchEvent(new Event("disconnect")); }); }
+        ready.resolve(new Response(manifest)); await flush();
+        const recovered = video(); expect(recovered).not.toBe(element); expect(recovered.autoplay).toBe(false);
+        const play = vi.mocked(HTMLMediaElement.prototype.play); play.mockClear(); setClock(recovered, 0);
+        expect(play).not.toHaveBeenCalled(); expect(recovered.playbackRate).toBe(1.25); expect(recovered.volume).toBe(0.4); expect(recovered.muted).toBe(true);
+        view.unmount(); await flush();
+      } finally { restorePip(); f.dispose(); }
+    });
+    it("preserves explicit user play intent across native wireless pause events", async () => {
+      const f = setup();
+      try {
+        const view = render(<VideoPlayer {...f.props} />); await flush(); const element = video(); setClock(element, 73.1, false);
+        f.wireless(element, true);
+        Object.defineProperty(element, "paused", { configurable: true, value: true }); fireEvent.pause(element);
+        expect(document.querySelector("button[aria-label='Pause']")).not.toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+        expect(document.querySelector("button[aria-label='Play']")).not.toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "Play" })); fireEvent.pause(element);
+        expect(document.querySelector("button[aria-label='Pause']")).not.toBeNull();
+        expect(element.currentTime).toBe(73.1); expect(element.src).toBe(alias()); expect(f.create).toHaveBeenCalledTimes(1);
+        f.wireless(element, false); view.unmount(); await flush();
+      } finally { f.dispose(); }
+    });
+    it.each(["remote", "wireless"])("does not start watchdog recovery without local frames during valid %s playback", async (mode) => {
+      vi.useFakeTimers(); const f = setup(); const refresh = vi.fn(async () => {});
+      try {
+        const view = render(<VideoPlayer {...f.props} refreshCurrentSource={refresh} />); await flush(); const element = video(); setClock(element, 73.1, false); fireEvent.playing(element);
+        if (mode === "remote") { f.remote.state = "connected"; act(() => { f.remote.dispatchEvent(new Event("connect")); }); } else f.wireless(element, true);
+        await act(async () => { await vi.advanceTimersByTimeAsync(150_001); }); await flush();
+        expect(f.create).toHaveBeenCalledTimes(1); expect(refresh).not.toHaveBeenCalled(); expect(f.handles[0].release).not.toHaveBeenCalled();
+        expect(screen.queryByText("Playback interrupted")).toBeNull(); expect(element.src).toBe(alias()); expect(document.querySelector("button[aria-label='Pause']")).not.toBeNull();
+        if (mode === "remote") { f.remote.state = "disconnected"; act(() => { f.remote.dispatchEvent(new Event("disconnect")); }); } else f.wireless(element, false);
+        view.unmount(); await flush();
+      } finally { f.dispose(); }
+    });
+  });
+  it.each([false, true])("activates initial HLS before any native=%s reader attaches and releases only after detach", async (native) => {
+    const f = fixture();
+    if (native) {
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    }
+    const activation = deferred<{ url: string; leaseTarget: null }>();
+    const originalCreate = f.create.getMockImplementation()!;
+    f.create.mockImplementationOnce(async () => {
+      const h = await originalCreate(master, new AbortController().signal);
+      h.activate.mockImplementationOnce(() => activation.promise);
+      return h;
+    });
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned initial" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush();
+    expect(f.create).toHaveBeenCalledTimes(1);
+    expect(f.fetcher).toHaveBeenCalledWith(f.handles[0].url, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(hlsInstances).toHaveLength(0);
+    expect(video().getAttribute("src")).toBeNull();
+    expect(f.handles[0].activate).toHaveBeenCalledWith("transcode-1", manifest, expect.any(AbortSignal));
+    await act(async () => { activation.resolve({ url: f.handles[0].activatedURL, leaseTarget: null }); });
+    await flush();
+    const element = video();
+    if (native) expect(element.src).toBe(f.handles[0].activatedURL);
+    else expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(f.handles[0].activatedURL);
+    fireEvent.pause(element); fireEvent(window, new Event("pagehide"));
+    await flush();
+    expect(f.handles[0].release).not.toHaveBeenCalled();
+    expect(f.handles[0].cancel).not.toHaveBeenCalled();
+    const load = vi.mocked(HTMLMediaElement.prototype.load); load.mockClear();
+    view.unmount(); await flush();
+    expect(element.getAttribute("src")).toBeNull();
+    expect(load).toHaveBeenCalled();
+    if (!native) expect(hlsInstances[0].destroy).toHaveBeenCalled();
+    expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+    expect(f.handles[0].cancel).not.toHaveBeenCalled();
+  });
+  it("cancels a stale ready activation instead of mounting it after a source replacement", async () => {
+    const f = fixture(); const activation = deferred<{ url: string; leaseTarget: null }>();
+    const originalCreate = f.create.getMockImplementation()!;
+    f.create.mockImplementationOnce(async (...args) => {
+      const h = await originalCreate(...args); h.activate.mockImplementationOnce(() => activation.promise); return h;
+    });
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned stale" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush();
+    view.rerender(<VideoPlayer url="https://x/replacement.mp4" title="New" onClose={() => {}} />);
+    await flush();
+    expect(f.handles[0].cancel).toHaveBeenCalledTimes(1);
+    activation.resolve({ url: f.handles[0].activatedURL, leaseTarget: null }); await flush();
+    expect(video().src).toBe("https://x/replacement.mp4");
+    expect(hlsInstances).toHaveLength(0);
+    expect(f.handles[0].release).not.toHaveBeenCalled();
+  });
+  it("cancels a late ticket allocation after the mounting owner unmounts", async () => {
+    const f = fixture(); const allocation = deferred<Awaited<ReturnType<typeof f.create>>>();
+    const originalCreate = f.create.getMockImplementation()!;
+    f.create.mockImplementationOnce(() => allocation.promise);
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned allocation" serverOptimized={f.optimized} onClose={() => {}} />);
+    view.unmount();
+    allocation.resolve(await originalCreate(master, new AbortController().signal)); await flush();
+    expect(f.handles[0].cancel).toHaveBeenCalledTimes(1);
+    expect(f.fetcher).not.toHaveBeenCalled(); expect(hlsInstances).toHaveLength(0);
+  });
+  it("keeps the StrictMode connected reader through replay and releases the committed reader on real removal", async () => {
+    const f = fixture();
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    const view = render(<StrictMode><VideoPlayer url={master} engine="webview-hls-transcode" title="Owned strict" serverOptimized={f.optimized} onClose={() => {}} /></StrictMode>);
+    await flush();
+    const live = f.handles.at(-1)!;
+    expect(live.cancel).not.toHaveBeenCalled(); expect(live.release).not.toHaveBeenCalled();
+    fireEvent.pause(video()); await flush();
+    expect(live.release).not.toHaveBeenCalled();
+    view.unmount(); await flush();
+    expect(live.release).toHaveBeenCalledExactlyOnceWith(`transcode-${f.handles.length}`);
+  });
+  it("retains a detached PiP reader until actual PiP exit, then stops it before release", async () => {
+    const f = fixture();
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned PiP" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); const element = video();
+    const restore = replaceProperty(document, "pictureInPictureElement", element);
+    try {
+      view.unmount(); await flush(); expect(f.handles[0].release).not.toHaveBeenCalled();
+      restore(); fireEvent(element, new Event("leavepictureinpicture")); await flush();
+      expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+    } finally { restore(); }
+  });
+  it.each([0, 73.1, 3600])("retires an exclusive reader on busy and retries the SAME new ticket at exact %s", async (position) => {
+    const f = fixture();
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned max1" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); const old = video(); setClock(old, position);
+    old.volume = 0.35; old.muted = true; old.playbackRate = 1.25;
+    const release = deferred<void>();
+    f.handles[0].release.mockImplementationOnce(() => release.promise);
+    let gets = 0;
+    f.fetcher.mockImplementation(async () => ++gets === 1 ? new Response(null, { status: 503 }) : new Response(manifest));
+    await selectQuality();
+    expect(f.create).toHaveBeenCalledTimes(2);
+    expect(f.request).toHaveBeenCalledWith("720p", position);
+    expect(hlsInstances[0].destroy).toHaveBeenCalled();
+    expect(old.getAttribute("src")).toBeNull();
+    expect(f.handles[0].release).toHaveBeenCalledWith("transcode-1");
+    expect(f.fetcher.mock.calls.filter(([url]) => String(url) === f.handles[1].url)).toHaveLength(1);
+    release.resolve(); await flush();
+    expect(f.create).toHaveBeenCalledTimes(2);
+    expect(f.fetcher.mock.calls.filter(([url]) => String(url) === f.handles[1].url)).toHaveLength(2);
+    expect(hlsInstances.at(-1)!.loadSource).toHaveBeenCalledWith(f.handles[1].activatedURL);
+    expect(hlsInstances.at(-1)!.config.startPosition).toBe(0);
+    const replacement = video();
+    expect(replacement).not.toBe(old);
+    expect(replacement.autoplay).toBe(false); expect(replacement.volume).toBe(0.35);
+    expect(replacement.muted).toBe(true); expect(replacement.playbackRate).toBe(1.25);
+    const play = vi.mocked(HTMLMediaElement.prototype.play); play.mockClear();
+    setClock(replacement, 0); expect(play).not.toHaveBeenCalled();
+    expect(scrubBarMock.mock.lastCall![0].currentTime).toBe(position);
+    expect(f.handles[0].cancel).not.toHaveBeenCalled(); expect(f.handles[1].cancel).not.toHaveBeenCalled();
+  });
+  it("keeps the exact retired point in error and Retry when replacement fails, never remounting the closed original", async () => {
+    const f = fixture();
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned failed replacement" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); const old = video(); setClock(old, 3600); old.playbackRate = 1.5;
+    let gets = 0;
+    f.fetcher.mockImplementation(async () => new Response(gets++ === 0 ? null : "failed", { status: gets === 1 ? 503 : 500 }));
+    await selectQuality();
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
+    expect(video()).toBeNull(); expect(f.handles[1].cancel).toHaveBeenCalledTimes(1);
+    f.fetcher.mockImplementation(async () => new Response(manifest));
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flush();
+    expect(f.create).toHaveBeenCalledTimes(3);
+    expect(f.request.mock.calls.at(-1)).toEqual(["720p", 3600]);
+    expect(hlsInstances.at(-1)!.loadSource).toHaveBeenCalledWith(f.handles[2].activatedURL);
+    expect(video().playbackRate).toBe(1.5); expect(video().autoplay).toBe(false);
+    expect(hlsInstances.filter((hls) => hls.loadSource.mock.calls.some(([url]) => url === f.handles[0].activatedURL))).toHaveLength(1);
+  });
+  it.each([true, false])("explicitly retries the exact detached generation after rejected release with paused=%s", async (paused) => {
+    const f = fixture();
+    const tracks = [{ index: 0, language: "eng", label: "English", default: true }, { index: 1, language: "jpn", label: "Japanese", default: false }];
+    const optimized = { ...f.optimized, loadSourceInfo: vi.fn(async () => ({ durationSeconds: 7200, tracks })), loadAudioTracks: vi.fn(async () => tracks) };
+    render(<VideoPlayer url={master + "&audio=1"} engine="webview-hls-transcode" title="Detached release retry" serverOptimized={optimized} onClose={() => {}} />);
+    await flush(); const old = video(); setClock(old, 3600, paused); old.playbackRate = 1.25; old.volume = 0.4; old.muted = true;
+    const acknowledged = deferred<void>();
+    f.handles[0].release.mockRejectedValueOnce(new Error("Release acknowledgement lost"));
+    f.handles[0].release.mockImplementationOnce(() => acknowledged.promise);
+    let released = false; acknowledged.promise.then(() => { released = true; });
+    f.fetcher.mockImplementation(async () => released ? new Response(manifest, { headers: { "x-yawf-transcode-audio": "1" } }) : new Response(null, { status: 503 }));
+    await selectQuality();
+    expect(f.request).toHaveBeenCalledWith("720p", 3600, 1);
+    expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+    expect(hlsInstances[0].destroy).toHaveBeenCalledTimes(1); expect(old.getAttribute("src")).toBeNull(); expect(video()).toBeNull();
+    const retry = screen.getByRole("button", { name: "Retry playback" });
+    fireEvent.click(retry); await flush();
+    expect(f.handles[0].release.mock.calls).toEqual([["transcode-1"], ["transcode-1"]]);
+    expect(f.create).toHaveBeenCalledTimes(3); expect(f.request.mock.calls.at(-1)).toEqual(["720p", 3600, 1]);
+    expect(f.handles[2].activate).not.toHaveBeenCalled();
+    expect(f.fetcher.mock.calls.filter(([target]) => target === f.handles[2].url)).toHaveLength(1);
+    fireEvent.click(retry); fireEvent.click(retry); await flush();
+    expect(f.create).toHaveBeenCalledTimes(3); expect(f.handles[0].release).toHaveBeenCalledTimes(2);
+    expect(hlsInstances[0].destroy).toHaveBeenCalledTimes(1);
+    expect(f.fetcher.mock.calls.filter(([target]) => target === f.handles[2].url)).toHaveLength(1);
+    acknowledged.resolve(); await flush();
+    expect(f.handles[0].release).toHaveBeenCalledTimes(2); expect(f.handles[2].activate).toHaveBeenCalledTimes(1);
+    expect(f.fetcher.mock.calls.filter(([target]) => target === f.handles[2].url)).toHaveLength(2);
+    expect(hlsInstances.at(-1)!.loadSource).toHaveBeenCalledWith(f.handles[2].activatedURL);
+    const recovered = video(); expect(recovered).not.toBe(old); expect(recovered.autoplay).toBe(false);
+    expect(recovered.playbackRate).toBe(1.25); expect(recovered.volume).toBe(0.4); expect(recovered.muted).toBe(true);
+    const play = vi.mocked(HTMLMediaElement.prototype.play); play.mockClear(); setClock(recovered, 0);
+    expect(play).toHaveBeenCalledTimes(paused ? 0 : 1); expect(scrubBarMock.mock.lastCall![0].currentTime).toBe(3600);
+    expect(f.handles[0].cancel).not.toHaveBeenCalled(); expect(f.handles[1].cancel).toHaveBeenCalledTimes(1);
+  });
+  it("keeps the current owned source attached while a native cast prevents foreground retirement", async () => {
+    const f = fixture(); isTauriMock.mockReturnValue(true); nativeCastStateMock.phase = "casting";
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Cast blocks release retry" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); const attached = video(); setClock(attached, 3600); attached.playbackRate = 1.25;
+    fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+    f.fetcher.mockImplementation(async () => new Response(null, { status: 503 }));
+    await selectQuality();
+    expect(video()).toBe(attached); expect(attached.currentTime).toBe(3600); expect(attached.playbackRate).toBe(1.25);
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledExactlyOnceWith(f.handles[0].activatedURL);
+    expect(hlsInstances[0].destroy).not.toHaveBeenCalled(); expect(f.handles[0].release).not.toHaveBeenCalled(); expect(f.handles[0].cancel).not.toHaveBeenCalled();
+    expect(f.handles[1].activate).not.toHaveBeenCalled();
+    view.unmount(); await flush(); expect(f.handles[1].cancel).toHaveBeenCalledTimes(1);
+    nativeCastStateMock.phase = "idle"; act(() => { for (const listener of nativeCastStateMock.listeners) listener(); }); await flush();
+    expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+  });
+  it("never retires healthy playback to satisfy a background default warmup", async () => {
+    const f = fixture();
+    const base = { url: master, engine: "webview-hls-transcode" as const, title: "Owned background", onClose: () => {} };
+    const view = render(<VideoPlayer {...base} serverOptimized={f.optimized} />);
+    await flush(); setClock(video(), 73.1, false); fireEvent.playing(video()); video().currentTime = 74; fireEvent.timeUpdate(video());
+    f.fetcher.mockImplementation(async () => new Response(null, { status: 503 }));
+    view.rerender(<VideoPlayer {...base} serverOptimized={{ ...f.optimized, defaultQuality: "720p" }} />);
+    await flush();
+    expect(f.create).toHaveBeenCalledTimes(2);
+    expect(f.handles[0].release).not.toHaveBeenCalled();
+    expect(hlsInstances[0].destroy).not.toHaveBeenCalled();
+    view.unmount(); await flush(); expect(f.handles[1].cancel).toHaveBeenCalledTimes(1);
+  });
+  it.each([true, false])("recovers an owned native media error at the confirmed hour with paused=%s", async (paused) => {
+    const f = fixture(); deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned native recovery" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); const old = video(); setClock(old, 3600, paused);
+    old.playbackRate = 1.25; old.volume = 0.4; old.muted = true;
+    let gets = 0;
+    f.fetcher.mockImplementation(async () => ++gets === 1 ? new Response(null, { status: 503 }) : new Response(manifest));
+    act(() => { old.currentTime = 0; }); Object.defineProperty(old, "paused", { configurable: true, value: true });
+    fireMediaError(old); await flush();
+    expect(f.request).toHaveBeenCalledWith("480p", 3600);
+    expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+    const recovered = video(); expect(recovered.src).toBe(f.handles[1].activatedURL + "#t=0.001");
+    const play = vi.mocked(HTMLMediaElement.prototype.play); play.mockClear();
+    setClock(recovered, 0, true);
+    expect(play).toHaveBeenCalledTimes(paused ? 0 : 1);
+    expect(recovered.playbackRate).toBe(1.25); expect(recovered.volume).toBe(0.4); expect(recovered.muted).toBe(true);
+  });
+  it.each([true, false])("preserves a later paused=%s intent through deferred activation after exact retirement", async (finalPaused) => {
+    const f = fixture(); const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
+    const restore = replaceProperty(navigator, "mediaSession", { metadata: null, playbackState: "none", setPositionState: vi.fn(),
+      setActionHandler: (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => handlers.set(action, handler) });
+    try {
+      render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned late intent" serverOptimized={f.optimized} onClose={() => {}} />);
+      await flush(); const old = video(); setClock(old, 73.1, !finalPaused);
+      const activation = deferred<{ url: string; leaseTarget: null }>();
+      const originalCreate = f.create.getMockImplementation()!;
+      f.create.mockImplementationOnce(async (...args) => {
+        const h = await originalCreate(...args); h.activate.mockImplementationOnce(() => activation.promise); return h;
+      });
+      let gets = 0;
+      f.fetcher.mockImplementation(async () => ++gets === 1 ? new Response(null, { status: 503 }) : new Response(manifest));
+      await selectQuality();
+      expect(f.handles[0].release).toHaveBeenCalledTimes(1);
+      const action = finalPaused ? "pause" : "play";
+      const play = vi.mocked(HTMLMediaElement.prototype.play); play.mockClear();
+      act(() => { handlers.get(action)?.({ action }); });
+      expect(play).not.toHaveBeenCalled();
+      // Retired decoder events are not a new user pause or a zero seek.
+      fireEvent.pause(old); old.currentTime = 0; fireEvent.timeUpdate(old);
+      activation.resolve({ url: f.handles[1].activatedURL, leaseTarget: null }); await flush();
+      expect(hlsInstances.at(-1)!.config.startPosition).toBe(0);
+      play.mockClear(); setClock(video(), 0);
+      expect(play).toHaveBeenCalledTimes(finalPaused ? 0 : 1);
+      expect(f.request).toHaveBeenCalledWith("720p", 73.1);
+    } finally { restore(); }
+  });
+  it("releases the captured old reader without clearing a replacement player's source", async () => {
+    const f = fixture();
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned replace" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); const old = video();
+    view.rerender(<VideoPlayer url="https://x/replacement.mp4" sourceRevision={2} title="New reader" onClose={() => {}} />);
+    await flush();
+    expect(old.getAttribute("src")).toBeNull(); expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+    expect(video().src).toBe("https://x/replacement.mp4"); expect(f.handles[0].cancel).not.toHaveBeenCalled();
+  });
+  it("cancels an owned warmup on explicit Original while late activation cannot replace it", async () => {
+    const f = fixture(); const activation = deferred<{ url: string; leaseTarget: null }>();
+    const originalCreate = f.create.getMockImplementation()!;
+    f.create.mockImplementationOnce(async (...args) => {
+      const h = await originalCreate(...args); h.activate.mockImplementationOnce(() => activation.promise); return h;
+    });
+    render(<VideoPlayer url="https://x/original.mp4" title="Owned original cancellation" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); setClock(video(), 73.1);
+    await selectQuality();
+    fireEvent.click(screen.getByRole("button", { name: "Device Original" })); await flush();
+    expect(f.handles[0].cancel).toHaveBeenCalledTimes(1);
+    activation.resolve({ url: f.handles[0].activatedURL, leaseTarget: null }); await flush();
+    expect(video().src).toBe("https://x/original.mp4"); expect(f.handles[0].release).not.toHaveBeenCalled();
+    expect(hlsInstances).toHaveLength(0);
+  });
+  it("retains a detached native cast only until the captured global cast reaches terminal state", async () => {
+    vi.useFakeTimers(); const f = fixture(); isTauriMock.mockReturnValue(true);
+    nativeCastStateMock.phase = "casting";
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned casting" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+    fireEvent(window, new Event("pagehide")); await flush();
+    expect(f.handles[0].release).not.toHaveBeenCalled();
+    view.unmount(); await flush(); expect(f.handles[0].release).not.toHaveBeenCalled();
+    nativeCastStateMock.phase = "idle";
+    act(() => { for (const listener of nativeCastStateMock.listeners) listener(); }); await flush();
+    expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+    expect(nativeCastStateMock.listeners.size).toBe(0);
+  });
+  it("keeps one ticket through initial busy retries and cancels it on a terminal manifest failure", async () => {
+    vi.useFakeTimers(); const f = fixture(); let gets = 0;
+    f.fetcher.mockImplementation(async () => ++gets === 1 ? new Response(null, { status: 503 }) : new Response("failed", { status: 500 }));
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned initial busy" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); await flush();
+    expect(f.create).toHaveBeenCalledTimes(1); expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.fetcher.mock.calls.every(([url]) => url === f.handles[0].url)).toBe(true);
+    expect(f.handles[0].cancel).toHaveBeenCalledTimes(1); expect(f.handles[0].activate).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
+  });
+  it("does not retire or release an owned reader for gateway timeout alone", async () => {
+    const f = fixture();
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned gateway" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); setClock(video(), 73.1);
+    f.fetcher.mockImplementation(async () => new Response(null, { status: 504 }));
+    await selectQuality(); expect(f.handles[0].release).not.toHaveBeenCalled(); expect(hlsInstances[0].destroy).not.toHaveBeenCalled();
+    view.unmount(); await flush(); expect(f.handles[1].cancel).toHaveBeenCalledTimes(1);
+  });
+  it("preserves manual audio selection through an occupied-slot replacement", async () => {
+    const f = fixture();
+    const tracks = [{ index: 0, language: "eng", label: "English", default: true }, { index: 1, language: "jpn", label: "Japanese", default: false }];
+    const optimized = { ...f.optimized, loadSourceInfo: vi.fn(async () => ({ durationSeconds: 7200, tracks })), loadAudioTracks: vi.fn(async () => tracks) };
+    render(<VideoPlayer url={master + "&audio=0"} engine="webview-hls-transcode" title="Owned audio" serverOptimized={optimized} onClose={() => {}} />);
+    await flush(); setClock(video(), 73.1);
+    let gets = 0;
+    f.fetcher.mockImplementation(async () => ++gets === 1 ? new Response(null, { status: 503 }) : new Response(manifest, { headers: { "x-yawf-transcode-audio": "1" } }));
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    fireEvent.click(screen.getByRole("button", { name: /Japanese/ })); await flush();
+    expect(f.request).toHaveBeenCalledWith("480p", 73.1, 1);
+    expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+    expect(f.handles[1].activate).toHaveBeenCalledExactlyOnceWith("transcode-2", manifest, expect.any(AbortSignal));
+    expect(hlsInstances.at(-1)!.loadSource).toHaveBeenCalledWith(f.handles[1].activatedURL);
+  });
+  it("keeps a healthy reader while remembered audio is busy and cancels that abandoned ticket", async () => {
+    const f = fixture(); const inventory = deferred<{ durationSeconds: number; tracks: ServerAudioTrack[] }>();
+    const optimized = { ...f.optimized, loadSourceInfo: vi.fn(() => inventory.promise) };
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned remembered audio" savedPrefs={{ preferredAudioLang: "jpn" }} serverOptimized={optimized} onClose={() => {}} />);
+    await flush(); setClock(video(), 73.1, false);
+    f.fetcher.mockImplementation(async () => new Response(null, { status: 503 }));
+    inventory.resolve({ durationSeconds: 7200, tracks: [{ index: 0, language: "eng", label: "English", default: true }, { index: 1, language: "jpn", label: "Japanese", default: false }] });
+    await flush();
+    expect(f.request).toHaveBeenCalledWith("480p", 73.1, 1);
+    expect(f.handles[0].release).not.toHaveBeenCalled(); expect(hlsInstances[0].destroy).not.toHaveBeenCalled();
+    view.unmount(); await flush(); expect(f.handles[1].cancel).toHaveBeenCalledTimes(1);
+  });
+  it.each([0, 3600])("preserves a native paused out-of-window target=%s during max1 retirement", async (target) => {
+    const f = fixture(); deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" timelineOffsetSeconds={100} title="Owned native seek" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); const old = video(); setClock(old, 3);
+    Object.defineProperties(old, { duration: { configurable: true, value: 18 }, seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 18 } } });
+    let gets = 0;
+    f.fetcher.mockImplementation(async () => ++gets === 1 ? new Response(null, { status: 503 }) : new Response(manifest));
+    act(() => { scrubBarMock.mock.lastCall![0].onSeek(target); }); await flush();
+    expect(f.request).toHaveBeenCalledWith("480p", target);
+    expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+    expect(video().src).toBe(f.handles[1].activatedURL + "#t=0.001");
+    const play = vi.mocked(HTMLMediaElement.prototype.play); play.mockClear(); setClock(video(), 0);
+    expect(play).not.toHaveBeenCalled();
+    expect(scrubBarMock.mock.lastCall![0].currentTime).toBe(target);
+  });
+  it("does not activate an owned recovery which cannot confirm the selected audio", async () => {
+    const f = fixture();
+    const browserTracks = Object.assign(new EventTarget(), {
+      0: { id: "en", label: "English", language: "eng", enabled: false },
+      1: { id: "jp", label: "Japanese", language: "jpn", enabled: true }, length: 2,
+      item(index: number) { return this[index as 0 | 1] ?? null; },
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", { configurable: true, get: () => browserTracks });
+    const optimized = { ...f.optimized, loadSourceInfo: vi.fn(async () => ({ durationSeconds: 7200, tracks: [
+      { index: 0, language: "eng", label: "English", default: false }, { index: 1, language: "jpn", label: "Japanese", default: true },
+    ] })) };
+    render(<VideoPlayer url="https://x/audio-original.mp4" title="Owned mismatched audio" serverOptimized={optimized} onClose={() => {}} />);
+    await flush(); setClock(video(), 3600);
+    f.fetcher.mockImplementation(async () => new Response(manifest, { headers: { "x-yawf-transcode-audio": "0" } }));
+    fireMediaError(video()); await flush();
+    expect(f.request).toHaveBeenCalledWith("480p", 3600, 1);
+    expect(f.handles[0].activate).not.toHaveBeenCalled(); expect(f.handles[0].cancel).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/could not preserve the selected audio track/)).toBeInTheDocument();
+  });
+  it("does not revoke another mounted consumer when the retired local slot is still busy", async () => {
+    vi.useFakeTimers(); const f = fixture(); deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    const view = render(<><VideoPlayer url={master} engine="webview-hls-transcode" title="Other consumer" serverOptimized={f.optimized} onClose={() => {}} />
+      <VideoPlayer url={master} engine="webview-hls-transcode" title="Switching consumer" serverOptimized={f.optimized} onClose={() => {}} /></>);
+    await flush();
+    const elements = document.querySelectorAll<HTMLVideoElement>("video.player-video"); setClock(elements[0], 73.1); setClock(elements[1], 3600);
+    f.fetcher.mockImplementation(async () => new Response(null, { status: 503 }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Playback settings" })[1]);
+    fireEvent.click(screen.getByRole("button", { name: "720p" })); await flush();
+    expect(f.handles[1].release).toHaveBeenCalledExactlyOnceWith("transcode-2");
+    expect(f.handles[0].release).not.toHaveBeenCalled(); expect(elements[0].src).toBe(f.handles[0].activatedURL);
+    await act(async () => { await vi.advanceTimersByTimeAsync(45_001); }); await flush();
+    expect(f.handles[2].cancel).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
+    expect(elements[0].isConnected).toBe(true); expect(f.handles[0].release).not.toHaveBeenCalled();
+    expect(f.create).toHaveBeenCalledTimes(3); view.unmount(); await flush();
+  });
+  it("cancels the newly ready warmup after owner replacement without releasing the new owner's reader", async () => {
+    const f = fixture(); const ready = deferred<Response>();
+    const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned stale warmup" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); setClock(video(), 73.1); f.fetcher.mockImplementationOnce(() => ready.promise);
+    await selectQuality();
+    view.rerender(<VideoPlayer url="https://x/new-owner.mp4" sourceRevision={1} title="Fresh owner" onClose={() => {}} />);
+    await flush(); expect(f.handles[1].cancel).toHaveBeenCalledTimes(1);
+    ready.resolve(new Response(manifest)); await flush();
+    expect(video().src).toBe("https://x/new-owner.mp4"); expect(f.handles[1].activate).not.toHaveBeenCalled();
+    expect(f.handles[0].release).toHaveBeenCalledExactlyOnceWith("transcode-1");
+  });
+  it("does not reacquire on new selector objects with the same committed source and create function", async () => {
+    const f = fixture();
+    const props = { url: master, engine: "webview-hls-transcode" as const, title: "Owned stable objects", onClose: () => {} };
+    const view = render(<VideoPlayer {...props} serverOptimized={f.optimized} />);
+    await flush(); const attached = video(); setClock(attached, 73.1, false);
+    for (let i = 0; i < 4; i += 1) {
+      view.rerender(<VideoPlayer {...props} serverOptimized={{ ...f.optimized, ownership: { create: f.create }, request: (...args) => f.request(...args) }} />);
+      await flush();
+    }
+    expect(video()).toBe(attached); expect(video().currentTime).toBe(73.1); expect(video().paused).toBe(false);
+    expect(f.create).toHaveBeenCalledTimes(1); expect(f.handles[0].activate).toHaveBeenCalledTimes(1);
+    expect(f.handles[0].cancel).not.toHaveBeenCalled(); expect(f.handles[0].release).not.toHaveBeenCalled();
+  });
+  it("keeps desktop embedded initial HLS on its canonical cookie-free native path", async () => {
+    const f = fixture(); isTauriMock.mockReturnValue(true);
+    render(<VideoPlayer url={master} engine="native-mpv" title="Native canonical" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush();
+    expect(f.create).not.toHaveBeenCalled(); expect(f.fetcher).not.toHaveBeenCalled();
+    expect(screen.getByTestId("embedded-player")).toHaveAttribute("data-url", master);
+  });
+  it("keeps Android TV native initial HLS free of WebView preparation tickets", async () => {
+    const f = fixture(); const play = vi.fn(); window.YawfAndroidTV = { play, stop: vi.fn() };
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="TV canonical" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush();
+    expect(f.create).not.toHaveBeenCalled(); expect(f.fetcher).not.toHaveBeenCalled();
+    expect(JSON.parse(play.mock.calls[0][0]).url).toBe(master);
+  });
+  it("does not acquire a WebView ticket for an embedded native selector callback", async () => {
+    const f = fixture(); isTauriMock.mockReturnValue(true); embeddedModeIntentObserver.enabled = true;
+    embeddedModeIntentObserver.props.length = 0;
+    try {
+      render(<VideoPlayer url="https://server.example/api/stream/native-original" engine="native-mpv" title="Native selector" serverOptimized={f.optimized} onClose={() => {}} />);
+      act(() => { void embeddedModeIntentObserver.props.at(-1)!.onSwitchServerOptimized!("480p", 73.1); });
+      await flush();
+      expect(f.create).not.toHaveBeenCalled();
+      expect(f.fetcher).toHaveBeenCalledWith(master + "&start=73.1", expect.any(Object));
+      expect(hlsInstances.at(-1)!.loadSource).toHaveBeenCalledWith(master + "&start=73.1");
+    } finally { embeddedModeIntentObserver.enabled = false; }
+  });
+  it("gives casting an independent canonical capability, never its local owned master URL", async () => {
+    const f = fixture(); isTauriMock.mockReturnValue(true);
+    castMediaObserver.enabled = true; castMediaObserver.urls.length = 0;
+    const capability = "https://server.example/api/external-stream/owned/" + "A".repeat(43);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Cast canonical" externalPlaybackUrl={capability} serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush();
+    expect(f.create).toHaveBeenCalledTimes(1);
+    expect(castMediaObserver.urls.at(-1)).toBe(capability);
+    expect(castMediaObserver.urls).not.toContain(f.handles[0].activatedURL);
+    castMediaObserver.enabled = false;
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(f.handles[0].activatedURL);
+  });
+  it("keeps initial preparation pending through slow allocation plus manifest warming without a child startup error", async () => {
+    vi.useFakeTimers(); const f = fixture(); const allocation = deferred<Awaited<ReturnType<typeof f.create>>>();
+    const ready = deferred<Response>(); const originalCreate = f.create.getMockImplementation()!;
+    f.create.mockImplementationOnce(() => allocation.promise); f.fetcher.mockImplementationOnce(() => ready.promise);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned slow warmup" serverOptimized={f.optimized} onClose={() => {}} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(7000); });
+    allocation.resolve(await originalCreate(master, new AbortController().signal)); await flush();
+    await act(async () => { await vi.advanceTimersByTimeAsync(38_100); }); await flush();
+    expect(screen.queryByRole("alert")).toBeNull(); expect(video()).not.toBeNull();
+    expect(video().getAttribute("src")).toBeNull(); expect(f.handles[0].cancel).not.toHaveBeenCalled();
+    ready.resolve(new Response(manifest)); await flush();
+    expect(f.handles[0].activate).toHaveBeenCalledTimes(1);
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(f.handles[0].activatedURL);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+  it("bounds an unacknowledged retirement and retains exact Retry without mounting the closed URL", async () => {
+    vi.useFakeTimers(); const f = fixture();
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Owned release timeout" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); setClock(video(), 3600); video().playbackRate = 1.5;
+    const release = deferred<void>(); f.handles[0].release.mockImplementationOnce(() => release.promise);
+    f.fetcher.mockImplementation(async () => new Response(null, { status: 503 })); await selectQuality();
+    expect(f.handles[0].release).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(45_001); }); await flush();
+    expect(f.handles[1].cancel).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument(); expect(video()).toBeNull();
+    release.resolve(); await flush(); expect(video()).toBeNull();
+    f.fetcher.mockImplementation(async () => new Response(manifest));
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flush();
+    expect(f.request.mock.calls.at(-1)).toEqual(["720p", 3600]);
+    expect(hlsInstances.at(-1)!.loadSource).toHaveBeenCalledWith(f.handles[2].activatedURL);
+    expect(video().playbackRate).toBe(1.5); expect(video().autoplay).toBe(false);
+  });
+  it("binds the accepted recovery claim even when React commits before the caller clears its error", async () => {
+    const f = fixture();
+    render(<VideoPlayer url="https://server.example/api/stream/original" title="Owned synchronous retry commit" serverOptimized={f.optimized} onClose={() => {}} />);
+    await flush(); setClock(video(), 73.1); video().playbackRate = 1.25;
+    f.fetcher.mockImplementation(async () => new Response(null, { status: 500 }));
+    fireMediaError(video()); await flush();
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
+    expect(f.handles[0].cancel).toHaveBeenCalledTimes(1);
+    ownedCommitObserver.enabled = true;
+    ownedCommitObserver.commits = 0;
+    try {
+      f.fetcher.mockImplementation(async () => new Response(manifest));
+      fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flush();
+      expect(ownedCommitObserver.commits).toBe(1);
+      expect(f.handles[1].release).not.toHaveBeenCalled(); expect(f.handles[1].cancel).not.toHaveBeenCalled();
+      expect(hlsInstances.at(-1)!.loadSource).toHaveBeenCalledWith(f.handles[1].activatedURL);
+      expect(video().playbackRate).toBe(1.25); expect(video().autoplay).toBe(false);
+      expect(f.request.mock.calls.at(-1)).toEqual(["480p", 73.1]);
+    } finally { ownedCommitObserver.enabled = false; }
+  });
+  it("keeps legacy initial HLS behavior when ownership is absent", async () => {
+    const f = fixture();
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Legacy ownership" serverOptimized={{ qualities: ["480p"], request: f.request }} onClose={() => {}} />);
+    await flush();
+    expect(f.create).not.toHaveBeenCalled();
+    expect(f.fetcher).toHaveBeenCalledWith(master, expect.any(Object));
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(master);
+  });
+});
+
+describe("cast availability fences", () => {
+  beforeEach(() => { castMediaObserver.enabled = true; castMediaObserver.urls.length = 0; });
+  afterEach(() => { castMediaObserver.enabled = false; });
+  async function flush() { await act(async () => { for (let i = 0; i < 12; i += 1) await Promise.resolve(); }); }
+  it("withholds casting from the native external shell when its external target is explicitly null", async () => {
+    isTauriMock.mockReturnValue(true);
+    render(<VideoPlayer url="https://server.example/api/stream/protected-native" engine="native-mpv"
+      useBuiltInPlayer={false} externalPlaybackUrl={null} title="Cast forbidden native" onClose={() => {}} />);
+    await flush();
+    expect(screen.queryByRole("button", { name: /^(Cast to a device|AirPlay)$/ })).toBeNull();
+    expect(castMediaObserver.urls).toEqual([]);
+  });
+  it("withholds desktop and touch WebView casting with a null target even after browser route availability", async () => {
+    const picker = vi.fn();
+    const restore = replaceProperty(HTMLVideoElement.prototype, "webkitShowPlaybackTargetPicker", picker);
+    try {
+      const props = { url: "https://server.example/api/stream/protected-webview", engine: "webview-direct" as const, title: "Cast forbidden webview", onClose: () => {} };
+      const view = render(<VideoPlayer {...props} />);
+      const availability = new Event("webkitplaybacktargetavailabilitychanged") as Event & { availability: string };
+      availability.availability = "available";
+      fireEvent(document.querySelector("video")!, availability);
+      expect(screen.getByRole("button", { name: "Cast to a device" })).toBeInTheDocument();
+      isTauriMock.mockReturnValue(true);
+      view.rerender(<VideoPlayer {...props} externalPlaybackUrl={null} />); await flush();
+      expect(screen.queryByRole("button", { name: /^(Cast to a device|AirPlay)$/ })).toBeNull();
+      expect(castMediaObserver.urls).toEqual([]);
+      Object.defineProperty(window, "__YAWF_TAURI_ANDROID__", { configurable: true, value: true });
+      deviceKindMock.mockReturnValue("android");
+      view.rerender(<VideoPlayer {...props} externalPlaybackUrl={null} />); await flush();
+      expect(document.querySelector(".player")).toHaveClass("is-touch-player");
+      expect(screen.queryByRole("button", { name: /^(Cast to a device|AirPlay)$/ })).toBeNull();
+      expect(castMediaObserver.urls).toEqual([]); expect(picker).not.toHaveBeenCalled();
+    } finally { restore(); }
+  });
+  it("uses the independent external capability in both native external and WebView casting shells", async () => {
+    isTauriMock.mockReturnValue(true);
+    const capability = "https://server.example/api/external-stream/independent/" + "A".repeat(43);
+    const props = { url: "https://server.example/api/stream/protected", title: "Cast independent", externalPlaybackUrl: capability, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} engine="native-mpv" useBuiltInPlayer={false} />); await flush();
+    expect(castMediaObserver.urls.at(-1)).toBe(capability);
+    expect(screen.getByRole("button", { name: "Cast to a device" })).toBeInTheDocument();
+    castMediaObserver.urls.length = 0;
+    view.rerender(<VideoPlayer {...props} engine="webview-direct" />); await flush();
+    expect(castMediaObserver.urls.at(-1)).toBe(capability);
+    expect(castMediaObserver.urls).not.toContain(props.url);
+  });
+  it.each([
+    { label: "null fence", target: null },
+    { label: "independent capability", target: "https://server.example/api/external-stream/native/" + "A".repeat(43) },
+    { label: "undefined local fallback", target: undefined },
+  ])("forwards the $label to the actual builtin-native branch", async ({ target }) => {
+    isTauriMock.mockReturnValue(true); embeddedModeIntentObserver.enabled = true;
+    embeddedModeIntentObserver.props.length = 0;
+    const url = "https://server.example/api/stream/native-source";
+    try {
+      render(<VideoPlayer url={url} title="Builtin cast target" engine="native-mpv" useBuiltInPlayer={true}
+        externalPlaybackUrl={target} onClose={() => {}} />); await flush();
+      expect(screen.getByTestId("embedded-player")).toBeInTheDocument();
+      expect(document.querySelector("video.player-video")).toBeNull();
+      expect(embeddedModeIntentObserver.props.at(-1)?.castPlaybackUrl).toBe(target === undefined ? url : target);
+    } finally { embeddedModeIntentObserver.enabled = false; }
+  });
+  it("retains undefined local-target fallback in both native external and WebView casting shells", async () => {
+    isTauriMock.mockReturnValue(true);
+    const props = { url: "https://local.example/movie.mp4", title: "Cast local fallback", onClose: () => {} };
+    const view = render(<VideoPlayer {...props} engine="native-mpv" useBuiltInPlayer={false} />); await flush();
+    expect(castMediaObserver.urls.at(-1)).toBe(props.url);
+    expect(screen.getByRole("button", { name: "Cast to a device" })).toBeInTheDocument();
+    castMediaObserver.urls.length = 0;
+    view.rerender(<VideoPlayer {...props} engine="webview-direct" />); await flush();
+    expect(castMediaObserver.urls.at(-1)).toBe(props.url);
+    expect(screen.getByRole("button", { name: "Cast to a device" })).toBeInTheDocument();
   });
 });

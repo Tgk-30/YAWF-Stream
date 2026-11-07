@@ -207,7 +207,7 @@ describe("HLS transcode arguments", () => {
 });
 
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
@@ -2203,4 +2203,471 @@ describe("current generation retention", () => {
     } finally { database.mockRestore(); clock.mockRestore(); await cleanup(f); }
   });
 
+});
+
+
+describe("issued transcode preparation ownership", () => {
+  function fixture(options: { max?: number; ready?: boolean; exits?: boolean; timeout?: number } = {}) {
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-issued-preparation-"));
+    const database = new AppDatabase(":memory:");
+    let ready = options.ready !== false;
+    const children: Array<{
+      child: ChildProcess; dir: string; signals: unknown[]; running: boolean;
+      ready(): void; finish(): void;
+    }> = [];
+    let maximum = 0;
+    const config = {
+      dataDir, maxTranscodes: options.max ?? 1,
+      transcodeVideoEncoder: "libx264", transcodeStartTimeoutMs: options.timeout ?? 1000,
+    } as ServerConfig;
+    const transcoder: Transcoder = {
+      async detect() { return true; },
+      spawnHls(args) {
+        const dir = dirname(args.at(-1)!);
+        const child = new EventEmitter() as EventEmitter & { kill: (signal: unknown) => boolean; stderr: null };
+        const record = {
+          child: child as unknown as ChildProcess, dir, signals: [] as unknown[], running: true,
+          ready() {
+            writeFileSync(join(dir, "stream.m3u8"), "#EXTM3U\n480p.m3u8\n");
+            for (const quality of ["1080p", "720p", "480p", "360p"]) {
+              writeFileSync(join(dir, `${quality}.m3u8`), "#EXTM3U\n");
+              writeFileSync(join(dir, `${quality}_seg_00000.ts`), fakeMpegTsSegment());
+              writeFileSync(join(dir, `${quality}_subtitles.m3u8`), "#EXTM3U\n");
+              writeFileSync(join(dir, `${quality}0.vtt`), "WEBVTT\n\n");
+            }
+          },
+          finish() {
+            if (!record.running) return;
+            record.running = false; child.emit("exit", 0); child.emit("close", 0);
+          },
+        };
+        child.kill = (signal) => {
+          record.signals.push(signal);
+          // A later event, never kill()'s return value, releases the permit.
+          if (options.exits !== false) queueMicrotask(() => record.finish());
+          return record.running;
+        };
+        child.stderr = null;
+        children.push(record);
+        maximum = Math.max(maximum, children.filter((item) => item.running).length);
+        if (ready) record.ready();
+        return record.child;
+      },
+    };
+    const registry = new TranscodeRegistry(database, config, transcoder);
+    const acquire = (id: string, startSeconds = 0, session = "session", signal?: AbortSignal) =>
+      registry.acquirePreparation(session, id, "https://provider.example/video", { startSeconds }, { signal });
+    const register = (id: string, session = "session") => registry.registerPreparation(session, id);
+    const cleanup = async () => {
+      children.forEach((item) => item.finish());
+      await registry.stop(); database.close(); rmSync(dataDir, { recursive: true, force: true });
+    };
+    return { registry, database, dataDir, children, acquire, register, cleanup, config, transcoder,
+      maximum: () => maximum, setReady: (value: boolean) => { ready = value; } };
+  }
+
+  it("allocates metadata only and never recreates an unknown or cancelled ticket", async () => {
+    const f = fixture();
+    const probe = vi.fn(async () => ({ audio: false, subtitle: false }));
+    f.transcoder.probeStreams = probe;
+    try {
+      expect(f.registry.isPreparationRegistered("session", "unknown")).toBe(false);
+      await expect(f.acquire("unknown")).rejects.toMatchObject({ statusCode: 410 });
+      f.register("cancel-before-get");
+      expect(f.registry.isPreparationRegistered("session", "cancel-before-get")).toBe(true);
+      expect(f.registry.isPreparationRegistered("other", "cancel-before-get")).toBe(false);
+      expect(f.registry.activatePreparation("session", "cancel-before-get", "transcode-not-ready")).toBe("not-ready");
+      expect(f.children).toHaveLength(0);
+      expect(existsSync(join(f.dataDir, "transcode-preparations"))).toBe(false);
+      expect(await f.registry.cancelPreparation("session", "cancel-before-get")).toBe("applied");
+      await expect(f.acquire("cancel-before-get")).rejects.toMatchObject({ statusCode: 410 });
+      expect(await f.registry.cancelPreparation("session", "cancel-before-get")).toBe("gone");
+      expect(f.registry.isPreparationRegistered("session", "cancel-before-get")).toBe(false);
+      expect(probe).not.toHaveBeenCalled();
+      expect(f.children).toHaveLength(0);
+    } finally { await f.cleanup(); }
+  });
+
+  it("fences delayed actions and scopes identical ticket text to its stream session", async () => {
+    const f = fixture();
+    try {
+      f.register("old"); const old = await f.acquire("old"); old.release();
+      await f.registry.cancelPreparation("session", "old", old.generation);
+      f.register("new"); const fresh = await f.acquire("new", 90); fresh.release();
+      expect(await f.registry.cancelPreparation("session", "old", fresh.generation)).toBe("gone");
+      expect(f.registry.activatePreparation("session", "new", old.generation)).toBe("generation-mismatch");
+      expect(await f.registry.releasePreparation("session", "new", old.generation)).toBe("generation-mismatch");
+      expect(await f.registry.cancelPreparation("other-session", "new", fresh.generation)).toBe("gone");
+      expect(f.registry.activatePreparation("session", "new", fresh.generation)).toBe("applied");
+      expect(f.children[1]!.signals).toEqual([]);
+      f.register("new", "other-session");
+      expect(await f.registry.cancelPreparation("other-session", "new")).toBe("applied");
+      expect(f.registry.acquirePreparationAsset("session", "new", fresh.generation, "stream.m3u8")?.dir).toBe(fresh.dir);
+    } finally { await f.cleanup(); }
+  });
+
+  it("reclaims ready max1 output only after actual child exit and lets the successor wait", async () => {
+    const f = fixture({ exits: false });
+    try {
+      f.register("old"); const old = await f.acquire("old"); old.release();
+      const cancelled = f.registry.cancelPreparation("session", "old", old.generation);
+      f.register("new"); const next = observe(f.acquire("new", 90));
+      await vi.waitFor(() => expect(f.children[0]!.signals).toContain("SIGTERM"));
+      expect(f.children).toHaveLength(1); expect(f.children[0]!.running).toBe(true);
+      f.children[0]!.finish(); await cancelled;
+      const result = await next;
+      expect(result.status).toBe("fulfilled");
+      if (result.status === "fulfilled") result.value.release();
+      expect(f.children).toHaveLength(2); expect(f.maximum()).toBe(1);
+      expect(existsSync(old.dir)).toBe(false);
+      f.children[0]!.child.emit("exit", 0);
+      f.register("third", "other");
+      await expect(f.acquire("third", 0, "other")).rejects.toMatchObject({ statusCode: 503 });
+    } finally { await f.cleanup(); }
+  });
+
+  it("holds every metadata reader without activating and reclaims after the last idempotent release", async () => {
+    const f = fixture();
+    try {
+      f.register("master");
+      const [first, second] = await Promise.all([f.acquire("master"), f.acquire("master")]);
+      expect(f.registry.acquirePreparationAsset("session", "master", first.generation, "stream.m3u8")).toBeNull();
+      await f.registry.cancelPreparation("session", "master");
+      expect(f.children[0]!.signals).toEqual([]); expect(existsSync(first.dir)).toBe(true);
+      first.release(); first.release(); expect(f.children[0]!.signals).toEqual([]);
+      second.release(); second.release();
+      await vi.waitFor(() => expect(existsSync(first.dir)).toBe(false));
+      expect(f.children[0]!.signals).toEqual(["SIGTERM"]);
+      await expect(f.acquire("master")).rejects.toMatchObject({ statusCode: 410 });
+    } finally { await f.cleanup(); }
+  });
+
+  it("removes only the cancelled logical holder of coalesced ready output", async () => {
+    const f = fixture();
+    try {
+      f.register("a"); f.register("b");
+      const [a, b] = await Promise.all([f.acquire("a"), f.acquire("b")]); a.release(); b.release();
+      expect(a.generation).toBe(b.generation); expect(f.children).toHaveLength(1);
+      await f.registry.cancelPreparation("session", "a", a.generation);
+      expect(f.children[0]!.signals).toEqual([]);
+      expect(f.registry.activatePreparation("session", "b", b.generation)).toBe("applied");
+      expect(await f.registry.cancelPreparation("session", "b", b.generation)).toBe("active");
+      expect(f.children[0]!.signals).toEqual([]);
+      await f.registry.releasePreparation("session", "b", b.generation);
+      expect(f.children[0]!.signals).toEqual(["SIGTERM"]);
+    } finally { await f.cleanup(); }
+  });
+
+  it("never publishes owned readiness over legacy current or kills another active owned generation", async () => {
+    const f = fixture({ max: 3 });
+    try {
+      const legacy = await f.registry.ensureJob("session", "https://provider.example/video");
+      f.register("a"); const a = await f.acquire("a", 30); a.release();
+      expect(f.registry.dirFor("session")).toBe(legacy);
+      expect(f.registry.activatePreparation("session", "a", a.generation)).toBe("applied");
+      f.register("b"); const b = await f.acquire("b", 60); b.release();
+      expect(f.registry.activatePreparation("session", "b", b.generation)).toBe("applied");
+      expect(f.registry.dirFor("session")).toBe(legacy);
+      expect(f.children.map((item) => item.signals)).toEqual([[], [], []]);
+      await f.registry.releasePreparation("session", "b", b.generation);
+      const asset = f.registry.acquirePreparationAsset("session", "a", a.generation, "480p_seg_00000.ts");
+      expect(asset?.dir).toBe(a.dir); asset?.release();
+      expect(f.children[0]!.signals).toEqual([]); expect(f.children[1]!.signals).toEqual([]);
+      expect(existsSync(join(legacy, "stream.m3u8"))).toBe(true);
+    } finally { await f.cleanup(); }
+  });
+
+  it.each(["ensure", "asset", "retention"])("protects matching owned output after legacy %s access", async (access) => {
+    const f = fixture();
+    try {
+      f.register("owned"); const owned = await f.acquire("owned"); owned.release();
+      if (access === "ensure") expect(await f.registry.ensureJob("session", "https://provider.example/video")).toBe(owned.dir);
+      else if (access === "asset") expect(f.registry.dirForAsset("session", "480p.m3u8", owned.generation)).toBe(owned.dir);
+      else expect(f.registry.touchCurrentGeneration("session", "480p.m3u8", owned.generation)).toBe(true);
+      await f.registry.cancelPreparation("session", "owned", owned.generation);
+      expect(f.children[0]!.signals).toEqual([]); expect(existsSync(owned.dir)).toBe(true);
+      f.register("new"); await expect(f.acquire("new", 90)).rejects.toMatchObject({ statusCode: 503 });
+    } finally { await f.cleanup(); }
+  });
+
+  it("preserves a legacy waiter that joined owned startup and its later asset access", async () => {
+    const f = fixture({ ready: false });
+    try {
+      f.register("owned"); const owned = observe(f.acquire("owned"));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      const legacy = observe(f.registry.ensureJob("session", "https://provider.example/video"));
+      f.children[0]!.ready();
+      const ready = await owned; expect(ready.status).toBe("fulfilled");
+      if (ready.status !== "fulfilled") throw ready.error;
+      ready.value.release();
+      await f.registry.cancelPreparation("session", "owned");
+      expect(await legacy).toMatchObject({ status: "fulfilled", value: ready.value.dir });
+      expect(f.children[0]!.signals).toEqual([]);
+    } finally { await f.cleanup(); }
+  });
+
+  it("retains a legacy current job claimed by an owned viewer during legacy replacement", async () => {
+    const f = fixture({ max: 2 });
+    try {
+      const original = await f.registry.ensureJob("session", "https://provider.example/video");
+      f.register("viewer"); const owned = await f.acquire("viewer"); owned.release();
+      f.registry.activatePreparation("session", "viewer", owned.generation);
+      await f.registry.ensureJob("session", "https://provider.example/video", { startSeconds: 90 });
+      expect(f.children[0]!.signals).toEqual([]);
+      const asset = f.registry.acquirePreparationAsset("session", "viewer", owned.generation, "stream.m3u8");
+      expect(asset?.dir).toBe(original); asset?.release();
+      await f.registry.releasePreparation("session", "viewer", owned.generation);
+      expect(f.children[0]!.signals).toEqual([]);
+    } finally { await f.cleanup(); }
+  });
+
+  it("looks up owned subtitle readiness and timeline metadata without claiming legacy ownership", async () => {
+    const f = fixture();
+    f.transcoder.probeStreams = async () => ({ audio: false, subtitle: true });
+    try {
+      await f.registry.sourceInfoFor("session", "https://provider.example/video");
+      f.register("subtitles");
+      const prepared = await f.registry.acquirePreparation("session", "subtitles", "https://provider.example/video", {
+        preserveSubtitles: true, startSeconds: 75,
+      });
+      prepared.release();
+      expect(f.registry.generationFor("session", prepared.dir)).toBe(prepared.generation);
+      expect(f.registry.startSecondsForAsset("session", prepared.generation)).toBe(75);
+      expect(f.registry.subtitleReadyForAsset("session", prepared.generation)).toBe(true);
+      expect(f.registry.subtitleReadyForAsset("session", "transcode-wrong")).toBe(false);
+      expect(f.registry.startSecondsForAsset("other-session", prepared.generation)).toBeNull();
+      await f.registry.cancelPreparation("session", "subtitles", prepared.generation);
+      expect(f.children[0]!.signals).toEqual(["SIGTERM"]);
+      expect(existsSync(prepared.dir)).toBe(false);
+    } finally { await f.cleanup(); }
+  });
+
+  it("requires exact active identity and strict filenames before acquiring a reader", async () => {
+    const f = fixture();
+    try {
+      f.register("active"); const ready = await f.acquire("active"); ready.release();
+      expect(f.registry.acquirePreparationAsset("session", "active", ready.generation, "480p.m3u8")).toBeNull();
+      expect(f.registry.activatePreparation("session", "active", "transcode-wrong")).toBe("generation-mismatch");
+      f.registry.activatePreparation("session", "active", ready.generation);
+      writeFileSync(join(ready.dir, "not-hls.txt"), "non-media fixture");
+      for (const asset of ["../stream.m3u8", "/stream.m3u8", "not-hls.txt", "480p_seg_99999.ts"]) {
+        expect(f.registry.acquirePreparationAsset("session", "active", ready.generation, asset)).toBeNull();
+      }
+      expect(f.registry.acquirePreparationAsset("other", "active", ready.generation, "stream.m3u8")).toBeNull();
+      expect(f.registry.acquirePreparationAsset("session", "active", "transcode-wrong", "stream.m3u8")).toBeNull();
+      const master = f.registry.acquirePreparationAsset("session", "active", ready.generation, "stream.m3u8");
+      const segment = f.registry.acquirePreparationAsset("session", "active", ready.generation, "480p_seg_00000.ts");
+      expect(master?.dir).toBe(ready.dir); expect(segment?.dir).toBe(ready.dir);
+      await f.registry.releasePreparation("session", "active", ready.generation);
+      expect(f.children[0]!.signals).toEqual([]);
+      master?.release(); master?.release(); expect(f.children[0]!.signals).toEqual([]);
+      segment?.release(); await vi.waitFor(() => expect(existsSync(ready.dir)).toBe(false));
+    } finally { await f.cleanup(); }
+  });
+
+  it.each([true, false])("detaches one HTTP waiter without cancelling a shared producer, same ticket=%s", async (same) => {
+    const f = fixture({ ready: false }); const a = new AbortController(); const b = new AbortController();
+    try {
+      f.register("a"); if (!same) f.register("b");
+      const first = observe(f.acquire("a", 0, "session", a.signal));
+      const second = observe(f.acquire(same ? "a" : "b", 0, "session", b.signal));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      a.abort(); await expect(first).resolves.toMatchObject({ status: "rejected", error: { statusCode: 499 } });
+      expect(f.children[0]!.signals).toEqual([]);
+      f.children[0]!.ready(); const result = await second;
+      expect(result.status).toBe("fulfilled");
+      if (result.status === "fulfilled") result.value.release();
+      expect(f.children).toHaveLength(1);
+    } finally { await f.cleanup(); }
+  });
+
+  it("cancels a shared pending ticket promptly without waiting for the other logical holder", async () => {
+    const f = fixture({ ready: false });
+    try {
+      f.register("a"); f.register("b");
+      const a = observe(f.acquire("a")); const b = observe(f.acquire("b"));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      expect(await f.registry.cancelPreparation("session", "a")).toBe("applied");
+      await expect(a).resolves.toMatchObject({ status: "rejected", error: { statusCode: 499 } });
+      expect(f.children[0]!.signals).toEqual([]);
+      f.children[0]!.ready(); const result = await b;
+      expect(result.status).toBe("fulfilled"); if (result.status === "fulfilled") result.value.release();
+    } finally { await f.cleanup(); }
+  });
+
+  it("cancels the last same-ticket pending waiter and fences its late callback", async () => {
+    const f = fixture({ ready: false, exits: false }); const a = new AbortController(); const b = new AbortController();
+    try {
+      f.register("old"); const first = observe(f.acquire("old", 0, "session", a.signal));
+      const second = observe(f.acquire("old", 0, "session", b.signal));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      a.abort(); await expect(first).resolves.toMatchObject({ status: "rejected", error: { statusCode: 499 } });
+      expect(f.children[0]!.signals).toEqual([]);
+      b.abort(); await expect(second).resolves.toMatchObject({ status: "rejected", error: { statusCode: 499 } });
+      await vi.waitFor(() => expect(f.children[0]!.signals).toContain("SIGTERM"), { timeout: 300 });
+      f.setReady(true); f.register("new"); const next = observe(f.acquire("new", 90));
+      expect(f.children).toHaveLength(1); f.children[0]!.finish();
+      const result = await next; expect(result.status).toBe("fulfilled");
+      if (result.status === "fulfilled") result.value.release();
+      await expect(f.acquire("old")).rejects.toMatchObject({ statusCode: 410 });
+      expect(f.maximum()).toBe(1);
+    } finally { await f.cleanup(); }
+  });
+
+  it.each([503, 504])("retries immutable issued identity after transient %s without rebinding options", async (status) => {
+    const f = fixture({ ready: status === 503, timeout: 50 });
+    try {
+      if (status === 503) await f.registry.ensureJob("busy", "https://provider.example/other");
+      f.register("retry");
+      await expect(f.acquire("retry", 90)).rejects.toMatchObject({ statusCode: status });
+      await expect(f.acquire("retry", 91)).rejects.toMatchObject({ statusCode: 409 });
+      await expect(f.registry.acquirePreparation("session", "retry", "https://provider.example/different", { startSeconds: 90 }))
+        .rejects.toMatchObject({ statusCode: 409 });
+      f.children.forEach((item) => item.finish()); f.setReady(true);
+      const recovered = await f.acquire("retry", 90); recovered.release();
+      expect(f.registry.startSecondsForAsset("session", recovered.generation)).toBe(90);
+      expect(f.maximum()).toBe(1);
+    } finally { await f.cleanup(); }
+  });
+
+  it("never cancels the older owner when an unused or mismatched queued ticket is cancelled", async () => {
+    const f = fixture({ ready: false });
+    try {
+      f.register("old"); const old = observe(f.acquire("old"));
+      await vi.waitFor(() => expect(f.children).toHaveLength(1));
+      f.register("unused"); await f.registry.cancelPreparation("session", "unused");
+      f.register("queued"); const queued = observe(f.acquire("queued", 90));
+      await f.registry.cancelPreparation("session", "queued");
+      await expect(queued).resolves.toMatchObject({ status: "rejected", error: { statusCode: 499 } });
+      expect(f.children[0]!.signals).toEqual([]);
+      f.children[0]!.ready(); const result = await old;
+      expect(result.status).toBe("fulfilled"); if (result.status === "fulfilled") result.value.release();
+      expect(f.children).toHaveLength(1);
+    } finally { await f.cleanup(); }
+  });
+
+  it("renews only an active existing rendition without resurrecting an idle generation", async () => {
+    const f = fixture(); let now = Date.now(); const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      f.register("lease"); const ready = await f.acquire("lease"); ready.release();
+      expect(f.registry.touchPreparationGeneration("session", "lease", ready.generation, "480p.m3u8")).toBe(false);
+      f.registry.activatePreparation("session", "lease", ready.generation);
+      now += 100;
+      expect(f.registry.touchPreparationGeneration("session", "lease", ready.generation, "480p.m3u8")).toBe(true);
+      rmSync(join(ready.dir, "360p.m3u8"));
+      now += 119_999;
+      expect(f.registry.touchPreparationGeneration("session", "lease", ready.generation, "360p.m3u8")).toBe(false);
+      now += 2;
+      expect(f.registry.touchPreparationGeneration("session", "lease", ready.generation, "480p.m3u8")).toBe(false);
+      expect(f.registry.touchPreparationGeneration("session", "lease", "transcode-wrong", "480p.m3u8")).toBe(false);
+    } finally { clock.mockRestore(); await f.cleanup(); }
+  });
+
+  it("bounds tickets globally and per session without evicting live claims", async () => {
+    const f = fixture(); let now = Date.now(); const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      f.register("active"); f.register("ready");
+      const active = await f.acquire("active"); active.release(); f.registry.activatePreparation("session", "active", active.generation);
+      const ready = await f.acquire("ready"); ready.release();
+      for (let i = 0; i < 62; i += 1) f.register(`unused-${i}`);
+      expect(() => f.register("overflow")).toThrow(expect.objectContaining({ statusCode: 429 }));
+      now += 60_000;
+      expect(f.registry.isPreparationRegistered("session", "unused-0")).toBe(false);
+      expect(f.registry.isPreparationRegistered("session", "active")).toBe(true);
+      expect(f.registry.isPreparationRegistered("session", "ready")).toBe(true);
+      f.register("after-expiry");
+      await expect(f.acquire("unused-0")).rejects.toMatchObject({ statusCode: 410 });
+      expect(f.registry.activatePreparation("session", "ready", ready.generation)).toBe("applied");
+      const held = f.registry.acquirePreparationAsset("session", "active", active.generation, "480p.m3u8");
+      expect(held?.dir).toBe(active.dir); held?.release();
+      for (let i = 0; i < 61; i += 1) f.register(`fill-${i}`);
+      for (let session = 0; session < 63; session += 1) {
+        for (let i = 0; i < 64; i += 1) f.register(`ticket-${i}`, `s-${session}`);
+      }
+      expect(() => f.register("global-overflow", "last-session")).toThrow(expect.objectContaining({ statusCode: 429 }));
+      expect(f.children).toHaveLength(1);
+    } finally { clock.mockRestore(); await f.cleanup(); }
+  });
+
+  it("sweeps only its dedicated crash namespace once before concurrent owned creation", async () => {
+    const f = fixture({ max: 3 });
+    const root = join(f.dataDir, "transcode-preparations");
+    try {
+      mkdirSync(join(root, "transcode-crash"), { recursive: true });
+      writeFileSync(join(root, "transcode-crash", "old.ts"), "old output");
+      const sibling = join(f.dataDir, "user-data.txt"); writeFileSync(sibling, "keep");
+      f.register("a", "a"); f.register("b", "b");
+      const [a, b] = await Promise.all([f.acquire("a", 0, "a"), f.acquire("b", 0, "b")]); a.release(); b.release();
+      f.register("c", "c"); const c = await f.acquire("c", 90, "c"); c.release();
+      expect(existsSync(join(root, "transcode-crash"))).toBe(false);
+      expect(existsSync(sibling)).toBe(true);
+      expect(dirname(a.dir)).toBe(root); expect(dirname(b.dir)).toBe(root);
+      expect(existsSync(a.dir)).toBe(true); expect(existsSync(b.dir)).toBe(true);
+      expect(f.maximum()).toBe(3);
+    } finally { await f.cleanup(); }
+  });
+
+  it.each(["kill", "stop"])("owns ready active pending and unused work during %s", async (action) => {
+    const f = fixture({ max: 3 });
+    try {
+      f.register("a"); const a = await f.acquire("a"); a.release(); f.registry.activatePreparation("session", "a", a.generation);
+      f.register("b"); const b = await f.acquire("b", 30); b.release();
+      f.register("unused"); f.setReady(false); f.register("pending"); const pending = observe(f.acquire("pending", 60));
+      await vi.waitFor(() => expect(f.children).toHaveLength(3));
+      if (action === "kill") await f.registry.kill("session"); else await f.registry.stop();
+      expect((await pending).status).toBe("rejected");
+      expect(f.children.every((item) => !item.running)).toBe(true);
+      expect(existsSync(a.dir)).toBe(false); expect(existsSync(b.dir)).toBe(false);
+      expect(f.children.every((item) => !existsSync(item.dir))).toBe(true);
+      await expect(f.acquire("a")).rejects.toMatchObject({ statusCode: 410 });
+      expect(f.registry.activatePreparation("session", "unused", a.generation)).toBe("gone");
+    } finally { await f.cleanup(); }
+  });
+
+  it("rejects old issued IDs after restart and sweeps old owned crash output lazily", async () => {
+    const f = fixture(); const restarted = new TranscodeRegistry(f.database, f.config, f.transcoder);
+    try {
+      f.register("old"); const old = await f.acquire("old"); old.release();
+      await f.registry.stop();
+      mkdirSync(old.dir, { recursive: true }); writeFileSync(join(old.dir, "leftover.ts"), "crash");
+      await expect(restarted.acquirePreparation("session", "old", "https://provider.example/video")).rejects.toMatchObject({ statusCode: 410 });
+      restarted.registerPreparation("session", "fresh");
+      const fresh = await restarted.acquirePreparation("session", "fresh", "https://provider.example/video"); fresh.release();
+      expect(existsSync(old.dir)).toBe(false); expect(existsSync(fresh.dir)).toBe(true);
+    } finally { await restarted.stop(); await f.cleanup(); }
+  });
+
+  it("reaps idle owned generations but keeps a pinned response until its release", async () => {
+    const f = fixture({ max: 2 }); let now = Date.now(); const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const prepare = f.database.sqlite.prepare.bind(f.database.sqlite);
+    const database = vi.spyOn(f.database.sqlite, "prepare").mockImplementation((sql) =>
+      sql === "SELECT revoked_at, expires_at FROM stream_sessions WHERE id = ?"
+        ? { get: () => ({ revoked_at: null, expires_at: "9999-12-31T00:00:00.000Z" }) } as never : prepare(sql));
+    try {
+      f.register("old"); const old = await f.acquire("old"); old.release();
+      f.register("pinned"); const pinned = await f.acquire("pinned", 90);
+      now += 120_001;
+      (f.registry as unknown as { reap(): void }).reap();
+      await vi.waitFor(() => expect(existsSync(old.dir)).toBe(false));
+      expect(existsSync(pinned.dir)).toBe(true); expect(f.children[1]!.signals).toEqual([]);
+      pinned.release(); (f.registry as unknown as { reap(): void }).reap();
+      await vi.waitFor(() => expect(existsSync(pinned.dir)).toBe(false));
+      await expect(f.acquire("old")).rejects.toMatchObject({ statusCode: 410 });
+    } finally { database.mockRestore(); clock.mockRestore(); await f.cleanup(); }
+  });
+
+  // Real disposal has a four-second ceiling; fake children report exit only
+  // when this test says so, preserving the actual-termination capacity gate.
+  it("retains a stubborn ready child's permit after bounded disposal", async () => {
+    const f = fixture({ exits: false });
+    try {
+      f.register("old"); const old = await f.acquire("old"); old.release();
+      await f.registry.cancelPreparation("session", "old", old.generation);
+      expect(f.children[0]!.signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(f.children[0]!.running).toBe(true);
+      f.register("new"); await expect(f.acquire("new", 90)).rejects.toMatchObject({ statusCode: 503 });
+      f.children[0]!.finish(); const next = await f.acquire("new", 90); next.release();
+      expect(f.maximum()).toBe(1);
+    } finally { await f.cleanup(); }
+  }, 8000);
 });

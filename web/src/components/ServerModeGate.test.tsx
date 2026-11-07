@@ -213,6 +213,19 @@ describe("ServerModeGate", () => {
     });
   });
 
+  it.each([
+    ["enabled", true], ["disabled", false], ["malformed-string", "true"], ["legacy-missing", undefined],
+  ])("requires explicit preparation ownership capability %s", async (_label, capability) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      setupRequired: false,
+      session: { profileId: "p", username: "u", displayName: "U", role: "member", simpleMode: false },
+      transcodeCapabilities: { preparationOwnership: capability },
+    }));
+    render(<ServerModeGate>{CHILD}</ServerModeGate>);
+    const provider = await screen.findByTestId("session-provider");
+    expect(JSON.parse(provider.dataset.transcodeCapabilities!).preparationOwnership).toBe(capability === true);
+  });
+
   it("falls back to default flags when bootstrap omits optional fields", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({

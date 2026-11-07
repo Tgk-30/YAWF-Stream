@@ -71,6 +71,7 @@ import { ScrubBar } from "./player/ScrubBar";
 import { CaptionsMenu, type EmbeddedCaptions } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { CastControls } from "./CastControls";
+import { castController } from "../lib/cast";
 import { predictEpisodeEnd } from "../lib/endPredictor";
 import type { PlaybackPrefs } from "../storage/models";
 import {
@@ -115,6 +116,8 @@ import {
 import { renewServerHlsLease, serverHlsLeaseTarget } from "../lib/serverApi";
 import { notifyUnauthorized } from "../lib/serverSession";
 import type {
+  ServerHlsPreparation,
+  createServerHlsPreparation,
   ServerAudioInventoryLoadOptions,
   ServerAudioTrack,
   ServerOptimizedSource,
@@ -146,6 +149,102 @@ export interface PlaybackHandoffState {
   playbackRate: number;
   /** Transient logical selection, independent of per-title persistence. */
   audioPreference?: AudioPreference | null;
+}
+
+// Claims outlive keyed effects. Only explicitly stopped captured readers may
+// relinquish a generation, never pause, visibility or React effect cleanup.
+type OwnedHlsReader = {
+  video: HTMLVideoElement;
+  close: () => void;
+  retained: () => boolean;
+  closed: boolean;
+  promptPending: boolean;
+  binding?: { teardown: () => void; alternative?: HTMLSourceElement; clearAlternative?: () => void };
+  dispose: () => void;
+  expired: () => void;
+  refresh: () => void;
+};
+type OwnedHlsClaim = {
+  preparation: ServerHlsPreparation;
+  generation: string;
+  readers: Set<OwnedHlsReader>;
+  retired: boolean;
+  releasePromise?: Promise<void>;
+  browserPlaybackUrl: string | null;
+  leaseTarget: string | null;
+  lease?: { timer?: number; controller?: AbortController; stopped: boolean; lastAttempt: number };
+};
+function stopOwnedHlsLease(claim: OwnedHlsClaim): void {
+  if (claim.lease == null) return;
+  claim.lease.stopped = true;
+  window.clearTimeout(claim.lease.timer);
+  claim.lease.controller?.abort();
+}
+function retainOwnedHlsLease(claim: OwnedHlsClaim): void {
+  if (claim.leaseTarget == null || claim.lease != null || claim.retired) return;
+  const lease = { stopped: false, lastAttempt: -Infinity } as NonNullable<OwnedHlsClaim["lease"]>;
+  claim.lease = lease;
+  const renew = async () => {
+    if (lease.stopped || claim.retired || claim.readers.size === 0) return;
+    const remaining = 30_000 - (Date.now() - lease.lastAttempt);
+    if (remaining > 0) { lease.timer = window.setTimeout(() => void renew(), remaining); return; }
+    lease.lastAttempt = Date.now();
+    const controller = new AbortController();
+    lease.controller = controller;
+    try {
+      const status = await promiseWithinTimeout(renewServerHlsLease(claim.leaseTarget!, controller.signal),
+        5_000, "Stream retention timed out.", () => controller.abort());
+      if (lease.stopped || claim.retired) return;
+      if (status === 401 || status === 403 || status === 404 || status === 405) {
+        stopOwnedHlsLease(claim);
+        if (status === 401) notifyUnauthorized();
+        else if (status !== 405) for (const reader of claim.readers) reader.expired();
+      }
+    } catch {
+      // A transient failure never changes media or polls a master playlist.
+    } finally {
+      if (lease.controller === controller) lease.controller = undefined;
+      if (!lease.stopped && !claim.retired && claim.readers.size > 0) {
+        lease.timer = window.setTimeout(() => void renew(), Math.max(0, 30_000 - (Date.now() - lease.lastAttempt)));
+      }
+    }
+  };
+  void renew();
+}
+function releaseOwnedHlsClaim(claim: OwnedHlsClaim): Promise<void> {
+  if ([...claim.readers].some((reader) => !reader.closed)) return Promise.reject(new Error("Playback is still attached."));
+  claim.retired = true;
+  stopOwnedHlsLease(claim);
+  return claim.releasePromise ??= claim.preparation.release(claim.generation).catch((error: unknown) => {
+    claim.releasePromise = undefined;
+    throw error;
+  });
+}
+function closeOwnedHlsReader(claim: OwnedHlsClaim, reader: OwnedHlsReader): void {
+  if (reader.closed) return;
+  reader.closed = true; // Teardown may synchronously emit native disconnect.
+  try { reader.close(); }
+  catch (error) { reader.closed = false; throw error; }
+  claim.readers.delete(reader);
+}
+function checkDetachedOwnedHlsReader(claim: OwnedHlsClaim, reader: OwnedHlsReader): void {
+  // StrictMode ref replay can leave the actual element connected. PiP and
+  // casting retain their reader independently of ordinary visible chrome.
+  if (reader.closed || reader.video.isConnected || reader.retained()) return;
+  closeOwnedHlsReader(claim, reader);
+  if (claim.readers.size === 0) void releaseOwnedHlsClaim(claim).catch(() => {});
+}
+async function retireOwnedHlsClaim(claim: OwnedHlsClaim): Promise<boolean> {
+  if (claim.retired) {
+    if (claim.readers.size !== 0) return false;
+    await releaseOwnedHlsClaim(claim);
+    return true;
+  }
+  if (claim.readers.size === 0 || [...claim.readers].some((reader) => reader.retained())) return false;
+  claim.retired = true; // Fence late hls.js imports before reader teardown.
+  for (const reader of [...claim.readers]) closeOwnedHlsReader(claim, reader);
+  await releaseOwnedHlsClaim(claim);
+  return true;
 }
 
 type WebviewRecoverySnapshot = {
@@ -268,6 +367,10 @@ interface VideoPlayerProps {
    * original-device player without rendering unavailable controls. */
   serverOptimized?: {
     qualities: readonly ServerTranscodeQuality[];
+    ownership?: {
+      create: typeof createServerHlsPreparation;
+      browserPlaybackURL?: (ownedURL: string) => string | null;
+    };
     loadAudioTracks?: (
       options?: ServerAudioInventoryLoadOptions,
     ) => Promise<ServerAudioTrack[]>;
@@ -338,10 +441,20 @@ interface WebKitVideoElement extends HTMLVideoElement {
   ) => void;
   webkitPresentationMode?: "inline" | "picture-in-picture" | "fullscreen";
   webkitShowPlaybackTargetPicker?: () => void;
+  webkitCurrentPlaybackTargetIsWireless?: boolean;
 }
 
 interface WebKitDocument extends Document {
   webkitFullscreenElement?: Element | null;
+}
+
+function currentMsePrimarySource(video: HTMLVideoElement): string | null {
+  const direct = video.getAttribute("src");
+  if (direct?.startsWith("blob:")) return direct;
+  if (direct) return null;
+  // hls.js uses a first <source> instead of src for ManagedMediaSource.
+  const first = video.querySelector("source");
+  return first?.src.startsWith("blob:") && (!video.currentSrc || video.currentSrc === first.src) ? first.src : null;
 }
 
 function shouldUseNativeHls(video: HTMLVideoElement): boolean {
@@ -931,6 +1044,8 @@ export function VideoPlayer({
     audioPreference?: AudioPreference;
     partialTimeline: boolean;
     leaseTarget: string | null;
+    claim?: OwnedHlsClaim;
+    canonicalUrl?: string;
   };
   type ScopedPosition = {
     originOwner: string;
@@ -951,6 +1066,10 @@ export function VideoPlayer({
     url: string;
     recovery?: WebviewRecoverySnapshot;
   } | null>(null);
+  const [initialOwnedSource, setInitialOwnedSource] = useState<{
+    owner: string; url: string; leaseTarget: string | null; claim: OwnedHlsClaim;
+  } | null>(null);
+  const ownedClaimsRef = useRef(new Set<OwnedHlsClaim>());
   const [optimizedSource, setOptimizedSource] = useState<ScopedOptimizedSource | null>(null);
   const [sourceSwitchPosition, setSourceSwitchPosition] = useState<ScopedPosition | null>(null);
   const [sourceSwitchState, setSourceSwitchState] = useState<PlaybackHandoffState | null>(null);
@@ -1017,7 +1136,9 @@ export function VideoPlayer({
     sourceSwitchPosition?.originOwner === playbackOwner
       ? sourceSwitchState
       : initialHandoffState;
-  const effectiveUrl = activeFallback?.url ?? activeOptimized?.url ?? url;
+  const activeInitialOwned = initialOwnedSource?.owner === playbackOwner ? initialOwnedSource : null;
+  const activeOwnedClaim = activeOptimized?.claim ?? (activeOptimized == null && activeFallback == null ? activeInitialOwned?.claim : undefined);
+  const effectiveUrl = activeFallback?.url ?? activeOptimized?.url ?? activeInitialOwned?.url ?? url;
   const effectiveEngine: PlaybackEngine = activeFallback
     ? "webview-hls-transcode"
     : activeOptimized != null
@@ -1026,9 +1147,10 @@ export function VideoPlayer({
   // An explicit null is an availability fence from Server Mode: its protected
   // player URL must never be handed to an app that cannot inherit web cookies.
   // Undefined retains the legacy/local behavior of using the playable source.
+  const canonicalUrl = activeFallback?.url ?? activeOptimized?.canonicalUrl ?? activeOptimized?.url ?? url;
   const externalTarget = externalPlaybackUrl === null
     ? null
-    : externalPlaybackUrl?.trim() || effectiveUrl;
+    : externalPlaybackUrl?.trim() || canonicalUrl;
   const effectiveTimelineOffsetSeconds = activeOptimized?.timelineOffsetSeconds ?? timelineOffsetSeconds;
   const effectiveStartPositionSeconds = activeOptimized?.startPositionSeconds ?? (
     activeSourceSwitchPosition == null
@@ -1101,6 +1223,8 @@ export function VideoPlayer({
   const [webChromeVisible, setWebChromeVisible] = useState(true);
   const [webviewPaused, setWebviewPaused] = useState(false);
   const externalHandoffVideoRef = useRef<HTMLVideoElement | null>(null);
+  const activeOwnedClaimRef = useRef(activeOwnedClaim);
+  const retiredRecoveryRef = useRef<{ owner: string; snapshot: WebviewRecoverySnapshot } | null>(null);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [castSuspended, setCastSuspended] = useState(false);
   const [webMenuOpen, setWebMenuOpen] = useState(false);
@@ -1136,6 +1260,7 @@ export function VideoPlayer({
     source: { key: string };
     snapshot: WebviewRecoverySnapshot;
     message: string;
+    quality?: ServerTranscodeQuality;
   } | null>(null);
   useLayoutEffect(() => {
     currentWebviewSourceRef.current = webviewSource;
@@ -1193,9 +1318,10 @@ export function VideoPlayer({
   // Async ownership follows the committed player, not a replacement render
   // that React can suspend or abandon while the old owner remains mounted.
   useLayoutEffect(() => {
+    activeOwnedClaimRef.current = activeOwnedClaim;
     activeWebSourceRef.current = effectiveUrl;
     playbackOwnerRef.current = playbackOwner;
-  }, [effectiveUrl, playbackOwner]);
+  }, [activeOwnedClaim, effectiveUrl, playbackOwner]);
   const invalidateManualServerAudioPreference = useCallback((
     owner: string,
     preference: AudioPreference,
@@ -1242,6 +1368,26 @@ export function VideoPlayer({
     setServerLeaseExpired(false);
     setManualRecoveryPending(false);
   }, [cancelSourceInfoRetry, playbackOwner]);
+  useLayoutEffect(() => {
+    // An activation can be superseded before its first reader commits.
+    for (const claim of ownedClaimsRef.current) {
+      // The foreground owner retains a failed release for explicit Retry.
+      // An unrelated render must not silently start another cleanup attempt.
+      if (claim === activeOwnedClaim && claim.retired) continue;
+      if ((claim !== activeOwnedClaim || externalError != null) && claim.readers.size === 0) {
+        void releaseOwnedHlsClaim(claim).catch(() => {});
+        ownedClaimsRef.current.delete(claim);
+      }
+    }
+    return () => {
+      queueMicrotask(() => {
+        for (const claim of ownedClaimsRef.current) {
+          for (const reader of [...claim.readers]) checkDetachedOwnedHlsReader(claim, reader);
+          if (!playerMountedRef.current && claim.readers.size === 0) void releaseOwnedHlsClaim(claim).catch(() => {});
+        }
+      });
+    };
+  });
   const androidTVNative = hasAndroidTVBridge();
   const sharedTouchPlayer =
     mode === "webview" &&
@@ -1269,6 +1415,7 @@ export function VideoPlayer({
   );
 
   const reportAbsolutePosition = useCallback((next: number) => {
+    if (retiredRecoveryRef.current?.owner === playbackOwnerRef.current) return;
     if (Number.isFinite(next)) latestAbsolutePositionRef.current = Math.max(0, next);
   }, []);
 
@@ -1323,6 +1470,8 @@ export function VideoPlayer({
   const currentWebviewHandoffState = useCallback((
     fallback?: PlaybackHandoffState | null,
   ): PlaybackHandoffState | null => {
+    const retired = retiredRecoveryRef.current;
+    if (retired?.owner === playbackOwnerRef.current) return retired.snapshot.state;
     const video = externalHandoffVideoRef.current;
     if (video == null) return fallback ?? null;
     return {
@@ -1433,6 +1582,7 @@ export function VideoPlayer({
   // next episode.
   useEffect(() => {
     latestAbsolutePositionRef.current = Math.max(0, startPositionSeconds ?? 0) + timelineOffsetSeconds;
+    retiredRecoveryRef.current = null;
     setFallbackSource(null);
     setOptimizedSource(null);
     setSourceSwitchPosition(null);
@@ -1747,6 +1897,70 @@ export function VideoPlayer({
   /** Prepare the server manifest before replacing the currently playing source.
    * This keeps Device Original running when ffmpeg is busy, unavailable, or
    * fails to start. HLS session cookies stay in the webview fetch path. */
+  const initialPreparationRef = useRef<AbortController | null>(null);
+  const createOwnedPreparation = serverOptimized?.ownership?.create;
+  const browserPlaybackFactoryRef = useRef(serverOptimized?.ownership?.browserPlaybackURL);
+  useLayoutEffect(() => {
+    browserPlaybackFactoryRef.current = serverOptimized?.ownership?.browserPlaybackURL;
+  }, [serverOptimized?.ownership?.browserPlaybackURL]);
+  useEffect(() => {
+    if (createOwnedPreparation == null || !originalSourceIsServerOptimized || mode !== "webview" || androidTVNative) return;
+    const owner = playbackOwner;
+    const controller = new AbortController();
+    initialPreparationRef.current = controller;
+    let active = true;
+    let preparation: ServerHlsPreparation | undefined;
+    let transferred = false;
+    let cancellation: Promise<void> | undefined;
+    const cancel = () => { if (!transferred && preparation != null) cancellation ??= preparation.cancel().catch(() => {}); };
+    controller.signal.addEventListener("abort", cancel);
+    const owns = () => active && playerMountedRef.current && playbackOwnerRef.current === owner && !controller.signal.aborted;
+    void (async () => {
+      preparation = await promiseWithinTimeout(createOwnedPreparation(url, controller.signal),
+        SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS, "Server playback ownership timed out.", () => controller.abort());
+      if (!owns()) return;
+      const deadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
+      let delay = SERVER_OPTIMIZED_RETRY_BASE_MS;
+      while (owns()) {
+        const response = await promiseWithinTimeout(fetch(preparation.url, {
+          credentials: "include", cache: "no-store", redirect: "error",
+          headers: { accept: "application/vnd.apple.mpegurl" }, signal: controller.signal,
+        }), Math.max(1, deadline - Date.now()), "Server optimized playback timed out.", () => controller.abort());
+        if (!owns()) return;
+        if ((response.status === 503 || response.status === 504) && Date.now() < deadline) {
+          await abortableDelay(Math.min(delay, Math.max(1, deadline - Date.now())), controller.signal);
+          delay = Math.min(delay * 2, SERVER_OPTIMIZED_RETRY_MAX_MS);
+          if (Date.now() >= deadline) throw new Error("Server optimized playback timed out.");
+          continue;
+        }
+        if (!response.ok) throw new Error(`The server could not prepare playback (${response.status}).`);
+        const manifest = await promiseWithinTimeout(response.text(), Math.max(1, deadline - Date.now()),
+          "Server optimized playback timed out.", () => controller.abort());
+        if (!owns()) return;
+        if (!manifest.startsWith("#EXTM3U")) throw new Error("The server did not return a playable HLS manifest.");
+        const generation = preparation.generationFromResponse(response);
+        const activated = await promiseWithinTimeout(preparation.activate(generation, manifest, controller.signal),
+          Math.max(1, deadline - Date.now()), "Server optimized playback timed out.", () => controller.abort());
+        if (!owns()) return;
+        const claim: OwnedHlsClaim = {
+          preparation, generation, readers: new Set(), retired: false, leaseTarget: activated.leaseTarget,
+          browserPlaybackUrl: !underTauri && externalTarget != null ? browserPlaybackFactoryRef.current?.(activated.url) ?? null : null,
+        };
+        ownedClaimsRef.current.add(claim);
+        transferred = true;
+        setInitialOwnedSource({ owner, ...activated, claim });
+        return;
+      }
+    })().catch((error: unknown) => {
+      if (active && playerMountedRef.current && playbackOwnerRef.current === owner) setExternalError(error instanceof Error ? error.message : "Server playback preparation failed.");
+    }).finally(() => { cancel(); controller.signal.removeEventListener("abort", cancel); });
+    return () => { active = false; controller.abort(); if (initialPreparationRef.current === controller) initialPreparationRef.current = null; };
+  }, [androidTVNative, createOwnedPreparation, mode, originalSourceIsServerOptimized, playbackOwner, url, playbackAttempt]);
+
+  useLayoutEffect(() => {
+    if (externalError != null) initialPreparationRef.current?.abort();
+  }, [externalError]);
+
   const switchToServerOptimized = useCallback(
     async (
       quality: ServerTranscodeQuality,
@@ -1777,6 +1991,7 @@ export function VideoPlayer({
         }
         return false;
       }
+      initialPreparationRef.current?.abort();
       const position = Number.isFinite(absolutePositionSeconds)
         ? Math.max(0, absolutePositionSeconds)
         : 0;
@@ -1792,6 +2007,14 @@ export function VideoPlayer({
         optimizationPendingRef.current.request === request;
       setServerOptimizationPending(true);
       setServerOptimizationError(null);
+      let preparation: ServerHlsPreparation | undefined;
+      let transferred = false;
+      let cancellation: Promise<void> | undefined;
+      const cancel = () => { if (!transferred && preparation != null) cancellation ??= preparation.cancel().catch(() => {}); };
+      controller.signal.addEventListener("abort", cancel);
+      let generation: string | undefined;
+      let retirementAttempted = false;
+      let retirementSnapshot: WebviewRecoverySnapshot | undefined;
       try {
         latestAbsolutePositionRef.current = position;
         // Resolve the job URL quickly, then give the trusted server manifest
@@ -1811,6 +2034,12 @@ export function VideoPlayer({
           throw new Error("The server returned an untrusted optimized playback URL.");
         }
         const manifestDeadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
+        if (serverOptimized.ownership != null && mode === "webview" && !androidTVNative) {
+          preparation = await promiseWithinTimeout(serverOptimized.ownership.create(next.url, controller.signal),
+            SERVER_OPTIMIZED_REQUEST_TIMEOUT_MS, "Server playback ownership timed out.", () => controller.abort());
+          if (!ownsRequest()) return false;
+        }
+        const preparationURL = preparation?.url ?? next.url;
         let retryDelayMs = SERVER_OPTIMIZED_RETRY_BASE_MS;
         let manifest: string | null = null;
         let preparedAudioTrack = purpose === "recovery" ? next.audioTrack : audioTrack ?? next.audioTrack;
@@ -1822,7 +2051,7 @@ export function VideoPlayer({
             throw new Error("Server optimized playback timed out.");
           }
           const response = await promiseWithinTimeout(
-            fetch(next.url, {
+            fetch(preparationURL, {
               credentials: "include",
               headers: { accept: "application/vnd.apple.mpegurl" },
               signal: controller.signal,
@@ -1833,6 +2062,30 @@ export function VideoPlayer({
           );
           if (!ownsRequest()) return false;
           if (response.status === 503 || response.status === 504) {
+            const currentClaim = activeOwnedClaimRef.current;
+            if (response.status === 503 && preparation != null && !retirementAttempted &&
+              currentClaim != null && (!currentClaim.retired || currentClaim.readers.size === 0) && purpose !== "automatic-default" && purpose !== "remembered-audio") {
+              retirementAttempted = true;
+              const requestedState = typeof handoffState === "function" ? handoffState() : handoffState;
+              const currentState = currentWebviewHandoffState(requestedState);
+              const state = optimizationPendingRef.current?.failureState?.() ??
+                (purpose === "recovery" ? requestedState : null) ??
+                (purpose === "native-hls-seek" && currentState != null && requestedState != null
+                  ? { ...currentState, paused: requestedState.paused } : currentState);
+              if (state != null) {
+                retirementSnapshot = {
+                  position: positionIntent === "fixed" ? position : latestAbsolutePositionRef.current,
+                  state: audioPreference == null ? state : { ...state, audioPreference },
+                };
+                retiredRecoveryRef.current = { owner, snapshot: retirementSnapshot };
+                const retired = await promiseWithinTimeout(retireOwnedHlsClaim(currentClaim),
+                  Math.max(1, manifestDeadline - Date.now()), "The previous playback reader could not be released.", () => controller.abort());
+                if (!ownsRequest()) return false;
+                if (retired) continue;
+                retiredRecoveryRef.current = null;
+                retirementSnapshot = undefined;
+              }
+            }
             const retryRemainingMs = manifestDeadline - Date.now();
             if (retryRemainingMs <= 0) {
               controller.abort();
@@ -1848,6 +2101,7 @@ export function VideoPlayer({
           if (!response.ok) {
             throw new Error(`The server could not prepare ${quality} playback (${response.status}).`);
           }
+          generation = preparation?.generationFromResponse(response);
           const responseAudioTrack = response.headers.get("x-yawf-transcode-audio");
           if (/^(?:0|[1-9]|[12][0-9]|3[01])$/.test(responseAudioTrack ?? "")) {
             preparedAudioTrack = Number(responseAudioTrack);
@@ -1869,6 +2123,16 @@ export function VideoPlayer({
           throw new Error("The server did not return a playable HLS manifest.");
         }
         if (!ownsRequest()) return false;
+        const requestedAudioConfirmed = audioPreference != null && audioTrack != null && preparedAudioTrack === audioTrack;
+        if ((purpose === "recovery" && audioTrack != null && !requestedAudioConfirmed) ||
+          (preparation != null && audioTrack != null && preparedAudioTrack !== audioTrack)) {
+          throw new Error("Optimized playback could not preserve the selected audio track. Open an external player or choose another source.");
+        }
+        const activated = preparation != null && generation != null
+          ? await promiseWithinTimeout(preparation.activate(generation, manifest, controller.signal),
+              Math.max(1, manifestDeadline - Date.now()), "Server playback activation timed out.", () => controller.abort())
+          : { url: next.url, leaseTarget: serverHlsLeaseTarget(next.url, manifest) };
+        if (!ownsRequest() || controller.signal.aborted) return false;
         // Ordinary quality switches follow playback while the manifest warms.
         // An explicit out-of-window seek instead owns its requested position;
         // a late clock event from the old media must not undo that user action.
@@ -1892,7 +2156,9 @@ export function VideoPlayer({
         const currentHandoffState = currentWebviewHandoffState(requestedHandoffState);
         const failureState = optimizationPendingRef.current?.failureState?.();
         const activationHandoffState =
-          failureState != null
+          retirementSnapshot != null
+            ? currentHandoffState
+            : failureState != null
             ? { ...failureState, audioPreference: requestedHandoffState?.audioPreference }
             : purpose === "recovery" && requestedHandoffState != null
             ? requestedHandoffState
@@ -1900,13 +2166,6 @@ export function VideoPlayer({
           requestedHandoffState != null && currentHandoffState != null
             ? { ...currentHandoffState, paused: requestedHandoffState.paused }
             : currentHandoffState;
-        const requestedAudioConfirmed =
-          audioPreference != null &&
-          audioTrack != null &&
-          preparedAudioTrack === audioTrack;
-        if (purpose === "recovery" && audioTrack != null && !requestedAudioConfirmed) {
-          throw new Error("Optimized playback could not preserve the selected audio track. Open an external player or choose another source.");
-        }
         if (retainAudioPreference && requestedAudioConfirmed) {
           rememberManualServerAudioPreference(audioPreference);
         }
@@ -1924,17 +2183,27 @@ export function VideoPlayer({
                 language: appliedTrack?.language?.trim() || null,
                 label: appliedTrack?.label?.trim() || null,
               };
+        const claim: OwnedHlsClaim | undefined = preparation != null && generation != null
+          ? { preparation, generation, readers: new Set<OwnedHlsReader>(), retired: false, leaseTarget: activated.leaseTarget,
+              browserPlaybackUrl: !underTauri && externalTarget != null ? browserPlaybackFactoryRef.current?.(activated.url) ?? null : null }
+          : undefined;
+        retiredRecoveryRef.current = null;
         setFallbackSource(null);
         setSourceSwitchPosition({
           originOwner: owner,
           position: activationPosition,
         });
         setSourceSwitchState(activationHandoffState);
+        setExternalError(null);
+        if (claim != null) { ownedClaimsRef.current.add(claim); transferred = true; }
         setOptimizedSource({
           ...next,
+          url: activated.url,
+          canonicalUrl: next.url,
+          claim,
           audioTrack: preparedAudioTrack,
           audioPreference: appliedAudioPreference,
-          leaseTarget: serverHlsLeaseTarget(next.url, manifest),
+          leaseTarget: activated.leaseTarget,
           partialTimeline: /(?:^|\n)#EXT-X-PLAYLIST-TYPE:EVENT(?:\r?$|\s)/m.test(manifest),
           startPositionSeconds: activationStart,
           originOwner: owner,
@@ -1948,10 +2217,16 @@ export function VideoPlayer({
         const message = error instanceof Error ? error.message : "The server could not prepare optimized playback.";
         setServerOptimizationError(message);
         recordDiagnostic("player", "server_optimized.failed", "warning", message);
-        if (optimizationPendingRef.current?.failureState != null) setExternalError(message);
+        if (retirementSnapshot != null) {
+          const snapshot = retiredRecoveryRef.current?.snapshot ?? retirementSnapshot;
+          failedWebviewRecoveryRef.current = { owner, source: currentWebviewSourceRef.current, snapshot, message, quality };
+          setExternalError(message);
+        } else if (optimizationPendingRef.current?.failureState != null) setExternalError(message);
         if (purpose === "recovery") throw new Error(message);
         return false;
       } finally {
+        cancel();
+        controller.signal.removeEventListener("abort", cancel);
         if (ownsRequest()) {
           optimizationPendingRef.current = null;
           setServerOptimizationPending(false);
@@ -1961,6 +2236,8 @@ export function VideoPlayer({
     [
       currentWebviewHandoffState,
       activeKnownSourceAudio,
+      androidTVNative,
+      mode,
       playbackOwner,
       rememberManualServerAudioPreference,
       serverOptimized,
@@ -1983,6 +2260,11 @@ export function VideoPlayer({
     const position = Number.isFinite(absolutePositionSeconds)
       ? Math.max(0, absolutePositionSeconds)
       : 0;
+    retiredRecoveryRef.current = null;
+    if (createOwnedPreparation != null && originalSourceIsServerOptimized) {
+      setInitialOwnedSource(null);
+      setPlaybackAttempt((attempt) => attempt + 1);
+    }
     setFallbackSource(null);
     setOptimizedSource(null);
     setSourceSwitchPosition({
@@ -1992,7 +2274,7 @@ export function VideoPlayer({
     setSourceSwitchState(handoffState ?? null);
     setServerOptimizationError(null);
     recordDiagnostic("player", "server_optimized.disabled");
-  }, [playbackOwner]);
+  }, [createOwnedPreparation, originalSourceIsServerOptimized, playbackOwner]);
 
   // The deferred default is a startup policy, not a command. Only a current
   // owner's explicit quality, audio or mode control consumes it. Automatic
@@ -2051,10 +2333,22 @@ export function VideoPlayer({
       optimizationPendingRef.current = null;
       setServerOptimizationPending(false);
     }
+    if (createOwnedPreparation != null && originalSourceIsServerOptimized) {
+      // The caller's original is itself HLS. A relinquished generation is not
+      // an original-file fallback; prepare a fresh offset at the owned point.
+      const quality = initialServerOptimizedQuality ?? serverOptimized?.qualities[0];
+      if (quality != null) void switchToServerOptimized(quality, absolutePositionSeconds,
+        handoffState, initialServerAudioTrack ?? undefined, undefined, "fixed");
+      return;
+    }
     switchToDeviceOriginal(absolutePositionSeconds, handoffState);
-  }, [claimExplicitServerOptimizationChoice, playbackOwner, switchToDeviceOriginal]);
+  }, [claimExplicitServerOptimizationChoice, createOwnedPreparation, initialServerAudioTrack,
+    initialServerOptimizedQuality, originalSourceIsServerOptimized, playbackOwner,
+    serverOptimized, switchToDeviceOriginal, switchToServerOptimized]);
 
   const updatePendingHandoffPaused = useCallback((paused: boolean) => {
+    const retired = retiredRecoveryRef.current;
+    if (retired?.owner === playbackOwner) retired.snapshot.state = { ...retired.snapshot.state, paused };
     if (
       playbackOwnerRef.current !== playbackOwner ||
       sourceSwitchPosition?.originOwner !== playbackOwner
@@ -2099,7 +2393,7 @@ export function VideoPlayer({
       if (!playerMountedRef.current || playbackOwnerRef.current !== owner ||
         currentWebviewSourceRef.current !== webviewSource) return;
       recordDiagnostic("player", "webview.playback_failed", "error", message);
-      if (activeOptimized != null) {
+      if (activeOptimized != null && activeOptimized.claim == null) {
         // Fence the failed intent before restoring/remounting its original
         // source. A remembered preference is not permission to retry failure.
         automaticAudioIntentFenceRef.current = { owner, intentEpoch: activeOptimized.intentEpoch };
@@ -2146,7 +2440,7 @@ export function VideoPlayer({
       const pendingForCurrentOwner = recoveryPendingRef.current?.owner === owner;
       if (pendingForCurrentOwner) return;
       if (
-        effectiveEngine === "webview-direct" &&
+        (effectiveEngine === "webview-direct" || activeOwnedClaim != null) &&
         activeFallback == null &&
         (serverOptimized != null || requestWebviewFallback != null)
       ) {
@@ -2183,9 +2477,12 @@ export function VideoPlayer({
             label: track.label ?? `Audio ${track.index + 1}`,
             logicalLabel: track.label, language: track.language,
           })));
-          const quality = serverOptimized.defaultQuality != null && serverOptimized.qualities.includes(serverOptimized.defaultQuality)
-            ? serverOptimized.defaultQuality
-            : serverOptimized.qualities.includes("480p") ? "480p" : serverOptimized.qualities[0];
+          const retainedQuality = failedWebviewRecoveryRef.current?.owner === owner
+            ? failedWebviewRecoveryRef.current.quality : undefined;
+          const quality = retainedQuality ?? activeOptimized?.quality ?? initialServerOptimizedQuality ?? (
+            serverOptimized.defaultQuality != null && serverOptimized.qualities.includes(serverOptimized.defaultQuality)
+              ? serverOptimized.defaultQuality
+              : serverOptimized.qualities.includes("480p") ? "480p" : serverOptimized.qualities[0]);
           if (preference != null && selected == null) {
             message = "Optimized playback could not preserve the selected audio track. Open an external player or choose another source.";
           } else if (quality != null) {
@@ -2222,18 +2519,21 @@ export function VideoPlayer({
         }
         // Error UI unmounts the failed element. Keep its owned recovery point
         // instead of making Retry remount Device Original at its initial zero.
-        failedWebviewRecoveryRef.current = { owner, source: webviewSource, snapshot: readRecovery(), message };
+        failedWebviewRecoveryRef.current = { owner, source: webviewSource, snapshot: readRecovery(), message,
+          quality: failedWebviewRecoveryRef.current?.quality ?? activeOptimized?.quality ?? initialServerOptimizedQuality ?? undefined };
       }
       setExternalError(message);
     }, [
       activeFallback,
       activeOptimized,
+      activeOwnedClaim,
       activeSourceSwitchState,
       activeKnownSourceAudio,
       castSuspended,
       currentWebviewHandoffState,
       effectiveEngine,
       originalSourceIsServerOptimized,
+      initialServerOptimizedQuality,
       playbackOwner,
       resolveWebviewFallbackForRequest,
       requestWebviewFallback,
@@ -2542,8 +2842,8 @@ export function VideoPlayer({
     // An HLS fallback is the playable rendition. The external capability is
     // only for direct sources, where it avoids handing the TV an app cookie.
     const playbackURL = effectiveEngine === "webview-hls-transcode"
-      ? effectiveUrl
-      : externalPlaybackUrl?.trim() || effectiveUrl;
+      ? canonicalUrl
+      : externalPlaybackUrl?.trim() || canonicalUrl;
     const started = startAndroidTVPlayback({
       url: playbackURL,
       contentType: androidTVContentType(
@@ -2621,6 +2921,7 @@ export function VideoPlayer({
     };
   }, [
     androidTVNative,
+    canonicalUrl,
     effectiveUrl,
     effectiveEngine,
     externalPlaybackUrl,
@@ -2714,6 +3015,7 @@ export function VideoPlayer({
         onAbsolutePositionChange={reportAbsolutePosition}
         onOpenExternalPlayer={externalPlaybackAvailable ? openExternalPlayback : undefined}
         externalActionStatus={externalPlaybackAvailable ? externalActionStatus : null}
+        castPlaybackUrl={externalTarget}
         playbackDecision={playbackDecisionFor(effectiveEngine, effectiveUrl)}
         onProgress={reportProgress}
         onEnded={reportEnded}
@@ -2768,10 +3070,10 @@ export function VideoPlayer({
             {subtitle && <span className="player-subtitle">{subtitle}</span>}
           </div>
           <div className="player-bar-actions">
-            {mode !== "webview" && (
+            {mode !== "webview" && externalTarget != null && (
               <CastControls
                 media={{
-                  url: effectiveUrl,
+                  url: externalTarget,
                   title,
                   subtitleUrl: activeSubtitleUrl,
                 }}
@@ -2871,7 +3173,10 @@ export function VideoPlayer({
             optimizedTimelineIsPartial={activeOptimized?.partialTimeline ?? initialServerOptimizedTimeline}
             externalHandoffVideoRef={externalHandoffVideoRef}
             serverOptimized={serverOptimized}
-            preparedLeaseTarget={activeOptimized?.leaseTarget}
+            preparedLeaseTarget={activeOptimized != null ? activeOptimized.leaseTarget : activeInitialOwned?.leaseTarget}
+            ownedClaim={activeOwnedClaim}
+            castPlaybackUrl={externalTarget}
+            ownedPreparationPending={createOwnedPreparation != null && originalSourceIsServerOptimized && activeOptimized == null && activeInitialOwned == null}
             onServerLeaseExpired={expireServerGeneration}
             serverAudioOwner={playbackOwner}
             initialServerAudioTracks={activeKnownSourceAudio?.tracks}
@@ -3034,6 +3339,9 @@ function WebviewPlayer({
   serverOptimized,
   serverAudioOwner,
   preparedLeaseTarget,
+  ownedClaim,
+  castPlaybackUrl,
+  ownedPreparationPending,
   onServerLeaseExpired,
   initialServerAudioTracks,
   activeServerOptimizedQuality,
@@ -3127,6 +3435,9 @@ function WebviewPlayer({
   serverOptimized?: VideoPlayerProps["serverOptimized"];
   serverAudioOwner: string;
   preparedLeaseTarget?: string | null;
+  ownedClaim?: OwnedHlsClaim;
+  castPlaybackUrl: string | null;
+  ownedPreparationPending: boolean;
   onServerLeaseExpired: (source: string, position: number, handoff: PlaybackHandoffState) => void;
   initialServerAudioTracks?: readonly ServerAudioTrack[];
   activeServerOptimizedQuality: ServerTranscodeQuality | null;
@@ -3169,10 +3480,6 @@ function WebviewPlayer({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const captionViewportRef = useRef<HTMLDivElement | null>(null);
   const captionControlsRef = useRef<HTMLDivElement | null>(null);
-  const setVideoElement = useCallback((element: HTMLVideoElement | null) => {
-    videoRef.current = element;
-    externalHandoffVideoRef.current = element;
-  }, [externalHandoffVideoRef]);
   const hlsRef = useRef<HlsInstance | null>(null);
   const lastAudibleVolumeRef = useRef(1);
   const playerPreferencesRef = useRef(playerPreferences);
@@ -3188,6 +3495,88 @@ function WebviewPlayer({
   const pausedForCastRef = useRef(false);
   const suspendedRef = useRef(suspended);
   suspendedRef.current = suspended;
+  const ownedReaderRef = useRef<OwnedHlsReader | null>(null);
+  const remoteReaderSuspendedRef = useRef(false);
+  const remoteOutputActiveRef = useRef(false);
+  const [remoteReaderSuspended, setRemoteReaderSuspended] = useState(false);
+  const browserAlias = !isTauri() ? ownedClaim?.browserPlaybackUrl ?? null : null;
+  const browserAliasBindingRef = useRef<{ video: HTMLVideoElement; source: string; primarySource?: string; alternative?: HTMLSourceElement } | null>(null);
+  const [browserAliasBound, setBrowserAliasBound] = useState(false);
+  const exactBrowserAliasBound = () => {
+    const binding = browserAliasBindingRef.current;
+    if (binding == null || ownedClaim?.retired || videoRef.current !== binding.video) return false;
+    return binding.alternative == null
+      ? binding.video.src === binding.source
+      : currentMsePrimarySource(binding.video) === binding.primarySource && binding.alternative.parentElement === binding.video && binding.alternative.src === binding.source;
+  };
+  const setVideoElement = useCallback((element: HTMLVideoElement | null) => {
+    const previous = ownedReaderRef.current;
+    if (previous != null && ownedClaim != null && previous.video !== element) {
+      queueMicrotask(() => checkDetachedOwnedHlsReader(ownedClaim, previous));
+    }
+    videoRef.current = element;
+    externalHandoffVideoRef.current = element;
+    if (element != null && ownedClaim != null && (previous == null || previous.video !== element)) {
+      const reader: OwnedHlsReader = {
+        video: element, closed: false, promptPending: false,
+        retained: () => (suspendedRef.current && (element.isConnected ||
+          castController.getSnapshot().phase === "loading" || castController.getSnapshot().phase === "casting")) || reader.promptPending ||
+          document.pictureInPictureElement === element ||
+          (element as WebKitVideoElement).webkitPresentationMode === "picture-in-picture" ||
+          (element as WebKitVideoElement).webkitCurrentPlaybackTargetIsWireless === true ||
+          element.remote?.state === "connecting" || element.remote?.state === "connected",
+        dispose: () => {},
+        refresh: () => {},
+        expired: () => {
+          if (videoRef.current !== element || !element.isConnected) return;
+          leaseExpiredCallbackRef.current(url, Math.max(0, element.currentTime + timelineOffsetRef.current), {
+            paused: element.paused, volume: element.volume, muted: element.muted, playbackRate: element.playbackRate,
+          });
+        },
+        close: () => {
+          reader.dispose();
+          // hls.destroy() can itself call media.load(). Remove the public
+          // alternative first so a closed reader cannot select it again.
+          reader.binding?.clearAlternative?.();
+          reader.binding?.teardown();
+          element.pause();
+          element.removeAttribute("src");
+          element.load();
+        },
+      };
+      ownedReaderRef.current = reader;
+      ownedClaim.readers.add(reader);
+      const changed = () => {
+        if (reader.closed) return;
+        const retained = reader.retained();
+        // Retention is broader than remote output. PiP, an open picker and a
+        // connecting receiver still use the local element's real play state.
+        remoteOutputActiveRef.current = (element as WebKitVideoElement).webkitCurrentPlaybackTargetIsWireless === true || element.remote?.state === "connected";
+        remoteReaderSuspendedRef.current = retained;
+        stallStateRef.current = { ...stallStateRef.current, suspended: suspendedRef.current || retained };
+        stallWatchdogRef.current?.update(stallStateRef.current);
+        if (videoRef.current === element && element.isConnected) setRemoteReaderSuspended(retained);
+        checkDetachedOwnedHlsReader(ownedClaim, reader);
+      };
+      reader.refresh = changed;
+      const events = ["enterpictureinpicture", "leavepictureinpicture", "webkitpresentationmodechanged", "webkitcurrentplaybacktargetiswirelesschanged"];
+      for (const event of events) element.addEventListener(event, changed);
+      const remote = element.remote;
+      const removeCastListener = isTauri() ? castController.subscribe(changed) : () => {};
+      for (const event of ["connecting", "connect", "disconnect"]) remote?.addEventListener?.(event, changed);
+      reader.dispose = () => {
+        removeCastListener();
+        for (const event of events) element.removeEventListener(event, changed);
+        for (const event of ["connecting", "connect", "disconnect"]) remote?.removeEventListener?.(event, changed);
+      };
+      retainOwnedHlsLease(ownedClaim);
+      changed();
+    }
+  }, [externalHandoffVideoRef, ownedClaim, url]);
+  useEffect(() => {
+    const reader = ownedReaderRef.current;
+    if (reader != null && ownedClaim != null) reader.refresh();
+  }, [ownedClaim, suspended]);
   const stallWatchdogRef = useRef<PlaybackStallWatchdog | null>(null);
   const startupReadyRef = useRef(false);
   const stallStateRef = useRef<PlaybackStallState>({
@@ -3319,11 +3708,11 @@ function WebviewPlayer({
     scrubbingRef.current = scrubbing;
     stallStateRef.current = {
       ...stallStateRef.current,
-      suspended,
+      suspended: suspended || remoteReaderSuspended,
       seeking: scrubbing || rendererSeekingRef.current,
     };
     stallWatchdogRef.current?.update(stallStateRef.current);
-  }, [scrubbing, suspended]);
+  }, [scrubbing, suspended, remoteReaderSuspended]);
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
       if (event.key === "Escape" && (ended || endPrediction.show)) {
@@ -3405,6 +3794,13 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     ownedPlaybackPausedRef.current = !shouldPlay;
+    if (ownedClaim?.retired) {
+      onPendingHandoffPausedChange(!shouldPlay);
+      setPaused(!shouldPlay);
+      setPlaying(shouldPlay);
+      onPausedChange(!shouldPlay);
+      return;
+    }
     if (pendingRecoverySeekRef.current != null) {
       pendingRecoverySeekRef.current.state.paused = !shouldPlay;
     }
@@ -3431,6 +3827,11 @@ function WebviewPlayer({
       if (!shouldPlay && !video.paused) video.pause();
       return;
     }
+    if (remoteOutputActiveRef.current) {
+      setPaused(!shouldPlay);
+      setPlaying(shouldPlay);
+      onPausedChange(!shouldPlay);
+    }
     if (shouldPlay) {
       try {
         void video.play().catch(() => {});
@@ -3440,7 +3841,7 @@ function WebviewPlayer({
     } else {
       video.pause();
     }
-  }, [onPausedChange, onPendingHandoffPausedChange]);
+  }, [onPausedChange, onPendingHandoffPausedChange, ownedClaim]);
 
   const applyDeferredHandoffPlayback = useCallback((
     video: HTMLVideoElement,
@@ -3464,6 +3865,10 @@ function WebviewPlayer({
   const togglePlaybackState = useCallback(() => {
     const video = videoRef.current;
     if (video == null) return;
+    if (ownedClaim?.retired || remoteOutputActiveRef.current) {
+      requestPlaybackState(ownedPlaybackPausedRef.current);
+      return;
+    }
     const pendingNativeSeek = pendingNativeHlsSeekRef.current;
     if (pendingNativeSeek != null) {
       const wantsPlayback = pendingNativeSeek.playbackIntent === "play" ||
@@ -3479,7 +3884,7 @@ function WebviewPlayer({
         (pendingIntent == null && sourceSwitchStateRef.current?.paused !== true)
       : !video.paused;
     requestPlaybackState(!wantsPlayback);
-  }, [requestPlaybackState]);
+  }, [requestPlaybackState, ownedClaim]);
 
   const startServerAudioInventoryLoad = useCallback((retryFailed: boolean) => {
     const load = serverAudioLoaderRef.current;
@@ -4487,16 +4892,17 @@ function WebviewPlayer({
       );
     }
 
+    const remote = video.remote;
     const supportsRemotePlayback = "remote" in HTMLMediaElement.prototype;
     let availabilityWatchId: number | null = null;
     let cancelled = false;
-    if (supportsRemotePlayback && typeof video.remote?.watchAvailability === "function") {
+    if (supportsRemotePlayback && typeof remote?.watchAvailability === "function") {
       try {
-        void video.remote.watchAvailability((available) => {
+        void remote.watchAvailability((available) => {
           if (!cancelled) setRemotePlaybackAvailable(available);
         }).then((id) => {
           if (cancelled) {
-            void video.remote.cancelWatchAvailability(id).catch(() => {});
+            void remote.cancelWatchAvailability(id).catch(() => {});
           } else {
             availabilityWatchId = id;
           }
@@ -4515,10 +4921,10 @@ function WebviewPlayer({
         );
       }
       if (availabilityWatchId != null) {
-        void video.remote.cancelWatchAvailability(availabilityWatchId).catch(() => {});
+        void remote.cancelWatchAvailability(availabilityWatchId).catch(() => {});
       }
     };
-  }, [underTauri]);
+  }, [underTauri, browserAliasBound]);
 
   // Report playback progress (throttled to ~once / 5s) + keep currentTime/
   // duration in sync for the custom scrub bar.
@@ -4662,7 +5068,7 @@ function WebviewPlayer({
         ...stallStateRef.current,
         paused: video.paused,
         seeking: video.seeking || rendererSeekingRef.current || scrubbingRef.current,
-        suspended: suspendedRef.current,
+        suspended: suspendedRef.current || remoteReaderSuspendedRef.current,
         ended: video.ended,
       };
       stallStateRef.current = liveState;
@@ -4695,13 +5101,14 @@ function WebviewPlayer({
       started: false,
       paused: true,
       seeking: false,
-      suspended: suspendedRef.current,
+      suspended: suspendedRef.current || remoteReaderSuspendedRef.current,
       ended: false,
       tearingDown: false,
     };
 
     const sync = (patch: Partial<PlaybackStallState> = {}) => {
-      stallStateRef.current = { ...stallStateRef.current, ...patch };
+      stallStateRef.current = { ...stallStateRef.current, ...patch,
+        suspended: suspendedRef.current || remoteReaderSuspendedRef.current };
       watchdog.update(stallStateRef.current);
     };
     const bufferedFrontier = () => {
@@ -4872,6 +5279,7 @@ function WebviewPlayer({
       return true;
     };
     const onTimeUpdate = () => {
+      if (ownedClaim?.retired) return;
       // A failed decoder's reset clock is not confirmed playback or history.
       if (video.error != null) return;
       if (pendingNativeHlsSeekRef.current != null && !confirmPendingNativeHlsSeek(video)) {
@@ -5024,6 +5432,7 @@ function WebviewPlayer({
       );
     };
     const onVideoEnded = () => {
+      if (ownedClaim?.retired) return;
       if (exactHandoffPendingRef.current) {
         applyResume();
         return;
@@ -5072,6 +5481,13 @@ function WebviewPlayer({
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
     const onPause = () => {
+      if (ownedClaim?.retired) return;
+      if (remoteOutputActiveRef.current) {
+        setPaused(ownedPlaybackPausedRef.current);
+        setPlaying(!ownedPlaybackPausedRef.current);
+        onPausedChange(ownedPlaybackPausedRef.current);
+        return;
+      }
       if (video.error == null && !suspendedRef.current && !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null) {
         ownedPlaybackPausedRef.current = true;
       }
@@ -5099,6 +5515,7 @@ function WebviewPlayer({
       }
     };
     const onPlay = () => {
+      if (remoteOutputActiveRef.current) return;
       if (video.error == null) ownedPlaybackPausedRef.current = false;
       if (
         suspendedRef.current ||
@@ -5272,6 +5689,7 @@ function WebviewPlayer({
     onAbsolutePositionChange,
     onPausedChange,
     onVerifiedPlaybackProgress,
+    ownedClaim,
     scrobbleContext,
     url,
   ]);
@@ -5282,11 +5700,11 @@ function WebviewPlayer({
   }, [url]);
 
   useEffect(() => {
-    if (suspended || startupReadyRef.current) return;
+    if (suspended || remoteReaderSuspended || ownedPreparationPending || startupReadyRef.current) return;
     const timeoutMs = webviewStartupTimeout(engine, url);
     let active = true;
     const timer = window.setTimeout(() => {
-      if (!active || suspendedRef.current || startupReadyRef.current) return;
+      if (!active || suspendedRef.current || remoteReaderSuspendedRef.current || startupReadyRef.current) return;
       onPlaybackErrorRef.current(
         "Playback did not become ready. Retry playback, choose another source, or open this stream externally.",
         exactHandoffPendingRef.current,
@@ -5296,11 +5714,11 @@ function WebviewPlayer({
       active = false;
       window.clearTimeout(timer);
     };
-  }, [engine, suspended, url]);
+  }, [engine, ownedPreparationPending, remoteReaderSuspended, suspended, url]);
 
   const needsServerPreparation = isHls && serverOptimized != null && isTrustedServerHlsManifestURL(url);
   const [initialLeasePreparation, setInitialLeasePreparation] = useState<{ source: string; target: string | null } | null>(null);
-  const leasePreparationReady = !needsServerPreparation || preparedLeaseTarget !== undefined || initialLeasePreparation?.source === url;
+  const leasePreparationReady = !ownedPreparationPending && (!needsServerPreparation || preparedLeaseTarget !== undefined || initialLeasePreparation?.source === url);
   const leaseTarget = preparedLeaseTarget !== undefined
     ? preparedLeaseTarget
     : initialLeasePreparation?.source === url ? initialLeasePreparation.target : null;
@@ -5312,7 +5730,7 @@ function WebviewPlayer({
   const leaseLastAttemptRef = useRef<{ target: string; at: number } | null>(null);
 
   useEffect(() => {
-    if (!needsServerPreparation || preparedLeaseTarget !== undefined) return;
+    if (serverOptimized?.ownership != null || !needsServerPreparation || preparedLeaseTarget !== undefined) return;
     const video = videoRef.current;
     const controller = new AbortController();
     let active = true;
@@ -5346,11 +5764,11 @@ function WebviewPlayer({
       }
     });
     return () => { active = false; controller.abort(); };
-  }, [needsServerPreparation, preparedLeaseTarget, url]);
+  }, [needsServerPreparation, preparedLeaseTarget, serverOptimized?.ownership, url]);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (video == null || !leasePreparationReady || leaseTarget == null || suspended || ended || serverOptimizationPending) return;
+    if (ownedClaim != null || video == null || !leasePreparationReady || leaseTarget == null || suspended || ended || serverOptimizationPending) return;
     let active = true;
     let dormant = false;
     let terminal = false;
@@ -5409,12 +5827,16 @@ function WebviewPlayer({
       window.removeEventListener("pageshow", onPageShow);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [ended, leasePreparationReady, leaseTarget, serverOptimizationPending, suspended, url]);
+  }, [ended, leasePreparationReady, leaseTarget, ownedClaim, serverOptimizationPending, suspended, url]);
 
   // Wire hls.js for HLS streams when the browser can't play them natively.
   useEffect(() => {
     const video = videoRef.current;
-    if (video == null || !leasePreparationReady) return;
+    if (video == null || !leasePreparationReady || ownedClaim?.retired) return;
+    const reader = ownedReaderRef.current;
+    if (reader?.binding != null) return;
+    const binding: NonNullable<OwnedHlsReader["binding"]> = { teardown: () => {} };
+    if (reader != null) reader.binding = binding;
     nativeExactHlsFragmentRef.current = false;
 
     if (!isHls) {
@@ -5434,10 +5856,14 @@ function WebviewPlayer({
         video.removeAttribute("crossorigin");
       }
       const sourceUrl = requiresExactHandoffRef.current
-        ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
-        : url;
+        ? nativeHlsSourceWithExactStart(browserAlias ?? url, startPositionRef.current)
+        : browserAlias ?? url;
       nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
       if (video.src !== sourceUrl) video.src = sourceUrl;
+      if (browserAlias != null) {
+        browserAliasBindingRef.current = { video, source: sourceUrl };
+        setBrowserAliasBound(true);
+      }
       return;
     }
 
@@ -5488,10 +5914,31 @@ function WebviewPlayer({
         };
       }
     };
+    const clearAlternative = () => {
+      const alternative = binding.alternative;
+      if (alternative == null) return;
+      video.disableRemotePlayback = true;
+      alternative.remove();
+      binding.alternative = undefined;
+      if (browserAliasBindingRef.current?.alternative === alternative) {
+        browserAliasBindingRef.current = null;
+        if (videoRef.current === video && video.isConnected) setBrowserAliasBound(false);
+      }
+    };
+    binding.clearAlternative = clearAlternative;
+    const teardown = () => {
+      cancelled = true;
+      clearAlternative();
+      window.clearTimeout(retryTimer);
+      removeCaptionListeners();
+      instance?.destroy();
+      if (hlsRef.current === instance) hlsRef.current = null;
+    };
+    binding.teardown = teardown;
     void import("hls.js").then(({ default: Hls }) => {
       // The effect can be torn down (or the URL swapped) while the chunk is in
       // flight; without this we would attach a player to a stale <video>.
-      if (cancelled) return;
+      if (cancelled || ownedClaim?.retired || ownedReaderRef.current?.closed) return;
       const element = videoRef.current;
       if (element == null) return;
       if (!Hls.isSupported()) {
@@ -5503,10 +5950,14 @@ function WebviewPlayer({
             element.removeAttribute("crossorigin");
           }
           const sourceUrl = requiresExactHandoffRef.current
-            ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
-            : url;
+            ? nativeHlsSourceWithExactStart(browserAlias ?? url, startPositionRef.current)
+            : browserAlias ?? url;
           nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
           if (element.src !== sourceUrl) element.src = sourceUrl;
+          if (browserAlias != null) {
+            browserAliasBindingRef.current = { video: element, source: sourceUrl };
+            if (videoRef.current === element) setBrowserAliasBound(true);
+          }
           return;
         }
         onPlaybackErrorRef.current(
@@ -5551,6 +6002,21 @@ function WebviewPlayer({
         },
       });
       hlsRef.current = instance;
+      if (browserAlias != null) instance.on(Hls.Events.MEDIA_ATTACHED, () => {
+        const primarySource = currentMsePrimarySource(element);
+        if (cancelled || reader?.closed || primarySource == null) return;
+        clearAlternative();
+        // Append after hls.js's blob, including its ManagedMediaSource child.
+        // This captured node is not React-owned and survives retained unmounts.
+        const alternative = document.createElement("source");
+        alternative.type = "application/vnd.apple.mpegurl";
+        alternative.src = browserAlias;
+        element.appendChild(alternative);
+        binding.alternative = alternative;
+        browserAliasBindingRef.current = { video: element, source: browserAlias, primarySource, alternative };
+        element.disableRemotePlayback = false;
+        if (videoRef.current === element) setBrowserAliasBound(true);
+      });
       const refreshCaptions = () => {
         if (!cancelled && hlsRef.current === instance) captionControllerRef.current?.refresh();
       };
@@ -5563,7 +6029,7 @@ function WebviewPlayer({
       };
       refreshCaptions();
       instance.on(Hls.Events.ERROR, (_event, data) => {
-        if (cancelled || !data.fatal || instance == null) return;
+        if (cancelled || reader?.closed || !data.fatal || instance == null) return;
         const action = nextHlsRecovery(data.type, recovery);
         if (action === "retry-network") {
           recovery.networkRetries += 1;
@@ -5590,6 +6056,7 @@ function WebviewPlayer({
         if (action === "recover-media") {
           recovery.mediaRecoveries += 1;
           recordDiagnostic("player", "hls.media_recovery", "warning");
+          clearAlternative();
           instance.recoverMediaError();
           return;
         }
@@ -5600,6 +6067,7 @@ function WebviewPlayer({
             ? "The stream stopped responding after two retries. Try again or choose another stream."
             : "The stream could not be decoded. Try again or choose another stream.",
           exactHandoffPendingRef.current,
+          () => captureRecoverySnapshot(video),
         );
       });
       instance.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -5673,16 +6141,16 @@ function WebviewPlayer({
       }
     });
     return () => {
-      cancelled = true;
-      window.clearTimeout(retryTimer);
-      removeCaptionListeners();
-      instance?.destroy();
-      if (hlsRef.current === instance) hlsRef.current = null;
+      if (reader != null && ownedClaim != null) {
+        queueMicrotask(() => checkDetachedOwnedHlsReader(ownedClaim, reader));
+        return;
+      }
+      teardown();
       setHlsLevels([]);
       setHlsAudioTracks([]);
       setHlsAudioInventoryKnown(false);
     };
-  }, [engine, url, isHls, leasePreparationReady]);
+  }, [engine, url, isHls, leasePreparationReady, ownedClaim, browserAlias]);
 
   const beginConfirmedNativeHlsSeek = (
     video: HTMLVideoElement,
@@ -5774,7 +6242,7 @@ function WebviewPlayer({
   };
 
   const currentRecoveryState = (video: HTMLVideoElement): PlaybackHandoffState => ({
-    paused: video.error == null ? video.paused : ownedPlaybackPausedRef.current,
+    paused: video.error == null && !remoteOutputActiveRef.current ? video.paused : ownedPlaybackPausedRef.current,
     volume: Number.isFinite(video.volume) ? Math.min(1, Math.max(0, video.volume)) : 1,
     muted: video.muted,
     playbackRate: Number.isFinite(video.playbackRate) && video.playbackRate > 0 ? video.playbackRate : 1,
@@ -6016,7 +6484,7 @@ function WebviewPlayer({
 
   const showBrowserCastPicker = () => {
     const video = videoRef.current;
-    if (video == null) return;
+    if (video == null || castPlaybackUrl == null || (ownedClaim != null && !exactBrowserAliasBound())) return;
     const webkitVideo = video as WebKitVideoElement;
     if (
       airPlayAvailable &&
@@ -6035,8 +6503,23 @@ function WebviewPlayer({
       typeof video.remote?.prompt === "function"
     ) {
       try {
-        void video.remote.prompt().catch(() => {});
+        const reader = ownedReaderRef.current;
+        if (reader != null) {
+          reader.promptPending = true;
+          reader.refresh();
+        }
+        void video.remote.prompt().catch(() => {}).finally(() => {
+          if (reader != null && ownedClaim != null) {
+            reader.promptPending = false;
+            reader.refresh();
+          }
+        });
       } catch {
+        const reader = ownedReaderRef.current;
+        if (reader != null && ownedClaim != null) {
+          reader.promptPending = false;
+          reader.refresh();
+        }
         // The route can disappear just before the prompt opens.
       }
     }
@@ -6640,6 +7123,7 @@ function WebviewPlayer({
           onClick={handleVideoClick}
           onDoubleClick={handleVideoDoubleClick}
           onError={(event) => {
+            if (ownedClaim?.retired) return;
             // hls.js owns its media errors and bounded recovery. Native HLS and
             // direct files still surface the media element's error here.
             if (isHls && hlsRef.current != null) {
@@ -6855,13 +7339,13 @@ function WebviewPlayer({
               <Icon name="captions" size={17} />
               {(subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null) && <span className="captions-active-dot" />}
             </button>
-            {underTauri ? (
+            {underTauri && castPlaybackUrl != null ? (
               <CastControls
-                media={{ url, title, subtitleUrl: castSubtitleUrl }}
+                media={{ url: castPlaybackUrl, title, subtitleUrl: castSubtitleUrl }}
                 buttonClassName="chip player-osd-icon-button player-mobile-optional"
                 onLocalPlaybackChange={onCastLocalPlaybackChange}
               />
-            ) : browserCastAvailable ? (
+            ) : !underTauri && castPlaybackUrl != null && browserCastAvailable && (ownedClaim == null || (browserAliasBound && exactBrowserAliasBound())) ? (
               <button
                 type="button"
                 className="chip player-osd-icon-button player-mobile-optional"
@@ -7041,13 +7525,13 @@ function WebviewPlayer({
                   <span className="player-touch-action-label">Screen</span>
                   <span className="player-touch-action-value">{videoFit === "contain" ? "Fit" : videoFit === "cover" ? "Fill" : "Stretch"}</span>
                 </button>
-                {underTauri ? (
+                {underTauri && castPlaybackUrl != null ? (
                   <CastControls
-                    media={{ url, title, subtitleUrl: castSubtitleUrl }}
+                    media={{ url: castPlaybackUrl, title, subtitleUrl: castSubtitleUrl }}
                     buttonClassName="chip player-touch-action player-mobile-optional player-touch-cast"
                     onLocalPlaybackChange={onCastLocalPlaybackChange}
                   />
-                ) : browserCastAvailable ? (
+                ) : !underTauri && castPlaybackUrl != null && browserCastAvailable && (ownedClaim == null || (browserAliasBound && exactBrowserAliasBound())) ? (
                   <button
                     type="button"
                     className="chip player-touch-action player-mobile-optional"
@@ -7344,7 +7828,6 @@ function WebviewPlayer({
                   type="button"
                   className={`chip${activeServerOptimizedQuality == null ? " is-active" : ""}`}
                   aria-pressed={activeServerOptimizedQuality == null}
-                  disabled={serverOptimizationPending}
                   onClick={selectDeviceOriginal}
                 >
                   Device Original

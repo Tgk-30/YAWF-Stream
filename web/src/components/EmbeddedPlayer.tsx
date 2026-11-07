@@ -156,6 +156,9 @@ interface Props {
    * only pauses before invoking it; target and credential policy stay upstream. */
   onOpenExternalPlayer?: () => void | Promise<void>;
   externalActionStatus?: string | null;
+  /** Opaque target supplied upstream. Null withholds casting; omitted retains
+   * the original local-media fallback without changing native playback. */
+  castPlaybackUrl?: string | null;
   /** Immutable TMDB playback identity, snapshotted by Detail when Play opens. */
   scrobbleContext?: TraktScrobbleContext | null;
   onClose: () => void;
@@ -593,9 +596,11 @@ export function EmbeddedPlayer({
   onAbsolutePositionChange,
   onOpenExternalPlayer,
   externalActionStatus = null,
+  castPlaybackUrl,
   scrobbleContext = null,
   onClose,
 }: Props) {
+  const castTarget = castPlaybackUrl === undefined ? url : castPlaybackUrl;
   const [error, setError] = useState<string | null>(null);
   const [manualRetryPending, setManualRetryPending] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -2377,11 +2382,13 @@ export function EmbeddedPlayer({
             </div>
 
             <div className="embed-buttons-right">
-              <CastControls
-                media={{ url, title, subtitleUrl: activeSubtitleUrl }}
-                buttonClassName="embed-icon-btn"
-                onLocalPlaybackChange={setCastSuspended}
-              />
+              {castTarget != null && (
+                <CastControls
+                  media={{ url: castTarget, title, subtitleUrl: activeSubtitleUrl }}
+                  buttonClassName="embed-icon-btn"
+                  onLocalPlaybackChange={setCastSuspended}
+                />
+              )}
               {onPlayNext != null && (
                 <button
                   type="button"

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import * as ts from "typescript";
 
 // ── Dep mocks ────────────────────────────────────────────────────────────────
 // serverApi depends on serverMode (base URL) and serverSession (CSRF + 401
@@ -1334,6 +1337,32 @@ describe("server setup helpers", () => {
 
 
 describe("server HLS generation retention", () => {
+  it("renews legacy and owned leases without Array.at in an isolated older-engine realm", async () => {
+    const text = readFileSync(new URL("./serverApi.ts", import.meta.url), "utf8");
+    const file = ts.createSourceFile("serverApi.ts", text, ts.ScriptTarget.Latest, true);
+    const functions = file.statements.filter((node) => ts.isFunctionDeclaration(node) &&
+      (node.name?.text === "serverHlsLeaseTarget" || node.name?.text === "renewServerHlsLease"));
+    expect(functions).toHaveLength(2);
+    const code = ts.transpileModule(functions.map((node) => node.getText(file)).join("\n"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+    }).outputText;
+    const fetched: string[] = [];
+    const renew = runInNewContext(`Array.prototype.at = undefined;\n${code}\nexports.renewServerHlsLease`, {
+      exports: {}, URL, URLSearchParams,
+      configuredServerURL: () => "https://server.example",
+      window: { location: { origin: "https://server.example" } },
+      fetch: async (url: string, init: RequestInit) => {
+        expect(init).toMatchObject({ method: "HEAD", credentials: "include", redirect: "error" });
+        fetched.push(url); return { status: 200 };
+      },
+    }) as typeof api.renewServerHlsLease;
+    const legacy = "https://server.example/api/stream/one/480p.m3u8?generation=transcode-actual";
+    const owned = `${legacy}&preparation=prep_${"a".repeat(32)}`;
+    await expect(renew(legacy, new AbortController().signal)).resolves.toBe(200);
+    await expect(renew(owned, new AbortController().signal)).resolves.toBe(200);
+    expect(fetched).toEqual([legacy, owned]);
+  });
+
   const master = "https://server.example/yawf/api/stream/one/index.m3u8?start=46#t=0.001";
   const manifest = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000\n480p.m3u8?generation=transcode-actual\n";
   it("binds the actual child generation under the configured mount without requested clock parameters", () => {
@@ -1389,4 +1418,250 @@ describe("server HLS generation retention", () => {
     expect(notifyUnauthorized).not.toHaveBeenCalled();
   });
 
+});
+
+describe("issued server HLS preparation ownership", () => {
+  const id = `prep_${"a".repeat(32)}`;
+  const generation = "transcode-owned";
+  const source = "https://server.example/api/stream/one/index.m3u8?quality=360p&start=73";
+  const manifest = `#EXTM3U\n360p.m3u8?generation=${generation}&preparation=${id}\n`;
+  const issued = async (signal = new AbortController().signal) => {
+    readCsrfToken.mockReturnValue("fixture-csrf");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ preparationId: id }) as never);
+    return api.createServerHlsPreparation(source, signal);
+  };
+
+  it("issues metadata only before an owned GET and retains the exact seek parameters", async () => {
+    const handle = await issued();
+    const url = new URL(handle.url);
+    expect(url.searchParams.get("start")).toBe("73");
+    expect(url.searchParams.get("quality")).toBe("360p");
+    expect(url.searchParams.get("preparation")).toBe(id);
+    expect(url.searchParams.has("generation")).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastCall()).toMatchObject({ url: "https://server.example/api/stream/one/preparations", init: {
+      method: "POST", body: "{}", credentials: "include", redirect: "error", cache: "no-store",
+      headers: { "x-csrf-token": "fixture-csrf" },
+    } });
+  });
+
+  it.each([
+    source.replace("server.example", "foreign.example"),
+    source.replace("https://", "https://user:password@"),
+    source.replace("/api/stream/", "/elsewhere/api/stream/"),
+    `${source}&preparation=already-issued`,
+    `${source}&generation=transcode-old`,
+    `${source}&redirect=https://foreign.example`,
+  ])("rejects an untrusted or previously owned input %s before transmission", async (url) => {
+    readCsrfToken.mockReturnValue("fixture-csrf");
+    await expect(api.createServerHlsPreparation(url, new AbortController().signal)).rejects.toThrow("Untrusted");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses metadata issuance without the authenticated session CSRF value", async () => {
+    await expect(api.createServerHlsPreparation(source, new AbortController().signal)).rejects.toThrow("session");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not allocate for an already aborted attempt", async () => {
+    readCsrfToken.mockReturnValue("fixture-csrf");
+    const controller = new AbortController(); controller.abort();
+    await expect(api.createServerHlsPreparation(source, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("cleans a late issued response after its caller has aborted", async () => {
+    readCsrfToken.mockReturnValue("fixture-csrf");
+    let resolve!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied" }) as never);
+    const controller = new AbortController();
+    const pending = api.createServerHlsPreparation(source, controller.signal);
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort();
+    resolve(jsonResponse({ preparationId: id }) as Response);
+    await rejected;
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({ action: "cancel" });
+    expect(lastCall().url.endsWith(`/preparations/${id}`)).toBe(true);
+  });
+
+  it.each(["foreign-id", "", null])("requires a valid server-issued ticket (%j)", async (preparationId) => {
+    readCsrfToken.mockReturnValue("fixture-csrf");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ preparationId }) as never);
+    await expect(api.createServerHlsPreparation(source, new AbortController().signal)).rejects.toThrow("valid playback preparation");
+  });
+
+  it("requires matching ownership and generation response headers", async () => {
+    const handle = await issued();
+    expect(handle.generationFromResponse(new Response("", { headers: {
+      "x-yawf-transcode-preparation": id, "x-yawf-transcode-generation": generation,
+    } }))).toBe(generation);
+    const invalidHeaders: Record<string, string>[] = [
+      {},
+      { "x-yawf-transcode-preparation": "foreign", "x-yawf-transcode-generation": generation },
+      { "x-yawf-transcode-preparation": id, "x-yawf-transcode-generation": "../outside" },
+    ];
+    for (const headers of invalidHeaders) {
+      expect(() => handle.generationFromResponse(new Response("", { headers }))).toThrow("confirm owned");
+    }
+  });
+
+  it("activates only the confirmed generation and returns a pinned owned source and actual lease", async () => {
+    const handle = await issued();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied", generation }) as never);
+    const active = await handle.activate(generation, manifest);
+    expect(new URL(active.url).searchParams.get("generation")).toBe(generation);
+    expect(new URL(active.url).searchParams.get("preparation")).toBe(id);
+    expect(active.leaseTarget).toBe(`https://server.example/api/stream/one/360p.m3u8?generation=${generation}&preparation=${id}`);
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({ action: "activate", generation });
+    expect(lastCall().init.redirect).toBe("error");
+  });
+
+  it.each([
+    ["missing ticket", manifest.replace(`&preparation=${id}`, "")],
+    ["wrong ticket", manifest.replace(id, `prep_${"b".repeat(32)}`)],
+    ["wrong generation", manifest.replace(generation, "transcode-other")],
+    ["foreign origin", manifest.replace("360p.m3u8", "https://foreign.example/360p.m3u8")],
+    ["duplicate generation", manifest.replace(`generation=${generation}`, `generation=${generation}&generation=${generation}`)],
+    ["unexpected query", manifest.replace(`generation=${generation}`, `generation=${generation}&extra=1`)],
+  ])("rejects altered owned media references before activation: %s", async (_label, body) => {
+    const handle = await issued();
+    await expect(handle.activate(generation, body)).rejects.toThrow("Invalid owned playback manifest");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("deduplicates pending cancellation and rejects later activation locally", async () => {
+    const handle = await issued();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied" }) as never);
+    await Promise.all([handle.cancel(), handle.cancel()]);
+    await expect(handle.activate(generation, manifest)).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({ action: "cancel" });
+  });
+
+  it.each(["cancel", "release"] as const)("allows an explicit cleanup retry after transient %s failure without reactivation", async (action) => {
+    const handle = await issued();
+    if (action === "release") {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied", generation }) as never);
+      await handle.activate(generation, manifest);
+    }
+    const cleanup = () => action === "release" ? handle.release(generation) : handle.cancel();
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, { status: 503 }) as never);
+    const beforeFailure = fetchMock.mock.calls.length;
+    const outcomes = await Promise.allSettled([cleanup(), cleanup()]);
+    expect(outcomes.every((outcome) => outcome.status === "rejected")).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(beforeFailure + 1);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "gone" }) as never);
+    await expect(cleanup()).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(beforeFailure + 2);
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({ action, ...(action === "release" ? { generation } : {}) });
+    await expect(handle.activate(generation, manifest)).rejects.toMatchObject({ name: "AbortError" });
+    await cleanup();
+    expect(fetchMock).toHaveBeenCalledTimes(beforeFailure + 2);
+  });
+
+  it("releases an ambiguous activation without returning a late media source", async () => {
+    const handle = await issued();
+    let resolve!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied" }) as never);
+    const pending = handle.activate(generation, manifest);
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    try {
+      await handle.cancel();
+      expect(JSON.parse(String(lastCall().init.body))).toEqual({ action: "release", generation });
+    } finally {
+      resolve(jsonResponse({ status: "applied", generation }) as Response);
+      await rejected;
+    }
+  });
+
+  it("fails closed on a substituted activation acknowledgment and cleans its exact generation", async () => {
+    const handle = await issued();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied", generation: "transcode-other" }) as never);
+    await expect(handle.activate(generation, manifest)).rejects.toThrow("requested playback generation");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied" }) as never);
+    await handle.cancel();
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({ action: "release", generation });
+  });
+
+  it("releases a detached generation once and rejects a wrong generation", async () => {
+    const handle = await issued();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied", generation }) as never);
+    await handle.activate(generation, manifest);
+    await expect(handle.release("transcode-other")).rejects.toThrow("release generation");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "gone" }) as never);
+    await Promise.all([handle.release(generation), handle.release(generation)]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({ action: "release", generation });
+  });
+
+  it("never sends a new server's CSRF value to an old cleanup endpoint", async () => {
+    const handle = await issued();
+    configuredServerURL.mockReturnValue("https://new.example");
+    readCsrfToken.mockReturnValue("new-server-csrf");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied" }) as never);
+    await handle.cancel();
+    expect(lastCall().url).toBe(`https://server.example/api/stream/one/preparations/${id}`);
+    expect(lastCall().init.headers).toMatchObject({ "x-csrf-token": "fixture-csrf" });
+  });
+
+  it("does not invalidate a different current server session after stale cleanup401", async () => {
+    const handle = await issued();
+    configuredServerURL.mockReturnValue("https://new.example");
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, { status: 401 }) as never);
+    await expect(handle.cancel()).rejects.toThrow("401");
+    expect(notifyUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it("renews an owned child using its actual generation and ticket without reading media", async () => {
+    const handle = await issued();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "applied", generation }) as never);
+    const active = await handle.activate(generation, manifest);
+    fetchMock.mockResolvedValueOnce({ status: 200 } as never);
+    await expect(api.renewServerHlsLease(active.leaseTarget!, new AbortController().signal)).resolves.toBe(200);
+    expect(lastCall().init).toMatchObject({ method: "HEAD", credentials: "include", redirect: "error" });
+    expect(lastCall().url).toBe(active.leaseTarget);
+  });
+});
+
+describe("owned browser transport", () => {
+  const preparation = `prep_${"a".repeat(32)}`;
+  const generation = "transcode-owned";
+  const owned = `https://server.example/api/stream/one/index.m3u8?quality=360p&start=73&generation=${generation}&preparation=${preparation}`;
+  const capability = `https://server.example/api/external-stream/one/${"t".repeat(43)}`;
+
+  it("prebinds the same generation without changing quality, position or credentials", () => {
+    expect(api.serverOwnedBrowserPlaybackURL(owned, capability)).toBe(`${capability}/index.m3u8?generation=${generation}&preparation=${preparation}`);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("keeps an exact configured reverse-proxy mount", () => {
+    configuredServerURL.mockReturnValue("https://server.example/yawf/");
+    const mounted = (url: string) => url.replace("/api/", "/yawf/api/");
+    expect(api.serverOwnedBrowserPlaybackURL(mounted(owned), mounted(capability))).toBe(`${mounted(capability)}/index.m3u8?generation=${generation}&preparation=${preparation}`);
+    expect(api.serverOwnedBrowserPlaybackURL(owned, capability)).toBeNull();
+  });
+  it.each([
+    ["foreign-source", owned.replace("server.example", "foreign.example"), capability],
+    ["foreign-capability", owned, capability.replace("server.example", "foreign.example")],
+    ["wrong-stream", owned, capability.replace("/one/", "/other/")],
+    ["foreign-mount", owned, capability.replace("/api/", "/other/api/")],
+    ["source-userinfo", owned.replace("https://", "https://user:password@"), capability],
+    ["capability-userinfo", owned, capability.replace("https://", "https://user:password@")],
+    ["missing-generation", owned.replace(`&generation=${generation}`, ""), capability],
+    ["missing-ticket", owned.replace(`&preparation=${preparation}`, ""), capability],
+    ["duplicate-generation", `${owned}&generation=${generation}`, capability],
+    ["duplicate-ticket", `${owned}&preparation=${preparation}`, capability],
+    ["source-query-injection", `${owned}&url=https://foreign.example`, capability],
+    ["source-hash", `${owned}#fragment`, capability],
+    ["capability-query", owned, `${capability}?url=https://foreign.example`],
+    ["capability-hash", owned, `${capability}#fragment`],
+    ["capability-extra-path", owned, `${capability}/index.m3u8`],
+    ["invalid-ticket", owned.replace(preparation, "unknown"), capability],
+    ["invalid-generation", owned.replace(generation, "unknown"), capability],
+    ["missing-capability", owned, null],
+  ])("rejects untrusted transport %s", (_label, source, external) => {
+    expect(api.serverOwnedBrowserPlaybackURL(source!, external)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

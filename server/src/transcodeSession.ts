@@ -15,7 +15,7 @@ import { basename, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { AppDatabase } from "./db.js";
 import type { ServerConfig } from "./types.js";
-import { TRANSCODE_SUBTITLE_PLAYLIST_PATTERN } from "./transcodeHls.js";
+import { isTranscodeAssetName, TRANSCODE_SUBTITLE_PLAYLIST_PATTERN } from "./transcodeHls.js";
 import type {
   Transcoder,
   TranscoderAudioTrack,
@@ -39,6 +39,9 @@ const FAILED_PROBE_RETRY_COOLDOWN_MS = 5_000;
 const MAX_PROBE_CACHE_ENTRIES = 64;
 const PROBE_FAST_CALLER_TIMEOUT_MS = 6_000;
 const PROBE_RETRY_CALLER_TIMEOUT_MS = 17_000;
+const UNUSED_PREPARATION_MS = 60_000;
+const MAX_SESSION_PREPARATIONS = 64;
+const MAX_PREPARATIONS = 4096;
 
 /** Legacy client profile names retained for older app versions. */
 export type TranscodeClientProfile = "adaptive" | "high" | "data-saver";
@@ -98,6 +101,25 @@ export interface TranscodeSourceInfoOptions {
 
 export interface TranscodeJobLifecycle {
   signal?: AbortSignal;
+}
+
+export interface TranscodePreparedJob {
+  dir: string;
+  generation: string;
+  /** Hold disposable output through the master response without activating it. */
+  release(): void;
+}
+
+export interface TranscodePreparationAsset {
+  dir: string;
+  release(): void;
+}
+
+export type TranscodePreparationActionResult =
+  | "applied" | "gone" | "generation-mismatch" | "not-ready" | "active";
+
+function preparationGone(): Error {
+  return Object.assign(new Error("The transcode preparation is no longer available."), { statusCode: 410 });
 }
 
 function preparationCancelled(): Error {
@@ -359,10 +381,30 @@ interface Job {
   assetGeneration: string;
   startSeconds: number;
   subtitleVideoMpegTsTimestamp: number | null;
+  claims: Set<PreparationTicket>;
+  readers: number;
+  legacyProtected: boolean;
+}
+
+interface PreparationTicket {
+  id: string;
+  sessionId: string;
+  createdAt: number;
+  state: "unused" | "pending" | "ready" | "active";
+  fingerprint?: string;
+  upstreamUrl?: string;
+  job?: Job;
+  controller?: AbortController;
+  request?: Promise<string>;
+  waiters: Set<symbol>;
+  delivered: boolean;
 }
 
 interface PendingJob {
   fingerprint: string;
+  owned?: boolean;
+  tickets: Set<PreparationTicket>;
+  legacyProtected: boolean;
   promise: Promise<string>;
   controller: AbortController;
   waiters: Set<symbol>;
@@ -388,6 +430,10 @@ export class TranscodeRegistry {
   private lifecycle: "open" | "closing" | "closed" = "open";
   private stopPromise: Promise<void> | null = null;
   private readonly jobs = new Map<string, Job>();
+  private readonly preparations = new Map<string, Map<string, PreparationTicket>>();
+  private readonly ownedJobs = new Map<string, Map<string, Job>>();
+  private readonly ownedCleanup = new Map<string, Set<Promise<void>>>();
+  private ownedCacheReady: Promise<string> | null = null;
   /** Child processes remain here until Node reports exit or close.
    * Completed jobs keep their cached assets in `jobs`, but no longer consume
    * an execution slot. Conversely, a disposed child still consumes a slot
@@ -475,15 +521,23 @@ export class TranscodeRegistry {
     for (const [id, probe] of this.streamProbes) {
       this.invalidateProbe(id, probe);
     }
-    const pendingCreations = [...this.pending.values()].map((entry) => entry.promise);
+    const pendingCreations = [
+      ...[...this.pending.values()].map((entry) => entry.promise),
+      ...[...this.preparations.values()].flatMap((tickets) =>
+        [...tickets.values()].flatMap((ticket) => ticket.request == null ? [] : [ticket.request])),
+    ];
     const ids = new Set([
       ...this.jobs.keys(),
       ...this.pending.keys(),
       ...this.retired.keys(),
+      ...this.ownedJobs.keys(),
+      ...this.preparations.keys(),
+      ...this.ownedCleanup.keys(),
     ]);
     try {
       await Promise.all([...ids].map((id) => this.kill(id)));
       await Promise.all(pendingCreations.map((creation) => creation.catch(() => undefined)));
+      await Promise.all([...this.ownedCleanup.values()].flatMap((entries) => [...entries]));
     } finally {
       this.lifecycle = "closed";
     }
@@ -713,6 +767,24 @@ export class TranscodeRegistry {
   private reap(): void {
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
+    this.expireUnusedPreparations(now);
+    for (const [id, entries] of this.ownedJobs) {
+      const row = this.db.sqlite
+        .prepare("SELECT revoked_at, expires_at FROM stream_sessions WHERE id = ?")
+        .get(id) as { revoked_at: string | null; expires_at: string | null } | undefined;
+      if (row == null || row.revoked_at != null || (row.expires_at != null && row.expires_at <= nowIso)) {
+        void this.kill(id);
+        continue;
+      }
+      for (const job of [...entries.values()]) {
+        if (now - job.lastAccess > IDLE_MS && job.readers === 0) {
+          for (const ticket of [...job.claims]) this.removePreparation(ticket);
+          job.claims.clear();
+          this.forgetOwnedJob(id, job);
+          void this.disposeOwnedJob(id, job);
+        }
+      }
+    }
     for (const [id, job] of [...this.jobs.entries()]) {
       const row = this.db.sqlite
         .prepare("SELECT revoked_at, expires_at FROM stream_sessions WHERE id = ?")
@@ -721,7 +793,7 @@ export class TranscodeRegistry {
         row == null ||
         row.revoked_at != null ||
         (row.expires_at != null && row.expires_at <= nowIso) ||
-        now - job.lastAccess > IDLE_MS;
+        (now - job.lastAccess > IDLE_MS && job.readers === 0);
       if (dead) void this.kill(id);
     }
     for (const id of this.pending.keys()) {
@@ -751,6 +823,13 @@ export class TranscodeRegistry {
     const probe = this.streamProbes.get(sessionId);
     if (probe != null) this.invalidateProbe(sessionId, probe);
     this.generations.set(sessionId, (this.generations.get(sessionId) ?? 0) + 1);
+    const owned = [...(this.ownedJobs.get(sessionId)?.values() ?? [])];
+    this.ownedJobs.delete(sessionId);
+    for (const ticket of [...(this.preparations.get(sessionId)?.values() ?? [])]) {
+      this.removePreparation(ticket);
+      ticket.controller?.abort();
+    }
+    for (const item of owned) { item.cancelled = true; item.claims.clear(); }
     const job = this.jobs.get(sessionId);
     if (job != null) {
       this.jobs.delete(sessionId);
@@ -764,6 +843,7 @@ export class TranscodeRegistry {
       pending.job = undefined;
     }
     await pending?.promise.catch(() => undefined);
+    await Promise.all(owned.map((item) => this.disposeOwnedJob(sessionId, item)));
     const retired = this.retired.get(sessionId) ?? [];
     this.retired.delete(sessionId);
     await Promise.all(retired.map((item) => this.disposeJob(sessionId, item, false)));
@@ -833,6 +913,10 @@ export class TranscodeRegistry {
   }
 
   private async retireJob(sessionId: string, job: Job): Promise<void> {
+    if (job.claims.size > 0 || job.readers > 0) {
+      this.storeOwnedJob(sessionId, job);
+      return;
+    }
     try {
       for (const child of job.children) child.kill("SIGTERM");
     } catch {
@@ -864,7 +948,8 @@ export class TranscodeRegistry {
    * extends the fixed grace period of a replaced generation. Authorization is
    * checked by the asset route before calling this method. */
   touchCurrentGeneration(sessionId: string, asset: string, generation: string): boolean {
-    const job = this.jobs.get(sessionId);
+    const current = this.jobs.get(sessionId);
+    const job = current?.assetGeneration === generation ? current : this.ownedJobs.get(sessionId)?.get(generation);
     const now = Date.now();
     if (
       job == null || job.assetGeneration !== generation ||
@@ -874,6 +959,7 @@ export class TranscodeRegistry {
       !existsSync(join(job.dir, asset))
     ) return false;
     job.lastAccess = now;
+    job.legacyProtected = true;
     return true;
   }
 
@@ -881,6 +967,7 @@ export class TranscodeRegistry {
     const candidates = [
       this.jobs.get(sessionId),
       ...(this.retired.get(sessionId) ?? []),
+      ...(this.ownedJobs.get(sessionId)?.values() ?? []),
     ];
     return candidates.find((job) => job?.dir === dir)?.assetGeneration ?? null;
   }
@@ -889,12 +976,14 @@ export class TranscodeRegistry {
     const candidates = [
       this.jobs.get(sessionId),
       ...(this.retired.get(sessionId) ?? []),
+      ...(this.ownedJobs.get(sessionId)?.values() ?? []),
     ].filter((job): job is Job => job != null);
     const match = generation == null
       ? candidates[0]
       : candidates.find((job) => job.assetGeneration === generation);
     if (match == null || !existsSync(join(match.dir, asset))) return null;
     match.lastAccess = Date.now();
+    match.legacyProtected = true;
     return match.dir;
   }
 
@@ -902,6 +991,7 @@ export class TranscodeRegistry {
     const candidates = [
       this.jobs.get(sessionId),
       ...(this.retired.get(sessionId) ?? []),
+      ...(this.ownedJobs.get(sessionId)?.values() ?? []),
     ].filter((job): job is Job => job != null);
     const match = generation == null
       ? candidates[0]
@@ -916,11 +1006,245 @@ export class TranscodeRegistry {
     const candidates = [
       this.jobs.get(sessionId),
       ...(this.retired.get(sessionId) ?? []),
+      ...(this.ownedJobs.get(sessionId)?.values() ?? []),
     ].filter((job): job is Job => job != null);
     const match = generation == null
       ? candidates[0]
       : candidates.find((job) => job.assetGeneration === generation);
     return match?.subtitleVideoMpegTsTimestamp != null;
+  }
+
+  /** IDs are allocated by the authenticated route, never by a manifest GET.
+   * Removing an ID is terminal: a delayed GET cannot recreate its claim. */
+  registerPreparation(sessionId: string, preparationId: string): void {
+    if (this.lifecycle !== "open") throw preparationGone();
+    this.expireUnusedPreparations(Date.now());
+    const tickets = this.preparations.get(sessionId) ?? new Map<string, PreparationTicket>();
+    if (tickets.has(preparationId)) {
+      throw Object.assign(new Error("The preparation ID is already registered."), { statusCode: 409 });
+    }
+    const total = [...this.preparations.values()].reduce((count, entries) => count + entries.size, 0);
+    if (tickets.size >= MAX_SESSION_PREPARATIONS || total >= MAX_PREPARATIONS) {
+      throw Object.assign(new Error("Too many transcode preparations."), { statusCode: 429 });
+    }
+    tickets.set(preparationId, {
+      id: preparationId, sessionId, createdAt: Date.now(), state: "unused",
+      waiters: new Set(), delivered: false,
+    });
+    this.preparations.set(sessionId, tickets);
+  }
+
+  isPreparationRegistered(sessionId: string, preparationId: string): boolean {
+    if (this.lifecycle !== "open") return false;
+    this.expireUnusedPreparations(Date.now());
+    return this.preparations.get(sessionId)?.has(preparationId) === true;
+  }
+
+  async acquirePreparation(
+    sessionId: string,
+    preparationId: string,
+    upstreamUrl: string,
+    options: HlsTranscodeOptions = {},
+    lifecycle: TranscodeJobLifecycle = {},
+  ): Promise<TranscodePreparedJob> {
+    if (lifecycle.signal?.aborted === true) throw preparationCancelled();
+    if (this.lifecycle !== "open") throw preparationGone();
+    this.expireUnusedPreparations(Date.now());
+    const ticket = this.preparations.get(sessionId)?.get(preparationId);
+    if (ticket == null) throw preparationGone();
+    const fingerprint = JSON.stringify(this.normalizeOptions(options));
+    if (ticket.fingerprint != null && (ticket.fingerprint !== fingerprint || ticket.upstreamUrl !== upstreamUrl)) {
+      throw Object.assign(new Error("A preparation cannot change its source or playback options."), { statusCode: 409 });
+    }
+    ticket.fingerprint = fingerprint;
+    ticket.upstreamUrl = upstreamUrl;
+    if (ticket.request == null) {
+      ticket.controller = new AbortController();
+      if (ticket.job == null) ticket.state = "pending";
+      ticket.request = this.ensureJobInternal(sessionId, upstreamUrl, options, {
+        signal: ticket.controller.signal,
+      }, ticket).finally(() => {
+        ticket.request = undefined;
+        if (this.hasPreparation(ticket) && ticket.job == null) ticket.state = "unused";
+      });
+    }
+    const request = ticket.request;
+    const waiter = Symbol();
+    ticket.waiters.add(waiter);
+    return new Promise((resolve, reject) => {
+      let finished = false;
+      const finish = (aborted: boolean, error?: unknown) => {
+        if (finished) return;
+        finished = true;
+        lifecycle.signal?.removeEventListener("abort", abort);
+        ticket.waiters.delete(waiter);
+        if (aborted) {
+          if (ticket.waiters.size === 0 && !ticket.delivered && ticket.state !== "active") {
+            void this.cancelPreparation(sessionId, preparationId).catch(() => {});
+          }
+          reject(preparationCancelled());
+        } else if (error != null) {
+          reject(error);
+        } else if (!this.hasPreparation(ticket) || ticket.job == null || ticket.job.disposed || ticket.job.cancelled) {
+          reject(preparationGone());
+        } else {
+          ticket.delivered = true;
+          const job = ticket.job;
+          resolve({ dir: job.dir, generation: job.assetGeneration, release: this.pinPreparationJob(sessionId, job) });
+        }
+      };
+      const abort = () => finish(true);
+      lifecycle.signal?.addEventListener("abort", abort, { once: true });
+      void request.then(() => finish(false), (error: unknown) => finish(false, error));
+      if (lifecycle.signal?.aborted === true) abort();
+    });
+  }
+
+  activatePreparation(sessionId: string, preparationId: string, expectedGeneration: string): TranscodePreparationActionResult {
+    const ticket = this.preparations.get(sessionId)?.get(preparationId);
+    if (ticket == null) return "gone";
+    if (ticket.job == null) return "not-ready";
+    if (ticket.job.assetGeneration !== expectedGeneration) return "generation-mismatch";
+    if (ticket.job.disposed || ticket.job.cancelled || ticket.job.failed) return "gone";
+    ticket.state = "active";
+    ticket.job.lastAccess = Date.now();
+    return "applied";
+  }
+
+  async cancelPreparation(sessionId: string, preparationId: string, expectedGeneration?: string): Promise<TranscodePreparationActionResult> {
+    const ticket = this.preparations.get(sessionId)?.get(preparationId);
+    if (ticket == null) return "gone";
+    if (expectedGeneration != null && ticket.job?.assetGeneration !== expectedGeneration) return "generation-mismatch";
+    if (ticket.state === "active") return "active";
+    const job = ticket.job;
+    const request = ticket.request;
+    this.removePreparation(ticket);
+    ticket.controller?.abort();
+    if (job != null) await this.reclaimPreparationJob(sessionId, job);
+    else {
+      const pending = this.pending.get(sessionId);
+      if (pending?.cancelled === true) await pending.promise.catch(() => undefined);
+      else await request?.catch(() => undefined);
+    }
+    return "applied";
+  }
+
+  async releasePreparation(sessionId: string, preparationId: string, expectedGeneration: string): Promise<TranscodePreparationActionResult> {
+    const ticket = this.preparations.get(sessionId)?.get(preparationId);
+    if (ticket == null) return "gone";
+    if (ticket.job?.assetGeneration !== expectedGeneration) return "generation-mismatch";
+    const job = ticket.job;
+    this.removePreparation(ticket);
+    ticket.controller?.abort();
+    await this.reclaimPreparationJob(sessionId, job);
+    return "applied";
+  }
+
+  acquirePreparationAsset(sessionId: string, preparationId: string, generation: string, asset: string): TranscodePreparationAsset | null {
+    const ticket = this.preparations.get(sessionId)?.get(preparationId);
+    const job = ticket?.job;
+    if (ticket?.state !== "active" || job == null || job.assetGeneration !== generation ||
+      job.disposed || job.cancelled || job.failed ||
+      (asset !== MANIFEST_NAME && !isTranscodeAssetName(asset)) || !existsSync(join(job.dir, asset))) return null;
+    job.lastAccess = Date.now();
+    return { dir: job.dir, release: this.pinPreparationJob(sessionId, job) };
+  }
+
+  touchPreparationGeneration(sessionId: string, preparationId: string, generation: string, asset: string): boolean {
+    const ticket = this.preparations.get(sessionId)?.get(preparationId);
+    const job = ticket?.job;
+    if (ticket?.state !== "active" || job == null || job.assetGeneration !== generation ||
+      job.disposed || job.cancelled || job.failed || Date.now() - job.lastAccess > IDLE_MS ||
+      !/^(?:1080p|720p|480p|360p)\.m3u8$/.test(asset) || !existsSync(join(job.dir, asset))) return false;
+    job.lastAccess = Date.now();
+    return true;
+  }
+
+  private hasPreparation(ticket: PreparationTicket): boolean {
+    return this.preparations.get(ticket.sessionId)?.get(ticket.id) === ticket;
+  }
+
+  private removePreparation(ticket: PreparationTicket): void {
+    if (!this.hasPreparation(ticket)) return;
+    const tickets = this.preparations.get(ticket.sessionId)!;
+    tickets.delete(ticket.id);
+    if (tickets.size === 0) this.preparations.delete(ticket.sessionId);
+    ticket.job?.claims.delete(ticket);
+    this.pending.get(ticket.sessionId)?.tickets.delete(ticket);
+  }
+
+  private bindPreparation(ticket: PreparationTicket, job: Job): void {
+    if (!this.hasPreparation(ticket)) return;
+    ticket.job = job;
+    if (ticket.state !== "active") ticket.state = "ready";
+    job.claims.add(ticket);
+    job.lastAccess = Date.now();
+  }
+
+  private expireUnusedPreparations(now: number): void {
+    for (const tickets of this.preparations.values()) {
+      for (const ticket of [...tickets.values()]) {
+        if (ticket.state === "unused" && ticket.request == null && now - ticket.createdAt >= UNUSED_PREPARATION_MS) {
+          this.removePreparation(ticket);
+        }
+      }
+    }
+  }
+
+  private prepareOwnedCache(): Promise<string> {
+    if (this.ownedCacheReady == null) {
+      const root = join(this.config.dataDir, "transcode-preparations");
+      this.ownedCacheReady = (async () => {
+        // This dedicated namespace contains only disposable owned HLS output.
+        // Await its one-time crash sweep before any new generation is created.
+        await rm(root, { recursive: true, force: true });
+        await mkdir(root, { recursive: true });
+        return root;
+      })();
+    }
+    return this.ownedCacheReady;
+  }
+
+  private storeOwnedJob(sessionId: string, job: Job): void {
+    const entries = this.ownedJobs.get(sessionId) ?? new Map<string, Job>();
+    entries.set(job.assetGeneration, job);
+    this.ownedJobs.set(sessionId, entries);
+  }
+
+  private forgetOwnedJob(sessionId: string, job: Job): void {
+    const entries = this.ownedJobs.get(sessionId);
+    entries?.delete(job.assetGeneration);
+    if (entries?.size === 0) this.ownedJobs.delete(sessionId);
+  }
+
+  private pinPreparationJob(sessionId: string, job: Job): () => void {
+    job.readers += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      job.readers -= 1;
+      void this.reclaimPreparationJob(sessionId, job).catch(() => {});
+    };
+  }
+
+  private reclaimPreparationJob(sessionId: string, job: Job): Promise<void> {
+    if (job.legacyProtected || job.claims.size > 0 || job.readers > 0) return Promise.resolve();
+    job.cancelled = true;
+    this.forgetOwnedJob(sessionId, job);
+    return this.disposeOwnedJob(sessionId, job);
+  }
+
+  private disposeOwnedJob(sessionId: string, job: Job): Promise<void> {
+    const cleanup = this.disposeJob(sessionId, job, false);
+    const entries = this.ownedCleanup.get(sessionId) ?? new Set<Promise<void>>();
+    entries.add(cleanup);
+    this.ownedCleanup.set(sessionId, entries);
+    void cleanup.finally(() => {
+      entries.delete(cleanup);
+      if (entries.size === 0 && this.ownedCleanup.get(sessionId) === entries) this.ownedCleanup.delete(sessionId);
+    }).catch(() => {});
+    return cleanup;
   }
 
   /** Ensure an HLS job exists for this session and return its output dir once the
@@ -932,33 +1256,44 @@ export class TranscodeRegistry {
     options: HlsTranscodeOptions = {},
     lifecycle: TranscodeJobLifecycle = {},
   ): Promise<string> {
+    return this.ensureJobInternal(sessionId, upstreamUrl, options, lifecycle);
+  }
+
+  private async ensureJobInternal(
+    sessionId: string,
+    upstreamUrl: string,
+    options: HlsTranscodeOptions,
+    lifecycle: TranscodeJobLifecycle,
+    ticket?: PreparationTicket,
+  ): Promise<string> {
     if (lifecycle.signal?.aborted === true) throw preparationCancelled();
+    if (ticket != null && !this.hasPreparation(ticket)) throw preparationGone();
     if (this.lifecycle !== "open") {
       throw Object.assign(new Error("The transcode registry is closed."), { statusCode: 410 });
     }
     const requestGeneration = this.generations.get(sessionId) ?? 0;
-    const normalizedOptions: HlsTranscodeOptions = {
-      profile: options.profile ?? "adaptive",
-      quality: options.quality ?? qualityForProfile(options.profile ?? "adaptive"),
-      startSeconds: Math.max(0, Math.floor(options.startSeconds ?? 0)),
-      audioTrack:
-        options.audioTrack != null && Number.isInteger(options.audioTrack)
-          ? Math.min(31, Math.max(0, options.audioTrack))
-          : 0,
-      hdrPolicy: options.hdrPolicy ?? "auto",
-      preserveSubtitles: options.preserveSubtitles === true,
-      videoEncoder: options.videoEncoder ?? this.config.transcodeVideoEncoder,
-    };
+    const normalizedOptions = this.normalizeOptions(options);
     const fingerprint = JSON.stringify(normalizedOptions);
     const existing = this.jobs.get(sessionId);
-    if (existing != null && !existing.failed && existing.fingerprint === fingerprint) {
-      existing.lastAccess = Date.now();
-      return existing.dir;
+    const reusable = [existing, ...(this.ownedJobs.get(sessionId)?.values() ?? [])]
+      .find((job) => job != null && !job.failed && !job.cancelled && !job.disposed && job.fingerprint === fingerprint);
+    if (reusable != null) {
+      reusable.lastAccess = Date.now();
+      if (ticket == null) reusable.legacyProtected = true;
+      else this.bindPreparation(ticket, reusable);
+      return reusable.dir;
+    }
+    const cleanup = this.ownedCleanup.get(sessionId);
+    if (cleanup != null && cleanup.size > 0) {
+      await Promise.all([...cleanup]);
+      return this.ensureJobInternal(sessionId, upstreamUrl, options, lifecycle, ticket);
     }
     // Coalesce concurrent creations for the same session into one promise.
     const inflight = this.pending.get(sessionId);
     if (inflight != null) {
       if (!inflight.cancelled && inflight.fingerprint === fingerprint) {
+        if (ticket == null) inflight.legacyProtected = true;
+        else inflight.tickets.add(ticket);
         return this.waitForCreation(sessionId, inflight, lifecycle.signal, true);
       }
       // A request changed profile/offset while the first FFmpeg startup was in
@@ -975,11 +1310,14 @@ export class TranscodeRegistry {
       ) {
         throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
       }
-      return this.ensureJob(sessionId, upstreamUrl, options, lifecycle);
+      return this.ensureJobInternal(sessionId, upstreamUrl, options, lifecycle, ticket);
     }
     const generation = requestGeneration;
     const pendingEntry: PendingJob = {
       fingerprint,
+      owned: ticket != null,
+      tickets: new Set(ticket == null ? [] : [ticket]),
+      legacyProtected: ticket == null,
       promise: Promise.resolve(""),
       controller: new AbortController(),
       waiters: new Set(),
@@ -1015,6 +1353,21 @@ export class TranscodeRegistry {
     pendingEntry.promise = created;
     this.pending.set(sessionId, pendingEntry);
     return this.waitForCreation(sessionId, pendingEntry, lifecycle.signal, true);
+  }
+
+  private normalizeOptions(options: HlsTranscodeOptions): HlsTranscodeOptions {
+    return {
+      profile: options.profile ?? "adaptive",
+      quality: options.quality ?? qualityForProfile(options.profile ?? "adaptive"),
+      startSeconds: Math.max(0, Math.floor(options.startSeconds ?? 0)),
+      audioTrack:
+        options.audioTrack != null && Number.isInteger(options.audioTrack)
+          ? Math.min(31, Math.max(0, options.audioTrack))
+          : 0,
+      hdrPolicy: options.hdrPolicy ?? "auto",
+      preserveSubtitles: options.preserveSubtitles === true,
+      videoEncoder: options.videoEncoder ?? this.config.transcodeVideoEncoder,
+    };
   }
 
   private waitForCreation(sessionId: string, entry: PendingJob, signal: AbortSignal | undefined, owns: boolean): Promise<string> {
@@ -1071,7 +1424,9 @@ export class TranscodeRegistry {
       throw Object.assign(new Error("The transcoder is busy. Try again shortly."), { statusCode: 503 });
     }
 
-    await mkdir(this.config.dataDir, { recursive: true });
+    const outputRoot = creation.owned ? await this.prepareOwnedCache() : this.config.dataDir;
+    assertCurrent();
+    await mkdir(outputRoot, { recursive: true });
     assertCurrent();
     if (
       this.lifecycle !== "open" ||
@@ -1079,7 +1434,7 @@ export class TranscodeRegistry {
     ) {
       throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
     }
-    const dir = await mkdtemp(join(this.config.dataDir, "transcode-"));
+    const dir = await mkdtemp(join(outputRoot, "transcode-"));
     if (creation.cancelled) {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
       throw preparationCancelled();
@@ -1133,6 +1488,9 @@ export class TranscodeRegistry {
       assetGeneration: basename(dir),
       startSeconds: options.startSeconds ?? 0,
       subtitleVideoMpegTsTimestamp: null,
+      claims: new Set(),
+      readers: 0,
+      legacyProtected: creation.legacyProtected,
     };
     for (const process of children) this.trackChild(process);
     registerStaged(job);
@@ -1199,6 +1557,14 @@ export class TranscodeRegistry {
           throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
         }
         creation.published = true;
+        job.legacyProtected ||= creation.legacyProtected;
+        for (const ticket of creation.tickets) {
+          if (this.hasPreparation(ticket)) this.bindPreparation(ticket, job);
+        }
+        if (creation.owned) {
+          this.storeOwnedJob(sessionId, job);
+          return dir;
+        }
         this.jobs.set(sessionId, job);
         this.db.sqlite
           .prepare("UPDATE stream_sessions SET transcode_dir = ? WHERE id = ?")
