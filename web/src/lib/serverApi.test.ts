@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import * as ts from "typescript";
 
 // ── Dep mocks ────────────────────────────────────────────────────────────────
 // serverApi depends on serverMode (base URL) and serverSession (CSRF + 401
@@ -1334,6 +1337,30 @@ describe("server setup helpers", () => {
 
 
 describe("server HLS generation retention", () => {
+  it("renews generation leases without Array.at in an isolated older-engine realm", async () => {
+    const text = readFileSync(new URL("./serverApi.ts", import.meta.url), "utf8");
+    const file = ts.createSourceFile("serverApi.ts", text, ts.ScriptTarget.Latest, true);
+    const functions = file.statements.filter((node) => ts.isFunctionDeclaration(node) &&
+      (node.name?.text === "serverHlsLeaseTarget" || node.name?.text === "renewServerHlsLease"));
+    expect(functions).toHaveLength(2);
+    const code = ts.transpileModule(functions.map((node) => node.getText(file)).join("\n"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+    }).outputText;
+    const fetched: string[] = [];
+    const renew = runInNewContext(`Array.prototype.at = undefined;\n${code}\nexports.renewServerHlsLease`, {
+      exports: {}, URL, URLSearchParams,
+      configuredServerURL: () => "https://server.example",
+      window: { location: { origin: "https://server.example" } },
+      fetch: async (url: string, init: RequestInit) => {
+        expect(init).toMatchObject({ method: "HEAD", credentials: "include", redirect: "error" });
+        fetched.push(url); return { status: 200 };
+      },
+    }) as typeof api.renewServerHlsLease;
+    const legacy = "https://server.example/api/stream/one/480p.m3u8?generation=transcode-actual";
+    await expect(renew(legacy, new AbortController().signal)).resolves.toBe(200);
+    expect(fetched).toEqual([legacy]);
+  });
+
   const master = "https://server.example/yawf/api/stream/one/index.m3u8?start=46#t=0.001";
   const manifest = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000\n480p.m3u8?generation=transcode-actual\n";
   it("binds the actual child generation under the configured mount without requested clock parameters", () => {
