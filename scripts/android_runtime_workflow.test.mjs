@@ -116,6 +116,7 @@ function validateCandidateDelivery(job) {
   for (const literal of [
     'release.get("id") == release_id',
     'release.get("draft") is False and release.get("prerelease") is False',
+    'release.get("target_commitish") == source',
     'set(observed_assets) == set(expected_assets)',
     'asset.get("browser_download_url") ==',
     'run.get("head_sha") == source',
@@ -154,7 +155,7 @@ function publicFixture() {
       draft: false,
       prerelease: false,
       published_at: "2026-10-25T23:00:52Z",
-      target_commitish: "main",
+      target_commitish: candidatePins.CANDIDATE_SOURCE_SHA,
       immutable: false,
       assets: [
         asset(candidatePins.CANDIDATE_APK_ASSET_NAME, 676347366, 88640385, candidatePins.CANDIDATE_APK_SHA256, "application/vnd.android.package-archive"),
@@ -224,7 +225,7 @@ function publicFixture() {
   };
 }
 
-function runPublicAdmission(mutate = () => {}) {
+function runPublicAdmission(mutate = () => {}, job = api30Runtime) {
   const fixture = publicFixture();
   mutate(fixture);
   const directory = mkdtempSync(join(tmpdir(), "yawf-public61-candidate-admission-"));
@@ -243,7 +244,7 @@ function runPublicAdmission(mutate = () => {}) {
     CANDIDATE_VERIFICATION: join(directory, "Android_2.3.61_verification.json"),
     CANDIDATE_CHECKSUMS: join(directory, "SHA256SUMS"),
   };
-  const [metadataPython, assetPython] = publicAdmissionPython(api30Runtime);
+  const [metadataPython, assetPython] = publicAdmissionPython(job);
   try {
     const metadata = spawnSync("python3", ["-c", metadataPython], { encoding: "utf8", env });
     if (metadata.status !== 0) return { metadata, assets: null, evidence: "" };
@@ -314,6 +315,25 @@ test("executes the exact public metadata and asset-content admission phases", ()
   assert.match(result.evidence, /automaticOtaEvidence=false/);
   assert.match(result.evidence, /assetBytesVerified=true/);
   assert.match(result.evidence, /releaseMetadataVerified=true/);
+});
+
+test("rejects mutable and wrong public release targets in both API30 jobs", () => {
+  for (const [jobName, job] of [
+    ["runtime", api30Runtime],
+    ["stock WebView guide", api30Guide],
+  ]) {
+    for (const [targetName, target] of [
+      ["mutable main", "main"],
+      ["wrong source", "0".repeat(40)],
+    ]) {
+      const result = runPublicAdmission((fixture) => {
+        fixture.release.target_commitish = target;
+      }, job);
+      assert.notEqual(result.metadata.status, 0, `${jobName}: ${targetName}`);
+      assert.match(result.metadata.stderr, /Public release target changed/, `${jobName}: ${targetName}`);
+      assert.equal(result.assets, null, `${jobName}: ${targetName}`);
+    }
+  }
 });
 
 test("fails closed on public release, producer, tag, and asset inventory changes", () => {
