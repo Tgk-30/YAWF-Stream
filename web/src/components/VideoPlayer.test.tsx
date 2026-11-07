@@ -1713,6 +1713,569 @@ describe("WebviewPlayer", () => {
     expect(screen.queryByText("Playback interrupted")).toBeNull();
   });
 
+  it.each([
+    [true, "seek"], [false, "seek"], [true, "live clock"], [false, "live clock"],
+    [true, "reset clock"], [false, "reset clock"],
+    [true, "confirmed seek reset"], [false, "confirmed seek reset"],
+  ] as const)("retains paused=%s and %s position through direct media-error fallback", async (wasPaused, positionOrigin) => {
+    Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+      configurable: true, value: { getInsets: vi.fn() },
+    });
+    const pending = deferred<string | null>();
+    const loadStream = vi.fn(() => pending.promise);
+    render(<VideoPlayer url="https://x/seek-error.mp4" title="Seek recovery"
+      engine="webview-direct" requestWebviewFallback={loadStream} onClose={() => {}} />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    let originalTime = 11;
+    let originalPaused = wasPaused;
+    Object.defineProperties(original, {
+      currentTime: { configurable: true, get: () => originalTime, set: (value: number) => {
+        originalTime = positionOrigin === "seek" ? 0 : value;
+      } },
+      duration: { configurable: true, get: () => 180 },
+      readyState: { configurable: true, get: () => HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, get: () => originalPaused },
+    });
+    original.volume = 0.4;
+    original.muted = true;
+    original.playbackRate = 1.5;
+    fireEvent.loadedMetadata(original);
+    fireEvent.timeUpdate(original);
+    if (wasPaused) fireEvent.pause(original);
+    else fireEvent.play(original);
+    // The decoder can lose its current clock as the seek fails. The owned
+    // requested point is stronger evidence than that reset media clock.
+    if (positionOrigin === "seek" || positionOrigin === "confirmed seek reset") {
+      act(() => { scrubBarMock.mock.lastCall![0].onSeek(73.1); });
+      fireEvent.seeking(original);
+      if (positionOrigin === "confirmed seek reset") fireEvent.seeked(original);
+    } else {
+      // No timeupdate has reported this live clock to the parent yet.
+      originalTime = 73.1;
+    }
+    if (positionOrigin === "reset clock" || positionOrigin === "confirmed seek reset") {
+      fireEvent.timeUpdate(original);
+      originalTime = 0;
+      originalPaused = true;
+      Object.defineProperty(original, "error", { configurable: true, value: { code: 3 } });
+      fireEvent.pause(original);
+      fireEvent.timeUpdate(original);
+    }
+    fireMediaError(original);
+    await waitFor(() => expect(loadStream).toHaveBeenCalledTimes(1));
+    expect(document.querySelector("video.player-video")).toBe(original);
+    await act(async () => { pending.resolve("https://x/seek-recovery/index.m3u8"); });
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const recovered = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(recovered).not.toBe(original);
+    expect(hlsInstances[0].config.startPosition).toBe(73.1);
+    expect(recovered.autoplay).toBe(false);
+    expect(recovered.volume).toBe(0.4);
+    expect(recovered.muted).toBe(true);
+    expect(recovered.playbackRate).toBe(1.5);
+    const play = vi.mocked(HTMLMediaElement.prototype.play);
+    play.mockClear();
+    let localTime = 0;
+    let duration = 18;
+    let readyState: number = HTMLMediaElement.HAVE_METADATA;
+    let seeking = false;
+    let paused = true;
+    const writes = vi.fn((value: number) => { localTime = value; seeking = true; });
+    Object.defineProperties(recovered, {
+      currentTime: { configurable: true, get: () => localTime, set: writes },
+      duration: { configurable: true, get: () => duration },
+      readyState: { configurable: true, get: () => readyState },
+      seeking: { configurable: true, get: () => seeking },
+      paused: { configurable: true, get: () => paused },
+    });
+    play.mockImplementation(function (this: HTMLMediaElement) {
+      expect(this).toBe(recovered);
+      expect(localTime).toBe(73.1);
+      paused = false;
+      fireEvent.play(this);
+      fireEvent.playing(this);
+      return Promise.resolve();
+    });
+    fireEvent.loadedMetadata(recovered);
+    fireEvent.canPlay(recovered);
+    expect(play).not.toHaveBeenCalled();
+    expect(writes).not.toHaveBeenCalled();
+    duration = 180;
+    fireEvent.durationChange(recovered);
+    expect(writes).toHaveBeenLastCalledWith(73.1);
+    expect(play).not.toHaveBeenCalled();
+    readyState = HTMLMediaElement.HAVE_CURRENT_DATA;
+    seeking = false;
+    fireEvent.seeked(recovered);
+    expect(play).toHaveBeenCalledTimes(wasPaused ? 0 : 1);
+    expect(recovered.currentTime).toBe(73.1);
+    expect(recovered.paused).toBe(wasPaused);
+    expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+  });
+
+  it("retains transient audio through direct media-error fallback without enabling per-title persistence", async () => {
+    const tracks = Object.assign(new EventTarget(), {
+      0: { id: "en", label: "English", language: "eng", enabled: true },
+      1: { id: "jp", label: "Japanese", language: "jpn", enabled: false },
+      length: 2,
+      item(index: number) { return this[index as 0 | 1] ?? null; },
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", {
+      configurable: true, get: () => tracks,
+    });
+    const preferences = { defaultAudioLanguage: "eng", rememberPerTitleTrackChoices: false };
+    render(<VideoPlayer url="https://x/audio-error.mp4" title="Audio recovery"
+      playerPreferences={preferences} requestWebviewFallback={async () => "https://x/audio-recovery.m3u8"}
+      onClose={() => {}} />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(original, "paused", { configurable: true, value: true });
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Japanese" }));
+    expect(tracks[1].enabled).toBe(true);
+    fireMediaError(original);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    act(() => {
+      hlsInstances[0].audioTracks = [{ name: "English", lang: "eng" }, { name: "Japanese", lang: "jpn" }];
+      hlsInstances[0].emit("audioTracksUpdated");
+    });
+    expect(hlsInstances[0].audioTrack).toBe(1);
+    expect(preferences).toEqual({ defaultAudioLanguage: "eng", rememberPerTitleTrackChoices: false });
+  });
+
+  it.each([true, false])("retains explicit zero and updated paused=%s intent during deferred media-error fallback", async (finalPaused) => {
+    const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
+    const restore = replaceProperty(navigator, "mediaSession", {
+      metadata: null, playbackState: "none", setPositionState: vi.fn(),
+      setActionHandler: (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => handlers.set(action, handler),
+    });
+    try {
+      const pending = deferred<string | null>();
+      const loadStream = vi.fn(() => pending.promise);
+      render(<VideoPlayer url="https://x/zero-error.mp4" title="Zero recovery"
+        requestWebviewFallback={loadStream} onClose={() => {}} />);
+      const original = document.querySelector("video.player-video") as HTMLVideoElement;
+      let position = 73.1;
+      let paused = !finalPaused;
+      Object.defineProperties(original, {
+        currentTime: { configurable: true, get: () => position, set: (value: number) => { position = value; } },
+        duration: { configurable: true, value: 180 },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+        paused: { configurable: true, get: () => paused },
+      });
+      fireEvent.loadedMetadata(original);
+      fireEvent.timeUpdate(original);
+      if (paused) fireEvent.pause(original); else fireEvent.play(original);
+      act(() => { scrubBarMock.mock.lastCall![0].onSeek(0); });
+      fireEvent.seeking(original);
+      fireEvent.seeked(original);
+      Object.defineProperty(original, "error", { configurable: true, value: { code: 3 } });
+      paused = true;
+      fireEvent.pause(original);
+      fireEvent.error(original);
+      await waitFor(() => expect(loadStream).toHaveBeenCalledTimes(1));
+      const action = finalPaused ? "pause" : "play";
+      act(() => { handlers.get(action)?.({ action }); });
+      await act(async () => { pending.resolve("https://x/zero-recovery.m3u8"); });
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      expect(hlsInstances[0].config.startPosition).toBe(0);
+      const recovered = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(recovered.autoplay).toBe(false);
+      expect(recovered.currentTime).toBe(0);
+      Object.defineProperties(recovered, {
+        duration: { configurable: true, value: 180 },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+      fireEvent.loadedMetadata(recovered);
+      expect(play).toHaveBeenCalledTimes(finalPaused ? 0 : 1);
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+    } finally { restore(); }
+  });
+
+  it.each([
+    [true, null], [false, null], [true, "play"], [false, "pause"],
+  ] as const)("recovers the hour-offset source paused=%s with late %s intent", async (initialPaused, lateAction) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+      configurable: true, value: { getInsets: vi.fn() },
+    });
+    const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
+    const restore = replaceProperty(navigator, "mediaSession", {
+      metadata: null, playbackState: "none", setPositionState: vi.fn(),
+      setActionHandler: (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => handlers.set(action, handler),
+    });
+    try {
+      const pending = deferred<{
+        url: string; timelineOffsetSeconds: number; startPositionSeconds: number; quality: "480p";
+      }>();
+      const request = vi.fn(() => pending.promise);
+      const legacy = vi.fn(async () => "https://server.example/api/stream/from-zero/index.m3u8");
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment0.ts\n")));
+      render(<VideoPlayer url="https://server.example/api/stream/original" title="Hour recovery"
+        engine="webview-direct" serverOptimized={{ qualities: ["480p"], request }}
+        requestWebviewFallback={legacy} onClose={() => {}} />);
+      const original = document.querySelector("video.player-video") as HTMLVideoElement;
+      let position = 3600;
+      let paused = initialPaused;
+      Object.defineProperties(original, {
+        currentTime: { configurable: true, get: () => position },
+        duration: { configurable: true, value: 7200 },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+        paused: { configurable: true, get: () => paused },
+      });
+      original.playbackRate = 1.25;
+      fireEvent.loadedMetadata(original);
+      fireEvent.timeUpdate(original);
+      if (paused) fireEvent.pause(original); else fireEvent.play(original);
+      position = 0;
+      paused = true;
+      Object.defineProperty(original, "error", { configurable: true, value: { code: 3 } });
+      fireEvent.pause(original);
+      fireEvent.error(original);
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 3600));
+      if (lateAction != null) act(() => { handlers.get(lateAction)?.({ action: lateAction }); });
+      await act(async () => { pending.resolve({
+        url: "https://server.example/api/stream/offset/index.m3u8",
+        timelineOffsetSeconds: 3600, startPositionSeconds: 0, quality: "480p",
+      }); });
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      expect(legacy).not.toHaveBeenCalled();
+      expect(hlsInstances[0].config.startPosition).toBe(0);
+      const recovered = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(recovered.autoplay).toBe(false);
+      expect(recovered.playbackRate).toBe(1.25);
+      Object.defineProperties(recovered, {
+        duration: { configurable: true, value: 18 },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      });
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      play.mockClear();
+      fireEvent.loadedMetadata(recovered);
+      const finalPaused = lateAction == null ? initialPaused : lateAction === "pause";
+      expect(play).toHaveBeenCalledTimes(finalPaused ? 0 : 1);
+      fireEvent.timeUpdate(recovered);
+      expect(scrubBarMock.mock.lastCall![0].currentTime).toBe(3600);
+      expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+    } finally { restore(); }
+  });
+
+  it.each([true, false])("preserves offset recovery audio only with known inventory=%s", async (knownInventory) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const tracks = Object.assign(new EventTarget(), {
+      0: { id: "en", label: "English", language: "eng", enabled: false },
+      1: { id: "jp", label: "Japanese", language: "jpn", enabled: true },
+      length: 2,
+      item(index: number) { return this[index as 0 | 1] ?? null; },
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", {
+      configurable: true, get: () => tracks,
+    });
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/audio-offset/index.m3u8",
+      timelineOffsetSeconds: 3600, startPositionSeconds: 0, quality: "480p" as const, audioTrack: 1,
+    }));
+    const legacy = vi.fn();
+    const loadSourceInfo = vi.fn(async () => ({ durationSeconds: 7200, tracks: [
+      { index: 0, codec: "aac", language: "eng", label: "English", default: false, channels: 2 },
+      { index: 1, codec: "aac", language: "jpn", label: "Japanese", default: true, channels: 2 },
+    ] }));
+    render(<VideoPlayer url="https://server.example/api/stream/audio-original" title="Mapped audio"
+      serverOptimized={{ qualities: ["480p"], request, loadSourceInfo: knownInventory ? loadSourceInfo : undefined }}
+      requestWebviewFallback={legacy} onClose={() => {}} />);
+    await act(async () => { await Promise.resolve(); });
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(original, {
+      currentTime: { configurable: true, value: 3600, writable: true },
+      duration: { configurable: true, value: 7200 },
+    });
+    fireEvent.timeUpdate(original);
+    fireMediaError(original);
+    if (knownInventory) {
+      await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 3600, 1));
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    } else {
+      await waitFor(() => expect(screen.getByText(/could not preserve the selected audio track/)).toBeInTheDocument());
+      expect(request).not.toHaveBeenCalled();
+    }
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to a from-zero transcode after offset recovery fails", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async () => { throw new Error("Preparation unavailable"); });
+    const legacy = vi.fn(async () => "https://server.example/api/stream/slow/index.m3u8");
+    render(<VideoPlayer url="https://server.example/api/stream/failed-original" title="Failed offset"
+      serverOptimized={{ qualities: ["480p"], request }} requestWebviewFallback={legacy} onClose={() => {}} />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(original, "currentTime", { configurable: true, value: 3600 });
+    fireMediaError(original);
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 3600));
+    await waitFor(() => expect(screen.getByText("Playback interrupted")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
+    expect(document.querySelector(".player-compatibility-status")).toBeNull();
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it.each(["automatic default", "explicit quality", "explicit failure"])("keeps error recovery owned while %s preparation is pending", async (kind) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const pending = deferred<{ url: string; timelineOffsetSeconds: number; startPositionSeconds: number; quality: ServerTranscodeQuality }>();
+    let requestCount = 0;
+    const request = vi.fn((quality: ServerTranscodeQuality, position: number) => ++requestCount === 1
+      ? pending.promise : Promise.resolve({ url: "https://server.example/api/stream/recovery-fixed/index.m3u8",
+        timelineOffsetSeconds: position, startPositionSeconds: 0, quality }));
+    const legacy = vi.fn();
+    render(<VideoPlayer url="https://server.example/api/stream/pending-original" title="Pending recovery"
+      serverOptimized={{ qualities: ["480p", "360p"], defaultQuality: kind === "automatic default" ? "480p" : null, request }}
+      requestWebviewFallback={legacy} onClose={() => {}} />);
+    if (kind === "automatic default") await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0));
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    let position = 3600;
+    let paused = false;
+    Object.defineProperties(original, {
+      currentTime: { configurable: true, get: () => position },
+      duration: { configurable: true, value: 7200 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, get: () => paused },
+    });
+    fireEvent.loadedMetadata(original); fireEvent.timeUpdate(original); fireEvent.play(original);
+    if (kind !== "automatic default") {
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: "360p" }));
+      await waitFor(() => expect(request).toHaveBeenCalledWith("360p", 3600));
+    }
+    position = 0; paused = true;
+    Object.defineProperty(original, "error", { configurable: true, value: { code: 3 } });
+    fireEvent.pause(original); fireEvent.error(original);
+    await act(async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+    expect(screen.queryByText("Playback interrupted")).toBeNull();
+    if (kind === "automatic default") {
+      await waitFor(() => expect(request).toHaveBeenLastCalledWith("480p", 3600));
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    } else expect(request).toHaveBeenCalledTimes(1);
+    if (kind === "explicit failure") {
+      await act(async () => { pending.reject(new Error("Chosen quality could not be prepared")); });
+      await waitFor(() => expect(screen.getByText("Playback interrupted")).toBeInTheDocument());
+      expect(screen.getByRole("button", { name: "Retry playback" })).toBeInTheDocument();
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(legacy).not.toHaveBeenCalled();
+      return;
+    }
+    await act(async () => { pending.resolve({
+      url: `https://server.example/api/stream/${kind === "automatic default" ? "stale-warmup" : "chosen-quality"}/index.m3u8`,
+      timelineOffsetSeconds: kind === "automatic default" ? 0 : 3600,
+      startPositionSeconds: 0, quality: kind === "automatic default" ? "480p" : "360p",
+    }); });
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(kind === "automatic default"
+      ? "https://server.example/api/stream/recovery-fixed/index.m3u8"
+      : "https://server.example/api/stream/chosen-quality/index.m3u8");
+    expect(hlsInstances[0].config.startPosition).toBe(0);
+    const recovered = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(recovered, {
+      duration: { configurable: true, value: 18 }, readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+    });
+    const play = vi.mocked(HTMLMediaElement.prototype.play); play.mockClear();
+    fireEvent.loadedMetadata(recovered);
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it.each(["metadata mismatch", "header mismatch", "unconfirmed"])("rejects %s audio during offset recovery before mounting default audio", async (caseName) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", {
+      headers: caseName === "header mismatch" ? { "x-yawf-transcode-audio": "0" } : {},
+    })));
+    const request = vi.fn(async () => ({
+      url: "https://server.example/api/stream/wrong-audio/index.m3u8", timelineOffsetSeconds: 3600,
+      startPositionSeconds: 0, quality: "480p" as const,
+      audioTrack: caseName === "metadata mismatch" ? 0 : caseName === "unconfirmed" ? undefined : 1,
+    }));
+    const legacy = vi.fn();
+    render(<VideoPlayer url="https://server.example/api/stream/audio-original" title="Audio confirmation"
+      serverOptimized={{ qualities: ["480p"], request, loadSourceInfo: async () => ({ durationSeconds: 7200, tracks: [
+        { index: 0, language: "eng", label: "English", default: false },
+        { index: 1, language: "jpn", label: "Japanese", default: true },
+      ] }) }} requestWebviewFallback={legacy} onClose={() => {}} />);
+    await act(async () => { await Promise.resolve(); });
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(original, "currentTime", { configurable: true, value: 3600 });
+    fireMediaError(original);
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 3600, 1));
+    await waitFor(() => expect(screen.getByText("Playback interrupted")).toBeInTheDocument());
+    expect(screen.getByText(/could not preserve the selected audio track/)).toBeInTheDocument();
+    expect(hlsInstances).toHaveLength(0);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it("supersedes remembered-audio warmup after backward zero seek and media error", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const pending = deferred<{ url: string; timelineOffsetSeconds: number; startPositionSeconds: number; quality: ServerTranscodeQuality; audioTrack: number }>();
+    let count = 0;
+    const request = vi.fn((quality: ServerTranscodeQuality, position: number, audioTrack = 0) => ++count === 1
+      ? pending.promise : Promise.resolve({
+        url: `https://server.example/api/stream/fixed-zero-${count}/index.m3u8`,
+        timelineOffsetSeconds: position, startPositionSeconds: 0, quality, audioTrack,
+      }));
+    const legacy = vi.fn();
+    render(<VideoPlayer url="https://server.example/api/stream/remembered-original" title="Remembered recovery"
+      startPositionSeconds={16} savedPrefs={{ preferredAudioLang: "jpn" }}
+      serverOptimized={{ qualities: ["480p"], request, loadSourceInfo: async () => ({ durationSeconds: 7200, tracks: [
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 1, language: "jpn", label: "Japanese", default: false },
+      ] }) }} requestWebviewFallback={legacy} onClose={() => {}} />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    let position = 16;
+    Object.defineProperties(original, {
+      currentTime: { configurable: true, get: () => position, set: (value: number) => { position = value; } },
+      duration: { configurable: true, value: 7200 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, value: true },
+    });
+    fireEvent.loadedMetadata(original); fireEvent.timeUpdate(original); fireEvent.pause(original);
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 16, 1));
+    act(() => { scrubBarMock.mock.lastCall![0].onSeek(0); });
+    fireEvent.seeking(original); fireEvent.seeked(original);
+    fireMediaError(original);
+    await waitFor(() => expect(request.mock.calls.length).toBeGreaterThan(1));
+    expect(request.mock.calls.slice(1).every(([, target]) => target === 0)).toBe(true);
+    await waitFor(() => expect(hlsInstances.length).toBeGreaterThan(0));
+    await act(async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+    const recovered = document.querySelector("video.player-video") as HTMLVideoElement;
+    await act(async () => { pending.resolve({
+      url: "https://server.example/api/stream/stale-remembered/index.m3u8",
+      timelineOffsetSeconds: 16, startPositionSeconds: 0, quality: "480p", audioTrack: 1,
+    }); });
+    expect(document.querySelector("video.player-video")).toBe(recovered);
+    expect(hlsInstances.some((instance) => instance.loadSource.mock.calls.some(
+      ([source]) => source === "https://server.example/api/stream/stale-remembered/index.m3u8",
+    ))).toBe(false);
+    expect(screen.queryByText("Playback interrupted")).toBeNull();
+    expect(recovered.autoplay).toBe(false);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("retries busy offset recovery at the retained point with paused=%s", async (wasPaused) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const pending = deferred<{ url: string; timelineOffsetSeconds: number; startPositionSeconds: number; quality: "480p"; audioTrack: number }>();
+    let calls = 0;
+    const request = vi.fn(() => ++calls === 1 ? Promise.reject(new Error("Server is busy")) : pending.promise);
+    const legacy = vi.fn();
+    render(<VideoPlayer url="https://server.example/api/stream/busy-original" title="Busy retry"
+      serverOptimized={{ qualities: ["480p"], request, loadSourceInfo: async () => ({ durationSeconds: 7200, tracks: [
+        { index: 1, language: "jpn", label: "Japanese", default: true },
+      ] }) }} requestWebviewFallback={legacy} onClose={() => {}} />);
+    await act(async () => { await Promise.resolve(); });
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    let position = 3600;
+    let paused = wasPaused;
+    Object.defineProperties(original, {
+      currentTime: { configurable: true, get: () => position }, duration: { configurable: true, value: 7200 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, get: () => paused },
+    });
+    original.volume = 0.35; original.muted = true; original.playbackRate = 1.25;
+    fireEvent.loadedMetadata(original); fireEvent.timeUpdate(original);
+    if (paused) fireEvent.pause(original); else fireEvent.play(original);
+    position = 0; paused = true;
+    Object.defineProperty(original, "error", { configurable: true, value: { code: 3 } });
+    fireEvent.pause(original); fireEvent.error(original);
+    await waitFor(() => expect(screen.getByText("Playback interrupted")).toBeInTheDocument());
+    expect(request).toHaveBeenCalledWith("480p", 3600, 1);
+    const retry = screen.getByRole("button", { name: "Retry playback" });
+    await userEvent.click(retry);
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(request).toHaveBeenLastCalledWith("480p", 3600, 1);
+    expect(document.querySelector("video.player-video")).toBeNull();
+    fireEvent.click(retry);
+    expect(request).toHaveBeenCalledTimes(2);
+    await act(async () => { pending.resolve({
+      url: "https://server.example/api/stream/busy-recovered/index.m3u8", timelineOffsetSeconds: 3600,
+      startPositionSeconds: 0, quality: "480p", audioTrack: 1,
+    }); });
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    const recovered = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(recovered.autoplay).toBe(false);
+    expect(recovered.volume).toBe(0.35); expect(recovered.muted).toBe(true); expect(recovered.playbackRate).toBe(1.25);
+    let recoveredPaused = true;
+    Object.defineProperties(recovered, {
+      duration: { configurable: true, value: 18 }, readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, get: () => recoveredPaused },
+    });
+    const play = vi.mocked(HTMLMediaElement.prototype.play); play.mockClear();
+    play.mockImplementation(function (this: HTMLMediaElement) {
+      recoveredPaused = false; fireEvent.play(this); fireEvent.playing(this); return Promise.resolve();
+    });
+    fireEvent.loadedMetadata(recovered); fireEvent.timeUpdate(recovered);
+    expect(play).toHaveBeenCalledTimes(wasPaused ? 0 : 1);
+    expect(recovered.paused).toBe(wasPaused);
+    expect(scrubBarMock.mock.lastCall![0].currentTime).toBe(3600);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it("does not commit a failed-recovery Retry after its playback owner changes", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const pending = deferred<{ url: string; timelineOffsetSeconds: number; startPositionSeconds: number; quality: "480p" }>();
+    let calls = 0;
+    const requestA = vi.fn(() => ++calls === 1 ? Promise.reject(new Error("Server is busy")) : pending.promise);
+    const requestB = vi.fn();
+    const view = render(<VideoPlayer url="https://server.example/api/stream/retry-A" title="Retry A"
+      serverOptimized={{ qualities: ["480p"], request: requestA }} onClose={() => {}} />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(original, "currentTime", { configurable: true, value: 73.1 });
+    fireMediaError(original);
+    await waitFor(() => expect(screen.getByText("Playback interrupted")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    await waitFor(() => expect(requestA).toHaveBeenCalledTimes(2));
+    view.rerender(<VideoPlayer url="https://server.example/api/stream/retry-B" title="Retry B" sourceRevision={1}
+      serverOptimized={{ qualities: ["480p"], request: requestB }} onClose={() => {}} />);
+    const current = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(current.src).toBe("https://server.example/api/stream/retry-B");
+    await act(async () => { pending.resolve({
+      url: "https://server.example/api/stream/stale-retry/index.m3u8", timelineOffsetSeconds: 73.1,
+      startPositionSeconds: 0, quality: "480p",
+    }); });
+    expect(document.querySelector("video.player-video")).toBe(current);
+    expect(requestB).not.toHaveBeenCalled();
+    expect(hlsInstances).toHaveLength(0);
+    expect(screen.queryByText("Playback interrupted")).toBeNull();
+  });
+
+  it("keeps the known saved start when Original fails before metadata", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (quality: ServerTranscodeQuality, position: number) => ({
+      url: "https://server.example/api/stream/start-recovery/index.m3u8",
+      timelineOffsetSeconds: position, startPositionSeconds: 0, quality,
+    }));
+    render(<VideoPlayer url="https://server.example/api/stream/start-original" title="Known resume"
+      startPositionSeconds={3600} serverOptimized={{ qualities: ["480p"], request }} onClose={() => {}} />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(original.readyState).toBe(HTMLMediaElement.HAVE_NOTHING);
+    expect(original.currentTime).toBe(0);
+    fireMediaError(original);
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 3600));
+  });
+
+  it.each(["explicit start", "committed seek"])("keeps %s zero over an older saved start before metadata", async (intent) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (quality: ServerTranscodeQuality, position: number) => ({
+      url: "https://server.example/api/stream/zero-start-recovery/index.m3u8",
+      timelineOffsetSeconds: position, startPositionSeconds: 0, quality,
+    }));
+    const props = { url: "https://server.example/api/stream/zero-start-original", title: "Zero resume",
+      startPositionSeconds: 3600, serverOptimized: { qualities: ["480p"] as ServerTranscodeQuality[], request }, onClose: vi.fn() };
+    const view = render(<VideoPlayer {...props} />);
+    if (intent === "explicit start") view.rerender(<VideoPlayer {...props} startPositionSeconds={0} />);
+    else {
+      act(() => { scrubBarMock.mock.lastCall![0].onSeek(0); });
+      fireEvent.seeked(document.querySelector("video.player-video")!);
+    }
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(original.readyState).toBe(HTMLMediaElement.HAVE_NOTHING);
+    fireMediaError(original);
+    await waitFor(() => expect(request).toHaveBeenCalledWith("480p", 0));
+  });
+
   it("ignores a stale fallback success while the current source recovery stays pending", async () => {
     const first = deferred<string | null>();
     const second = deferred<string | null>();
@@ -10223,6 +10786,122 @@ describe("WebviewPlayer", () => {
     expect(cc.className).toContain("is-active");
     expect(document.querySelector(".captions-active-dot")).not.toBeNull();
   });
+});
+
+describe("local pause resume media ownership", () => {
+  it.each(["desktop overlay", "desktop Space", "Android touch", "Android Space"])(
+    "preserves the nonzero media clock and source through %s resume",
+    async (route) => {
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      const android = route.startsWith("Android");
+      deviceKindMock.mockReturnValue(android ? "android" : "mac");
+      if (android) {
+        Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+          configurable: true, value: { getInsets: vi.fn() },
+        });
+      }
+      const stopInvocations = vi.fn();
+      const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
+      const mediaSession = {
+        metadata: null,
+        playbackState: "none",
+        setPositionState: vi.fn(),
+        setActionHandler: vi.fn((action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+          handlers.set(action, handler == null ? null : (details) => {
+            if (action === "stop") stopInvocations();
+            handler(details);
+          });
+        }),
+      } as unknown as MediaSession;
+      const restoreMediaSession = replaceProperty(navigator, "mediaSession", mediaSession);
+      const srcWrite = vi.spyOn(HTMLMediaElement.prototype, "src", "set");
+      const play = vi.mocked(HTMLMediaElement.prototype.play);
+      const pause = vi.mocked(HTMLMediaElement.prototype.pause);
+      const load = vi.mocked(HTMLMediaElement.prototype.load);
+      let view: ReturnType<typeof render> | null = null;
+      try {
+        view = render(<VideoPlayer url="https://server.example/api/stream/local-resume" title="Resume ownership" onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        let currentTime = 73.1;
+        let paused = false;
+        const timeWrites = vi.fn((value: number) => { currentTime = value; });
+        Object.defineProperties(video, {
+          currentTime: { configurable: true, get: () => currentTime, set: timeWrites },
+          duration: { configurable: true, get: () => 180 },
+          readyState: { configurable: true, get: () => HTMLMediaElement.HAVE_ENOUGH_DATA },
+          paused: { configurable: true, get: () => paused },
+        });
+        // jsdom has no media engine. Model native play/pause events, not the
+        // player's state setters, so the real parent paused rerender executes.
+        play.mockImplementation(function (this: HTMLMediaElement) {
+          expect(this).toBe(video);
+          paused = false;
+          fireEvent.play(this);
+          fireEvent.playing(this);
+          return Promise.resolve();
+        });
+        pause.mockImplementation(function (this: HTMLMediaElement) {
+          expect(this).toBe(video);
+          paused = true;
+          fireEvent.pause(this);
+        });
+        fireEvent.loadedMetadata(video);
+        fireEvent.canPlay(video);
+        fireEvent.play(video);
+        fireEvent.playing(video);
+        fireEvent.timeUpdate(video);
+        expect(handlers.get("stop")).toEqual(expect.any(Function));
+        const source = video.src;
+        const loadstart = vi.fn();
+        const emptied = vi.fn();
+        video.addEventListener("loadstart", loadstart);
+        video.addEventListener("emptied", emptied);
+        srcWrite.mockClear();
+        load.mockClear();
+        timeWrites.mockClear();
+        play.mockClear();
+        pause.mockClear();
+
+        await userEvent.click(screen.getByRole("button", { name: /^Pause$/ }));
+        expect(video.paused).toBe(true);
+        expect(pause).toHaveBeenCalledTimes(1);
+        expect(document.querySelector("video.player-video")).toBe(video);
+        // Late readiness events must not reapply the initial position during
+        // an ordinary local pause or after the parent's paused UI rerenders.
+        fireEvent.progress(video);
+        fireEvent.canPlay(video);
+        expect(video.currentTime).toBe(73.1);
+        if (route === "desktop overlay") {
+          await userEvent.click(screen.getByLabelText(/^Paused:/));
+        } else if (route === "Android touch") {
+          await userEvent.click(screen.getByRole("button", { name: /^Play$/ }));
+        } else {
+          act(() => {
+            fireEvent.keyDown(window, { key: " ", code: "Space", cancelable: true });
+          });
+        }
+        fireEvent.progress(video);
+        fireEvent.canPlay(video);
+        await act(async () => { await Promise.resolve(); });
+
+        expect(play).toHaveBeenCalledTimes(1);
+        expect(video.paused).toBe(false);
+        expect(document.querySelector("video.player-video")).toBe(video);
+        expect(video.src).toBe(source);
+        expect(video.currentTime).toBe(73.1);
+        expect(timeWrites).not.toHaveBeenCalled();
+        expect(srcWrite).not.toHaveBeenCalled();
+        expect(load).not.toHaveBeenCalled();
+        expect(loadstart).not.toHaveBeenCalled();
+        expect(emptied).not.toHaveBeenCalled();
+        expect(stopInvocations).not.toHaveBeenCalled();
+      } finally {
+        view?.unmount();
+        srcWrite.mockRestore();
+        restoreMediaSession();
+      }
+    },
+  );
 });
 
 describe("post-start webview stall recovery", () => {
