@@ -19,16 +19,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import {
-  init,
-  destroy,
-  command,
-  setProperty,
-  getProperty,
-  observeProperties,
-  setVideoMarginRatio,
-  addSubtitleTrack,
-  setAudioPassthrough,
-  setHdrPolicy,
+  createRenderPlayerSession,
   type MpvConfig,
   type MpvObservableProperty,
 } from "../lib/renderPlayer";
@@ -596,6 +587,9 @@ export function EmbeddedPlayer({
   scrobbleContext = null,
   onClose,
 }: Props) {
+  const nativeSession = useMemo(() => createRenderPlayerSession(), [url, playbackAuthorization, startPositionSeconds, scrobbleContext]);
+  const { command, setProperty, getProperty, observeProperties, setVideoMarginRatio,
+    addSubtitleTrack, setAudioPassthrough, setHdrPolicy } = nativeSession;
   const [error, setError] = useState<string | null>(null);
   const [manualRetryPending, setManualRetryPending] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -836,7 +830,7 @@ export function EmbeddedPlayer({
       }
     }
     wasCastSuspendedRef.current = castSuspended;
-  }, [castSuspended]);
+  }, [castSuspended, setProperty]);
 
   // Page transparent + app UI hidden so the native mpv surface shows through.
   useEffect(() => {
@@ -882,7 +876,7 @@ export function EmbeddedPlayer({
     } catch {
       /* ignore - menu just shows "none" */
     }
-  }, []);
+  }, [ getProperty]);
   const refreshChapters = useCallback(async () => {
     try {
       const raw = await getProperty("chapter-list", "node");
@@ -896,7 +890,7 @@ export function EmbeddedPlayer({
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [ getProperty]);
   const refreshAudioDevices = useCallback(async () => {
     try {
       const raw = await getProperty("audio-device-list", "node");
@@ -904,7 +898,7 @@ export function EmbeddedPlayer({
     } catch {
       setAudioDevices([]);
     }
-  }, []);
+  }, [ getProperty]);
 
   // A URL change creates a new mpv instance and removes the old process-owned
   // subtitle directory. Clear the old id map before the attachment effect runs
@@ -974,7 +968,7 @@ export function EmbeddedPlayer({
     subtitleSearch.activeTrackId,
     subtitleSearch.tracks,
     url,
-  ]);
+   setProperty, addSubtitleTrack]);
 
   // ── libmpv lifecycle: init → observe → load; destroy on unmount ────────────
   useEffect(() => {
@@ -990,6 +984,7 @@ export function EmbeddedPlayer({
     // Armed after loadfile; fires if no first frame arrives in time.
     let watchdog: number | undefined;
     let retryTimer: number | undefined;
+    let finishRetryWait: (() => void) | undefined;
     let trackRefreshTimer: number | undefined;
     firstFrameRef.current = false; // new file: show the initial spinner again
     startedRef.current = false;
@@ -1092,7 +1087,7 @@ export function EmbeddedPlayer({
 
     void (async () => {
       try {
-        await init(MPV_CONFIG);
+        await nativeSession.init(MPV_CONFIG, async () => {
         if (cancelled) {
           return;
         }
@@ -1379,7 +1374,8 @@ export function EmbeddedPlayer({
           // first touch (cold cache, 502s) that a fresh attempt clears, and
           // these used to count as instant player failures.
           await new Promise<void>((resolve) => {
-            retryTimer = window.setTimeout(resolve, 800);
+            finishRetryWait = resolve;
+            retryTimer = window.setTimeout(() => { finishRetryWait = undefined; resolve(); }, 800);
           });
           retryTimer = undefined;
           if (cancelled) return;
@@ -1459,6 +1455,7 @@ export function EmbeddedPlayer({
             void refreshChapters();
           }
         }, 700);
+        });
       } catch (e) {
         const playbackError = e instanceof Error ? e : new Error(String(e));
         await triggerNativeFallback(playbackError);
@@ -1473,9 +1470,10 @@ export function EmbeddedPlayer({
       }
       window.clearTimeout(watchdog);
       window.clearTimeout(retryTimer);
+      finishRetryWait?.(); finishRetryWait = undefined;
       window.clearTimeout(trackRefreshTimer);
       unlisten?.();
-      void destroy().catch(() => {});
+      void nativeSession.destroy().catch(() => {});
       if (scrobbleContext != null) {
         scrobblePlaybackStop(
           scrobbleContext,
@@ -1490,7 +1488,7 @@ export function EmbeddedPlayer({
     refreshTracks,
     refreshChapters,
     scrobbleContext,
-  ]);
+   nativeSession, command, setProperty, observeProperties, setVideoMarginRatio]);
 
   // Keep the current player prefs in a ref so the throttled/unmount progress
   // writes can persist them without re-subscribing on every track/speed change.
@@ -1548,7 +1546,7 @@ export function EmbeddedPlayer({
     setPaused((current) => !current);
     void setProperty("pause", !paused);
     nudgeControls();
-  }, [paused, ended, nudgeControls]);
+  }, [paused, ended, nudgeControls, command, setProperty]);
 
   const seekTo = useCallback((to: number) => {
     const duration = durRef.current;
@@ -1566,7 +1564,7 @@ export function EmbeddedPlayer({
     setEnded(false);
     endedRef.current = false;
     void command("seek", [next, "absolute"]);
-  }, []);
+  }, [ command]);
 
   const relSeek = useCallback(
     (delta: number) => {
@@ -1583,7 +1581,7 @@ export function EmbeddedPlayer({
     if (next > 0) lastAudibleVolume.current = next;
     void setProperty("volume", next);
     void setProperty("mute", next === 0);
-  }, []);
+  }, [ setProperty]);
   const toggleMute = useCallback(() => {
     if (volumeIsSilent) {
       const restored = volume > 0 ? volume : Math.max(1, lastAudibleVolume.current);
@@ -1597,23 +1595,23 @@ export function EmbeddedPlayer({
     lastAudibleVolume.current = volume;
     setMuted(true);
     void setProperty("mute", true);
-  }, [volume, volumeIsSilent]);
+  }, [volume, volumeIsSilent, setProperty]);
 
   const applySpeed = useCallback((s: number) => {
     setSpeed(s);
     void setProperty("speed", s);
-  }, []);
+  }, [ setProperty]);
 
   const selectAudio = useCallback((id: string) => {
     setActiveAid(id);
     void setProperty("aid", id);
-  }, []);
+  }, [ setProperty]);
   const selectSub = useCallback((id: string) => {
     nativeCustomSubtitleActiveRef.current = false;
     subtitleSearch.setActiveTrack(null);
     setActiveSid(id);
     void setProperty("sid", id);
-  }, [subtitleSearch.setActiveTrack]);
+  }, [subtitleSearch.setActiveTrack, setProperty]);
 
   // Restore remembered audio/subtitle/speed once, after the track list loads.
   const restoredAudioRef = useRef(false);
@@ -1698,35 +1696,35 @@ export function EmbeddedPlayer({
   const applySubDelay = useCallback((d: number) => {
     setSubDelay(d);
     void setProperty("sub-delay", d);
-  }, []);
+  }, [ setProperty]);
   const applyAudioDelay = useCallback((d: number) => {
     setAudioDelay(d);
     void setProperty("audio-delay", d);
-  }, []);
+  }, [ setProperty]);
   const applySubScale = useCallback((s: number) => {
     setSubScale(s);
     void setProperty("sub-scale", s);
-  }, []);
+  }, [ setProperty]);
   const applySubPosition = useCallback((position: number) => {
     setSubPosition(position);
     void setProperty("sub-pos", position);
-  }, []);
+  }, [ setProperty]);
   const applyVideoZoom = useCallback((zoom: number) => {
     setVideoZoom(zoom);
     void setProperty("video-zoom", zoom);
-  }, []);
+  }, [ setProperty]);
   const applyVideoPanX = useCallback((pan: number) => {
     setVideoPanX(pan);
     void setProperty("video-pan-x", pan);
-  }, []);
+  }, [ setProperty]);
   const applyVideoPanY = useCallback((pan: number) => {
     setVideoPanY(pan);
     void setProperty("video-pan-y", pan);
-  }, []);
+  }, [ setProperty]);
   const applyVideoAspect = useCallback((aspect: string) => {
     setVideoAspect(aspect);
     void setProperty("video-aspect-override", aspect);
-  }, []);
+  }, [ setProperty]);
   const applyAudioDevice = useCallback((device: string) => {
     setAudioDevice(device);
     setPlaybackSettingError(null);
@@ -1735,7 +1733,7 @@ export function EmbeddedPlayer({
         `Audio output could not be changed: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
-  }, []);
+  }, [ setProperty]);
   const applyAudioPassthrough = useCallback((enabled: boolean) => {
     setAudioPassthroughEnabled(enabled);
     setPlaybackSettingError(null);
@@ -1745,7 +1743,7 @@ export function EmbeddedPlayer({
         `Audio passthrough could not be changed: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
-  }, []);
+  }, [ setAudioPassthrough]);
   const applyHdrPolicy = useCallback((policy: "auto" | "preserve" | "tone-map") => {
     setHdrPolicyValue(policy);
     setPlaybackSettingError(null);
@@ -1754,7 +1752,7 @@ export function EmbeddedPlayer({
         `HDR policy could not be changed: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
-  }, []);
+  }, [ setHdrPolicy]);
 
   const syncFullscreen = useCallback(async () => {
     const actual = await getCurrentWindow().isFullscreen();
@@ -1897,7 +1895,7 @@ export function EmbeddedPlayer({
         }
       }
     })();
-  }, []);
+  }, [ setProperty]);
 
   // Keep the current window's real fullscreen state in sync (Esc, green button).
   useEffect(() => {
@@ -2022,7 +2020,7 @@ export function EmbeddedPlayer({
     togglePause, relSeek, changeVolume, volume, toggleMute, toggleFullscreen,
     applySpeed, speed, doClose, seekTo, nudgeControls, menu, fullscreen,
     detailsSection, refreshTracks, dismissUpNext,
-  ]);
+   command]);
 
   const nativeSourceSize = useMemo<PixelSize | null>(() => {
     const width = sourceW > 0 ? sourceW : videoW;

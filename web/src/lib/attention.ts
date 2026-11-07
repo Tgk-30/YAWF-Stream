@@ -15,8 +15,11 @@ interface AttentionGate {
 const attentionGates = new Set<AttentionGate>();
 const attentionListeners = new Set<() => void>();
 const playerMountListeners = new Set<() => void>();
+const updateInstallationListeners = new Set<() => void>();
+let updateInstallationActive = false;
 let idleGateSuppressed = false;
 let playerMounts = 0;
+let readerWork = 0;
 let attentionParked = false;
 
 function publishAttention(): void {
@@ -66,8 +69,54 @@ function subscribePlayerMount(listener: () => void): () => void {
   return () => playerMountListeners.delete(listener);
 }
 
-function getPlayerMounted(): boolean {
-  return playerMounts > 0;
+export function getPlayerMounted(): boolean {
+  return playerMounts > 0 || readerWork > 0;
+}
+
+/** Admission is synchronous, but callers acquire only from committed effects. */
+export function tryRegisterPlayerMount(): (() => void) | null {
+  return updateInstallationActive ? null : registerPlayerMount();
+}
+
+/** Native work remains an activity owner until its exact acknowledgement. */
+export function tryAcquireReaderWork(): (() => void) | null {
+  if (updateInstallationActive) return null;
+  readerWork += 1;
+  playerMountListeners.forEach((listener) => listener());
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    readerWork -= 1;
+    playerMountListeners.forEach((listener) => listener());
+  };
+}
+
+/** Hold through the non-cancellable native install and process restart. */
+export function tryAcquireUpdateInstallation(): (() => void) | null {
+  if (updateInstallationActive || getPlayerMounted()) return null;
+  updateInstallationActive = true;
+  updateInstallationListeners.forEach((listener) => listener());
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    updateInstallationActive = false;
+    updateInstallationListeners.forEach((listener) => listener());
+  };
+}
+
+function subscribeUpdateInstallation(listener: () => void): () => void {
+  updateInstallationListeners.add(listener);
+  return () => updateInstallationListeners.delete(listener);
+}
+
+export function getUpdateInstallationActive(): boolean {
+  return updateInstallationActive;
+}
+
+export function useUpdateInstallationActive(): boolean {
+  return useSyncExternalStore(subscribeUpdateInstallation, getUpdateInstallationActive, getUpdateInstallationActive);
 }
 
 export function usePlayerMounted(): boolean {

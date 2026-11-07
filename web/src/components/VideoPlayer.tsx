@@ -42,8 +42,8 @@ import {
   isTauri,
   isDesktopTauri,
   openInExternalPlayer,
-  playWithMpv,
-  mpvStop,
+  createMpvSession,
+  type MpvSession,
 } from "../lib/tauri";
 import { deviceKind, isStandaloneDisplay } from "../lib/platform";
 import { containerFullscreenExit, containerFullscreenRequest, ipadSafariPageUrl } from "../lib/playerFullscreen";
@@ -83,7 +83,7 @@ import {
   PlayerPauseOverlay,
   type NowPlayingMetadata,
 } from "./player/PlayerPauseOverlay";
-import { registerPlayerMount } from "../lib/attention";
+import { tryRegisterPlayerMount, useUpdateInstallationActive } from "../lib/attention";
 import { recordDiagnostic } from "../lib/diagnostics";
 import { mediaErrorMessage, nextHlsRecovery } from "../lib/playerReliability";
 import {
@@ -858,7 +858,34 @@ const WebviewScrubber = memo(
   }),
 );
 
-export function VideoPlayer({
+export function VideoPlayer(props: VideoPlayerProps) {
+  const installing = useUpdateInstallationActive();
+  const [admitted, setAdmitted] = useState(false);
+  const admissionRef = useRef<(() => void) | null>(null);
+  useLayoutEffect(() => {
+    admissionRef.current ??= tryRegisterPlayerMount();
+    setAdmitted(admissionRef.current != null);
+  }, [installing]);
+  useEffect(() => () => {
+    // Suspense hides clean up layout effects but retain media/native readers.
+    // Only passive unmount cleanup relinquishes this captured playback lease.
+    admissionRef.current?.();
+    admissionRef.current = null;
+  }, []);
+  // Never mount a media/native implementation before committed admission.
+  if (!admitted) return createPortal(
+    <div className="player-backdrop">
+      <div className="player player-native-tv-status" role="status">
+        <h2 className="player-external-title">Update in progress</h2>
+        <p>An update is finishing. Playback will be available after restart.</p>
+        <button type="button" className="btn btn-prominent" onClick={props.onClose}>Close player</button>
+      </div>
+    </div>, document.body,
+  );
+  return <AdmittedVideoPlayer {...props} />;
+}
+
+function AdmittedVideoPlayer({
   url,
   sourceRevision = 0,
   title,
@@ -1650,10 +1677,8 @@ export function VideoPlayer({
 
   useEffect(() => {
     recordDiagnostic("player", "session.started", "info", requestedEngine);
-    const unregister = registerPlayerMount();
     return () => {
       recordDiagnostic("player", "session.closed");
-      unregister();
     };
   }, [requestedEngine]);
   useEffect(() => {
@@ -2330,6 +2355,7 @@ export function VideoPlayer({
     setExternalActionStatus(null);
     try {
       if (desktopTauri) {
+        if (!ownsRequest()) return;
         const status = await openInExternalPlayer(
           target,
           preferredPlayer,
@@ -2481,6 +2507,7 @@ export function VideoPlayer({
   // mpv's `--wid` in-window embedding is unreliable, so mpv typically opens its
   // own window - see src-tauri/src/player.rs. mpv is stopped when this closes.
   const startedMpvRef = useRef(false);
+  const sidecarSessionRef = useRef<MpvSession | null>(null);
   const castSuspendedRef = useRef(castSuspended);
   castSuspendedRef.current = castSuspended;
   useEffect(() => {
@@ -2490,14 +2517,14 @@ export function VideoPlayer({
     setExternalStatus(null);
     setExternalError(null);
 
-    playWithMpv(effectiveUrl, playbackAuthorization)
+    const session = createMpvSession();
+    sidecarSessionRef.current = session;
+    session.start(effectiveUrl, playbackAuthorization)
       .then((res) => {
         if (cancelled) return;
         startedMpvRef.current = true;
         if (castSuspendedRef.current) {
-          void import("../lib/tauri")
-            .then(({ mpvPause }) => mpvPause())
-            .catch(() => {});
+          void session.pause().catch(() => {});
         }
         setExternalStatus(
           res.embedded
@@ -2535,9 +2562,11 @@ export function VideoPlayer({
 
     return () => {
       cancelled = true;
-      // Tear down the bundled mpv if we started it (no-op for the VLC fallback).
-      if (startedMpvRef.current) {
-        mpvStop().catch(() => {});
+      // Drain an issued start even if its acknowledgement arrived after close.
+      void session.stop().catch(() => {});
+      if (sidecarSessionRef.current === session) {
+        sidecarSessionRef.current = null;
+        startedMpvRef.current = false;
       }
     };
   }, [
@@ -2553,11 +2582,8 @@ export function VideoPlayer({
 
   useEffect(() => {
     if (mode !== "external" || useEmbedded || !startedMpvRef.current) return;
-    void import("../lib/tauri")
-      .then(({ mpvPause, mpvResume }) =>
-        castSuspended ? mpvPause() : mpvResume(),
-      )
-      .catch(() => {});
+    const session = sidecarSessionRef.current;
+    if (session != null) void (castSuspended ? session.pause() : session.resume()).catch(() => {});
   }, [castSuspended, mode, useEmbedded]);
 
   useEffect(() => {

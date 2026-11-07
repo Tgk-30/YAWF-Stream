@@ -88,3 +88,5 @@ embedded-secrets.json
 dist-deb/
 # Generated local macOS libmpv dependency bundle.
 /web/src-tauri/Frameworks/
+/scripts/desktop-update-runtime/runtime-config.json
+/web/.build/

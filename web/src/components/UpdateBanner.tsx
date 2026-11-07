@@ -11,9 +11,11 @@
 // update and then relaunches the app. Optional failures remain dismissible;
 // compatibility failures stay blocking until native compatibility is restored.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   checkForUpdates,
+  UpdateDeferredError,
+  UpdateRestartRequiredError,
   markUpdateChecked,
   updateCheckAgeMs,
   WEEKLY_UPDATE_CHECK_MS,
@@ -30,9 +32,10 @@ import {
 } from "../lib/appVersion";
 import { isDesktopTauri, isTauri } from "../lib/tauri";
 import { Icon } from "./Icon";
+import { getPlayerMounted, usePlayerMounted, useUpdateInstallationActive } from "../lib/attention";
 import "./UpdateBanner.css";
 
-type Phase = "checking" | "idle" | "installing" | "error";
+type Phase = "checking" | "idle" | "waiting" | "installing" | "restart-required" | "restarting" | "error";
 
 type CompatibilityRequirement = {
   currentVersion: string;
@@ -91,70 +94,113 @@ export function UpdateBanner({
   const installStartedRef = useRef(false);
   // Event handlers from a prior render can remain queued or retained. Read the
   // current policy through a ref rather than trusting their captured props.
-  const networkModeRef = useRef(networkMode);
-  networkModeRef.current = networkMode;
+  const policyRef = useRef({ networkMode, autoCheck, autoInstall });
   const mountedRef = useRef(false);
-
-  useEffect(() => {
+  const currentOfferRef = useRef<PendingUpdate | null>(null);
+  const queuedRef = useRef<{ pending: PendingUpdate; requirement: CompatibilityRequirement | null; automatic: boolean } | null>(null);
+  const [queueTick, setQueueTick] = useState(0);
+  const playerMounted = usePlayerMounted();
+  const installationActive = useUpdateInstallationActive();
+  useLayoutEffect(() => {
+    policyRef.current = { networkMode, autoCheck, autoInstall };
+  }, [networkMode, autoCheck, autoInstall]);
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      queuedRef.current = null;
+      const offer = currentOfferRef.current;
+      currentOfferRef.current = null;
+      if (!installStartedRef.current) void offer?.close?.().catch(() => {});
     };
   }, []);
+
+  const beginRestart = (pending: PendingUpdate) => {
+    if (!mountedRef.current || currentOfferRef.current !== pending || !pending.applied || pending.restart == null) return Promise.resolve();
+    if (installPromiseRef.current != null) return installPromiseRef.current;
+    setPhase("restarting");
+    const operation = pending.restart();
+    installPromiseRef.current = operation;
+    void operation.catch(() => {
+      if (mountedRef.current && currentOfferRef.current === pending) setPhase("restart-required");
+    }).finally(() => { if (installPromiseRef.current === operation) installPromiseRef.current = null; });
+    return operation;
+  };
 
   const beginInstall = (
     pending: PendingUpdate,
     requirement: CompatibilityRequirement | null,
+    automatic = false,
   ) => {
+    if (pending.applied) return beginRestart(pending);
+    const eligible = () => mountedRef.current && currentOfferRef.current === pending &&
+      isNetworkAllowed("updates", policyRef.current.networkMode) &&
+      (!automatic || (policyRef.current.autoInstall && (policyRef.current.autoCheck || requirement != null)));
+    if (!eligible()) return Promise.resolve();
+    queuedRef.current = { pending, requirement, automatic };
     if (installPromiseRef.current != null) return installPromiseRef.current;
-    const suspendForPrivacy = () => {
-      pendingRef.current = false;
-      if (!mountedRef.current) return;
-      setUpdate(null);
-      setCompatibility(requirement);
-      setFailureReason(requirement == null ? null : "privacy-blocked");
-      setPhase(requirement == null ? "idle" : "error");
-    };
-    if (!isNetworkAllowed("updates", networkModeRef.current)) {
-      suspendForPrivacy();
+    if (getPlayerMounted() || installationActive) {
+      setPhase("waiting");
       return Promise.resolve();
     }
     setFailureReason(null);
     setPhase("installing");
     setProgress(0);
     const operation = Promise.resolve().then(async () => {
-      // Re-check immediately before entering the updater plugin. This closes
-      // the gap between a click/auto-install decision and its queued microtask.
-      if (!isNetworkAllowed("updates", networkModeRef.current)) {
-        suspendForPrivacy();
+      if (!eligible() || getPlayerMounted()) {
+        if (mountedRef.current && eligible()) setPhase("waiting");
         return;
       }
-      installStartedRef.current = true;
       await pending.install((fraction) => {
         if (mountedRef.current) setProgress(fraction);
+      }, {
+        canProceed: eligible,
+        onInstallStarted: () => { installStartedRef.current = true; queuedRef.current = null; },
       });
+      installStartedRef.current = true;
+      queuedRef.current = null;
     });
     installPromiseRef.current = operation;
-    void operation
-      .catch(() => {
-        if (!isNetworkAllowed("updates", networkModeRef.current)) {
-          suspendForPrivacy();
-          return;
-        }
-        if (mountedRef.current) {
+    void operation.catch((error: unknown) => {
+      if (!mountedRef.current) return;
+      if (error instanceof UpdateRestartRequiredError || pending.applied) {
+        installStartedRef.current = true;
+        queuedRef.current = null;
+        setPhase("restart-required");
+      } else if (error instanceof UpdateDeferredError) {
+        if (!isNetworkAllowed("updates", policyRef.current.networkMode)) {
+          queuedRef.current = null;
+          setUpdate(null);
           setCompatibility(requirement);
-          setFailureReason("install-failed");
-          setPhase("error");
-        }
-      })
-      .finally(() => {
+          setFailureReason(requirement == null ? null : "privacy-blocked");
+          setPhase(requirement == null ? "idle" : "error");
+        } else setPhase(eligible() ? "waiting" : "idle");
+      } else {
         installStartedRef.current = false;
-        if (installPromiseRef.current === operation) {
-          installPromiseRef.current = null;
-        }
-      });
+        queuedRef.current = null;
+        setCompatibility(requirement);
+        setFailureReason("install-failed");
+        setPhase("error");
+      }
+    }).finally(() => {
+      if (installPromiseRef.current === operation) installPromiseRef.current = null;
+      if (mountedRef.current) setQueueTick((value) => value + 1);
+    });
     return operation;
   };
+
+  useEffect(() => {
+    if (installStartedRef.current) return;
+    const queued = queuedRef.current;
+    if (queued == null) return;
+    if (!isNetworkAllowed("updates", networkMode) ||
+      (queued.automatic && (!autoInstall || (!autoCheck && queued.requirement == null)))) {
+      queuedRef.current = null;
+      setPhase("idle");
+      return;
+    }
+    if (!playerMounted && !installationActive) void beginInstall(queued.pending, queued.requirement, queued.automatic);
+  }, [autoCheck, autoInstall, installationActive, networkMode, playerMounted, queueTick]);
 
   // Hide an optional update as soon as its download becomes disallowed. Keep
   // a mandatory compatibility gate visible with the precise privacy reason.
@@ -215,8 +261,17 @@ export function UpdateBanner({
         setFailureReason(null);
         setPhase("checking");
       }
-      const result = await sharedCheck();
-      if (cancelled) return;
+      const existing = currentOfferRef.current;
+      const result: UpdateCheckResult = existing != null &&
+        (requirement == null || compareAppVersions(existing.version, requirement.compatibilityFloor) >= 0)
+        ? { status: "available", update: existing }
+        : await sharedCheck();
+      if (cancelled) {
+        if (result.status === "available") queueMicrotask(() => {
+          if (currentOfferRef.current !== result.update) void result.update.close?.().catch(() => {});
+        });
+        return;
+      }
       if (result.status !== "privacy-blocked" && result.status !== "unsupported") {
         markUpdateChecked();
       }
@@ -263,11 +318,13 @@ export function UpdateBanner({
       ) {
         return;
       }
+      if (currentOfferRef.current != null && currentOfferRef.current !== pending) void currentOfferRef.current.close?.().catch(() => {});
+      currentOfferRef.current = pending;
       pendingRef.current = true;
       setFailureReason(null);
       setUpdate(pending);
       if (autoInstall) {
-        void beginInstall(pending, requirement);
+        void beginInstall(pending, requirement, true);
       } else {
         setPhase("idle");
       }
@@ -325,6 +382,10 @@ export function UpdateBanner({
   const checking = phase === "checking";
   const installing = phase === "installing";
   const errored = phase === "error";
+  const blockingCompatibility = compatibility != null && !playerMounted;
+  const waiting = phase === "waiting";
+  const restartRequired = phase === "restart-required";
+  const restarting = phase === "restarting";
   // A determinate bar when we have a fraction; otherwise an indeterminate sweep.
   const pct =
     progress != null ? Math.round(Math.min(1, Math.max(0, progress)) * 100) : null;
@@ -349,8 +410,8 @@ export function UpdateBanner({
   const banner = (
     <div
       className={`update-banner glass-raised glass-lit${compatibility != null ? " is-compatibility" : ""}`}
-      role={compatibility != null ? "alertdialog" : "status"}
-      aria-modal={compatibility != null ? true : undefined}
+      role={blockingCompatibility ? "alertdialog" : "status"}
+      aria-modal={blockingCompatibility ? true : undefined}
       aria-label={compatibility != null ? "Desktop update required" : undefined}
       aria-live="polite"
     >
@@ -359,7 +420,15 @@ export function UpdateBanner({
       </div>
 
       <div className="update-banner-body">
-        {checking ? (
+        {restartRequired || restarting ? (
+          <>
+            <span className="update-banner-title">Update v{update?.version} installed</span>
+            <span className="update-banner-sub t-secondary">
+              {restarting ? "Restarting the app…" : "Restart is required to finish. The installed update will not be downloaded or applied again."}
+              {compatibility != null ? ` This signed update meets native compatibility floor v${compatibility.compatibilityFloor} after restart.` : ""}
+            </span>
+          </>
+        ) : checking ? (
           <>
             <span className="update-banner-title">Checking desktop update…</span>
             <span className="update-banner-sub t-secondary">
@@ -403,13 +472,19 @@ export function UpdateBanner({
               {compatibility != null
                 ? `Install this signed update to meet native compatibility floor v${compatibility.compatibilityFloor}.`
                 : "A new version of YAWF Stream is ready to install."}
+              {waiting ? " Close all players and wait for playback to finish stopping. If it cannot finish, reopen the app before updating." : ""}
             </span>
           </>
         )}
       </div>
 
       <div className="update-banner-actions">
-        {errored ? (
+        {restartRequired || restarting ? (
+          <button type="button" className="btn btn-prominent update-banner-install" disabled={restarting}
+            onClick={() => { if (update != null) void beginRestart(update); }}>
+            {restarting ? "Restarting…" : "Restart app"}
+          </button>
+        ) : errored ? (
           <button
             type="button"
             className="btn btn-prominent update-banner-install"
@@ -437,15 +512,19 @@ export function UpdateBanner({
           )
         )}
 
-        {!checking && !installing && compatibility == null && (
+        {!checking && !installing && !restartRequired && !restarting && compatibility == null && (
           <button
             type="button"
             className="update-banner-dismiss"
             onClick={() => {
               // Remember this version so the weekly poll won't re-surface it, and
               // free the poll to look for a later one.
+              if (installStartedRef.current || currentOfferRef.current !== update) return;
               dismissedVersionRef.current = update?.version ?? null;
               pendingRef.current = false;
+              queuedRef.current = null;
+              currentOfferRef.current = null;
+              void update?.close?.().catch(() => {});
               setUpdate(null);
             }}
             aria-label="Dismiss update notification"
@@ -458,7 +537,7 @@ export function UpdateBanner({
     </div>
   );
 
-  return compatibility != null ? (
+  return blockingCompatibility ? (
     <div className="update-compatibility-backdrop">{banner}</div>
   ) : (
     banner

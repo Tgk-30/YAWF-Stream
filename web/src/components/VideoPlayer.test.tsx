@@ -8,7 +8,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode, Suspense, startTransition, useState } from "react";
+import { StrictMode, Suspense, startTransition, useState, useLayoutEffect } from "react";
 import { readFileSync } from "node:fs";
 import type {
   ServerAudioInventoryLoadOptions,
@@ -251,7 +251,11 @@ const isAndroidExternalPlayerEligibleOverride = vi.fn<() => boolean | undefined>
   () => undefined,
 );
 const mpvStopMock = vi.fn(async () => {});
-vi.mock("../lib/tauri", () => ({
+const nativeSidecar = vi.hoisted(() => ({ actual: false, invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => nativeSidecar.invoke(...args) }));
+vi.mock("../lib/tauri", async (original) => {
+  const actual = await original<typeof import("../lib/tauri")>();
+  return ({
   isTauri: () => isTauriMock(),
   isDesktopTauri: () => {
     const markers = window as unknown as Record<string, unknown>;
@@ -259,15 +263,17 @@ vi.mock("../lib/tauri", () => ({
       markers.__YAWF_TAURI_MOBILE__ !== true &&
       !["android", "ios"].includes(deviceKindMock());
   },
-  playWithMpv: (url: string, authorization?: string) =>
-    playWithMpvMock(url, authorization),
+  createMpvSession: () => nativeSidecar.actual ? actual.createMpvSession() : ({
+    start: (url: string, authorization?: string) => playWithMpvMock(url, authorization),
+    stop: () => mpvStopMock(), pause: async () => {}, resume: async () => {},
+  }),
   openInExternalPlayer: (
     url: string,
     preferred?: string,
     authorization?: string,
   ) => openInExternalPlayerMock(url, preferred, authorization),
   mpvStop: () => mpvStopMock(),
-}));
+}); });
 vi.mock("../lib/androidExternalPlayer", async (orig) => {
   const actual = await orig<typeof import("../lib/androidExternalPlayer")>();
   return {
@@ -420,6 +426,7 @@ vi.mock("./EmbeddedPlayer", () => ({
 }));
 
 import { VideoPlayer } from "./VideoPlayer";
+import { getPlayerMounted, tryAcquireUpdateInstallation } from "../lib/attention";
 import {
   FRESH_STREAM_RESOLUTION_TIMEOUT_MS,
   POST_START_STALL_TIMEOUT_MS,
@@ -482,6 +489,7 @@ beforeEach(() => {
   // Initial server HLS owners now prepare their master before media attach.
   // Keep all HTTP synthetic; individual transport tests supply real fixture URIs.
   vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n")));
+  nativeSidecar.actual = false; nativeSidecar.invoke.mockReset(); nativeSidecar.invoke.mockResolvedValue(undefined);
   recordDiagnosticMock.mockClear();
   scrobbleStartMock.mockClear();
   scrobblePauseMock.mockClear();
@@ -14001,5 +14009,94 @@ describe("Original pending-generation cancellation contract", () => {
       act(() => { staleOriginal(8); });
       expect(document.querySelector("video.player-video")).toBe(committed);
     } finally { embeddedModeIntentObserver.enabled = false; }
+  });
+});
+
+describe("desktop updater player admission boundary", () => {
+  it.each(["direct", "HLS", "embedded", "external", "TV"] as const)("blocks the %s reader implementation while physical installation owns admission", async (reader) => {
+    const release = tryAcquireUpdateInstallation(); expect(release).not.toBeNull();
+    if (reader === "embedded" || reader === "external") { isTauriMock.mockReturnValue(true); deviceKindMock.mockReturnValue("mac"); }
+    const tvPlay = vi.fn(); if (reader === "TV") window.YawfAndroidTV = { play: tvPlay, stop: vi.fn() };
+    const view = render(<VideoPlayer url={reader === "HLS" || reader === "TV" ? "https://x/video.m3u8" : "https://x/video.mp4"}
+      engine={reader === "embedded" || reader === "external" ? "native-mpv" : reader === "HLS" ? "webview-hls-transcode" : "webview-direct"}
+      useBuiltInPlayer={reader !== "external"} title="Blocked reader" onClose={() => {}} />);
+    try {
+      await act(async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve(); });
+      expect(screen.getByText(/Playback will be available after restart/)).toBeInTheDocument();
+      expect(document.querySelector("video.player-video")).toBeNull(); expect(screen.queryByTestId("embedded-player")).toBeNull();
+      expect(hlsInstances).toHaveLength(0); expect(tvPlay).not.toHaveBeenCalled(); expect(playWithMpvMock).not.toHaveBeenCalled();
+      expect(openInExternalPlayerMock).not.toHaveBeenCalled(); expect(getPlayerMounted()).toBe(false);
+    } finally { view.unmount(); act(() => release!()); }
+  });
+  it("rejects a player rendered before installation but committed after installer admission", () => {
+    let release: (() => void) | null = null;
+    function EarlierCommit() { useLayoutEffect(() => { release = tryAcquireUpdateInstallation(); return () => release?.(); }, []); return null; }
+    const view = render(<><EarlierCommit /><VideoPlayer url="https://x/video.mp4" title="Late commit" onClose={() => {}} /></>);
+    expect(release).not.toBeNull(); expect(document.querySelector("video.player-video")).toBeNull();
+    expect(getPlayerMounted()).toBe(false);
+    act(() => release!());
+    expect(document.querySelector("video.player-video")).not.toBeNull(); expect(getPlayerMounted()).toBe(true);
+    view.unmount(); expect(getPlayerMounted()).toBe(false);
+  });
+  it("retains a connected reader's lease through forced Suspense hiding and reveal", () => {
+    const blocked = new Promise<void>(() => {}); let choose = (_value: boolean) => {};
+    function Gate({ hidden }: { hidden: boolean }) { if (hidden) throw blocked; return null; }
+    function Scenario() {
+      const [hidden, setHidden] = useState(false); choose = setHidden;
+      return <Suspense fallback={<div>Hidden reader fallback</div>}>
+        <VideoPlayer url="https://x/video.mp4" title="Hidden admitted reader" onClose={() => {}} />
+        <Gate hidden={hidden} />
+      </Suspense>;
+    }
+    const view = render(<Scenario />); const reader = document.querySelector("video.player-video")!;
+    expect(reader).not.toBeNull(); expect(getPlayerMounted()).toBe(true);
+    act(() => choose(true)); expect(screen.getByText("Hidden reader fallback")).toBeInTheDocument();
+    expect(reader.isConnected).toBe(true); expect(getPlayerMounted()).toBe(true);
+    const forbidden = tryAcquireUpdateInstallation();
+    try { expect(forbidden).toBeNull(); } finally { forbidden?.(); }
+    act(() => choose(false)); expect(document.querySelector("video.player-video")).toBe(reader);
+    expect(getPlayerMounted()).toBe(true);
+    view.unmount(); expect(getPlayerMounted()).toBe(false);
+    const release = tryAcquireUpdateInstallation(); expect(release).not.toBeNull(); release!();
+  });
+  it.each([true, false])("retains playback admission for a mounted paused=%s player across source revisions", (paused) => {
+    const props = { url: "https://x/video.mp4", title: "Admitted player", onClose: () => {}, initialHandoffState: { paused, volume: 0.4, muted: true, playbackRate: 1.25 } };
+    const view = render(<StrictMode><VideoPlayer {...props} sourceRevision={1} /></StrictMode>);
+    expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+    view.rerender(<StrictMode><VideoPlayer {...props} sourceRevision={2} /></StrictMode>);
+    expect(getPlayerMounted()).toBe(true); expect(tryAcquireUpdateInstallation()).toBeNull();
+    view.unmount(); expect(getPlayerMounted()).toBe(false);
+    const release = tryAcquireUpdateInstallation(); expect(release).not.toBeNull(); release!();
+  });
+});
+
+describe("actual sidecar admission integration", () => {
+  it("retains native work after wrapper unmount through late start and stop acknowledgements", async () => {
+    nativeSidecar.actual = true; isTauriMock.mockReturnValue(true); deviceKindMock.mockReturnValue("mac");
+    const restore = replaceProperty(window, "__TAURI_INTERNALS__", {});
+    const started = deferred<{ embedded: boolean; status: string }>(); const stopped = deferred<void>();
+    nativeSidecar.invoke.mockImplementation((command: string) => command === "mpv_play" ? started.promise : stopped.promise);
+    const view = render(<VideoPlayer url="https://x/native.mkv" title="Native drain" engine="native-mpv" useBuiltInPlayer={false} onClose={() => {}} />);
+    try {
+      await waitFor(() => expect(nativeSidecar.invoke).toHaveBeenCalledWith("mpv_play", expect.any(Object)));
+      view.unmount(); expect(getPlayerMounted()).toBe(true);
+      const denied = tryAcquireUpdateInstallation(); try { expect(denied).toBeNull(); } finally { denied?.(); }
+      started.resolve({ embedded: false, status: "Late native start" });
+      await waitFor(() => expect(nativeSidecar.invoke).toHaveBeenCalledWith("mpv_stop"));
+      expect(getPlayerMounted()).toBe(true); stopped.resolve();
+      await waitFor(() => expect(getPlayerMounted()).toBe(false));
+    } finally {
+      started.resolve({ embedded: false, status: "Closed" }); stopped.resolve(); view.unmount(); restore(); nativeSidecar.actual = false;
+    }
+  });
+  it("uses a styled full-window waiting surface with an operable Close action", () => {
+    const release = tryAcquireUpdateInstallation()!; const close = vi.fn();
+    const view = render(<VideoPlayer url="https://x/video.mp4" title="Blocked" onClose={close} />);
+    try {
+      const status = screen.getByRole("status"); expect(status).toHaveClass("player", "player-native-tv-status");
+      expect(screen.getByRole("button", { name: "Close player" })).toHaveClass("btn", "btn-prominent");
+      fireEvent.click(screen.getByRole("button", { name: "Close player" })); expect(close).toHaveBeenCalledTimes(1);
+      expect(document.querySelector("video.player-video")).toBeNull();
+    } finally { view.unmount(); release(); }
   });
 });

@@ -9,6 +9,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { tryAcquireReaderWork } from "./attention";
 
 /** One observed property: [name, format, fallback?] - matches the plugin shape. */
 export type MpvObservableProperty = readonly [string, string, ...string[]];
@@ -54,27 +55,20 @@ function toObserveSpecs(
   return (props ?? []).map((p) => ({ name: p[0], format: p[1] }));
 }
 
-/** Create the player (mpv + native surface + event stream). No file is loaded. */
-export function init(config: MpvConfig): Promise<void> {
-  return enqueueLifecycle(async () => {
-    lastVideoMarginBottom = undefined;
-    await invoke("player_init", {
-      options: stringifyOptions(config.initialOptions),
-      observed: toObserveSpecs(config.observedProperties),
-    });
+async function rawInit(config: MpvConfig): Promise<void> {
+  lastVideoMarginBottom = undefined;
+  await invoke("player_init", {
+    options: stringifyOptions(config.initialOptions),
+    observed: toObserveSpecs(config.observedProperties),
   });
 }
-
-/** Tear the player down and remove the native surface. */
-export function destroy(): Promise<void> {
-  return enqueueLifecycle(async () => {
-    lastVideoMarginBottom = undefined;
-    await invoke("player_destroy");
-  });
+async function rawDestroy(): Promise<void> {
+  lastVideoMarginBottom = undefined;
+  await invoke("player_destroy");
 }
 
 /** Run an mpv command, e.g. command("loadfile", [url, "replace"]). */
-export async function command(
+async function command(
   name: string,
   args: ReadonlyArray<string | number> = [],
   streamAuthorization?: string,
@@ -86,7 +80,7 @@ export async function command(
 }
 
 /** Set an mpv property. Booleans become yes/no; numbers are stringified. */
-export async function setProperty(
+async function setProperty(
   name: string,
   value: string | number | boolean,
 ): Promise<void> {
@@ -99,7 +93,7 @@ export async function setProperty(
  * Get an mpv property. `format` is accepted for API parity; only `track-list`
  * and `chapter-list` are supported, and both come back as JSON arrays.
  */
-export async function getProperty(
+async function getProperty(
   name: string,
   _format?: string,
 ): Promise<unknown> {
@@ -107,7 +101,7 @@ export async function getProperty(
 }
 
 /** Attach a downloaded or translated WebVTT track to the native player. */
-export async function addSubtitleTrack(
+async function addSubtitleTrack(
   contents: string,
   label: string,
   language: string,
@@ -120,12 +114,12 @@ export async function addSubtitleTrack(
 }
 
 /** Enable or disable codec passthrough on the selected native audio device. */
-export async function setAudioPassthrough(enabled: boolean): Promise<void> {
+async function setAudioPassthrough(enabled: boolean): Promise<void> {
   await invoke("player_set_audio_passthrough", { enabled });
 }
 
 /** Apply an explicit native HDR output policy. */
-export async function setHdrPolicy(
+async function setHdrPolicy(
   policy: "auto" | "preserve" | "tone-map",
 ): Promise<void> {
   await invoke("player_set_hdr_policy", { policy });
@@ -136,7 +130,7 @@ export async function setHdrPolicy(
  * are already observed by `init` (from config.observedProperties); this attaches
  * the listener and returns an unlisten function.
  */
-export async function observeProperties(
+async function observeProperties(
   _properties: readonly MpvObservableProperty[],
   callback: (ev: { name: string; data: unknown }) => void,
 ): Promise<() => void> {
@@ -147,7 +141,7 @@ export async function observeProperties(
 }
 
 /** Reserve a fraction of the bottom of the video for the control bar. */
-export async function setVideoMarginRatio(margin: {
+async function setVideoMarginRatio(margin: {
   bottom?: number;
 }): Promise<void> {
   const bottom = margin.bottom ?? 0;
@@ -160,4 +154,63 @@ export async function setVideoMarginRatio(margin: {
     lastVideoMarginBottom = undefined;
     throw error;
   }
+}
+
+type RenderOwner = { closed: boolean; release: (() => void) | null; pending: Set<Promise<unknown>> };
+let currentOwner: RenderOwner | null = null;
+async function retireOwner(owner: RenderOwner): Promise<void> {
+  owner.closed = true;
+  await Promise.allSettled([...owner.pending]);
+  if (currentOwner === owner) {
+    await rawDestroy();
+    currentOwner = null;
+  }
+  owner.release?.(); owner.release = null;
+}
+
+/** Own init/setup, issued commands and teardown as one serialized native reader. */
+export function createRenderPlayerSession() {
+  const owner: RenderOwner = { closed: false, release: null, pending: new Set() };
+  let initialization: Promise<void> | null = null;
+  let destruction: Promise<void> | null = null;
+  const run = <T>(operation: () => Promise<T>): Promise<T> => {
+    if (owner.closed || currentOwner !== owner) return Promise.reject(new Error("This native playback session is closed."));
+    const active = operation().finally(() => { owner.pending.delete(active); });
+    owner.pending.add(active);
+    return active;
+  };
+  return {
+    init: (config: MpvConfig, setup?: () => Promise<void>): Promise<void> => {
+      if (initialization != null) return initialization;
+      if (owner.closed) return Promise.reject(new Error("This native playback session is closed."));
+      owner.release = tryAcquireReaderWork();
+      if (owner.release == null) return Promise.reject(new Error("An update is being installed. Reopen playback after restart."));
+      initialization = enqueueLifecycle(async () => {
+        if (owner.closed) return;
+        if (currentOwner != null && currentOwner !== owner) await retireOwner(currentOwner);
+        currentOwner = owner;
+        try {
+          await rawInit(config);
+          if (!owner.closed) await setup?.();
+        } catch (error) { await retireOwner(owner); throw error; }
+      });
+      return initialization;
+    },
+    destroy: (): Promise<void> => {
+      owner.closed = true;
+      if (destruction != null) return destruction;
+      const active = enqueueLifecycle(() => retireOwner(owner)).catch((error: unknown) => { destruction = null; throw error; });
+      destruction = active;
+      return active;
+    },
+    command: (...args: Parameters<typeof command>) => run(() => command(...args)),
+    setProperty: (...args: Parameters<typeof setProperty>) => run(() => setProperty(...args)),
+    getProperty: (...args: Parameters<typeof getProperty>) => run(() => getProperty(...args)),
+    addSubtitleTrack: (...args: Parameters<typeof addSubtitleTrack>) => run(() => addSubtitleTrack(...args)),
+    setAudioPassthrough: (...args: Parameters<typeof setAudioPassthrough>) => run(() => setAudioPassthrough(...args)),
+    setHdrPolicy: (...args: Parameters<typeof setHdrPolicy>) => run(() => setHdrPolicy(...args)),
+    setVideoMarginRatio: (...args: Parameters<typeof setVideoMarginRatio>) => run(() => setVideoMarginRatio(...args)),
+    observeProperties: (properties: readonly MpvObservableProperty[], callback: (ev: { name: string; data: unknown }) => void) => run(() =>
+      observeProperties(properties, (event) => { if (!owner.closed && currentOwner === owner) callback(event); })),
+  };
 }

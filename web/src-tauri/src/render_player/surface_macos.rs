@@ -611,6 +611,14 @@ impl FrameSnapshot {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum SurfaceReadiness {
+    Pending = 0,
+    Ready = 1,
+    Dead = 2,
+}
+
 /// Send-safe native geometry and window-wrap state. Objective-C objects are held
 /// only as raw addresses and are dereferenced exclusively on AppKit's main
 /// thread. The atomics are updated by mpv's event thread.
@@ -621,6 +629,7 @@ struct SurfaceState {
     webview_sibling_ptr: usize,
     host_ptr: AtomicUsize,
     layer_ptr: AtomicUsize,
+    readiness: AtomicU8,
     dwidth: AtomicI64,
     dheight: AtomicI64,
     first_draw_logged: AtomicBool,
@@ -659,6 +668,7 @@ impl SurfaceState {
             webview_sibling_ptr,
             host_ptr: AtomicUsize::new(0),
             layer_ptr: AtomicUsize::new(0),
+            readiness: AtomicU8::new(SurfaceReadiness::Pending as u8),
             dwidth: AtomicI64::new(0),
             dheight: AtomicI64::new(0),
             first_draw_logged: AtomicBool::new(false),
@@ -682,6 +692,33 @@ impl SurfaceState {
             webview_transparent: AtomicBool::new(false),
             dead: AtomicBool::new(false),
         })
+    }
+
+    fn render_readiness(&self) -> SurfaceReadiness {
+        if self.dead.load(Ordering::Acquire) || self.layer_ptr.load(Ordering::Acquire) == 0 {
+            return SurfaceReadiness::Dead;
+        }
+        match self.readiness.load(Ordering::Acquire) {
+            0 => SurfaceReadiness::Pending,
+            1 => SurfaceReadiness::Ready,
+            _ => SurfaceReadiness::Dead,
+        }
+    }
+
+    fn mark_render_context_ready(&self) {
+        // A late draw cannot undo teardown, even while it owns the render slot.
+        let _ = self.readiness.compare_exchange(
+            SurfaceReadiness::Pending as u8,
+            SurfaceReadiness::Ready as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn begin_teardown(&self) -> bool {
+        self.readiness
+            .store(SurfaceReadiness::Dead as u8, Ordering::Release);
+        !self.dead.swap(true, Ordering::AcqRel)
     }
 
     fn dimension_text(&self) -> (String, String) {
@@ -1096,6 +1133,7 @@ define_class!(
                     Ok(rc) => {
                         rp_log("VideoLayer.draw: RenderContext created");
                         *render_slot = Some(rc);
+                        ivars.surface.mark_render_context_ready();
                     }
                     Err(e) => rp_log(&format!("VideoLayer.draw: RenderContext failed: {e}")),
                 }
@@ -2579,8 +2617,17 @@ fn remove_window_observers(host: &HostView) {
     unsafe { center.removeObserver(host) };
 }
 
+fn take_render_for_teardown<T>(render: &Mutex<Option<T>>) -> Option<T> {
+    // Poison does not remove the owned context. Recover it for ordered cleanup,
+    // and release the mutex before its Drop takes the CGL context lock.
+    let mut slot = render
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    slot.take()
+}
+
 fn teardown_surface_on_main(surface: &Arc<SurfaceState>, reason: &str, restore_window_frame: bool) {
-    if surface.dead.swap(true, Ordering::AcqRel) {
+    if !surface.begin_teardown() {
         return;
     }
     surface.wrap_active.store(false, Ordering::Release);
@@ -2640,10 +2687,7 @@ fn teardown_surface_on_main(surface: &Arc<SurfaceState>, reason: &str, restore_w
         // after callback unregistration and mpv_render_context_free return.
         // Release the render mutex before Drop acquires the CGL context lock:
         // draw acquires CGL first and then the render mutex.
-        let render = {
-            let mut slot = layer.ivars().render.lock().unwrap();
-            slot.take()
-        };
+        let render = take_render_for_teardown(&layer.ivars().render);
         drop(render);
     }
     if host_ptr != 0 {
@@ -2750,6 +2794,40 @@ pub fn surface_pre_init<R: Runtime>(_app: &AppHandle<R>) -> Result<PreInit, Stri
     })
 }
 
+fn finish_surface_attach<T>(
+    mut render_ready: impl FnMut() -> SurfaceReadiness,
+    mut deadline_reached: impl FnMut() -> bool,
+    mut redraw_and_wait: impl FnMut(),
+    teardown: impl FnOnce(),
+    publish: impl FnOnce() -> T,
+) -> Result<T, String> {
+    loop {
+        match render_ready() {
+            SurfaceReadiness::Ready => return Ok(publish()),
+            SurfaceReadiness::Dead => {
+                teardown();
+                return Err("video surface closed before its render context was ready".to_string());
+            }
+            SurfaceReadiness::Pending => {}
+        }
+        if deadline_reached() {
+            teardown();
+            return Err("timed out waiting for the video render context".to_string());
+        }
+        redraw_and_wait();
+    }
+}
+
+fn with_live_surface_layer(surface: &SurfaceState, redraw: impl FnOnce(usize)) {
+    if surface.dead.load(Ordering::Acquire) {
+        return;
+    }
+    let layer_ptr = surface.layer_ptr.load(Ordering::Acquire);
+    if layer_ptr != 0 {
+        redraw(layer_ptr);
+    }
+}
+
 pub fn surface_attach<R: Runtime>(
     app: &AppHandle<R>,
     mpv: Arc<Mpv>,
@@ -2775,7 +2853,7 @@ pub fn surface_attach<R: Runtime>(
             }
         })
         .map_err(|e| format!("could not access the native webview: {e}"))?;
-    let (_host_view_ptr, layer_ptr, state) =
+    let (_host_view_ptr, _layer_ptr, state) =
         rx.recv_timeout(std::time::Duration::from_secs(8))
             .map_err(|_| "timed out setting up the video surface".to_string())??;
 
@@ -2786,36 +2864,42 @@ pub fn surface_attach<R: Runtime>(
     // video output fails permanently (black). We run off the main thread, so the
     // main run loop keeps drawing the layer while we poll.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let ready = {
-            let layer: &VideoLayer = unsafe { &*(layer_ptr as *const VideoLayer) };
-            layer
-                .ivars()
-                .render
-                .lock()
-                .map(|g| g.is_some())
-                .unwrap_or(false)
-        };
-        if ready {
-            rp_log("attach_surface: render context ready");
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            rp_log("attach_surface: WARN render context not ready after 3s");
-            break;
-        }
-        // Nudge a redraw (harmless if one is already pending) and yield.
-        DispatchQueue::main().exec_async({
-            let p = layer_ptr;
-            move || {
-                let l: &VideoLayer = unsafe { &*(p as *const VideoLayer) };
-                l.setNeedsDisplay();
+    let readiness_state = state.clone();
+    let redraw_state = state.clone();
+    let teardown_state = state.clone();
+    finish_surface_attach(
+        || readiness_state.render_readiness(),
+        || std::time::Instant::now() >= deadline,
+        || {
+            // A queued nudge may run after inline timeout teardown. Resolve its
+            // live layer on the main thread, never retain only a raw address.
+            DispatchQueue::main().exec_async({
+                let state = redraw_state.clone();
+                move || {
+                    with_live_surface_layer(&state, |p| {
+                        let layer: &VideoLayer = unsafe { &*(p as *const VideoLayer) };
+                        layer.setNeedsDisplay();
+                    });
+                }
+            });
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        },
+        move || {
+            rp_log("attach_surface: render context unavailable; tearing down");
+            let teardown = move || {
+                teardown_surface_on_main(&teardown_state, "attach-render-context-timeout", true);
+            };
+            if MainThreadMarker::new().is_some() {
+                teardown();
+            } else {
+                DispatchQueue::main().exec_sync(teardown);
             }
-        });
-        std::thread::sleep(std::time::Duration::from_millis(15));
-    }
-
-    Ok(Arc::new(MacosSurface { state }))
+        },
+        move || {
+            rp_log("attach_surface: render context ready");
+            Arc::new(MacosSurface { state }) as Arc<dyn VideoSurface>
+        },
+    )
 }
 
 // ---- Main-thread surface setup ------------------------------------------
@@ -3001,14 +3085,239 @@ fn setup_on_main(
 mod tests {
     use super::{
         capped_render_target_dimensions, claim_webview_opacity_restore, claim_webview_transparency,
-        first_wrap_size, fullscreen_blocks_window_mutation, layer_context_action,
-        render_context_matches_creation, render_update_has_frame, resume_wrap_decision,
-        should_queue_callback_redraw, should_requeue_after_draw, wrap_postcondition_decision,
+        finish_surface_attach, first_wrap_size, fullscreen_blocks_window_mutation,
+        layer_context_action, render_context_matches_creation, render_update_has_frame,
+        resume_wrap_decision, should_queue_callback_redraw, should_requeue_after_draw,
+        take_render_for_teardown, with_live_surface_layer, wrap_postcondition_decision,
         CallbackLifecycle, LayerContextAction, RenderCallbackState, ResumeWrapDecision,
-        SurfaceState, WrapPostconditionDecision,
+        SurfaceReadiness, SurfaceState, WrapPostconditionDecision,
     };
     use objc2_foundation::NSSize;
+    use std::cell::{Cell, RefCell};
     use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, TryLockError, Weak};
+
+    #[test]
+    fn ready_surface_publishes_once_without_cleanup_or_redraw() {
+        let published = Cell::new(0);
+        let result = finish_surface_attach(
+            || SurfaceReadiness::Ready,
+            || panic!("ready surface must not test its deadline"),
+            || panic!("ready surface must not redraw"),
+            || panic!("ready surface must not teardown"),
+            || {
+                published.set(published.get() + 1);
+                "ready surface"
+            },
+        );
+        assert_eq!(result, Ok("ready surface"));
+        assert_eq!(published.get(), 1);
+    }
+
+    #[test]
+    fn pending_surface_publishes_only_after_observed_render_readiness() {
+        let polls = Cell::new(0);
+        let redraws = Cell::new(0);
+        let result = finish_surface_attach(
+            || {
+                polls.set(polls.get() + 1);
+                if polls.get() == 2 {
+                    SurfaceReadiness::Ready
+                } else {
+                    SurfaceReadiness::Pending
+                }
+            },
+            || false,
+            || redraws.set(redraws.get() + 1),
+            || panic!("surface became ready before its deadline"),
+            || {
+                assert_eq!(polls.get(), 2);
+                "ready surface"
+            },
+        );
+        assert_eq!(result, Ok("ready surface"));
+        assert_eq!(redraws.get(), 1);
+    }
+
+    #[test]
+    fn timed_out_surface_tears_down_once_before_error_and_never_publishes() {
+        let polls = Cell::new(0);
+        let order = RefCell::new(Vec::new());
+        let result = finish_surface_attach(
+            || {
+                polls.set(polls.get() + 1);
+                SurfaceReadiness::Pending
+            },
+            || polls.get() == 3,
+            || order.borrow_mut().push("redraw"),
+            || order.borrow_mut().push("cleanup acknowledged"),
+            || {
+                order.borrow_mut().push("published");
+            },
+        );
+        assert_eq!(
+            result,
+            Err("timed out waiting for the video render context".to_string())
+        );
+        order.borrow_mut().push("error returned");
+        assert_eq!(
+            *order.borrow(),
+            ["redraw", "redraw", "cleanup acknowledged", "error returned"]
+        );
+    }
+
+    #[test]
+    fn window_close_before_next_attach_poll_fails_without_objc_access() {
+        let state = SurfaceState::new(0, 0, 0, 0);
+        // An intentionally invalid Objective-C address proves polling only reads
+        // Rust-owned state. Teardown ownership is simulated without native UI.
+        state.layer_ptr.store(usize::MAX, Ordering::Release);
+        let before_close = Arc::new(std::sync::Barrier::new(2));
+        let after_close = Arc::new(std::sync::Barrier::new(2));
+        let closer = {
+            let state = state.clone();
+            let before_close = before_close.clone();
+            let after_close = after_close.clone();
+            std::thread::spawn(move || {
+                before_close.wait();
+                assert!(state.begin_teardown());
+                after_close.wait();
+            })
+        };
+        let cleanup = Cell::new(0);
+        let redraws = Cell::new(0);
+        let result = finish_surface_attach(
+            || state.render_readiness(),
+            || false,
+            || {
+                redraws.set(redraws.get() + 1);
+                before_close.wait();
+                after_close.wait();
+            },
+            || cleanup.set(cleanup.get() + 1),
+            || panic!("closed surface must not publish"),
+        );
+        closer.join().unwrap();
+        assert_eq!(
+            result,
+            Err("video surface closed before its render context was ready".to_string())
+        );
+        assert_eq!(redraws.get(), 1);
+        assert_eq!(cleanup.get(), 1);
+    }
+
+    #[test]
+    fn late_render_context_creation_cannot_resurrect_terminal_dead_readiness() {
+        let state = SurfaceState::new(0, 0, 0, 0);
+        state.layer_ptr.store(usize::MAX, Ordering::Release);
+        assert_eq!(state.render_readiness(), SurfaceReadiness::Pending);
+        state.mark_render_context_ready();
+        assert_eq!(state.render_readiness(), SurfaceReadiness::Ready);
+        assert!(state.begin_teardown());
+        state.mark_render_context_ready();
+        assert_eq!(
+            state.readiness.load(Ordering::Acquire),
+            SurfaceReadiness::Dead as u8
+        );
+        assert_eq!(state.render_readiness(), SurfaceReadiness::Dead);
+        assert!(!state.begin_teardown());
+    }
+
+    #[test]
+    fn cleared_layer_cannot_publish_a_previous_ready_surface() {
+        let state = SurfaceState::new(0, 0, 0, 0);
+        state.layer_ptr.store(usize::MAX, Ordering::Release);
+        state.mark_render_context_ready();
+        assert_eq!(state.render_readiness(), SurfaceReadiness::Ready);
+        state.layer_ptr.store(0, Ordering::Release);
+        let cleanup = Cell::new(0);
+        let result = finish_surface_attach(
+            || state.render_readiness(),
+            || panic!("cleared surface must fail before its deadline"),
+            || panic!("cleared surface must not redraw"),
+            || cleanup.set(cleanup.get() + 1),
+            || panic!("cleared surface must not publish"),
+        );
+        assert_eq!(
+            result,
+            Err("video surface closed before its render context was ready".to_string())
+        );
+        assert_eq!(cleanup.get(), 1);
+    }
+
+    struct RenderTeardownProbe {
+        slot: Weak<Mutex<Option<RenderTeardownProbe>>>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for RenderTeardownProbe {
+        fn drop(&mut self) {
+            // A failed assertion can unwind while the slot itself is dropped.
+            let Some(slot) = self.slot.upgrade() else {
+                return;
+            };
+            let guard = match slot.try_lock() {
+                Ok(guard) => guard,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => panic!("render Drop retained the render mutex"),
+            };
+            assert!(guard.is_none());
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn assert_render_teardown_releases_guard_before_drop(poisoned: bool) {
+        let slot = Arc::new(Mutex::new(None));
+        let drops = Arc::new(AtomicUsize::new(0));
+        *slot.lock().unwrap() = Some(RenderTeardownProbe {
+            slot: Arc::downgrade(&slot),
+            drops: drops.clone(),
+        });
+        if poisoned {
+            let slot = slot.clone();
+            assert!(std::thread::spawn(move || {
+                let _guard = slot.lock().unwrap();
+                panic!("intentional render-slot poison fixture");
+            })
+            .join()
+            .is_err());
+        }
+        let render = take_render_for_teardown(&slot);
+        assert!(render.is_some());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(render);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(take_render_for_teardown(&slot).is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn healthy_render_teardown_takes_once_and_unlocks_before_context_drop() {
+        assert_render_teardown_releases_guard_before_drop(false);
+    }
+
+    #[test]
+    fn poisoned_render_teardown_recovers_owned_context_and_unlocks_before_drop() {
+        assert_render_teardown_releases_guard_before_drop(true);
+    }
+
+    #[test]
+    fn queued_attach_redraw_requires_current_live_nonzero_layer() {
+        let state = SurfaceState::new(0, 0, 0, 0);
+        let redraws = RefCell::new(Vec::new());
+        with_live_surface_layer(&state, |layer| redraws.borrow_mut().push(layer));
+        assert!(redraws.borrow().is_empty());
+        state.layer_ptr.store(0x1000, Ordering::Release);
+        with_live_surface_layer(&state, |layer| redraws.borrow_mut().push(layer));
+        assert_eq!(*redraws.borrow(), [0x1000]);
+        state.dead.store(true, Ordering::Release);
+        with_live_surface_layer(&state, |layer| redraws.borrow_mut().push(layer));
+        assert_eq!(*redraws.borrow(), [0x1000]);
+        state.dead.store(false, Ordering::Release);
+        state.layer_ptr.store(0, Ordering::Release);
+        with_live_surface_layer(&state, |layer| redraws.borrow_mut().push(layer));
+        assert_eq!(*redraws.borrow(), [0x1000]);
+    }
 
     #[test]
     fn render_target_pixel_budget_preserves_window_aspect() {
