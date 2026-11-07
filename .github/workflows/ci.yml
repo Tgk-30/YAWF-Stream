@@ -289,7 +289,7 @@ jobs:
 
       - name: App responsive contract
         run: |
-          node --test scripts/check_app_responsive_folder_contract.test.mjs scripts/check_folder_editor_keyboard_contract.test.mjs scripts/check_first_run_scroll_contract.test.mjs scripts/check_stream_cache_warning_layout.test.mjs
+          node --test scripts/check_app_responsive_folder_contract.test.mjs scripts/check_folder_editor_keyboard_contract.test.mjs scripts/check_first_run_scroll_contract.test.mjs scripts/check_stream_cache_warning_layout.test.mjs scripts/check_server_gate_layout.test.mjs
           node scripts/check_app_responsive_contract.mjs
 
       # The server's esbuild bundle imports web TypeScript that pulls 3rd-party
@@ -426,6 +426,11 @@ jobs:
         env:
           YAWF_REQUIRE_ANDROID_FULLSCREEN_BEHAVIOR: "1"
         run: node --test scripts/android_fullscreen.test.mjs
+
+      - name: Require actual Android keyboard layout behavior
+        env:
+          YAWF_REQUIRE_ANDROID_IME_BEHAVIOR: "1"
+        run: node --test scripts/android_ime.test.mjs
 
       # The desktop target is checked by the `rust` job on macOS. Repeating it on
       # this Linux runner would need the GTK development headers the Tauri Linux

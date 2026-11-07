@@ -144,10 +144,18 @@ export interface PlaybackHandoffState {
   volume: number;
   muted: boolean;
   playbackRate: number;
+  /** Transient logical selection, independent of per-title persistence. */
+  audioPreference?: AudioPreference | null;
 }
 
+type WebviewRecoverySnapshot = {
+  position: number;
+  state: PlaybackHandoffState;
+};
+type WebviewRecoveryContext = WebviewRecoverySnapshot | (() => WebviewRecoverySnapshot);
+
 type ServerOptimizedPositionIntent = "follow-current" | "fixed";
-type ServerOptimizationPurpose = "ordinary" | "native-hls-seek" | "remembered-audio";
+type ServerOptimizationPurpose = "ordinary" | "native-hls-seek" | "remembered-audio" | "automatic-default" | "recovery";
 type PendingNativeHlsSeek = {
   sequence: number;
   absoluteTarget: number;
@@ -941,6 +949,7 @@ export function VideoPlayer({
     originUrl: string;
     originEngine: PlaybackEngine;
     url: string;
+    recovery?: WebviewRecoverySnapshot;
   } | null>(null);
   const [optimizedSource, setOptimizedSource] = useState<ScopedOptimizedSource | null>(null);
   const [sourceSwitchPosition, setSourceSwitchPosition] = useState<ScopedPosition | null>(null);
@@ -1122,6 +1131,12 @@ export function VideoPlayer({
   // change the current source's presentation readiness.
   const webviewSource = useMemo(() => ({ key: webviewSourceKey }), [webviewSourceKey]);
   const currentWebviewSourceRef = useRef(webviewSource);
+  const failedWebviewRecoveryRef = useRef<{
+    owner: string;
+    source: { key: string };
+    snapshot: WebviewRecoverySnapshot;
+    message: string;
+  } | null>(null);
   useLayoutEffect(() => {
     currentWebviewSourceRef.current = webviewSource;
   }, [webviewSource]);
@@ -1157,6 +1172,7 @@ export function VideoPlayer({
     request: number;
     controller: AbortController;
     purpose: ServerOptimizationPurpose;
+    failureState?: () => PlaybackHandoffState;
   } | null>(null);
   const sourceInfoLoadOwnerRef = useRef<string | null>(null);
   const sourceInfoGenerationRef = useRef(0);
@@ -1197,6 +1213,7 @@ export function VideoPlayer({
       playerMountedRef.current = false;
       recoveryRequestSequenceRef.current += 1;
       recoveryPendingRef.current = null;
+      failedWebviewRecoveryRef.current = null;
       optimizationRequestSequenceRef.current += 1;
       optimizationPendingRef.current?.controller.abort();
       optimizationPendingRef.current = null;
@@ -1208,6 +1225,7 @@ export function VideoPlayer({
   useLayoutEffect(() => {
     recoveryRequestSequenceRef.current += 1;
     recoveryPendingRef.current = null;
+    failedWebviewRecoveryRef.current = null;
     optimizationRequestSequenceRef.current += 1;
     optimizationPendingRef.current?.controller.abort();
     optimizationPendingRef.current = null;
@@ -1655,6 +1673,7 @@ export function VideoPlayer({
     owner: string,
     request: number,
     fallbackRequest: (() => Promise<string | null>) | undefined,
+    recovery?: WebviewRecoveryContext,
   ): Promise<boolean | null> => {
     if (fallbackRequest == null) {
       recordDiagnostic("player", "native.fallback_unavailable", "warning");
@@ -1672,10 +1691,17 @@ export function VideoPlayer({
       recordDiagnostic("player", "native.fallback_failed", "error");
       return false;
     }
+    const snapshot = typeof recovery === "function" ? recovery() : recovery;
+    if (snapshot != null) {
+      latestAbsolutePositionRef.current = snapshot.position;
+      setSourceSwitchPosition({ originOwner: owner, position: snapshot.position });
+      setSourceSwitchState(snapshot.state);
+    }
     setFallbackSource({
       originUrl: url,
       originEngine: requestedEngine,
       url: hlsUrl,
+      recovery: snapshot,
     });
     recordDiagnostic("player", "native.fallback_ready");
     return true;
@@ -1741,7 +1767,7 @@ export function VideoPlayer({
         return false;
       }
       const blockedIntent = automaticAudioIntentFenceRef.current;
-      if (purpose === "remembered-audio" && blockedIntent?.owner === owner &&
+      if ((purpose === "remembered-audio" || purpose === "recovery") && blockedIntent?.owner === owner &&
         blockedIntent.intentEpoch === explicitOptimizationIntentRef.current) return false;
       if (optimizationPendingRef.current?.owner === owner) {
         if (purpose === "native-hls-seek") {
@@ -1787,7 +1813,7 @@ export function VideoPlayer({
         const manifestDeadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
         let retryDelayMs = SERVER_OPTIMIZED_RETRY_BASE_MS;
         let manifest: string | null = null;
-        let preparedAudioTrack = audioTrack ?? next.audioTrack;
+        let preparedAudioTrack = purpose === "recovery" ? next.audioTrack : audioTrack ?? next.audioTrack;
         while (manifest == null) {
           if (!ownsRequest() || controller.signal.aborted) return false;
           const remainingMs = manifestDeadline - Date.now();
@@ -1864,8 +1890,13 @@ export function VideoPlayer({
           : handoffState ?? null;
         if (!ownsRequest()) return false;
         const currentHandoffState = currentWebviewHandoffState(requestedHandoffState);
+        const failureState = optimizationPendingRef.current?.failureState?.();
         const activationHandoffState =
-          (purpose === "native-hls-seek" || purpose === "remembered-audio") &&
+          failureState != null
+            ? { ...failureState, audioPreference: requestedHandoffState?.audioPreference }
+            : purpose === "recovery" && requestedHandoffState != null
+            ? requestedHandoffState
+            : (purpose === "native-hls-seek" || purpose === "remembered-audio") &&
           requestedHandoffState != null && currentHandoffState != null
             ? { ...currentHandoffState, paused: requestedHandoffState.paused }
             : currentHandoffState;
@@ -1873,6 +1904,9 @@ export function VideoPlayer({
           audioPreference != null &&
           audioTrack != null &&
           preparedAudioTrack === audioTrack;
+        if (purpose === "recovery" && audioTrack != null && !requestedAudioConfirmed) {
+          throw new Error("Optimized playback could not preserve the selected audio track. Open an external player or choose another source.");
+        }
         if (retainAudioPreference && requestedAudioConfirmed) {
           rememberManualServerAudioPreference(audioPreference);
         }
@@ -1914,6 +1948,8 @@ export function VideoPlayer({
         const message = error instanceof Error ? error.message : "The server could not prepare optimized playback.";
         setServerOptimizationError(message);
         recordDiagnostic("player", "server_optimized.failed", "warning", message);
+        if (optimizationPendingRef.current?.failureState != null) setExternalError(message);
+        if (purpose === "recovery") throw new Error(message);
         return false;
       } finally {
         if (ownsRequest()) {
@@ -2044,7 +2080,8 @@ export function VideoPlayer({
       return;
     }
     autoOptimizationAttemptedRef.current = identity;
-    void switchToServerOptimized(quality, latestAbsolutePositionRef.current);
+    void switchToServerOptimized(quality, latestAbsolutePositionRef.current,
+      undefined, undefined, undefined, "follow-current", false, "automatic-default");
   }, [
     activeOptimized,
     originalSourceIsServerOptimized,
@@ -2057,7 +2094,7 @@ export function VideoPlayer({
   ]);
 
   const handleWebviewPlaybackError = useCallback(
-    async (message: string, exactHandoffPending: boolean) => {
+    async (message: string, exactHandoffPending: boolean, recovery?: WebviewRecoveryContext) => {
       const owner = playbackOwner;
       if (!playerMountedRef.current || playbackOwnerRef.current !== owner ||
         currentWebviewSourceRef.current !== webviewSource) return;
@@ -2100,22 +2137,72 @@ export function VideoPlayer({
         );
         return;
       }
+      const blockedRecovery = automaticAudioIntentFenceRef.current;
+      if (effectiveEngine === "webview-direct" && blockedRecovery?.owner === owner &&
+        blockedRecovery.intentEpoch === explicitOptimizationIntentRef.current) {
+        setExternalError(message);
+        return;
+      }
       const pendingForCurrentOwner = recoveryPendingRef.current?.owner === owner;
       if (pendingForCurrentOwner) return;
       if (
         effectiveEngine === "webview-direct" &&
         activeFallback == null &&
-        requestWebviewFallback != null
+        (serverOptimized != null || requestWebviewFallback != null)
       ) {
+        const readRecovery = (): WebviewRecoverySnapshot => typeof recovery === "function" ? recovery() : recovery ?? {
+            position: latestAbsolutePositionRef.current,
+            state: currentWebviewHandoffState(activeSourceSwitchState) ?? {
+              paused: webviewPaused, volume: 1, muted: false, playbackRate: 1,
+            },
+          };
+        const preparing = optimizationPendingRef.current;
+        if (preparing?.owner === owner) {
+          if (preparing.purpose !== "automatic-default" && preparing.purpose !== "remembered-audio") {
+            // An actual failure does not cancel a user's chosen quality/audio.
+            // Preserve that operation while replacing its decoder-lost state.
+            preparing.failureState = () => readRecovery().state;
+            return;
+          }
+          optimizationRequestSequenceRef.current += 1;
+          preparing.controller.abort();
+          optimizationPendingRef.current = null;
+          setServerOptimizationPending(false);
+        }
         const request = ++recoveryRequestSequenceRef.current;
+        const intentEpoch = explicitOptimizationIntentRef.current;
         recoveryPendingRef.current = { owner, request };
         setWebRecoveryPending(true);
         setExternalActionStatus("Preparing a browser-compatible stream…");
-        const recovered = await resolveWebviewFallbackForRequest(
-          owner,
-          request,
-          requestWebviewFallback,
-        );
+        let recovered: boolean | null = false;
+        if (serverOptimized != null) {
+          const snapshot = readRecovery();
+          const preference = snapshot.state.audioPreference ?? retainedServerAudioPreference;
+          const selected = retainedServerAudioMatch(preference, (activeKnownSourceAudio?.tracks ?? []).map((track) => ({
+            index: track.index, id: String(track.index),
+            label: track.label ?? `Audio ${track.index + 1}`,
+            logicalLabel: track.label, language: track.language,
+          })));
+          const quality = serverOptimized.defaultQuality != null && serverOptimized.qualities.includes(serverOptimized.defaultQuality)
+            ? serverOptimized.defaultQuality
+            : serverOptimized.qualities.includes("480p") ? "480p" : serverOptimized.qualities[0];
+          if (preference != null && selected == null) {
+            message = "Optimized playback could not preserve the selected audio track. Open an external player or choose another source.";
+          } else if (quality != null) {
+            // Start a short offset generation at the owned failure point. A
+            // full-from-zero fallback cannot recover an hour-long seek quickly.
+            try {
+              recovered = await switchToServerOptimized(
+                quality, snapshot.position, () => readRecovery().state,
+                selected?.index, preference ?? undefined, "fixed", false, "recovery",
+              );
+            } catch (error) {
+              message = error instanceof Error ? error.message : "Optimized playback could not be prepared.";
+            }
+          }
+        } else {
+          recovered = await resolveWebviewFallbackForRequest(owner, request, requestWebviewFallback, readRecovery);
+        }
         if (
           !playerMountedRef.current ||
           playbackOwnerRef.current !== owner ||
@@ -2127,13 +2214,22 @@ export function VideoPlayer({
         recoveryPendingRef.current = null;
         setWebRecoveryPending(false);
         setExternalActionStatus(null);
-        if (recovered) return;
+        if (explicitOptimizationIntentRef.current !== intentEpoch) return;
+        if (recovered) {
+          failedWebviewRecoveryRef.current = null;
+          setExternalError(null);
+          return;
+        }
+        // Error UI unmounts the failed element. Keep its owned recovery point
+        // instead of making Retry remount Device Original at its initial zero.
+        failedWebviewRecoveryRef.current = { owner, source: webviewSource, snapshot: readRecovery(), message };
       }
       setExternalError(message);
     }, [
       activeFallback,
       activeOptimized,
       activeSourceSwitchState,
+      activeKnownSourceAudio,
       castSuspended,
       currentWebviewHandoffState,
       effectiveEngine,
@@ -2141,11 +2237,32 @@ export function VideoPlayer({
       playbackOwner,
       resolveWebviewFallbackForRequest,
       requestWebviewFallback,
+      retainedServerAudioPreference,
+      serverOptimized,
       setExternalActionStatus,
       switchToDeviceOriginal,
+      switchToServerOptimized,
       webviewSource,
+      webviewPaused,
     ],
   );
+
+  const retryFailedWebviewRecovery = useCallback(async (): Promise<void> => {
+    const failed = failedWebviewRecoveryRef.current;
+    if (failed == null || failed.owner !== playbackOwner || failed.source !== webviewSource ||
+      !playerMountedRef.current || playbackOwnerRef.current !== failed.owner ||
+      manualRecoveryPending || recoveryPendingRef.current?.owner === failed.owner) return;
+    setManualRecoveryPending(true);
+    explicitOptimizationIntentRef.current += 1;
+    recordDiagnostic("player", "webview.retry_requested");
+    try {
+      // Leave the error surface mounted while capacity is unavailable. Only a
+      // prepared, synchronized compatible source may replace it.
+      await handleWebviewPlaybackError(failed.message, false, failed.snapshot);
+    } finally {
+      if (playerMountedRef.current && playbackOwnerRef.current === failed.owner) setManualRecoveryPending(false);
+    }
+  }, [handleWebviewPlaybackError, manualRecoveryPending, playbackOwner, webviewSource]);
 
   const externalTargetRef = useRef(externalTarget);
   externalTargetRef.current = externalTarget;
@@ -2750,7 +2867,7 @@ export function VideoPlayer({
               : undefined}
             onServerSourceInfoKnown={rememberCurrentServerSourceInfo}
             sourceSwitchState={activeSourceSwitchState}
-            exactHandoff={activeOptimized != null}
+            exactHandoff={activeOptimized != null || activeFallback?.recovery != null}
             optimizedTimelineIsPartial={activeOptimized?.partialTimeline ?? initialServerOptimizedTimeline}
             externalHandoffVideoRef={externalHandoffVideoRef}
             serverOptimized={serverOptimized}
@@ -2775,8 +2892,8 @@ export function VideoPlayer({
             onSelectServerOptimized={selectServerOptimized}
             onSelectDeviceOriginal={selectDeviceOriginal}
             onAbsolutePositionChange={reportAbsolutePosition}
-            onPlaybackError={(message, exactHandoffPending) =>
-              void handleWebviewPlaybackError(message, exactHandoffPending)
+            onPlaybackError={(message, exactHandoffPending, recovery) =>
+              void handleWebviewPlaybackError(message, exactHandoffPending, recovery)
             }
             onPlaybackStall={recoverPostStartStall}
             onOpenExternalPlayer={() => void openExternalPlayback()}
@@ -2820,6 +2937,9 @@ export function VideoPlayer({
               mode === "webview" && externalError != null
                 ? serverLeaseExpired && refreshCurrentSource == null
                   ? undefined
+                  : !serverLeaseExpired && failedWebviewRecoveryRef.current?.owner === playbackOwner &&
+                    failedWebviewRecoveryRef.current.source === webviewSource
+                  ? retryFailedWebviewRecovery
                   : lastStallContextRef.current != null && refreshCurrentSource != null
                   ? retryFreshStream
                   : () => {
@@ -2981,7 +3101,7 @@ function WebviewPlayer({
   exactHandoff: boolean;
   optimizedTimelineIsPartial: boolean;
   externalHandoffVideoRef: { current: HTMLVideoElement | null };
-  onPlaybackError: (message: string, exactHandoffPending: boolean) => void;
+  onPlaybackError: (message: string, exactHandoffPending: boolean, recovery?: WebviewRecoveryContext) => void;
   onPlaybackStall: (
     absolutePositionSeconds: number,
     handoffState: PlaybackHandoffState,
@@ -3145,6 +3265,7 @@ function WebviewPlayer({
   const verifiedPlaybackProgressReportedRef = useRef(false);
   const verifiedPlaybackPlayingRef = useRef(false);
   const lastObservedMediaTimeRef = useRef(0);
+  const ownedPlaybackPausedRef = useRef(sourceSwitchState?.paused ?? false);
   const [playbackStatus, setPlaybackStatus] = useState<"starting" | "buffering" | "seeking" | null>(
     requiresExactHandoff ? "seeking" : "starting",
   );
@@ -3180,6 +3301,7 @@ function WebviewPlayer({
   }, [onScrubbingChange]);
   useEffect(() => () => onScrubbingChange(false), [onScrubbingChange]);
   const rendererSeekingRef = useRef(false);
+  const pendingRecoverySeekRef = useRef<WebviewRecoverySnapshot | null>(null);
   const scrubbingRef = useRef(false);
   // Set when the video reaches its natural end - drives the Up-next card.
   const [ended, setEnded] = useState(false);
@@ -3282,6 +3404,10 @@ function WebviewPlayer({
   const requestPlaybackState = useCallback((shouldPlay: boolean) => {
     const video = videoRef.current;
     if (video == null) return;
+    ownedPlaybackPausedRef.current = !shouldPlay;
+    if (pendingRecoverySeekRef.current != null) {
+      pendingRecoverySeekRef.current.state.paused = !shouldPlay;
+    }
     const pendingNativeSeek = pendingNativeHlsSeekRef.current;
     if (pendingNativeSeek != null) {
       pendingNativeSeek.playbackIntent = shouldPlay ? "play" : "pause";
@@ -4078,6 +4204,14 @@ function WebviewPlayer({
           : savedPrefs;
         const match =
           findPreferredLanguageMatch(
+            sourceSwitchStateRef.current?.audioPreference?.language,
+            available,
+            (track) => track.language,
+          ) ??
+          (sourceSwitchStateRef.current?.audioPreference?.language == null
+            ? available.find((track) => track.id === sourceSwitchStateRef.current?.audioPreference?.id)
+            : null) ??
+          findPreferredLanguageMatch(
             perTitlePrefs?.preferredAudioLang,
             available,
             (track) => track.language,
@@ -4597,6 +4731,13 @@ function WebviewPlayer({
       const frontier = bufferedFrontier();
       lastBufferedFrontier = Number.isFinite(frontier) ? frontier : lastPosition;
       rendererSeekingRef.current = false;
+      if (video.error == null && Number.isFinite(video.currentTime)) {
+        lastObservedMediaTimeRef.current = video.currentTime;
+      }
+      const pending = pendingRecoverySeekRef.current;
+      if (pending != null && Math.abs(video.currentTime + timelineOffsetRef.current - pending.position) <= 0.25) {
+        pendingRecoverySeekRef.current = null;
+      }
       sync({ seeking: scrubbingRef.current });
     };
     const onBufferProgress = () => {
@@ -4654,6 +4795,7 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     didSeekRef.current = false;
+    pendingRecoverySeekRef.current = null;
     explicitInitialSeekRef.current = null;
     exactHandoffPendingRef.current = requiresExactHandoffRef.current;
     pendingHandoffPlaybackIntentRef.current = null;
@@ -4730,6 +4872,8 @@ function WebviewPlayer({
       return true;
     };
     const onTimeUpdate = () => {
+      // A failed decoder's reset clock is not confirmed playback or history.
+      if (video.error != null) return;
       if (pendingNativeHlsSeekRef.current != null && !confirmPendingNativeHlsSeek(video)) {
         setPlaybackStatus("seeking");
         video.pause();
@@ -4928,6 +5072,9 @@ function WebviewPlayer({
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
     const onPause = () => {
+      if (video.error == null && !suspendedRef.current && !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null) {
+        ownedPlaybackPausedRef.current = true;
+      }
       verifiedPlaybackPlayingRef.current = false;
       if (pendingNativeHlsSeekRef.current != null) {
         setPaused(true);
@@ -4952,6 +5099,7 @@ function WebviewPlayer({
       }
     };
     const onPlay = () => {
+      if (video.error == null) ownedPlaybackPausedRef.current = false;
       if (
         suspendedRef.current ||
         exactHandoffPendingRef.current ||
@@ -4996,6 +5144,7 @@ function WebviewPlayer({
       exactHandoffPendingRef.current ? "seeking" : "buffering",
     );
     const onPlaying = () => {
+      if (video.error != null) return;
       if (exactHandoffPendingRef.current || pendingNativeHlsSeekRef.current != null) {
         video.pause();
         setPlaybackStatus("seeking");
@@ -5322,6 +5471,10 @@ function WebviewPlayer({
         );
       // A stale remembered language should not suppress the global fallback.
       const match =
+        matchLanguage(sourceSwitchStateRef.current?.audioPreference?.language) ??
+        (sourceSwitchStateRef.current?.audioPreference?.language == null
+          ? tracks.find((track) => track.id === sourceSwitchStateRef.current?.audioPreference?.id)
+          : null) ??
         matchLanguage(perTitlePrefs?.preferredAudioLang) ??
         matchLanguage(preferences?.defaultAudioLanguage);
       if (match == null) return;
@@ -5620,6 +5773,46 @@ function WebviewPlayer({
     return true;
   };
 
+  const currentRecoveryState = (video: HTMLVideoElement): PlaybackHandoffState => ({
+    paused: video.error == null ? video.paused : ownedPlaybackPausedRef.current,
+    volume: Number.isFinite(video.volume) ? Math.min(1, Math.max(0, video.volume)) : 1,
+    muted: video.muted,
+    playbackRate: Number.isFinite(video.playbackRate) && video.playbackRate > 0 ? video.playbackRate : 1,
+    audioPreference: audioPreferenceRef.current.id != null || audioPreferenceRef.current.language != null
+      ? { ...audioPreferenceRef.current }
+      : null,
+  });
+  const captureRecoverySnapshot = (video: HTMLVideoElement): WebviewRecoverySnapshot => {
+    const pending = pendingRecoverySeekRef.current;
+    const nativeSeek = pendingNativeHlsSeekRef.current;
+    const current = currentRecoveryState(video);
+    // A bookmark not yet applied before metadata is still owned intent. A
+    // committed user seek consumes that initial decision, including zero.
+    const initialTarget = !didSeekRef.current && (requiresExactHandoffRef.current ||
+      explicitInitialSeekRef.current != null || (startPositionRef.current ?? 0) > 5)
+      ? explicitInitialSeekRef.current ?? startPositionRef.current ?? 0
+      : null;
+    return {
+      position: nativeSeek?.absoluteTarget ?? pending?.position ?? Math.max(0,
+        (initialTarget ?? (Number.isFinite(video.currentTime) && video.currentTime > 0
+          ? video.currentTime
+          : lastObservedMediaTimeRef.current)) + timelineOffsetRef.current,
+      ),
+      state: {
+        ...current,
+        paused: nativeSeek != null
+          ? nativeSeek.playbackIntent === "play" ? false : nativeSeek.playbackIntent === "pause" ? true : nativeSeek.paused
+          : pending?.state.paused ?? current.paused,
+      },
+    };
+  };
+  const assignRequestedSeek = (video: HTMLVideoElement, localTarget: number, absoluteTarget: number) => {
+    // A failed decoder can reset currentTime before error is delivered. Keep
+    // the last point this owned seek actually requested, including previews.
+    pendingRecoverySeekRef.current = { position: absoluteTarget, state: currentRecoveryState(video) };
+    video.currentTime = localTarget;
+  };
+
   const seekAbsolute = (t: number, allowPreparation = true) => {
     const video = videoRef.current;
     if (video == null || !Number.isFinite(t)) return;
@@ -5631,7 +5824,7 @@ function WebviewPlayer({
       const localTarget = Math.min(Math.max(t, 0), localDuration);
       if (allowPreparation) claimInitialSeek(localTarget);
       if (!beginConfirmedNativeHlsSeek(video, localTarget, localTarget, allowPreparation)) {
-        video.currentTime = localTarget;
+        assignRequestedSeek(video, localTarget, localTarget);
       }
       scrubberRef.current?.setCurrentTime(localTarget);
       return;
@@ -5673,7 +5866,7 @@ function WebviewPlayer({
     ) {
       if (allowPreparation) claimInitialSeek(localTarget);
       if (!beginConfirmedNativeHlsSeek(video, localTarget, absoluteTarget, allowPreparation)) {
-        video.currentTime = localTarget;
+        assignRequestedSeek(video, localTarget, absoluteTarget);
       }
       scrubberRef.current?.setCurrentTime(
         knownDuration == null ? localTarget : absoluteTarget,
@@ -5751,7 +5944,7 @@ function WebviewPlayer({
       optimizedTimelineIsPartialRef.current ? timelineOffsetRef.current : 0
     );
     if (!beginConfirmedNativeHlsSeek(video, localTarget, absoluteTarget, allowPreparation)) {
-      video.currentTime = localTarget;
+      assignRequestedSeek(video, localTarget, absoluteTarget);
     }
     scrubberRef.current?.setCurrentTime(localTarget);
   };
@@ -6439,7 +6632,7 @@ function WebviewPlayer({
             objectFit: videoFit,
             transform: `translate(${videoPanX}%, ${videoPanY}%) scale(${videoZoom})`,
           }}
-          autoPlay={sourceSwitchState?.paused !== true}
+          autoPlay={!exactHandoff && sourceSwitchState?.paused !== true}
           playsInline
           crossOrigin={isTrustedServerStreamURL(url) ? "use-credentials" : undefined}
           x-webkit-airplay="allow"
@@ -6458,10 +6651,12 @@ function WebviewPlayer({
             // MediaError on the playable video. Treat only a real MediaError as
             // a playback failure; later readiness/progress remains authoritative.
             if (mediaError == null) return;
+            const failedVideo = event.currentTarget;
             stopLeaseRef.current();
             onPlaybackErrorRef.current(
               mediaErrorMessage(mediaError),
               exactHandoffPendingRef.current,
+              () => captureRecoverySnapshot(failedVideo),
             );
           }}
         >

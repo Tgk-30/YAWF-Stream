@@ -959,7 +959,7 @@ function preFullscreenMainActivity(packageName) {
 
 // Keep the already-audited Activity generator byte-identical. Fullscreen adds
 // lifecycle hooks only; it never replaces Wry's WebChromeClient or JS bridges.
-function patchedMainActivity(packageName) {
+function preImeMainActivity(packageName) {
   return preFullscreenMainActivity(packageName)
     .replace('class MainActivity : TauriActivity() {',
       'class MainActivity : TauriActivity() {\n  private var fullscreenController: YawfFullscreenController? = null')
@@ -983,6 +983,46 @@ function patchedMainActivity(packageName) {
   }
 
   private fun inspectWebViewCompatibility()`);
+}
+
+function patchedMainActivity(packageName) {
+  const previous = preImeMainActivity(packageName);
+  const legacyInsets = `    val windowInsets = webView.rootWindowInsets ?: return
+    var top = windowInsets.systemWindowInsetTop.coerceAtLeast(0)
+    var right = windowInsets.systemWindowInsetRight.coerceAtLeast(0)
+    var bottom = windowInsets.systemWindowInsetBottom.coerceAtLeast(0)
+    var left = windowInsets.systemWindowInsetLeft.coerceAtLeast(0)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      windowInsets.displayCutout?.let { cutout ->
+        top = max(top, cutout.safeInsetTop.coerceAtLeast(0))
+        right = max(right, cutout.safeInsetRight.coerceAtLeast(0))
+        bottom = max(bottom, cutout.safeInsetBottom.coerceAtLeast(0))
+        left = max(left, cutout.safeInsetLeft.coerceAtLeast(0))
+      }
+    }`;
+  if (!previous.includes(legacyInsets)) throw new Error("Unsupported persistent inset template.");
+  return previous
+    .replace('import androidx.annotation.Keep\n', 'import androidx.annotation.Keep\nimport androidx.core.view.ViewCompat\nimport androidx.core.view.WindowInsetsCompat\n')
+    .replace('class MainActivity : TauriActivity() {', 'class MainActivity : TauriActivity() {\n  private var imeController: YawfImeController? = null')
+    .replace('  override fun onWebViewCreate(webView: WebView) {', `  override fun onWebViewCreate(webView: WebView) {
+    imeController?.destroy()
+    imeController = null`)
+    .replace('    fullscreenController = YawfFullscreenController(this, webView)', `    fullscreenController = YawfFullscreenController(this, webView)
+    // Wry installs no WebView inset listener. Parent attachment follows this hook.
+    imeController = YawfImeController(webView).also { it.attach(exclusiveWebViewListener = true) }`)
+    .replace('    fullscreenController?.onConfigurationChanged()', '    fullscreenController?.onConfigurationChanged()\n    imeController?.onConfigurationChanged()')
+    .replace('  override fun onDestroy() {', `  override fun onDestroy() {
+    imeController?.destroy()
+    imeController = null`)
+    .replace(legacyInsets, `    val windowInsets = ViewCompat.getRootWindowInsets(webView) ?: return
+    // The read-only safe-area bridge contains persistent bars/cutouts, never IME.
+    val persistent = windowInsets.getInsets(
+      WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+    )
+    val top = persistent.top.coerceAtLeast(0)
+    val right = persistent.right.coerceAtLeast(0)
+    val bottom = persistent.bottom.coerceAtLeast(0)
+    val left = persistent.left.coerceAtLeast(0)`);
 }
 
 const originalFullscreenShow = `  override fun onShowCustomView(view: View, callback: CustomViewCallback) {
@@ -1184,7 +1224,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     activity === safeAreaActivity ||
     activity === serverPlayerPatchedMainActivity(packageName) ||
     activity === previousPatchedMainActivity(packageName) ||
-    activity === preFullscreenMainActivity(packageName);
+    activity === preFullscreenMainActivity(packageName) ||
+    activity === preImeMainActivity(packageName);
   if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",
@@ -1207,6 +1248,16 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
         .replace(leanbackFeatureTemplate, "")
         .replace(leanbackCategoryTemplate, "")
     : manifest;
+
+  const resizeLine = 'android:windowSoftInputMode="adjustResize"';
+  if (/android:windowSoftInputMode\s*=/.test(patchedManifest) && !patchedManifest.includes(resizeLine)) {
+    throw new Error("Unsupported Android keyboard resize template. Refusing to overwrite.");
+  }
+  if (!patchedManifest.includes(resizeLine)) {
+    const anchor = 'android:name=".MainActivity"';
+    if (patchedManifest.split(anchor).length !== 2) throw new Error("Android keyboard activity anchor missing or duplicated.");
+    patchedManifest = patchedManifest.replace(anchor, anchor + ' ' + resizeLine);
+  }
 
   if (patchedManifest.includes('android.permission.REQUEST_INSTALL_PACKAGES') && !patchedManifest.includes(installPermission)) {
     throw new Error("Unsupported Android updater permission template.");
@@ -1235,6 +1286,13 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     throw new Error("Generated Android fullscreen controller has unrecognized changes. Refusing to overwrite.");
   }
   const fullscreenChanged = !existsSync(fullscreenPath);
+  const imePath = join(dirname(mainActivityPath), "YawfImeController.kt");
+  const imeSource = readFileSync(new URL("./android/YawfImeController.kt", import.meta.url), "utf8")
+    .replace(/^package com\.tgk30\.debridstreamer$/m, `package ${packageName}`);
+  if (existsSync(imePath) && readFileSync(imePath, "utf8") !== imeSource) {
+    throw new Error("Generated Android keyboard controller has unrecognized changes. Refusing to overwrite.");
+  }
+  const imeChanged = !existsSync(imePath);
   const hook = fullscreenGradleHook(packageName);
   const hasFullscreenHook = patchedGradleWithWebkit.includes(hook);
   if (!hasFullscreenHook && /YAWF_FULLSCREEN|--fullscreen-only/.test(patchedGradleWithWebkit)) {
@@ -1247,6 +1305,7 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
   const gradleChanged = gradle !== finalGradle;
   if (gradleChanged) writeFileSync(gradlePath, finalGradle);
   if (fullscreenChanged) writeFileSync(fullscreenPath, fullscreenSource);
+  if (imeChanged) writeFileSync(imePath, imeSource);
   if (activityChanged) writeFileSync(mainActivityPath, replacementActivity);
   if (manifestChanged) writeFileSync(manifestPath, patchedManifest);
   if (updaterChanged) {
@@ -1257,7 +1316,7 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
 
   return {
     androidRoot,
-    changed: gradleChanged || activityChanged || manifestChanged || updaterChanged || fullscreenChanged,
+    changed: gradleChanged || activityChanged || manifestChanged || updaterChanged || fullscreenChanged || imeChanged,
     gradleChanged,
     activityChanged,
     manifestChanged,

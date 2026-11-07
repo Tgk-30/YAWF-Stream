@@ -224,7 +224,8 @@ dependencies {
 test("migrates the exact previous fully patched activity and is a second-pass no-op", () => {
   const fixture = createPreviousPatchedFixture();
   try {
-    const preserved = [fixture.manifest, fixture.updater, fixture.updatePaths];
+    const preserved = [fixture.updater, fixture.updatePaths];
+    const previousManifest = readFileSync(fixture.manifest, "utf8");
     const previousGradle = readFileSync(fixture.gradle, "utf8");
     const before = new Map(preserved.map((path) => [path, readFileSync(path)]));
     const first = patchTauriAndroidProject({ root: fixture.root });
@@ -233,13 +234,17 @@ test("migrates the exact previous fully patched activity and is a second-pass no
       changed: true,
       gradleChanged: true,
       activityChanged: true,
-      manifestChanged: false,
+      manifestChanged: true,
     });
     assert.equal(
       readFileSync(fixture.mainActivity, "utf8"),
       patchedMainActivityForWebViewCompatibilityTest(packageName),
     );
     for (const path of preserved) assert.deepEqual(readFileSync(path), before.get(path), path);
+    assert.equal(readFileSync(fixture.manifest, "utf8"), previousManifest.replace(
+      'android:name=".MainActivity"',
+      'android:name=".MainActivity" android:windowSoftInputMode="adjustResize"',
+    ));
 
     const migratedGradle = readFileSync(fixture.gradle, "utf8");
     const hook = migratedGradle.slice(previousGradle.length);

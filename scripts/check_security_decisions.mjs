@@ -134,6 +134,7 @@ const androidRemoteSafeAreaPermission = read(
   "web/src-tauri/permissions/android-remote-safe-area.toml",
 );
 const androidProjectPatcher = read("scripts/patch_tauri_android.mjs");
+const androidImeController = read("scripts/android/YawfImeController.kt");
 const mobileSafeAreaSource = read("web/src/lib/mobileSafeArea.ts");
 // Inspect the current generated activity, not recognized historical templates.
 const currentActivityStart = androidProjectPatcher.indexOf("function serverPlayerPatchedMainActivity(packageName) {");
@@ -204,6 +205,15 @@ check(
     !/__TAURI_INTERNALS__|__TAURI__/.test(androidProjectPatcher) &&
     !/setWebViewClient|setOnApplyWindowInsetsListener/.test(androidProjectPatcher),
   "Legacy Android inset transport exposes one cached getter and a fixed no-payload change event",
+);
+check(
+  /SEC-014[^\n]*native-only IME fitting[^\n]*never exports keyboard state/.test(decisions) &&
+    /setOnApplyWindowInsetsListener\(webView\)/.test(androidImeController) &&
+    /layout\.bottomMargin = nextBottom/.test(androidImeController) &&
+    /WindowInsetsCompat\.Type\.systemBars\(\) or WindowInsetsCompat\.Type\.displayCutout\(\)/.test(androidImeController) &&
+    !/JavascriptInterface|evaluateJavascript|loadUrl|WebChromeClient|CookieManager|Intent|java\.net|okhttp|setPadding|addView|removeView/.test(androidImeController) &&
+    /The read-only safe-area bridge contains persistent bars\/cutouts, never IME/.test(androidProjectPatcher),
+  "Android keyboard fitting is native layout only and does not expand the four-value bridge",
 );
 const desktopCommandNames = new Set(
   [...desktopPermission.matchAll(/^\s*"([a-z][a-z0-9_]*)",?\s*$/gm)].map(
