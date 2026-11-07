@@ -20,6 +20,48 @@ export const pinnedMedia = {
 };
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+function disposableRunnerTemp() {
+  if (process.platform !== 'darwin' || process.env.GITHUB_ACTIONS !== 'true' || !process.env.RUNNER_TEMP) throw new Error('This test may run only on a disposable GitHub macOS runner');
+  return resolve(process.env.RUNNER_TEMP);
+}
+
+export function validateCglProbe(value) {
+  const booleans = ['attempted', 'productionProfile', 'acceleratedRequested', 'core32Requested', 'pixelFormatPresent', 'describeAttempted', 'accelerated', 'createAttempted', 'contextPresent', 'setCurrentAttempted', 'versionQueried', 'versionObserved', 'restoreAttempted', 'previousRestored', 'supported'];
+  const integers = ['chooseError', 'pixelFormatCount', 'describeError', 'createError', 'setCurrentError', 'glMajor', 'glMinor', 'glError', 'restoreError', 'detachError'];
+  const keys = ['schemaVersion', 'diagnosticOnly', 'offscreenContextOnly', 'provesVideoRendering', 'exactProduction', 'defaultControl', 'executionSucceeded'];
+  if (!value || Object.keys(value).length !== keys.length || keys.some((key) => !(key in value)) || value.schemaVersion !== 1 || value.diagnosticOnly !== true || value.offscreenContextOnly !== true || value.provesVideoRendering !== false || typeof value.executionSucceeded !== 'boolean') throw new Error('Malformed offscreen CGL probe envelope');
+  for (const name of ['exactProduction', 'defaultControl']) {
+    const result = value[name];
+    if (!result || Object.keys(result).length !== 25 || booleans.some((key) => typeof result[key] !== 'boolean') || integers.some((key) => !Number.isSafeInteger(result[key]))) throw new Error('Malformed CGL capability observations');
+    if (result.supported && !(result.attempted && result.pixelFormatPresent && result.pixelFormatCount > 0 && result.describeAttempted && result.createAttempted && result.contextPresent && result.setCurrentAttempted && result.versionQueried && result.versionObserved && result.restoreAttempted && result.previousRestored && result.chooseError === 0 && result.createError === 0 && result.setCurrentError === 0 && result.glError === 0 && result.restoreError === 0 && result.glMajor > 0)) throw new Error('Unsupported CGL success assertion');
+  }
+  const exact = value.exactProduction, control = value.defaultControl;
+  if (!exact.attempted || !exact.productionProfile || !exact.acceleratedRequested || !exact.core32Requested || control.productionProfile || control.acceleratedRequested || control.core32Requested || control.attempted !== (!exact.supported && exact.previousRestored)) throw new Error('CGL production and control profiles do not match the fixture');
+  if (exact.supported && !(exact.describeError === 0 && exact.accelerated && (exact.glMajor > 3 || (exact.glMajor === 3 && exact.glMinor >= 2)))) throw new Error('Production CGL profile was not actually available');
+  if (value.executionSucceeded !== (exact.previousRestored && (!control.attempted || control.previousRestored))) throw new Error('CGL restoration result is inconsistent');
+  return value;
+}
+
+export async function runCglCapabilityProbe() {
+  const temporaryRoot = disposableRunnerTemp();
+  const workspace = await mkdtemp(join(temporaryRoot, 'yawf-cgl-probe-'));
+  const evidence = join(temporaryRoot, 'desktop-update-runtime-evidence'); await mkdir(evidence, { recursive: true });
+  const receipt = { schemaVersion: 1, source: run('git', ['rev-parse', 'HEAD']), candidateHead: process.env.QUALIFICATION_SOURCE_HEAD ?? null, arch: process.arch, observedAt: new Date().toISOString(), diagnosticOnly: true, provesVideoRendering: false };
+  const executable = join(workspace, 'probe-cgl');
+  const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(APPLE_|TAURI_SIGNING_|GH_TOKEN$|GITHUB_TOKEN$)/.test(name)));
+  try {
+    run('/usr/bin/xcrun', ['clang', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations', join(root, 'scripts/desktop-update-runtime/probe_cgl.c'), '-framework', 'OpenGL', '-o', executable], { timeout: 60_000, env: environment });
+    receipt.executableSha256 = digest(await readFile(executable));
+    const result = spawnSync(executable, [], { env: environment, encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 });
+    receipt.commandExit = result.status; receipt.commandSignal = result.signal;
+    if (result.stdout) receipt.observation = validateCglProbe(JSON.parse(result.stdout));
+    if (result.status !== 0 || !receipt.observation?.executionSucceeded) throw new Error('CGL probe execution failed; unsupported capability must not be inferred');
+    receipt.capability = receipt.observation.exactProduction.supported ? 'exact-offscreen-context-available' : receipt.observation.defaultControl.supported ? 'exact-attempt-unavailable-default-control-available' : 'no-tested-offscreen-context-available';
+    return receipt;
+  } catch (error) { receipt.error = String(error.message).slice(0, 400); throw error; }
+  finally { await writeFile(join(evidence, 'cgl-probe.json'), JSON.stringify(receipt, null, 2)); }
+}
+
 export async function prepareLinkerDirectory(workspace, mpv) {
   const linkerDirectory = join(workspace, 'linker');
   await mkdir(linkerDirectory);
@@ -94,9 +136,8 @@ function exactPids(executable) {
 }
 
 export async function runMacosQualification() {
-  if (process.platform !== 'darwin' || process.env.GITHUB_ACTIONS !== 'true' || !process.env.RUNNER_TEMP) throw new Error('This test may run only on a disposable GitHub macOS runner');
+  const temporaryRoot = disposableRunnerTemp();
   if (!pinnedMedia[process.arch]) throw new Error('Unsupported native test architecture');
-  const temporaryRoot = resolve(process.env.RUNNER_TEMP);
   const workspace = await mkdtemp(join(temporaryRoot, 'yawf-update-runtime-'));
   if (!workspace.startsWith(`${temporaryRoot}${sep}`)) throw new Error('Invalid disposable test directory');
   const evidence = join(temporaryRoot, 'desktop-update-runtime-evidence');
@@ -110,6 +151,12 @@ export async function runMacosQualification() {
   const nativeDebugLog = '/tmp/ds-rp-debug.log';
   const receipt = { schemaVersion: 1, classification: 'disposable-native-qualification-not-release', source: run('git', ['rev-parse', 'HEAD']), candidateHead: process.env.QUALIFICATION_SOURCE_HEAD ?? null, arch: process.arch, baseVersion, nextVersion, startedAt: new Date().toISOString(), passed: false };
   try {
+    let graphicsProbe;
+    try { graphicsProbe = JSON.parse(await readFile(join(evidence, 'cgl-probe.json'), 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; graphicsProbe = await runCglCapabilityProbe(); }
+    if (graphicsProbe.source !== receipt.source || graphicsProbe.arch !== receipt.arch || graphicsProbe.candidateHead !== receipt.candidateHead || !graphicsProbe.observation?.executionSucceeded || graphicsProbe.error) throw new Error('Fresh same-source CGL probe is required');
+    validateCglProbe(graphicsProbe.observation);
+    receipt.graphicsProbe = graphicsProbe;
     const pinned = pinnedMedia[process.arch];
     const release = await fetch(`https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.58-web/${pinned.name}`, { signal: AbortSignal.timeout(120_000) });
     if (!release.ok) throw new Error(`Pinned public media package returned ${release.status}`);
@@ -234,6 +281,7 @@ export async function runMacosQualification() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  if (process.argv.length !== 3 || process.argv[2] !== '--run') throw new Error('Usage: node scripts/desktop-update-runtime/run_macos.mjs --run (disposable hosted macOS runner only)');
-  await runMacosQualification();
+  if (process.argv.length !== 3 || !['--run', '--probe-only'].includes(process.argv[2])) throw new Error('Usage: node scripts/desktop-update-runtime/run_macos.mjs --run|--probe-only (disposable hosted macOS runner only)');
+  if (process.argv[2] === '--probe-only') await runCglCapabilityProbe();
+  else await runMacosQualification();
 }

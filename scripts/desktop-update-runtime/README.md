@@ -27,6 +27,13 @@ The existing native debug tracer is enabled only after exclusively claiming its
 fixed log path on the disposable runner. A bounded head/tail snapshot is retained
 after exact fixture-process cleanup, then the owned log is removed. An existing
 unrelated log is never read or overwritten.
+An early, same-host CGL probe records the exact accelerated 3.2-core context
+requirements. A separately labeled default control runs only if the exact
+attempt is unavailable. This diagnostic neither changes the application graphics
+policy nor proves Core Animation drawing or video rendering. Compile, timeout,
+signal, restoration, or malformed-output failures are distinct from a successful
+observation of unsupported capability. The early receipt is uploaded before the
+long native builds so it can be inspected without restarting those producers.
 
 Run the fixture contracts with:
 

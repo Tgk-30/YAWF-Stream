@@ -53,6 +53,8 @@ jobs:
             arch: x86_64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 50
+    env:
+      QUALIFICATION_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,14 +66,23 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: 'web/src-tauri -> target'
+          cache-on-failure: true
       - name: Install locked frontend dependencies
         working-directory: web
         run: npm ci
       - name: Validate disposable qualification contracts
         run: node --test scripts/desktop-update-runtime/*.test.mjs
+      - name: Observe offscreen CGL capability without changing graphics policy
+        run: node scripts/desktop-update-runtime/run_macos.mjs --probe-only
+      - name: Retain early same-host graphics diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-cgl-probe-${{ matrix.arch }}
+          path: ${{ runner.temp }}/desktop-update-runtime-evidence/cgl-probe.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Exercise native playback and an actual signed two-version update
-        env:
-          QUALIFICATION_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node scripts/desktop-update-runtime/run_macos.mjs --run
       - name: Preserve bounded native evidence, never ephemeral private keys
         if: always()
