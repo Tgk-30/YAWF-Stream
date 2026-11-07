@@ -3,7 +3,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -19,6 +19,13 @@ export const pinnedMedia = {
   x64: { name: 'YAWF.Stream_x64.app.tar.gz', sha256: '1eb7dca34cfc383c20ec35857c4d345fd0d13c9882590805fb32540e5a06dba4' },
 };
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+export async function prepareLinkerDirectory(workspace, mpv) {
+  const linkerDirectory = join(workspace, 'linker');
+  await mkdir(linkerDirectory);
+  await symlink(mpv, join(linkerDirectory, 'libmpv.dylib'));
+  return linkerDirectory;
+}
 
 export function fixtureConfig({ version, publicKey, baseUrl, frontend, frameworks }) {
   const url = new URL(baseUrl);
@@ -86,7 +93,11 @@ export async function runMacosQualification() {
     run('/usr/bin/codesign', ['--verify', '--deep', '--strict', originalApp]);
     const frameworkDirectory = join(originalApp, 'Contents/Frameworks');
     const frameworks = (await filesBelow(frameworkDirectory)).filter((path) => path.endsWith('.dylib'));
-    if (!frameworks.some((path) => /libmpv(?:\.\d+)*\.dylib$/.test(path))) throw new Error('Pinned signed package lacks libmpv');
+    const mpv = frameworks.find((path) => path.endsWith('/libmpv.2.dylib'));
+    if (!mpv) throw new Error('Pinned signed package lacks libmpv client API 2');
+    // Shipping Frameworks contain canonical runtime files, not the development
+    // linker alias. Keep that alias outside the verified source app bundle.
+    const linkerDirectory = await prepareLinkerDirectory(workspace, mpv);
     const ffmpeg = (await filesBelow(join(originalApp, 'Contents/Resources'))).find((path) => path.endsWith('/ffmpeg'));
     if (!ffmpeg) throw new Error('Pinned signed package lacks FFmpeg');
     const mediaPath = join(workspace, 'fixture.mp4');
@@ -110,7 +121,7 @@ export async function runMacosQualification() {
     await vite.build({ configFile: false, root: fixtureRoot, publicDir: false,
       resolve: { alias: { react: join(web, 'node_modules/react'), 'react-dom': join(web, 'node_modules/react-dom'), '@tauri-apps': join(web, 'node_modules/@tauri-apps') } },
       esbuild: { jsx: 'automatic' }, build: { target: 'chrome90', outDir: frontend, emptyOutDir: true } });
-    const nativeEnvironment = { ...cleanEnvironment, MPV_LIB_DIR: frameworkDirectory, MACOSX_DEPLOYMENT_TARGET: '11.0' };
+    const nativeEnvironment = { ...cleanEnvironment, MPV_LIB_DIR: linkerDirectory, MACOSX_DEPLOYMENT_TARGET: '11.0' };
     for (const version of [baseVersion, nextVersion]) {
       const configPath = join(workspace, `tauri-${version}.json`);
       await writeFile(configPath, JSON.stringify(fixtureConfig({ version, publicKey, baseUrl: service.address, frontend, frameworks })));
