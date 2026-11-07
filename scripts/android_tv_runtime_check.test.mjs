@@ -44,6 +44,10 @@ const retainedTimeBarXmlPath = join(
   "android-runtime-instrumentation/fixtures/runtime-tv-media3-visible-timebar.xml",
 );
 const workflowPath = join(root, ".github/workflows/android-tv-runtime.yml");
+const candidateWorkflowPath = join(
+  root,
+  ".github/workflows/android-tv-candidate-runtime.yml",
+);
 const python = process.env.PYTHON || "python3";
 const productPackage = "com.yawf.stream.tv";
 const javac = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin/javac") : "javac";
@@ -278,6 +282,304 @@ function assertWorkflowPolicy(source) {
   assert.match(source, /captureBeforeCleanup=true/);
   assert.match(source, /assert packages == \["com\.yawf\.stream\.tv"\], packages/);
 }
+
+const transportBegin = "          # BEGIN TV_POSTBOOT_TRANSPORT_READINESS\n";
+const transportEnd = "          # END TV_POSTBOOT_TRANSPORT_READINESS\n";
+
+function stableTransportBlock(source) {
+  const start = source.indexOf(transportBegin);
+  const end = source.indexOf(transportEnd);
+  assert.ok(start >= 0 && end > start, "stable transport markers are missing or unordered");
+  assert.equal(source.indexOf(transportBegin, start + 1), -1, "stable transport begin marker is duplicated");
+  assert.equal(source.indexOf(transportEnd, end + 1), -1, "stable transport end marker is duplicated");
+  return source
+    .slice(start + transportBegin.length, end)
+    .split("\n")
+    .map((line) => line.replace(/^ {10}/, ""))
+    .join("\n");
+}
+
+function replaceOnce(source, search, replacement) {
+  assert.equal(source.split(search).length, 2, `transport mutation anchor must be unique: ${search}`);
+  return source.replace(search, replacement);
+}
+
+function ignoreTransportAssignmentStatus(block) {
+  let reverted = replaceOnce(
+    block,
+    `if adb_state="$(timeout "\${probe_timeout}s" adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null)"; then`,
+    `if adb_state="$(timeout "\${probe_timeout}s" adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null || true)"; then`,
+  );
+  reverted = replaceOnce(
+    reverted,
+    `if boot_completed="$(timeout "\${probe_timeout}s" adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\\r')"; then`,
+    `if boot_completed="$(timeout "\${probe_timeout}s" adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\\r' || true)"; then`,
+  );
+  return reverted;
+}
+
+function runStableTransport(block, timeline, { deadline = 20, emulatorPid = "$$", timeout = 10_000 } = {}) {
+  const directory = mkdtempSync(join(tmpdir(), "yawf-tv-postboot-"));
+  const plan = join(directory, "plan.txt");
+  const counter = join(directory, "counter.txt");
+  const current = join(directory, "current.txt");
+  const calls = join(directory, "adb-calls.txt");
+  const timeouts = join(directory, "timeouts.txt");
+  const sleeps = join(directory, "sleeps.txt");
+  const script = join(directory, "probe.sh");
+  writeFileSync(plan, `${timeline.join("\n")}\n`);
+  writeFileSync(counter, "0\n");
+  writeFileSync(current, "");
+  writeFileSync(calls, "");
+  writeFileSync(timeouts, "");
+  writeFileSync(sleeps, "");
+  writeFileSync(script, `#!/bin/bash
+set -euo pipefail
+export FAKE_PLAN=${JSON.stringify(plan)}
+export FAKE_COUNTER=${JSON.stringify(counter)}
+export FAKE_CURRENT=${JSON.stringify(current)}
+export FAKE_CALLS=${JSON.stringify(calls)}
+export FAKE_TIMEOUTS=${JSON.stringify(timeouts)}
+export FAKE_SLEEPS=${JSON.stringify(sleeps)}
+fake_current_event() {
+  if [ -s "$FAKE_CURRENT" ]; then
+    cat "$FAKE_CURRENT"
+  else
+    sed -n '1p' "$FAKE_PLAN"
+  fi
+}
+adb() {
+  printf '%s\\n' "$*" >> "$FAKE_CALLS"
+  if [ "\${3:-}" = get-state ]; then
+    local index event
+    index=$(( $(cat "$FAKE_COUNTER") + 1 ))
+    printf '%s\\n' "$index" > "$FAKE_COUNTER"
+    event="$(sed -n "\${index}p" "$FAKE_PLAN")"
+    if [ -z "$event" ]; then event="$(tail -n 1 "$FAKE_PLAN")"; fi
+    printf '%s\\n' "$event" > "$FAKE_CURRENT"
+    case "$event" in
+      missing) return 1 ;;
+      offline) printf '%s\\n' offline ;;
+      state_exit1) printf '%s\\n' device; return 1 ;;
+      state_exit124) printf '%s\\n' device; return 124 ;;
+      *) printf '%s\\n' device ;;
+    esac
+    return
+  fi
+  local event
+  event="$(fake_current_event)"
+  if [ "\${3:-}" = shell ] && [ "\${4:-}" = getprop ]; then
+    case "$event" in
+      boot0) printf '%s\\n' 0 ;;
+      boot_error) return 1 ;;
+      boot_exit1) printf '%s\\n' 1; return 1 ;;
+      boot_exit124) printf '%s\\n' 1; return 124 ;;
+      *) printf '%s\\n' 1 ;;
+    esac
+    return
+  fi
+  if [ "\${3:-}" = shell ] && [ "\${4:-}" = true ]; then
+    [ "$event" != noopfail ]
+    return
+  fi
+  return 90
+}
+timeout() {
+  local raw="\${1:-}" seconds
+  seconds="\${raw%s}"
+  case "$seconds" in
+    ''|*[!0-9]*) return 91 ;;
+  esac
+  if [ "$seconds" -lt 1 ] || [ "$seconds" -gt 8 ]; then return 92; fi
+  printf '%s\\n' "$seconds" >> "$FAKE_TIMEOUTS"
+  shift
+  "$@"
+}
+sleep() {
+  [ "\${1:-}" = 2 ] || return 93
+  printf '%s\\n' 2 >> "$FAKE_SLEEPS"
+  SECONDS=$((SECONDS + 2))
+}
+${block}
+EMULATOR_SERIAL=emulator-5556
+emulator_pid=${emulatorPid}
+SECONDS=0
+boot_deadline=${deadline}
+if wait_for_stable_emulator_transport; then
+  printf '%s\\n' admitted
+else
+  printf '%s\\n' rejected
+fi
+`);
+  const result = spawnSync("/bin/bash", [script], {
+    encoding: "utf8",
+    timeout,
+    killSignal: "SIGKILL",
+  });
+  const lines = (path) => readFileSync(path, "utf8").trim().split("\n").filter(Boolean);
+  return {
+    ...result,
+    stateCalls: Number(readFileSync(counter, "utf8").trim()),
+    adbCalls: lines(calls),
+    timeoutSeconds: lines(timeouts).map(Number),
+    sleepCalls: lines(sleeps).length,
+  };
+}
+
+function assertRejected(result, label) {
+  assert.equal(result.status, 0, `${label}: ${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stdout.trim(), "rejected", label);
+}
+
+function assertAdmitted(result, expectedStateCalls, label) {
+  assert.equal(result.status, 0, `${label}: ${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stdout.trim(), "admitted", label);
+  assert.equal(result.stateCalls, expectedStateCalls, label);
+}
+
+test("both TV workflows require three bounded stable post-boot ADB samples", () => {
+  const historical = read(workflowPath);
+  const candidate = read(candidateWorkflowPath);
+  const historicalBlock = stableTransportBlock(historical);
+  const candidateBlock = stableTransportBlock(candidate);
+  assert.equal(candidateBlock, historicalBlock, "candidate and historical readiness blocks diverged");
+  for (const source of [historical, candidate]) {
+    const deadline = source.indexOf("boot_deadline=$((SECONDS + 360))");
+    const barrier = source.indexOf(transportBegin);
+    const call = source.indexOf("          wait_for_stable_emulator_transport\n", barrier);
+    const identity = source.indexOf('          test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk');
+    assert.ok(deadline >= 0 && deadline < barrier && barrier < call && call < identity);
+    assert.equal((source.match(/wait_for_stable_emulator_transport\n/g) ?? []).length, 1);
+  }
+
+  const ready = runStableTransport(historicalBlock, ["ready", "ready", "ready"]);
+  assertAdmitted(ready, 3, "three stable samples");
+  assert.equal(ready.sleepCalls, 2);
+  assert.equal(ready.adbCalls.filter((call) => call.endsWith("shell true")).length, 3);
+  assert.ok(ready.timeoutSeconds.every((value) => value >= 1 && value <= 8));
+});
+
+test("post-boot readiness resets every failed sample and fails closed on exit or deadline", () => {
+  const block = stableTransportBlock(read(workflowPath));
+  for (const failure of ["offline", "boot0", "noopfail"]) {
+    const result = runStableTransport(block, ["ready", "ready", failure, "ready", "ready", "ready"]);
+    assertAdmitted(result, 6, `reset after ${failure}`);
+  }
+
+  const exited = runStableTransport(block, ["ready", "ready", "ready"], { emulatorPid: "999999999" });
+  assertRejected(exited, "owned emulator exit");
+  assert.equal(exited.stateCalls, 0);
+
+  const deadline = runStableTransport(block, ["offline"], { deadline: 5 });
+  assertRejected(deadline, "bounded offline deadline");
+  assert.ok(deadline.timeoutSeconds.length > 0);
+  assert.ok(deadline.timeoutSeconds.every((value) => value >= 1 && value <= 5));
+  assert.ok(deadline.sleepCalls <= 2);
+});
+
+for (const [failure, label] of [
+  ["state_exit1", "get-state prints device then exits 1"],
+  ["state_exit124", "get-state prints device then exits 124"],
+  ["boot_exit1", "getprop prints 1 then exits 1"],
+  ["boot_exit124", "getprop prints 1 then exits 124"],
+]) {
+  test(`post-boot rejects ${label}`, () => {
+    const block = stableTransportBlock(read(workflowPath));
+    const corrected = runStableTransport(
+      block,
+      ["ready", "ready", failure, "ready", "ready", "ready"],
+      { deadline: 30 },
+    );
+    assertAdmitted(corrected, 6, `${label}: corrected barrier requires three fresh successes`);
+
+    const ignoredStatus = ignoreTransportAssignmentStatus(block);
+    assertAdmitted(
+      runStableTransport(ignoredStatus, ["ready", "ready", failure], { deadline: 20 }),
+      3,
+      `${label}: ignored-status V1 behavior admits valid-looking failed output`,
+    );
+  });
+}
+
+test("post-boot predecessor admits without state or no-op shell readiness", () => {
+  const block = stableTransportBlock(read(workflowPath));
+  const predecessor = `wait_for_stable_emulator_transport() {
+  while [ "$(adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\\r')" != 1 ]; do
+    if [ "$SECONDS" -ge "$boot_deadline" ]; then return 1; fi
+    sleep 2
+  done
+}`;
+  assertAdmitted(
+    runStableTransport(predecessor, ["noopfail"], { deadline: 5 }),
+    0,
+    "boot-property-only predecessor admits without state or shell readiness",
+  );
+  assertRejected(runStableTransport(block, ["noopfail"], { deadline: 5 }), "new barrier rejects predecessor case");
+});
+
+test("post-boot readiness fails if the state check is omitted", () => {
+  const block = stableTransportBlock(read(workflowPath));
+  let omittedState = replaceOnce(
+    block,
+    'if [ "$state_ready" = true ] && [ "$adb_state" = device ]; then',
+    "if true; then",
+  );
+  omittedState = replaceOnce(
+    omittedState,
+    'if [ "$state_ready" = true ] && [ "$adb_state" = device ] && [ "$boot_ready" = true ] && [ "$boot_completed" = 1 ] && [ "$shell_ready" = true ]; then',
+    'if [ "$boot_ready" = true ] && [ "$boot_completed" = 1 ] && [ "$shell_ready" = true ]; then',
+  );
+  assertRejected(runStableTransport(block, ["offline"], { deadline: 5 }), "state control");
+  assertAdmitted(runStableTransport(omittedState, ["offline"], { deadline: 20 }), 3, "omitted state mutant");
+});
+
+test("post-boot readiness fails if the no-op shell check is omitted", () => {
+  const block = stableTransportBlock(read(workflowPath));
+  const omittedShell = replaceOnce(
+    block,
+    'if [ "$state_ready" = true ] && [ "$adb_state" = device ] && [ "$boot_ready" = true ] && [ "$boot_completed" = 1 ] && [ "$shell_ready" = true ]; then',
+    'if [ "$state_ready" = true ] && [ "$adb_state" = device ] && [ "$boot_ready" = true ] && [ "$boot_completed" = 1 ]; then',
+  );
+  assertRejected(runStableTransport(block, ["noopfail"], { deadline: 5 }), "shell control");
+  assertAdmitted(runStableTransport(omittedShell, ["noopfail"], { deadline: 20 }), 3, "omitted shell mutant");
+});
+
+test("post-boot readiness fails if failed samples do not reset the streak", () => {
+  const block = stableTransportBlock(read(workflowPath));
+  const omittedReset = replaceOnce(block, "    else\n      stable_samples=0\n    fi", "    else\n      :\n    fi");
+  assertAdmitted(
+    runStableTransport(block, ["ready", "ready", "noopfail", "ready", "ready", "ready"]),
+    6,
+    "reset control",
+  );
+  assertAdmitted(
+    runStableTransport(omittedReset, ["ready", "ready", "noopfail", "ready"], { deadline: 20 }),
+    4,
+    "omitted reset mutant admits nonconsecutive readiness",
+  );
+});
+
+test("post-boot readiness fails if the overall deadline is omitted", () => {
+  const block = stableTransportBlock(read(workflowPath));
+  let omittedDeadline = block.replace(
+    /remaining_adb_timeout\(\) \{[\s\S]*?\n\}/,
+    "remaining_adb_timeout() {\n  printf '%s\\n' 8\n}",
+  );
+  assert.notEqual(omittedDeadline, block);
+  omittedDeadline = replaceOnce(
+    omittedDeadline,
+    '    if [ "$SECONDS" -ge "$boot_deadline" ]; then\n      echo "::error::Android TV emulator did not reach stable boot and ADB transport within 360 seconds" >&2\n      return 1\n    fi',
+    "    :",
+  );
+  omittedDeadline = replaceOnce(
+    omittedDeadline,
+    '      if [ "$remaining" -lt 2 ]; then\n        echo "::error::Android TV emulator did not reach stable boot and ADB transport within 360 seconds" >&2\n        return 1\n      fi\n      sleep 2',
+    "      sleep 2",
+  );
+  const runaway = runStableTransport(omittedDeadline, ["offline"], { deadline: 1, timeout: 250 });
+  assert.equal(runaway.status, null, "omitted deadline mutant unexpectedly terminated");
+  assert.equal(runaway.error?.code, "ETIMEDOUT", "omitted deadline mutant did not exceed the behavioral bound");
+});
 
 function javaMethod(source, name) {
   const signature = new RegExp(`private\\s+[A-Za-z0-9_.<>]+\\s+${name}\\(`);
@@ -651,7 +953,7 @@ function assertFirstDpadConnectPolicy(source) {
 function assertJavaSemanticPolicy(source) {
   for (const marker of [
     'assertTrue("Playback position did not advance"',
-    'assertTrue("Decoded center frame did not change while playback advanced"',
+    'assertTrue("Decoded upper-video ROI did not change while playback advanced"',
     'assertTrue("Position advanced materially while paused"',
     'assertTrue("D-pad seek did not move by a meaningful delta"',
     'assertTrue("Back did not restore focus to the WebView or one of its descendants"',
@@ -673,7 +975,7 @@ test("host admission and semantic receipt policy self-tests execute", () => {
 test("fixture path and native bridge contract self-tests execute", () => {
   const result = runPythonSelfTest(fixturePath);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stderr, /Ran 2 tests/);
+  assert.match(result.stderr, /Ran 4 tests/);
 });
 
 test("host tests kill removal of decoded-frame semantic admission", () => {

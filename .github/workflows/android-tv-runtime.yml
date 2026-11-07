@@ -258,7 +258,7 @@ jobs:
           set -euo pipefail
           python3 scripts/android_tv_runtime_check.py --self-test
           python3 scripts/android_tv_runtime_fixture.py self-test
-          node --test scripts/android_tv_runtime_check.test.mjs
+          node --test scripts/android_tv_runtime_check.test.mjs scripts/runtime_tv_upper_video_roi.test.mjs
           python3 scripts/android_tv_runtime_fixture.py generate \
             --output "$RUNNER_TEMP/tv-fixture" \
             > "$EVIDENCE/fixture-generation-stdout.json"
@@ -386,13 +386,90 @@ jobs:
           emulator_pid=$!
           timeout 360s adb -s "$EMULATOR_SERIAL" wait-for-device
           boot_deadline=$((SECONDS + 360))
-          while [ "$(adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != 1 ]; do
-            if [ "$SECONDS" -ge "$boot_deadline" ]; then
-              echo "::error::Android TV emulator did not complete boot within 360 seconds" >&2
-              exit 1
+          # BEGIN TV_POSTBOOT_TRANSPORT_READINESS
+          remaining_adb_timeout() {
+            local remaining=$((boot_deadline - SECONDS))
+            if [ "$remaining" -le 0 ]; then return 1; fi
+            if [ "$remaining" -lt 8 ]; then
+              printf '%s\n' "$remaining"
+            else
+              printf '%s\n' 8
             fi
-            sleep 2
-          done
+          }
+          wait_for_stable_emulator_transport() {
+            local stable_samples=0
+            local probe_timeout=""
+            local adb_state=""
+            local state_ready=false
+            local boot_completed=""
+            local boot_ready=false
+            local shell_ready=false
+            local remaining=0
+            while [ "$stable_samples" -lt 3 ]; do
+              if ! kill -0 "$emulator_pid" 2>/dev/null; then
+                echo "::error::Android TV emulator exited before stable ADB transport" >&2
+                return 1
+              fi
+              if ! probe_timeout="$(remaining_adb_timeout)"; then
+                echo "::error::Android TV emulator did not reach stable boot and ADB transport within 360 seconds" >&2
+                return 1
+              fi
+              adb_state=""
+              state_ready=false
+              if adb_state="$(timeout "${probe_timeout}s" adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null)"; then
+                state_ready=true
+              else
+                adb_state=""
+                stable_samples=0
+              fi
+              boot_completed=""
+              boot_ready=false
+              shell_ready=false
+              if [ "$state_ready" = true ] && [ "$adb_state" = device ]; then
+                if ! probe_timeout="$(remaining_adb_timeout)"; then
+                  echo "::error::Android TV emulator did not reach stable boot and ADB transport within 360 seconds" >&2
+                  return 1
+                fi
+                if boot_completed="$(timeout "${probe_timeout}s" adb -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"; then
+                  boot_ready=true
+                else
+                  boot_completed=""
+                  stable_samples=0
+                fi
+                if [ "$boot_ready" = true ] && [ "$boot_completed" = 1 ]; then
+                  if ! probe_timeout="$(remaining_adb_timeout)"; then
+                    echo "::error::Android TV emulator did not reach stable boot and ADB transport within 360 seconds" >&2
+                    return 1
+                  elif timeout "${probe_timeout}s" adb -s "$EMULATOR_SERIAL" shell true >/dev/null 2>&1; then
+                    shell_ready=true
+                  fi
+                fi
+              fi
+              if ! kill -0 "$emulator_pid" 2>/dev/null; then
+                echo "::error::Android TV emulator exited before stable ADB transport" >&2
+                return 1
+              fi
+              if [ "$SECONDS" -ge "$boot_deadline" ]; then
+                echo "::error::Android TV emulator did not reach stable boot and ADB transport within 360 seconds" >&2
+                return 1
+              fi
+              if [ "$state_ready" = true ] && [ "$adb_state" = device ] && [ "$boot_ready" = true ] && [ "$boot_completed" = 1 ] && [ "$shell_ready" = true ]; then
+                stable_samples=$((stable_samples + 1))
+              else
+                stable_samples=0
+              fi
+              if [ "$stable_samples" -lt 3 ]; then
+                remaining=$((boot_deadline - SECONDS))
+                if [ "$remaining" -lt 2 ]; then
+                  echo "::error::Android TV emulator did not reach stable boot and ADB transport within 360 seconds" >&2
+                  return 1
+                fi
+                sleep 2
+              fi
+            done
+          }
+          # END TV_POSTBOOT_TRANSPORT_READINESS
+          wait_for_stable_emulator_transport
           test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')" = 36
           test "$(adb -s "$EMULATOR_SERIAL" shell getprop ro.product.cpu.abi | tr -d '\r')" = x86_64
           adb -s "$EMULATOR_SERIAL" shell wm size > "$EVIDENCE/device-display.txt"
