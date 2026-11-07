@@ -306,12 +306,18 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
       () => assertSafeAreaWebViewCreateContract(missingUnsupportedReturn),
       /unsupported path must return before any safe-area attachment/,
     );
-    assert.match(activity, /val windowInsets = webView\.rootWindowInsets \?: return/);
-    for (const side of ["Top", "Right", "Bottom", "Left"]) {
-      assert.match(activity, new RegExp(`systemWindowInset${side}\\.coerceAtLeast\\(0\\)`));
-      assert.match(activity, new RegExp(`safeInset${side}\\.coerceAtLeast\\(0\\)`));
+    assert.match(activity, /val windowInsets = ViewCompat\.getRootWindowInsets\(webView\) \?: return/);
+    assert.match(activity, /WindowInsetsCompat\.Type\.systemBars\(\) or WindowInsetsCompat\.Type\.displayCutout\(\)/);
+    for (const side of ["top", "right", "bottom", "left"]) {
+      assert.match(activity, new RegExp(`persistent\\.${side}\\.coerceAtLeast\\(0\\)`));
     }
-    assert.match(activity, /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.P/);
+    const refreshInsets = activity.slice(activity.indexOf("  private fun refreshSafeAreaInsets"), activity.indexOf("  private fun detachSafeAreaBridge"));
+    assert.doesNotMatch(refreshInsets, /systemWindowInset|Type\.ime\(\)/);
+    assert.match(activity, /YawfImeController\(webView\)\.also \{ it\.attach\(exclusiveWebViewListener = true\) \}/);
+    assert.equal(activity.match(/imeController\?\.destroy\(\)/g)?.length, 2);
+    assert.match(activity, /imeController\?\.onConfigurationChanged\(\)/);
+    assert.match(manifest, /android:windowSoftInputMode="adjustResize"/);
+    assert.equal(readFileSync(join(dirname(mainActivity), "YawfImeController.kt"), "utf8"), readFileSync(new URL("./android/YawfImeController.kt", import.meta.url), "utf8"));
     assert.match(activity, /addOnLayoutChangeListener\(layoutListener\)/);
     assert.match(activity, /addOnGlobalLayoutListener\(globalLayoutListener\)/);
     assert.match(activity, /override fun onConfigurationChanged\(newConfig: Configuration\)/);

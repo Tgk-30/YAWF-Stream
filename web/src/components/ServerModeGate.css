@@ -1,10 +1,20 @@
 .server-gate {
+  --server-gate-gutter: calc(32px * var(--density-scale));
   position: relative;
-  overflow: hidden;
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: calc(32px * var(--density-scale));
+  box-sizing: border-box;
+  height: 100vh;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: max(var(--server-gate-gutter), var(--safe-area-top));
+  padding-right: max(var(--server-gate-gutter), var(--safe-area-right));
+  padding-bottom: max(var(--server-gate-gutter), var(--safe-area-bottom));
+  padding-left: max(var(--server-gate-gutter), var(--safe-area-left));
+  scroll-padding-top: max(var(--server-gate-gutter), var(--safe-area-top));
+  scroll-padding-bottom: max(var(--server-gate-gutter), var(--safe-area-bottom));
   background:
     radial-gradient(circle at 20% 15%, rgba(82, 113, 255, 0.24), transparent 32%),
     radial-gradient(circle at 85% 20%, rgba(32, 201, 151, 0.18), transparent 28%),
@@ -12,10 +22,29 @@
   color: #f8fafc;
 }
 
+@supports (height: 100dvh) {
+  .server-gate {
+    height: 100dvh;
+  }
+}
+
+@media (max-width: 600px), (max-height: 500px) {
+  .server-gate {
+    --server-gate-gutter: max(16px, calc(16px * var(--density-scale)));
+  }
+}
+
 .server-gate-card {
   position: relative;
   z-index: 1;
+  flex: 0 0 auto;
   width: min(440px, 100%);
+  min-width: 0;
+  max-width: 100%;
+  /* Auto margins center fitting cards and become zero when scrolling is needed. */
+  margin-top: auto;
+  margin-bottom: auto;
+  overflow-wrap: anywhere;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: calc(8px * var(--radius-scale));
   background: rgba(11, 18, 32, 0.78);
@@ -49,7 +78,9 @@
 }
 
 .server-gate-field input {
-  min-height: 42px;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: calc(8px * var(--radius-scale));
   background: rgba(255, 255, 255, 0.08);
@@ -64,7 +95,8 @@
 }
 
 .server-gate-button {
-  min-height: 42px;
+  min-width: 44px;
+  min-height: 44px;
   border: 0;
   border-radius: calc(8px * var(--radius-scale));
   background: #e5f0ff;
