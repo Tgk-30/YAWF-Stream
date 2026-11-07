@@ -1,4 +1,4 @@
-name: Android public fixed 2.3.42 to 2.3.74 automatic OTA runtime check
+name: Android public fixed 2.3.42 to 2.3.74 automatic OTA functional fixture at 480 dpi
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ jobs:
       github.repository_owner == 'Tgk-30' &&
       github.actor == 'Tgk-30' &&
       github.ref_type == 'branch'
-    name: Public fixed 2.3.42 to 2.3.74 automatic native updater
+    name: Public fixed 2.3.42 to 2.3.74 automatic native updater at 480 dpi
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -53,10 +53,10 @@ jobs:
       AUTOMATIC_BINDING: public-assets/fixed42-to74-automatic-admission.json
       UPDATER_SOURCE_SHA256: 129df15e095ed5ce8933d17ab9a0329da79244e14ac046df18c3fad32e01163d
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
-      AVD_NAME: yawf-public-fixed42-to74-automatic-ota-api36
+      AVD_NAME: yawf-public-fixed42-to74-automatic-ota-api36-480dpi
       EMULATOR_SERIAL: emulator-5554
       EMULATOR_GPU: swiftshader_indirect
-      EVIDENCE: android-public-fixed42-to74-automatic-ota-runtime-evidence
+      EVIDENCE: android-public-fixed42-to74-automatic-ota-runtime-480dpi-evidence
       OTA_MODE: public-fixed42-to74-initial-cancel-due-resume-v1
 
     steps:
@@ -336,6 +336,11 @@ jobs:
             echo "independentColdProcessProof=false"
             echo "weeklyElapsedSchedulingProof=false"
             echo "physicalDeviceProof=false"
+            echo "functionalOtaFixtureDensityDpi=480"
+            echo "expectedUnzoomedDpr=3"
+            echo "domDprMeasured=false"
+            echo "original420DpiObserverGapOpen=true"
+            echo "fullUiQualificationClaimed=false"
             echo "realPublicRuntimeProof=pending-this-workflow-success"
           } > "$EVIDENCE/binding.txt"
 
@@ -553,7 +558,7 @@ jobs:
           test -r /dev/kvm -a -w /dev/kvm
           stat -c 'kvmOwner=%u kvmGroup=%g kvmMode=%a' /dev/kvm > "$EVIDENCE/kvm.txt"
 
-          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-public-fixed42-automatic-ota-android"
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-public-fixed42-to74-480dpi-android"
           export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
           export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
           run_evidence="$EVIDENCE/run-1"
@@ -670,6 +675,67 @@ jobs:
             --device pixel \
             --path "$ANDROID_AVD_HOME/$AVD_NAME" \
             2>&1 | tee "$run_evidence/avd-create.txt"
+          AVD_CONFIG="$ANDROID_AVD_HOME/$AVD_NAME/config.ini" \
+          RUN_EVIDENCE="$run_evidence" python3 - <<'PY'
+          # BEGIN EXACT480 PREBOOT FIXTURE
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          name = "yawf-public-fixed42-to74-automatic-ota-api36-480dpi"
+          root = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+          owned = root / "yawf-public-fixed42-to74-480dpi-android" / "avd"
+          assert os.environ["AVD_NAME"] == name, "Unexpected owned AVD name"
+          assert Path(os.environ["ANDROID_AVD_HOME"]) == owned, "Unexpected owned AVD root"
+          config = Path(os.environ["AVD_CONFIG"])
+          expected = owned / name / "config.ini"
+          assert config == expected, "Configuration escaped the new owned AVD"
+          assert not config.is_symlink() and config.resolve(strict=True) == expected, "Aliased AVD configuration"
+          assert config.is_file() and config.stat().st_nlink == 1, "AVD configuration is not a unique regular file"
+          original = config.read_bytes()
+          assert len(original) <= 64 * 1024, "Oversized AVD configuration"
+          lines = original.decode("utf-8").splitlines(keepends=True)
+          required = {"hw.device.name": "pixel", "hw.lcd.width": "1080", "hw.lcd.height": "1920", "hw.lcd.density": "420"}
+          indices = {}
+          for index, line in enumerate(lines):
+              stripped = line.strip()
+              if not stripped or stripped.startswith(("#", ";")):
+                  continue
+              key, separator, value = line.partition("=")
+              if separator and key.strip() in required:
+                  key = key.strip()
+                  assert key not in indices, "Duplicate hardware property: " + key
+                  assert value.strip() == required[key], "Unexpected fresh Pixel hardware: " + key
+                  indices[key] = index
+          assert set(indices) == set(required), "Incomplete fresh Pixel hardware"
+          index = indices["hw.lcd.density"]
+          match = re.fullmatch(r"([ \t]*hw\.lcd\.density[ \t]*=[ \t]*)420([ \t]*)(\r?\n|\Z)", lines[index])
+          assert match is not None, "Unexpected density syntax"
+          lines[index] = match[1] + "480" + match[2] + match[3]
+          configured = "".join(lines).encode("utf-8")
+          config.write_bytes(configured)
+          evidence = Path(os.environ["RUN_EVIDENCE"])
+          (evidence / "avd-config-before.ini").write_bytes(original)
+          (evidence / "avd-config-480dpi.ini").write_bytes(configured)
+          (evidence / "preboot-display-fixture.json").write_text(json.dumps({
+              "schemaVersion": 1,
+              "scope": "functional-ota-only",
+              "avdName": name,
+              "physicalWidth": 1080,
+              "physicalHeight": 1920,
+              "originalDensityDpi": 420,
+              "configuredDensityDpi": 480,
+              "expectedUnzoomedDpr": 3,
+              "domDprMeasured": False,
+              "original420DpiObserverGapOpen": True,
+              "fullUiQualificationClaimed": False,
+              "configBeforeSha256": hashlib.sha256(original).hexdigest(),
+              "configAfterSha256": hashlib.sha256(configured).hexdigest(),
+          }, indent=2) + "\n")
+          # END EXACT480 PREBOOT FIXTURE
+          PY
           emulator -version | tee "$run_evidence/emulator-version.txt"
           nohup emulator \
             -avd "$AVD_NAME" \
@@ -711,6 +777,34 @@ jobs:
             echo "systemImagePackage=$SYSTEM_IMAGE_PACKAGE"
             echo "gpuBackend=$EMULATOR_GPU"
           } > "$run_evidence/device-binding.txt"
+
+          adb -s "$EMULATOR_SERIAL" shell wm size > "$run_evidence/effective-display-size.txt"
+          adb -s "$EMULATOR_SERIAL" shell wm density > "$run_evidence/effective-display-density.txt"
+          RUN_EVIDENCE="$run_evidence" python3 - <<'PY'
+          # BEGIN EXACT480 POSTBOOT READBACK
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          evidence = Path(os.environ["RUN_EVIDENCE"])
+          size = (evidence / "effective-display-size.txt").read_text()
+          density = (evidence / "effective-display-density.txt").read_text()
+          assert re.fullmatch(r"Physical size: 1080x1920\n?", size), "Effective physical size was not exactly 1080x1920 or was overridden"
+          assert re.fullmatch(r"Physical density: 480\n?", density), "Effective physical density was not exactly 480 or was overridden"
+          (evidence / "effective-display-fixture.json").write_text(json.dumps({
+              "schemaVersion": 1,
+              "scope": "functional-ota-only",
+              "physicalWidth": 1080,
+              "physicalHeight": 1920,
+              "physicalDensityDpi": 480,
+              "expectedUnzoomedDpr": 3,
+              "domDprMeasured": False,
+              "original420DpiObserverGapOpen": True,
+              "fullUiQualificationClaimed": False,
+          }, indent=2) + "\n")
+          # END EXACT480 POSTBOOT READBACK
+          PY
 
           adb -s "$EMULATOR_SERIAL" shell dumpsys webviewupdate \
             > "$run_evidence/stock-webview-provider.txt"
@@ -762,7 +856,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-public-fixed42-to74-automatic-ota-api36-evidence
+          name: android-public-fixed42-to74-automatic-ota-api36-480dpi-evidence
           path: ${{ env.EVIDENCE }}
           if-no-files-found: error
           retention-days: 14
