@@ -24,10 +24,22 @@ const failureRefObserver = vi.hoisted(() => ({
   enabled: false,
   refs: [] as Array<{ current: (message: string, exactHandoffPending: boolean) => void }>,
 }));
+const stallRecoveryObserver = vi.hoisted(() => ({
+  enabled: false,
+  callbacks: [] as Array<(position: number, state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => Promise<boolean>>,
+}));
 vi.mock("react", async (original) => {
   const actual = await original<typeof import("react")>();
   return {
     ...actual,
+    useCallback: ((...args: Parameters<typeof actual.useCallback>) => {
+      const callback = actual.useCallback(...args);
+      const observed = callback as (typeof stallRecoveryObserver.callbacks)[number];
+      if (stallRecoveryObserver.enabled && callback.toString().includes("stall.refresh_started") && !stallRecoveryObserver.callbacks.includes(observed)) {
+        stallRecoveryObserver.callbacks.push(observed);
+      }
+      return callback;
+    }) as typeof actual.useCallback,
     useRef: ((...args: unknown[]) => {
       const ref = Reflect.apply(actual.useRef, undefined, args);
       const initial = args[0];
@@ -10914,6 +10926,128 @@ describe("post-start webview stall recovery", () => {
     fireEvent.playing(video);
     return state;
   }
+
+  async function beginDeferredRecovery(kind: "automatic" | "manual") {
+    vi.useFakeTimers();
+    const pending = deferred<void>();
+    const refresh = vi.fn(() => pending.promise);
+    if (kind === "manual") refresh.mockRejectedValueOnce(new Error("Initial resolution failed"));
+    const props = { title: "Recovery owner", refreshCurrentSource: refresh, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://x/old.mp4" sourceRevision={1} />);
+    const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    original.currentTime = 40; playingMedia(original);
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS); });
+    if (kind === "manual") {
+      fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+      await act(async () => { await Promise.resolve(); });
+    }
+    expect(refresh).toHaveBeenCalledTimes(kind === "automatic" ? 1 : 2);
+    return { view, props, pending, refresh };
+  }
+  async function settleRecovery(pending: ReturnType<typeof deferred<void>>, outcome: "reject" | "timeout" | "resolve") {
+    await act(async () => {
+      if (outcome === "reject") pending.reject(new Error("Old resolution failed late"));
+      else if (outcome === "resolve") pending.resolve();
+      else await vi.advanceTimersByTimeAsync(FRESH_STREAM_RESOLUTION_TIMEOUT_MS);
+      await Promise.resolve();
+    });
+  }
+
+  it.each([
+    ["automatic", "URL", "reject"], ["automatic", "URL", "timeout"], ["automatic", "URL", "resolve"],
+    ["automatic", "revision", "reject"], ["automatic", "revision", "timeout"], ["automatic", "revision", "resolve"],
+    ["manual", "URL", "reject"], ["manual", "URL", "timeout"], ["manual", "URL", "resolve"],
+    ["manual", "revision", "reject"], ["manual", "revision", "timeout"], ["manual", "revision", "resolve"],
+  ] as const)("ignores stale %s recovery after committed %s replacement and %s", async (kind, replacement, outcome) => {
+    const f = await beginDeferredRecovery(kind);
+    f.view.rerender(<VideoPlayer {...f.props} url={replacement === "URL" ? "https://x/new.mp4" : "https://x/old.mp4"} sourceRevision={2} />);
+    const successor = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireEvent.canPlay(successor); fireEvent.pause(successor);
+    successor.currentTime = 73.1; successor.playbackRate = 1.25; successor.volume = 0.4; successor.muted = true;
+    const pauseCalls = vi.mocked(successor.pause).mock.calls.length;
+    const loadCalls = vi.mocked(successor.load).mock.calls.length;
+    const source = successor.src;
+    recordDiagnosticMock.mockClear();
+    await settleRecovery(f.pending, outcome);
+    expect(document.querySelector("video.player-video")).toBe(successor);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(successor.src).toBe(source); expect(successor.currentTime).toBe(73.1);
+    expect(successor.playbackRate).toBe(1.25); expect(successor.volume).toBe(0.4); expect(successor.muted).toBe(true);
+    expect(successor.pause).toHaveBeenCalledTimes(pauseCalls); expect(successor.load).toHaveBeenCalledTimes(loadCalls);
+    expect(recordDiagnosticMock.mock.calls.filter(([, code]) => String(code).startsWith("stall."))).toHaveLength(0);
+  });
+  it.each([
+    ["automatic", "reject"], ["automatic", "timeout"], ["automatic", "resolve"],
+    ["manual", "reject"], ["manual", "timeout"], ["manual", "resolve"],
+  ] as const)("does not publish %s recovery %s after unmount", async (kind, outcome) => {
+    const f = await beginDeferredRecovery(kind);
+    f.view.unmount(); recordDiagnosticMock.mockClear();
+    await settleRecovery(f.pending, outcome);
+    expect(recordDiagnosticMock).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBeNull();
+  });
+  it.each(["URL", "revision"] as const)("rejects an old saved stall callback after committed %s replacement", async (replacement) => {
+    stallRecoveryObserver.enabled = true; stallRecoveryObserver.callbacks = [];
+    try {
+      const refresh = vi.fn(async () => {});
+      const props = { title: "Saved recovery", refreshCurrentSource: refresh, onClose: () => {} };
+      const view = render(<VideoPlayer {...props} url="https://x/old.mp4" sourceRevision={1} />);
+      const saved = stallRecoveryObserver.callbacks[0]!; expect(saved).toBeDefined();
+      view.rerender(<VideoPlayer {...props} url={replacement === "URL" ? "https://x/new.mp4" : "https://x/old.mp4"} sourceRevision={2} />);
+      const successor = document.querySelector("video.player-video");
+      let accepted = true;
+      await act(async () => { accepted = await saved(40, { paused: false, volume: 1, muted: false, playbackRate: 1 }); });
+      expect(accepted).toBe(false); expect(refresh).not.toHaveBeenCalled();
+      expect(document.querySelector("video.player-video")).toBe(successor); expect(screen.queryByRole("alert")).toBeNull();
+    } finally { stallRecoveryObserver.enabled = false; stallRecoveryObserver.callbacks = []; }
+  });
+  it.each(["automatic", "manual"] as const)("keeps the committed %s recovery authoritative through an abandoned render", async (kind) => {
+    vi.useFakeTimers();
+    const pending = deferred<void>();
+    const refresh = vi.fn(() => pending.promise);
+    if (kind === "manual") refresh.mockRejectedValueOnce(new Error("Initial resolution failed"));
+    let choose: (value: boolean) => void = () => {};
+    let speculative = 0;
+    const blocked = new Promise<void>(() => {});
+    function Gate({ replacement }: { replacement: boolean }) { if (replacement) { speculative += 1; throw blocked; } return null; }
+    function Scenario() {
+      const [replacement, setReplacement] = useState(false); choose = setReplacement;
+      return <Suspense fallback={<div>Speculative recovery</div>}>
+        <VideoPlayer title="Committed recovery" url={replacement ? "https://x/uncommitted.mp4" : "https://x/old.mp4"} refreshCurrentSource={refresh} onClose={() => {}} />
+        <Gate replacement={replacement} />
+      </Suspense>;
+    }
+    render(<Scenario />); const original = document.querySelector("video.player-video") as HTMLVideoElement;
+    original.currentTime = 40; playingMedia(original);
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS); });
+    if (kind === "manual") fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    act(() => { startTransition(() => choose(true)); });
+    expect(speculative).toBeGreaterThan(0);
+    await settleRecovery(pending, "reject");
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    act(() => choose(false));
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
+    expect(document.querySelector("video.player-video")).toBeNull();
+  });
+  it("does not clear a successor manual request when an older automatic request rejects", async () => {
+    const f = await beginDeferredRecovery("automatic");
+    deviceKindMock.mockReturnValue("ios");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => init?.method === "HEAD"
+      ? new Response(null, { status: 404 }) : new Response("#EXTM3U\n480p.m3u8?generation=transcode-new\n")));
+    const next = deferred<void>(); f.refresh.mockImplementationOnce(() => next.promise);
+    f.view.rerender(<VideoPlayer {...f.props} url="https://server.example/api/stream/new/index.m3u8?quality=480p" sourceRevision={2}
+      serverOptimized={{ qualities: ["480p"], request: async () => { throw new Error("Unexpected optimization"); } }} />);
+    await act(async () => { for (let i = 0; i < 15; i += 1) await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    await settleRecovery(f.pending, "reject");
+    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    await settleRecovery(next, "reject");
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
+  });
 
   it("keeps advancing live media when progress events are delayed past the watchdog", async () => {
     vi.useFakeTimers();
