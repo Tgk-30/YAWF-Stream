@@ -47,12 +47,17 @@ jobs:
         working-directory: server
         run: npm ci
 
-      - name: Test, typecheck, and build server
+      - name: Test server
         working-directory: server
-        run: |
-          npm test
-          npm run typecheck
-          npm run build
+        run: npm test
+
+      - name: Typecheck server
+        working-directory: server
+        run: npm run typecheck
+
+      - name: Build server
+        working-directory: server
+        run: npm run build
 
   rust:
     name: Rust format, lint, test, and audit
