@@ -2761,28 +2761,105 @@ public final class RuntimeOtaFlowTest {
     }
 
     private void launchVisibleAppFromLauncher(String appLabel, String expectedPackage, String phase) {
-        device.pressHome();
-        device.waitForIdle(1_000);
-        String launcherPackage = device.getCurrentPackageName();
-        assertNotNull("Launcher package was unavailable for " + appLabel, launcherPackage);
-        assertFalse("Product remained foreground while seeking launcher icon",
+        long deadline = SystemClock.uptimeMillis() + SHORT_WAIT_MS;
+        String launcherPackage = device.getLauncherPackageName();
+        assertNotNull("Default launcher package was unavailable for " + appLabel, launcherPackage);
+        assertFalse("Product package was registered as the default launcher",
                 OtaFlowPolicy.PRODUCT_PACKAGE.equals(launcherPackage));
-        UiObject2 icon = findUniqueLauncherObject(appLabel, launcherPackage, true);
-        if (icon == null) {
-            int width = device.getDisplayWidth();
-            int height = device.getDisplayHeight();
-            device.swipe(width / 2, height - 2, width / 2, height / 4, 30);
-            device.waitForIdle(1_000);
-            launcherPackage = device.getCurrentPackageName();
-            icon = findUniqueLauncherObject(appLabel, launcherPackage, true);
+        device.pressHome();
+        boolean drawerGestureSent = false;
+        UiObject2 icon = null;
+        while (SystemClock.uptimeMillis() < deadline) {
+            refreshVisibleLauncherObservation();
+            UiObject2 surface = findVisibleLauncherSurface(launcherPackage);
+            if (surface != null) {
+                icon = findVisibleLauncherIcon(appLabel, launcherPackage);
+                if (icon != null) break;
+                if (!drawerGestureSent
+                        && (launcherPackage + ":id/workspace").equals(surface.getResourceName())) {
+                    assertNoBindingTerms();
+                    refreshVisibleLauncherObservation();
+                    surface = findVisibleLauncherSurface(launcherPackage);
+                    assertNotNull("Launcher workspace disappeared before drawer gesture", surface);
+                    assertEquals("Launcher surface changed before drawer gesture",
+                            launcherPackage + ":id/workspace", surface.getResourceName());
+                    Rect workspace = surface.getVisibleBounds();
+                    int width = device.getDisplayWidth();
+                    int height = device.getDisplayHeight();
+                    int x = workspace.centerX();
+                    int startY = Math.min(workspace.bottom - workspace.height() / 4,
+                            height * 3 / 4);
+                    int endY = Math.max(workspace.top + workspace.height() / 4, height / 4);
+                    assertTrue("Launcher drawer gesture was outside its visible content",
+                            x > 0 && x < width && endY > 0 && startY < height
+                                    && startY > endY && workspace.contains(x, startY)
+                                    && workspace.contains(x, endY));
+                    assertTrue("Launcher deadline elapsed before drawer gesture",
+                            SystemClock.uptimeMillis() < deadline);
+                    assertTrue("Launcher drawer gesture was not accepted",
+                            device.swipe(x, startY, x, endY, 30));
+                    drawerGestureSent = true;
+                }
+            }
+            SystemClock.sleep(150);
         }
         assertNotNull("Visible launcher icon was unavailable for " + appLabel, icon);
+        Rect iconBounds = icon.getVisibleBounds();
         assertNoBindingTerms();
-        icon.click();
+        refreshVisibleLauncherObservation();
+        assertNotNull("Launcher surface disappeared before icon click",
+                findVisibleLauncherSurface(launcherPackage));
+        UiObject2 freshIcon = findVisibleLauncherIcon(appLabel, launcherPackage);
+        assertNotNull("Exact launcher icon disappeared before click", freshIcon);
+        assertEquals("Launcher icon bounds changed before click",
+                iconBounds, freshIcon.getVisibleBounds());
+        assertTrue("Launcher deadline elapsed before icon click",
+                SystemClock.uptimeMillis() < deadline);
+        freshIcon.click();
         assertTrue(appLabel + " package did not become visible for " + phase,
                 device.wait(Until.hasObject(By.pkg(expectedPackage)), UI_WAIT_MS));
         device.waitForIdle(2_000);
         log("Opened " + appLabel + " through its exact visible launcher icon for " + phase);
+    }
+
+    private void refreshVisibleLauncherObservation() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            assertTrue("Launcher accessibility cache refresh failed",
+                    instrumentation.getUiAutomation().clearCache());
+        }
+    }
+
+    private UiObject2 findVisibleLauncherSurface(String launcherPackage) {
+        if (!launcherPackage.equals(device.getCurrentPackageName())) return null;
+        // Recents shares the launcher package, but is not a workspace or an app drawer.
+        if (device.hasObject(By.res(launcherPackage, "overview_panel").pkg(launcherPackage))) {
+            return null;
+        }
+        List<UiObject2> roots = device.findObjects(
+                By.res(launcherPackage, "launcher").pkg(launcherPackage));
+        if (roots.size() != 1) return null;
+        Rect display = new Rect(0, 0, device.getDisplayWidth(), device.getDisplayHeight());
+        if (!display.equals(roots.get(0).getVisibleBounds())) return null;
+        List<UiObject2> surfaces = new ArrayList<>();
+        surfaces.addAll(device.findObjects(By.res(launcherPackage, "workspace").pkg(launcherPackage)));
+        surfaces.addAll(device.findObjects(By.res(launcherPackage, "apps_view").pkg(launcherPackage)));
+        if (surfaces.size() != 1) return null;
+        UiObject2 surface = surfaces.get(0);
+        Rect bounds = surface.getVisibleBounds();
+        return surface.isEnabled() && !bounds.isEmpty() && display.contains(bounds) ? surface : null;
+    }
+
+    private UiObject2 findVisibleLauncherIcon(String appLabel, String launcherPackage) {
+        UiObject2 icon = findUniqueLauncherObject(appLabel, launcherPackage, true);
+        if (icon == null) return null;
+        assertEquals("Launcher icon package changed", launcherPackage, icon.getApplicationPackage());
+        assertEquals("Launcher icon class changed", "android.widget.TextView", icon.getClassName());
+        assertTrue("Launcher icon was not actionable", icon.isClickable() && icon.isEnabled());
+        Rect bounds = icon.getVisibleBounds();
+        assertTrue("Launcher icon was outside the visible display",
+                !bounds.isEmpty() && new Rect(0, 0, device.getDisplayWidth(),
+                        device.getDisplayHeight()).contains(bounds));
+        return icon;
     }
 
     private UiObject2 findUniqueLauncherObject(
