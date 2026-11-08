@@ -177,6 +177,14 @@ export function hlsArgs(
     "-loglevel",
     "error",
   ];
+  // Resume short, seekable HTTP reads without looping EOF or restarting streams.
+  if (/^https?:\/\//i.test(upstreamUrl)) {
+    args.push(
+      "-reconnect", "1",
+      "-reconnect_on_network_error", "1",
+      "-reconnect_delay_max", "5",
+    );
+  }
   // Keep VIDEO and WebVTT in the same input clock domain, including at zero
   // start. Otherwise input normalization can shift only the generated cues.
   if (includeSubtitle) args.push("-copyts");
@@ -886,14 +894,17 @@ export class TranscodeRegistry {
   }
 
   dirForAsset(sessionId: string, asset: string, generation?: string): string | null {
+    const current = this.jobs.get(sessionId);
     const candidates = [
-      this.jobs.get(sessionId),
+      current,
       ...(this.retired.get(sessionId) ?? []),
     ].filter((job): job is Job => job != null);
     const match = generation == null
       ? candidates[0]
       : candidates.find((job) => job.assetGeneration === generation);
-    if (match == null || !existsSync(join(match.dir, asset))) return null;
+    // A failed current process must not masquerade as a completed playlist.
+    // Retired output keeps its fixed grace, including intentional SIGTERM exit.
+    if (match == null || (match === current && match.failed) || !existsSync(join(match.dir, asset))) return null;
     match.lastAccess = Date.now();
     return match.dir;
   }
@@ -1197,6 +1208,15 @@ export class TranscodeRegistry {
           await this.disposeJob(sessionId, job, false);
           if (creation.cancelled) throw preparationCancelled();
           throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
+        }
+        // Readiness files can survive a failed process. Recheck health after
+        // cancellation fences and any awaited subtitle-clock read, before swap.
+        if (job.failed) {
+          await this.disposeJob(sessionId, job, false);
+          throw Object.assign(
+            new Error("The transcode process stopped before playback was ready."),
+            { statusCode: 502 },
+          );
         }
         creation.published = true;
         this.jobs.set(sessionId, job);

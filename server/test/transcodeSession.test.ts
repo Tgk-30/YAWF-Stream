@@ -28,6 +28,38 @@ function fakeMpegTsSegment(): Buffer {
 }
 
 describe("HLS transcode arguments", () => {
+  it.each(["http", "https"] as const)("resumes seekable %s inputs with bounded reconnect before seek and input", (protocol) => {
+    const url = `${protocol}://provider.example/video.mp4`;
+    const args = hlsArgs(url, "/owned/yawf", {
+      quality: "480p", startSeconds: 731, preserveSubtitles: true, includeSubtitle: true,
+    });
+    for (const [option, value] of [["-reconnect", "1"], ["-reconnect_on_network_error", "1"], ["-reconnect_delay_max", "5"]] as const) {
+      expect(valueAfter(args, option)).toBe(value);
+      expect(args.filter((arg) => arg === option)).toHaveLength(1);
+      expect(args.indexOf(option)).toBeLessThan(args.indexOf("-ss"));
+      expect(args.indexOf(option)).toBeLessThan(args.indexOf("-i"));
+    }
+    expect(valueAfter(args, "-ss")).toBe("731");
+    expect(args.indexOf("-copyts")).toBeLessThan(args.indexOf("-ss"));
+    expect(valueAfter(args, "-i")).toBe(url);
+  });
+
+  it.each(["/owned/video.mp4", "video.mp4", "file:/owned/video.mp4"])("does not add HTTP reconnect options for local input %s", (url) => {
+    const args = hlsArgs(url, "/owned/yawf", { quality: "480p", startSeconds: 731 });
+    expect(args.filter((arg) => arg.startsWith("-reconnect"))).toEqual([]);
+    expect(valueAfter(args, "-i")).toBe(url);
+    expect(valueAfter(args, "-ss")).toBe("731");
+  });
+
+  it("never enables EOF replay, streamed restart, HTTP-status retries or newer reconnect options", () => {
+    const args = hlsArgs("https://provider.example/video.mp4", "/owned/yawf");
+    for (const option of [
+      "-reconnect_at_eof", "-reconnect_streamed", "-reconnect_on_http_error",
+      "-reconnect_max_retries", "-reconnect_delay_total_max", "-xerror",
+    ]) expect(args).not.toContain(option);
+    expect(args).not.toContain("-ss");
+  });
+
   it("builds a seek-aware adaptive 1080p, 720p, 480p, and 360p ladder", () => {
     const args = hlsArgs("https://provider.example/video", "/tmp/yawf", {
       profile: "adaptive",
@@ -267,7 +299,7 @@ function capacityRegistryFixture(maxTranscodes = 2) {
     dir: string;
     kills: number;
     running: boolean;
-    finish: (code?: number) => void;
+    finish: (code?: number | null, signal?: NodeJS.Signals) => void;
   }> = [];
   const transcoder: Transcoder = {
     async detect() { return true; },
@@ -282,15 +314,15 @@ function capacityRegistryFixture(maxTranscodes = 2) {
         dir,
         kills: 0,
         running: true,
-        finish: (code = 0) => {},
+        finish: (code: number | null = 0, signal?: NodeJS.Signals) => {},
       };
-      record.finish = (code = 0) => {
+      record.finish = (code: number | null = 0, signal?: NodeJS.Signals) => {
         if (!record.running) return;
         record.running = false;
         // Node reports process termination first, then stdio closure. The
         // registry must release capacity once even though both events fire.
-        child.emit("exit", code, null);
-        child.emit("close", code, null);
+        child.emit("exit", code, signal ?? null);
+        child.emit("close", code, signal ?? null);
       };
       child.kill = () => {
         record.kills += 1;
@@ -783,6 +815,107 @@ describe("transcode pre-spawn lifecycle ownership", () => {
 });
 
 describe("transcode process capacity", () => {
+  it.each(["exit", "error"] as const)("rejects a staged replacement with ready files after %s without retiring healthy output", async (failure) => {
+    const fixture = stagedRegistryFixture();
+    let pending: ReturnType<typeof observe<string>> | undefined;
+    try {
+      const original = await fixture.registry.ensureJob("healthy", "https://provider.example/source");
+      const generation = fixture.registry.generationFor("healthy", original)!;
+      const spawned = fixture.waitForSpawn();
+      pending = observe(fixture.registry.ensureJob("healthy", "https://provider.example/source", { quality: "360p", startSeconds: 90 }));
+      await spawned;
+      const staged = fixture.children[1]!;
+      writeFileSync(join(staged.dir, "stream.m3u8"), "#EXTM3U\n360p.m3u8\n");
+      writeFileSync(join(staged.dir, "360p_seg_00000.ts"), "partial segment");
+      if (failure === "exit") staged.child.emit("exit", 1, null);
+      else staged.child.emit("error", new Error("failed after writing readiness files"));
+      expect(await pending).toMatchObject({ status: "rejected", error: { statusCode: 502 } });
+      expect(fixture.registry.dirFor("healthy")).toBe(original);
+      expect(fixture.registry.dirForAsset("healthy", "1080p_seg_00000.ts", generation)).toBe(original);
+      expect(fixture.children[0]!.kills).toBe(0);
+      expect(staged.kills).toBeGreaterThan(0);
+      expect(existsSync(staged.dir)).toBe(false);
+    } finally {
+      await pending;
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["exit", "error"] as const)("refuses current-generation assets after a ready job reports %s", async (failure) => {
+    const fixture = capacityRegistryFixture();
+    try {
+      const dir = await fixture.registry.ensureJob("failed-current", "https://provider.example/source", { quality: "480p", startSeconds: 90 });
+      const generation = fixture.registry.generationFor("failed-current", dir)!;
+      writeFileSync(join(dir, "480p.m3u8"), "#EXTM3U\n#EXTINF:6,\n480p_seg_00000.ts\n#EXT-X-ENDLIST\n");
+      if (failure === "exit") fixture.children[0]!.finish(1);
+      else fixture.children[0]!.child.emit("error", new Error("post-readiness failure"));
+      for (const asset of ["stream.m3u8", "480p.m3u8", "480p_seg_00000.ts"]) {
+        expect(existsSync(join(dir, asset))).toBe(true);
+        expect(fixture.registry.dirForAsset("failed-current", asset, generation)).toBeNull();
+        expect(fixture.registry.dirForAsset("failed-current", asset)).toBeNull();
+      }
+      expect(fixture.registry.startSecondsForAsset("failed-current", generation)).toBe(90);
+      expect(fixture.children).toHaveLength(1);
+    } finally {
+      fixture.children.forEach((record) => record.finish(0));
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps successful completed current-generation playlists and segments readable", async () => {
+    const fixture = capacityRegistryFixture();
+    try {
+      const dir = await fixture.registry.ensureJob("completed-current", "https://provider.example/source", { quality: "480p" });
+      const generation = fixture.registry.generationFor("completed-current", dir)!;
+      writeFileSync(join(dir, "480p.m3u8"), "#EXTM3U\n#EXTINF:6,\n480p_seg_00000.ts\n#EXT-X-ENDLIST\n");
+      fixture.children[0]!.finish(0);
+      for (const asset of ["stream.m3u8", "480p.m3u8", "480p_seg_00000.ts"]) {
+        expect(fixture.registry.dirForAsset("completed-current", asset, generation)).toBe(dir);
+        expect(fixture.registry.dirForAsset("completed-current", asset)).toBe(dir);
+      }
+      expect(await fixture.registry.ensureJob("completed-current", "https://provider.example/source", { quality: "480p" })).toBe(dir);
+      expect(fixture.children).toHaveLength(1);
+    } finally {
+      fixture.children.forEach((record) => record.finish(0));
+      await fixture.registry.stop();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves the exact retired grace after intentional SIGTERM marks the old job failed", async () => {
+    const fixture = capacityRegistryFixture();
+    try {
+      const original = await fixture.registry.ensureJob("retired-grace", "https://provider.example/source", { quality: "480p" });
+      const generation = fixture.registry.generationFor("retired-grace", original)!;
+      writeFileSync(join(original, "480p.m3u8"), "#EXTM3U\n#EXTINF:6,\n480p_seg_00000.ts\n");
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const replacement = await fixture.registry.ensureJob("retired-grace", "https://provider.example/source", { quality: "360p", startSeconds: 90 });
+      expect(fixture.children[0]!.kills).toBeGreaterThan(0);
+      fixture.children[0]!.finish(null, "SIGTERM");
+      for (const asset of ["stream.m3u8", "480p.m3u8", "480p_seg_00000.ts"]) {
+        expect(fixture.registry.dirForAsset("retired-grace", asset, generation)).toBe(original);
+      }
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(fixture.registry.dirForAsset("retired-grace", "480p.m3u8", generation)).toBe(original);
+      expect(fixture.registry.dirFor("retired-grace")).toBe(replacement);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fixture.registry.dirForAsset("retired-grace", "480p.m3u8", generation)).toBeNull();
+      expect(fixture.registry.dirFor("retired-grace")).toBe(replacement);
+    } finally {
+      fixture.children.forEach((record) => record.finish(0));
+      await fixture.registry.stop();
+      vi.useRealTimers();
+      fixture.database.close();
+      rmSync(fixture.dataDir, { recursive: true, force: true });
+    }
+  });
+
+
   it.each(["exit", "error"] as const)("replaces same-options output after a ready job reports %s", async (failure) => {
     const fixture = capacityRegistryFixture(2);
     try {
