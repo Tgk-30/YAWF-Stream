@@ -910,6 +910,17 @@ export function VideoPlayer({
     scope: string;
     preference: AudioPreference;
   } | null>(null);
+  const [manualServerOptimizedQuality, setManualServerOptimizedQuality] = useState<{
+    scope: string;
+    originOwner: string;
+    quality: ServerTranscodeQuality;
+  } | null>(null);
+  const retainedServerOptimizedQuality =
+    serverAudioRetentionScope != null &&
+    manualServerOptimizedQuality?.scope === serverAudioRetentionScope &&
+    serverOptimized?.qualities.includes(manualServerOptimizedQuality.quality)
+      ? manualServerOptimizedQuality.quality
+      : null;
   const retainedServerAudioPreference =
     serverAudioRetentionScope != null &&
     manualServerAudioPreference?.scope === serverAudioRetentionScope
@@ -917,6 +928,9 @@ export function VideoPlayer({
       : null;
   useLayoutEffect(() => {
     setManualServerAudioPreference((current) =>
+      current?.scope === serverAudioRetentionScope ? current : null,
+    );
+    setManualServerOptimizedQuality((current) =>
       current?.scope === serverAudioRetentionScope ? current : null,
     );
   }, [serverAudioRetentionScope]);
@@ -2189,8 +2203,13 @@ export function VideoPlayer({
       audioPreference,
       positionIntent,
       retainAudioPreference,
-    ).then(() => undefined);
-  }, [claimExplicitServerOptimizationChoice, switchToServerOptimized]);
+    ).then((activated) => {
+      if (activated && !retainAudioPreference && serverAudioRetentionScope != null &&
+        playbackOwnerRef.current === playbackOwner) {
+        setManualServerOptimizedQuality({ scope: serverAudioRetentionScope, originOwner: playbackOwner, quality });
+      }
+    });
+  }, [claimExplicitServerOptimizationChoice, playbackOwner, serverAudioRetentionScope, switchToServerOptimized]);
 
   const selectDeviceOriginal = useCallback((
     absolutePositionSeconds: number,
@@ -3053,6 +3072,8 @@ export function VideoPlayer({
             }
             activeServerAudioPreference={activeOptimized?.audioPreference ?? null}
             retainedServerAudioPreference={retainedServerAudioPreference}
+            retainedServerOptimizedQuality={manualServerOptimizedQuality?.originOwner === playbackOwner
+              ? null : retainedServerOptimizedQuality}
             onRetainedServerAudioPreferenceUnavailable={
               invalidateManualServerAudioPreference
             }
@@ -3213,6 +3234,7 @@ function WebviewPlayer({
   initialServerAudioTrackExplicit,
   activeServerAudioPreference,
   retainedServerAudioPreference,
+  retainedServerOptimizedQuality,
   onRetainedServerAudioPreferenceUnavailable,
   serverOptimizationPending,
   serverOptimizationError,
@@ -3307,6 +3329,7 @@ function WebviewPlayer({
   initialServerAudioTrackExplicit: boolean;
   activeServerAudioPreference: AudioPreference | null;
   retainedServerAudioPreference: AudioPreference | null;
+  retainedServerOptimizedQuality: ServerTranscodeQuality | null;
   onRetainedServerAudioPreferenceUnavailable: (
     owner: string,
     preference: AudioPreference,
@@ -6725,7 +6748,7 @@ function WebviewPlayer({
       }
     }
     appliedServerAudioPreferenceRef.current = true;
-    const quality = activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
+    const quality = retainedServerOptimizedQuality ?? activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
     void onSwitchServerOptimized(
       quality,
       position,
@@ -6745,6 +6768,7 @@ function WebviewPlayer({
   }, [
     resolvedServerAudioTrack,
     activeServerOptimizedQuality,
+    retainedServerOptimizedQuality,
     matchedRetainedServerAudio,
     duration,
     knownAbsoluteDurationSeconds,

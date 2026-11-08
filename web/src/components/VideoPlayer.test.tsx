@@ -14564,7 +14564,7 @@ describe("explicit Device Original audio intent", () => {
       fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
     }
   }
-  async function setupMode() {
+  async function setupMode(chooseOriginal = true) {
     deviceKindMock.mockReturnValue("ios");
     vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
@@ -14597,9 +14597,11 @@ describe("explicit Device Original audio intent", () => {
     expect(request).toHaveBeenCalledTimes(2);
     expect(request).toHaveBeenLastCalledWith("360p", position, 1);
     readyMode(document.querySelector("video.player-video") as HTMLVideoElement, position);
-    await settleMode(); await settingsMode();
-    fireEvent.click(screen.getByRole("button", { name: "Device Original" }));
-    await settleMode();
+    if (chooseOriginal) {
+      await settleMode(); await settingsMode();
+      fireEvent.click(screen.getByRole("button", { name: "Device Original" }));
+      await settleMode();
+    }
     const original = document.querySelector("video.player-video") as HTMLVideoElement;
     return { props, view, request, original, onProgress };
   }
@@ -14642,6 +14644,58 @@ describe("explicit Device Original audio intent", () => {
     view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
     const next = document.querySelector("video.player-video") as HTMLVideoElement;
     readyMode(next); await settleMode();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenLastCalledWith("360p", position, 1);
+  });
+
+  it.each([["supported", ["480p", "360p"], "360p"], ["unsupported", ["480p"], "480p"]] as const)(
+    "[quality-continuity] uses %s explicit quality with a fresh semantic Japanese index",
+    async (_support, qualities, expectedQuality) => {
+      const { request, view, props } = await setupMode(false);
+      const nextTracks = [
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 4, language: "ja", label: "Japanese", default: false },
+      ];
+      view.rerender(<VideoPlayer {...props} sourceRevision={1} url="https://server.example/api/stream/fresh-mode"
+        serverOptimized={{ ...props.serverOptimized, qualities: [...qualities], loadSourceInfo: async () => ({ durationSeconds: 180, tracks: nextTracks }) }} />);
+      readyMode(document.querySelector("video.player-video") as HTMLVideoElement);
+      await settleMode();
+      expect(request).toHaveBeenCalledTimes(3);
+      expect(request).toHaveBeenLastCalledWith(expectedQuality, position, 4);
+      const renewed = document.querySelector("video.player-video") as HTMLVideoElement;
+      readyMode(renewed, position); await settleMode();
+      expect(renewed.currentTime).toBeCloseTo(0, 6);
+      expect(renewed.volume).toBe(0.35); expect(renewed.muted).toBe(true); expect(renewed.playbackRate).toBe(1.25);
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+    },
+  );
+
+  it.each([["supported", ["480p", "360p"], "360p"], ["unsupported", ["480p"], "480p"]] as const)(
+    "[quality-continuity] prefers %s remembered quality over a fresh trusted HLS480 source",
+    async (_support, qualities, expectedQuality) => {
+      const { request, view, props } = await setupMode(false);
+      const nextTracks = [
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 4, language: "ja", label: "Japanese", default: false },
+      ];
+      view.rerender(<VideoPlayer {...props} sourceRevision={1} engine="webview-hls-transcode"
+        url="https://server.example/api/stream/fresh-mode/index.m3u8?quality=480p"
+        serverOptimized={{ ...props.serverOptimized, qualities: [...qualities], loadSourceInfo: async () => ({ durationSeconds: 180, tracks: nextTracks }) }} />);
+      await settleMode();
+      readyMode(document.querySelector("video.player-video") as HTMLVideoElement);
+      await settleMode();
+      expect(request).toHaveBeenCalledTimes(3);
+      expect(request).toHaveBeenLastCalledWith(expectedQuality, position, 4);
+    },
+  );
+
+  it.each(["file", "episode"] as const)("[quality-continuity] clears explicit quality for a different %s scope", async (change) => {
+    const { request, view, props } = await setupMode(false);
+    view.rerender(<VideoPlayer {...props} sourceRevision={1}
+      sourceFileName={change === "file" ? "Other.Movie.mkv" : props.sourceFileName}
+      episode={change === "episode" ? 2 : undefined}
+      playerPreferences={{ defaultAudioLanguage: "jpn" }} />);
+    readyMode(document.querySelector("video.player-video") as HTMLVideoElement); await settleMode();
     expect(request).toHaveBeenCalledTimes(3);
     expect(request).toHaveBeenLastCalledWith("480p", position, 1);
   });
