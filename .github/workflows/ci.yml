@@ -253,6 +253,9 @@ jobs:
       - name: Generated Android project patch tests
         run: node --test scripts/patch_tauri_android.test.mjs
 
+      - name: Android Gradle bootstrap contracts
+        run: node --test scripts/prepare_android_gradle.test.mjs
+
       - name: Android external-player runtime harness contracts
         run: node --test scripts/android_external_player_workflow.test.mjs scripts/runtime_external_settings_transaction.test.mjs
 
@@ -397,7 +400,11 @@ jobs:
         run: npm run tauri -- android init --ci
 
       - name: Patch generated Android playback support
-        run: node scripts/patch_tauri_android.mjs
+        run: |
+          node scripts/patch_tauri_android.mjs
+          YAWF_GRADLE_ARCHIVE="$(node scripts/fetch_android_gradle.mjs)"
+          export YAWF_GRADLE_ARCHIVE
+          node scripts/prepare_android_gradle.mjs
 
       # The real gate. Desktop-only modules (player, keychain, server_host,
       # downloads) are cfg(desktop); this proves what remains actually compiles
