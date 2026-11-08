@@ -133,6 +133,7 @@ jobs:
           npm run build
           npm run tauri -- android init --ci
           node ../scripts/patch_tauri_android.mjs
+          node ../scripts/prepare_android_gradle.mjs
           npm run tauri -- android build --apk
 
       # Tauri's generated Gradle carries no signing config, so the release APK
