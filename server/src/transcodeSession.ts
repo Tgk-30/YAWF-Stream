@@ -892,7 +892,23 @@ export class TranscodeRegistry {
    * extends the fixed grace period of a replaced generation. Authorization is
    * checked by the asset route before calling this method. */
   touchCurrentGeneration(sessionId: string, asset: string, generation: string): boolean {
-    const job = this.jobs.get(sessionId);
+    return this.touchGeneration(this.jobs.get(sessionId), asset, generation);
+  }
+
+  /** HEAD may retain a prepared rendition before the decoder's first GET.
+   * Retention never activates output or retires another reader. */
+  touchRetainedGeneration(sessionId: string, asset: string, generation: string): boolean {
+    if (this.lifecycle !== "open") return false;
+    const current = this.jobs.get(sessionId);
+    const prepared = this.prepared.get(sessionId);
+    const job = current?.assetGeneration === generation ? current
+      : prepared?.assetGeneration === generation ? prepared : undefined;
+    if (job != null && job === prepared &&
+        job.lifecycleGeneration !== (this.generations.get(sessionId) ?? 0)) return false;
+    return this.touchGeneration(job, asset, generation);
+  }
+
+  private touchGeneration(job: Job | undefined, asset: string, generation: string): boolean {
     const now = Date.now();
     if (
       job == null || job.assetGeneration !== generation ||

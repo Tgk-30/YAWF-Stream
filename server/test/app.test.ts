@@ -4222,7 +4222,7 @@ describe("DebridStreamer server", () => {
       const preparedChild = prepared.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
       expect(kill).not.toHaveBeenCalled();
       expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
-      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(404);
+      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(200);
       // Segment prefetch is not activation. Neither is a legacy unqualified read.
       expect((await request(owner, { method: "GET", url: root + preparedChild.replace("360p.m3u8", "360p_seg_00000.ts") })).statusCode).toBe(200);
       expect((await request(owner, { method: "GET", url: `${root}360p.m3u8` })).statusCode).toBe(404);
@@ -4294,16 +4294,61 @@ describe("DebridStreamer server", () => {
       const preparedChild = prepared.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
       expect((await request({ app: on, cookies: new Map() }, { method: "GET", url: root + preparedChild })).statusCode).toBe(401);
       expect((await request(other, { method: "GET", url: root + preparedChild })).statusCode).toBe(404);
+      expect((await request({ app: on, cookies: new Map() }, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(401);
+      expect((await request(other, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(404);
       expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
-      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(404);
+      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(200);
       const bearer = { app: on, cookies: new Map<string, string>() };
+      expect((await request(bearer, { method: "HEAD", url: root + preparedChild, headers: { authorization: session.playbackAuthorization } })).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
       expect((await request(bearer, { method: "GET", url: root + preparedChild, headers: { authorization: session.playbackAuthorization } })).statusCode).toBe(200);
       expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(200);
       expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(404);
     } finally { await on.close(); }
   });
 
-  it("transcode HEAD retention uses authenticated empty current-only fast path without asset body work", async () => {
+  it("transcode: retention HEAD before the replacement child GET keeps both readers valid without adoption", async () => {
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 2 }, fake);
+    let bodyLookup: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const root = `/api/stream/${session.id}/`;
+      const first = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=480p` });
+      const currentChild = first.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      expect((await request(owner, { method: "GET", url: root + currentChild })).statusCode).toBe(200);
+      const currentProcess = spawn.mock.results[0]!.value as ReturnType<Transcoder["spawnHls"]>;
+      const kill = vi.spyOn(currentProcess, "kill");
+      const prepared = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=360p` });
+      const preparedChild = prepared.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      bodyLookup = vi.spyOn(TranscodeRegistry.prototype, "dirForAsset").mockImplementation(() => {
+        throw new Error("Retention must not read or adopt a rendition");
+      });
+      // A mounted engine's retention effect can run before its asynchronous
+      // HLS import and first exact rendition GET. This is not an expired job.
+      const earlyLease = await request(owner, { method: "HEAD", url: root + preparedChild });
+      expect(earlyLease.statusCode).toBe(200);
+      expect(earlyLease.body).toBe("");
+      expect(earlyLease.headers["cache-control"]).toBe("private, no-store");
+      expect(bodyLookup).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
+      bodyLookup.mockRestore(); bodyLookup = undefined;
+      expect((await request(owner, { method: "GET", url: root + currentChild })).statusCode).toBe(200);
+      expect(kill).not.toHaveBeenCalled();
+      // Only consuming B's exact child adopts it and retires A.
+      expect((await request(owner, { method: "GET", url: root + preparedChild })).statusCode).toBe(200);
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(404);
+      expect((await request(owner, { method: "GET", url: root + currentChild })).statusCode).toBe(200);
+      expect(spawn).toHaveBeenCalledTimes(2);
+    } finally { bodyLookup?.mockRestore(); await on.close(); }
+  });
+
+  it("transcode HEAD retention uses an authenticated empty fast path without asset body work", async () => {
     const fake = makeFakeTranscoder();
     const spawn = vi.spyOn(fake, "spawnHls");
     const on = await buildTranscodeApp({}, fake);
