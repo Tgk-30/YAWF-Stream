@@ -315,7 +315,8 @@ async function bundleHash(id) {
   return run("docker", ["exec", id, "node", "-e", "const f=require('fs'),c=require('crypto');process.stdout.write(c.createHash('sha256').update(f.readFileSync('/app/server/dist/index.cjs')).digest('hex'))"]);
 }
 async function activeStreams(id) {
-  const script = "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite',{readOnly:true});let r=d.prepare(`SELECT COUNT(*) count FROM stream_sessions WHERE revoked_at IS NULL AND expires_at > ? AND completed_at IS NULL`).get(new Date().toISOString());process.stdout.write(String(r.count));d.close()";
+  // HTTP transfer completion can precede HLS playback. Retain every valid grant.
+  const script = "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite',{readOnly:true});let r=d.prepare(`SELECT COUNT(*) count FROM stream_sessions WHERE revoked_at IS NULL AND expires_at > ?`).get(new Date().toISOString());process.stdout.write(String(r.count));d.close()";
   const value = await run("docker", ["exec", id, "node", "-e", script]);
   if (!/^\d+$/.test(value)) throw new Error("Could not verify active playback.");
   return Number(value);

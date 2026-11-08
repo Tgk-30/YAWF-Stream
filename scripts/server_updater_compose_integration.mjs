@@ -128,15 +128,19 @@ try {
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite',{readOnly:true});process.stdout.write(d.prepare('SELECT value FROM updater_rollback_probe').get().value);d.close()"), "writable");
 
     // An unexpired, non-revoked fixture stream must defer before image pull or
-    // service stop. It uses only the isolated database's existing fixture profile.
+    // service stop even if its HTTP transfer completed. It uses the isolated profile.
     run("/usr/local/sbin/yawf-server-update", ["register", compose]);
-    docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite');let p=d.prepare('SELECT id FROM profiles ORDER BY id LIMIT 1').get().id;d.prepare('INSERT INTO stream_sessions(id,profile_id,encrypted_upstream_url,created_at,expires_at) VALUES (?,?,?,?,?)').run('updater-active-fixture',p,'fixture','2026-10-12T03:00:00.000Z','2099-01-01T00:00:00.000Z');d.close()");
+    docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite');let p=d.prepare('SELECT id FROM profiles ORDER BY id LIMIT 1').get().id;d.prepare('INSERT INTO stream_sessions(id,profile_id,encrypted_upstream_url,created_at,expires_at,completed_at) VALUES (?,?,?,?,?,?)').run('updater-active-fixture',p,'fixture','2026-10-12T03:00:00.000Z','2099-01-01T00:00:00.000Z','2026-10-12T03:00:00.051Z');d.close()");
     const activeContainer = container("debridstreamer");
     productionTransaction(actualCandidateDigest, actualSourceRevision, "none");
     assert.equal(container("debridstreamer"), activeContainer, "active playback did not defer the update");
     const activeStatus = JSON.parse(readFileSync("/var/lib/yawf-server-updater/public/status.json", "utf8"));
     assert.equal(activeStatus.state, "deferred");
     assert.match(activeStatus.detail, /Active playback/);
+    docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite');d.prepare('UPDATE stream_sessions SET completed_at=NULL WHERE id=?').run('updater-active-fixture');d.close()");
+    productionTransaction(actualCandidateDigest, actualSourceRevision, "none");
+    assert.equal(container("debridstreamer"), activeContainer, "unfinished HTTP playback did not defer the update");
+    assert.equal(JSON.parse(readFileSync("/var/lib/yawf-server-updater/public/status.json", "utf8")).state, "deferred");
     docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite');d.prepare('DELETE FROM stream_sessions WHERE id=?').run('updater-active-fixture');d.close()");
 
     // Production transaction fault paths must leave live data untouched and
