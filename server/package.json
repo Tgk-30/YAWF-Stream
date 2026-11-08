@@ -1,7 +1,7 @@
 {
   "name": "debridstreamer-server",
   "private": true,
-  "version": "2.3.84",
+  "version": "2.3.85",
   "license": "MIT",
   "type": "module",
   "scripts": {

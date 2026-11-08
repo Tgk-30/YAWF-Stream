@@ -1128,6 +1128,11 @@ export function VideoPlayer({
   const [webChromeVisible, setWebChromeVisible] = useState(true);
   const [webviewPaused, setWebviewPaused] = useState(false);
   const externalHandoffVideoRef = useRef<HTMLVideoElement | null>(null);
+  const externalHandoffPauseRef = useRef<((video: HTMLVideoElement) => boolean) | null>(null);
+  const pauseWebviewForExternalHandoff = useCallback(() => {
+    const video = externalHandoffVideoRef.current;
+    if (video != null && externalHandoffPauseRef.current?.(video) !== true) video.pause();
+  }, []);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [castSuspended, setCastSuspended] = useState(false);
   const [webMenuOpen, setWebMenuOpen] = useState(false);
@@ -2511,7 +2516,7 @@ export function VideoPlayer({
         setExternalActionStatus("Opening Android player chooser…");
         // Stop local audio at the owned handoff boundary. Copying the link is
         // intentionally separate and must not interrupt in-window playback.
-        externalHandoffVideoRef.current?.pause();
+        pauseWebviewForExternalHandoff();
         const status = await openAndroidExternalPlayer(target, ownsRequest);
         if (status == null || !ownsRequest()) return;
         setExternalActionStatus(status);
@@ -2527,7 +2532,7 @@ export function VideoPlayer({
           ownsRequest,
           controller.signal,
           () => {
-            if (ownsRequest()) externalHandoffVideoRef.current?.pause();
+            if (ownsRequest()) pauseWebviewForExternalHandoff();
           },
         );
         if (serverExternalRequestRef.current === controller) {
@@ -2591,6 +2596,7 @@ export function VideoPlayer({
     androidNativeChooser,
     mobileTauri,
     browserExternalTarget,
+    pauseWebviewForExternalHandoff,
     setExternalActionStatus,
   ]);
 
@@ -3082,6 +3088,7 @@ export function VideoPlayer({
             exactHandoff={activeOptimized != null || activeFallback?.recovery != null}
             optimizedTimelineIsPartial={activeOptimized?.partialTimeline ?? initialServerOptimizedTimeline}
             externalHandoffVideoRef={externalHandoffVideoRef}
+            externalHandoffPauseRef={externalHandoffPauseRef}
             serverOptimized={serverOptimized}
             preparedLeaseTarget={activeOptimized?.leaseTarget}
             onServerLeaseExpired={expireServerGeneration}
@@ -3228,6 +3235,7 @@ function WebviewPlayer({
   exactHandoff,
   optimizedTimelineIsPartial,
   externalHandoffVideoRef,
+  externalHandoffPauseRef,
   onPlaybackError,
   onPlaybackStall,
   canRefreshSource,
@@ -3322,6 +3330,7 @@ function WebviewPlayer({
   exactHandoff: boolean;
   optimizedTimelineIsPartial: boolean;
   externalHandoffVideoRef: { current: HTMLVideoElement | null };
+  externalHandoffPauseRef: { current: ((video: HTMLVideoElement) => boolean) | null };
   onPlaybackError: (message: string, exactHandoffPending: boolean, recovery?: WebviewRecoveryContext) => void;
   onPlaybackStall: (
     absolutePositionSeconds: number,
@@ -3409,10 +3418,17 @@ function WebviewPlayer({
   serverAudioModeRef.current = serverOptimized?.loadAudioTracks != null;
   const appliedServerAudioPreferenceRef = useRef(false);
   const autoplayAttemptedRef = useRef(false);
+  const foregroundPlaybackRef = useRef<{ video: HTMLVideoElement; source: string; play: boolean } | null>(null);
+  const playbackSourceRef = useRef(url);
+  useLayoutEffect(() => { playbackSourceRef.current = url; }, [url]);
   const pausedForCastRef = useRef(false);
   const suspendedRef = useRef(suspended);
   suspendedRef.current = suspended;
   const documentSuspendedRef = useRef(document.visibilityState === "hidden");
+  const backgroundBlocksPlayback = (video: HTMLVideoElement | null) =>
+    (documentSuspendedRef.current || document.visibilityState === "hidden") &&
+    !(video != null && (document.pictureInPictureElement === video ||
+      (video as WebKitVideoElement).webkitPresentationMode === "picture-in-picture"));
   const stallWatchdogRef = useRef<PlaybackStallWatchdog | null>(null);
   const recoveryProgressWindowRef = useRef<PlaybackRecoveryProgress | null>(null);
   const rearmHlsRecoveryRef = useRef<((video: HTMLVideoElement) => void) | null>(null);
@@ -3655,10 +3671,32 @@ function WebviewPlayer({
     if (touchFeedbackTimerRef.current != null) window.clearTimeout(touchFeedbackTimerRef.current);
   }, [clearPendingTouchTap]);
 
+  const applyOwnedPlayback = useCallback((video: HTMLVideoElement, shouldPlay: boolean) => {
+    if (videoRef.current !== video || playbackSourceRef.current !== url) return;
+    video.autoplay = false;
+    if (backgroundBlocksPlayback(video) || suspendedRef.current ||
+        exactHandoffPendingRef.current || pendingNativeHlsSeekRef.current != null) {
+      foregroundPlaybackRef.current = { video, source: url, play: shouldPlay };
+      pendingHandoffPlaybackIntentRef.current = shouldPlay ? "play" : "pause";
+      if (!shouldPlay && !video.paused) video.pause();
+      return;
+    }
+    // Consume before the platform call, including synchronous media callbacks.
+    foregroundPlaybackRef.current = null;
+    pendingHandoffPlaybackIntentRef.current = null;
+    autoplayAttemptedRef.current = true;
+    if (shouldPlay && video.paused) {
+      try { void video.play().catch(() => {}); } catch { /* Older WebKit may throw synchronously. */ }
+    } else if (!shouldPlay && !video.paused) {
+      video.pause();
+    }
+  }, [url]);
+
   const requestPlaybackState = useCallback((shouldPlay: boolean) => {
     const video = videoRef.current;
     if (video == null) return;
     explicitPlaybackIntentRef.current = true;
+    video.autoplay = false;
     // Play/Pause changes intent, not ownership of a decoder-reset clock.
     ownedPlaybackPausedRef.current = !shouldPlay;
     const pendingRecoverySeek = pendingRecoverySeekFor(video);
@@ -3676,6 +3714,8 @@ function WebviewPlayer({
     }
     if (
       exactHandoffPendingRef.current ||
+      backgroundBlocksPlayback(video) ||
+      foregroundPlaybackRef.current?.video === video ||
       (suspendedRef.current && pendingHandoffPlaybackIntentRef.current != null)
     ) {
       pendingHandoffPlaybackIntentRef.current = shouldPlay ? "play" : "pause";
@@ -3683,7 +3723,8 @@ function WebviewPlayer({
       setPaused(!shouldPlay);
       setPlaying(shouldPlay);
       onPausedChange(!shouldPlay);
-      if (!shouldPlay && !video.paused) video.pause();
+      if (!exactHandoffPendingRef.current) applyOwnedPlayback(video, shouldPlay);
+      else if (!shouldPlay && !video.paused) video.pause();
       return;
     }
     if (shouldPlay) {
@@ -3695,26 +3736,29 @@ function WebviewPlayer({
     } else {
       video.pause();
     }
-  }, [onPausedChange, onPendingHandoffPausedChange]);
+  }, [applyOwnedPlayback, onPausedChange, onPendingHandoffPausedChange]);
+
+  useLayoutEffect(() => {
+    const pauseOwnedReader = (video: HTMLVideoElement) => {
+      if (videoRef.current !== video || playbackSourceRef.current !== url) return false;
+      requestPlaybackState(false);
+      return true;
+    };
+    externalHandoffPauseRef.current = pauseOwnedReader;
+    return () => {
+      if (externalHandoffPauseRef.current === pauseOwnedReader) externalHandoffPauseRef.current = null;
+    };
+  }, [externalHandoffPauseRef, requestPlaybackState, url]);
 
   const applyDeferredHandoffPlayback = useCallback((
     video: HTMLVideoElement,
     shouldPlay: boolean,
   ) => {
-    autoplayAttemptedRef.current = true;
     setPaused(!shouldPlay);
     setPlaying(shouldPlay);
     onPausedChange(!shouldPlay);
-    if (shouldPlay && video.paused) {
-      try {
-        void video.play().catch(() => {});
-      } catch {
-        // Older WebKit versions can throw synchronously instead of rejecting.
-      }
-    } else if (!shouldPlay && !video.paused) {
-      video.pause();
-    }
-  }, [onPausedChange]);
+    applyOwnedPlayback(video, shouldPlay);
+  }, [applyOwnedPlayback, onPausedChange]);
 
   const togglePlaybackState = useCallback(() => {
     const video = videoRef.current;
@@ -3728,6 +3772,7 @@ function WebviewPlayer({
     }
     const pendingIntent = pendingHandoffPlaybackIntentRef.current;
     const hasDeferredHandoffIntent = exactHandoffPendingRef.current ||
+      foregroundPlaybackRef.current?.video === video ||
       (suspendedRef.current && pendingIntent != null);
     const wantsPlayback = hasDeferredHandoffIntent
       ? pendingIntent === "play" ||
@@ -5078,6 +5123,7 @@ function WebviewPlayer({
       const next = pageHidden || document.visibilityState === "hidden";
       if (next === documentSuspendedRef.current) return;
       documentSuspendedRef.current = next;
+      if (next && backgroundBlocksPlayback(video)) video.autoplay = false;
       recoveryProgress.reset();
       if (next && !ownedPlaybackPausedRef.current) backgroundPauseVideoRef.current = video;
       if (!next) {
@@ -5092,6 +5138,11 @@ function WebviewPlayer({
         ended: video.ended,
       });
       if (!next) watchdog.noteProgress();
+      const pendingPlayback = foregroundPlaybackRef.current;
+      if (!next && pendingPlayback?.video === video && pendingPlayback.source === url &&
+          !video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        applyOwnedPlayback(video, pendingPlayback.play);
+      }
     };
     const onPageHide = () => { pageHidden = true; onDocumentLifecycle(); };
     const onPageShow = () => { pageHidden = false; onDocumentLifecycle(); };
@@ -5126,7 +5177,7 @@ function WebviewPlayer({
       window.removeEventListener("pageshow", onPageShow);
       document.removeEventListener("visibilitychange", onDocumentLifecycle);
     };
-  }, [url]);
+  }, [applyOwnedPlayback, url]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -5557,20 +5608,17 @@ function WebviewPlayer({
         autoplayAttemptedRef.current ||
         suspendedRef.current ||
         exactHandoffPendingRef.current ||
-        pendingNativeHlsSeekRef.current != null ||
-        sourceSwitchStateRef.current?.paused === true
+        pendingNativeHlsSeekRef.current != null
       ) return;
-      autoplayAttemptedRef.current = true;
-      if (!video.paused) return;
+      const pending = foregroundPlaybackRef.current;
+      const intent = pendingHandoffPlaybackIntentRef.current;
+      const shouldPlay = pending?.video === video && pending.source === url ? pending.play
+        : intent === "play" ? true : intent === "pause" ? false : sourceSwitchStateRef.current?.paused !== true;
       // Stream resolution is asynchronous, so some browsers no longer treat
       // the later player mount as part of the original click. Retry explicitly
       // when media is playable. If policy still blocks it, the Play control is
       // already visible and no external-player decision interrupts the flow.
-      try {
-        void video.play().catch(() => {});
-      } catch {
-        // Older WebKit versions can throw synchronously instead of rejecting.
-      }
+      applyOwnedPlayback(video, shouldPlay);
     };
     setEnded(false); // a new URL is a new playback - clear any stale end state
     setCurrentPosition(0);
@@ -5602,6 +5650,8 @@ function WebviewPlayer({
     video.addEventListener("volumechange", onVolumeChange);
     video.addEventListener("ratechange", onRateChange);
     return () => {
+      const pendingPlayback = foregroundPlaybackRef.current;
+      if (pendingPlayback?.video === video && pendingPlayback.source === url) foregroundPlaybackRef.current = null;
       pendingHandoffPlaybackIntentRef.current = null;
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("loadedmetadata", onLoadedMeta);
@@ -5629,6 +5679,7 @@ function WebviewPlayer({
     };
   }, [
     applyDeferredHandoffPlayback,
+    applyOwnedPlayback,
     confirmPendingNativeHlsSeek,
     onAbsolutePositionChange,
     onPausedChange,
@@ -6699,8 +6750,9 @@ function WebviewPlayer({
 
   const playbackHandoffState = useCallback((): PlaybackHandoffState => {
     const video = videoRef.current;
+    const pendingIntent = pendingHandoffPlaybackIntentRef.current;
     return {
-      paused: video?.paused ?? paused,
+      paused: pendingIntent === "play" ? false : pendingIntent === "pause" ? true : video?.paused ?? paused,
       volume: video?.volume ?? volume,
       muted: video?.muted ?? muted,
       playbackRate: video?.playbackRate ?? playbackRate,
@@ -7067,7 +7119,10 @@ function WebviewPlayer({
             objectFit: videoFit,
             transform: `translate(${videoPanX}%, ${videoPanY}%) scale(${videoZoom})`,
           }}
-          autoPlay={!exactHandoff && sourceSwitchState?.paused !== true}
+          autoPlay={!requiresExactHandoff && !autoplayAttemptedRef.current &&
+            pendingHandoffPlaybackIntentRef.current !== "pause" &&
+            (!explicitPlaybackIntentRef.current || !ownedPlaybackPausedRef.current) &&
+            !backgroundBlocksPlayback(videoRef.current)}
           playsInline
           crossOrigin={isTrustedServerStreamURL(url) ? "use-credentials" : undefined}
           x-webkit-airplay="allow"
