@@ -68,6 +68,7 @@ import { useScrubThumbnails } from "./player/useScrubThumbnails";
 import { useWakeLock } from "./player/useWakeLock";
 import { useTVRemotePlayback } from "./player/useTVRemotePlayback";
 import { ScrubBar } from "./player/ScrubBar";
+import { AdjustmentRange } from "./player/AdjustmentRange";
 import { CaptionsMenu, type EmbeddedCaptions } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { CastControls } from "./CastControls";
@@ -7783,51 +7784,45 @@ function WebviewPlayer({
             <label>
               <span className="t-secondary">Zoom</span>
               <span className="player-options-output">{Math.round(videoZoom * 100)}%</span>
-              <input
-                type="range"
+              <AdjustmentRange
                 min={1}
                 max={2.5}
                 step={0.05}
                 value={videoZoom}
-                onChange={(event) => onPresentationChange({ zoom: Number(event.currentTarget.value) })}
+                onValueChange={(value) => onPresentationChange({ zoom: value })}
               />
             </label>
             <label>
               <span className="t-secondary">Pan horizontally</span>
               <span className="player-options-output">{videoPanX}%</span>
-              <input
-                type="range"
+              <AdjustmentRange
                 min={-50}
                 max={50}
                 step={1}
                 value={videoPanX}
-                onChange={(event) => onPresentationChange({ panX: Number(event.currentTarget.value) })}
+                onValueChange={(value) => onPresentationChange({ panX: value })}
               />
             </label>
             <label>
               <span className="t-secondary">Pan vertically</span>
               <span className="player-options-output">{videoPanY}%</span>
-              <input
-                type="range"
+              <AdjustmentRange
                 min={-50}
                 max={50}
                 step={1}
                 value={videoPanY}
-                onChange={(event) => onPresentationChange({ panY: Number(event.currentTarget.value) })}
+                onValueChange={(value) => onPresentationChange({ panY: value })}
               />
             </label>
             <label>
               <span className="t-secondary">Subtitle position</span>
               <span className="player-options-output">{subtitlePosition}%</span>
-              <input
-                type="range"
+              <AdjustmentRange
                 min={10}
                 max={95}
                 step={1}
                 value={subtitlePosition}
-                onChange={(event) =>
-                  setSubtitlePosition(Number(event.currentTarget.value))
-                }
+                onValueChange={setSubtitlePosition}
               />
             </label>
           </div>

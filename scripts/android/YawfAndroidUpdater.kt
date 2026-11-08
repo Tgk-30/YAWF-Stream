@@ -1923,7 +1923,10 @@ class YawfAndroidUpdater private constructor(
       if (redirect > 0) requireAllowedRedirect(current)
       val connection = openConnection(current, deadline)
       try {
-        connection.setRequestProperty("Range", "bytes=0-0")
+        // GitHub resolves the asset; only the approved final CDN receives the byte probe.
+        if (assetProbeRequiresRange(current)) {
+          connection.setRequestProperty("Range", "bytes=0-0")
+        }
         val status = connection.responseCode
         if (status in 300..399) {
           if (redirect == MAX_REDIRECTS) throw UpdaterFailure("Too many download redirects")
@@ -1962,6 +1965,11 @@ class YawfAndroidUpdater private constructor(
     if (resolvedSize != expectedSize || resolvedSize !in 1L..MAX_APK_BYTES) {
       throw UpdaterFailure("APK endpoint size does not match the manifest")
     }
+  }
+
+  private fun assetProbeRequiresRange(url: String): Boolean {
+    requireAllowedRedirect(url)
+    return URI(url).host?.lowercase(Locale.US) in FINAL_DOWNLOAD_HOSTS
   }
 
   private fun readBounded(

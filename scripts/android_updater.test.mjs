@@ -893,6 +893,17 @@ function ensureRealJsonJar() {
   return path;
 }
 
+test("asset range probe is limited to the approved final CDN after GitHub redirect lookup", () => {
+  const probe = section("private fun resolveAssetDownload(", "private fun validateResolvedAssetSize(");
+  assert.match(probe, /if \(assetProbeRequiresRange\(current\)\) \{\s*connection\.setRequestProperty\("Range", "bytes=0-0"\)\s*\}/);
+  assert.match(probe, /requireOfficialAssetUrl\(browserUrl, tag, name\)/);
+  assert.match(probe, /requireFinalDownloadHost\(current\)/);
+  assert.match(probe, /validateResolvedAssetSize\(connection, status, expectedSize\)/);
+  const policy = section("private fun assetProbeRequiresRange(", "private fun readBounded(");
+  assert.match(policy, /requireAllowedRedirect\(url\)/);
+  assert.match(policy, /return URI\(url\)\.host\?\.lowercase\(Locale\.US\) in FINAL_DOWNLOAD_HOSTS/);
+});
+
 test("actual Kotlin parser, redirect, replay, state, and cancellation behavior", (t) => {
   const tools = locateKotlinAndroidTools();
   if (!tools) {
@@ -937,7 +948,7 @@ test("actual Kotlin parser, redirect, replay, state, and cancellation behavior",
       { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
     );
     assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
-    assert.match(run.stdout, /YawfAndroidUpdater behavior assertions passed: 92/);
+    assert.match(run.stdout, /YawfAndroidUpdater behavior assertions passed: 95/);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }

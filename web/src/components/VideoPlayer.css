@@ -419,6 +419,7 @@
   font-variant-numeric: tabular-nums;
 }
 .player-options-sliders input[type="range"] {
+  touch-action: pan-y;
   grid-column: 1 / -1;
   width: 100%;
   min-height: 28px;
