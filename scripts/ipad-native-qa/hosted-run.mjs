@@ -80,23 +80,40 @@ export function expectedEnvironment(ownership, source, instance) {
     QA_HTTP_PROBE_URL: 'http://127.0.0.1:43178/__qa/arrival', QA_EXPECTED_FIXTURE_ID: instance, QA_EXPECTED_SOURCE_REVISION: source };
 }
 export function validateTestRun(plist, expected, products, isOwnedFile = (path) => existsSync(path) && inside(realpathSync(products), realpathSync(path))) {
-  const targets = plist.TestConfigurations?.flatMap((configuration) => configuration.TestTargets ?? []);
-  requireThat(plist.__xctestrun_metadata__?.FormatVersion === 2 && targets?.length === 1, 'Exactly one generated test target/configuration is required');
-  const target = targets[0];
+  const format = plist.__xctestrun_metadata__?.FormatVersion;
+  const keys = Object.keys(plist).sort().join();
+  let target;
+  if (format === 1) {
+    requireThat(keys === 'SafariNativeInputTests,__xctestrun_metadata__', 'Exactly one generated v1 test target is required');
+    target = plist.SafariNativeInputTests;
+  } else {
+    const configurations = plist.TestConfigurations;
+    requireThat(format === 2 && keys === 'TestConfigurations,__xctestrun_metadata__' && Array.isArray(configurations) && configurations.length === 1 && Array.isArray(configurations[0]?.TestTargets) && configurations[0].TestTargets.length === 1, 'Exactly one generated test target/configuration is required');
+    target = configurations[0].TestTargets[0];
+  }
   requireThat(target.BlueprintName === 'SafariNativeInputTests' && target.IsUITestBundle === true, 'Unexpected XCTest target');
   const env = target.EnvironmentVariables ?? {};
   requireThat(Object.keys(env).filter((key) => key.startsWith('QA_')).sort().join() === Object.keys(expected).sort().join(), 'Five resolved QA environment values are required');
   for (const [key, text] of Object.entries(expected)) requireThat(env[key] === text && !String(env[key]).includes('$('), `Unresolved or mismatched QA environment: ${key}`);
   requireThat(!Object.keys(env).some((key) => key.startsWith('SIMULATOR_')) && Object.keys(target.CommandLineArguments ?? {}).length === 0, 'Simulator identity/launch argument overrides are forbidden');
-  for (const key of ['TestBundlePath', 'TestHostPath', 'UITargetAppPath']) {
+  const ownedProducts = {};
+  for (const key of ['TestHostPath', 'UITargetAppPath', 'TestBundlePath']) {
     const text = target[key];
-    requireThat(typeof text === 'string' && text.startsWith('__TESTROOT__/') && !text.includes('$('), `Unresolved/unowned product: ${key}`);
-    const path = resolve(products, text.slice('__TESTROOT__/'.length));
+    let path;
+    if (key === 'TestBundlePath' && text === '__TESTHOST__/PlugIns/SafariNativeInputTests.xctest') {
+      // Xcode v1 emits this exact alias relative to the already admitted app.
+      requireThat(basename(ownedProducts.TestHostPath) === 'SafariNativeInputTests-Runner.app', 'Test bundle alias requires the owned host app');
+      path = resolve(ownedProducts.TestHostPath, 'PlugIns/SafariNativeInputTests.xctest');
+    } else {
+      requireThat(typeof text === 'string' && text.startsWith('__TESTROOT__/') && !text.includes('$('), `Unresolved/unowned product: ${key}`);
+      path = resolve(products, text.slice('__TESTROOT__/'.length));
+    }
     requireThat(inside(products, path) && isOwnedFile(path), `Product escapes the owned build: ${key}`);
     const rel = relative(products, path);
     const suffix = key === 'TestBundlePath' ? /SafariNativeInputTests-Runner\.app\/PlugIns\/SafariNativeInputTests\.xctest$/
       : key === 'UITargetAppPath' ? /NativeQAAnchor\.app$/ : /SafariNativeInputTests-Runner\.app(?:\/SafariNativeInputTests-Runner)?$/;
     requireThat(suffix.test(rel), `Wrong owned product identity: ${key}`);
+    ownedProducts[key] = path;
   }
   return target;
 }

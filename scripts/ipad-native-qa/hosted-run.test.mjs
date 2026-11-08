@@ -22,6 +22,27 @@ const ref = (text) => ({ id: v(text) });
 const validSummary = { result: 'Passed', totalTestCount: 1, passedTests: 1, failedTests: 0, skippedTests: 0, expectedFailures: 0, testFailures: [], runtimeWarnings: [] };
 function runPlist() { return { __xctestrun_metadata__: { FormatVersion: 2 }, TestConfigurations: [{ TestTargets: [{ BlueprintName: 'SafariNativeInputTests', IsUITestBundle: true, EnvironmentVariables: { ...environment }, TestBundlePath: '__TESTROOT__/Debug-iphonesimulator/SafariNativeInputTests-Runner.app/PlugIns/SafariNativeInputTests.xctest', TestHostPath: '__TESTROOT__/Debug-iphonesimulator/SafariNativeInputTests-Runner.app/SafariNativeInputTests-Runner', UITargetAppPath: '__TESTROOT__/Debug-iphonesimulator/NativeQAAnchor.app' }] }] }; }
 const target = (run) => run.TestConfigurations[0].TestTargets[0];
+// Captured public schema fields from Xcode26.5 run42440130147, 14-plutil.log.
+// Omitted Xcode diagnostic defaults do not participate in target admission.
+const capturedEnvironment = {
+  QA_OWNED_DEVICE_NAME: 'YAWF-iPad-NativeQA-51e9536a-4579-4f98-a640-0f7389818c7f',
+  QA_EXPECTED_UDID: '10EE1009-0656-44F0-A8EB-281F01B4F533',
+  QA_EXPECTED_SOURCE_REVISION: 'e1b2e73b341dc8941f4ac0b041da880cf36f8ee2',
+  QA_EXPECTED_FIXTURE_ID: '51e9536a-4579-4f98-a640-0f7389818c7f',
+  QA_HTTP_PROBE_URL: 'http://127.0.0.1:43178/__qa/arrival',
+};
+function capturedRunPlist() {
+  return {
+    SafariNativeInputTests: {
+      BlueprintName: 'SafariNativeInputTests', IsUITestBundle: true, IsXCTRunnerHostedTestBundle: true,
+      TestBundlePath: '__TESTHOST__/PlugIns/SafariNativeInputTests.xctest',
+      TestHostPath: '__TESTROOT__/Debug-iphonesimulator/SafariNativeInputTests-Runner.app',
+      UITargetAppPath: '__TESTROOT__/Debug-iphonesimulator/NativeQAAnchor.app',
+      EnvironmentVariables: { ...capturedEnvironment }, CommandLineArguments: [],
+    },
+    __xctestrun_metadata__: { ContainerInfo: { ContainerName: 'NativeQA', SchemeName: 'NativeQA' }, FormatVersion: 1 },
+  };
+}
 const folder = fileURLToPath(new URL('.', import.meta.url));
 const controller = readFileSync(join(folder, 'hosted-run.mjs'), 'utf8');
 const workflow = readFileSync(new URL('../../.github/workflows/ipad-native-qa.yml', import.meta.url), 'utf8');
@@ -147,3 +168,60 @@ for (const [label, marker] of [['missing', undefined], ['self-hosted', 'self-hos
     assert.throws(() => hostedContext(env, 'darwin', 'arm64', (path) => path), /Only a GitHub-hosted ARM macOS runner/);
   });
 }
+
+test('captured Xcode26.5 v1 xctestrun admits the exact owned host-relative test bundle', () => {
+  const paths = [];
+  const run = capturedRunPlist();
+  assert.equal(validateTestRun(run, capturedEnvironment, '/build/products', (path) => { paths.push(path); return true; }), run.SafariNativeInputTests);
+  assert.deepEqual(paths, ['/build/products/Debug-iphonesimulator/SafariNativeInputTests-Runner.app', '/build/products/Debug-iphonesimulator/NativeQAAnchor.app', '/build/products/Debug-iphonesimulator/SafariNativeInputTests-Runner.app/PlugIns/SafariNativeInputTests.xctest']);
+});
+
+for (const [label, change] of [
+  ['v1 extra top-level target', (run) => { run.OtherTests = { ...run.SafariNativeInputTests }; }],
+  ['v1 mixed configurations', (run) => { run.TestConfigurations = [{ TestTargets: [run.SafariNativeInputTests] }]; }],
+  ['v1 renamed top-level target', (run) => { run.OtherTests = run.SafariNativeInputTests; delete run.SafariNativeInputTests; }],
+  ['v1 unknown format', (run) => { run.__xctestrun_metadata__.FormatVersion = 3; }],
+]) {
+  test(`captured xctestrun rejects ${label}`, () => {
+    const run = capturedRunPlist(); change(run);
+    assert.throws(() => validateTestRun(run, capturedEnvironment, '/build/products', () => true));
+  });
+}
+for (const [label, change] of [
+  ['v2 extra empty configuration', (run) => { run.TestConfigurations.push({ TestTargets: [] }); }],
+  ['v2 extra target', (run) => { run.TestConfigurations[0].TestTargets.push(target(runPlist())); }],
+  ['v2 mixed top-level target', (run) => { run.SafariNativeInputTests = target(run); }],
+  ['v2 unknown format', (run) => { run.__xctestrun_metadata__.FormatVersion = 3; }],
+]) {
+  test(`generated xctestrun rejects ${label}`, () => {
+    const run = runPlist(); change(run);
+    assert.throws(() => validateTestRun(run, environment, '/build/products', () => true));
+  });
+}
+for (const key of Object.keys(capturedEnvironment)) {
+  test(`captured xctestrun still rejects unresolved ${key}`, () => {
+    const run = capturedRunPlist(); run.SafariNativeInputTests.EnvironmentVariables[key] = '$(UNRESOLVED)';
+    assert.throws(() => validateTestRun(run, capturedEnvironment, '/build/products', () => true));
+  });
+}
+for (const [label, change] of [
+  ['nonliteral TESTHOST traversal', (t) => { t.TestBundlePath = '__TESTHOST__/../SafariNativeInputTests-Runner.app/PlugIns/SafariNativeInputTests.xctest'; }],
+  ['TESTHOST on target app', (t) => { t.UITargetAppPath = '__TESTHOST__/../NativeQAAnchor.app'; }],
+  ['TESTHOST relative to host executable', (t) => { t.TestHostPath += '/SafariNativeInputTests-Runner'; }],
+]) {
+  test(`captured xctestrun rejects ${label}`, () => {
+    const run = capturedRunPlist(); change(run.SafariNativeInputTests);
+    assert.throws(() => validateTestRun(run, capturedEnvironment, '/build/products', () => true));
+  });
+}
+test('captured TESTHOST bundle retains actual physical symlink containment', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ipad-hosted-v1-products-')); const products = join(root, 'products');
+  const runner = join(products, 'Debug-iphonesimulator/SafariNativeInputTests-Runner.app');
+  const bundle = join(runner, 'PlugIns/SafariNativeInputTests.xctest');
+  try {
+    mkdirSync(bundle, { recursive: true }); mkdirSync(join(products, 'Debug-iphonesimulator/NativeQAAnchor.app'));
+    validateTestRun(capturedRunPlist(), capturedEnvironment, products);
+    rmSync(bundle, { recursive: true }); const foreign = join(root, 'foreign.xctest'); mkdirSync(foreign); symlinkSync(foreign, bundle);
+    assert.throws(() => validateTestRun(capturedRunPlist(), capturedEnvironment, products));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
