@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { diagnosticContext, fullRegistry, ownedTarget, destinationObservation, runDiagnostic, runDiagnosticCleanup, DEVICE_TYPE, OFFSETS_MS } from './ipad-destination-diagnostic.mjs';
 import { RUNTIME, MIN_FREE_BYTES } from './ipad-native-qa/hosted-run.mjs';
@@ -11,7 +11,7 @@ const SOURCE = 'a'.repeat(40), ID = '22222222-2222-4222-8222-222222222222', INST
 const source = readFileSync(new URL('./ipad-destination-diagnostic.mjs', import.meta.url), 'utf8');
 const workflow = readFileSync(new URL('../.github/workflows/ipad-destination-diagnostic.yml', import.meta.url), 'utf8');
 function fixture(options = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'ipad-destination-contract-')), temp = join(root, 'temp'), workspace = join(root, 'workspace'), home = join(root, 'home');
+  const root = realpathSync(mkdtempSync(join(options.tempParent ?? tmpdir(), 'ipad-destination-contract-'))), temp = join(root, 'temp'), workspace = join(root, 'workspace'), home = join(root, 'home');
   for (const path of [temp, workspace, join(home, 'Library/Developer/CoreSimulator/Devices')]) mkdirSync(path, { recursive: true });
   const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'macOS', RUNNER_ARCH: 'ARM64', GITHUB_REPOSITORY: 'Tgk-30/YAWF-Stream', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: SOURCE, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: temp, GITHUB_WORKSPACE: workspace, GITHUB_TOKEN: 'not-forwarded' };
   const existing = { udid: '11111111-1111-4111-8111-111111111111', name: 'preexisting', state: 'Shutdown', isAvailable: true, deviceTypeIdentifier: DEVICE_TYPE, dataPath: join(home, 'Library/Developer/CoreSimulator/Devices/existing/data'), extraMetadata: { retained: true } };
@@ -54,6 +54,30 @@ test('diagnostic context rejects local hosts, forks, missing hosting evidence an
     assert.throws(() => diagnosticContext(f.env, 'linux', 'arm64'));
     await assert.rejects(runDiagnostic({ ...f.env, GITHUB_ACTIONS: 'false' }, f.deps)); assert.equal(f.calls.length, 0);
   });
+});
+test('fixture canonicalizes a symlinked temp parent without admitting noncanonical runner roots', async () => {
+  const owner = realpathSync(mkdtempSync(join(tmpdir(), 'ipad-destination-symlink-')));
+  try {
+    const actualParent = join(owner, 'actual'), aliasParent = join(owner, 'alias');
+    mkdirSync(actualParent); symlinkSync(actualParent, aliasParent, 'dir');
+    await using({ tempParent: aliasParent }, async (f) => {
+      assert.equal(f.root, realpathSync(f.root));
+      assert.equal(join(actualParent, basename(f.root)), f.root);
+      const aliasRoot = join(aliasParent, basename(f.root));
+      assert.notEqual(aliasRoot, f.root); assert.equal(realpathSync(aliasRoot), f.root);
+      for (const env of [
+        { ...f.env, RUNNER_TEMP: join(aliasRoot, 'temp') },
+        { ...f.env, GITHUB_WORKSPACE: join(aliasRoot, 'workspace') },
+      ]) {
+        assert.throws(() => diagnosticContext(env, 'darwin', 'arm64'), /Canonical separate runner-owned roots/);
+        await assert.rejects(runDiagnostic(env, f.deps), /Canonical separate runner-owned roots/);
+        assert.equal(f.calls.length, 0);
+      }
+      const result = await runDiagnostic(f.env, f.deps);
+      assert.equal(result.diagnosticCompleted, true);
+      assert.equal(result.nativeTestsExecuted, false); assert.equal(result.productBuilt, false);
+    });
+  } finally { rmSync(owner, { recursive: true, force: true }); }
 });
 test('full registry comparison retains every preexisting metadata field and rejects duplicate UUIDs', () => {
   const a = { devices: { [RUNTIME]: [{ udid: ID, extraMetadata: { value: 1 } }] } }, b = structuredClone(a); b.devices[RUNTIME][0].extraMetadata.value = 2;
