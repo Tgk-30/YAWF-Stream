@@ -24,6 +24,10 @@ const failureRefObserver = vi.hoisted(() => ({
   enabled: false,
   refs: [] as Array<{ current: (message: string, exactHandoffPending: boolean) => void }>,
 }));
+const healthyRecoveryObserver = vi.hoisted(() => ({
+  enabled: false,
+  callbacks: [] as Array<(video: HTMLVideoElement) => boolean>,
+}));
 const stallRecoveryObserver = vi.hoisted(() => ({
   enabled: false,
   callbacks: [] as Array<(position: number, state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => Promise<boolean>>,
@@ -37,6 +41,10 @@ vi.mock("react", async (original) => {
       const observed = callback as (typeof stallRecoveryObserver.callbacks)[number];
       if (stallRecoveryObserver.enabled && callback.toString().includes("stall.refresh_started") && !stallRecoveryObserver.callbacks.includes(observed)) {
         stallRecoveryObserver.callbacks.push(observed);
+      }
+      const healthy = callback as (typeof healthyRecoveryObserver.callbacks)[number];
+      if (healthyRecoveryObserver.enabled && callback.toString().includes("stall.refresh_rearmed") && !healthyRecoveryObserver.callbacks.includes(healthy)) {
+        healthyRecoveryObserver.callbacks.push(healthy);
       }
       return callback;
     }) as typeof actual.useCallback,
@@ -15455,6 +15463,73 @@ describe("terminal post-start source recovery", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
   });
 
+  it.each([
+    ["direct", false], ["direct", true], ["native-hls", false], ["native-hls", true],
+  ] as const)("[terminal-nonpartial-fence] ignores %s queued EOS during pending recovery with owned paused=%s", async (transport, paused) => {
+    if (transport === "native-hls") {
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    }
+    const pending = deferred<void>();
+    const refresh = vi.fn<() => Promise<void>>().mockImplementationOnce(() => pending.promise).mockResolvedValue(undefined);
+    const onEnded = vi.fn(), onNext = vi.fn();
+    render(<VideoPlayer url={`https://x/nonpartial.${transport === "direct" ? "mp4" : "m3u8"}`}
+      engine={transport === "direct" ? "webview-direct" : "webview-hls-transcode"}
+      title="Nonpartial queued terminal" timelineOffsetSeconds={100}
+      refreshCurrentSource={refresh} onEnded={onEnded} upNext={{ label: "Next" }} onPlayNext={onNext} onClose={() => {}} />);
+    await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = terminalMedia(video);
+    video.currentTime = 98; fireEvent.timeUpdate(video);
+    if (paused) { state.paused = true; fireEvent.pause(video); }
+    if (transport === "native-hls") expect(hlsInstances).toHaveLength(0);
+    act(() => {
+      terminalError(video, state, 2, 0);
+      expect(refresh).toHaveBeenCalledExactlyOnceWith(198, {
+        paused, volume: 0.35, muted: true, playbackRate: 1.25, audioPreference: null,
+      });
+      state.ended = true;
+      fireEvent.ended(video);
+      fireEvent.ended(video);
+      fireEvent.error(video);
+    });
+    await flushTerminal();
+    // A completion callback queues history and next-episode work in Detail.
+    expect(onEnded).not.toHaveBeenCalled();
+    expect(onNext).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.querySelector("video.player-video")).toBe(video);
+    pending.reject(new Error("Synthetic refresh failure")); await flushTerminal();
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flushTerminal();
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenLastCalledWith(198, expect.objectContaining({
+      paused, volume: 0.35, muted: true, playbackRate: 1.25,
+    }));
+    expect(onEnded).not.toHaveBeenCalled(); expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it.each(["direct", "native-hls"] as const)("[terminal-nonpartial-natural] preserves %s genuine completion and next action", async (transport) => {
+    if (transport === "native-hls") {
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    }
+    const refresh = vi.fn(async () => {}), onEnded = vi.fn(), onNext = vi.fn();
+    render(<VideoPlayer url={`https://x/natural.${transport === "direct" ? "mp4" : "m3u8"}`}
+      engine={transport === "direct" ? "webview-direct" : "webview-hls-transcode"}
+      title="Natural completion" timelineOffsetSeconds={100}
+      refreshCurrentSource={refresh} onEnded={onEnded} upNext={{ label: "Next" }} onPlayNext={onNext} onClose={() => {}} />);
+    await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = terminalMedia(video);
+    video.currentTime = 98; fireEvent.timeUpdate(video);
+    state.ended = true; state.paused = true; video.currentTime = 100; fireEvent.ended(video);
+    await flushTerminal();
+    expect(onEnded).toHaveBeenCalledExactlyOnceWith(200, 200, expect.objectContaining({ playbackSpeed: 1.25 }));
+    expect(onNext).toHaveBeenCalledTimes(1); expect(refresh).not.toHaveBeenCalled();
+  });
+
   it("[terminal-controls] does not fresh-resolve a partial EOS whose original duration is unknown", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
@@ -15467,6 +15542,135 @@ describe("terminal post-start source recovery", () => {
     const state = terminalMedia(video); state.ended = true; state.paused = true; fireEvent.ended(video); await flushTerminal();
     expect(refresh).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("Server Optimized ended before the original media completed");
+  });
+
+  async function advanceEligiblePlayback(video: HTMLVideoElement, seconds: number) {
+    for (let index = 0; index < seconds; index += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      video.currentTime += video.playbackRate;
+      fireEvent.timeUpdate(video);
+    }
+    await flushTerminal();
+  }
+  function longTerminalMedia(video: HTMLVideoElement) {
+    const state = terminalMedia(video);
+    Object.defineProperty(video, "duration", { configurable: true, value: 1000 });
+    fireEvent.durationChange(video);
+    // The new-rate sample seeds the clock, but earns no elapsed playback.
+    fireEvent.rateChange(video); fireEvent.timeUpdate(video);
+    return state;
+  }
+
+  it.each(["direct", "native-hls"] as const)("[earned-recovery] %s can refresh sequential cutoffs only after each successor earns 60s", async (transport) => {
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    try {
+      if (transport === "native-hls") {
+        deviceKindMock.mockReturnValue("ios");
+        vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+      }
+      const refresh = vi.fn(async () => {});
+      const extension = transport === "direct" ? "mp4" : "m3u8";
+      const props = { title: "Continuous recovery", engine: transport === "direct" ? "webview-direct" as const : "webview-hls-transcode" as const,
+        refreshCurrentSource: refresh, onClose: () => {} };
+      const view = render(<VideoPlayer {...props} url={`https://x/continuous-0.${extension}`} />);
+      await flushTerminal();
+      let video = document.querySelector("video.player-video") as HTMLVideoElement;
+      terminalError(video, longTerminalMedia(video)); await flushTerminal();
+      expect(refresh).toHaveBeenCalledTimes(1);
+      for (let revision = 1; revision <= 2; revision += 1) {
+        view.rerender(<VideoPlayer {...props} url={`https://x/continuous-${revision}.${extension}`} sourceRevision={revision} />);
+        await flushTerminal();
+        video = document.querySelector("video.player-video") as HTMLVideoElement;
+        const state = longTerminalMedia(video);
+        await advanceEligiblePlayback(video, 60);
+        terminalError(video, state); await flushTerminal();
+        expect(refresh).toHaveBeenCalledTimes(revision + 1);
+        expect(refresh).toHaveBeenLastCalledWith(100.75, expect.objectContaining({ paused: false, volume: 0.35, muted: true, playbackRate: 1.25 }));
+        expect(screen.queryByRole("alert")).toBeNull();
+      }
+    } finally { clock.mockRestore(); }
+  });
+
+  async function prepareEarnedSuccessor(refresh = vi.fn(async () => {})) {
+    const props = { title: "Earning controls", refreshCurrentSource: refresh, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://x/earning-a.mp4" />);
+    const first = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalError(first, longTerminalMedia(first)); await flushTerminal();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    view.rerender(<VideoPlayer {...props} url="https://x/earning-b.mp4" sourceRevision={1} />); await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = longTerminalMedia(video);
+    return { view, props, video, state, refresh };
+  }
+
+  it.each([0, 59])("[earned-controls] source replacement plus%s seconds cannot immediately rearm", async (seconds) => {
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    try {
+      const { video, state, refresh } = await prepareEarnedSuccessor();
+      await advanceEligiblePlayback(video, seconds); terminalError(video, state); await flushTerminal();
+      expect(refresh).toHaveBeenCalledTimes(1); expect(screen.getByRole("alert")).toHaveTextContent("Retry to request a fresh stream");
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each(["paused", "seek", "hidden", "scrub", "buffering", "remote", "jump"] as const)("[earned-controls] %s resets the59s contiguous playback window", async (interruption) => {
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    let restoreVisibility: (() => void) | undefined;
+    try {
+      if (interruption === "remote") { isTauriMock.mockReturnValue(true); deviceKindMock.mockReturnValue("android"); }
+      const { video, state, refresh } = await prepareEarnedSuccessor();
+      await advanceEligiblePlayback(video, 59);
+      if (interruption === "paused") {
+        state.paused = true; fireEvent.pause(video);
+        await act(async () => { await vi.advanceTimersByTimeAsync(120000); });
+        state.paused = false; fireEvent.play(video); fireEvent.playing(video);
+      } else if (interruption === "seek") {
+        state.seeking = true; fireEvent.seeking(video); video.currentTime += 120;
+        state.seeking = false; fireEvent.seeked(video);
+      } else if (interruption === "hidden") {
+        const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+        restoreVisibility = () => visibility.mockRestore(); document.dispatchEvent(new Event("visibilitychange"));
+        await act(async () => { await vi.advanceTimersByTimeAsync(120000); });
+        video.currentTime += 120; visibility.mockReturnValue("visible"); document.dispatchEvent(new Event("visibilitychange"));
+      } else if (interruption === "scrub") {
+        fireEvent.pointerDown(screen.getByTestId("scrub-bar")); fireEvent.timeUpdate(video);
+        fireEvent.pointerUp(screen.getByTestId("scrub-bar"));
+      } else if (interruption === "buffering") {
+        fireEvent.waiting(video); await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); fireEvent.playing(video);
+      } else if (interruption === "remote") {
+        fireEvent.click(screen.getByText("test suspend playback")); fireEvent.timeUpdate(video);
+        fireEvent.click(screen.getByText("test resume playback"));
+      } else {
+        await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); video.currentTime += 120; fireEvent.timeUpdate(video);
+      }
+      fireEvent.timeUpdate(video); await advanceEligiblePlayback(video, 1);
+      terminalError(video, state); await flushTerminal();
+      expect(refresh).toHaveBeenCalledTimes(1); expect(screen.getByRole("alert")).toHaveTextContent("Retry to request a fresh stream");
+    } finally { restoreVisibility?.(); clock.mockRestore(); }
+  });
+
+  it("[earned-owner] a captured old-child callback cannot rearm a newer committed reader", async () => {
+    healthyRecoveryObserver.enabled = true; healthyRecoveryObserver.callbacks = [];
+    try {
+      const { view, props, video, refresh } = await prepareEarnedSuccessor();
+      const stale = healthyRecoveryObserver.callbacks[healthyRecoveryObserver.callbacks.length - 1]!; expect(stale).toBeDefined();
+      view.rerender(<VideoPlayer {...props} url="https://x/earning-c.mp4" sourceRevision={2} />); await flushTerminal();
+      const current = document.querySelector("video.player-video") as HTMLVideoElement; const state = longTerminalMedia(current);
+      expect(video.isConnected).toBe(false); expect(stale(video)).toBe(false);
+      terminalError(current, state); await flushTerminal(); expect(refresh).toHaveBeenCalledTimes(1);
+    } finally { healthyRecoveryObserver.enabled = false; healthyRecoveryObserver.callbacks = []; }
+  });
+
+  it("[earned-owner] a callback during pending fresh resolution cannot replenish its active budget", async () => {
+    healthyRecoveryObserver.enabled = true; healthyRecoveryObserver.callbacks = [];
+    try {
+      const pending = deferred<void>(), refresh = vi.fn(() => pending.promise);
+      render(<VideoPlayer url="https://x/earning-pending.mp4" title="Pending earning" refreshCurrentSource={refresh} onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      terminalError(video, longTerminalMedia(video)); await flushTerminal();
+      const callback = healthyRecoveryObserver.callbacks[healthyRecoveryObserver.callbacks.length - 1]!; expect(callback).toBeDefined();
+      expect(callback(video)).toBe(false); fireEvent.error(video); await flushTerminal(); expect(refresh).toHaveBeenCalledTimes(1);
+      pending.resolve(); await flushTerminal();
+    } finally { healthyRecoveryObserver.enabled = false; healthyRecoveryObserver.callbacks = []; }
   });
 
   it("[terminal-budget] shares the one-shot budget with later generations and keeps explicit Retry at the latest point", async () => {

@@ -4090,6 +4090,49 @@ describe("DebridStreamer server", () => {
     }>(created).session;
   }
 
+  it.each(["exit", "error"] as const)("transcode: rejects a child playlist when %s occurs after lookup but before read completes", async (failure) => {
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({}, fake);
+    let lookup: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const master = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=480p` });
+      expect(master.statusCode).toBe(200);
+      const child = master.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const url = `/api/stream/${session.id}/${child}`;
+      const healthy = await request(owner, { method: "GET", url });
+      expect(healthy.statusCode).toBe(200);
+      expect(healthy.body).toContain("#EXT-X-ENDLIST");
+      const process = spawn.mock.results[0]!.value as ReturnType<Transcoder["spawnHls"]>;
+      const originalLookup = TranscodeRegistry.prototype.dirForAsset;
+      const order: string[] = [];
+      lookup = vi.spyOn(TranscodeRegistry.prototype, "dirForAsset").mockImplementationOnce(function (this: TranscodeRegistry, ...args: Parameters<TranscodeRegistry["dirForAsset"]>) {
+        const dir = originalLookup.apply(this, args);
+        expect(dir).not.toBeNull();
+        order.push("lookup");
+        // The real asynchronous readFile is unchanged. Fail the child in the
+        // microtask immediately after its successful directory lookup.
+        queueMicrotask(() => {
+          order.push("failure");
+          if (failure === "exit") process.emit("exit", 1, null);
+          else process.emit("error", new Error("failed while reading playlist"));
+        });
+        return dir;
+      });
+      const interrupted = await request(owner, { method: "GET", url });
+      expect(order).toEqual(["lookup", "failure"]);
+      expect(interrupted.statusCode).toBe(404);
+      expect(interrupted.body).not.toContain("#EXTM3U");
+      expect(json<{ error: string }>(interrupted).error).toBe("Transcode asset not found.");
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally {
+      lookup?.mockRestore();
+      await on.close();
+    }
+  });
+
   it("transcode HEAD retention uses authenticated empty current-only fast path without asset body work", async () => {
     const fake = makeFakeTranscoder();
     const spawn = vi.spyOn(fake, "spawnHls");

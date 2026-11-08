@@ -6525,6 +6525,9 @@ function registerRoutes(
     reply.header("cache-control", "no-store");
     if (asset.endsWith(".m3u8")) {
       const manifest = await readFile(path, "utf8");
+      if (transcode.registry.dirForAsset(row.id, asset, generation) !== dir) {
+        throw httpError(404, "Transcode asset not found.");
+      }
       reply.header("content-type", "application/vnd.apple.mpegurl");
       return reply.send(rewriteTranscodeManifest(manifest, generation));
     }
