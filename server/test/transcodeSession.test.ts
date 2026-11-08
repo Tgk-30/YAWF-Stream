@@ -291,7 +291,7 @@ function stagedRegistryFixture(firstSpawnPlayable = true) {
   return { children, dataDir, database, registry, waitForSpawn };
 }
 
-function capacityRegistryFixture(maxTranscodes = 2) {
+function capacityRegistryFixture(maxTranscodes = 2, exitOnKill = false) {
   const dataDir = mkdtempSync(join(tmpdir(), "yawf-transcode-capacity-"));
   const database = new AppDatabase(":memory:");
   const children: Array<{
@@ -326,9 +326,10 @@ function capacityRegistryFixture(maxTranscodes = 2) {
       };
       child.kill = () => {
         record.kills += 1;
-        // SIGTERM is asynchronous in production. Tests explicitly emit the
-        // later exit/close so cancellation cannot prematurely free capacity.
-        return record.running;
+        // Most tests explicitly emit asynchronous exit to preserve capacity.
+        const wasRunning = record.running;
+        if (exitOnKill) record.finish(0);
+        return wasRunning;
       };
       child.stderr = null;
       children.push(record);
@@ -890,11 +891,14 @@ describe("transcode process capacity", () => {
   it("preserves the exact retired grace after intentional SIGTERM marks the old job failed", async () => {
     const fixture = capacityRegistryFixture();
     try {
+      seedTranscodeSession(fixture.database, "retired-grace");
       const original = await fixture.registry.ensureJob("retired-grace", "https://provider.example/source", { quality: "480p" });
       const generation = fixture.registry.generationFor("retired-grace", original)!;
       writeFileSync(join(original, "480p.m3u8"), "#EXTM3U\n#EXTINF:6,\n480p_seg_00000.ts\n");
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       const replacement = await fixture.registry.ensureJob("retired-grace", "https://provider.example/source", { quality: "360p", startSeconds: 90 });
+      writeFileSync(join(replacement, "360p.m3u8"), "#EXTM3U\n");
+      expect(fixture.registry.dirForAsset("retired-grace", "360p.m3u8", fixture.registry.generationFor("retired-grace", replacement)!, true)).toBe(replacement);
       expect(fixture.children[0]!.kills).toBeGreaterThan(0);
       fixture.children[0]!.finish(null, "SIGTERM");
       for (const asset of ["stream.m3u8", "480p.m3u8", "480p_seg_00000.ts"]) {
@@ -919,6 +923,7 @@ describe("transcode process capacity", () => {
   it.each(["exit", "error"] as const)("replaces same-options output after a ready job reports %s", async (failure) => {
     const fixture = capacityRegistryFixture(2);
     try {
+      seedTranscodeSession(fixture.database, "recover");
       const original = await fixture.registry.ensureJob("recover", "https://provider.example/source");
       const originalGeneration = fixture.registry.generationFor("recover", original)!;
       if (failure === "exit") fixture.children[0]!.finish(1);
@@ -931,6 +936,8 @@ describe("transcode process capacity", () => {
       expect(replacement).not.toBe(original);
       expect(coalesced).toBe(replacement);
       expect(fixture.children).toHaveLength(2);
+      writeFileSync(join(replacement, "1080p.m3u8"), "#EXTM3U\n");
+      expect(fixture.registry.dirForAsset("recover", "1080p.m3u8", fixture.registry.generationFor("recover", replacement)!, true)).toBe(replacement);
       expect(fixture.registry.dirFor("recover")).toBe(replacement);
       expect(fixture.registry.generationFor("recover", replacement)).not.toBe(originalGeneration);
       expect(fixture.registry.dirForAsset("recover", "stream.m3u8", originalGeneration)).toBe(original);
@@ -949,6 +956,7 @@ describe("transcode process capacity", () => {
   it("keeps a failed live child's slot until close before coalescing recovery", async () => {
     const fixture = capacityRegistryFixture(1);
     try {
+      seedTranscodeSession(fixture.database, "recover");
       const original = await fixture.registry.ensureJob("recover", "https://provider.example/source");
       fixture.children[0]!.child.emit("error", new Error("post-readiness failure"));
       await expect(fixture.registry.ensureJob("recover", "https://provider.example/source"))
@@ -977,6 +985,7 @@ describe("transcode process capacity", () => {
   it("cancels a coalesced failed-job replacement without leaking its staged output", async () => {
     const fixture = stagedRegistryFixture();
     try {
+      seedTranscodeSession(fixture.database, "recover");
       const original = await fixture.registry.ensureJob("recover", "https://provider.example/source");
       fixture.children[0]!.child.emit("exit", 1);
       const first = observe(fixture.registry.ensureJob("recover", "https://provider.example/source"));
@@ -1027,6 +1036,7 @@ describe("transcode process capacity", () => {
   it("replaces either of two completed cached jobs without discarding prior assets", async () => {
     const fixture = capacityRegistryFixture(2);
     try {
+      seedTranscodeSession(fixture.database, "first");
       const first = await fixture.registry.ensureJob(
         "first",
         "https://provider.example/first",
@@ -1046,6 +1056,8 @@ describe("transcode process capacity", () => {
         { quality: "360p", startSeconds: 60 },
       );
       expect(fixture.children).toHaveLength(3);
+      writeFileSync(join(replacement, "360p.m3u8"), "#EXTM3U\n");
+      expect(fixture.registry.dirForAsset("first", "360p.m3u8", fixture.registry.generationFor("first", replacement)!, true)).toBe(replacement);
       expect(replacement).not.toBe(first);
       expect(fixture.registry.dirFor("second")).toBe(second);
       expect(fixture.registry.dirForAsset(
@@ -2251,6 +2263,7 @@ describe("transcode stream probe admission", () => {
 describe("current generation retention", () => {
   async function leaseFixture() {
     const fixture = capacityRegistryFixture(2);
+    seedTranscodeSession(fixture.database, "leased");
     const dir = await fixture.registry.ensureJob("leased", "https://provider.example/source");
     fixture.children[0]!.finish(0);
     writeFileSync(join(dir, "480p.m3u8"), "#EXTM3U\n");
@@ -2308,6 +2321,8 @@ describe("current generation retention", () => {
     try {
       const replacement = await f.registry.ensureJob("leased", "https://provider.example/source", { quality: "360p" });
       f.children[1]!.finish(0);
+      writeFileSync(join(replacement, "360p.m3u8"), "#EXTM3U\n");
+      expect(f.registry.dirForAsset("leased", "360p.m3u8", f.registry.generationFor("leased", replacement)!, true)).toBe(replacement);
       const before = f.job.lastAccess;
       expect(f.registry.touchCurrentGeneration("leased", "480p.m3u8", f.generation)).toBe(false);
       expect(f.job.lastAccess).toBe(before);
@@ -2336,4 +2351,192 @@ describe("current generation retention", () => {
     } finally { database.mockRestore(); clock.mockRestore(); await cleanup(f); }
   });
 
+});
+
+
+function seedTranscodeSession(database: AppDatabase, id: string): void {
+  database.sqlite.prepare("INSERT OR IGNORE INTO users (id, username, display_name, password_hash, role, created_at) VALUES ('transcode-owner', 'transcode-owner', 'Fixture', 'fixture-hash', 'owner', '2026-01-01')").run();
+  database.sqlite.prepare("INSERT OR IGNORE INTO profiles (id, user_id, display_name, created_at, updated_at) VALUES ('transcode-profile', 'transcode-owner', 'Fixture', '2026-01-01', '2026-01-01')").run();
+  database.sqlite.prepare("INSERT INTO stream_sessions (id, profile_id, encrypted_upstream_url, created_at, expires_at) VALUES (?, 'transcode-profile', 'fixture', '2026-01-01', '9999-12-31T00:00:00.000Z')").run(id);
+}
+
+describe("prepared replacement activation", () => {
+  async function fixture(exitOnKill = true) {
+    const f = capacityRegistryFixture(2, exitOnKill);
+    seedTranscodeSession(f.database, "prepared");
+    const original = await f.registry.ensureJob("prepared", "https://provider.example/video", { quality: "480p" });
+    writeFileSync(join(original, "480p.m3u8"), "#EXTM3U\n");
+    const originalGeneration = f.registry.generationFor("prepared", original)!;
+    const replacement = await f.registry.ensureJob("prepared", "https://provider.example/video", { quality: "360p", startSeconds: 731 });
+    writeFileSync(join(replacement, "360p.m3u8"), "#EXTM3U\n");
+    const replacementGeneration = f.registry.generationFor("prepared", replacement)!;
+    const pointer = () => (f.database.sqlite.prepare("SELECT transcode_dir FROM stream_sessions WHERE id = 'prepared'").get() as { transcode_dir: string }).transcode_dir;
+    const activate = (asset = "360p.m3u8", generation: string | undefined = replacementGeneration) =>
+      (f.registry.dirForAsset as (id: string, asset: string, generation?: string, activate?: boolean) => string | null)("prepared", asset, generation, true);
+    const cleanup = async () => {
+      f.children.forEach(child => child.finish()); await f.registry.stop();
+      f.database.close(); rmSync(f.dataDir, { recursive: true, force: true }); vi.useRealTimers();
+    };
+    return { ...f, original, originalGeneration, replacement, replacementGeneration, pointer, activate, cleanup };
+  }
+  it("discarded ready replacement never starts the active reader retirement grace", async () => {
+    const f = await fixture();
+    try {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(f.registry.dirFor("prepared")).toBe(f.original);
+      expect(f.pointer()).toBe(f.original); expect(f.children[0]!.kills).toBe(0);
+      expect(f.registry.touchCurrentGeneration("prepared", "480p.m3u8", f.originalGeneration)).toBe(true);
+      expect(existsSync(f.original)).toBe(true);
+      expect(f.registry.dirForAsset("prepared", "360p.m3u8", f.replacementGeneration)).toBe(f.replacement);
+    } finally { await f.cleanup(); }
+  });
+  it("exact rendition activation commits before retiring the old reader for exactly30seconds", async () => {
+    const f = await fixture();
+    try {
+      expect(f.registry.dirForAsset("prepared", "360p.m3u8", f.replacementGeneration)).toBe(f.replacement);
+      expect(f.registry.dirFor("prepared")).toBe(f.original); expect(f.pointer()).toBe(f.original);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      expect(f.activate()).toBe(f.replacement);
+      expect(f.pointer()).toBe(f.replacement); expect(f.registry.dirFor("prepared")).toBe(f.replacement);
+      expect(f.children[0]!.kills).toBe(1);
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(f.registry.dirForAsset("prepared", "480p.m3u8", f.originalGeneration)).toBe(f.original);
+      expect(f.activate("480p.m3u8", f.originalGeneration)).toBe(f.original);
+      expect(f.registry.dirFor("prepared")).toBe(f.replacement);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.registry.dirForAsset("prepared", "480p.m3u8", f.originalGeneration)).toBeNull();
+      expect(f.registry.dirFor("prepared")).toBe(f.replacement);
+    } finally { await f.cleanup(); }
+  });
+  it.each(["master", "segment", "subtitle-playlist", "subtitle-segment", "missing-generation", "wrong-generation"])("does not activate on %s lookup", async kind => {
+    const f = await fixture();
+    try {
+      const asset = kind === "master" ? "stream.m3u8" : kind === "segment" ? "360p_seg_00000.ts" : kind === "subtitle-playlist" ? "360p_subtitles.m3u8" : kind === "subtitle-segment" ? "360p0.vtt" : "360p.m3u8";
+      if (kind.startsWith("subtitle")) writeFileSync(join(f.replacement, asset), "fixture");
+      const generation = kind === "missing-generation" ? undefined : kind === "wrong-generation" ? "transcode-unknown" : f.replacementGeneration;
+      (f.registry.dirForAsset as (id: string, asset: string, generation?: string, activate?: boolean) => string | null)("prepared", asset, generation, true);
+      expect(f.registry.dirFor("prepared")).toBe(f.original); expect(f.pointer()).toBe(f.original);
+      expect(f.children[0]!.kills).toBe(0);
+    } finally { await f.cleanup(); }
+  });
+  it.each(["exit", "error"] as const)("rejects a prepared %s before activation without retiring the active reader", async failure => {
+    const f = await fixture();
+    try {
+      if (failure === "exit") f.children[1]!.finish(1);
+      else f.children[1]!.child.emit("error", new Error("fixture failed preparation"));
+      expect(f.activate()).toBeNull(); expect(f.registry.dirFor("prepared")).toBe(f.original);
+      expect(f.pointer()).toBe(f.original); expect(f.children[0]!.kills).toBe(0);
+    } finally { await f.cleanup(); }
+  });
+  it("failed activation database write leaves active ownership and prepared retry intact", async () => {
+    const f = await fixture();
+    try {
+      f.database.sqlite.exec("CREATE TRIGGER reject_activation BEFORE UPDATE OF transcode_dir ON stream_sessions BEGIN SELECT RAISE(ABORT, 'fixture activation write failure'); END");
+      expect(() => f.activate()).toThrow("fixture activation write failure");
+      expect(f.pointer()).toBe(f.original); expect(f.registry.dirFor("prepared")).toBe(f.original);
+      expect(f.children[0]!.kills).toBe(0);
+      f.database.sqlite.exec("DROP TRIGGER reject_activation");
+      expect(f.activate()).toBe(f.replacement); expect(f.pointer()).toBe(f.replacement);
+    } finally { await f.cleanup(); }
+  });
+  it("idle prepared output is removed alone while the current reader keeps its lease", async () => {
+    const f = await fixture(); let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      now += 60_000; expect(f.registry.touchCurrentGeneration("prepared", "480p.m3u8", f.originalGeneration)).toBe(true);
+      now += 60_001; expect(f.registry.touchCurrentGeneration("prepared", "480p.m3u8", f.originalGeneration)).toBe(true);
+      (f.registry as unknown as { reap(): void }).reap();
+      await vi.waitFor(() => expect(existsSync(f.replacement)).toBe(false));
+      expect(f.registry.dirFor("prepared")).toBe(f.original); expect(f.pointer()).toBe(f.original);
+      expect(f.children[0]!.kills).toBe(0); expect(f.children[1]!.kills).toBeGreaterThan(0);
+      expect(f.activate()).toBeNull();
+    } finally { clock.mockRestore(); await f.cleanup(); }
+  });
+  it("an idle prepared generation cannot revive before the next reaper tick", async () => {
+    const f = await fixture(); const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 120_001);
+    try {
+      expect(f.activate()).toBeNull(); expect(f.registry.dirFor("prepared")).toBe(f.original);
+      expect(f.pointer()).toBe(f.original); expect(f.children[0]!.kills).toBe(0);
+    } finally { clock.mockRestore(); await f.cleanup(); }
+  });
+  it("reuses one prepared generation and resets its idle access window", async () => {
+    const f = await fixture(); let now = Date.now(); const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      now += 100_000;
+      expect(await f.registry.ensureJob("prepared", "https://provider.example/video", { quality: "360p", startSeconds: 731 })).toBe(f.replacement);
+      expect(f.registry.touchCurrentGeneration("prepared", "480p.m3u8", f.originalGeneration)).toBe(true);
+      now += 30_000; (f.registry as unknown as { reap(): void }).reap();
+      expect(f.activate()).toBe(f.replacement); expect(f.children).toHaveLength(2);
+    } finally { clock.mockRestore(); await f.cleanup(); }
+  });
+  it("superseding invalidates the old preparation before awaiting exit and coalesces its successor", async () => {
+    const f = await fixture(false);
+    try {
+      const first = observe(f.registry.ensureJob("prepared", "https://provider.example/video", { quality: "720p", startSeconds: 900 }));
+      await vi.waitFor(() => expect(f.children[1]!.kills).toBeGreaterThan(0));
+      const second = observe(f.registry.ensureJob("prepared", "https://provider.example/video", { quality: "720p", startSeconds: 900 }));
+      expect(f.activate()).toBeNull(); expect(f.registry.dirFor("prepared")).toBe(f.original);
+      expect(f.registry.generationFor("prepared", f.replacement)).toBeNull();
+      expect(f.children).toHaveLength(2); expect(f.children[0]!.kills).toBe(0);
+      await expect(f.registry.ensureJob("other-holder", "https://provider.example/other")).rejects.toMatchObject({ statusCode: 503 });
+      f.children[1]!.finish();
+      const result = await first; expect(result.status).toBe("fulfilled");
+      if (result.status !== "fulfilled") throw new Error("Expected prepared successor");
+      expect(await second).toEqual(result); expect(f.children).toHaveLength(3);
+      writeFileSync(join(result.value, "720p.m3u8"), "#EXTM3U\n");
+      expect(f.activate()).toBeNull(); expect(f.pointer()).toBe(f.original);
+      expect(f.registry.dirForAsset("prepared", "720p.m3u8", f.registry.generationFor("prepared", result.value)!, true)).toBe(result.value);
+      expect(f.pointer()).toBe(result.value); expect(f.children[0]!.kills).toBe(1);
+    } finally { await f.cleanup(); }
+  });
+  it("readiness starts the prepared idle window after a delayed warmup", async () => {
+    const f = stagedRegistryFixture(); seedTranscodeSession(f.database, "ready-clock");
+    let now = Date.now(); const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const original = await f.registry.ensureJob("ready-clock", "https://provider.example/video");
+      const spawned = f.waitForSpawn();
+      const next = f.registry.ensureJob("ready-clock", "https://provider.example/video", { quality: "360p" });
+      await spawned; now += 300;
+      writeFileSync(join(f.children[1]!.dir, "stream.m3u8"), "#EXTM3U\n");
+      writeFileSync(join(f.children[1]!.dir, "360p_seg_00000.ts"), "segment");
+      await next;
+      const state = f.registry as unknown as { prepared?: Map<string, { lastAccess: number }>; jobs: Map<string, { lastAccess: number }> };
+      expect((state.prepared?.get("ready-clock") ?? state.jobs.get("ready-clock"))!.lastAccess).toBe(now);
+      expect(f.registry.dirFor("ready-clock")).toBe(original);
+    } finally { clock.mockRestore(); await f.registry.stop(); f.database.close(); rmSync(f.dataDir, { recursive: true, force: true }); }
+  });
+  it.each(["revoked", "expired"] as const)("rejects activation after the session is %s", async reason => {
+    const f = await fixture();
+    try {
+      f.database.sqlite.prepare(reason === "revoked"
+        ? "UPDATE stream_sessions SET revoked_at = '2026-01-01' WHERE id = 'prepared'"
+        : "UPDATE stream_sessions SET expires_at = '2026-01-01' WHERE id = 'prepared'").run();
+      expect(f.activate()).toBeNull(); expect(f.registry.dirFor("prepared")).toBe(f.original);
+      expect(f.pointer()).toBe(f.original); expect(f.children[0]!.kills).toBe(0);
+    } finally { await f.cleanup(); }
+  });
+  it("superseded prepared process retains capacity until its actual exit", async () => {
+    const f = await fixture(false);
+    try {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const replacement = observe(f.registry.ensureJob("prepared", "https://provider.example/video", { quality: "720p" }));
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(await replacement).toMatchObject({ status: "rejected", error: { statusCode: 503 } });
+      expect(f.children[1]!.running).toBe(true); expect(f.children).toHaveLength(2);
+      expect(f.registry.dirFor("prepared")).toBe(f.original); expect(f.children[0]!.kills).toBe(0);
+      f.children[1]!.finish();
+      await expect(f.registry.ensureJob("prepared", "https://provider.example/video", { quality: "720p" })).resolves.toEqual(expect.any(String));
+      expect(f.children).toHaveLength(3);
+    } finally { await f.cleanup(); }
+  });
+  it.each(["kill", "stop"] as const)("%s cleans current and prepared outputs without allowing stale activation", async method => {
+    const f = await fixture();
+    try {
+      await (method === "kill" ? f.registry.kill("prepared") : f.registry.stop());
+      expect(f.activate()).toBeNull(); expect(f.registry.dirFor("prepared")).toBeNull();
+      expect(existsSync(f.original)).toBe(false); expect(existsSync(f.replacement)).toBe(false);
+      expect(f.pointer()).toBeNull();
+    } finally { await f.cleanup(); }
+  });
 });

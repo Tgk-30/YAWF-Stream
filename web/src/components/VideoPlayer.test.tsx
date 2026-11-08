@@ -15397,6 +15397,122 @@ describe("terminal post-start source recovery", () => {
   }
   beforeEach(() => { vi.useFakeTimers(); });
 
+  it.each([
+    ["clamped", 100, 25.75, 99.5, 150, 2],
+    ["near-origin", 100, 99, 99.5, 150, 2],
+    ["missing", 100, 25.75, 99.5, 150, 4],
+    ["backward", 20, 200, 19.5, 50, 2],
+    ["zero", 0, 200, 0, 5, 4],
+  ] as const)("[seek-intent-progress] %s seek yields to later verified playback before terminal error", async (kind, target, origin, settled, latest, code) => {
+    const refresh = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/seek-progress.mp4" title="Seek progress" refreshCurrentSource={refresh} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = longTerminalMedia(video);
+    video.currentTime = origin; fireEvent.timeUpdate(video);
+    state.seeking = true; fireEvent.seeking(video);
+    act(() => scrubBarMock.mock.lastCall![0].onSeek(target));
+    video.currentTime = settled;
+    state.seeking = false;
+    if (kind === "clamped" || kind === "backward") fireEvent.seeked(video);
+    fireEvent.timeUpdate(video);
+    video.currentTime = latest - 0.5; fireEvent.timeUpdate(video);
+    video.currentTime = latest; fireEvent.timeUpdate(video);
+    terminalError(video, state, code); await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(latest, expect.objectContaining({
+      paused: false, volume: 0.35, muted: true, playbackRate: 1.25,
+    }));
+  });
+
+  it.each([0, 20, 100])("[seek-intent-controls] preserves immediate unconfirmed target%s across decoder reset", async (target) => {
+    const refresh = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/seek-immediate.mp4" title="Immediate seek" refreshCurrentSource={refresh} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = longTerminalMedia(video);
+    video.currentTime = 200; fireEvent.timeUpdate(video);
+    state.seeking = true; fireEvent.seeking(video);
+    act(() => scrubBarMock.mock.lastCall![0].onSeek(target));
+    terminalError(video, state, 2); await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }));
+  });
+
+  it("[seek-intent-controls] keeps a paused clamped seek until playback actually advances", async () => {
+    const refresh = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/seek-paused.mp4" title="Paused seek" refreshCurrentSource={refresh} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = longTerminalMedia(video);
+    state.paused = true; fireEvent.pause(video);
+    state.seeking = true; fireEvent.seeking(video);
+    act(() => scrubBarMock.mock.lastCall![0].onSeek(100));
+    video.currentTime = 99.5; state.seeking = false; fireEvent.seeked(video); fireEvent.timeUpdate(video);
+    terminalError(video, state, 4); await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(100, expect.objectContaining({ paused: true }));
+  });
+
+  it("[seek-intent-controls] does not treat an ignored backward seek's old clock as confirmation", async () => {
+    const refresh = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/seek-ignored.mp4" title="Ignored backward seek" refreshCurrentSource={refresh} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = longTerminalMedia(video);
+    video.currentTime = 200; fireEvent.timeUpdate(video);
+    state.seeking = true; fireEvent.seeking(video);
+    act(() => scrubBarMock.mock.lastCall![0].onSeek(20));
+    state.seeking = false;
+    video.currentTime = 201; fireEvent.timeUpdate(video);
+    video.currentTime = 202; fireEvent.timeUpdate(video);
+    terminalError(video, state); await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(20, expect.objectContaining({ paused: false }));
+  });
+
+  it.each([false, true])("[unknown-partial-eos] refreshes verified EVENT EOF without completion, owned paused=%s", async (paused) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480p.m3u8?generation=transcode-unknown\n")));
+    const refresh = vi.fn(async () => {}), ended = vi.fn(), next = vi.fn();
+    render(<VideoPlayer url="https://server.example/api/stream/unknown-progress/index.m3u8?quality=480p" engine="webview-hls-transcode"
+      title="Unknown partial end" timelineOffsetSeconds={3600} serverOptimized={{ qualities: ["480p"], request: vi.fn() }}
+      refreshCurrentSource={refresh} onEnded={ended} onPlayNext={next} upNext={{ label: "Next" }} onClose={() => {}} />);
+    await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = terminalMedia(video);
+    Object.defineProperty(video, "duration", { configurable: true, value: 30 }); fireEvent.durationChange(video);
+    video.currentTime = 29; fireEvent.timeUpdate(video);
+    if (paused) { state.paused = true; fireEvent.pause(video); }
+    video.currentTime = 30; state.ended = true; state.paused = true; fireEvent.pause(video); fireEvent.ended(video);
+    await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(3630, expect.objectContaining({ paused, volume: 0.35, muted: true, playbackRate: 1.25 }));
+    expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
+    fireEvent.ended(video); await flushTerminal(); expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("[unknown-partial-budget] refuses another EVENT EOF before a successor earns60s and keeps explicit Retry", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480p.m3u8?generation=transcode-unknown\n")));
+    const refresh = vi.fn(async () => {}), ended = vi.fn(), next = vi.fn();
+    const props = { title: "Unknown partial budget", engine: "webview-hls-transcode" as const,
+      serverOptimized: { qualities: ["480p" as const], request: vi.fn() }, refreshCurrentSource: refresh,
+      onEnded: ended, onPlayNext: next, upNext: { label: "Next" }, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://server.example/api/stream/unknown-a/index.m3u8?quality=480p" timelineOffsetSeconds={100} />);
+    await flushTerminal();
+    const endPartial = async () => {
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      const state = terminalMedia(video);
+      Object.defineProperty(video, "duration", { configurable: true, value: 30 }); fireEvent.durationChange(video);
+      video.currentTime = 29; fireEvent.timeUpdate(video);
+      video.currentTime = 30; state.ended = true; state.paused = true; fireEvent.ended(video);
+      await flushTerminal();
+    };
+    await endPartial(); expect(refresh).toHaveBeenCalledTimes(1);
+    view.rerender(<VideoPlayer {...props} url="https://server.example/api/stream/unknown-b/index.m3u8?quality=480p" timelineOffsetSeconds={130} sourceRevision={1} />);
+    await flushTerminal(); await endPartial();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("Retry to request a fresh stream");
+    expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flushTerminal();
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenLastCalledWith(160, expect.objectContaining({ paused: false }));
+  });
+
   it.each([[2, false, 0], [2, true, 0], [4, false, 1.25]] as const)("[terminal-network] refreshes confirmed error=%s with owned paused=%s and failed clock=%s", async (code, paused, failedClock) => {
     const tracks = Object.assign(new EventTarget(), {
       0: { id: "jp", label: "Japanese", language: "jpn", enabled: true }, length: 1,
@@ -15530,7 +15646,7 @@ describe("terminal post-start source recovery", () => {
     expect(onNext).toHaveBeenCalledTimes(1); expect(refresh).not.toHaveBeenCalled();
   });
 
-  it("[terminal-controls] does not fresh-resolve a partial EOS whose original duration is unknown", async () => {
+  it("[terminal-controls] does not fresh-resolve an unknown partial EOS before verified progress", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
     vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480p.m3u8?generation=transcode-terminal\n")));
@@ -15539,7 +15655,10 @@ describe("terminal post-start source recovery", () => {
       title="Unknown total" serverOptimized={{ qualities: ["480p"], request: vi.fn() }} refreshCurrentSource={refresh} onEnded={ended} onClose={() => {}} />);
     await flushTerminal();
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
-    const state = terminalMedia(video); state.ended = true; state.paused = true; fireEvent.ended(video); await flushTerminal();
+    Object.defineProperty(video, "duration", { configurable: true, value: 30 });
+    markCurrentMediaDataReady(video); fireEvent.loadedMetadata(video); fireEvent.canPlay(video);
+    Object.defineProperty(video, "ended", { configurable: true, value: true });
+    fireEvent.ended(video); await flushTerminal();
     expect(refresh).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("Server Optimized ended before the original media completed");
   });

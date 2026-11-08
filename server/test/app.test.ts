@@ -4133,6 +4133,176 @@ describe("DebridStreamer server", () => {
     }
   });
 
+  it.each(["exit", "error"] as const)("transcode: a prepared replacement %s during master read cannot detach current playback", async (failure) => {
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 2 }, fake);
+    let generationLookup: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const root = `/api/stream/${session.id}/`;
+      const first = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=480p` });
+      const currentChild = first.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const currentProcess = spawn.mock.results[0]!.value as ReturnType<Transcoder["spawnHls"]>;
+      const kill = vi.spyOn(currentProcess, "kill");
+      const original = TranscodeRegistry.prototype.generationFor;
+      const order: string[] = [];
+      generationLookup = vi.spyOn(TranscodeRegistry.prototype, "generationFor").mockImplementationOnce(function (this: TranscodeRegistry, ...args: Parameters<TranscodeRegistry["generationFor"]>) {
+        const generation = original.apply(this, args);
+        const preparedProcess = spawn.mock.results[1]!.value as ReturnType<Transcoder["spawnHls"]>;
+        order.push("generation");
+        queueMicrotask(() => {
+          order.push("failure");
+          if (failure === "exit") preparedProcess.emit("exit", 1, null);
+          else preparedProcess.emit("error", new Error("prepared replacement failed during master read"));
+        });
+        return generation;
+      });
+      const interrupted = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=360p` });
+      expect(order).toEqual(["generation", "failure"]);
+      expect(interrupted.statusCode).toBe(404);
+      expect(interrupted.body).not.toContain("#EXTM3U");
+      expect(kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
+    } finally { generationLookup?.mockRestore(); await on.close(); }
+  });
+
+  it("transcode: a prepared replacement superseded during master read cannot detach current playback", async () => {
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 2 }, fake);
+    let generationLookup: ReturnType<typeof vi.spyOn> | undefined;
+    let supersession: Promise<string> | undefined;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const root = `/api/stream/${session.id}/`;
+      const first = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=480p` });
+      const currentChild = first.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const currentProcess = spawn.mock.results[0]!.value as ReturnType<Transcoder["spawnHls"]>;
+      const kill = vi.spyOn(currentProcess, "kill");
+      const original = TranscodeRegistry.prototype.generationFor;
+      const order: string[] = [];
+      generationLookup = vi.spyOn(TranscodeRegistry.prototype, "generationFor").mockImplementationOnce(function (this: TranscodeRegistry, ...args: Parameters<TranscodeRegistry["generationFor"]>) {
+        const generation = original.apply(this, args);
+        order.push("generation");
+        queueMicrotask(() => {
+          order.push("supersession");
+          supersession = this.ensureJob(session.id, "http://127.0.0.1:9/video", { quality: "720p" });
+        });
+        return generation;
+      });
+      const interrupted = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=360p` });
+      expect(order).toEqual(["generation", "supersession"]);
+      expect(interrupted.statusCode).toBe(404);
+      expect(interrupted.body).not.toContain("#EXTM3U");
+      expect(supersession).toBeDefined();
+      await supersession;
+      expect(kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
+    } finally { generationLookup?.mockRestore(); await supersession?.catch(() => undefined); await on.close(); }
+  });
+
+  it("transcode: abandoned prepared replacement keeps current playback and lease alive", async () => {
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 2 }, fake);
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const root = `/api/stream/${session.id}/`;
+      const first = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=480p` });
+      const currentChild = first.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      expect((await request(owner, { method: "GET", url: root + currentChild })).statusCode).toBe(200);
+      const currentProcess = spawn.mock.results[0]!.value as ReturnType<Transcoder["spawnHls"]>;
+      const kill = vi.spyOn(currentProcess, "kill");
+      const prepared = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=360p` });
+      expect(prepared.statusCode).toBe(200);
+      const preparedChild = prepared.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      expect(kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(404);
+      // Segment prefetch is not activation. Neither is a legacy unqualified read.
+      expect((await request(owner, { method: "GET", url: root + preparedChild.replace("360p.m3u8", "360p_seg_00000.ts") })).statusCode).toBe(200);
+      expect((await request(owner, { method: "GET", url: `${root}360p.m3u8` })).statusCode).toBe(404);
+      expect(kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
+      // A committed engine's exact rendition read activates the prepared job.
+      expect((await request(owner, { method: "GET", url: root + preparedChild })).statusCode).toBe(200);
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(404);
+      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(200);
+      // An old in-flight rendition remains readable, but cannot reactivate A.
+      expect((await request(owner, { method: "GET", url: root + currentChild })).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(200);
+      expect(spawn).toHaveBeenCalledTimes(2);
+    } finally { await on.close(); }
+  });
+
+  it.each(["exit", "error"] as const)("transcode: a prepared replacement %s during playlist read leaves current playback alive", async (failure) => {
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 2 }, fake);
+    let lookup: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const root = `/api/stream/${session.id}/`;
+      const first = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=480p` });
+      const currentChild = first.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const currentProcess = spawn.mock.results[0]!.value as ReturnType<Transcoder["spawnHls"]>;
+      const kill = vi.spyOn(currentProcess, "kill");
+      const prepared = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=360p` });
+      const preparedChild = prepared.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const preparedProcess = spawn.mock.results[1]!.value as ReturnType<Transcoder["spawnHls"]>;
+      const originalLookup = TranscodeRegistry.prototype.dirForAsset;
+      const order: string[] = [];
+      lookup = vi.spyOn(TranscodeRegistry.prototype, "dirForAsset").mockImplementationOnce(function (this: TranscodeRegistry, ...args: Parameters<TranscodeRegistry["dirForAsset"]>) {
+        const dir = originalLookup.apply(this, args);
+        expect(dir).not.toBeNull();
+        order.push("lookup");
+        queueMicrotask(() => {
+          order.push("failure");
+          if (failure === "exit") preparedProcess.emit("exit", 1, null);
+          else preparedProcess.emit("error", new Error("prepared replacement failed while reading"));
+        });
+        return dir;
+      });
+      const interrupted = await request(owner, { method: "GET", url: root + preparedChild });
+      expect(order).toEqual(["lookup", "failure"]);
+      expect(interrupted.statusCode).toBe(404);
+      expect(interrupted.body).not.toContain("#EXTM3U");
+      expect(kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
+      expect((await request(owner, { method: "GET", url: root + currentChild })).statusCode).toBe(200);
+      expect(spawn).toHaveBeenCalledTimes(2);
+    } finally { lookup?.mockRestore(); await on.close(); }
+  });
+
+  it("transcode: a prepared replacement cannot be activated by an unauthenticated or other-profile read", async () => {
+    const on = await buildTranscodeApp({ maxTranscodes: 2 });
+    try {
+      const owner = await setupOwner(on);
+      await createProfile(owner, "replacement-other", "replacement-password");
+      const other = await login(on, "replacement-other", "replacement-password");
+      const session = await createRawSession(owner);
+      const root = `/api/stream/${session.id}/`;
+      const first = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=480p` });
+      const currentChild = first.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const prepared = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=360p` });
+      const preparedChild = prepared.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      expect((await request({ app: on, cookies: new Map() }, { method: "GET", url: root + preparedChild })).statusCode).toBe(401);
+      expect((await request(other, { method: "GET", url: root + preparedChild })).statusCode).toBe(404);
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(404);
+      const bearer = { app: on, cookies: new Map<string, string>() };
+      expect((await request(bearer, { method: "GET", url: root + preparedChild, headers: { authorization: session.playbackAuthorization } })).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: root + preparedChild })).statusCode).toBe(200);
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(404);
+    } finally { await on.close(); }
+  });
+
   it("transcode HEAD retention uses authenticated empty current-only fast path without asset body work", async () => {
     const fake = makeFakeTranscoder();
     const spawn = vi.spyOn(fake, "spawnHls");
@@ -4162,6 +4332,8 @@ describe("DebridStreamer server", () => {
       const child = first.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
       const next = await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=360p` });
       const replacement = next.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      expect((await request(owner, { method: "HEAD", url: `/api/stream/${session.id}/${child}` })).statusCode).toBe(200);
+      expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/${replacement}` })).statusCode).toBe(200);
       expect((await request(owner, { method: "HEAD", url: `/api/stream/${session.id}/${child}` })).statusCode).toBe(404);
       expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/${child}` })).statusCode).toBe(200);
       expect((await request(owner, { method: "HEAD", url: `/api/stream/${session.id}/${replacement}` })).statusCode).toBe(200);
@@ -4608,6 +4780,11 @@ describe("DebridStreamer server", () => {
       });
       expect(fixed.statusCode).toBe(200);
       expect(fixed.headers["x-yawf-transcode-quality"]).toBe("360p");
+      const fixedChild = fixed.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/${fixedChild}`,
+      })).statusCode).toBe(200);
       const segment = await request(owner, {
         method: "GET",
         url: `/api/stream/${session.id}/360p_seg_00000.ts`,
@@ -4620,6 +4797,11 @@ describe("DebridStreamer server", () => {
       });
       expect(adaptive.statusCode).toBe(200);
       expect(adaptive.body).toContain("360p.m3u8");
+      const adaptiveChild = adaptive.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/${adaptiveChild}`,
+      })).statusCode).toBe(200);
       expect((await request(owner, {
         method: "GET",
         url: `/api/stream/${session.id}/360p_seg_00000.ts`,
@@ -5088,9 +5270,15 @@ describe("DebridStreamer server", () => {
         url: `/api/stream/${session.id}/1080p_seg_00000.ts`,
       })).statusCode).toBe(200);
 
-      expect((await request(owner, {
+      const replacement = await request(owner, {
         method: "GET",
         url: `/api/stream/${session.id}/index.m3u8?quality=360p`,
+      });
+      expect(replacement.statusCode).toBe(200);
+      const rendition = replacement.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      expect((await request(owner, {
+        method: "GET",
+        url: `/api/stream/${session.id}/${rendition}`,
       })).statusCode).toBe(200);
       expect((await request(owner, {
         method: "GET",
