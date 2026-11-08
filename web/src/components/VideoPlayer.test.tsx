@@ -14690,3 +14690,145 @@ describe("physical HTML media retirement", () => {
     expect(instance.startLoad).toHaveBeenCalledTimes(loads);
   });
 });
+
+
+describe("interrupted webview header exit", () => {
+  function ready(video: HTMLVideoElement) {
+    Object.defineProperties(video, {
+      paused: { configurable: true, value: false },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+      duration: { configurable: true, value: 900 },
+    });
+    fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+  }
+  function hiddenPlaying(layout: "desktop" | "android" = "desktop") {
+    vi.useFakeTimers();
+    if (layout === "android") {
+      deviceKindMock.mockReturnValue("android"); isTauriMock.mockReturnValue(true);
+      Object.defineProperty(window, "__YAWF_TAURI_ANDROID__", { configurable: true, value: true });
+    }
+    const onClose = vi.fn();
+    const props = { url: "https://x/error-exit.mp4", title: "Error exit", onClose };
+    const view = render(<VideoPlayer {...props} />);
+    const pane = screen.getByRole("dialog", { name: "Playing Error exit" });
+    if (layout === "android") expect(pane).toHaveClass("is-touch-player");
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    ready(video);
+    const bar = pane.querySelector(".player-bar")!;
+    const advance = () => act(() => vi.advanceTimersByTime(3_201));
+    advance();
+    expect(bar).not.toHaveClass("is-visible");
+    expect(screen.queryByRole("button", { name: "Close player" })).toBeNull();
+    return { view, props, video, bar, pane, onClose, advance };
+  }
+
+  it.each(["desktop", "android"] as const)("[error-exit] reveals and pins the %s error header with an accessible normal Close", (layout) => {
+    const { video, bar, pane, onClose, advance } = hiddenPlaying(layout);
+    fireMediaError(video);
+    expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
+    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(bar).toHaveClass("is-visible"); expect(bar).not.toHaveAttribute("aria-hidden", "true");
+    // Ordinary activity must not turn the error header into another transient
+    // 3200ms reveal. Do not focus or hover a control until after this assertion.
+    fireEvent.pointerMove(pane);
+    advance(); advance();
+    expect(bar).toHaveClass("is-visible");
+    const close = screen.getByRole("button", { name: "Close player" });
+    const details = screen.getByRole("button", { name: "Player details and shortcuts" });
+    expect(close.tabIndex).toBe(0); expect(details.tabIndex).toBe(0);
+    fireEvent.keyDown(pane, { key: "Tab" });
+    expect(details).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["retry", "source-owner change"] as const)("[error-exit] releases the error pin after %s becomes playable", (action) => {
+    const { view, props, video, bar, advance } = hiddenPlaying();
+    fireMediaError(video);
+    expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
+    expect(bar).toHaveClass("is-visible");
+    advance(); expect(bar).toHaveClass("is-visible");
+    if (action === "retry") fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    else view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+    expect(screen.queryByText("Playback interrupted")).toBeNull();
+    const successor = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(successor).not.toBeNull(); expect(successor).not.toBe(video);
+    ready(successor);
+    advance();
+    expect(bar).not.toHaveClass("is-visible");
+    expect(screen.queryByRole("button", { name: "Close player" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Close player", hidden: true }).tabIndex).toBe(-1);
+  });
+
+  for (const layout of ["desktop", "android"] as const) {
+    for (const menu of ["settings", "captions"] as const) {
+      it.each(["Close", "Escape"] as const)(`[error-modal] restores ${layout} ${menu} ownership to the error pane for %s`, (exit) => {
+        captionMenuMode.actual = true;
+        const { video, pane, bar, onClose } = hiddenPlaying(layout);
+        fireEvent.pointerMove(pane);
+        const menuName = menu === "settings" ? "Playback settings" : "Subtitles";
+        const trigger = screen.getByRole("button", { name: menuName });
+        fireEvent.click(trigger);
+        const ordinary = screen.getByRole("dialog", { name: menuName });
+        expect(ordinary).toHaveFocus();
+        // A live child dialog still owns Escape; the parent cannot waive its
+        // suspension globally just to repair interrupted playback.
+        fireEvent.keyDown(window, { key: "Escape" });
+        expect(screen.queryByRole("dialog", { name: menuName })).toBeNull();
+        expect(onClose).not.toHaveBeenCalled();
+        fireEvent.click(trigger);
+        expect(screen.getByRole("dialog", { name: menuName })).toHaveFocus();
+        if (layout === "android") expect(bar).toHaveAttribute("inert");
+
+        // Resource errors are delivered even while a modal owns user input.
+        fireMediaError(video);
+        expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
+        expect(screen.queryByRole("dialog", { name: menuName })).toBeNull();
+        expect(document.querySelector("video.player-video")).toBeNull();
+        expect(pane).not.toHaveClass("has-touch-menu");
+        expect(bar).not.toHaveAttribute("inert"); expect(bar).not.toHaveAttribute("aria-hidden", "true");
+        const close = screen.getByRole("button", { name: "Close player" });
+        const details = screen.getByRole("button", { name: "Player details and shortcuts" });
+        fireEvent.keyDown(window, { key: "Tab" });
+        expect(details).toHaveFocus();
+        expect(onClose).not.toHaveBeenCalled();
+        if (exit === "Close") fireEvent.click(close);
+        else fireEvent.keyDown(window, { key: "Escape" });
+        expect(onClose).toHaveBeenCalledTimes(1);
+      });
+    }
+  }
+
+  it.each(["desktop", "android"] as const)("[error-modal] preserves independent %s Details modal ownership on an interrupted pane", (layout) => {
+    const { video, onClose } = hiddenPlaying(layout);
+    fireMediaError(video);
+    fireEvent.click(screen.getByRole("button", { name: "Player details and shortcuts" }));
+    const details = screen.getByRole("dialog", { name: "Player details and shortcuts" });
+    expect(details).toHaveFocus();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Player details and shortcuts" })).toBeNull();
+    expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["ready", "failed"] as const)("[error-exit] preserves the separate %s native external panel header", async (state) => {
+    vi.useFakeTimers(); isTauriMock.mockReturnValue(true);
+    if (state === "failed") {
+      playWithMpvMock.mockRejectedValue(new Error("Synthetic native unavailable"));
+      openInExternalPlayerMock.mockRejectedValue(new Error("Synthetic external unavailable"));
+    }
+    render(<VideoPlayer url="https://x/native.mkv" engine="native-mpv" useBuiltInPlayer={false} title="Native exit" onClose={() => {}} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    expect(document.querySelector("video.player-video")).toBeNull();
+    if (state === "failed") expect(screen.getByText("Could not open a player")).toBeInTheDocument();
+    else expect(screen.getByText(/Playing in the bundled mpv/)).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(6_402));
+    expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+    expect(screen.getByRole("button", { name: "Close player" }).tabIndex).toBe(0);
+    expect(screen.queryByRole("button", { name: "Retry playback" })).toBeNull();
+    expect(playWithMpvMock).toHaveBeenCalledTimes(1);
+  });
+});

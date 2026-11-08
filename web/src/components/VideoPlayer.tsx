@@ -1252,7 +1252,9 @@ export function VideoPlayer({
     mode === "webview" &&
     !androidTVNative &&
     ((dk === "ios" && !underTauri) || androidAppUi);
-  const touchMenuOpen = sharedTouchPlayer && (captionsOpen || webMenuOpen);
+  const webviewChildShown = mode === "webview" && externalError == null;
+  const webviewChildMenuOpen = webviewChildShown && (captionsOpen || webMenuOpen);
+  const touchMenuOpen = sharedTouchPlayer && webviewChildMenuOpen;
   const androidOnCloseRef = useRef(onClose);
   const androidOnProgressRef = useRef(onProgress);
   androidOnCloseRef.current = onClose;
@@ -1267,8 +1269,9 @@ export function VideoPlayer({
   const chromeExplicitPointerFocusRef = useRef(false);
   const chromeHideTimer = useRef<number | undefined>(undefined);
   const lastChromeNudgeAt = useRef(Number.NEGATIVE_INFINITY);
+  const webviewErrorPanelShown = mode === "webview" && externalError != null;
   const chromePinned =
-    webviewPending || webviewPaused || webScrubbing || captionsOpen || webMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
+    webviewErrorPanelShown || webviewPending || webviewPaused || webScrubbing || webviewChildMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
   const chromePinnedRef = useRef(chromePinned);
   useLayoutEffect(() => {
     chromePinnedRef.current = chromePinned;
@@ -1276,7 +1279,7 @@ export function VideoPlayer({
   const playerDialogRef = useModalA11y<HTMLDivElement>(
     onClose,
     !useEmbedded,
-    captionsOpen || webMenuOpen || detailsSection != null,
+    webviewChildMenuOpen || detailsSection != null,
   );
 
   const reportAbsolutePosition = useCallback((next: number) => {
@@ -2982,7 +2985,7 @@ export function VideoPlayer({
           />
         )}
 
-        {mode === "webview" && externalError == null ? (
+        {webviewChildShown ? (
           <WebviewPlayer
             key={webviewSourceKey}
             presentation={videoPresentation}
