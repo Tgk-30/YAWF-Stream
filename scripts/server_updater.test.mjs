@@ -1,6 +1,7 @@
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
-import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -286,4 +287,87 @@ test("public status stays readable under UMask 0077 while private state stays re
   assert.match(helper, /const mode = path === PATHS\.status \? 0o644 : 0o600/);
   assert.match(helper, /mkdirSync\(backup, \{ recursive: true, mode: 0o700 \}\)/);
   assert.match(helper, /mkdirSync\(PATHS\.root, \{ recursive: true, mode: 0o700 \}\)/);
+});
+
+
+function activeStreamGuardScript() {
+  const source = readFileSync(new URL("../deploy/updater/yawf-server-update.mjs", import.meta.url), "utf8");
+  const match = /async function activeStreams\(id\) \{[\s\S]*?const script = ("(?:[^"\\]|\\.)*");/.exec(source);
+  assert.ok(match, "The actual installed activity query must be testable");
+  return JSON.parse(match[1]);
+}
+
+function streamGuardFixture(t, rows) {
+  const directory = mkdtempSync(join(tmpdir(), "yawf-updater-grants-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = join(directory, "fixture.sqlite");
+  const db = new DatabaseSync(file);
+  try {
+    db.exec("CREATE TABLE stream_sessions(id TEXT, created_at TEXT, expires_at TEXT, revoked_at TEXT, completed_at TEXT)");
+    const insert = db.prepare("INSERT INTO stream_sessions VALUES(?,?,?,?,?)");
+    for (const [index, row] of rows.entries()) insert.run(String(index), row.created, row.expires, row.revoked, row.completed);
+  } finally { db.close(); }
+  return file;
+}
+
+function validStreamGrant(overrides = {}) {
+  const created = Date.now() - 120_000;
+  return { created: new Date(created).toISOString(), expires: new Date(created + 6 * 60 * 60 * 1000).toISOString(),
+    revoked: null, completed: new Date(created + 51).toISOString(), ...overrides };
+}
+
+function actualActiveGrantCount(file) {
+  const script = activeStreamGuardScript();
+  const databaseLiteral = "'/data/debridstreamer.sqlite'";
+  assert.equal(script.split(databaseLiteral).length, 2, "Only the fixture input path may be replaced");
+  const actual = script.replace(databaseLiteral, JSON.stringify(file));
+  const result = spawnSync(process.execPath, ["-e", actual], { encoding: "utf8", env: {}, timeout: 5000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^\d+$/);
+  return Number(result.stdout);
+}
+
+test("active stream guard counts a future HTTP-completed HLS grant", (t) => {
+  const file = streamGuardFixture(t, [validStreamGrant()]);
+  assert.equal(actualActiveGrantCount(file), 1);
+});
+test("active stream guard retains a future unfinished HTTP transfer", (t) => {
+  const file = streamGuardFixture(t, [validStreamGrant({ completed: null })]);
+  assert.equal(actualActiveGrantCount(file), 1);
+});
+test("active stream guard excludes revoked grants", (t) => {
+  const file = streamGuardFixture(t, [validStreamGrant({ revoked: new Date().toISOString() })]);
+  assert.equal(actualActiveGrantCount(file), 0);
+});
+test("active stream guard excludes expired grants", (t) => {
+  const file = streamGuardFixture(t, [validStreamGrant({ expires: new Date(Date.now() - 60_000).toISOString() })]);
+  assert.equal(actualActiveGrantCount(file), 0);
+});
+test("active stream guard counts completed and unfinished valid grants together", (t) => {
+  const file = streamGuardFixture(t, [validStreamGrant(), validStreamGrant({ completed: null }),
+    validStreamGrant({ revoked: new Date().toISOString() }), validStreamGrant({ expires: new Date(Date.now() - 60_000).toISOString() })]);
+  assert.equal(actualActiveGrantCount(file), 2);
+});
+test("active stream guard recheck detects a completed transfer created during pull", (t) => {
+  const file = streamGuardFixture(t, []);
+  assert.equal(actualActiveGrantCount(file), 0);
+  const db = new DatabaseSync(file), row = validStreamGrant();
+  try { db.prepare("INSERT INTO stream_sessions VALUES(?,?,?,?,?)").run("during-pull", row.created, row.expires, row.revoked, row.completed); }
+  finally { db.close(); }
+  assert.equal(actualActiveGrantCount(file), 1);
+});
+test("active stream guard reads without changing transfer completion or expiry", (t) => {
+  const row = validStreamGrant(), file = streamGuardFixture(t, [row]);
+  assert.equal(actualActiveGrantCount(file), 1);
+  const db = new DatabaseSync(file, { readOnly: true });
+  try { assert.deepEqual({ ...db.prepare("SELECT expires_at, completed_at FROM stream_sessions").get() }, { expires_at: row.expires, completed_at: row.completed }); }
+  finally { db.close(); }
+});
+
+test("active stream guard keeps HTTP completion immutable independently of the count", (t) => {
+  const row = validStreamGrant(), file = streamGuardFixture(t, [row]);
+  actualActiveGrantCount(file);
+  const db = new DatabaseSync(file, { readOnly: true });
+  try { assert.deepEqual({ ...db.prepare("SELECT expires_at, completed_at FROM stream_sessions").get() }, { expires_at: row.expires, completed_at: row.completed }); }
+  finally { db.close(); }
 });
