@@ -1,0 +1,51 @@
+name: iPad destination discovery diagnostic only
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/ipad-destination-diagnostic.yml'
+      - 'scripts/ipad-destination-diagnostic.mjs'
+      - 'scripts/ipad_destination_diagnostic.test.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipad-destination-diagnostic-only
+  cancel-in-progress: false
+
+jobs:
+  diagnostic:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    name: Fresh A16 destination diagnostic, no app tests
+    runs-on: macos-26
+    timeout-minutes: 10
+    env:
+      QA_PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+    steps:
+      - name: Checkout exact diagnostic source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.17.0'
+      - name: Original helpers and isolated diagnostic contracts
+        run: node --test scripts/ipad-native-qa/hosted-run.test.mjs scripts/ipad_destination_diagnostic.test.mjs
+      - name: Fixed destination observations, no canary
+        run: node scripts/ipad-destination-diagnostic.mjs
+      - name: Always validate and clean only the new owned tuple
+        if: always()
+        run: node scripts/ipad-destination-diagnostic.mjs --cleanup-only
+      - name: Retain bounded diagnostic metadata, not native qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipad-destination-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ipad-destination-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}/evidence
+          if-no-files-found: error
+          retention-days: 1
