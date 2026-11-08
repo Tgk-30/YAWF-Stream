@@ -15363,3 +15363,211 @@ describe("mobile background playback lifecycle", () => {
     expect(fixture.fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(heads);
   });
 });
+
+
+describe("terminal post-start source recovery", () => {
+  async function flushTerminal() {
+    await act(async () => { for (let i = 0; i < 12; i += 1) await Promise.resolve(); });
+  }
+  function terminalMedia(video: HTMLVideoElement) {
+    const state = { paused: false, seeking: false, ended: false };
+    for (const key of ["paused", "seeking", "ended"] as const) {
+      Object.defineProperty(video, key, { configurable: true, get: () => state[key] });
+    }
+    Object.defineProperty(video, "duration", { configurable: true, value: 100 });
+    markCurrentMediaDataReady(video);
+    fireEvent.loadedMetadata(video); fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+    video.currentTime = 20.25; fireEvent.timeUpdate(video);
+    video.currentTime = 25.75; fireEvent.timeUpdate(video);
+    video.volume = 0.35; video.muted = true; video.playbackRate = 1.25;
+    return state;
+  }
+  function terminalError(video: HTMLVideoElement, state: { paused: boolean }, code = 2, failedClock = 0) {
+    // A real terminal MediaError can reset the decoder clock and auto-pause.
+    Object.defineProperty(video, "error", { configurable: true, value: { code, message: "Synthetic terminal failure" } });
+    video.currentTime = failedClock; state.paused = true; fireEvent.pause(video); fireEvent.error(video);
+  }
+  beforeEach(() => { vi.useFakeTimers(); });
+
+  it.each([[2, false, 0], [2, true, 0], [4, false, 1.25]] as const)("[terminal-network] refreshes confirmed error=%s with owned paused=%s and failed clock=%s", async (code, paused, failedClock) => {
+    const tracks = Object.assign(new EventTarget(), {
+      0: { id: "jp", label: "Japanese", language: "jpn", enabled: true }, length: 1,
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", { configurable: true, get: () => tracks });
+    const refresh = vi.fn(async () => {}), fallback = vi.fn(async () => "https://x/old-session-compatible.mp4");
+    render(<VideoPlayer url="https://x/old-session.mp4" title="Terminal" timelineOffsetSeconds={3600}
+      refreshCurrentSource={refresh} requestWebviewFallback={fallback} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = terminalMedia(video);
+    if (paused) { state.paused = true; fireEvent.pause(video); }
+    terminalError(video, state, code, failedClock); await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(3625.75, {
+      paused, volume: 0.35, muted: true, playbackRate: 1.25,
+      audioPreference: { id: "jp", language: "jpn" },
+    });
+    expect(fallback).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+  });
+
+  it.each([false, true])("[terminal-eos] refreshes a partial optimized end without completion or losing owned paused=%s", async (paused) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480p.m3u8?generation=transcode-terminal\n")));
+    const refresh = vi.fn(async () => {}), request = vi.fn(), onEnded = vi.fn(), onNext = vi.fn();
+    render(<VideoPlayer url="https://server.example/api/stream/old/index.m3u8?quality=480p" engine="webview-hls-transcode"
+      title="Partial terminal" timelineOffsetSeconds={3600} serverOptimized={{ qualities: ["480p"], request,
+        loadSourceInfo: async () => ({ durationSeconds: 3700, tracks: [] }) }}
+      refreshCurrentSource={refresh} onEnded={onEnded} upNext={{ label: "Next" }} onPlayNext={onNext} onClose={() => {}} />);
+    await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = terminalMedia(video);
+    if (paused) { state.paused = true; fireEvent.pause(video); }
+    state.ended = true; state.paused = true; fireEvent.pause(video); fireEvent.ended(video);
+    await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(3625.75, expect.objectContaining({ paused, volume: 0.35, muted: true, playbackRate: 1.25 }));
+    expect(onEnded).not.toHaveBeenCalled(); expect(onNext).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+  });
+
+  it("[terminal-duplicate] coalesces synchronous terminal errors and EOS while the fresh resolver is pending", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480p.m3u8?generation=transcode-terminal\n")));
+    const pending = deferred<void>(), refresh = vi.fn(() => pending.promise);
+    render(<VideoPlayer url="https://server.example/api/stream/old/index.m3u8?quality=480p" engine="webview-hls-transcode"
+      title="Duplicate terminal" serverOptimized={{ qualities: ["480p"], request: vi.fn(), loadSourceInfo: async () => ({ durationSeconds: 100, tracks: [] }) }}
+      refreshCurrentSource={refresh} onClose={() => {}} />);
+    await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = terminalMedia(video);
+    expect(hlsInstances).toHaveLength(0); // Native HLS owns the element error path.
+    act(() => {
+      terminalError(video, state);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      fireEvent.error(video); state.ended = true; fireEvent.ended(video);
+    });
+    await flushTerminal();
+    expect(refresh).toHaveBeenCalledTimes(1); expect(screen.queryByRole("alert")).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(refresh).toHaveBeenCalledTimes(1); expect(screen.queryByRole("alert")).toBeNull();
+    pending.reject(new Error("Synthetic refresh failed")); await flushTerminal();
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+  });
+
+  it("[terminal-controls] does not fresh-resolve a partial EOS whose original duration is unknown", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480p.m3u8?generation=transcode-terminal\n")));
+    const refresh = vi.fn(async () => {}), ended = vi.fn();
+    render(<VideoPlayer url="https://server.example/api/stream/unknown/index.m3u8?quality=480p" engine="webview-hls-transcode"
+      title="Unknown total" serverOptimized={{ qualities: ["480p"], request: vi.fn() }} refreshCurrentSource={refresh} onEnded={ended} onClose={() => {}} />);
+    await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = terminalMedia(video); state.ended = true; state.paused = true; fireEvent.ended(video); await flushTerminal();
+    expect(refresh).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Server Optimized ended before the original media completed");
+  });
+
+  it("[terminal-budget] shares the one-shot budget with later generations and keeps explicit Retry at the latest point", async () => {
+    const refresh = vi.fn(async () => {}), fallback = vi.fn(async () => "https://x/compatible.mp4");
+    const props = { title: "Budget", refreshCurrentSource: refresh, requestWebviewFallback: fallback, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://x/old.mp4" />);
+    let video = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalError(video, terminalMedia(video)); await flushTerminal();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    view.rerender(<VideoPlayer {...props} url="https://x/fresh.mp4" sourceRevision={2} timelineOffsetSeconds={100} />);
+    video = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalError(video, terminalMedia(video)); await flushTerminal();
+    expect(refresh).toHaveBeenCalledTimes(1); expect(fallback).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Retry to request a fresh stream");
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flushTerminal();
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenLastCalledWith(125.75, expect.objectContaining({ paused: false }));
+  });
+
+  it("[terminal-deadline] preserves the terminal snapshot through the existing fresh-resolution deadline", async () => {
+    const pending = deferred<void>(), refresh = vi.fn(() => pending.promise);
+    render(<VideoPlayer url="https://x/old.mp4" title="Deadline" refreshCurrentSource={refresh} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalError(video, terminalMedia(video)); await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(25.75, expect.objectContaining({ paused: false }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(FRESH_STREAM_RESOLUTION_TIMEOUT_MS); });
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
+    pending.resolve(); await flushTerminal();
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+  });
+
+  it("[terminal-hls] refreshes a started HLS transport only after its two existing internal retries", async () => {
+    const refresh = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/network.m3u8" title="HLS terminal" timelineOffsetSeconds={100}
+      refreshCurrentSource={refresh} onClose={() => {}} />);
+    await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalMedia(video);
+    const hls = hlsInstances[0];
+    act(() => hls.emit("hlsError", { fatal: true, type: "networkError" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(hls.startLoad).toHaveBeenCalledTimes(1); expect(refresh).not.toHaveBeenCalled();
+    act(() => hls.emit("hlsError", { fatal: true, type: "networkError" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(hls.startLoad).toHaveBeenCalledTimes(2); expect(refresh).not.toHaveBeenCalled();
+    act(() => hls.emit("hlsError", { fatal: true, type: "networkError" })); await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(125.75, expect.objectContaining({ paused: false, volume: 0.35, muted: true, playbackRate: 1.25 }));
+    expect(hls.startLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([2, 3, 4])("[terminal-controls] keeps startup error %s in codec fallback rather than fresh resolution", async (code) => {
+    const refresh = vi.fn(async () => {}), fallback = vi.fn(async () => "https://x/compatible.mp4");
+    render(<VideoPlayer url="https://x/startup.mp4" title="Startup" refreshCurrentSource={refresh} requestWebviewFallback={fallback} onClose={() => {}} />);
+    fireMediaError(document.querySelector("video.player-video") as HTMLVideoElement, code); await flushTerminal();
+    expect(refresh).not.toHaveBeenCalled(); expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("[terminal-controls] keeps a post-start decode error in codec fallback", async () => {
+    const refresh = vi.fn(async () => {}), fallback = vi.fn(async () => "https://x/compatible.mp4");
+    render(<VideoPlayer url="https://x/decoder.mp4" title="Decoder" refreshCurrentSource={refresh} requestWebviewFallback={fallback} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalError(video, terminalMedia(video), 3); await flushTerminal();
+    expect(refresh).not.toHaveBeenCalled(); expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("[terminal-controls] keeps pending exact handoff errors out of fresh resolution", async () => {
+    const refresh = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/handoff.mp4" title="Pending" startPositionSeconds={50}
+      initialHandoffState={{ paused: false, volume: 1, muted: false, playbackRate: 1 }} refreshCurrentSource={refresh} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperty(video, "paused", { configurable: true, value: false });
+    fireEvent.playing(video); video.currentTime = 10; fireEvent.timeUpdate(video); fireMediaError(video, 2);
+    await flushTerminal(); expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("[terminal-controls] retains usable post-start codec fallback without a fresh resolver", async () => {
+    const fallback = vi.fn(async () => "https://x/compatible.mp4");
+    render(<VideoPlayer url="https://x/local.mp4" title="Local" requestWebviewFallback={fallback} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalError(video, terminalMedia(video)); await flushTerminal();
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("video.player-video")).not.toBe(video);
+  });
+
+  it.each([false, true])("[terminal-controls] leaves normal completion and auto-advance intact for partial=%s", async (partial) => {
+    const refresh = vi.fn(async () => {}), ended = vi.fn(), next = vi.fn();
+    if (partial) {
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480p.m3u8?generation=transcode-terminal\n")));
+    }
+    render(<VideoPlayer url={partial ? "https://server.example/api/stream/complete/index.m3u8?quality=480p" : "https://x/complete.mp4"}
+      engine={partial ? "webview-hls-transcode" : "webview-direct"} title="Complete" refreshCurrentSource={refresh} onEnded={ended}
+      serverOptimized={partial ? { qualities: ["480p"], request: vi.fn(), loadSourceInfo: async () => ({ durationSeconds: 100, tracks: [] }) } : undefined}
+      upNext={{ label: "Next" }} onPlayNext={next} onClose={() => {}} />);
+    await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = terminalMedia(video);
+    video.currentTime = 98; fireEvent.timeUpdate(video);
+    state.ended = true; state.paused = true; video.currentTime = 100; fireEvent.ended(video);
+    await flushTerminal(); expect(refresh).not.toHaveBeenCalled(); expect(ended).toHaveBeenCalledTimes(1); expect(next).toHaveBeenCalledTimes(1);
+  });
+});
