@@ -827,12 +827,15 @@ interface BrowserAudioVideoElement extends HTMLVideoElement {
 const WebviewScrubber = memo(
   forwardRef<
     WebviewScrubberHandle,
-    Omit<React.ComponentProps<typeof ScrubBar>, "currentTime"> & { active: boolean }
+    Omit<React.ComponentProps<typeof ScrubBar>, "currentTime" | "onSeekPreview"> & { active: boolean }
   >(function WebviewScrubber({ duration, active, ...props }, ref) {
     const [currentTime, setCurrentTime] = useState(0);
     const latestTimeRef = useRef(0);
     const activeRef = useRef(active);
     activeRef.current = active;
+    // ScrubBar owns the transient thumb/time preview. Only onSeek may commit
+    // release or keyboard input to media; pointer preview must remain local.
+    const keepPreviewLocal = useCallback(() => {}, []);
 
     const flush = useCallback(() => {
       const next = latestTimeRef.current;
@@ -854,7 +857,7 @@ const WebviewScrubber = memo(
       if (active) flush();
     }, [active, flush]);
 
-    return <ScrubBar {...props} duration={duration} currentTime={currentTime} />;
+    return <ScrubBar {...props} duration={duration} currentTime={currentTime} onSeekPreview={keepPreviewLocal} />;
   }),
 );
 
@@ -6909,7 +6912,6 @@ function WebviewPlayer({
           onHover={thumbs.onHover}
           onLeave={thumbs.onLeave}
           onSeek={seek}
-          onSeekPreview={(time) => seek(time, false)}
           onScrubbingChange={updateScrubbing}
           disabled={!chromeVisible}
         />
@@ -7163,7 +7165,6 @@ function WebviewPlayer({
               onHover={thumbs.onHover}
               onLeave={thumbs.onLeave}
               onSeek={seek}
-              onSeekPreview={(time) => seek(time, false)}
               onScrubbingChange={updateScrubbing}
               disabled={!chromeVisible}
               touchPresentation

@@ -6874,6 +6874,130 @@ describe("WebviewPlayer", () => {
     await waitFor(() => expect(hlsInstances).toHaveLength(2));
   });
 
+  function realLocalScrub(wasPaused = false, layout: "desktop" | "touch" = "desktop") {
+    scrubBarMode.actual = true;
+    deviceKindMock.mockReturnValue(layout === "touch" ? "ios" : "mac");
+    const request = vi.fn();
+    const props = { url: "https://x/preview.mp4", title: "Local preview owner", onClose: () => {}, serverOptimized: { qualities: ["480p"] as const, request } };
+    const view = render(<VideoPlayer {...props} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    let currentTime = 100;
+    const writes = vi.fn((value: number) => { currentTime = value; });
+    Object.defineProperties(video, {
+      duration: { configurable: true, value: 1_000 },
+      currentTime: { configurable: true, get: () => currentTime, set: writes },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+      paused: { configurable: true, value: wasPaused },
+    });
+    fireEvent.loadedMetadata(video); fireEvent.canPlay(video);
+    if (wasPaused) fireEvent.pause(video);
+    else { fireEvent.play(video); fireEvent.playing(video); }
+    fireEvent.timeUpdate(video);
+    writes.mockClear();
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    const captures = new Set<number>();
+    slider.setPointerCapture = vi.fn((id: number) => { captures.add(id); });
+    slider.hasPointerCapture = vi.fn((id: number) => captures.has(id));
+    slider.releasePointerCapture = vi.fn((id: number) => { captures.delete(id); });
+    return { video, slider, writes, request, view, props, nativeClock: (time: number) => { currentTime = time; fireEvent.timeUpdate(video); } };
+  }
+
+  for (const layout of ["desktop", "touch"] as const) {
+    it.each([true, false])(`[preview] keeps ${layout} pointer motion media-free while paused=%s and commits only its owner release`, (wasPaused) => {
+      const { video, slider, writes, request, nativeClock } = realLocalScrub(wasPaused, layout);
+      const playCalls = vi.mocked(video.play).mock.calls.length, pauseCalls = vi.mocked(video.pause).mock.calls.length;
+      fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+      expect(writes).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+      expect(slider).toHaveAttribute("aria-valuenow", "200");
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+      expect(writes).not.toHaveBeenCalled(); expect(video.currentTime).toBe(100);
+      expect(slider).toHaveAttribute("aria-valuenow", "800");
+      expect(slider.querySelector(".scrubbar-fill")).toHaveStyle({ transform: "scaleX(0.8)" });
+      nativeClock(101);
+      expect(slider).toHaveAttribute("aria-valuenow", "800");
+      // A second pointer cannot commit or steal the original gesture.
+      fireEvent.pointerDown(slider, { pointerId: 8, pointerType: "touch", clientX: 90 });
+      fireEvent.pointerUp(slider, { pointerId: 8, pointerType: "touch", clientX: 90 });
+      expect(writes).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+      expect(slider).toHaveAttribute("aria-valuenow", "800");
+      fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 85 });
+      expect(writes.mock.calls).toEqual([[850]]); expect(video.currentTime).toBe(850);
+      expect(slider).toHaveAttribute("aria-valuenow", "850");
+      expect(request).not.toHaveBeenCalled(); expect(video.paused).toBe(wasPaused);
+      expect(video.play).toHaveBeenCalledTimes(playCalls); expect(video.pause).toHaveBeenCalledTimes(pauseCalls);
+    });
+  }
+
+  it.each(["hls.js", "native Safari"])("[preview] leaves in-window %s media and preparation untouched until release", async (renderer) => {
+    if (renderer === "native Safari") {
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    }
+    const { slider, current, request } = await prepareRealTouchScrub();
+    let localTime = current.currentTime;
+    const writes = vi.fn((value: number) => { localTime = value; });
+    Object.defineProperty(current, "currentTime", { configurable: true, get: () => localTime, set: writes });
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 40 });
+    fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 40.2 });
+    expect(writes).not.toHaveBeenCalled(); expect(request).toHaveBeenCalledTimes(1);
+    expect(slider).toHaveAttribute("aria-valuenow", "402");
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 40.6 });
+    expect(writes).toHaveBeenCalledTimes(1); expect(writes.mock.calls[0][0]).toBeCloseTo(11);
+    expect(request).toHaveBeenCalledTimes(1); expect(current.paused).toBe(true);
+    fireEvent.seeked(current);
+  });
+
+  it.each(["pointerCancel", "lostPointerCapture"] as const)("[preview] abandons %s without any media write or late commit", (terminal) => {
+    const { slider, writes, request } = realLocalScrub(false, "touch");
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+    expect(writes).not.toHaveBeenCalled();
+    fireEvent[terminal](slider, { pointerId: 7, pointerType: "touch" });
+    expect(slider).toHaveAttribute("aria-valuenow", "100");
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+    expect(writes).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each(["source replacement", "unmount"] as const)("[preview] retires %s without committing the old rail's pointer intent", (action) => {
+    const { slider, writes, request, view, props } = realLocalScrub();
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+    expect(writes).not.toHaveBeenCalled();
+    if (action === "unmount") view.unmount();
+    else view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+    expect(slider.isConnected).toBe(false);
+    expect(slider.releasePointerCapture).toHaveBeenCalledWith(7);
+    const successor = document.querySelector("video.player-video") as HTMLVideoElement | null;
+    const successorTime = successor?.currentTime;
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+    expect(writes).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+    expect(successor?.currentTime).toBe(successorTime);
+  });
+
+  it.each([[-20, 0], [140, 1_000]])("[preview] commits a clamped tap release at x=%s exactly once", (clientX, expected) => {
+    const { slider, writes, video } = realLocalScrub(true);
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX });
+    expect(writes).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX });
+    expect(writes.mock.calls).toEqual([[expected]]); expect(video.paused).toBe(true);
+  });
+
+  it("[preview] pins real scrubbing chrome then disables the canceled rail without a late commit", () => {
+    vi.useFakeTimers();
+    const { slider, writes } = realLocalScrub(false, "touch");
+    const bar = document.querySelector(".player-bar")!;
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    expect(writes).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(3_201));
+    expect(bar).toHaveClass("is-visible");
+    fireEvent.pointerCancel(slider, { pointerId: 7, pointerType: "touch" });
+    act(() => vi.advanceTimersByTime(3_201));
+    expect(bar).not.toHaveClass("is-visible"); expect(slider).toHaveAttribute("tabindex", "-1");
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+    expect(writes).not.toHaveBeenCalled();
+  });
+
   it("keeps real local touch previews and keyboard seeks immediate", () => {
     scrubBarMode.actual = true;
     render(<VideoPlayer url="https://x/movie.mp4" title="Local touch" onClose={() => {}} />);
@@ -6883,9 +7007,11 @@ describe("WebviewPlayer", () => {
     const slider = screen.getByRole("slider", { name: "Seek" });
     slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
     fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
-    expect(video.currentTime).toBe(200);
+    expect(video.currentTime).toBe(0);
+    expect(slider).toHaveAttribute("aria-valuenow", "200");
     fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
-    expect(video.currentTime).toBe(800);
+    expect(video.currentTime).toBe(0);
+    expect(slider).toHaveAttribute("aria-valuenow", "800");
     fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 85 });
     expect(video.currentTime).toBe(850);
     fireEvent.timeUpdate(video);
