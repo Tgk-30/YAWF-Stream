@@ -14046,11 +14046,11 @@ describe("server generation HEAD retention", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
     expect(document.querySelector("video.player-video")).toBeNull();
-    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25 });
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
     await flushLease();
     expect(refresh).toHaveBeenCalledTimes(2);
-    expect(refresh).toHaveBeenLastCalledWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25 });
+    expect(refresh).toHaveBeenLastCalledWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
     expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
   });
   it("does not offer old-URL Retry when an expired owner has no fresh resolver", async () => {
@@ -15272,7 +15272,7 @@ describe("mobile background playback lifecycle", () => {
     const initialPlayCalls = vi.mocked(old.play).mock.calls.length;
     old.currentTime = 7.25; old.volume = 0.4; old.muted = true; old.playbackRate = 1.25;
     await sleepPage(fixture.expire);
-    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused, volume: 0.4, muted: true, playbackRate: 1.25 });
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
     expect(old.play).toHaveBeenCalledTimes(initialPlayCalls);
     expect(document.querySelector("video.player-video")).toBeNull();
     expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
@@ -15294,6 +15294,170 @@ describe("mobile background playback lifecycle", () => {
     expect(fresh.play).toHaveBeenCalledTimes(freshPlayCalls + (paused ? 0 : 1));
     expect(screen.queryByRole("alert")).toBeNull(); expect(state.paused).toBe(paused);
     expect(fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+
+  async function ownedLease(status: number) {
+    layout(true);
+    hlsIsSupported.mockReturnValue(false);
+    const fixture = leaseFetch(status);
+    const tracks = Object.assign(new EventTarget(), {
+      0: { id: "jp", label: "Japanese", language: "jpn", enabled: true }, length: 1,
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", { configurable: true, get: () => tracks });
+    const refresh = vi.fn(async (_position: number, _state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => {});
+    const props = { title: "Owned lease snapshot", serverOptimized: { ...optimized,
+      loadSourceInfo: async () => ({ durationSeconds: 1000, tracks: [] }) }, refreshCurrentSource: refresh, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url={master} engine="webview-hls-transcode" />);
+    await flush();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = mediaState(video);
+    Object.defineProperties(video, {
+      duration: { configurable: true, value: 1000 },
+      seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 1000 } },
+    });
+    markCurrentMediaDataReady(video); fireEvent.loadedMetadata(video);
+    fireEvent.play(video); fireEvent.playing(video);
+    video.currentTime = 299; fireEvent.timeUpdate(video);
+    video.currentTime = 300; fireEvent.timeUpdate(video);
+    video.volume = 0.4; video.muted = true; video.playbackRate = 1.25;
+    expect(hlsInstances).toHaveLength(0); // Native HLS, not the hls.js error path.
+    return { ...fixture, refresh, props, view, video, state };
+  }
+  function resetPausedDecoder(f: Awaited<ReturnType<typeof ownedLease>>) {
+    f.video.currentTime = 0; f.state.paused = true;
+    fireEvent.timeUpdate(f.video); fireEvent.pause(f.video); fireEvent.timeUpdate(f.video);
+  }
+  async function foregroundExpired(f: Awaited<ReturnType<typeof ownedLease>>) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_001); });
+    f.expire();
+    act(() => window.dispatchEvent(new Event("pageshow")));
+    await flush();
+  }
+
+  it.each([[404, "pause-before-hide"], [403, "pause-before-hide"], [404, "hide-before-pause"], [403, "hide-before-pause"]] as const)(
+    "[lease-owned-snapshot] renew %s preserves playing300 after %s and decoderzero timeupdates", async (status, order) => {
+      const f = await ownedLease(status);
+      if (order === "pause-before-hide") resetPausedDecoder(f);
+      act(() => window.dispatchEvent(new Event("pagehide")));
+      if (order === "hide-before-pause") resetPausedDecoder(f);
+      await foregroundExpired(f);
+      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: { id: "jp", language: "jpn" } }));
+    },
+  );
+
+  it("[lease-owned-snapshot] explicit Pause before hiding retains paused300 despite decoderzero", async () => {
+    const f = await ownedLease(404);
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    f.state.paused = true; fireEvent.pause(f.video);
+    act(() => window.dispatchEvent(new Event("pagehide")));
+    resetPausedDecoder(f); await foregroundExpired(f);
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: true }));
+  });
+
+  it.each([0, 100])("[lease-owned-snapshot] pending requested seek%s survives hidden pause without using stale300", async (target) => {
+    const f = await ownedLease(404);
+    fireEvent.keyDown(window, { key: String(target / 100) });
+    expect(f.video.currentTime).toBe(target);
+    f.state.seeking = true; fireEvent.seeking(f.video);
+    act(() => window.dispatchEvent(new Event("pagehide")));
+    resetPausedDecoder(f); await foregroundExpired(f);
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }));
+  });
+
+  it.each([0, 100])("[lease-owned-snapshot] confirmed requested seek%s remains legitimate after hidden reset", async (target) => {
+    const f = await ownedLease(404);
+    fireEvent.keyDown(window, { key: String(target / 100) });
+    expect(f.video.currentTime).toBe(target);
+    f.state.seeking = true; fireEvent.seeking(f.video);
+    f.state.seeking = false; fireEvent.seeked(f.video);
+    act(() => window.dispatchEvent(new Event("pagehide")));
+    resetPausedDecoder(f); await foregroundExpired(f);
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }));
+  });
+
+  it("[lease-owned-snapshot] visible pause without suspension remains genuine pause intent", async () => {
+    const f = await ownedLease(404);
+    f.state.paused = true; fireEvent.pause(f.video); f.expire();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); }); await flush();
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: true }));
+  });
+
+  it("[lease-owned-snapshot] explicit Play supersedes an earlier visible Pause before hiding", async () => {
+    const f = await ownedLease(403);
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    f.state.paused = true; fireEvent.pause(f.video);
+    fireEvent.click(screen.getByRole("button", { name: "Play" }));
+    f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video);
+    resetPausedDecoder(f); act(() => window.dispatchEvent(new Event("pagehide")));
+    await foregroundExpired(f);
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }));
+  });
+
+  it.each([0, 30_000])("[lease-owned-pause-controls] visible native pause held%s ms stays paused through hide", async (held) => {
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    try {
+      const f = await ownedLease(404);
+      f.state.paused = true; fireEvent.pause(f.video);
+      await act(async () => { await vi.advanceTimersByTimeAsync(held); });
+      act(() => window.dispatchEvent(new Event("pagehide")));
+      if (held > 0) resetPausedDecoder(f); // A later reset cannot revoke an established pause.
+      await foregroundExpired(f);
+      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: true }));
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each([[0, true], [0, false], [100, true]] as const)("[lease-owned-pause-controls] native media seek%s timeupdate=%s remains authoritative without an app pendingseek", async (target, timeupdate) => {
+    const f = await ownedLease(404);
+    f.state.seeking = true; fireEvent.seeking(f.video);
+    f.video.currentTime = target;
+    if (timeupdate) fireEvent.timeUpdate(f.video);
+    f.state.seeking = false; fireEvent.seeked(f.video);
+    act(() => window.dispatchEvent(new Event("pagehide")));
+    resetPausedDecoder(f); await foregroundExpired(f);
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }));
+  });
+
+  it("[lease-owned-snapshot] quiet replay1 and2 before expired HEAD settles cannot replace owned300", async () => {
+    const f = await ownedLease(404);
+    resetPausedDecoder(f); act(() => window.dispatchEvent(new Event("pagehide")));
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_001); });
+    f.expire();
+    act(() => {
+      window.dispatchEvent(new Event("pageshow"));
+      f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video);
+      f.video.currentTime = 1; fireEvent.timeUpdate(f.video);
+      f.video.currentTime = 2; fireEvent.timeUpdate(f.video);
+    });
+    await flush();
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }));
+  });
+
+  it.each(["Pause", "Play"] as const)("[lease-clock-intent] explicit %s cannot authorize quiet replay2 as the new clock", async (intent) => {
+    const f = await ownedLease(404);
+    const head = deferred<Response>();
+    resetPausedDecoder(f); act(() => window.dispatchEvent(new Event("pagehide")));
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_001); });
+    f.fetcher.mockImplementation(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? head.promise : new Response(manifest));
+    act(() => window.dispatchEvent(new Event("pageshow")));
+    await flush();
+    f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video);
+    f.video.currentTime = 1; fireEvent.timeUpdate(f.video);
+    f.video.currentTime = 2; fireEvent.timeUpdate(f.video);
+    if (intent === "Play") { f.state.paused = true; fireEvent.pause(f.video); }
+    fireEvent.click(screen.getByRole("button", { name: intent }));
+    f.state.paused = intent === "Pause";
+    fireEvent(f.video, new Event(f.state.paused ? "pause" : "play"));
+    head.resolve(new Response(null, { status: 404 })); await flush();
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: intent === "Pause" }));
+  });
+
+  it("[lease-owned-snapshot] terminal failure after hidden reset uses the same owned300 playing snapshot", async () => {
+    const f = await ownedLease(404);
+    resetPausedDecoder(f); act(() => window.dispatchEvent(new Event("pagehide")));
+    Object.defineProperty(f.video, "error", { configurable: true, value: { code: 2 } });
+    fireEvent.error(f.video); await flush();
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }));
   });
 
   it("[resume-lease] bounds StrictMode automatic expiry recovery then retries the same paused snapshot without old attach", async () => {
@@ -15318,7 +15482,7 @@ describe("mobile background playback lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Preparing fresh stream" }));
     await flush();
     expect(refresh).toHaveBeenCalledTimes(2);
-    expect(refresh.mock.calls[0]).toEqual([3607.25, { paused: true, volume: 0.3, muted: true, playbackRate: 1.5 }]);
+    expect(refresh.mock.calls[0]).toEqual([3607.25, { paused: true, volume: 0.3, muted: true, playbackRate: 1.5, audioPreference: null }]);
     expect(refresh.mock.calls[1]).toEqual(refresh.mock.calls[0]);
     pending.resolve(); retry.resolve(); await flush();
     expect(document.querySelector("video.player-video")).toBeNull();
