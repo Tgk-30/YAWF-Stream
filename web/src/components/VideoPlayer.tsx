@@ -3088,6 +3088,7 @@ export function VideoPlayer({
               void handleWebviewPlaybackError(message, exactHandoffPending, recovery)
             }
             onPlaybackStall={recoverPostStartStall}
+            canRefreshSource={refreshCurrentSource != null}
             onOpenExternalPlayer={() => void openExternalPlayback()}
             onCopyExternalLink={mobileTauri || browserExternalTarget != null
               ? () => void copyExternalPlaybackLink()
@@ -3206,6 +3207,7 @@ function WebviewPlayer({
   externalHandoffVideoRef,
   onPlaybackError,
   onPlaybackStall,
+  canRefreshSource,
   onOpenExternalPlayer,
   onCopyExternalLink,
   nativeExternalChooser,
@@ -3301,6 +3303,7 @@ function WebviewPlayer({
     absolutePositionSeconds: number,
     handoffState: PlaybackHandoffState,
   ) => Promise<boolean>;
+  canRefreshSource: boolean;
   onOpenExternalPlayer: () => void;
   onCopyExternalLink?: () => void;
   nativeExternalChooser: boolean;
@@ -3363,6 +3366,7 @@ function WebviewPlayer({
   onAbsolutePositionChange: (absolutePositionSeconds: number) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const terminalRecoveryVideoRef = useRef<HTMLVideoElement | null>(null);
   const captionViewportRef = useRef<HTMLDivElement | null>(null);
   const captionControlsRef = useRef<HTMLDivElement | null>(null);
   const setVideoElement = useCallback((element: HTMLVideoElement | null) => {
@@ -4744,6 +4748,8 @@ function WebviewPlayer({
   onPlaybackErrorRef.current = onPlaybackError;
   const onPlaybackStallRef = useRef(onPlaybackStall);
   onPlaybackStallRef.current = onPlaybackStall;
+  const canRefreshSourceRef = useRef(canRefreshSource);
+  canRefreshSourceRef.current = canRefreshSource;
   // Resume position is captured in a ref + a one-shot guard so we seek exactly
   // once, when metadata first loads, without re-subscribing the effect.
   const startPositionRef = useRef(startPositionSeconds);
@@ -4861,7 +4867,8 @@ function WebviewPlayer({
     let lastPosition = Number.isFinite(video.currentTime) ? video.currentTime : 0;
     let lastBufferedFrontier = Number.NaN;
     const watchdog = new PlaybackStallWatchdog(() => {
-      if (!active || videoRef.current !== video || stallWatchdogRef.current !== watchdog) return;
+      if (!active || videoRef.current !== video || stallWatchdogRef.current !== watchdog ||
+        terminalRecoveryVideoRef.current === video) return;
       const liveState = {
         ...stallStateRef.current,
         paused: video.paused,
@@ -5271,6 +5278,7 @@ function WebviewPlayer({
         optimizedTimelineIsPartial &&
         (absoluteDuration == null || absolutePosition < absoluteDuration - 10)
       ) {
+        if (absoluteDuration != null && recoverTerminalPlayback(video)) return;
         onAbsolutePositionChange(absolutePosition);
         onPlaybackErrorRef.current(
           "Server Optimized ended before the original media completed.",
@@ -5309,7 +5317,7 @@ function WebviewPlayer({
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
     const onPause = () => {
-      if (video.error == null && !suspendedRef.current && !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null) {
+      if (video.error == null && !video.ended && !suspendedRef.current && !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null) {
         ownedPlaybackPausedRef.current = true;
       }
       verifiedPlaybackPlayingRef.current = false;
@@ -5832,6 +5840,7 @@ function WebviewPlayer({
         }
         stopLeaseRef.current();
         recordDiagnostic("player", "hls.fatal", "error", data.type);
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && recoverTerminalPlayback(element)) return;
         onPlaybackErrorRef.current(
           data.type === Hls.ErrorTypes.NETWORK_ERROR
             ? "The stream stopped responding after two retries. Try again or choose another stream."
@@ -6011,7 +6020,7 @@ function WebviewPlayer({
   };
 
   const currentRecoveryState = (video: HTMLVideoElement): PlaybackHandoffState => ({
-    paused: video.error == null ? video.paused : ownedPlaybackPausedRef.current,
+    paused: video.error == null && !video.ended ? video.paused : ownedPlaybackPausedRef.current,
     volume: Number.isFinite(video.volume) ? Math.min(1, Math.max(0, video.volume)) : 1,
     muted: video.muted,
     playbackRate: Number.isFinite(video.playbackRate) && video.playbackRate > 0 ? video.playbackRate : 1,
@@ -6042,6 +6051,30 @@ function WebviewPlayer({
           : pending?.state.paused ?? current.paused,
       },
     };
+  };
+  const recoverTerminalPlayback = (video: HTMLVideoElement): boolean => {
+    if (
+      !canRefreshSourceRef.current ||
+      videoRef.current !== video ||
+      !verifiedPlaybackProgressReportedRef.current ||
+      exactHandoffPendingRef.current ||
+      pendingNativeHlsSeekRef.current != null
+    ) return false;
+    // A terminal transport failure is not a codec incompatibility. Re-resolve
+    // through the same owner-fenced, one-shot recovery used by the watchdog,
+    // instead of preparing another decoder against the potentially dead grant.
+    // Fence synchronously: the browser can queue error, pause and ended before
+    // the asynchronous parent resolver publishes a replacement.
+    if (terminalRecoveryVideoRef.current === video) return true;
+    terminalRecoveryVideoRef.current = video;
+    const snapshot = captureRecoverySnapshot(video);
+    if (video.error != null && pendingRecoverySeekRef.current == null) {
+      snapshot.position = Math.max(0, lastObservedMediaTimeRef.current + timelineOffsetRef.current);
+    }
+    stopLeaseRef.current();
+    stallWatchdogRef.current?.stop();
+    void onPlaybackStallRef.current(snapshot.position, snapshot.state);
+    return true;
   };
   const assignRequestedSeek = (video: HTMLVideoElement, localTarget: number, absoluteTarget: number) => {
     // A failed decoder can reset currentTime before error is delivered. Keep
@@ -6918,6 +6951,7 @@ function WebviewPlayer({
             // a playback failure; later readiness/progress remains authoritative.
             if (mediaError == null) return;
             const failedVideo = event.currentTarget;
+            if ((mediaError.code === 2 || mediaError.code === 4) && recoverTerminalPlayback(failedVideo)) return;
             stopLeaseRef.current();
             onPlaybackErrorRef.current(
               mediaErrorMessage(mediaError),
