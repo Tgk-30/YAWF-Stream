@@ -2379,6 +2379,57 @@ describe("prepared replacement activation", () => {
     };
     return { ...f, original, originalGeneration, replacement, replacementGeneration, pointer, activate, cleanup };
   }
+  function touchRetained(f: Awaited<ReturnType<typeof fixture>>, asset = "360p.m3u8", generation = f.replacementGeneration, session = "prepared") {
+    // Baseline equivalent of the existing HEAD route, without an absent-method failure.
+    const registry = f.registry as typeof f.registry & { touchRetainedGeneration?: (id: string, asset: string, generation: string) => boolean };
+    return (registry.touchRetainedGeneration ?? registry.touchCurrentGeneration).call(registry, session, asset, generation);
+  }
+
+  it("[retained-ready] HEAD-equivalent renewal keeps prepared output alive without activating or retiring its current reader", async () => {
+    const f = await fixture();
+    const state = f.registry as unknown as { jobs: Map<string, { lastAccess: number }>; prepared: Map<string, { lastAccess: number }> };
+    const original = state.jobs.get("prepared")!, prepared = state.prepared.get("prepared")!;
+    let now = prepared.lastAccess + 1; const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const originalAccess = original.lastAccess;
+      expect(f.registry.touchCurrentGeneration("prepared", "360p.m3u8", f.replacementGeneration)).toBe(false);
+      expect(touchRetained(f)).toBe(true); expect(prepared.lastAccess).toBe(now);
+      expect(original.lastAccess).toBe(originalAccess); expect(f.pointer()).toBe(f.original);
+      for (let index = 0; index < 3; index += 1) {
+        now += 60_000;
+        expect(f.registry.touchCurrentGeneration("prepared", "480p.m3u8", f.originalGeneration)).toBe(true);
+        expect(touchRetained(f)).toBe(true);
+        (f.registry as unknown as { reap(): void }).reap();
+      }
+      expect(state.jobs.get("prepared")).toBe(original); expect(state.prepared.get("prepared")).toBe(prepared);
+      expect(f.pointer()).toBe(f.original); expect(f.children.map(child => child.kills)).toEqual([0, 0]);
+      expect(existsSync(f.original)).toBe(true); expect(existsSync(f.replacement)).toBe(true);
+      expect(f.activate()).toBe(f.replacement); expect(f.pointer()).toBe(f.replacement);
+      expect(f.children[0]!.kills).toBe(1);
+      expect(touchRetained(f, "480p.m3u8", f.originalGeneration)).toBe(false);
+      expect(touchRetained(f)).toBe(true);
+    } finally { clock.mockRestore(); await f.cleanup(); }
+  });
+
+  it.each(["failed", "cancelled", "disposed", "idle", "wrong-session", "wrong-generation", "missing", "segment", "master", "stale-lifecycle", "closed"] as const)("[retained-controls] rejects %s without touching either retained owner", async (kind) => {
+    const f = await fixture();
+    const state = f.registry as unknown as { lifecycle: string; prepared: Map<string, { lastAccess: number; failed: boolean; cancelled: boolean; disposed: boolean; lifecycleGeneration: number }>; jobs: Map<string, { lastAccess: number }> };
+    const job = state.prepared.get("prepared")!, current = state.jobs.get("prepared")!;
+    const before = job.lastAccess, currentBefore = current.lastAccess, generation = job.lifecycleGeneration;
+    const clock = kind === "idle" ? vi.spyOn(Date, "now").mockReturnValue(before + 120_001) : null;
+    try {
+      if (kind === "failed" || kind === "cancelled" || kind === "disposed") job[kind] = true;
+      if (kind === "stale-lifecycle") job.lifecycleGeneration -= 1;
+      if (kind === "closed") state.lifecycle = "stopping";
+      const asset = kind === "missing" ? "720p.m3u8" : kind === "segment" ? "360p_seg_00000.ts" : kind === "master" ? "stream.m3u8" : kind === "closed" ? "480p.m3u8" : "360p.m3u8";
+      expect(touchRetained(f, asset, kind === "wrong-generation" ? "transcode-wrong" : kind === "closed" ? f.originalGeneration : f.replacementGeneration, kind === "wrong-session" ? "other" : "prepared")).toBe(false);
+      expect(job.lastAccess).toBe(before); expect(current.lastAccess).toBe(currentBefore);
+      expect(f.pointer()).toBe(f.original); expect(f.children[0]!.kills).toBe(0);
+    } finally {
+      clock?.mockRestore(); job.failed = false; job.cancelled = false; job.disposed = false; job.lifecycleGeneration = generation; state.lifecycle = "open"; await f.cleanup();
+    }
+  });
+
   it("discarded ready replacement never starts the active reader retirement grace", async () => {
     const f = await fixture();
     try {

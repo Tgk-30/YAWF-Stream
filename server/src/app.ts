@@ -6526,7 +6526,7 @@ function registerRoutes(
       if (
         typeof generation !== "string" ||
         !/^transcode-[A-Za-z0-9_-]{1,100}$/.test(generation) ||
-        !transcode.registry.touchCurrentGeneration(row.id, asset, generation)
+        !transcode.registry.touchRetainedGeneration(row.id, asset, generation)
       ) throw httpError(404, "Transcode asset not found.");
       return reply.status(200).send();
     }

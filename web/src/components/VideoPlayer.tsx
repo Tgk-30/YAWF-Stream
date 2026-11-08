@@ -3415,6 +3415,7 @@ function WebviewPlayer({
   const documentSuspendedRef = useRef(document.visibilityState === "hidden");
   const stallWatchdogRef = useRef<PlaybackStallWatchdog | null>(null);
   const recoveryProgressWindowRef = useRef<PlaybackRecoveryProgress | null>(null);
+  const rearmHlsRecoveryRef = useRef<((video: HTMLVideoElement) => void) | null>(null);
   const startupReadyRef = useRef(false);
   const stallStateRef = useRef<PlaybackStallState>({
     started: false,
@@ -5052,8 +5053,9 @@ function WebviewPlayer({
         !video.paused && !video.ended && !video.seeking && !rendererSeekingRef.current && !scrubbingRef.current &&
         !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null && !recoveryBuffering &&
         !suspendedRef.current && !documentSuspendedRef.current && document.visibilityState !== "hidden";
-      if (!recoveryProgressReported && recoveryProgress.note(performance.now(), video.currentTime, video.playbackRate, eligible)) {
-        recoveryProgressReported = onRecoveryPlaybackHealthyRef.current(video);
+      if (recoveryProgress.note(performance.now(), video.currentTime, video.playbackRate, eligible)) {
+        rearmHlsRecoveryRef.current?.(video);
+        if (!recoveryProgressReported) recoveryProgressReported = onRecoveryPlaybackHealthyRef.current(video);
       }
       const next = video.currentTime;
       if (Number.isFinite(next) && Math.abs(next - lastPosition) >= 0.05) {
@@ -5781,6 +5783,7 @@ function WebviewPlayer({
     let cancelled = false;
     let instance: HlsInstance | null = null;
     let removeCaptionListeners = () => {};
+    let rearmRecovery: ((video: HTMLVideoElement) => void) | null = null;
     setNativeHlsPlayback(false);
     appliedHlsAudioPreferenceRef.current = false;
     setHlsAudioInventoryKnown(false);
@@ -5884,6 +5887,14 @@ function WebviewPlayer({
         },
       });
       hlsRef.current = instance;
+      const ownedInstance = instance;
+      rearmRecovery = (video) => {
+        if (cancelled || video !== element || videoRef.current !== element ||
+            hlsRef.current !== ownedInstance || retryTimer != null) return;
+        recovery.networkRetries = 0;
+        recovery.mediaRecoveries = 0;
+      };
+      rearmHlsRecoveryRef.current = rearmRecovery;
       const refreshCaptions = () => {
         if (!cancelled && hlsRef.current === instance) captionControllerRef.current?.refresh();
       };
@@ -5896,7 +5907,10 @@ function WebviewPlayer({
       };
       refreshCaptions();
       instance.on(Hls.Events.ERROR, (_event, data) => {
-        if (cancelled || !data.fatal || instance == null) return;
+        if (cancelled || !data.fatal || instance == null || hlsRef.current !== instance || videoRef.current !== element) return;
+        // Each fault must earn a fresh contiguous healthy window, not reuse
+        // playback credit accumulated before this recovery attempt.
+        recoveryProgressWindowRef.current?.reset();
         const action = nextHlsRecovery(data.type, recovery);
         if (action === "retry-network") {
           recovery.networkRetries += 1;
@@ -5905,6 +5919,7 @@ function WebviewPlayer({
           retryTimer = window.setTimeout(
             () => {
               retryTimer = undefined;
+              if (cancelled || instance == null || hlsRef.current !== instance || videoRef.current !== element) return;
               if (
                 data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
                 data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT
@@ -6009,6 +6024,7 @@ function WebviewPlayer({
     return () => {
       cancelled = true;
       window.clearTimeout(retryTimer);
+      if (rearmHlsRecoveryRef.current === rearmRecovery) rearmHlsRecoveryRef.current = null;
       removeCaptionListeners();
       instance?.destroy();
       if (hlsRef.current === instance) hlsRef.current = null;

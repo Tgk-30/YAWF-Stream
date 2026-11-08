@@ -15397,6 +15397,107 @@ describe("terminal post-start source recovery", () => {
   }
   beforeEach(() => { vi.useFakeTimers(); });
 
+  async function hlsBudgetFixture(outerRecovery = false) {
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("");
+    const refresh = vi.fn(async () => {});
+    const props = { title: "HLS budget", refreshCurrentSource: refresh, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://x/hls-budget-a.m3u8" />);
+    await flushTerminal();
+    let video = document.querySelector("video.player-video") as HTMLVideoElement;
+    let state = longTerminalMedia(video);
+    if (outerRecovery) {
+      const first = hlsInstances.at(-1)!;
+      act(() => first.emit("hlsError", { fatal: true, type: "networkError" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      act(() => first.emit("hlsError", { fatal: true, type: "networkError" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      act(() => first.emit("hlsError", { fatal: true, type: "networkError" })); await flushTerminal();
+      expect(refresh).toHaveBeenCalledTimes(1);
+      view.rerender(<VideoPlayer {...props} url="https://x/hls-budget-b.m3u8" sourceRevision={1} />);
+      await flushTerminal(); video = document.querySelector("video.player-video") as HTMLVideoElement;
+      state = longTerminalMedia(video);
+    }
+    return { view, props, video, state, refresh, hls: hlsInstances.at(-1)! };
+  }
+  async function consumeHlsBudget(hls: typeof hlsInstances[number], kind: "network" | "media") {
+    const count = kind === "network" ? 2 : 1;
+    for (let index = 1; index <= count; index += 1) {
+      act(() => hls.emit("hlsError", { fatal: true, type: `${kind}Error`, details: "fragLoadError" }));
+      if (kind === "network") await act(async () => { await vi.advanceTimersByTimeAsync(index * 500); });
+    }
+  }
+  function seedHlsHealthyClock(video: HTMLVideoElement) {
+    fireEvent.playing(video); fireEvent.timeUpdate(video);
+  }
+
+  it.each(["network", "media"] as const)("[hls-earned-budget] restores the full %s budget across two healthy windows after outer recovery already rearmed", async (kind) => {
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    try {
+      const f = await hlsBudgetFixture(true);
+      const action = kind === "network" ? f.hls.startLoad : f.hls.recoverMediaError;
+      const size = kind === "network" ? 2 : 1;
+      await consumeHlsBudget(f.hls, kind); expect(action).toHaveBeenCalledTimes(size);
+      for (let window = 1; window <= 2; window += 1) {
+        seedHlsHealthyClock(f.video); await advanceEligiblePlayback(f.video, 60);
+        await consumeHlsBudget(f.hls, kind);
+        expect(hlsInstances.at(-1)).toBe(f.hls);
+        expect(action).toHaveBeenCalledTimes(size * (window + 1));
+        expect(f.refresh).toHaveBeenCalledTimes(1); expect(screen.queryByRole("alert")).toBeNull();
+      }
+      act(() => f.hls.emit("hlsError", { fatal: true, type: `${kind}Error` })); await flushTerminal();
+      expect(action).toHaveBeenCalledTimes(size * 3);
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each(["insufficient", "paused", "seeking", "waiting", "hidden", "stalled", "jump", "rate", "manifest"] as const)("[hls-budget-controls] %s cannot rearm an exhausted network budget", async (interruption) => {
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    let visibility: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const f = await hlsBudgetFixture(); await consumeHlsBudget(f.hls, "network");
+      seedHlsHealthyClock(f.video); await advanceEligiblePlayback(f.video, 59);
+      if (interruption === "paused") { f.state.paused = true; fireEvent.pause(f.video); fireEvent.timeUpdate(f.video); f.state.paused = false; fireEvent.play(f.video); }
+      else if (interruption === "seeking") { f.state.seeking = true; fireEvent.seeking(f.video); f.video.currentTime += 20; f.state.seeking = false; fireEvent.seeked(f.video); }
+      else if (interruption === "waiting") { fireEvent.waiting(f.video); fireEvent.timeUpdate(f.video); fireEvent.playing(f.video); }
+      else if (interruption === "hidden") { visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden"); document.dispatchEvent(new Event("visibilitychange")); fireEvent.timeUpdate(f.video); visibility.mockReturnValue("visible"); document.dispatchEvent(new Event("visibilitychange")); }
+      else if (interruption === "stalled") { await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); fireEvent.timeUpdate(f.video); }
+      else if (interruption === "jump") { await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); f.video.currentTime += 120; fireEvent.timeUpdate(f.video); }
+      else if (interruption === "rate") { f.video.playbackRate = 2; fireEvent.rateChange(f.video); fireEvent.timeUpdate(f.video); }
+      else if (interruption === "manifest") { act(() => f.hls.emit("manifestParsed")); act(() => f.hls.emit("fragLoaded")); }
+      if (interruption !== "insufficient" && interruption !== "manifest") await advanceEligiblePlayback(f.video, 2);
+      act(() => f.hls.emit("hlsError", { fatal: true, type: "networkError" })); await flushTerminal();
+      expect(f.hls.startLoad).toHaveBeenCalledTimes(2);
+      expect(f.refresh).toHaveBeenCalledTimes(1);
+    } finally { visibility?.mockRestore(); clock.mockRestore(); }
+  });
+
+  it("[hls-fault-credit] a new fatal fault discards the preceding healthy window's credit", async () => {
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    try {
+      const f = await hlsBudgetFixture(); await consumeHlsBudget(f.hls, "network");
+      seedHlsHealthyClock(f.video); await advanceEligiblePlayback(f.video, 60);
+      act(() => f.hls.emit("hlsError", { fatal: true, type: "networkError" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      await advanceEligiblePlayback(f.video, 1);
+      act(() => f.hls.emit("hlsError", { fatal: true, type: "networkError" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      act(() => f.hls.emit("hlsError", { fatal: true, type: "networkError" })); await flushTerminal();
+      expect(f.hls.startLoad).toHaveBeenCalledTimes(4); expect(f.refresh).toHaveBeenCalledTimes(1);
+    } finally { clock.mockRestore(); }
+  });
+
+  it("[hls-stale-retry] a captured old retry task cannot load after a source replacement", async () => {
+    const f = await hlsBudgetFixture();
+    const timers = vi.spyOn(window, "setTimeout");
+    act(() => f.hls.emit("hlsError", { fatal: true, type: "networkError" }));
+    const retry = timers.mock.calls.filter(([, delay]) => delay === 500).at(-1)?.[0];
+    expect(typeof retry).toBe("function");
+    f.view.rerender(<VideoPlayer {...f.props} url="https://x/hls-budget-new.m3u8" sourceRevision={1} />); await flushTerminal();
+    act(() => { (retry as () => void)(); });
+    expect(f.hls.startLoad).not.toHaveBeenCalled();
+    expect(hlsInstances.at(-1)!.startLoad).not.toHaveBeenCalled();
+    expect(f.hls.destroy).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["clamped", 100, 25.75, 99.5, 150, 2],
     ["near-origin", 100, 99, 99.5, 150, 2],
