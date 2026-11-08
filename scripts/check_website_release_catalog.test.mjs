@@ -8,12 +8,12 @@ test("website release catalog accepts the published platform channels", () => {
   assert.deepEqual(validateWebsiteReleaseCatalog(source), []);
 });
 
-test("website release catalog rejects server79 while leaving independent channels unchanged", () => {
+test("website release catalog rejects server80 while leaving independent channels unchanged", () => {
   const previous = source.replace(
+    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.81', tag: 'v2.3.81' };",
     "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.80', tag: 'v2.3.80' };",
-    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.79', tag: 'v2.3.79' };",
   );
-  assert.notEqual(previous, source, "fixture must contain the server80 mutation target");
+  assert.notEqual(previous, source, "fixture must contain the server81 mutation target");
   assert.deepEqual(validateWebsiteReleaseCatalog(previous), ["SERVER_RELEASE must retain its published version and tag"]);
 });
 
@@ -30,18 +30,18 @@ for (const { name, from, to } of [
   },
   {
     name: "Android phone tag",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.78', tag: 'android-v2.3.78' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.81', tag: 'android-v2.3.81' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.13' };",
   },
   {
     name: "stale Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.78', tag: 'android-v2.3.78' };",
-    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.74', tag: 'android-v2.3.74' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.81', tag: 'android-v2.3.81' };",
+    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.78', tag: 'android-v2.3.78' };",
   },
   {
     name: "unpublished future Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.78', tag: 'android-v2.3.78' };",
-    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.79', tag: 'android-v2.3.79' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.81', tag: 'android-v2.3.81' };",
+    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.82', tag: 'android-v2.3.82' };",
   },
   {
     name: "Android TV filename",
@@ -55,23 +55,23 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.80', tag: 'v2.3.80' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.81', tag: 'v2.3.81' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.80'",
+    from: "tag: 'v2.3.81'",
     to: "tag: 'v2.3.51'",
   },
   {
     name: "stale server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.80', tag: 'v2.3.80' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.79', tag: 'v2.3.79' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.81', tag: 'v2.3.81' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.80', tag: 'v2.3.80' };",
   },
   {
     name: "unpublished future server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.80', tag: 'v2.3.80' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.81', tag: 'v2.3.81' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.81', tag: 'v2.3.81' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.82', tag: 'v2.3.82' };",
   },
   {
     name: "server Debian filename",
@@ -131,6 +131,8 @@ for (const { name, from, to } of [
 ]) {
   test(`website release catalog rejects a mutated ${name}`, () => {
     assert.ok(source.includes(from), `fixture must contain ${name} mutation target`);
-    assert.ok(validateWebsiteReleaseCatalog(source.replace(from, to)).length > 0);
+    const mutated = source.replace(from, to);
+    assert.notEqual(mutated, source, `${name} mutation must change the fixture`);
+    assert.ok(validateWebsiteReleaseCatalog(mutated).length > 0);
   });
 }
