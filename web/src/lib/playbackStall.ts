@@ -102,3 +102,37 @@ export class PlaybackStallWatchdog {
     this.timer = undefined;
   }
 }
+
+export const RECOVERY_REARM_PROGRESS_MS = 60_000;
+const MAX_HEALTHY_SAMPLE_GAP_MS = 5_000;
+
+/** Earn recovery only from a contiguous, plausible playing clock, never a seek or wall-time gap. */
+export class PlaybackRecoveryProgress {
+  private previous: { nowMs: number; position: number; rate: number } | null = null;
+  private progressMs = 0;
+
+  reset(): void {
+    this.previous = null;
+    this.progressMs = 0;
+  }
+
+  note(nowMs: number, position: number, rate: number, eligible: boolean): boolean {
+    if (!eligible || !Number.isFinite(nowMs) || !Number.isFinite(position) || position < 0 ||
+        !Number.isFinite(rate) || rate <= 0) {
+      this.reset();
+      return false;
+    }
+    const previous = this.previous;
+    this.previous = { nowMs, position, rate };
+    if (previous == null) return false;
+    const elapsedMs = nowMs - previous.nowMs;
+    const advanced = position - previous.position;
+    if (elapsedMs <= 0 || elapsedMs > MAX_HEALTHY_SAMPLE_GAP_MS || rate !== previous.rate || advanced <= 0 ||
+        advanced > elapsedMs / 1000 * rate + 0.25) {
+      this.progressMs = 0;
+      return false;
+    }
+    this.progressMs += Math.min(elapsedMs, advanced / rate * 1000);
+    return this.progressMs >= RECOVERY_REARM_PROGRESS_MS;
+  }
+}
