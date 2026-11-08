@@ -985,7 +985,7 @@ function preImeMainActivity(packageName) {
   private fun inspectWebViewCompatibility()`);
 }
 
-function patchedMainActivity(packageName) {
+function preGestureMainActivity(packageName) {
   const previous = preImeMainActivity(packageName);
   const legacyInsets = `    val windowInsets = webView.rootWindowInsets ?: return
     var top = windowInsets.systemWindowInsetTop.coerceAtLeast(0)
@@ -1023,6 +1023,59 @@ function patchedMainActivity(packageName) {
     val right = persistent.right.coerceAtLeast(0)
     val bottom = persistent.bottom.coerceAtLeast(0)
     val left = persistent.left.coerceAtLeast(0)`);
+}
+
+function patchedMainActivity(packageName) {
+  let activity = preGestureMainActivity(packageName);
+  const replacements = [
+    [`@Keep
+class YawfSafeAreaBridge(
+  private val snapshot: AtomicReference<String>,
+) {
+  @JavascriptInterface
+  fun getInsets(): String = snapshot.get()
+}`, `data class YawfInsetSnapshot(
+  val safeArea: String,
+  val systemGestures: String,
+)
+
+@Keep
+class YawfSafeAreaBridge(
+  private val snapshot: AtomicReference<YawfInsetSnapshot>,
+) {
+  @JavascriptInterface
+  fun getInsets(): String = snapshot.get().safeArea
+
+  @JavascriptInterface
+  fun getSystemGestureInsets(): String = snapshot.get().systemGestures
+}`],
+    ['private val safeAreaSnapshot = AtomicReference(EMPTY_SAFE_AREA)',
+      'private val safeAreaSnapshot = AtomicReference(YawfInsetSnapshot(EMPTY_SAFE_AREA, EMPTY_SAFE_AREA))'],
+    [`    val nextSnapshot =
+      "{\\\"top\\\":$top,\\\"right\\\":$right,\\\"bottom\\\":$bottom,\\\"left\\\":$left}"`,
+    `    // Read current root insets only. Do not reserve legacy button bars as gestures.
+    val gestureSnapshot = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      val gestures = windowInsets.getInsets(WindowInsetsCompat.Type.systemGestures())
+      val gestureTop = gestures.top.coerceAtLeast(0)
+      val gestureRight = gestures.right.coerceAtLeast(0)
+      val gestureBottom = gestures.bottom.coerceAtLeast(0)
+      val gestureLeft = gestures.left.coerceAtLeast(0)
+      "{\\\"top\\\":$gestureTop,\\\"right\\\":$gestureRight,\\\"bottom\\\":$gestureBottom,\\\"left\\\":$gestureLeft}"
+    } else EMPTY_SAFE_AREA
+    val nextSnapshot = YawfInsetSnapshot(
+      "{\\\"top\\\":$top,\\\"right\\\":$right,\\\"bottom\\\":$bottom,\\\"left\\\":$left}",
+      gestureSnapshot,
+    )`],
+    ['safeAreaSnapshot.set(EMPTY_SAFE_AREA)',
+      'safeAreaSnapshot.set(YawfInsetSnapshot(EMPTY_SAFE_AREA, EMPTY_SAFE_AREA))'],
+  ];
+  for (const [before, after] of replacements) {
+    if (activity.split(before).length !== 2) {
+      throw new Error("Unsupported system gesture inset template.");
+    }
+    activity = activity.replace(before, after);
+  }
+  return activity;
 }
 
 const originalFullscreenShow = `  override fun onShowCustomView(view: View, callback: CustomViewCallback) {
@@ -1104,6 +1157,10 @@ export function patchedMainActivityForWebViewCompatibilityTest(packageName) {
 
 export function previousPatchedMainActivityForWebViewCompatibilityTest(packageName) {
   return previousPatchedMainActivity(packageName);
+}
+
+export function previousGestureMainActivityForTest(packageName) {
+  return preGestureMainActivity(packageName);
 }
 
 const updatePaths = '<?xml version="1.0" encoding="utf-8"?>\n<paths xmlns:android="http://schemas.android.com/apk/res/android">\n    <files-path name="updates" path="updates/" />\n</paths>\n';
@@ -1225,7 +1282,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     activity === serverPlayerPatchedMainActivity(packageName) ||
     activity === previousPatchedMainActivity(packageName) ||
     activity === preFullscreenMainActivity(packageName) ||
-    activity === preImeMainActivity(packageName);
+    activity === preImeMainActivity(packageName) ||
+    activity === preGestureMainActivity(packageName);
   if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",

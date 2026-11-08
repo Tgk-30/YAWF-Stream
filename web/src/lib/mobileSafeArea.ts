@@ -10,10 +10,13 @@ interface PhysicalSafeAreaInsets {
 
 interface AndroidSafeAreaSnapshotBridge {
   getInsets: () => unknown;
+  getSystemGestureInsets?: () => unknown;
 }
 
 const CSS_SIDES = ["top", "right", "bottom", "left"] as const;
 const NATIVE_SAFE_AREA_CHANGE_EVENT = "yawf-native-safe-area-change";
+const ZERO_INSETS: PhysicalSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+const gestureStyleOwners = new WeakMap<CSSStyleDeclaration, { values: Map<string, string> }>();
 
 function isNativeAndroidWebView(): boolean {
   const runtime = globalThis as typeof globalThis & {
@@ -22,13 +25,13 @@ function isNativeAndroidWebView(): boolean {
   return runtime.__YAWF_TAURI_ANDROID__ === true || deviceKind() === "android";
 }
 
-function nativeSnapshotProvider(): (() => unknown) | null {
+function nativeSnapshotProvider(method: keyof AndroidSafeAreaSnapshotBridge = "getInsets"): (() => unknown) | null {
   const runtime = globalThis as typeof globalThis & {
     __YAWF_NATIVE_SAFE_AREA__?: Partial<AndroidSafeAreaSnapshotBridge>;
   };
   const bridge = runtime.__YAWF_NATIVE_SAFE_AREA__;
-  return bridge != null && typeof bridge.getInsets === "function"
-    ? () => bridge.getInsets?.()
+  return bridge != null && typeof bridge[method] === "function"
+    ? () => bridge[method]?.()
     : null;
 }
 
@@ -72,16 +75,50 @@ export function applyPhysicalSafeAreaInsets(
   insets: PhysicalSafeAreaInsets,
   pixelRatio = window.devicePixelRatio,
 ): void {
+  applyPhysicalInsets(insets, "--native-safe-area", pixelRatio);
+}
+
+function applyPhysicalInsets(
+  insets: PhysicalSafeAreaInsets,
+  prefix: string,
+  pixelRatio = window.devicePixelRatio,
+  style = document.documentElement.style,
+): Map<string, string> {
   const ratio = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 1;
-  const root = document.documentElement;
+  const values = new Map<string, string>();
   for (const side of CSS_SIDES) {
     const physicalPixels = insets[side];
     const cssPixels =
       Number.isFinite(physicalPixels) && physicalPixels > 0
         ? physicalPixels / ratio
         : 0;
-    root.style.setProperty(`--native-safe-area-${side}`, `${cssPixels}px`);
+    const name = `${prefix}-${side}`, value = `${cssPixels}px`;
+    style.setProperty(name, value);
+    values.set(name, value);
   }
+  return values;
+}
+
+function applyNativePlayerControlInsets(
+  gestures: PhysicalSafeAreaInsets | null,
+  persistentInsets: PhysicalSafeAreaInsets,
+  style: CSSStyleDeclaration,
+): Map<string, string> {
+  const pixelRatio = window.devicePixelRatio;
+  const ratio = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 1;
+  const values = gestures == null ? new Map<string, string>()
+    : applyPhysicalInsets(gestures, "--native-system-gesture", ratio, style);
+  // Chromium may round a CSS boundary outward by ceil(DPR) physical pixels.
+  // Reserve that bound plus one physical pixel beyond the eight-CSS-pixel thumb.
+  const roundingClearance = (Math.ceil(ratio) + 1) / ratio;
+  for (const side of ["left", "right"] as const) {
+    const unsafePixels = Math.max(persistentInsets[side], gestures?.[side] ?? 0);
+    const gutter = unsafePixels > 0 ? unsafePixels / ratio + 8 + roundingClearance : 0;
+    const name = `--native-player-control-gutter-${side}`, value = `${gutter}px`;
+    style.setProperty(name, value);
+    values.set(name, value);
+  }
+  return values;
 }
 
 /**
@@ -93,12 +130,30 @@ export function installMobileSafeAreaInsets(): () => void {
   const snapshotProvider = nativeSnapshotProvider();
   const useTauriCommand = isTauri() && isNativeAndroidWebView();
   if (snapshotProvider == null && !useTauriCommand) return () => {};
+  let gestureSnapshotProvider: (() => unknown) | null = null;
+  try {
+    gestureSnapshotProvider = nativeSnapshotProvider("getSystemGestureInsets");
+  } catch {
+    // The optional method cannot invalidate an older APK's safe-area bridge.
+  }
+  const style = document.documentElement.style;
+  const removeOwnedGestureValues = (owner: { values: Map<string, string> }) => {
+    for (const [name, value] of owner.values) {
+      if (style.getPropertyValue(name) === value) style.removeProperty(name);
+    }
+  };
+  const previousOwner = gestureStyleOwners.get(style);
+  if (previousOwner != null) removeOwnedGestureValues(previousOwner);
+  const gestureOwner = { values: new Map<string, string>() };
+  gestureStyleOwners.set(style, gestureOwner);
+  const ownsGestureStyle = () => gestureStyleOwners.get(style) === gestureOwner;
 
   let stopped = false;
   let frame: number | null = null;
   let refreshRevision = 0;
   let refreshRunning = false;
   let refreshQueued = false;
+  let lastValidSafeInsets: PhysicalSafeAreaInsets | null = null;
   const timers = new Set<number>();
 
   const update = async () => {
@@ -107,6 +162,7 @@ export function installMobileSafeAreaInsets(): () => void {
     do {
       refreshQueued = false;
       const requestRevision = refreshRevision;
+      let insets: PhysicalSafeAreaInsets | null = null;
       try {
         const rawInsets = snapshotProvider != null
           ? snapshotProvider()
@@ -114,14 +170,32 @@ export function installMobileSafeAreaInsets(): () => void {
               const { invoke } = await import("@tauri-apps/api/core");
               return invoke<PhysicalSafeAreaInsets>("mobile_safe_area_insets");
             })();
-        const insets = validatedPhysicalSafeAreaInsets(rawInsets);
+        insets = validatedPhysicalSafeAreaInsets(rawInsets);
         if (insets == null) throw new Error("invalid native inset snapshot");
-        if (!stopped && requestRevision === refreshRevision) {
-          applyPhysicalSafeAreaInsets(insets);
-        }
       } catch {
-        if (!stopped && requestRevision === refreshRevision) {
+        if (!stopped && requestRevision === refreshRevision && ownsGestureStyle()) {
           console.warn("[YAWF Stream] Could not refresh native safe-area insets.");
+        }
+      }
+      let gestures: PhysicalSafeAreaInsets | null = null;
+      if (gestureSnapshotProvider != null) {
+        try {
+          gestures = validatedPhysicalSafeAreaInsets(gestureSnapshotProvider());
+        } catch {
+          // Reset optional data below instead of retaining a pre-rotation strip.
+        }
+      }
+      if (!stopped && requestRevision === refreshRevision && ownsGestureStyle()) {
+        if (insets != null) {
+          applyPhysicalSafeAreaInsets(insets);
+          lastValidSafeInsets = insets;
+        }
+        if (lastValidSafeInsets != null || gestureSnapshotProvider != null) {
+          gestureOwner.values = applyNativePlayerControlInsets(
+            gestureSnapshotProvider != null ? gestures ?? ZERO_INSETS : null,
+            lastValidSafeInsets ?? ZERO_INSETS,
+            style,
+          );
         }
       }
     } while (!stopped && refreshQueued);
@@ -175,5 +249,9 @@ export function installMobileSafeAreaInsets(): () => void {
     if (frame != null) window.cancelAnimationFrame(frame);
     for (const timer of timers) window.clearTimeout(timer);
     timers.clear();
+    if (ownsGestureStyle()) {
+      removeOwnedGestureValues(gestureOwner);
+      gestureStyleOwners.delete(style);
+    }
   };
 }

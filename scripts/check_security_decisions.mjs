@@ -2,6 +2,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { patchedMainActivityForWebViewCompatibilityTest } from "./patch_tauri_android.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const failures = [];
@@ -136,12 +137,8 @@ const androidRemoteSafeAreaPermission = read(
 const androidProjectPatcher = read("scripts/patch_tauri_android.mjs");
 const androidImeController = read("scripts/android/YawfImeController.kt");
 const mobileSafeAreaSource = read("web/src/lib/mobileSafeArea.ts");
-// Inspect the current generated activity, not recognized historical templates.
-const currentActivityStart = androidProjectPatcher.indexOf("function serverPlayerPatchedMainActivity(packageName) {");
-const currentActivityEnd = androidProjectPatcher.indexOf("\nfunction patchedMainActivity(", currentActivityStart);
-const currentActivityTemplate = currentActivityStart >= 0 && currentActivityEnd > currentActivityStart
-  ? androidProjectPatcher.slice(currentActivityStart, currentActivityEnd)
-  : "";
+// Inspect the final generated activity after every supported template upgrade.
+const currentActivityTemplate = patchedMainActivityForWebViewCompatibilityTest("com.tgk30.debridstreamer");
 
 const androidRemoteSafeAreaCommands = new Set(
   [...androidRemoteSafeAreaPermission.matchAll(/commands\.allow\s*=\s*\[([^\]]*)\]/g)]
@@ -164,16 +161,22 @@ const generatedInsetBridge = /@Keep\nclass YawfSafeAreaBridge\([\s\S]*?\n}\n\ncl
 )?.[0];
 const expectedGeneratedInsetBridge = `@Keep
 class YawfSafeAreaBridge(
-  private val snapshot: AtomicReference<String>,
+  private val snapshot: AtomicReference<YawfInsetSnapshot>,
 ) {
   @JavascriptInterface
-  fun getInsets(): String = snapshot.get()
+  fun getInsets(): String = snapshot.get().safeArea
+
+  @JavascriptInterface
+  fun getSystemGestureInsets(): String = snapshot.get().systemGestures
 }
 
 class MainActivity`;
 check(
   generatedInsetBridge === expectedGeneratedInsetBridge &&
-    (currentActivityTemplate.match(/@JavascriptInterface/g)?.length ?? 0) === 1 &&
+    (currentActivityTemplate.match(/@JavascriptInterface/g)?.length ?? 0) === 2 &&
+    /SEC-014[^\n]*exactly two read-only methods[^\n]*getSystemGestureInsets[^\n]*no actions/.test(decisions) &&
+    /val gestureSnapshot = if \(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q\)/.test(currentActivityTemplate) &&
+    /windowInsets.getInsets\(WindowInsetsCompat.Type.systemGestures\(\)\)/.test(currentActivityTemplate) &&
     /private const val SAFE_AREA_BRIDGE_NAME = "__YAWF_NATIVE_SAFE_AREA__"/.test(
       androidProjectPatcher,
     ) &&
@@ -204,7 +207,7 @@ check(
     ) &&
     !/__TAURI_INTERNALS__|__TAURI__/.test(androidProjectPatcher) &&
     !/setWebViewClient|setOnApplyWindowInsetsListener/.test(androidProjectPatcher),
-  "Legacy Android inset transport exposes one cached getter and a fixed no-payload change event",
+  "Android inset transport exposes only two cached numeric getters and a fixed no-payload change event",
 );
 check(
   /SEC-014[^\n]*native-only IME fitting[^\n]*never exports keyboard state/.test(decisions) &&

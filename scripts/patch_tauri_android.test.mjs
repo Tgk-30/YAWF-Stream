@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   patchTauriAndroidProject,
   previousSafeAreaMainActivityForTest,
+  previousGestureMainActivityForTest,
 } from "./patch_tauri_android.mjs";
 
 const androidRoot = "web/src-tauri/gen/android/app";
@@ -222,7 +223,7 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
     assert.match(activity, /setAcceptThirdPartyCookies\(webView, true\)/);
     assert.match(activity, /statusBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/);
     assert.match(activity, /navigationBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/);
-    assert.equal(activity.match(/@JavascriptInterface/g)?.length, 1);
+    assert.equal(activity.match(/@JavascriptInterface/g)?.length, 2);
     assert.equal(activity.match(/addJavascriptInterface/g)?.length, 1);
     assert.match(activity, /private const val SERVER_PLAYER_BRIDGE_NAME = "__YAWF_SERVER_PLAYER__"/);
     assert.match(activity, /WebViewFeature\.WEB_MESSAGE_LISTENER/);
@@ -274,13 +275,19 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
       /private const val SAFE_AREA_BRIDGE_NAME = "__YAWF_NATIVE_SAFE_AREA__"/,
     );
     assert.match(activity, /@Keep\nclass YawfSafeAreaBridge\(/);
-    assert.match(activity, /fun getInsets\(\): String = snapshot\.get\(\)/);
+    assert.match(activity, /fun getInsets\(\): String = snapshot\.get\(\)\.safeArea/);
+    assert.match(activity, /fun getSystemGestureInsets\(\): String = snapshot\.get\(\)\.systemGestures/);
     const bridgeClass = activity.slice(
       activity.indexOf("@Keep\nclass YawfSafeAreaBridge"),
       activity.indexOf("\n\nclass MainActivity"),
     );
     assert.doesNotMatch(bridgeClass, /WebView|Activity|Context|Intent/);
-    assert.match(activity, /private val safeAreaSnapshot = AtomicReference\(EMPTY_SAFE_AREA\)/);
+    assert.deepEqual(
+      [...bridgeClass.matchAll(/@JavascriptInterface\s+fun (\w+)/g)].map((match) => match[1]),
+      ["getInsets", "getSystemGestureInsets"],
+      "the existing read-only bridge must expose only the two numeric snapshots",
+    );
+    assert.match(activity, /private val safeAreaSnapshot = AtomicReference\(YawfInsetSnapshot\(EMPTY_SAFE_AREA, EMPTY_SAFE_AREA\)\)/);
     assert.match(activity, /webView\.addJavascriptInterface\(safeAreaBridge, SAFE_AREA_BRIDGE_NAME\)/);
     assertSafeAreaWebViewCreateContract(activity);
     const reorderedSupportedSuper = activity
@@ -334,7 +341,7 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
     const detachStart = activity.indexOf("  private fun detachSafeAreaBridge()");
     assert.ok(detachStart >= 0, "detachSafeAreaBridge must exist");
     const detachBody = activity.slice(detachStart);
-    const resetSnapshotIndex = detachBody.indexOf("safeAreaSnapshot.set(EMPTY_SAFE_AREA)");
+    const resetSnapshotIndex = detachBody.indexOf("safeAreaSnapshot.set(YawfInsetSnapshot(EMPTY_SAFE_AREA, EMPTY_SAFE_AREA))");
     const nullableWebViewIndex = detachBody.indexOf("val webView = safeAreaWebView ?: return");
     assert.ok(resetSnapshotIndex >= 0, "detach must reset the cached snapshot");
     assert.ok(nullableWebViewIndex >= 0, "detach must retain its nullable WebView guard");
@@ -376,6 +383,7 @@ test("migrates every exact earlier activity including the safe-area template", (
     legacyCookieActivity,
     darkSystemBarCookieActivity,
     previousSafeAreaMainActivityForTest(packageName),
+    previousGestureMainActivityForTest(packageName),
   ]) {
     withFixture(({ root, mainActivity }) => {
       patchTauriAndroidProject({ root });
@@ -396,10 +404,10 @@ test("migrates every exact earlier activity including the safe-area template", (
         /navigationBarStyle = SystemBarStyle\.dark\(Color\.TRANSPARENT\)/,
       );
       assert.match(migratedActivity, /@Keep\nclass YawfSafeAreaBridge/);
-      assert.match(migratedActivity, /AtomicReference\(EMPTY_SAFE_AREA\)/);
+      assert.match(migratedActivity, /AtomicReference\(YawfInsetSnapshot\(EMPTY_SAFE_AREA, EMPTY_SAFE_AREA\)\)/);
       assert.match(migratedActivity, /WebViewCompat\.addWebMessageListener/);
       assert.match(migratedActivity, /pending\.replyProxy !== replyProxy/);
-      assert.equal(migratedActivity.match(/@JavascriptInterface/g)?.length, 1);
+      assert.equal(migratedActivity.match(/@JavascriptInterface/g)?.length, 2);
 
       const repeat = patchTauriAndroidProject({ root });
       assert.equal(repeat.changed, false);

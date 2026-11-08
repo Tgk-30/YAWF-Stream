@@ -50,7 +50,11 @@ test('Activity uses narrow native hooks with no new JS interface or ChromeClient
   assert.match(activity, /fullscreenController = YawfFullscreenController\(this, webView\)/);
   assert.match(activity, /fullscreenController\?\.onConfigurationChanged\(\)/);
   assert.equal(activity.match(/fullscreenController\?\.destroy\(\)/g).length, 2);
-  assert.equal(activity.match(/@JavascriptInterface/g).length, 1);
+  assert.deepEqual(
+    [...activity.matchAll(/@JavascriptInterface\s+fun (\w+)/g)].map((match) => match[1]),
+    ['getInsets', 'getSystemGestureInsets'],
+    'fullscreen adds no interface; only the two existing read-only inset snapshots are exposed',
+  );
   assert.doesNotMatch(activity + source, /setWebChromeClient|webChromeClient\s*=|requestFullscreen|requestedOrientation\s*=/);
 });
 

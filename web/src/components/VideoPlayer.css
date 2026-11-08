@@ -1263,9 +1263,9 @@
   gap: 0;
   padding:
     calc(52px * var(--density-scale))
-    max(calc(12px * var(--density-scale)), var(--safe-area-right))
+    max(calc(12px * var(--density-scale)), var(--safe-area-right), var(--native-player-control-gutter-right, 0px))
     max(calc(10px * var(--density-scale)), var(--safe-area-bottom))
-    max(calc(12px * var(--density-scale)), var(--safe-area-left));
+    max(calc(12px * var(--density-scale)), var(--safe-area-left), var(--native-player-control-gutter-left, 0px));
 }
 
 .player-touch-osd.is-visible .player-touch-action-row,
@@ -1360,8 +1360,17 @@
 }
 
 .scrubbar-wrap.is-touch .scrubbar {
+  position: relative;
   min-height: 44px;
   padding-block: 15px 9px;
+}
+
+/* The visible thumb extends beyond the rail; keep its outer halves hittable. */
+.scrubbar-wrap.is-touch .scrubbar::before {
+  content: "";
+  position: absolute;
+  inset: 0 -8px;
+  pointer-events: inherit;
 }
 
 .scrubbar-wrap.is-touch .scrubbar-track {
