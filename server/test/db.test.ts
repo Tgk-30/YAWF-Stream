@@ -40,20 +40,29 @@ describe("AppDatabase", () => {
   it("holds a persistent exclusive lease and releases it idempotently", () => {
     const path = temporaryDatabasePath(tempDirs);
     const db = new AppDatabase(path);
-    const lockPath = databaseLockPath(path);
-    expect(existsSync(lockPath)).toBe(true);
-    expect(statSync(lockPath).mode & 0o777).toBe(0o600);
-    expect(isDatabaseServerRunning(path)).toBe(true);
-    expect(() => acquireDatabaseLease(path)).toThrow(DatabaseLeaseBusyError);
+    let reopened: AppDatabase | undefined;
+    try {
+      const lockPath = databaseLockPath(path);
+      expect(existsSync(lockPath)).toBe(true);
+      expect(statSync(lockPath).mode & 0o777).toBe(0o600);
+      expect(isDatabaseServerRunning(path)).toBe(true);
+      expect(() => acquireDatabaseLease(path)).toThrow(DatabaseLeaseBusyError);
 
-    db.close();
-    db.close();
-    expect(existsSync(lockPath)).toBe(true);
-    expect(isDatabaseServerRunning(path)).toBe(false);
+      db.close();
+      db.close();
+      expect(existsSync(lockPath)).toBe(true);
+      expect(isDatabaseServerRunning(path)).toBe(false);
 
-    const reopened = new AppDatabase(path);
-    reopened.close();
-    expect(existsSync(lockPath)).toBe(true);
+      reopened = new AppDatabase(path);
+      reopened.close();
+      expect(existsSync(lockPath)).toBe(true);
+    } finally {
+      try {
+        reopened?.close();
+      } finally {
+        db.close();
+      }
+    }
   });
 
   it("keeps the lease held until a failed application database close is retried", () => {
