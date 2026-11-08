@@ -27,6 +27,16 @@ test("the explicit API credential is stdin-only and the source remains fixed", (
   }
 });
 
+test("accepts bounded stateless installation credentials without assuming an opaque token length", () => {
+  const segment = Buffer.from(JSON.stringify({ fixture: "a".repeat(600) })).toString("base64url");
+  const stateless = ["gh", "s_", "123456_", "fixture-header", ".", segment, ".fixture-signature"].join("");
+  for (const token of [stateless, "x".repeat(20), "x".repeat(4096), "a".repeat(20) + "-._~+/=="]) {
+    const { args, input } = gradleDownloadInvocation("/owned/gradle.zip", token);
+    assert.equal(args.some(arg => arg.includes(token)), false);
+    assert.equal(input, `header = "Authorization: Bearer ${token}"\n`);
+  }
+});
+
 test("an anonymous transfer uses no credential or ambient curl configuration", () => {
   for (const token of [undefined, null, ""]) {
     const { args, input } = gradleDownloadInvocation("/owned/gradle.zip", token);
@@ -39,9 +49,12 @@ test("an anonymous transfer uses no credential or ambient curl configuration", (
 for (const [label, token] of [
   ["newline", fixtureToken + "\nheader = invalid"],
   ["quote", fixtureToken + '"'],
+  ["backslash", fixtureToken + "\\"],
+  ["carriage-return", fixtureToken + "\r"],
+  ["embedded-padding", fixtureToken + "=a"],
   ["space", fixtureToken + " value"],
   ["short", "x"],
-  ["long", "x".repeat(257)],
+  ["long", "x".repeat(4097)],
   ["non-string", 12345678901234567890n],
 ]) {
   test(`rejects a ${label} credential before staging or starting transport`, () => {

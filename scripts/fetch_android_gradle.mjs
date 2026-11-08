@@ -11,7 +11,9 @@ export const GRADLE_ALL_ASSET_API = "https://api.github.com/repos/gradle/gradle-
 
 /** Keep an optional Actions token out of argv and default curl configuration. */
 export function gradleDownloadInvocation(archive, token) {
-  if (token != null && token !== "" && (typeof token !== "string" || !/^[A-Za-z0-9_]{20,256}$/.test(token))) {
+  // Installation credentials can be stateless JWTs, not just short opaque strings.
+  // RFC6750 bearer syntax excludes curl config delimiters and control characters.
+  if (token != null && token !== "" && (typeof token !== "string" || token.length < 20 || token.length > 4096 || !/^[A-Za-z0-9._~+/-]+=*$/.test(token))) {
     throw new Error("Invalid Gradle API credential format.");
   }
   const args = [
