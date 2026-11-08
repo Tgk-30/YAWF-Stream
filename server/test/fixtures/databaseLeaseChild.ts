@@ -15,14 +15,28 @@ try {
   process.exit();
 }
 
+let released = false;
+const releaseLease = () => {
+  if (released) return;
+  database.close();
+  released = true;
+};
 let closing = false;
 const close = () => {
   if (closing) return;
   closing = true;
-  database.close();
+  releaseLease();
   process.stdout.write("released\n", () => process.exit(0));
 };
 process.once("SIGINT", close);
 process.once("SIGTERM", close);
+process.on("message", (message) => {
+  if (message === "release-lease") {
+    releaseLease();
+    process.stdout.write(`lease-released:${process.pid}\n`);
+  } else if (message === "ping") {
+    process.stdout.write(`alive:${process.pid}\n`);
+  }
+});
 process.stdout.write("acquired\n");
 setInterval(() => {}, 60_000);

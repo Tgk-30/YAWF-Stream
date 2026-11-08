@@ -36,6 +36,8 @@ interface LeaseChild {
   acquired: Promise<void>;
   exit: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
   output(): { stdout: string; stderr: string };
+  releaseLease(): Promise<void>;
+  proveAlive(): Promise<void>;
   stop(signal: NodeJS.Signals): Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 }
 
@@ -67,7 +69,7 @@ function spawnLeaseChild(databasePath: string, signal: AbortSignal): LeaseChild 
   const owned = children.track(spawn(
     process.execPath,
     ["--import", "tsx", CHILD_FIXTURE, databasePath],
-    { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe", "ipc"] },
   ), signal);
   const acquired = owned.waitForOutput("acquired\n");
   void acquired.catch(() => {});
@@ -76,6 +78,14 @@ function spawnLeaseChild(databasePath: string, signal: AbortSignal): LeaseChild 
     acquired,
     get exit() { return owned.waitForClose(); },
     output: owned.output,
+    releaseLease: () => {
+      owned.child.send("release-lease");
+      return owned.waitForOutput(`lease-released:${owned.child.pid}\n`);
+    },
+    proveAlive: () => {
+      owned.child.send("ping");
+      return owned.waitForOutput(`alive:${owned.child.pid}\n`);
+    },
     stop: owned.stop,
   };
 }
@@ -141,19 +151,59 @@ describe("database lease process lifecycle", () => {
     await stopChild(replacement, "SIGTERM");
   });
 
-  it("releases the lease after an actual SIGTERM", async ({ signal }) => {
+  it("reacquires after actual SIGTERM with platform-correct termination semantics", async ({ signal }) => {
     const databasePath = temporaryDatabasePath();
+    const lockPath = databaseLockPath(databasePath);
     const owner = spawnLeaseChild(databasePath, signal);
     await owner.acquired;
+    const before = readFileSync(lockPath);
 
-    await expect(stopChild(owner, "SIGTERM")).resolves.toEqual({
-      code: 0,
-      signal: null,
-    });
-    expect(owner.output().stdout).toContain("released\n");
+    await expect(stopChild(owner, "SIGTERM")).resolves.toEqual(
+      process.platform === "win32"
+        ? { code: null, signal: "SIGTERM" }
+        : { code: 0, signal: null },
+    );
+    if (process.platform === "win32") {
+      expect(owner.output().stdout).not.toContain("released\n");
+    } else {
+      expect(owner.output().stdout).toContain("released\n");
+    }
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(lockPath)).toEqual(before);
 
     const replacement = spawnLeaseChild(databasePath, signal);
     await replacement.acquired;
+    await stopChild(replacement, "SIGTERM");
+  });
+
+  it("releases through IPC while its actual owner stays alive for successor acquisition", async ({ signal }) => {
+    const databasePath = temporaryDatabasePath();
+    const lockPath = databaseLockPath(databasePath);
+    const owner = spawnLeaseChild(databasePath, signal);
+    await owner.acquired;
+    const ownerPid = owner.child.pid;
+    expect(ownerPid).toBeGreaterThan(0);
+    expect(owner.child.connected).toBe(true);
+    const before = readFileSync(lockPath);
+
+    await owner.releaseLease();
+    expect(readFileSync(lockPath)).toEqual(before);
+    expect(owner.child.exitCode).toBeNull();
+    expect(owner.child.signalCode).toBeNull();
+    expect(owner.child.connected).toBe(true);
+
+    const replacement = spawnLeaseChild(databasePath, signal);
+    await replacement.acquired;
+    expect(replacement.child.pid).not.toBe(ownerPid);
+    await owner.proveAlive();
+    expect(owner.child.pid).toBe(ownerPid);
+    expect(owner.child.exitCode).toBeNull();
+    expect(owner.child.signalCode).toBeNull();
+    expect(owner.child.connected).toBe(true);
+    expect(children.size).toBe(2);
+    expect(readFileSync(lockPath)).toEqual(before);
+
+    await stopChild(owner, "SIGTERM");
     await stopChild(replacement, "SIGTERM");
   });
 
@@ -230,22 +280,74 @@ describe("database lease process lifecycle", () => {
     const databasePath = temporaryDatabasePath();
     const lockPath = databaseLockPath(databasePath);
     const journalPath = `${lockPath}-journal`;
+    const diagnostics = process.env.YAWF_TEST_LEASE_PHASES === "1";
+    const phaseStarted = performance.now();
+    const parentPhases = new Set<string>();
+    const phase = (name: "spawn-requested" | "ready-observed" | "sigkill-requested" | "close-observed" | "admission-start" | "admission-end") => {
+      if (!diagnostics || parentPhases.has(name)) return;
+      parentPhases.add(name);
+      const elapsed = Math.min(99_999_999, Math.max(0, Math.floor(performance.now() - phaseStarted)));
+      process.stdout.write(`lease-phase parent ${name} ${elapsed}\n`);
+    };
+    const onAbort = () => phase("sigkill-requested");
+    signal.addEventListener("abort", onAbort, { once: true });
+    phase("spawn-requested");
     const owned = children.track(spawn(
       process.execPath,
       ["--import", "tsx", HOT_JOURNAL_FIXTURE, lockPath],
       { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
     ), signal);
+    let closed = false;
+    const onClose = () => { closed = true; phase("close-observed"); };
+    const childPhases = new Set<string>();
+    let line = "";
+    let overflow = false;
+    const onPhaseData = (chunk: string) => {
+      if (!diagnostics || childPhases.size === 6) return;
+      for (const character of chunk) {
+        if (character === "\n") {
+          const match = !overflow && /^lease-phase child (module|open|seed-commit|begin|update|journal-validated-ready) ([0-9]{1,8})$/.exec(line);
+          if (match && !childPhases.has(match[1]!)) {
+            childPhases.add(match[1]!);
+            process.stdout.write(`lease-phase child ${match[1]} ${Number(match[2])}\n`);
+          }
+          line = "";
+          overflow = false;
+        } else if (!overflow && line.length < 96) {
+          line += character;
+        } else {
+          line = "";
+          overflow = true;
+        }
+      }
+    };
+    owned.child.stdout.on("data", onPhaseData);
+    owned.child.once("close", onClose);
     try {
       await owned.waitForOutput("hot-journal-ready\n");
+      phase("ready-observed");
+      phase("sigkill-requested");
       await owned.stop("SIGKILL");
 
       const databaseBefore = readFileSync(lockPath);
       const journalBefore = readFileSync(journalPath);
-      expect(() => acquireDatabaseLease(databasePath)).toThrow(DatabaseLeaseFormatError);
+      phase("admission-start");
+      try {
+        expect(() => acquireDatabaseLease(databasePath)).toThrow(DatabaseLeaseFormatError);
+      } finally {
+        phase("admission-end");
+      }
       expect(readFileSync(lockPath).equals(databaseBefore)).toBe(true);
       expect(readFileSync(journalPath).equals(journalBefore)).toBe(true);
     } finally {
-      await owned.dispose();
+      try {
+        if (!closed) phase("sigkill-requested");
+        await owned.dispose();
+      } finally {
+        owned.child.stdout.off("data", onPhaseData);
+        owned.child.off("close", onClose);
+        signal.removeEventListener("abort", onAbort);
+      }
     }
   });
 

@@ -49,7 +49,72 @@ jobs:
 
       - name: Test server
         working-directory: server
+        env:
+          YAWF_TEST_LEASE_PHASES: "1"
         run: npm test
+
+      - name: Observe Windows mode and DACL semantics, not a privacy gate
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP ('yawf-public-acl-fixture-' + [guid]::NewGuid().ToString('N'))
+          $owned = $false
+          $report = Join-Path $env:RUNNER_TEMP 'yawf-mode-acl-diagnostic.json'
+          $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+          $trusted = @($current.Value, 'S-1-5-18', 'S-1-5-32-544') | Select-Object -Unique
+          $records = @()
+          $nodeSource = @'
+          const fs = require('node:fs');
+          const p = process.argv[2];
+          fs.writeFileSync(p, 'Public non-sensitive ACL diagnostic fixture.', { mode: 0o600, flag: 'wx' });
+          fs.chmodSync(p, 0o600);
+          process.stdout.write(String(fs.statSync(p).mode & 0o777));
+          '@
+          try {
+            New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+            $owned = $true
+            foreach ($kind in @('private', 'permissive')) {
+              $dir = Join-Path $root $kind
+              New-Item -ItemType Directory -Path $dir -ErrorAction Stop | Out-Null
+              $security = [System.Security.AccessControl.DirectorySecurity]::new()
+              $security.SetOwner($current)
+              $security.SetAccessRuleProtection($true, $false)
+              $allow = @($trusted)
+              if ($kind -eq 'permissive') { $allow += 'S-1-1-0' }
+              foreach ($value in $allow) {
+                $sid = [System.Security.Principal.SecurityIdentifier]::new($value)
+                $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.InheritanceFlags]3, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)
+                $security.AddAccessRule($rule)
+              }
+              Set-Acl -LiteralPath $dir -AclObject $security -ErrorAction Stop
+              $file = Join-Path $dir 'public-fixture.txt'
+              $mode = $nodeSource | & node --input-type=commonjs - $file
+              if ($LASTEXITCODE -ne 0) { throw 'The Node mode diagnostic failed.' }
+              $acl = Get-Acl -LiteralPath $file -ErrorAction Stop
+              $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+              $broadRead = @($rules | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and ($trusted -notcontains $_.IdentityReference.Value) -and (([long]$_.FileSystemRights -band 1) -ne 0) -and (([int]$_.PropagationFlags -band 2) -eq 0) })
+              $records += [ordered]@{ fixture = $kind; requestedPosixMode = 384; projectedMode = [int]$mode; nativeUntrustedAllowReadAceCount = $broadRead.Count }
+            }
+            if ($records[0].nativeUntrustedAllowReadAceCount -ne 0 -or $records[1].nativeUntrustedAllowReadAceCount -lt 1) { throw 'Unexpected native ACL baseline; review the diagnostic rather than assuming privacy.' }
+            [ordered]@{ schemaVersion = 1; observationOnly = $true; productPrivacyQualified = $false; scope = 'Fresh public dummy files only. Not a product database or a different-user effective-read test.'; records = $records } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $report -Encoding utf8
+            Get-Content -LiteralPath $report
+          } finally {
+            if ($owned) {
+              $item = Get-Item -LiteralPath $root -Force
+              if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Refusing cleanup of a replaced diagnostic root.' }
+              Remove-Item -LiteralPath $root -Recurse -Force
+            }
+          }
+
+      - name: Retain Windows mode and DACL observations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-mode-acl-observations
+          path: ${{ runner.temp }}/yawf-mode-acl-diagnostic.json
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Typecheck server
         working-directory: server
