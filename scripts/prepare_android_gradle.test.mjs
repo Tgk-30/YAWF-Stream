@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, truncateSync, statSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   GRADLE_ALL_SHA256, GRADLE_ALL_URL, GRADLE_BIN_SHA256,
-  prepareAndroidGradle, prepareGradleWrapperProperties,
+  GRADLE_ALL_BYTES, prepareAndroidGradle, prepareGradleWrapperProperties, verifiedGradleArchiveUrl,
 } from "./prepare_android_gradle.mjs";
+import { GRADLE_ALL_ASSET_API } from "./fetch_android_gradle.mjs";
 
 const template = "# Generated wrapper\ndistributionBase=GRADLE_USER_HOME\ndistributionUrl=https\\://services.gradle.org/distributions/gradle-9.6.1-bin.zip\ndistributionPath=wrapper/dists\nzipStorePath=wrapper/dists\nzipStoreBase=GRADLE_USER_HOME\n";
 
@@ -14,6 +15,8 @@ test("official distribution URL and checksum pins match the verified Gradle rele
   assert.equal(GRADLE_ALL_URL, "https://downloads.gradle.org/distributions/gradle-9.6.1-all.zip");
   assert.equal(GRADLE_ALL_SHA256, "61ba77b3ff7167e60962763eb4bae79db7120c189b9544358d0ade3c1e712a83");
   assert.equal(GRADLE_BIN_SHA256, "9c0f7faeeb306cb14e4279a3e084ca6b596894089a0638e68a07c945a32c9e14");
+  assert.equal(GRADLE_ALL_BYTES, 239601473);
+  assert.equal(GRADLE_ALL_ASSET_API, "https://api.github.com/repos/gradle/gradle-distributions/releases/assets/458711396");
 });
 
 test("pins the same official Gradle version and verified ALL archive before wrapper bootstrap", () => {
@@ -107,13 +110,60 @@ test("rejects invalid source encoding without changing unrelated bytes", () => {
   }
 });
 
-test("both Android CI entrypoints prepare the wrapper before its first invocation", () => {
+test("local bootstrap rejects missing, wrong-sized, directory and symlink archives", () => {
+  const root = mkdtempSync(join(tmpdir(), "yawf-gradle-archive-"));
+  try {
+    const archive = join(root, "archive.zip");
+    assert.throws(() => verifiedGradleArchiveUrl(archive));
+    assert.throws(() => verifiedGradleArchiveUrl(root));
+    writeFileSync(archive, "not the pinned archive");
+    assert.throws(() => verifiedGradleArchiveUrl(archive));
+    const link = join(root, "link.zip");
+    symlinkSync(archive, link);
+    assert.throws(() => verifiedGradleArchiveUrl(link));
+    assert.throws(() => prepareGradleWrapperProperties(template, archive));
+    assert.equal(readFileSync(archive, "utf8"), "not the pinned archive");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("official API fetch is bounded and cannot use ambient curl credentials or skip verification", () => {
+  const source = readFileSync(new URL("./fetch_android_gradle.mjs", import.meta.url), "utf8");
+  assert.match(source, /"--disable", "--fail"/);
+  assert.match(source, /"--proto", "=https", "--proto-redir", "=https"/);
+  assert.match(source, /"--max-filesize", String\(GRADLE_ALL_BYTES\)/);
+  assert.match(source, /"--header", "Accept: application\/octet-stream"/);
+  assert.doesNotMatch(source, /Authorization|GITHUB_TOKEN|--insecure|--netrc|--user/);
+  assert.ok(source.indexOf("verifiedGradleArchiveUrl(archive);") > source.indexOf("if (result.status !== 0) throw"));
+  assert.ok(source.indexOf("return archive;") > source.indexOf("verifiedGradleArchiveUrl(archive);"));
+  assert.match(source, /timeout: 360_000/);
+});
+
+test("a full-sized untrusted archive cannot enter the local wrapper bootstrap", () => {
+  const root = mkdtempSync(join(tmpdir(), "yawf-gradle-archive-hash-"));
+  try {
+    const archive = join(root, "archive.zip");
+    writeFileSync(archive, "");
+    truncateSync(archive, GRADLE_ALL_BYTES);
+    assert.throws(() => verifiedGradleArchiveUrl(archive), /pinned official bytes/);
+    assert.equal(statSync(archive).size, GRADLE_ALL_BYTES);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("all three Android entrypoints prepare the wrapper before its first invocation", () => {
   const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   const phone = readFileSync(new URL("../.github/workflows/android-release.yml", import.meta.url), "utf8");
+  const desktop = readFileSync(new URL("../.github/workflows/web-release.yml", import.meta.url), "utf8");
   const android = ci.slice(ci.indexOf("\n  tauri-android:"), ci.indexOf("\n  android-tv:"));
   assert.ok(android.indexOf("node scripts/prepare_android_gradle.mjs") > android.indexOf("node scripts/patch_tauri_android.mjs"));
+  assert.ok(android.indexOf("node scripts/prepare_android_gradle.mjs") > android.indexOf("node scripts/fetch_android_gradle.mjs"));
   assert.ok(android.indexOf("node scripts/prepare_android_gradle.mjs") < android.indexOf("run: ./gradlew"));
   const build = phone.slice(phone.indexOf("      - name: Build the Android project"), phone.indexOf("      - name: Sign and verify the phone APK"));
-  assert.match(build, /node \.\.\/scripts\/patch_tauri_android\.mjs\s+node \.\.\/scripts\/prepare_android_gradle\.mjs\s+npm run tauri -- android build --apk/);
+  assert.match(build, /node \.\.\/scripts\/patch_tauri_android\.mjs\s+YAWF_GRADLE_ARCHIVE="\$\(node \.\.\/scripts\/fetch_android_gradle\.mjs\)"\s+export YAWF_GRADLE_ARCHIVE\s+node \.\.\/scripts\/prepare_android_gradle\.mjs\s+npm run tauri -- android build --apk/);
+  const coordinated = desktop.slice(desktop.indexOf("      - name: Build the Android project"), desktop.indexOf("      - name: Sign and verify the phone APK"));
+  assert.match(coordinated, /node \.\.\/scripts\/patch_tauri_android\.mjs\s+YAWF_GRADLE_ARCHIVE="\$\(node \.\.\/scripts\/fetch_android_gradle\.mjs\)"\s+export YAWF_GRADLE_ARCHIVE\s+node \.\.\/scripts\/prepare_android_gradle\.mjs\s+npm run tauri -- android build --apk/);
   assert.match(ci, /node --test scripts\/prepare_android_gradle\.test\.mjs/);
 });
