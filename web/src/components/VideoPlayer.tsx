@@ -1083,6 +1083,8 @@ export function VideoPlayer({
   const [externalStatus, setExternalStatus] = useState<string | null>(null);
   const [externalError, setExternalError] = useState<string | null>(null);
   const [detailsSection, setDetailsSection] = useState<"info" | "shortcuts" | null>(null);
+  const detailsTriggerRef = useRef<{ element: HTMLButtonElement; owner: string } | null>(null);
+  const detailsWasOpenRef = useRef(false);
   const [sourceSize, setSourceSize] = useState<PixelSize | null>(null);
   const [webTechnicalStats, setWebTechnicalStats] = useState<
     ReadonlyArray<readonly [string, string]>
@@ -1254,6 +1256,12 @@ export function VideoPlayer({
   androidOnProgressRef.current = onProgress;
   const [chromeHovered, setChromeHovered] = useState(false);
   const [chromeFocused, setChromeFocused] = useState(false);
+  const chromeInputModalityRef = useRef<"keyboard" | "pointer" | null>(null);
+  const chromeHoveredOwnerRef = useRef<HTMLElement | null>(null);
+  const chromeFocusedOwnerRef = useRef<HTMLElement | null>(null);
+  const chromePointerFocusTargetRef = useRef<Element | null>(null);
+  const chromePointerFocusTimerRef = useRef<number | undefined>(undefined);
+  const chromeExplicitPointerFocusRef = useRef(false);
   const chromeHideTimer = useRef<number | undefined>(undefined);
   const lastChromeNudgeAt = useRef(Number.NEGATIVE_INFINITY);
   const chromePinned =
@@ -1625,28 +1633,136 @@ export function VideoPlayer({
       if (!chromePinnedRef.current) setWebChromeVisible(false);
     }, 3200);
   }, [clearChromeTimer, mode]);
-  const holdChrome = useCallback(() => {
+  const clearChromePointerFocus = useCallback(() => {
+    window.clearTimeout(chromePointerFocusTimerRef.current);
+    chromePointerFocusTimerRef.current = undefined;
+    chromePointerFocusTargetRef.current = null;
+  }, []);
+  useEffect(() => {
+    const finishPointer = () => {
+      window.clearTimeout(chromePointerFocusTimerRef.current);
+      // Let the same input turn deliver native focus/click, but do not retain
+      // pointer classification when a drag ends without a click.
+      chromePointerFocusTimerRef.current = window.setTimeout(clearChromePointerFocus, 0);
+    };
+    window.addEventListener("pointerup", finishPointer);
+    window.addEventListener("pointercancel", clearChromePointerFocus);
+    window.addEventListener("blur", clearChromePointerFocus);
+    return () => {
+      window.removeEventListener("pointerup", finishPointer);
+      window.removeEventListener("pointercancel", clearChromePointerFocus);
+      window.removeEventListener("blur", clearChromePointerFocus);
+      clearChromePointerFocus();
+    };
+  }, [clearChromePointerFocus]);
+  useLayoutEffect(() => {
+    if (chromeHoveredOwnerRef.current?.isConnected === false) {
+      chromeHoveredOwnerRef.current = null;
+      setChromeHovered(false);
+    }
+    const focused = chromeFocusedOwnerRef.current;
+    if (focused != null && (!focused.isConnected || document.activeElement !== focused)) {
+      chromeFocusedOwnerRef.current = null;
+      setChromeFocused(false);
+    }
+    if (chromePointerFocusTargetRef.current?.isConnected === false) clearChromePointerFocus();
+  }, [clearChromePointerFocus, webviewSource]);
+  const holdChrome = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    // Touch and pen can enter controls without ever delivering a hover leave.
+    if (event.pointerType !== "mouse") return;
+    chromeHoveredOwnerRef.current = event.currentTarget;
     setChromeHovered(true);
     nudgeChrome();
   }, [nudgeChrome]);
-  const releaseChrome = useCallback(() => {
+  const releaseChrome = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (event.pointerType !== "mouse" || chromeHoveredOwnerRef.current !== event.currentTarget) return;
+    chromeHoveredOwnerRef.current = null;
     setChromeHovered(false);
     nudgeChrome();
   }, [nudgeChrome]);
-  const focusChrome = useCallback(() => {
-    setChromeFocused(true);
+  const noteChromePointer = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    clearChromePointerFocus();
+    chromeInputModalityRef.current = "pointer";
+    chromePointerFocusTargetRef.current = event.target instanceof Element ? event.target : null;
+    chromeFocusedOwnerRef.current = null;
+    setChromeFocused(false);
+    if (event.pointerType !== "mouse") {
+      chromeHoveredOwnerRef.current = null;
+      setChromeHovered(false);
+    }
+  }, [clearChromePointerFocus]);
+  const noteChromeClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    if (chromePointerFocusTargetRef.current != null || event.detail > 0) {
+      chromeInputModalityRef.current = "pointer";
+    } else if (chromeInputModalityRef.current === "pointer") {
+      chromeInputModalityRef.current = null;
+    }
+  }, []);
+  const noteChromeKeyboard = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
+    clearChromePointerFocus();
+    chromeInputModalityRef.current = "keyboard";
+    // A keyboard can take over an already touch-focused control without a new
+    // focus event. Keep that control visible, including on hybrid devices.
+    const focused = document.activeElement;
+    const ownsFocus = focused instanceof HTMLElement && event.currentTarget.contains(focused) &&
+      focused.closest(".player-bar, .player-osd, .player-touch-transport") != null;
+    chromeFocusedOwnerRef.current = ownsFocus ? focused : null;
+    setChromeFocused(ownsFocus);
+    nudgeChrome();
+  }, [clearChromePointerFocus, nudgeChrome]);
+  const focusChrome = useCallback((event: React.FocusEvent<HTMLElement>) => {
+    const target = event.target;
+    const pointer = chromePointerFocusTargetRef.current;
+    const pointerFocus = chromeExplicitPointerFocusRef.current || (pointer != null &&
+      (target.contains(pointer) || pointer.contains(target)));
+    // Only a current pointer gesture or an explicitly scoped menu restoration
+    // suppresses focus pinning. Later independent/assistive focus is not a tap.
+    chromeFocusedOwnerRef.current = pointerFocus ? null : target;
+    setChromeFocused(!pointerFocus);
     nudgeChrome();
   }, [nudgeChrome]);
+  const focusChromeControl = useCallback((target: HTMLElement | null) => {
+    if (target == null || !target.isConnected) return;
+    const pointerFocus = chromeInputModalityRef.current === "pointer";
+    chromeExplicitPointerFocusRef.current = pointerFocus;
+    try {
+      target.focus({ preventScroll: true });
+      if (document.activeElement === target) {
+        // Modal cleanup may already have focused this exact trigger, so a new
+        // focus event is not guaranteed. Apply this operation's own intent.
+        chromeFocusedOwnerRef.current = pointerFocus ? null : target;
+        setChromeFocused(!pointerFocus);
+      }
+    } finally {
+      chromeExplicitPointerFocusRef.current = false;
+    }
+  }, []);
   const blurChrome = useCallback(
     (event: React.FocusEvent<HTMLElement>) => {
-      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) {
-        return;
-      }
+      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+      const focused = chromeFocusedOwnerRef.current;
+      if (focused != null && !event.currentTarget.contains(focused)) return;
+      chromeFocusedOwnerRef.current = null;
       setChromeFocused(false);
       nudgeChrome();
     },
     [nudgeChrome],
   );
+  useEffect(() => {
+    const open = detailsSection != null;
+    const wasOpen = detailsWasOpenRef.current;
+    detailsWasOpenRef.current = open;
+    if (!wasOpen || open) return;
+    const origin = detailsTriggerRef.current;
+    detailsTriggerRef.current = null;
+    const player = playerDialogRef.current;
+    // The child popover's modal cleanup restores first. Reconcile only this
+    // actual header operation, never a shortcut or a retired player's origin.
+    if (origin == null || origin.owner !== playbackOwner ||
+        origin.owner !== playbackOwnerRef.current || !origin.element.isConnected ||
+        player == null || !player.isConnected || origin.element.closest(".player") !== player) return;
+    focusChromeControl(origin.element);
+  }, [detailsSection, focusChromeControl, playbackOwner, playerDialogRef]);
 
   useEffect(() => {
     recordDiagnostic("player", "session.started", "info", requestedEngine);
@@ -2773,7 +2889,10 @@ export function VideoPlayer({
         aria-modal="true"
         aria-label={`Playing ${title}`}
         tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e) => { clearChromePointerFocus(); e.stopPropagation(); }}
+        onClickCapture={mode === "webview" ? noteChromeClick : undefined}
+        onPointerDownCapture={mode === "webview" ? noteChromePointer : undefined}
+        onKeyDownCapture={mode === "webview" ? noteChromeKeyboard : undefined}
         onPointerMove={mode === "webview" ? nudgeChrome : undefined}
       >
         <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -2815,9 +2934,14 @@ export function VideoPlayer({
             <button
               type="button"
               className="player-info-button"
-              onClick={() =>
-                setDetailsSection((section) => section === "info" ? null : "info")
-              }
+              onClick={(event) => {
+                const trigger = event.currentTarget;
+                focusChromeControl(trigger);
+                detailsTriggerRef.current = trigger.isConnected
+                  ? { element: trigger, owner: playbackOwner }
+                  : null;
+                setDetailsSection((section) => section === "info" ? null : "info");
+              }}
               aria-label="Player details and shortcuts"
               aria-haspopup="dialog"
               aria-expanded={detailsSection != null}
@@ -2871,6 +2995,7 @@ export function VideoPlayer({
             onChromeEnter={holdChrome}
             onChromeLeave={releaseChrome}
             onChromeFocus={focusChrome}
+            onChromeControlFocus={focusChromeControl}
             onChromeBlur={blurChrome}
             onActivity={nudgeChrome}
             onPausedChange={setWebviewPaused}
@@ -2883,7 +3008,10 @@ export function VideoPlayer({
             onCastLocalPlaybackChange={setCastSuspended}
             suspended={castSuspended}
             onActiveSubtitleUrlChange={setActiveSubtitleUrl}
-            onOpenShortcuts={() => setDetailsSection("shortcuts")}
+            onOpenShortcuts={() => {
+              detailsTriggerRef.current = null;
+              setDetailsSection("shortcuts");
+            }}
             onSourceSize={setSourceSize}
             onTechnicalStats={updateWebTechnicalStats}
             onProgress={reportProgress}
@@ -3016,6 +3144,7 @@ function WebviewPlayer({
   onChromeEnter,
   onChromeLeave,
   onChromeFocus,
+  onChromeControlFocus,
   onChromeBlur,
   onActivity,
   onPausedChange,
@@ -3093,9 +3222,10 @@ function WebviewPlayer({
   detailsOpen: boolean;
   touchPlayer: boolean;
   chromeVisible: boolean;
-  onChromeEnter: () => void;
-  onChromeLeave: () => void;
-  onChromeFocus: () => void;
+  onChromeEnter: (event: React.PointerEvent<HTMLElement>) => void;
+  onChromeLeave: (event: React.PointerEvent<HTMLElement>) => void;
+  onChromeFocus: (event: React.FocusEvent<HTMLElement>) => void;
+  onChromeControlFocus: (target: HTMLElement | null) => void;
   onChromeBlur: (event: React.FocusEvent<HTMLElement>) => void;
   onActivity: () => void;
   onPausedChange: (paused: boolean) => void;
@@ -3248,9 +3378,10 @@ function WebviewPlayer({
   const previousPositionRef = useRef(0);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
-  const touchMenuOpen = touchPlayer && (optionsOpen || captionsOpen);
-  const touchMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const touchMenuWasOpenRef = useRef(false);
+  const menuOpen = optionsOpen || captionsOpen;
+  const touchMenuOpen = touchPlayer && menuOpen;
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuWasOpenRef = useRef(false);
   const optionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const audioShortcutRef = useRef<HTMLButtonElement | null>(null);
   const optionsOriginRef = useRef<"settings" | "audio" | null>(null);
@@ -6002,8 +6133,8 @@ function WebviewPlayer({
   }, []);
 
   const toggleOptions = () => {
-    optionsTriggerRef.current?.focus({ preventScroll: true });
-    if (touchPlayer && !optionsOpen) touchMenuTriggerRef.current = optionsTriggerRef.current;
+    onChromeControlFocus(optionsTriggerRef.current);
+    if (!optionsOpen) menuTriggerRef.current = optionsTriggerRef.current?.isConnected ? optionsTriggerRef.current : null;
     if (!optionsOpen) optionsOriginRef.current = "settings";
     audioOptionsRequestedRef.current = false;
     setCaptionsOpen(false);
@@ -6614,8 +6745,8 @@ function WebviewPlayer({
   }, [optionsOpen]);
 
   const openAudioOptions = () => {
-    audioShortcutRef.current?.focus({ preventScroll: true });
-    if (touchPlayer) touchMenuTriggerRef.current = audioShortcutRef.current;
+    onChromeControlFocus(audioShortcutRef.current);
+    menuTriggerRef.current = audioShortcutRef.current?.isConnected ? audioShortcutRef.current : null;
     optionsOriginRef.current = "audio";
     audioOptionsRequestedRef.current = true;
     setCaptionsOpen(false);
@@ -6629,19 +6760,19 @@ function WebviewPlayer({
     const origin = optionsOriginRef.current;
     optionsOriginRef.current = null;
     if (origin === "audio" && !audioShortcutAvailable) {
-      optionsTriggerRef.current?.focus({ preventScroll: true });
+      onChromeControlFocus(optionsTriggerRef.current);
     }
-  }, [audioShortcutAvailable, optionsOpen]);
+  }, [audioShortcutAvailable, onChromeControlFocus, optionsOpen]);
   useEffect(() => {
     // Restore after modal cleanup and after the background controls are no longer
     // inert. Touch browsers need not focus a button when it is tapped.
-    if (touchMenuWasOpenRef.current && !touchMenuOpen) {
-      const trigger = touchMenuTriggerRef.current;
-      const fallback = optionsTriggerRef.current;
-      (trigger?.isConnected ? trigger : fallback)?.focus({ preventScroll: true });
+    if (menuWasOpenRef.current && !menuOpen) {
+      const trigger = menuTriggerRef.current;
+      menuTriggerRef.current = null;
+      if (trigger?.isConnected) onChromeControlFocus(trigger);
     }
-    touchMenuWasOpenRef.current = touchMenuOpen;
-  }, [touchMenuOpen]);
+    menuWasOpenRef.current = menuOpen;
+  }, [menuOpen, onChromeControlFocus]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -6893,7 +7024,9 @@ function WebviewPlayer({
             <button
               type="button"
               className={`chip player-osd-icon-button${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
-              onClick={() => {
+              onClick={(event) => {
+                onChromeControlFocus(event.currentTarget);
+                if (!captionsOpen) menuTriggerRef.current = event.currentTarget.isConnected ? event.currentTarget : null;
                 setOptionsOpen(false);
                 setCaptionsOpen((open) => !open);
               }}
@@ -7056,7 +7189,8 @@ function WebviewPlayer({
                   type="button"
                   className={`chip player-touch-action${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
                   onClick={(event) => {
-                    touchMenuTriggerRef.current = event.currentTarget;
+                    onChromeControlFocus(event.currentTarget);
+                    if (!captionsOpen) menuTriggerRef.current = event.currentTarget.isConnected ? event.currentTarget : null;
                     setOptionsOpen(false);
                     setCaptionsOpen((open) => !open);
                   }}

@@ -10119,6 +10119,335 @@ describe("WebviewPlayer", () => {
     });
   });
 
+  describe("chrome input modality", () => {
+    function pointer(element: Element, type: "pointerover" | "pointerout" | "pointerdown" | "pointerup" | "pointercancel", pointerType: string) {
+      const event = new MouseEvent(type, { bubbles: true });
+      Object.defineProperty(event, "pointerType", { value: pointerType });
+      fireEvent(element, event);
+    }
+    function setup(layout: "desktop" | "touch" = "touch") {
+      vi.useFakeTimers();
+      deviceKindMock.mockReturnValue(layout === "touch" ? "ios" : "mac");
+      const props = { url: "https://x/chrome.mp4", title: "Chrome input", onClose: () => {} };
+      const view = render(<VideoPlayer {...props} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let paused = false;
+      Object.defineProperties(video, {
+        paused: { configurable: true, get: () => paused },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+        duration: { configurable: true, value: 900 },
+      });
+      vi.mocked(video.play).mockImplementation(async () => {
+        paused = false; fireEvent.play(video); fireEvent.playing(video);
+      });
+      vi.mocked(video.pause).mockImplementation(() => { paused = true; fireEvent.pause(video); });
+      fireEvent.canPlay(video);
+      fireEvent.play(video); fireEvent.playing(video);
+      const bar = document.querySelector(".player-bar") as HTMLElement;
+      const osd = document.querySelector(".player-osd") as HTMLElement;
+      const region = document.querySelector(layout === "touch" ? ".player-touch-transport" : ".player-osd") as HTMLElement;
+      const advance = () => act(() => vi.advanceTimersByTime(3_201));
+      return { video, bar, osd, region, advance, view, props };
+    }
+
+    it.each(["hover", "focus"] as const)("drops a disconnected child %s pin after a committed source remount", (kind) => {
+      const { video, bar, region, advance, view, props } = setup();
+      if (kind === "hover") pointer(region, "pointerover", "mouse");
+      else act(() => screen.getByRole("button", { name: "Pause" }).focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+      view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+      const next = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(next).not.toBe(video); expect(region.isConnected).toBe(false);
+      fireEvent.canPlay(next);
+      advance(); expect(bar).not.toHaveClass("is-visible");
+    });
+
+    it.each(["hover", "focus"] as const)("retains a connected parent header %s pin through a committed source remount", (kind) => {
+      const { bar, advance, view, props } = setup();
+      const close = screen.getByRole("button", { name: "Close player" });
+      if (kind === "hover") pointer(bar, "pointerover", "mouse");
+      else act(() => close.focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+      view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+      fireEvent.canPlay(document.querySelector("video.player-video")!);
+      expect(bar.isConnected).toBe(true);
+      if (kind === "focus") expect(document.activeElement).toBe(close);
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("drops a connected header focus pin when focus moved without a delivered blur before remount", () => {
+      const { bar, advance, view, props } = setup();
+      const close = screen.getByRole("button", { name: "Close player" });
+      act(() => close.focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      const suppressBlur = (event: FocusEvent) => {
+        if (event.target === close) event.stopPropagation();
+      };
+      window.addEventListener("focusout", suppressBlur, true);
+      try {
+        act(() => outside.focus());
+        expect(close.isConnected).toBe(true);
+        expect(document.activeElement).toBe(outside);
+        view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+        fireEvent.canPlay(document.querySelector("video.player-video")!);
+        advance(); expect(bar).not.toHaveClass("is-visible");
+      } finally {
+        window.removeEventListener("focusout", suppressBlur, true);
+        outside.remove();
+      }
+    });
+
+    it.each(["pointerup", "pointercancel"] as const)("allows independent programmatic focus after touch %s without a click", (terminal) => {
+      const { bar, advance } = setup();
+      const play = screen.getByRole("button", { name: "Pause" });
+      pointer(play, "pointerdown", "touch"); act(() => play.focus());
+      pointer(play, terminal, "touch");
+      act(() => vi.advanceTimersByTime(1));
+      // Re-focus the same target so the case also rejects a pointer scope
+      // accidentally surviving its terminal event, not only a different target.
+      act(() => play.blur()); act(() => play.focus());
+      expect(document.activeElement).toBe(play);
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("allows independent assistive focus after a completed touch-menu restoration", () => {
+      const { bar, advance } = setup();
+      const more = screen.getByRole("button", { name: "Playback settings" });
+      pointer(more, "pointerdown", "touch"); act(() => more.focus()); fireEvent.click(more);
+      const close = screen.getByRole("button", { name: "Close playback settings" });
+      pointer(close, "pointerdown", "touch"); fireEvent.click(close);
+      advance(); expect(bar).not.toHaveClass("is-visible");
+      const play = screen.getByRole("button", { name: "Pause", hidden: true });
+      act(() => play.focus());
+      expect(document.activeElement).toBe(play);
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it.each([
+      ["touch", "touch"], ["touch", "pen"], ["desktop", "touch"],
+    ] as const)("hides after %s-layout %s Resume focus without pointerleave or blur", async (layout, pointerType) => {
+      const { video, bar, osd, region, advance } = setup(layout);
+      act(() => video.pause());
+      const play = screen.getByRole("button", { name: "Play" });
+      pointer(region, "pointerover", pointerType);
+      pointer(play, "pointerdown", pointerType);
+      act(() => play.focus());
+      fireEvent.click(play);
+      pointer(play, "pointerup", pointerType);
+      expect(video.paused).toBe(false);
+      expect(document.activeElement).toBe(play);
+      advance();
+      expect(bar).not.toHaveClass("is-visible");
+      expect(osd).not.toHaveClass("is-visible");
+      expect(document.activeElement).toBe(play);
+      expect(video.paused).toBe(false);
+    });
+
+    it.each(["touch", "pen"] as const)("does not pin chrome on a %s pointerenter without pointerdown or pointerleave", (pointerType) => {
+      const { video, bar, osd, region, advance } = setup();
+      pointer(region, "pointerover", pointerType);
+      advance();
+      expect(bar).not.toHaveClass("is-visible");
+      expect(osd).not.toHaveClass("is-visible");
+      expect(video.paused).toBe(false);
+    });
+
+    it.each(["touch", "pen"] as const)("clears existing mouse-hover and keyboard-focus pins on %s without blur", (pointerType) => {
+      const { video, bar, region, advance } = setup();
+      const play = screen.getByRole("button", { name: "Pause" });
+      pointer(region, "pointerover", "mouse");
+      fireEvent.keyDown(play, { key: "Tab" }); act(() => play.focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+      pointer(play, "pointerdown", pointerType);
+      advance(); expect(bar).not.toHaveClass("is-visible");
+      expect(document.activeElement).toBe(play);
+      expect(video.paused).toBe(false);
+    });
+
+    it("preserves unclassified assistive or programmatic control focus", () => {
+      const { bar, advance } = setup();
+      act(() => screen.getByRole("button", { name: "Pause" }).focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("hides after touch settings close restores focus to More", () => {
+      const { bar, osd, advance } = setup();
+      const more = screen.getByRole("button", { name: "Playback settings" });
+      pointer(more, "pointerover", "touch"); pointer(more, "pointerdown", "touch");
+      act(() => more.focus()); fireEvent.click(more);
+      advance();
+      expect(bar).toHaveClass("is-visible");
+      const close = screen.getByRole("button", { name: "Close playback settings" });
+      pointer(close, "pointerdown", "touch"); fireEvent.click(close);
+      expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+      expect(document.activeElement).toBe(more);
+      advance();
+      expect(bar).not.toHaveClass("is-visible");
+      expect(osd).not.toHaveClass("is-visible");
+      expect(document.activeElement).toBe(more);
+    });
+
+    it("re-pins keyboard input on an already touch-focused control without another focus event", () => {
+      const { bar, advance } = setup();
+      const play = screen.getByRole("button", { name: "Pause" });
+      pointer(play, "pointerdown", "touch"); act(() => play.focus());
+      advance(); expect(bar).not.toHaveClass("is-visible");
+      fireEvent.keyDown(play, { key: "ArrowDown" });
+      expect(document.activeElement).toBe(play);
+      advance(); expect(bar).toHaveClass("is-visible");
+      expect(document.activeElement).toBe(play);
+      act(() => play.blur());
+      advance(); expect(bar).not.toHaveClass("is-visible");
+    });
+
+    it("preserves keyboard settings-close focus restoration pinning", () => {
+      const { bar, advance } = setup();
+      const more = screen.getByRole("button", { name: "Playback settings" });
+      fireEvent.keyDown(more, { key: "Tab" }); act(() => more.focus());
+      fireEvent.click(more);
+      const close = screen.getByRole("button", { name: "Close playback settings" });
+      fireEvent.keyDown(close, { key: "Escape" });
+      expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+      expect(document.activeElement).toBe(more);
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it.each(["desktop", "touch"] as const)("preserves actual mouse hover in the %s layout until mouse leave", (layout) => {
+      const { bar, region, advance } = setup(layout);
+      pointer(region, "pointerover", "mouse");
+      advance(); expect(bar).toHaveClass("is-visible");
+      pointer(region, "pointerout", "mouse");
+      advance(); expect(bar).not.toHaveClass("is-visible");
+    });
+
+    function touchPress(button: HTMLElement) {
+      pointer(button, "pointerdown", "touch");
+      // fireEvent does not perform the browser's ordinary focus default.
+      act(() => button.focus());
+      pointer(button, "pointerup", "touch");
+      fireEvent.click(button);
+    }
+    function enableNativeAudioChoices() {
+      const tracks = Object.assign(new EventTarget(), {
+        0: { id: "en", label: "English", language: "eng", enabled: true },
+        1: { id: "jp", label: "Japanese", language: "jpn", enabled: false },
+        length: 2,
+        item(index: number) { return this[index as 0 | 1] ?? null; },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", { configurable: true, get: () => tracks });
+    }
+
+    it.each(["settings", "captions", "audio"] as const)("[r3] retires desktop-layout touch %s restoration without losing exact focus or later assistive refocus", (menu) => {
+      captionMenuMode.actual = true;
+      if (menu === "audio") enableNativeAudioChoices();
+      const { video, bar, osd, advance } = setup("desktop");
+      const name = menu === "settings" ? "Playback settings" : menu === "captions" ? "Subtitles" : "Audio track, English";
+      const trigger = screen.getByRole("button", { name });
+      touchPress(trigger);
+      const close = screen.getByRole("button", { name: menu === "captions" ? "Close subtitles menu" : "Close playback settings" });
+      advance(); expect(bar).toHaveClass("is-visible");
+      touchPress(close);
+      expect(trigger).toHaveFocus();
+      advance();
+      expect(bar).not.toHaveClass("is-visible"); expect(osd).not.toHaveClass("is-visible");
+      expect(trigger).toHaveFocus(); expect(video.paused).toBe(false);
+      act(() => trigger.blur()); act(() => trigger.focus());
+      advance(); expect(bar).toHaveClass("is-visible"); expect(trigger).toHaveFocus();
+    });
+
+    it.each(["desktop", "touch"] as const)("[r3] retires %s-layout touch Details restoration after the actual child modal cleanup", (layout) => {
+      const { video, bar, advance } = setup(layout);
+      const trigger = screen.getByRole("button", { name: "Player details and shortcuts" });
+      touchPress(trigger);
+      const dialog = screen.getByRole("dialog", { name: "Player details and shortcuts" });
+      expect(dialog).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+      touchPress(within(dialog).getByRole("button", { name: "Close playback information" }));
+      expect(trigger).toHaveFocus();
+      advance(); expect(bar).not.toHaveClass("is-visible"); expect(trigger).toHaveFocus();
+      expect(video.paused).toBe(false);
+      act(() => trigger.blur()); act(() => trigger.focus());
+      advance(); expect(bar).toHaveClass("is-visible"); expect(trigger).toHaveFocus();
+    });
+
+    it.each(["settings", "captions", "details"] as const)("[r3] keeps keyboard %s modal restoration pinned", (menu) => {
+      captionMenuMode.actual = true;
+      const { bar, advance } = setup("desktop");
+      const trigger = screen.getByRole("button", { name: menu === "settings" ? "Playback settings" : menu === "captions" ? "Subtitles" : "Player details and shortcuts" });
+      fireEvent.keyDown(trigger, { key: "Tab" }); act(() => trigger.focus()); fireEvent.click(trigger);
+      const dialog = screen.getByRole("dialog", { name: menu === "settings" ? "Playback settings" : menu === "captions" ? "Subtitles" : "Player details and shortcuts" });
+      expect(dialog).toHaveFocus();
+      fireEvent.keyDown(dialog, { key: "Escape" });
+      expect(trigger).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("[r3] returns the question-mark shortcut to its actual non-header origin", () => {
+      setup("desktop");
+      const header = screen.getByRole("button", { name: "Player details and shortcuts" });
+      touchPress(header);
+      touchPress(screen.getByRole("button", { name: "Close playback information" }));
+      const pane = screen.getByRole("dialog", { name: "Playing Chrome input" });
+      act(() => pane.focus());
+      const headerFocus = vi.spyOn(header, "focus"); headerFocus.mockClear();
+      fireEvent.keyDown(pane, { key: "?" });
+      const dialog = screen.getByRole("dialog", { name: "Player details and shortcuts" });
+      expect(within(dialog).getByRole("tabpanel", { name: "Shortcuts" })).toBeInTheDocument();
+      fireEvent.keyDown(dialog, { key: "Escape" });
+      expect(pane).toHaveFocus(); expect(headerFocus).not.toHaveBeenCalled();
+    });
+
+    it.each(["disconnected", "other-player", "different-owner"] as const)("[r3] does not add owned Details reconciliation for a %s origin", (stale) => {
+      const { view, props } = setup("desktop");
+      const trigger = screen.getByRole("button", { name: "Player details and shortcuts" });
+      touchPress(trigger);
+      const parent = trigger.parentElement!, next = trigger.nextSibling;
+      const outside = document.createElement("div"); outside.className = "player";
+      if (stale === "disconnected") trigger.remove();
+      if (stale === "other-player") { document.body.append(outside); outside.append(trigger); }
+      if (stale === "different-owner") view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+      const oldFocus = vi.spyOn(trigger, "focus"); oldFocus.mockClear();
+      const fallback = vi.spyOn(screen.getByRole("button", { name: "Close player" }), "focus"); fallback.mockClear();
+      try {
+        touchPress(screen.getByRole("button", { name: "Close playback information" }));
+        // The unchanged generic modal hook attempts its saved origin once.
+        // No new owned reconciliation may re-focus or invent a fallback for it.
+        expect(oldFocus).toHaveBeenCalledTimes(1); expect(fallback).not.toHaveBeenCalled();
+      } finally {
+        if (trigger.parentElement !== parent) parent.insertBefore(trigger, next);
+        outside.remove();
+      }
+    });
+
+    it("[r3] does not substitute Settings for a disconnected desktop captions origin", () => {
+      captionMenuMode.actual = true;
+      setup("desktop");
+      const trigger = screen.getByRole("button", { name: "Subtitles" });
+      const settings = screen.getByRole("button", { name: "Playback settings" });
+      touchPress(trigger);
+      const parent = trigger.parentElement!, next = trigger.nextSibling;
+      trigger.remove();
+      const settingsFocus = vi.spyOn(settings, "focus"); settingsFocus.mockClear();
+      try {
+        touchPress(screen.getByRole("button", { name: "Close subtitles menu" }));
+        expect(settingsFocus).not.toHaveBeenCalled();
+      } finally { parent.insertBefore(trigger, next); }
+    });
+
+    it.each(["paused", "buffering", "settings", "captions", "scrubbing"] as const)("keeps chrome pinned for %s independently of touch focus", (reason) => {
+      const { video, bar, advance } = setup();
+      pointer(document.querySelector(".player")!, "pointerdown", "touch");
+      if (reason === "paused") act(() => video.pause());
+      if (reason === "buffering") fireEvent.waiting(video);
+      if (reason === "settings") fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      if (reason === "captions") fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+      if (reason === "scrubbing") pointer(screen.getByTestId("scrub-bar"), "pointerdown", "touch");
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+  });
+
   it("hides inactive web chrome, preserves it for pause or menus, and reveals it on pointer activity", () => {
     vi.useFakeTimers();
     try {
