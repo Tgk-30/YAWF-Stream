@@ -4986,6 +4986,9 @@ function WebviewPlayer({
         // available instead of issuing an earlier seek that HLS startup can
         // overwrite with the live edge.
         if (nativeExactHlsFragmentRef.current) return;
+        // Readiness events can arrive before an accepted seek finishes. Let it
+        // settle before retrying; seeked can still retry a clamped wrong target.
+        if (video.seeking) return;
         if (!targetIsAvailable(start)) return;
         try {
           video.currentTime = start;

@@ -14009,6 +14009,97 @@ describe("Original pending-generation cancellation contract", () => {
   });
 });
 
+describe("exact handoff in-flight seek ownership", () => {
+  function observeSeek(video: HTMLVideoElement, clampFirst = false) {
+    let currentTime = 0;
+    let seeking = false;
+    const writes = vi.fn((value: number) => {
+      // Model immediate target readback while the browser's asynchronous seek
+      // is still in flight, rather than treating assignment as completion.
+      currentTime = clampFirst && writes.mock.calls.length === 1 ? 30 : value;
+      seeking = true;
+    });
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, get: () => currentTime, set: writes },
+      seeking: { configurable: true, get: () => seeking },
+      duration: { configurable: true, value: 1_200 },
+      paused: { configurable: true, value: true },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 1_200 } },
+    });
+    return {
+      writes,
+      settle: () => { seeking = false; fireEvent.seeked(video); },
+    };
+  }
+
+  for (const intent of ["playing", "paused", "explicit-play"] as const) {
+    it.each(["loadedmetadata", "loadeddata", "durationchange", "progress", "canplay"])(
+      `does not restart the ${intent} handoff seek on %s`,
+      async (event) => {
+        render(<VideoPlayer url="https://media.example/exact.mp4" title="In-flight exact seek"
+          startPositionSeconds={120}
+          initialHandoffState={{ paused: intent !== "playing", volume: 1, muted: false, playbackRate: 1 }}
+          onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        const probe = observeSeek(video);
+        const play = vi.mocked(HTMLMediaElement.prototype.play);
+        if (intent === "explicit-play") {
+          await userEvent.click(screen.getByRole("button", { name: "Play" }));
+        }
+        fireEvent.loadedMetadata(video);
+        expect(probe.writes.mock.calls).toEqual([[120]]);
+        fireEvent.seeking(video);
+        fireEvent(video, new Event(event));
+        fireEvent(video, new Event(event));
+        expect(probe.writes.mock.calls).toEqual([[120]]);
+        expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+        expect(play).not.toHaveBeenCalled();
+
+        probe.settle();
+        expect(probe.writes.mock.calls).toEqual([[120]]);
+        expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+        expect(play).toHaveBeenCalledTimes(intent === "paused" ? 0 : 1);
+        // Completing a paused handoff must not leave a permanent Play veto.
+        if (intent === "paused") {
+          await userEvent.click(screen.getByRole("button", { name: "Play" }));
+          expect(play).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+  }
+
+  it("retries an exact seek that settled at a clamped wrong position, then confirms only its completed retry", () => {
+    render(<VideoPlayer url="https://media.example/clamped.mp4" title="Clamped exact seek"
+      startPositionSeconds={120}
+      initialHandoffState={{ paused: false, volume: 1, muted: false, playbackRate: 1 }}
+      onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const probe = observeSeek(video, true);
+    const play = vi.mocked(HTMLMediaElement.prototype.play);
+    fireEvent.loadedMetadata(video);
+    expect(video.currentTime).toBe(30);
+    expect(probe.writes.mock.calls).toEqual([[120]]);
+    expect(play).not.toHaveBeenCalled();
+
+    // A completed but clamped seek is not success. The existing seeked handler
+    // must retry immediately, without a polling timer or sticky pending latch.
+    probe.settle();
+    expect(probe.writes.mock.calls).toEqual([[120], [120]]);
+    expect(video.currentTime).toBe(120);
+    expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+    expect(play).not.toHaveBeenCalled();
+    fireEvent.canPlay(video);
+    expect(probe.writes.mock.calls).toEqual([[120], [120]]);
+    expect(play).not.toHaveBeenCalled();
+
+    probe.settle();
+    expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+    expect(probe.writes.mock.calls).toEqual([[120], [120]]);
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("physical HTML media retirement", () => {
   function mainVideo(): HTMLVideoElement {
     const video = document.querySelector<HTMLVideoElement>("video.player-video");
