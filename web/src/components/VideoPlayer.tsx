@@ -7140,7 +7140,10 @@ function WebviewPlayer({
             <button
               type="button"
               className="chip player-touch-skip"
-              onClick={() => relativeSeek(-10)}
+              onClick={(event) => {
+                onChromeControlFocus(event.currentTarget);
+                relativeSeek(-10);
+              }}
               aria-label="Back 10 seconds"
               tabIndex={chromeVisible ? undefined : -1}
             >
@@ -7150,7 +7153,10 @@ function WebviewPlayer({
             <button
               type="button"
               className="chip player-touch-play"
-              onClick={togglePlayback}
+              onClick={(event) => {
+                onChromeControlFocus(event.currentTarget);
+                togglePlayback();
+              }}
               aria-label={playing ? "Pause" : "Play"}
               aria-pressed={playing}
               tabIndex={chromeVisible ? undefined : -1}
@@ -7160,7 +7166,10 @@ function WebviewPlayer({
             <button
               type="button"
               className="chip player-touch-skip"
-              onClick={() => relativeSeek(10)}
+              onClick={(event) => {
+                onChromeControlFocus(event.currentTarget);
+                relativeSeek(10);
+              }}
               aria-label="Forward 10 seconds"
               tabIndex={chromeVisible ? undefined : -1}
             >

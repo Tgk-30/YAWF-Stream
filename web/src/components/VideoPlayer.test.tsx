@@ -10574,6 +10574,126 @@ describe("WebviewPlayer", () => {
     });
   });
 
+  describe("touch transport click ownership", () => {
+    function pointer(button: HTMLElement, type: "pointerdown" | "pointerup" | "pointerover" | "pointerout", pointerType = "touch") {
+      fireEvent(button, new PointerEvent(type, { bubbles: true, pointerId: 1, pointerType }));
+    }
+    function setup() {
+      vi.useFakeTimers();
+      deviceKindMock.mockReturnValue("android");
+      Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+        configurable: true,
+        value: { getInsets: vi.fn(() => '{"top":0,"right":0,"bottom":0,"left":0}') },
+      });
+      render(<VideoPlayer url="https://x/transport-focus.mp4" title="Transport focus" onClose={() => {}} />);
+      const player = screen.getByRole("dialog", { name: "Playing Transport focus" });
+      expect(player).toHaveClass("is-touch-player");
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let paused = false;
+      Object.defineProperties(video, {
+        paused: { configurable: true, get: () => paused },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+        duration: { configurable: true, value: 900 },
+        currentTime: { configurable: true, writable: true, value: 240.333 },
+      });
+      const play = vi.mocked(video.play), pause = vi.mocked(video.pause);
+      play.mockImplementation(async () => { paused = false; fireEvent.play(video); fireEvent.playing(video); });
+      pause.mockImplementation(() => { paused = true; fireEvent.pause(video); });
+      fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+      act(() => video.pause());
+      play.mockClear(); pause.mockClear();
+      const bar = player.querySelector(".player-bar")!;
+      const osd = player.querySelector(".player-osd")!;
+      const transport = player.querySelector(".player-touch-transport")!;
+      const advance = () => act(() => vi.advanceTimersByTime(3_201));
+      return { video, play, pause, bar, osd, transport, advance };
+    }
+    function lateTouchFocus(button: HTMLElement) {
+      pointer(button, "pointerdown"); pointer(button, "pointerup");
+      act(() => vi.advanceTimersByTime(1));
+      // Android can deliver native focus after the pointer cleanup turn.
+      act(() => button.focus());
+      fireEvent.click(button, { detail: 1 });
+    }
+
+    it("[transport-focus] retires late touch Play focus after resuming exactly once", () => {
+      const { video, play, pause, bar, osd, transport, advance } = setup();
+      const button = screen.getByRole("button", { name: "Play" });
+      lateTouchFocus(button);
+      expect(play).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false); expect(button).toHaveFocus();
+      advance();
+      expect(bar).not.toHaveClass("is-visible"); expect(osd).not.toHaveClass("is-visible");
+      expect(transport).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+      expect(video.currentTime).toBe(240.333);
+    });
+
+    it.each([["Back 10 seconds", 230.333], ["Forward 10 seconds", 250.333]] as const)("[transport-focus] retires late touch %s focus while seeking exactly once", (name, target) => {
+      const { video, play, pause, bar, osd, transport, advance } = setup();
+      act(() => { void video.play(); }); play.mockClear(); pause.mockClear();
+      let clock = video.currentTime;
+      const writeTime = vi.fn((value: number) => { clock = value; });
+      Object.defineProperty(video, "currentTime", { configurable: true, get: () => clock, set: writeTime });
+      const button = screen.getByRole("button", { name });
+      lateTouchFocus(button);
+      fireEvent.seeking(video); fireEvent.seeked(video);
+      expect(writeTime).toHaveBeenCalledTimes(1); expect(writeTime).toHaveBeenCalledWith(target);
+      expect(video.currentTime).toBe(target); expect(video.paused).toBe(false);
+      expect(pause).not.toHaveBeenCalled(); expect(button).toHaveFocus();
+      advance();
+      expect(bar).not.toHaveClass("is-visible"); expect(osd).not.toHaveClass("is-visible");
+      expect(transport).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+    });
+
+    it("[transport-focus] preserves the pause pin and resumes without retaining late touch Pause focus", () => {
+      const { video, play, pause, bar, advance } = setup();
+      act(() => { void video.play(); }); play.mockClear(); pause.mockClear();
+      const button = screen.getByRole("button", { name: "Pause" });
+      lateTouchFocus(button);
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+      expect(video.paused).toBe(true); expect(button).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+      act(() => { void video.play(); });
+      advance(); expect(bar).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+    });
+
+    it("[transport-focus] preserves keyboard Play activation and its real focus pin", () => {
+      const { video, play, pause, bar, advance } = setup();
+      const button = screen.getByRole("button", { name: "Play" });
+      fireEvent.keyDown(button, { key: "Tab" }); act(() => button.focus());
+      fireEvent.keyDown(button, { key: "Enter" }); fireEvent.click(button, { detail: 0 });
+      expect(play).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false); expect(button).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("[transport-focus] preserves independent assistive Play focus after an expired touch without activation", () => {
+      const { video, play, pause, bar, advance } = setup();
+      const button = screen.getByRole("button", { name: "Play" });
+      pointer(button, "pointerdown"); pointer(button, "pointerup");
+      act(() => vi.advanceTimersByTime(1));
+      act(() => button.focus());
+      fireEvent.click(button, { detail: 0 });
+      expect(play).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false); expect(button).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("[transport-focus] preserves ordinary mouse hover until leave after one Play activation", () => {
+      const { video, play, pause, bar, transport, advance } = setup();
+      const button = screen.getByRole("button", { name: "Play" });
+      pointer(transport as HTMLElement, "pointerover", "mouse");
+      pointer(button, "pointerdown", "mouse"); pointer(button, "pointerup", "mouse");
+      act(() => vi.advanceTimersByTime(1)); act(() => button.focus());
+      fireEvent.click(button, { detail: 1 });
+      expect(play).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false); expect(button).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+      pointer(transport as HTMLElement, "pointerout", "mouse");
+      advance(); expect(bar).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+    });
+  });
+
   it("hides inactive web chrome, preserves it for pause or menus, and reveals it on pointer activity", () => {
     vi.useFakeTimers();
     try {
