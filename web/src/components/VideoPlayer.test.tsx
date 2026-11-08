@@ -427,7 +427,7 @@ vi.mock("./EmbeddedPlayer", () => ({
   },
 }));
 
-import { VideoPlayer } from "./VideoPlayer";
+import { VideoPlayer, type PlaybackHandoffState } from "./VideoPlayer";
 import {
   FRESH_STREAM_RESOLUTION_TIMEOUT_MS,
   POST_START_STALL_TIMEOUT_MS,
@@ -15294,6 +15294,305 @@ describe("mobile background playback lifecycle", () => {
     expect(fresh.play).toHaveBeenCalledTimes(freshPlayCalls + (paused ? 0 : 1));
     expect(screen.queryByRole("alert")).toBeNull(); expect(state.paused).toBe(paused);
     expect(fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+
+  async function foregroundPipeline(replacement: boolean, paused = false, pendingSeek = false, touch = true, readyOnMount = true, hideReplacement = true, remoteExternal = false) {
+    layout(touch); hlsIsSupported.mockReturnValue(false); leaseFetch(200);
+    if (remoteExternal) { vi.stubGlobal("location", new URL("https://server.example/watch")); installRemoteServerPlayerProvider(); }
+    const restoreVisibility = replaceProperty(document, "visibilityState", "visible");
+    const tracks = Object.assign(new EventTarget(), {
+      0: { id: "jp", label: "Japanese", language: "jpn", enabled: true }, length: 1,
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", { configurable: true, get: () => tracks });
+    const actions = new Map<MediaSessionAction, MediaSessionActionHandler>();
+    const restoreMediaSession = replaceProperty(navigator, "mediaSession", {
+      metadata: null, playbackState: "none", setPositionState: vi.fn(),
+      setActionHandler: (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+        if (handler == null) actions.delete(action); else actions.set(action, handler);
+      },
+    });
+    const gate = deferred<void>();
+    const refresh = vi.fn<(position: number, state: PlaybackHandoffState) => void>();
+    const attempts: Array<{ video: HTMLVideoElement; hidden: boolean; position: number }> = [];
+    let visibleFailure = false;
+    const states = new WeakMap<HTMLVideoElement, { paused: boolean; seeking: boolean; ended: boolean }>();
+    vi.mocked(HTMLMediaElement.prototype.play).mockImplementation(function (this: HTMLVideoElement) {
+      const hidden = document.visibilityState === "hidden";
+      attempts.push({ video: this, hidden, position: this.currentTime });
+      const pip = document.pictureInPictureElement === this ||
+        (this as HTMLVideoElement & { webkitPresentationMode?: string }).webkitPresentationMode === "picture-in-picture";
+      if ((hidden && !pip) || visibleFailure) return Promise.reject(new DOMException("Synthetic autoplay refusal", "NotAllowedError"));
+      const state = states.get(this); if (state != null) state.paused = false;
+      fireEvent.play(this); fireEvent.playing(this);
+      return Promise.resolve();
+    });
+    const freshUrl = "https://server.example/api/stream/fresh-foreground/index.m3u8?quality=480p&start=229&audio=1";
+    const neverReady = deferred<void>();
+    let replaceOwner!: (change: "URL" | "revision" | "external" | "suspend") => void;
+    function Suspender({ active }: { active: boolean }) { if (active) throw neverReady.promise; return null; }
+    function Pipeline() {
+      const [source, setSource] = useState<{ url: string; revision: number; offset: number; handoff?: PlaybackHandoffState; external?: boolean; suspend?: boolean }>({
+        url: replacement ? master + "&audio=1" : "https://x/ordinary-hidden.mp4", revision: 0, offset: 0,
+      });
+      replaceOwner = (change) => setSource({ ...source, url: change === "URL" || change === "suspend" ? "https://x/new-foreground-owner.mp4" : source.url,
+        revision: source.revision + 1, external: change === "external", suspend: change === "suspend",
+        handoff: { paused: true, volume: 0.4, muted: true, playbackRate: 1.25 } });
+      return <><VideoPlayer url={source.url} sourceRevision={source.revision} title="Foreground pipeline"
+        externalPlaybackUrl={remoteExternal ? `https://server.example/api/external-stream/foreground/${"A".repeat(43)}` : undefined}
+        kind={source.external ? "external" : undefined}
+        engine={source.external ? undefined : replacement ? "webview-hls-transcode" : "webview-direct"}
+        timelineOffsetSeconds={source.offset} startPositionSeconds={source.handoff == null ? undefined : 0}
+        initialHandoffState={source.handoff} serverOptimized={replacement ? { ...optimized,
+          loadSourceInfo: async () => ({ durationSeconds: 1000, tracks: [
+            { index: 1, language: "jpn", label: "Japanese", codec: "aac", channels: 2, default: true },
+          ] }) } : undefined}
+        refreshCurrentSource={async (position, state) => {
+          refresh(position, state); await gate.promise;
+          setSource({ url: freshUrl, revision: 1, offset: position, handoff: state });
+        }} onClose={() => {}} /><Suspender active={source.suspend === true} /></>;
+    }
+    const visible = (next: boolean) => act(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: next ? "visible" : "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event(next ? "pageshow" : "pagehide"));
+    });
+    if (!replacement) visible(false);
+    const view = render(<Suspense fallback={<div>Pending new reader</div>}><Pipeline /></Suspense>); await flush();
+    const ready = (video: HTMLVideoElement, pending = false, events = true) => {
+      const state = { paused: true, seeking: pending, ended: false }; states.set(video, state);
+      for (const key of ["paused", "seeking", "ended"] as const) Object.defineProperty(video, key, { configurable: true, get: () => state[key] });
+      Object.defineProperties(video, { duration: { configurable: true, value: 1000 },
+        readyState: { configurable: true, value: events ? HTMLMediaElement.HAVE_CURRENT_DATA : HTMLMediaElement.HAVE_NOTHING },
+        seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 1000 } } });
+      if (events) { fireEvent.loadedMetadata(video); fireEvent.canPlay(video); fireEvent.seeked(video); }
+      return state;
+    };
+    const old = document.querySelector("video.player-video") as HTMLVideoElement;
+    if (replacement) {
+      const state = ready(old); state.paused = false; fireEvent.play(old); fireEvent.playing(old);
+      old.currentTime = 228; fireEvent.timeUpdate(old); old.currentTime = 229; fireEvent.timeUpdate(old);
+      old.volume = 0.4; old.muted = true; old.playbackRate = 1.25;
+      if (paused) { fireEvent.click(screen.getByRole("button", { name: "Pause" })); state.paused = true; fireEvent.pause(old); }
+      if (hideReplacement) visible(false);
+      Object.defineProperty(old, "error", { configurable: true, value: { code: 2 } });
+      state.paused = true; fireEvent.pause(old); fireEvent.error(old); await flush();
+      expect(refresh).toHaveBeenCalledExactlyOnceWith(229, expect.objectContaining({ paused }));
+      gate.resolve(); await flush();
+    }
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    if (replacement) { expect(video).not.toBe(old); expect(video.src).toContain("fresh-foreground/index.m3u8"); expect(video.src).toContain("audio=1"); }
+    const state = ready(video, pendingSeek, readyOnMount); await flush();
+    const command = (action: "play" | "pause") => act(() => {
+      const handler = actions.get(action); if (handler == null) throw new Error("Media Session action was not registered.");
+      handler({ action });
+    });
+    return { view, video, state, attempts, refresh, visible, command, ready,
+      replaceOwner: (change: "URL" | "revision" | "external") => act(() => replaceOwner(change)),
+      suspendOwner: () => act(() => { startTransition(() => replaceOwner("suspend")); }),
+      rejectVisible: () => { visibleFailure = true; },
+      restoreVisibility: () => { restoreVisibility(); restoreMediaSession(); }, replacement };
+  }
+
+  it.each([true, false])("[foreground-deferral] replacement=%s makes no hidden physical Play and resumes once visibly", async (replacement) => {
+    const f = await foregroundPipeline(replacement);
+    try {
+      expect(f.video.autoplay).toBe(false);
+      expect(f.attempts.filter((a) => a.video === f.video && a.hidden)).toHaveLength(0);
+      f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+      if (replacement) {
+        expect(f.video.currentTime + 229).toBeCloseTo(229, 1); expect(f.video.volume).toBe(0.4); expect(f.video.playbackRate).toBe(1.25);
+        expect(f.refresh.mock.calls[0]![1].audioPreference).toEqual(expect.objectContaining({ language: "jpn" }));
+      }
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it.each([true, false])("[foreground-retry] replacement=%s hidden rejection cannot consume the first visible playback attempt", async (replacement) => {
+    const f = await foregroundPipeline(replacement);
+    try {
+      f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+      expect(f.state.paused).toBe(false);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-controls] explicit hidden Pause cancels the queued playing handoff", async () => {
+    const f = await foregroundPipeline(true);
+    try {
+      f.command("pause"); f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(0);
+      expect(f.state.paused).toBe(true);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-controls] explicit hidden Pause then Play updates the queued intent", async () => {
+    const f = await foregroundPipeline(true);
+    try {
+      f.command("pause"); f.command("play");
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(0);
+      f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-controls] a genuinely paused handoff never starts on foreground", async () => {
+    const f = await foregroundPipeline(true, true);
+    try {
+      f.visible(true); await flush(); fireEvent.canPlay(f.video); f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(0);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-controls] exact seek must finish before a visible Play can be issued", async () => {
+    const f = await foregroundPipeline(true, false, true);
+    try {
+      f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(0);
+      f.state.seeking = false; fireEvent.seeked(f.video); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-controls] repeated lifecycle and readiness events consume only one visible attempt", async () => {
+    const f = await foregroundPipeline(true);
+    try {
+      f.visible(true); await flush();
+      f.visible(true); fireEvent.canPlay(f.video); fireEvent.loadedData(f.video); f.visible(false); f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-controls] a visible rejection remains one-shot rather than retrying every resume", async () => {
+    const f = await foregroundPipeline(false);
+    try {
+      f.rejectVisible(); f.visible(true); await flush();
+      f.visible(true); fireEvent.canPlay(f.video); f.visible(false); f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+      expect(f.state.paused).toBe(true);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-controls] cast suspension holds the foreground queue until local playback returns", async () => {
+    isTauriMock.mockReturnValue(true);
+    const f = await foregroundPipeline(true, false, false, false);
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+      f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(0);
+      fireEvent.click(screen.getByRole("button", { name: "test resume playback" })); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-controls] unmount cancels the old reader's queued physical Play", async () => {
+    const f = await foregroundPipeline(true);
+    try {
+      const before = f.attempts.filter((a) => a.video === f.video).length;
+      f.view.unmount(); f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(before);
+    } finally { f.restoreVisibility(); }
+  });
+
+  it.each(["standard", "webkit"] as const)("[foreground-pip] active %s PiP keeps existing hidden explicit Play usable", async (mode) => {
+    const f = await foregroundPipeline(true, true);
+    const restore = mode === "standard" ? replaceProperty(document, "pictureInPictureElement", f.video)
+      : replaceProperty(f.video, "webkitPresentationMode", "picture-in-picture");
+    try {
+      f.command("play"); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(1);
+      expect(f.state.paused).toBe(false);
+    } finally { restore(); f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it.each(["URL", "revision", "external"] as const)("[foreground-owner] %s replacement cannot replay the previous queued reader", async (change) => {
+    const f = await foregroundPipeline(true);
+    try {
+      const before = f.attempts.filter((a) => a.video === f.video).length;
+      f.replaceOwner(change); await flush();
+      expect(document.querySelector("video.player-video")).not.toBe(f.video);
+      f.visible(true); fireEvent.canPlay(f.video); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(before);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-owner] a suspended replacement cannot steal the retained current reader's foreground queue", async () => {
+    const f = await foregroundPipeline(true);
+    try {
+      f.suspendOwner(); await flush();
+      expect(document.querySelector("video.player-video")).toBe(f.video);
+      f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it.each(["pause", "pause-then-play"] as const)("[foreground-early-intent] hidden %s before canplay survives foreground before readiness", async (intent) => {
+    const f = await foregroundPipeline(false, false, false, true, false);
+    try {
+      f.command("pause"); if (intent === "pause-then-play") f.command("play");
+      f.visible(true); await flush();
+      f.video.volume = 0.3; fireEvent.volumeChange(f.video); // Force a visible render before canplay.
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(0);
+      if (intent === "pause") expect(f.video.autoplay).toBe(false);
+      f.ready(f.video); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(intent === "pause" ? 0 : 1);
+      if (intent === "pause") expect(f.video.autoplay).toBe(false);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-pip] another video's PiP cannot authorize this hidden reader", async () => {
+    const f = await foregroundPipeline(true, true);
+    const restore = replaceProperty(document, "pictureInPictureElement", document.createElement("video"));
+    try {
+      f.command("play"); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video)).toHaveLength(0);
+      f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+    } finally { restore(); f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it("[foreground-controls] foreground expiry replacement still plays immediately at its exact retained offset", async () => {
+    const f = await foregroundPipeline(true, false, false, true, true, false);
+    try {
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+      expect(f.attempts.filter((a) => a.video === f.video && a.hidden)).toHaveLength(0);
+      expect(f.video.currentTime + 229).toBeCloseTo(229, 1);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
+  });
+
+  it.each(["handoff", "cancel", "copy"] as const)("[foreground-external] actual Android chooser %s respects the local foreground queue", async (action) => {
+    const native = deferred<string | null>();
+    const handoff: { current?: () => void } = {};
+    openAndroidServerExternalPlayerMock.mockImplementation(async (_url, _owns, _signal, onHandoff) => {
+      handoff.current = onHandoff; return native.promise;
+    });
+    const restoreClipboard = replaceProperty(navigator, "clipboard", { writeText: vi.fn(async () => {}) });
+    const f = await foregroundPipeline(true, false, false, true, true, true, true);
+    try {
+      expect(f.state.paused).toBe(true); // Already physically paused: no later pause event is guaranteed.
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      if (action === "copy") {
+        fireEvent.click(screen.getByRole("button", { name: /^Copy stream link/ })); await flush();
+        expect(openAndroidServerExternalPlayerMock).not.toHaveBeenCalled();
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: /Open in external player/ })); await flush();
+        expect(openAndroidServerExternalPlayerMock).toHaveBeenCalledTimes(1);
+        expect(handoff.current).toBeTypeOf("function");
+        if (action === "handoff") act(() => handoff.current!());
+        native.resolve(action === "handoff" ? "External player opened." : null); await flush();
+      }
+      f.visible(true); await flush();
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(action === "handoff" ? 0 : 1);
+    } finally { f.view.unmount(); f.restoreVisibility(); restoreClipboard(); }
+  });
+
+  it("[foreground-controls] a consumed visible rejection cannot re-enable native autoplay on later renders", async () => {
+    const f = await foregroundPipeline(false);
+    try {
+      f.rejectVisible(); f.visible(true); await flush();
+      f.video.volume = 0.3; fireEvent.volumeChange(f.video);
+      expect(f.video.autoplay).toBe(false);
+      expect(f.attempts.filter((a) => a.video === f.video && !a.hidden)).toHaveLength(1);
+    } finally { f.view.unmount(); f.restoreVisibility(); }
   });
 
   async function ownedLease(status: number) {
