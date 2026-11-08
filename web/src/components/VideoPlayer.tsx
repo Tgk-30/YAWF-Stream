@@ -1473,7 +1473,11 @@ export function VideoPlayer({
       ? "This stream has expired. Choose another source or close the player."
       : "This stream has expired. Retry to request a fresh stream, or choose another source.");
     recordDiagnostic("player", "server_generation.expired", "warning");
-  }, [playbackOwner, refreshCurrentSource]);
+    if (refreshCurrentSource != null && !automaticStallRecoveryAttemptedRef.current &&
+      freshStreamRequestRef.current == null) {
+      void recoverPostStartStall(position, handoff);
+    }
+  }, [playbackOwner, recoverPostStartStall, refreshCurrentSource]);
 
   // State is scoped below for render-time safety. Reset it too, so a completed
   // previous source cannot leave stale errors or an automatic-mode latch on the
@@ -3118,7 +3122,7 @@ export function VideoPlayer({
                 : undefined
             }
             freshResolutionRequired={serverLeaseExpired}
-            retryPending={manualRecoveryPending}
+            retryPending={manualRecoveryPending || (serverLeaseExpired && webRecoveryPending)}
           />
         )}
         {webRecoveryPending && (
@@ -3357,6 +3361,7 @@ function WebviewPlayer({
   const pausedForCastRef = useRef(false);
   const suspendedRef = useRef(suspended);
   suspendedRef.current = suspended;
+  const documentSuspendedRef = useRef(document.visibilityState === "hidden");
   const stallWatchdogRef = useRef<PlaybackStallWatchdog | null>(null);
   const startupReadyRef = useRef(false);
   const stallStateRef = useRef<PlaybackStallState>({
@@ -3489,7 +3494,7 @@ function WebviewPlayer({
     scrubbingRef.current = scrubbing;
     stallStateRef.current = {
       ...stallStateRef.current,
-      suspended,
+      suspended: suspended || documentSuspendedRef.current || document.visibilityState === "hidden",
       seeking: scrubbing || rendererSeekingRef.current,
     };
     stallWatchdogRef.current?.update(stallStateRef.current);
@@ -4838,7 +4843,7 @@ function WebviewPlayer({
         ...stallStateRef.current,
         paused: video.paused,
         seeking: video.seeking || rendererSeekingRef.current || scrubbingRef.current,
-        suspended: suspendedRef.current,
+        suspended: suspendedRef.current || documentSuspendedRef.current || document.visibilityState === "hidden",
         ended: video.ended,
       };
       stallStateRef.current = liveState;
@@ -4871,13 +4876,16 @@ function WebviewPlayer({
       started: false,
       paused: true,
       seeking: false,
-      suspended: suspendedRef.current,
+      suspended: suspendedRef.current || documentSuspendedRef.current || document.visibilityState === "hidden",
       ended: false,
       tearingDown: false,
     };
 
     const sync = (patch: Partial<PlaybackStallState> = {}) => {
-      stallStateRef.current = { ...stallStateRef.current, ...patch };
+      stallStateRef.current = {
+        ...stallStateRef.current, ...patch,
+        suspended: suspendedRef.current || documentSuspendedRef.current || document.visibilityState === "hidden",
+      };
       watchdog.update(stallStateRef.current);
     };
     const bufferedFrontier = () => {
@@ -4944,6 +4952,27 @@ function WebviewPlayer({
         watchdog.noteProgress();
       }
     };
+    let pageHidden = false;
+    const onDocumentLifecycle = () => {
+      if (!active || videoRef.current !== video) return;
+      const next = pageHidden || document.visibilityState === "hidden";
+      if (next === documentSuspendedRef.current) return;
+      documentSuspendedRef.current = next;
+      if (!next) {
+        // Background wall time is not a playback stall. Rebaseline the owned
+        // clock and grant a full foreground progress window on resume.
+        lastPosition = Number.isFinite(video.currentTime) ? video.currentTime : lastPosition;
+        lastBufferedFrontier = bufferedFrontier();
+      }
+      sync({
+        paused: video.paused,
+        seeking: video.seeking || rendererSeekingRef.current || scrubbingRef.current,
+        ended: video.ended,
+      });
+      if (!next) watchdog.noteProgress();
+    };
+    const onPageHide = () => { pageHidden = true; onDocumentLifecycle(); };
+    const onPageShow = () => { pageHidden = false; onDocumentLifecycle(); };
 
     video.addEventListener("playing", onPlaying);
     video.addEventListener("pause", onPause);
@@ -4952,6 +4981,9 @@ function WebviewPlayer({
     video.addEventListener("seeked", onSeeked);
     video.addEventListener("timeupdate", onClockProgress);
     video.addEventListener("progress", onBufferProgress);
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("visibilitychange", onDocumentLifecycle);
     return () => {
       active = false;
       sync({ tearingDown: true });
@@ -4964,6 +4996,9 @@ function WebviewPlayer({
       video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("timeupdate", onClockProgress);
       video.removeEventListener("progress", onBufferProgress);
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("visibilitychange", onDocumentLifecycle);
     };
   }, [url]);
 
