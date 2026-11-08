@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -520,4 +520,100 @@ test("pins the audited SDK level and rejects unreviewed template targets before 
       }
     });
   }
+});
+
+
+const originalConfigChanges = "orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode";
+const retainedConfigChanges = `${originalConfigChanges}|assetsPaths`;
+
+function assertManifestRejectedWithoutWrites(edit, expected = /Unsupported Android MainActivity configuration template/) {
+  withFixture(({ root, app, mainActivity }) => {
+    const manifestPath = join(app, "src/main/AndroidManifest.xml");
+    const manifest = readFileSync(manifestPath, "utf8");
+    const edited = edit(manifest);
+    assert.notEqual(edited, manifest, "the invalid-template fixture must change actual input");
+    writeFileSync(manifestPath, edited);
+    const paths = [manifestPath, mainActivity, join(app, "build.gradle.kts")];
+    const before = paths.map((path) => readFileSync(path, "utf8"));
+    assert.throws(() => patchTauriAndroidProject({ root }), expected);
+    assert.deepEqual(paths.map((path) => readFileSync(path, "utf8")), before);
+    for (const name of ["YawfAndroidUpdater.kt", "YawfFullscreenController.kt", "YawfImeController.kt"]) {
+      assert.equal(existsSync(join(dirname(mainActivity), name)), false);
+    }
+  });
+}
+
+test("retains the live MainActivity for assets-path overlays without broadening other configuration handling", () => {
+  withFixture(({ root, app, mainActivity }) => {
+    const manifestPath = join(app, "src/main/AndroidManifest.xml");
+    patchTauriAndroidProject({ root });
+    const manifest = readFileSync(manifestPath, "utf8");
+    assert.equal(manifest.match(/android:configChanges="([^"]*)"/)[1], retainedConfigChanges);
+    assert.doesNotMatch(manifest, /allKnown|resourcesUnused/);
+    const activity = readFileSync(mainActivity, "utf8");
+    const body = /override fun onConfigurationChanged\(newConfig: Configuration\) \{([^}]+)\}/.exec(activity)?.[1];
+    assert.ok(body, "the retained Activity must forward resource/inset updates");
+    assert.ok(body.indexOf("super.onConfigurationChanged(newConfig)") >= 0);
+    assert.match(body, /fullscreenController\?\.onConfigurationChanged\(\)/);
+    assert.match(body, /imeController\?\.onConfigurationChanged\(\)/);
+    assert.match(body, /safeAreaWebView\?\.post/);
+    assert.doesNotMatch(body, /loadUrl|reload|setWebView|onCreate|onDestroy/);
+    assert.equal(patchTauriAndroidProject({ root }).changed, false);
+    assert.equal(readFileSync(manifestPath, "utf8"), manifest);
+  });
+});
+
+test("changes only MainActivity configuration and preserves other activities and permissions", () => {
+  withFixture(({ root, app }) => {
+    const manifestPath = join(app, "src/main/AndroidManifest.xml");
+    const otherActivity = `        <activity android:name=".OtherActivity" android:configChanges="${originalConfigChanges}" android:exported="false" />`;
+    const permission = '    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />';
+    writeFileSync(manifestPath, readFileSync(manifestPath, "utf8")
+      .replace("    <application", `${permission}\n    <application`)
+      .replace("    </application>", `${otherActivity}\n    </application>`));
+    patchTauriAndroidProject({ root });
+    const manifest = readFileSync(manifestPath, "utf8");
+    assert.ok(manifest.includes(otherActivity), "unrelated activities must remain byte-identical");
+    assert.ok(manifest.includes(permission), "existing permissions must remain byte-identical");
+    assert.equal(manifest.match(/\|assetsPaths/g)?.length, 1);
+    assert.ok(manifest.includes(`android:configChanges="${retainedConfigChanges}"`));
+  });
+});
+
+test("rejects unknown MainActivity configuration flags before any generated writes", () => {
+  for (const flag of ["unknownConfiguration", "allKnown", "resourcesUnused"]) {
+    assertManifestRejectedWithoutWrites((manifest) => manifest.replace(originalConfigChanges, `${originalConfigChanges}|${flag}`));
+  }
+});
+
+test("rejects malformed MainActivity configuration attributes before any generated writes", () => {
+  for (const invalid of [
+    `android:configChanges='${originalConfigChanges}'`,
+    `android:configChanges="${originalConfigChanges}|"`,
+    `android:configChanges="orientation|orientation"`,
+  ]) {
+    assertManifestRejectedWithoutWrites((manifest) => manifest.replace(`android:configChanges="${originalConfigChanges}"`, invalid));
+  }
+});
+
+test("rejects duplicate MainActivity configuration attributes before any generated writes", () => {
+  assertManifestRejectedWithoutWrites((manifest) => manifest.replace(
+    `android:configChanges="${originalConfigChanges}"`,
+    `android:configChanges="${originalConfigChanges}" android:configChanges="${originalConfigChanges}"`,
+  ));
+});
+
+test("rejects missing MainActivity configuration attributes before any generated writes", () => {
+  assertManifestRejectedWithoutWrites((manifest) => manifest.replace(`android:configChanges="${originalConfigChanges}"`, ""));
+});
+
+test("rejects missing or duplicate MainActivity declarations before any generated writes", () => {
+  const expected = /Unsupported Android MainActivity configuration template|Android keyboard activity anchor missing or duplicated/;
+  assertManifestRejectedWithoutWrites((manifest) => manifest.replace('android:name=".MainActivity"', 'android:name=".RenamedActivity"'), expected);
+  assertManifestRejectedWithoutWrites((manifest) => manifest.replace("    </application>",
+    `        <activity android:name=".MainActivity" android:configChanges="${originalConfigChanges}" />\n    </application>`), expected);
+});
+
+test("rejects duplicate MainActivity name attributes before any generated writes", () => {
+  assertManifestRejectedWithoutWrites((manifest) => manifest.replace('android:name=".MainActivity"', 'android:name=".MainActivity" android:name=".OtherActivity"'));
 });

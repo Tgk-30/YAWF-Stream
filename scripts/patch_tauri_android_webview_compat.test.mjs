@@ -192,7 +192,7 @@ dependencies {
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application android:usesCleartextTraffic="\${usesCleartextTraffic}">
-        <activity android:name=".MainActivity" android:exported="true">
+        <activity android:name=".MainActivity" android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -244,6 +244,9 @@ test("migrates the exact previous fully patched activity and is a second-pass no
     assert.equal(readFileSync(fixture.manifest, "utf8"), previousManifest.replace(
       'android:name=".MainActivity"',
       'android:name=".MainActivity" android:windowSoftInputMode="adjustResize"',
+    ).replace(
+      'android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"',
+      'android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|assetsPaths"',
     ));
 
     const migratedGradle = readFileSync(fixture.gradle, "utf8");
