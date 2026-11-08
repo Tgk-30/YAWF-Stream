@@ -99,6 +99,28 @@ function applyPhysicalInsets(
   return values;
 }
 
+function applyNativePlayerControlInsets(
+  gestures: PhysicalSafeAreaInsets | null,
+  persistentInsets: PhysicalSafeAreaInsets,
+  style: CSSStyleDeclaration,
+): Map<string, string> {
+  const pixelRatio = window.devicePixelRatio;
+  const ratio = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 1;
+  const values = gestures == null ? new Map<string, string>()
+    : applyPhysicalInsets(gestures, "--native-system-gesture", ratio, style);
+  // Chromium may round a CSS boundary outward by ceil(DPR) physical pixels.
+  // Reserve that bound plus one physical pixel beyond the eight-CSS-pixel thumb.
+  const roundingClearance = (Math.ceil(ratio) + 1) / ratio;
+  for (const side of ["left", "right"] as const) {
+    const unsafePixels = Math.max(persistentInsets[side], gestures?.[side] ?? 0);
+    const gutter = unsafePixels > 0 ? unsafePixels / ratio + 8 + roundingClearance : 0;
+    const name = `--native-player-control-gutter-${side}`, value = `${gutter}px`;
+    style.setProperty(name, value);
+    values.set(name, value);
+  }
+  return values;
+}
+
 /**
  * Mirrors Android WindowInsets into CSS variables. Android WebView currently
  * leaves env(safe-area-inset-*) at zero in an edge-to-edge activity, so CSS
@@ -131,6 +153,7 @@ export function installMobileSafeAreaInsets(): () => void {
   let refreshRevision = 0;
   let refreshRunning = false;
   let refreshQueued = false;
+  let lastValidSafeInsets: PhysicalSafeAreaInsets | null = null;
   const timers = new Set<number>();
 
   const update = async () => {
@@ -163,9 +186,16 @@ export function installMobileSafeAreaInsets(): () => void {
         }
       }
       if (!stopped && requestRevision === refreshRevision && ownsGestureStyle()) {
-        if (insets != null) applyPhysicalSafeAreaInsets(insets);
-        if (gestureSnapshotProvider != null) {
-          gestureOwner.values = applyPhysicalInsets(gestures ?? ZERO_INSETS, "--native-system-gesture", window.devicePixelRatio, style);
+        if (insets != null) {
+          applyPhysicalSafeAreaInsets(insets);
+          lastValidSafeInsets = insets;
+        }
+        if (lastValidSafeInsets != null || gestureSnapshotProvider != null) {
+          gestureOwner.values = applyNativePlayerControlInsets(
+            gestureSnapshotProvider != null ? gestures ?? ZERO_INSETS : null,
+            lastValidSafeInsets ?? ZERO_INSETS,
+            style,
+          );
         }
       }
     } while (!stopped && refreshQueued);

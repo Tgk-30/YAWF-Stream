@@ -421,14 +421,71 @@ function installGestureBridge(getInsets: () => unknown, getSystemGestureInsets?:
 function gestureValue(side: typeof gestureSides[number]) {
   return document.documentElement.style.getPropertyValue(`--native-system-gesture-${side}`);
 }
+const gutterSides = ["left", "right"] as const;
+function gutterValue(side: typeof gutterSides[number]) {
+  return document.documentElement.style.getPropertyValue(`--native-player-control-gutter-${side}`);
+}
+function expectGestureReset(value: string) {
+  for (const side of gestureSides) expect(gestureValue(side)).toBe(value);
+  for (const side of gutterSides) expect(gutterValue(side)).toBe(value);
+}
 
 describe("optional Android system-gesture insets", () => {
+  it.each([false, true])("[r2-persistent] reserves full thumb clearance beyond larger persistent sides, optionalMethod=%s", async (optional) => {
+    vi.spyOn(window, "devicePixelRatio", "get").mockReturnValue(2.625);
+    installGestureBridge(() => ({ top: 0, right: 128, bottom: 0, left: 126 }), optional ? () => ({ top: 0, right: 78, bottom: 0, left: 78 }) : undefined);
+    const frames = mockAnimationFrames(); const uninstall = installMobileSafeAreaInsets();
+    frames.flush(); await flushPromises();
+    expect(document.documentElement.style.getPropertyValue("--native-safe-area-right")).toBe(`${128 / 2.625}px`);
+    expect(gutterValue("left")).toBe(`${126 / 2.625 + 8 + 4 / 2.625}px`);
+    expect(gutterValue("right")).toBe(`${128 / 2.625 + 8 + 4 / 2.625}px`);
+    expect(gestureValue("right")).toBe(optional ? `${78 / 2.625}px` : "");
+    uninstall(); expectGestureReset("");
+  });
+
+  it("[r2-persistent-cache] invalid safe and gesture data retain the last committed persistent clearance until a valid zero reset", async () => {
+    let safe: unknown = { top: 0, right: 128, bottom: 0, left: 126 };
+    let gestures: unknown = { top: 0, right: 78, bottom: 0, left: 78 };
+    installGestureBridge(() => safe, () => gestures);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const frames = mockAnimationFrames(); const uninstall = installMobileSafeAreaInsets();
+    frames.flush(); await flushPromises();
+    safe = "invalid"; gestures = "invalid";
+    window.dispatchEvent(new Event("orientationchange")); frames.flush(); await flushPromises();
+    for (const side of gestureSides) expect(gestureValue(side)).toBe("0px");
+    expect(document.documentElement.style.getPropertyValue("--native-safe-area-right")).toBe("128px");
+    expect(gutterValue("left")).toBe("136px"); expect(gutterValue("right")).toBe("138px");
+    expect(warning).toHaveBeenCalledOnce();
+    safe = { top: 0, right: 0, bottom: 0, left: 0 }; gestures = safe;
+    window.dispatchEvent(new Event("orientationchange")); frames.flush(); await flushPromises(); expectGestureReset("0px");
+    uninstall(); expectGestureReset("");
+  });
+
+  it.each([
+    [2.625, "29.714285714285715px", "39.23809523809524px"],
+    [0.75, "104px", "114.66666666666667px"],
+    [1, "78px", "88px"],
+    [3, "26px", "35.333333333333336px"],
+    [0, "78px", "88px"],
+    [Number.NaN, "78px", "88px"],
+    [Number.POSITIVE_INFINITY, "78px", "88px"],
+  ] as const)("[r2-gutter-dpr] computes raw and rounded-clearance gutters at DPR%s", async (ratio, raw, gutter) => {
+    vi.spyOn(window, "devicePixelRatio", "get").mockReturnValue(ratio);
+    installGestureBridge(() => safeSnapshot, () => ({ top: 0, right: 0, bottom: 0, left: 78 }));
+    const frames = mockAnimationFrames(); const uninstall = installMobileSafeAreaInsets();
+    frames.flush(); await flushPromises();
+    expect(gestureValue("left")).toBe(raw); expect(gutterValue("left")).toBe(gutter);
+    expect(gestureValue("right")).toBe("0px"); expect(gutterValue("right")).toBe("0px");
+    uninstall(); expectGestureReset("");
+  });
+
   it("[gesture-old-apk] keeps the exact safe-area snapshot valid without an optional method", async () => {
     installGestureBridge(() => safeSnapshot);
     const frames = mockAnimationFrames(); const uninstall = installMobileSafeAreaInsets();
     frames.flush(); await flushPromises();
     expect(document.documentElement.style.getPropertyValue("--native-safe-area-top")).toBe("84px");
     for (const side of gestureSides) expect(gestureValue(side)).toBe("");
+    for (const side of gutterSides) expect(gutterValue(side)).toBe("0px");
     uninstall();
   });
 
@@ -439,6 +496,8 @@ describe("optional Android system-gesture insets", () => {
     frames.flush(); await flushPromises();
     expect(document.documentElement.style.getPropertyValue("--native-safe-area-top")).toBe("32px");
     for (const side of gestureSides) expect(gestureValue(side)).toBe(`${gestureSnapshot[side] / 2.625}px`);
+    expect(gutterValue("left")).toBe(`${63 / 2.625 + 8 + 4 / 2.625}px`);
+    expect(gutterValue("right")).toBe("39.23809523809524px");
     uninstall();
   });
 
@@ -456,7 +515,7 @@ describe("optional Android system-gesture insets", () => {
     installGestureBridge(() => safeSnapshot, () => ({ top: 0, right: 0, bottom: 0, left: 0 }));
     const frames = mockAnimationFrames(); const uninstall = installMobileSafeAreaInsets();
     frames.flush(); await flushPromises();
-    for (const side of gestureSides) expect(gestureValue(side)).toBe("0px");
+    expectGestureReset("0px");
     expect(document.documentElement.style.getPropertyValue("--native-safe-area-top")).toBe("84px");
     uninstall();
   });
@@ -475,7 +534,7 @@ describe("optional Android system-gesture insets", () => {
     const frames = mockAnimationFrames(); const uninstall = installMobileSafeAreaInsets();
     frames.flush(); await flushPromises(); expect(gestureValue("left")).toBe("63px");
     snapshot = invalid; window.dispatchEvent(new Event("orientationchange")); frames.flush(); await flushPromises();
-    for (const side of gestureSides) expect(gestureValue(side)).toBe("0px");
+    expectGestureReset("0px");
     expect(document.documentElement.style.getPropertyValue("--native-safe-area-top")).toBe("84px");
     uninstall();
   });
@@ -486,7 +545,7 @@ describe("optional Android system-gesture insets", () => {
     const frames = mockAnimationFrames(); const uninstall = installMobileSafeAreaInsets();
     frames.flush(); await flushPromises(); expect(gestureValue("right")).toBe("78px");
     fail = true; window.dispatchEvent(new Event("yawf-native-safe-area-change")); frames.flush(); await flushPromises();
-    for (const side of gestureSides) expect(gestureValue(side)).toBe("0px");
+    expectGestureReset("0px");
     expect(document.documentElement.style.getPropertyValue("--native-safe-area-top")).toBe("84px");
     uninstall();
   });
@@ -499,6 +558,7 @@ describe("optional Android system-gesture insets", () => {
     frames.flush(); await flushPromises(); expect(gestureValue("left")).toBe(`${78 / 2.625}px`);
     ratio = 3; rotated = true; window.dispatchEvent(new Event("orientationchange")); frames.flush(); await flushPromises();
     expect(gestureValue("left")).toBe("0px"); expect(gestureValue("right")).toBe("26px");
+    expect(gutterValue("left")).toBe("0px"); expect(gutterValue("right")).toBe("35.333333333333336px");
     uninstall();
   });
 
@@ -511,9 +571,10 @@ describe("optional Android system-gesture insets", () => {
     const frames = mockAnimationFrames(); const uninstall = installMobileSafeAreaInsets();
     frames.flush(); await flushPromises(); window.dispatchEvent(new Event("orientationchange"));
     first.resolve(safeSnapshot); await flushPromises();
-    for (const side of gestureSides) expect(gestureValue(side)).toBe("");
+    expectGestureReset("");
     second.resolve(safeSnapshot); await flushPromises();
     expect(gestureValue("left")).toBe("42px"); expect(gestureValue("right")).toBe("0px");
+    expect(gutterValue("left")).toBe("52px"); expect(gutterValue("right")).toBe("0px");
     uninstall();
   });
 
@@ -525,7 +586,8 @@ describe("optional Android system-gesture insets", () => {
     const current = installMobileSafeAreaInsets(); frames.flush(); await flushPromises();
     old();
     for (const side of gestureSides) expect(gestureValue(side)).toBe(`${gestureSnapshot[side]}px`);
-    current(); for (const side of gestureSides) expect(gestureValue(side)).toBe("");
+    for (const side of gutterSides) expect(gutterValue(side)).toBe(`${gestureSnapshot[side] + 10}px`);
+    current(); expectGestureReset("");
     expect(document.documentElement.style.getPropertyValue("--native-safe-area-top")).toBe("84px");
   });
 
@@ -537,6 +599,7 @@ describe("optional Android system-gesture insets", () => {
     const current = installMobileSafeAreaInsets(); frames.flush(); await flushPromises(); expect(gestureValue("right")).toBe("42px");
     pending.resolve(safeSnapshot); await flushPromises();
     expect(gestureValue("right")).toBe("42px"); expect(gestureValue("left")).toBe("0px");
+    expect(gutterValue("right")).toBe("52px"); expect(gutterValue("left")).toBe("0px");
     old(); current();
   });
 
@@ -545,7 +608,7 @@ describe("optional Android system-gesture insets", () => {
     const frames = mockAnimationFrames(); const uninstall = installMobileSafeAreaInsets();
     frames.flush(); await flushPromises(); expect(gestureValue("left")).toBe("63px");
     uninstall(); window.dispatchEvent(new Event("yawf-native-safe-area-change")); frames.flush(); await flushPromises();
-    for (const side of gestureSides) expect(gestureValue(side)).toBe("");
+    expectGestureReset("");
     expect(document.documentElement.style.getPropertyValue("--native-safe-area-top")).toBe("84px");
   });
 });
