@@ -10656,6 +10656,146 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  describe("video gesture reveal ownership", () => {
+    function setup(layout: "desktop" | "ios" | "android" = "ios") {
+      vi.useFakeTimers();
+      deviceKindMock.mockReturnValue(layout === "desktop" ? "mac" : layout);
+      if (layout === "android") {
+        (window as unknown as Record<string, unknown>).__YAWF_NATIVE_SAFE_AREA__ = {
+          getInsets: vi.fn(),
+        };
+      }
+      const props = { url: "https://x/gesture.mp4", title: "Gesture ownership", onClose: () => {} };
+      const view = render(<VideoPlayer {...props} />);
+      expect(document.querySelector(".player")!.classList.contains("is-touch-player"))
+        .toBe(layout !== "desktop");
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let paused = false;
+      Object.defineProperties(video, {
+        paused: { configurable: true, get: () => paused },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+        duration: { configurable: true, value: 900 },
+        currentTime: { configurable: true, writable: true, value: 40 },
+      });
+      const play = vi.mocked(video.play);
+      const pause = vi.mocked(video.pause);
+      play.mockImplementation(async () => {
+        paused = false; fireEvent.play(video); fireEvent.playing(video);
+      });
+      pause.mockImplementation(() => { paused = true; fireEvent.pause(video); });
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+      act(() => vi.advanceTimersByTime(3_201));
+      expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+      play.mockClear(); pause.mockClear();
+      return { video, play, pause, view, props };
+    }
+
+    function pointer(video: HTMLVideoElement, type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel", pointerType = "touch", pointerId = 1) {
+      fireEvent(video, new PointerEvent(type, {
+        bubbles: true, pointerType, pointerId, clientX: 50, clientY: 50,
+      }));
+    }
+    function movingGesture(video: HTMLVideoElement, pointerType = "touch", pointerId = 1) {
+      pointer(video, "pointerdown", pointerType, pointerId);
+      pointer(video, "pointermove", pointerType, pointerId);
+      expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+      pointer(video, "pointerup", pointerType, pointerId);
+      fireEvent.click(video, { detail: 1, clientX: 50, clientY: 50 });
+    }
+
+    it.each(["desktop", "ios", "android"] as const)("[gesture-reveal] keeps a moving hidden touch reveal-only while playing on %s", (layout) => {
+      const { video, play, pause } = setup(layout);
+      movingGesture(video);
+      expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+      expect(play).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false);
+    });
+
+    it.each(["desktop", "ios", "android"] as const)("[gesture-reveal] keeps a moving hidden pen reveal-only while playing on %s", (layout) => {
+      const { video, play, pause } = setup(layout);
+      movingGesture(video, "pen");
+      expect(play).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false);
+    });
+
+    it("[gesture-reveal] does not resume when playback pauses during a hidden reveal gesture", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      act(() => video.pause()); pause.mockClear();
+      pointer(video, "pointerup"); fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(play).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(true);
+    });
+
+    it.each(["touch", "pen"])("[gesture-control] toggles exactly once on the second visible %s gesture", (pointerType) => {
+      const { video, play, pause } = setup();
+      movingGesture(video, pointerType);
+      expect(pause).not.toHaveBeenCalled();
+      movingGesture(video, pointerType, 2);
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+      expect(video.paused).toBe(true);
+    });
+
+    it("[gesture-control] preserves immediate mouse playback toggle after hidden pointer activity", () => {
+      const { video, play, pause } = setup();
+      movingGesture(video, "mouse");
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] leaves keyboard playback available during a pending reveal gesture", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      fireEvent.keyDown(window, { key: " " });
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] clears canceled reveal ownership before an independent click", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove"); pointer(video, "pointercancel");
+      fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] replaces an abandoned hidden gesture with a new visible pointer", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      pointer(video, "pointerdown", "mouse", 2); pointer(video, "pointerup", "mouse", 2);
+      fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] ignores cancellation from a different pointer", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      pointer(video, "pointercancel", "touch", 2);
+      pointer(video, "pointerup"); fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(pause).not.toHaveBeenCalled(); expect(play).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false);
+    });
+
+    it("[gesture-control] consumes reveal ownership before an independent subsequent click", () => {
+      const { video, play, pause } = setup();
+      movingGesture(video);
+      expect(pause).not.toHaveBeenCalled();
+      fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] does not transfer a hidden gesture to a replacement source", () => {
+      const { video, view, props } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      view.rerender(<VideoPlayer {...props} url="https://x/next-gesture.mp4" />);
+      const next = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(next).not.toBe(video);
+      Object.defineProperty(next, "paused", { configurable: true, value: false });
+      fireEvent.canPlay(next); fireEvent.play(next); fireEvent.playing(next);
+      const pause = vi.mocked(next.pause); pause.mockClear();
+      fireEvent.click(next, { detail: 1, clientX: 50 });
+      expect(pause).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("announces startup and rebuffering until media is playable again", () => {
     render(<VideoPlayer url="https://x/movie.mp4" title="T" onClose={() => {}} />);
     const video = document.querySelector("video.player-video") as HTMLVideoElement;

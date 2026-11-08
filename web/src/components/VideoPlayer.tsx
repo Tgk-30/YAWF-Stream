@@ -3538,7 +3538,11 @@ function WebviewPlayer({
   const resolvedServerAudioTrack = activeServerAudioTrack ?? (
     defaultServerAudioTracks.length === 1 ? defaultServerAudioTracks[0].index : null
   );
-  const touchLikePointerRef = useRef(false);
+  const videoPointerGestureRef = useRef<{
+    pointerId: number;
+    touchLike: boolean;
+    chromeWasHidden: boolean;
+  } | null>(null);
   const touchTapRef = useRef<{
     zone: "back" | "forward";
     at: number;
@@ -3564,10 +3568,12 @@ function WebviewPlayer({
 
   useEffect(() => {
     clearPendingTouchTap();
+    videoPointerGestureRef.current = null;
   }, [clearPendingTouchTap, engine, serverAudioOwner, timelineOffsetSeconds, url]);
 
   useEffect(() => () => {
     clearPendingTouchTap();
+    videoPointerGestureRef.current = null;
     if (touchFeedbackTimerRef.current != null) window.clearTimeout(touchFeedbackTimerRef.current);
   }, [clearPendingTouchTap]);
 
@@ -6383,10 +6389,21 @@ function WebviewPlayer({
   const togglePlayback = togglePlaybackState;
 
   const handleVideoPointerDown = useCallback((event: React.PointerEvent<HTMLVideoElement>) => {
-    touchLikePointerRef.current =
-      event.pointerType === "touch" ||
-      event.pointerType === "pen" ||
-      window.matchMedia?.("(pointer: coarse)").matches === true;
+    videoPointerGestureRef.current = {
+      pointerId: event.pointerId,
+      touchLike: event.pointerType === "touch" ||
+        event.pointerType === "pen" ||
+        window.matchMedia?.("(pointer: coarse)").matches === true,
+      // Pointer movement can reveal chrome before this gesture's click. Its
+      // initial visibility still owns whether the click is reveal-only.
+      chromeWasHidden: !chromeVisible,
+    };
+  }, [chromeVisible]);
+
+  const handleVideoPointerCancel = useCallback((event: React.PointerEvent<HTMLVideoElement>) => {
+    if (videoPointerGestureRef.current?.pointerId === event.pointerId) {
+      videoPointerGestureRef.current = null;
+    }
   }, []);
 
   const showTouchSeekFeedback = useCallback((zone: "back" | "forward") => {
@@ -6401,12 +6418,13 @@ function WebviewPlayer({
   }, []);
 
   const handleVideoClick = useCallback((event: React.MouseEvent<HTMLVideoElement>) => {
+    const gesture = videoPointerGestureRef.current;
+    videoPointerGestureRef.current = null;
     const touchLike =
-      touchLikePointerRef.current ||
+      gesture?.touchLike ||
       window.matchMedia?.("(pointer: coarse)").matches === true;
-    touchLikePointerRef.current = false;
     if (nestedDialogOpen) return;
-    if (touchLike && !chromeVisible) {
+    if (touchLike && (gesture?.chromeWasHidden ?? !chromeVisible)) {
       onActivity();
       return;
     }
@@ -6825,6 +6843,7 @@ function WebviewPlayer({
           crossOrigin={isTrustedServerStreamURL(url) ? "use-credentials" : undefined}
           x-webkit-airplay="allow"
           onPointerDown={handleVideoPointerDown}
+          onPointerCancel={handleVideoPointerCancel}
           onClick={handleVideoClick}
           onDoubleClick={handleVideoDoubleClick}
           onError={(event) => {
