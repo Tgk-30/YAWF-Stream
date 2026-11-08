@@ -6360,6 +6360,16 @@ function registerRoutes(
 
   // HLS manifest: starts/reuses an ffmpeg job and returns the playlist with
   // session-scoped asset URIs relative to the manifest URL.
+  const readGeneratedManifest = async (path: string): Promise<string> => {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      if (error != null && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        throw httpError(404, "Transcode asset not found.");
+      }
+      throw error;
+    }
+  };
   app.get("/api/stream/:id/index.m3u8", async (request, reply) => {
     if (!transcode.ready) throw httpError(404, "Transcoding is not available.");
     const row = loadTranscodeSession(request);
@@ -6482,11 +6492,13 @@ function registerRoutes(
       preserveSubtitles,
       audioTrack,
     }, { signal: controller.signal });
-    const manifest = await readFile(join(dir, MANIFEST_NAME), "utf8");
-    const rewritten = rewriteTranscodeManifest(
-      manifest,
-      transcode.registry.generationFor(row.id, dir) ?? undefined,
-    );
+    const generation = transcode.registry.generationFor(row.id, dir);
+    if (generation == null) throw httpError(404, "Transcode asset not found.");
+    const manifest = await readGeneratedManifest(join(dir, MANIFEST_NAME));
+    if (transcode.registry.dirForAsset(row.id, MANIFEST_NAME, generation) !== dir) {
+      throw httpError(404, "Transcode asset not found.");
+    }
+    const rewritten = rewriteTranscodeManifest(manifest, generation);
     reply.header("content-type", "application/vnd.apple.mpegurl");
     reply.header("cache-control", "no-store");
     reply.header("x-yawf-playback-decision", "transcode");
@@ -6524,8 +6536,13 @@ function registerRoutes(
     if (!existsSync(path)) throw httpError(404, "Transcode asset not ready.");
     reply.header("cache-control", "no-store");
     if (asset.endsWith(".m3u8")) {
-      const manifest = await readFile(path, "utf8");
-      if (transcode.registry.dirForAsset(row.id, asset, generation) !== dir) {
+      const manifest = await readGeneratedManifest(path);
+      // Preparation alone cannot retire the reader still playing. Commit only
+      // after a real engine reads this exact generation's rendition playlist.
+      const activatePrepared = request.method === "GET" &&
+        typeof generation === "string" &&
+        /^(?:1080p|720p|480p|360p)\.m3u8$/.test(asset);
+      if (transcode.registry.dirForAsset(row.id, asset, generation, activatePrepared) !== dir) {
         throw httpError(404, "Transcode asset not found.");
       }
       reply.header("content-type", "application/vnd.apple.mpegurl");

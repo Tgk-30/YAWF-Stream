@@ -154,6 +154,12 @@ type WebviewRecoverySnapshot = {
   state: PlaybackHandoffState;
 };
 type WebviewRecoveryContext = WebviewRecoverySnapshot | (() => WebviewRecoverySnapshot);
+type PendingRecoverySeek = WebviewRecoverySnapshot & {
+  video: HTMLVideoElement;
+  sequence: number;
+  originPosition: number;
+  healthyMediaTime: number | null;
+};
 
 type ServerOptimizedPositionIntent = "follow-current" | "fixed";
 type ServerOptimizationPurpose = "ordinary" | "native-hls-seek" | "remembered-audio" | "automatic-default" | "recovery";
@@ -3521,7 +3527,12 @@ function WebviewPlayer({
   }, [onScrubbingChange]);
   useEffect(() => () => onScrubbingChange(false), [onScrubbingChange]);
   const rendererSeekingRef = useRef(false);
-  const pendingRecoverySeekRef = useRef<WebviewRecoverySnapshot | null>(null);
+  const pendingRecoverySeekRef = useRef<PendingRecoverySeek | null>(null);
+  const recoverySeekSequenceRef = useRef(0);
+  const pendingRecoverySeekFor = (video: HTMLVideoElement) => {
+    const pending = pendingRecoverySeekRef.current;
+    return pending?.video === video && pending.sequence === recoverySeekSequenceRef.current ? pending : null;
+  };
   const scrubbingRef = useRef(false);
   // Set when the video reaches its natural end - drives the Up-next card.
   const [ended, setEnded] = useState(false);
@@ -3632,9 +3643,8 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     ownedPlaybackPausedRef.current = !shouldPlay;
-    if (pendingRecoverySeekRef.current != null) {
-      pendingRecoverySeekRef.current.state.paused = !shouldPlay;
-    }
+    const pendingRecoverySeek = pendingRecoverySeekFor(video);
+    if (pendingRecoverySeek != null) pendingRecoverySeek.state.paused = !shouldPlay;
     const pendingNativeSeek = pendingNativeHlsSeekRef.current;
     if (pendingNativeSeek != null) {
       pendingNativeSeek.playbackIntent = shouldPlay ? "play" : "pause";
@@ -4970,6 +4980,7 @@ function WebviewPlayer({
       sync({ seeking: true });
     };
     const onSeeked = () => {
+      if (!active || videoRef.current !== video) return;
       recoveryProgress.reset();
       lastPosition = Number.isFinite(video.currentTime) ? video.currentTime : lastPosition;
       const frontier = bufferedFrontier();
@@ -4978,8 +4989,9 @@ function WebviewPlayer({
       if (video.error == null && Number.isFinite(video.currentTime)) {
         lastObservedMediaTimeRef.current = video.currentTime;
       }
-      const pending = pendingRecoverySeekRef.current;
-      if (pending != null && Math.abs(video.currentTime + timelineOffsetRef.current - pending.position) <= 0.25) {
+      const pending = pendingRecoverySeekFor(video);
+      if (pending != null && video.error == null && !video.seeking &&
+        Math.abs(video.currentTime + timelineOffsetRef.current - pending.position) <= 0.25) {
         pendingRecoverySeekRef.current = null;
       }
       sync({ seeking: scrubbingRef.current });
@@ -5005,6 +5017,34 @@ function WebviewPlayer({
       }
     };
     const onClockProgress = () => {
+      const pending = pendingRecoverySeekFor(video);
+      if (pending != null) {
+        const healthy = active && videoRef.current === video && terminalRecoveryVideoRef.current !== video &&
+          video.error == null && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+          verifiedPlaybackProgressReportedRef.current && verifiedPlaybackPlayingRef.current &&
+          !video.paused && !video.ended && !video.seeking && !scrubbingRef.current &&
+          !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null && !recoveryBuffering &&
+          !suspendedRef.current && !documentSuspendedRef.current && document.visibilityState !== "hidden";
+        const next = video.currentTime;
+        const absolute = next + timelineOffsetRef.current;
+        // A seeked event can be missing or report a clamped position. Require
+        // forward playback from a clock closer to this seek than its origin,
+        // not an ignored backward seek's still-running old clock.
+        if (healthy && Number.isFinite(next) &&
+          (pending.healthyMediaTime != null || Math.abs(absolute - pending.position) <= 0.25 ||
+            Math.abs(absolute - pending.position) < Math.abs(pending.originPosition - pending.position))) {
+          if (pending.healthyMediaTime != null && next > pending.healthyMediaTime + 0.01 &&
+            absolute >= pending.position - 0.25) {
+            pendingRecoverySeekRef.current = null;
+            rendererSeekingRef.current = false;
+            sync({ seeking: scrubbingRef.current });
+          } else {
+            pending.healthyMediaTime = next;
+          }
+        } else {
+          pending.healthyMediaTime = null;
+        }
+      }
       const eligible = active && videoRef.current === video && terminalRecoveryVideoRef.current !== video &&
         video.error == null && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
         verifiedPlaybackProgressReportedRef.current && verifiedPlaybackPlayingRef.current &&
@@ -5080,6 +5120,7 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     didSeekRef.current = false;
+    recoverySeekSequenceRef.current += 1;
     pendingRecoverySeekRef.current = null;
     explicitInitialSeekRef.current = null;
     exactHandoffPendingRef.current = requiresExactHandoffRef.current;
@@ -5324,7 +5365,7 @@ function WebviewPlayer({
         optimizedTimelineIsPartial &&
         (absoluteDuration == null || absolutePosition < absoluteDuration - 10)
       ) {
-        if (absoluteDuration != null && recoverTerminalPlayback(video)) return;
+        if (recoverTerminalPlayback(video)) return;
         onAbsolutePositionChange(absolutePosition);
         onPlaybackErrorRef.current(
           "Server Optimized ended before the original media completed.",
@@ -6075,7 +6116,7 @@ function WebviewPlayer({
       : null,
   });
   const captureRecoverySnapshot = (video: HTMLVideoElement): WebviewRecoverySnapshot => {
-    const pending = pendingRecoverySeekRef.current;
+    const pending = pendingRecoverySeekFor(video);
     const nativeSeek = pendingNativeHlsSeekRef.current;
     const current = currentRecoveryState(video);
     // A bookmark not yet applied before metadata is still owned intent. A
@@ -6114,7 +6155,7 @@ function WebviewPlayer({
     if (terminalRecoveryVideoRef.current === video) return true;
     terminalRecoveryVideoRef.current = video;
     const snapshot = captureRecoverySnapshot(video);
-    if (video.error != null && pendingRecoverySeekRef.current == null) {
+    if (video.error != null && pendingRecoverySeekFor(video) == null) {
       snapshot.position = Math.max(0, lastObservedMediaTimeRef.current + timelineOffsetRef.current);
     }
     stopLeaseRef.current();
@@ -6124,8 +6165,14 @@ function WebviewPlayer({
   };
   const assignRequestedSeek = (video: HTMLVideoElement, localTarget: number, absoluteTarget: number) => {
     // A failed decoder can reset currentTime before error is delivered. Keep
-    // the last point this owned seek actually requested, including previews.
-    pendingRecoverySeekRef.current = { position: absoluteTarget, state: currentRecoveryState(video) };
+    // the last point this owned seek actually requested until healthy playback
+    // confirms a newer clock for this reader and seek sequence.
+    pendingRecoverySeekRef.current = {
+      position: absoluteTarget, state: currentRecoveryState(video), video,
+      sequence: ++recoverySeekSequenceRef.current,
+      originPosition: (Number.isFinite(video.currentTime) ? video.currentTime : lastObservedMediaTimeRef.current) + timelineOffsetRef.current,
+      healthyMediaTime: null,
+    };
     video.currentTime = localTarget;
   };
 

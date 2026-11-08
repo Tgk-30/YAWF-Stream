@@ -365,6 +365,7 @@ interface Job {
   disposed: boolean;
   disposal?: Promise<void>;
   assetGeneration: string;
+  lifecycleGeneration: number;
   startSeconds: number;
   subtitleVideoMpegTsTimestamp: number | null;
 }
@@ -396,6 +397,8 @@ export class TranscodeRegistry {
   private lifecycle: "open" | "closing" | "closed" = "open";
   private stopPromise: Promise<void> | null = null;
   private readonly jobs = new Map<string, Job>();
+  /** Ready replacements remain inert until a client reads their rendition. */
+  private readonly prepared = new Map<string, Job>();
   /** Child processes remain here until Node reports exit or close.
    * Completed jobs keep their cached assets in `jobs`, but no longer consume
    * an execution slot. Conversely, a disposed child still consumes a slot
@@ -424,10 +427,10 @@ export class TranscodeRegistry {
     private readonly transcoder: Transcoder,
   ) {}
 
-  private activeWorkCount(): number {
+  private activeWorkCount(ownReservation?: PendingJob): number {
     let pendingReservations = 0;
     for (const pending of this.pending.values()) {
-      if (pending.job == null) pendingReservations += 1;
+      if (pending !== ownReservation && pending.job == null) pendingReservations += 1;
     }
     return this.liveChildren.size + pendingReservations + this.activeProbes;
   }
@@ -486,6 +489,7 @@ export class TranscodeRegistry {
     const pendingCreations = [...this.pending.values()].map((entry) => entry.promise);
     const ids = new Set([
       ...this.jobs.keys(),
+      ...this.prepared.keys(),
       ...this.pending.keys(),
       ...this.retired.keys(),
     ]);
@@ -732,6 +736,18 @@ export class TranscodeRegistry {
         now - job.lastAccess > IDLE_MS;
       if (dead) void this.kill(id);
     }
+    for (const [id, job] of [...this.prepared.entries()]) {
+      const row = this.db.sqlite
+        .prepare("SELECT revoked_at, expires_at FROM stream_sessions WHERE id = ?")
+        .get(id) as { revoked_at: string | null; expires_at: string | null } | undefined;
+      if (row == null || row.revoked_at != null || (row.expires_at != null && row.expires_at <= nowIso)) {
+        void this.kill(id);
+      } else if (now - job.lastAccess > IDLE_MS && this.prepared.get(id) === job) {
+        this.prepared.delete(id);
+        job.cancelled = true;
+        void this.disposeJob(id, job, false);
+      }
+    }
     for (const id of this.pending.keys()) {
       const row = this.db.sqlite
         .prepare("SELECT revoked_at, expires_at FROM stream_sessions WHERE id = ?")
@@ -759,11 +775,15 @@ export class TranscodeRegistry {
     const probe = this.streamProbes.get(sessionId);
     if (probe != null) this.invalidateProbe(sessionId, probe);
     this.generations.set(sessionId, (this.generations.get(sessionId) ?? 0) + 1);
+    const prepared = this.prepared.get(sessionId);
+    this.prepared.delete(sessionId);
+    if (prepared != null) prepared.cancelled = true;
     const job = this.jobs.get(sessionId);
     if (job != null) {
       this.jobs.delete(sessionId);
       await this.disposeJob(sessionId, job, false);
     }
+    if (prepared != null) await this.disposeJob(sessionId, prepared, false);
     const pending = this.pending.get(sessionId);
     const hadPendingJob = pending?.job != null;
     if (pending?.job != null) {
@@ -775,7 +795,7 @@ export class TranscodeRegistry {
     const retired = this.retired.get(sessionId) ?? [];
     this.retired.delete(sessionId);
     await Promise.all(retired.map((item) => this.disposeJob(sessionId, item, false)));
-    if (job != null || hadPendingJob || retired.length > 0) {
+    if (job != null || prepared != null || hadPendingJob || retired.length > 0) {
       try {
         this.db.sqlite.prepare("UPDATE stream_sessions SET transcode_dir = NULL WHERE id = ?").run(sessionId);
       } catch {
@@ -840,7 +860,7 @@ export class TranscodeRegistry {
     }
   }
 
-  private async retireJob(sessionId: string, job: Job): Promise<void> {
+  private retireJob(sessionId: string, job: Job): void {
     try {
       for (const child of job.children) child.kill("SIGTERM");
     } catch {
@@ -888,30 +908,47 @@ export class TranscodeRegistry {
   generationFor(sessionId: string, dir: string): string | null {
     const candidates = [
       this.jobs.get(sessionId),
+      this.prepared.get(sessionId),
       ...(this.retired.get(sessionId) ?? []),
     ];
     return candidates.find((job) => job?.dir === dir)?.assetGeneration ?? null;
   }
 
-  dirForAsset(sessionId: string, asset: string, generation?: string): string | null {
+  dirForAsset(sessionId: string, asset: string, generation?: string, activatePrepared = false): string | null {
     const current = this.jobs.get(sessionId);
-    const candidates = [
-      current,
-      ...(this.retired.get(sessionId) ?? []),
-    ].filter((job): job is Job => job != null);
+    const prepared = this.prepared.get(sessionId);
+    const candidates = [current, prepared, ...(this.retired.get(sessionId) ?? [])]
+      .filter((job): job is Job => job != null);
     const match = generation == null
-      ? candidates[0]
+      ? current
       : candidates.find((job) => job.assetGeneration === generation);
-    // A failed current process must not masquerade as a completed playlist.
+    const now = Date.now();
     // Retired output keeps its fixed grace, including intentional SIGTERM exit.
-    if (match == null || (match === current && match.failed) || !existsSync(join(match.dir, asset))) return null;
-    match.lastAccess = Date.now();
+    if (match == null || match.disposed || match.cancelled ||
+        ((match === current || match === prepared) && match.failed) ||
+        (match === prepared && now - match.lastAccess > IDLE_MS) ||
+        !existsSync(join(match.dir, asset))) return null;
+    if (activatePrepared && match === prepared && generation === match.assetGeneration &&
+        /^(?:1080p|720p|480p|360p)\.m3u8$/.test(asset)) {
+      if (this.lifecycle !== "open" || match.lifecycleGeneration !== (this.generations.get(sessionId) ?? 0)) return null;
+      const row = this.db.sqlite
+        .prepare("SELECT revoked_at, expires_at FROM stream_sessions WHERE id = ?")
+        .get(sessionId) as { revoked_at: string | null; expires_at: string | null } | undefined;
+      if (row == null || row.revoked_at != null || (row.expires_at != null && row.expires_at <= new Date(now).toISOString())) return null;
+      // Commit durable ownership before touching either live map or old reader.
+      this.db.sqlite.prepare("UPDATE stream_sessions SET transcode_dir = ? WHERE id = ?").run(match.dir, sessionId);
+      this.prepared.delete(sessionId);
+      this.jobs.set(sessionId, match);
+      if (current != null) this.retireJob(sessionId, current);
+    }
+    match.lastAccess = now;
     return match.dir;
   }
 
   startSecondsForAsset(sessionId: string, generation?: string): number | null {
     const candidates = [
       this.jobs.get(sessionId),
+      this.prepared.get(sessionId),
       ...(this.retired.get(sessionId) ?? []),
     ].filter((job): job is Job => job != null);
     const match = generation == null
@@ -926,6 +963,7 @@ export class TranscodeRegistry {
   ): boolean {
     const candidates = [
       this.jobs.get(sessionId),
+      this.prepared.get(sessionId),
       ...(this.retired.get(sessionId) ?? []),
     ].filter((job): job is Job => job != null);
     const match = generation == null
@@ -966,6 +1004,12 @@ export class TranscodeRegistry {
       existing.lastAccess = Date.now();
       return existing.dir;
     }
+    const prepared = this.prepared.get(sessionId);
+    if (prepared != null && !prepared.failed && !prepared.cancelled && !prepared.disposed &&
+        prepared.fingerprint === fingerprint && Date.now() - prepared.lastAccess <= IDLE_MS) {
+      prepared.lastAccess = Date.now();
+      return prepared.dir;
+    }
     // Coalesce concurrent creations for the same session into one promise.
     const inflight = this.pending.get(sessionId);
     if (inflight != null) {
@@ -997,25 +1041,32 @@ export class TranscodeRegistry {
       cancelled: false,
       published: false,
     };
-    const created = this.createJob(
-      sessionId,
-      upstreamUrl,
-      normalizedOptions,
-      fingerprint,
-      existing,
-      generation,
-      pendingEntry,
-      (job) => {
-        pendingEntry.job = job;
-        if (
-          this.lifecycle !== "open" ||
-          (this.generations.get(sessionId) ?? 0) !== generation
-        ) {
-          job.cancelled = true;
-          void this.disposeJob(sessionId, job, false);
-        }
-      },
-    ).finally(async () => {
+    const created = (async () => {
+      if (prepared != null && this.prepared.get(sessionId) === prepared) {
+        this.prepared.delete(sessionId);
+        prepared.cancelled = true;
+        await this.disposeJob(sessionId, prepared, false);
+      }
+      return this.createJob(
+        sessionId,
+        upstreamUrl,
+        normalizedOptions,
+        fingerprint,
+        existing,
+        generation,
+        pendingEntry,
+        (job) => {
+          pendingEntry.job = job;
+          if (
+            this.lifecycle !== "open" ||
+            (this.generations.get(sessionId) ?? 0) !== generation
+          ) {
+            job.cancelled = true;
+            void this.disposeJob(sessionId, job, false);
+          }
+        },
+      );
+    })().finally(async () => {
       if (pendingEntry.cancelled && pendingEntry.job != null) {
         await this.disposeJob(sessionId, pendingEntry.job, false);
       }
@@ -1078,7 +1129,7 @@ export class TranscodeRegistry {
     // Count actual live ffmpeg work, including a staged replacement. A quality
     // switch at a saturated cap fails honestly while the current job remains
     // playable, rather than exceeding the operator's process limit.
-    if (this.activeWorkCount() >= this.config.maxTranscodes) {
+    if (this.activeWorkCount(creation) >= this.config.maxTranscodes) {
       throw Object.assign(new Error("The transcoder is busy. Try again shortly."), { statusCode: 503 });
     }
 
@@ -1142,6 +1193,7 @@ export class TranscodeRegistry {
       cancelled: false,
       disposed: false,
       assetGeneration: basename(dir),
+      lifecycleGeneration: generation,
       startSeconds: options.startSeconds ?? 0,
       subtitleVideoMpegTsTimestamp: null,
     };
@@ -1198,9 +1250,9 @@ export class TranscodeRegistry {
           job.subtitleVideoMpegTsTimestamp != null
         );
       if (existsSync(manifest) && existsSync(firstSeg) && subtitleReady) {
-        // Atomically make the fully playable replacement visible before the
-        // old process and files are touched. A failed warm-up never changes the
-        // active map entry or session directory.
+        // Readiness alone does not mean the client adopted a replacement.
+        // Keep the active process and durable pointer until its exact successor
+        // rendition is read after preparation completes.
         if (
           creation.cancelled || job.cancelled || this.lifecycle !== "open" ||
           (this.generations.get(sessionId) ?? 0) !== generation
@@ -1218,12 +1270,21 @@ export class TranscodeRegistry {
             { statusCode: 502 },
           );
         }
+        job.lastAccess = Date.now();
+        if (previous != null) {
+          this.prepared.set(sessionId, job);
+        } else {
+          try {
+            this.db.sqlite
+              .prepare("UPDATE stream_sessions SET transcode_dir = ? WHERE id = ?")
+              .run(dir, sessionId);
+          } catch (error) {
+            await this.disposeJob(sessionId, job, false);
+            throw error;
+          }
+          this.jobs.set(sessionId, job);
+        }
         creation.published = true;
-        this.jobs.set(sessionId, job);
-        this.db.sqlite
-          .prepare("UPDATE stream_sessions SET transcode_dir = ? WHERE id = ?")
-          .run(dir, sessionId);
-        if (previous != null) await this.retireJob(sessionId, previous);
         return dir;
       }
       if (job.failed) {
