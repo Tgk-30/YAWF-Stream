@@ -2986,10 +2986,11 @@ describe("WebviewPlayer", () => {
       fireMediaError(document.querySelector("video.player-video") as HTMLVideoElement);
       expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /Open in external player/ })).toBeNull();
+      const pausesAfterErrorRetirement = pause.mock.calls.length;
       await userEvent.click(screen.getByRole("button", { name: "Copy stream link" }));
       expect(writeText).toHaveBeenCalledTimes(2);
       expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
-      expect(pause).not.toHaveBeenCalled();
+      expect(pause).toHaveBeenCalledTimes(pausesAfterErrorRetirement);
     } finally {
       restoreClipboard();
     }
@@ -5410,6 +5411,9 @@ describe("WebviewPlayer", () => {
     // Model only public media observations. Before metadata, duration is unknown
     // and currentTime is 0. Native HLS applies the actual product temporal fragment.
     const media = (video: HTMLVideoElement, duration: number) => {
+      // Queued metadata belongs to this resource even after its retired element
+      // has been emptied. Do not reload or read a new URL from that old node.
+      const mediaSource = video.src;
       let time = 0;
       let ready: number = HTMLMediaElement.HAVE_NOTHING;
       let knownDuration = Number.NaN;
@@ -5423,8 +5427,8 @@ describe("WebviewPlayer", () => {
       return () => {
         knownDuration = duration;
         ready = HTMLMediaElement.HAVE_METADATA;
-        const fragment = Number(new URL(video.src).hash.replace(/^#t=/, ""));
-        if (video.src.includes("#t=")) time = fragment <= 0.001 ? 0 : fragment;
+        const fragment = Number(new URL(mediaSource).hash.replace(/^#t=/, ""));
+        if (mediaSource.includes("#t=")) time = fragment <= 0.001 ? 0 : fragment;
         fireEvent.loadedMetadata(video);
         ready = HTMLMediaElement.HAVE_CURRENT_DATA;
         fireEvent.loadedData(video);
@@ -5720,12 +5724,13 @@ describe("WebviewPlayer", () => {
       vi.useFakeTimers();
       try {
         const { request, optimized } = await setupRecovery();
+        const optimizedSource = optimized.src;
         fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
         fireEvent.click(screen.getByRole("button", { name: "Japanese" }));
         await flushRecovery();
         expect(request).toHaveBeenCalledTimes(2);
         const current = document.querySelector("video.player-video") as HTMLVideoElement;
-        expect(current.src).toBe(optimized.src);
+        expect(current.src).toBe(optimizedSource);
         expect(current).not.toBe(optimized);
         fireMediaError(optimized, 4);
         await flushRecovery();
@@ -6869,6 +6874,130 @@ describe("WebviewPlayer", () => {
     await waitFor(() => expect(hlsInstances).toHaveLength(2));
   });
 
+  function realLocalScrub(wasPaused = false, layout: "desktop" | "touch" = "desktop") {
+    scrubBarMode.actual = true;
+    deviceKindMock.mockReturnValue(layout === "touch" ? "ios" : "mac");
+    const request = vi.fn();
+    const props = { url: "https://x/preview.mp4", title: "Local preview owner", onClose: () => {}, serverOptimized: { qualities: ["480p"] as const, request } };
+    const view = render(<VideoPlayer {...props} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    let currentTime = 100;
+    const writes = vi.fn((value: number) => { currentTime = value; });
+    Object.defineProperties(video, {
+      duration: { configurable: true, value: 1_000 },
+      currentTime: { configurable: true, get: () => currentTime, set: writes },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+      paused: { configurable: true, value: wasPaused },
+    });
+    fireEvent.loadedMetadata(video); fireEvent.canPlay(video);
+    if (wasPaused) fireEvent.pause(video);
+    else { fireEvent.play(video); fireEvent.playing(video); }
+    fireEvent.timeUpdate(video);
+    writes.mockClear();
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+    const captures = new Set<number>();
+    slider.setPointerCapture = vi.fn((id: number) => { captures.add(id); });
+    slider.hasPointerCapture = vi.fn((id: number) => captures.has(id));
+    slider.releasePointerCapture = vi.fn((id: number) => { captures.delete(id); });
+    return { video, slider, writes, request, view, props, nativeClock: (time: number) => { currentTime = time; fireEvent.timeUpdate(video); } };
+  }
+
+  for (const layout of ["desktop", "touch"] as const) {
+    it.each([true, false])(`[preview] keeps ${layout} pointer motion media-free while paused=%s and commits only its owner release`, (wasPaused) => {
+      const { video, slider, writes, request, nativeClock } = realLocalScrub(wasPaused, layout);
+      const playCalls = vi.mocked(video.play).mock.calls.length, pauseCalls = vi.mocked(video.pause).mock.calls.length;
+      fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+      expect(writes).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+      expect(slider).toHaveAttribute("aria-valuenow", "200");
+      fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+      expect(writes).not.toHaveBeenCalled(); expect(video.currentTime).toBe(100);
+      expect(slider).toHaveAttribute("aria-valuenow", "800");
+      expect(slider.querySelector(".scrubbar-fill")).toHaveStyle({ transform: "scaleX(0.8)" });
+      nativeClock(101);
+      expect(slider).toHaveAttribute("aria-valuenow", "800");
+      // A second pointer cannot commit or steal the original gesture.
+      fireEvent.pointerDown(slider, { pointerId: 8, pointerType: "touch", clientX: 90 });
+      fireEvent.pointerUp(slider, { pointerId: 8, pointerType: "touch", clientX: 90 });
+      expect(writes).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+      expect(slider).toHaveAttribute("aria-valuenow", "800");
+      fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 85 });
+      expect(writes.mock.calls).toEqual([[850]]); expect(video.currentTime).toBe(850);
+      expect(slider).toHaveAttribute("aria-valuenow", "850");
+      expect(request).not.toHaveBeenCalled(); expect(video.paused).toBe(wasPaused);
+      expect(video.play).toHaveBeenCalledTimes(playCalls); expect(video.pause).toHaveBeenCalledTimes(pauseCalls);
+    });
+  }
+
+  it.each(["hls.js", "native Safari"])("[preview] leaves in-window %s media and preparation untouched until release", async (renderer) => {
+    if (renderer === "native Safari") {
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    }
+    const { slider, current, request } = await prepareRealTouchScrub();
+    let localTime = current.currentTime;
+    const writes = vi.fn((value: number) => { localTime = value; });
+    Object.defineProperty(current, "currentTime", { configurable: true, get: () => localTime, set: writes });
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 40 });
+    fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 40.2 });
+    expect(writes).not.toHaveBeenCalled(); expect(request).toHaveBeenCalledTimes(1);
+    expect(slider).toHaveAttribute("aria-valuenow", "402");
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 40.6 });
+    expect(writes).toHaveBeenCalledTimes(1); expect(writes.mock.calls[0][0]).toBeCloseTo(11);
+    expect(request).toHaveBeenCalledTimes(1); expect(current.paused).toBe(true);
+    fireEvent.seeked(current);
+  });
+
+  it.each(["pointerCancel", "lostPointerCapture"] as const)("[preview] abandons %s without any media write or late commit", (terminal) => {
+    const { slider, writes, request } = realLocalScrub(false, "touch");
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+    expect(writes).not.toHaveBeenCalled();
+    fireEvent[terminal](slider, { pointerId: 7, pointerType: "touch" });
+    expect(slider).toHaveAttribute("aria-valuenow", "100");
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+    expect(writes).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each(["source replacement", "unmount"] as const)("[preview] retires %s without committing the old rail's pointer intent", (action) => {
+    const { slider, writes, request, view, props } = realLocalScrub();
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+    expect(writes).not.toHaveBeenCalled();
+    if (action === "unmount") view.unmount();
+    else view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+    expect(slider.isConnected).toBe(false);
+    expect(slider.releasePointerCapture).toHaveBeenCalledWith(7);
+    const successor = document.querySelector("video.player-video") as HTMLVideoElement | null;
+    const successorTime = successor?.currentTime;
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+    expect(writes).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+    expect(successor?.currentTime).toBe(successorTime);
+  });
+
+  it.each([[-20, 0], [140, 1_000]])("[preview] commits a clamped tap release at x=%s exactly once", (clientX, expected) => {
+    const { slider, writes, video } = realLocalScrub(true);
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX });
+    expect(writes).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX });
+    expect(writes.mock.calls).toEqual([[expected]]); expect(video.paused).toBe(true);
+  });
+
+  it("[preview] pins real scrubbing chrome then disables the canceled rail without a late commit", () => {
+    vi.useFakeTimers();
+    const { slider, writes } = realLocalScrub(false, "touch");
+    const bar = document.querySelector(".player-bar")!;
+    fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
+    expect(writes).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(3_201));
+    expect(bar).toHaveClass("is-visible");
+    fireEvent.pointerCancel(slider, { pointerId: 7, pointerType: "touch" });
+    act(() => vi.advanceTimersByTime(3_201));
+    expect(bar).not.toHaveClass("is-visible"); expect(slider).toHaveAttribute("tabindex", "-1");
+    fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 90 });
+    expect(writes).not.toHaveBeenCalled();
+  });
+
   it("keeps real local touch previews and keyboard seeks immediate", () => {
     scrubBarMode.actual = true;
     render(<VideoPlayer url="https://x/movie.mp4" title="Local touch" onClose={() => {}} />);
@@ -6878,9 +7007,11 @@ describe("WebviewPlayer", () => {
     const slider = screen.getByRole("slider", { name: "Seek" });
     slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
     fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
-    expect(video.currentTime).toBe(200);
+    expect(video.currentTime).toBe(0);
+    expect(slider).toHaveAttribute("aria-valuenow", "200");
     fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
-    expect(video.currentTime).toBe(800);
+    expect(video.currentTime).toBe(0);
+    expect(slider).toHaveAttribute("aria-valuenow", "800");
     fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 85 });
     expect(video.currentTime).toBe(850);
     fireEvent.timeUpdate(video);
@@ -10114,6 +10245,455 @@ describe("WebviewPlayer", () => {
     });
   });
 
+  describe("chrome input modality", () => {
+    function pointer(element: Element, type: "pointerover" | "pointerout" | "pointerdown" | "pointerup" | "pointercancel", pointerType: string) {
+      const event = new MouseEvent(type, { bubbles: true });
+      Object.defineProperty(event, "pointerType", { value: pointerType });
+      fireEvent(element, event);
+    }
+    function setup(layout: "desktop" | "touch" = "touch") {
+      vi.useFakeTimers();
+      deviceKindMock.mockReturnValue(layout === "touch" ? "ios" : "mac");
+      const props = { url: "https://x/chrome.mp4", title: "Chrome input", onClose: () => {} };
+      const view = render(<VideoPlayer {...props} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let paused = false;
+      Object.defineProperties(video, {
+        paused: { configurable: true, get: () => paused },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+        duration: { configurable: true, value: 900 },
+      });
+      vi.mocked(video.play).mockImplementation(async () => {
+        paused = false; fireEvent.play(video); fireEvent.playing(video);
+      });
+      vi.mocked(video.pause).mockImplementation(() => { paused = true; fireEvent.pause(video); });
+      fireEvent.canPlay(video);
+      fireEvent.play(video); fireEvent.playing(video);
+      const bar = document.querySelector(".player-bar") as HTMLElement;
+      const osd = document.querySelector(".player-osd") as HTMLElement;
+      const region = document.querySelector(layout === "touch" ? ".player-touch-transport" : ".player-osd") as HTMLElement;
+      const advance = () => act(() => vi.advanceTimersByTime(3_201));
+      return { video, bar, osd, region, advance, view, props };
+    }
+
+    it.each(["hover", "focus"] as const)("drops a disconnected child %s pin after a committed source remount", (kind) => {
+      const { video, bar, region, advance, view, props } = setup();
+      if (kind === "hover") pointer(region, "pointerover", "mouse");
+      else act(() => screen.getByRole("button", { name: "Pause" }).focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+      view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+      const next = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(next).not.toBe(video); expect(region.isConnected).toBe(false);
+      fireEvent.canPlay(next);
+      advance(); expect(bar).not.toHaveClass("is-visible");
+    });
+
+    it.each(["hover", "focus"] as const)("retains a connected parent header %s pin through a committed source remount", (kind) => {
+      const { bar, advance, view, props } = setup();
+      const close = screen.getByRole("button", { name: "Close player" });
+      if (kind === "hover") pointer(bar, "pointerover", "mouse");
+      else act(() => close.focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+      view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+      fireEvent.canPlay(document.querySelector("video.player-video")!);
+      expect(bar.isConnected).toBe(true);
+      if (kind === "focus") expect(document.activeElement).toBe(close);
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("drops a connected header focus pin when focus moved without a delivered blur before remount", () => {
+      const { bar, advance, view, props } = setup();
+      const close = screen.getByRole("button", { name: "Close player" });
+      act(() => close.focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      const suppressBlur = (event: FocusEvent) => {
+        if (event.target === close) event.stopPropagation();
+      };
+      window.addEventListener("focusout", suppressBlur, true);
+      try {
+        act(() => outside.focus());
+        expect(close.isConnected).toBe(true);
+        expect(document.activeElement).toBe(outside);
+        view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+        fireEvent.canPlay(document.querySelector("video.player-video")!);
+        advance(); expect(bar).not.toHaveClass("is-visible");
+      } finally {
+        window.removeEventListener("focusout", suppressBlur, true);
+        outside.remove();
+      }
+    });
+
+    it.each(["pointerup", "pointercancel"] as const)("allows independent programmatic focus after touch %s without a click", (terminal) => {
+      const { bar, advance } = setup();
+      const play = screen.getByRole("button", { name: "Pause" });
+      pointer(play, "pointerdown", "touch"); act(() => play.focus());
+      pointer(play, terminal, "touch");
+      act(() => vi.advanceTimersByTime(1));
+      // Re-focus the same target so the case also rejects a pointer scope
+      // accidentally surviving its terminal event, not only a different target.
+      act(() => play.blur()); act(() => play.focus());
+      expect(document.activeElement).toBe(play);
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("allows independent assistive focus after a completed touch-menu restoration", () => {
+      const { bar, advance } = setup();
+      const more = screen.getByRole("button", { name: "Playback settings" });
+      pointer(more, "pointerdown", "touch"); act(() => more.focus()); fireEvent.click(more);
+      const close = screen.getByRole("button", { name: "Close playback settings" });
+      pointer(close, "pointerdown", "touch"); fireEvent.click(close);
+      advance(); expect(bar).not.toHaveClass("is-visible");
+      const play = screen.getByRole("button", { name: "Pause", hidden: true });
+      act(() => play.focus());
+      expect(document.activeElement).toBe(play);
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it.each([
+      ["touch", "touch"], ["touch", "pen"], ["desktop", "touch"],
+    ] as const)("hides after %s-layout %s Resume focus without pointerleave or blur", async (layout, pointerType) => {
+      const { video, bar, osd, region, advance } = setup(layout);
+      act(() => video.pause());
+      const play = screen.getByRole("button", { name: "Play" });
+      pointer(region, "pointerover", pointerType);
+      pointer(play, "pointerdown", pointerType);
+      act(() => play.focus());
+      fireEvent.click(play);
+      pointer(play, "pointerup", pointerType);
+      expect(video.paused).toBe(false);
+      expect(document.activeElement).toBe(play);
+      advance();
+      expect(bar).not.toHaveClass("is-visible");
+      expect(osd).not.toHaveClass("is-visible");
+      expect(document.activeElement).toBe(play);
+      expect(video.paused).toBe(false);
+    });
+
+    it.each(["touch", "pen"] as const)("does not pin chrome on a %s pointerenter without pointerdown or pointerleave", (pointerType) => {
+      const { video, bar, osd, region, advance } = setup();
+      pointer(region, "pointerover", pointerType);
+      advance();
+      expect(bar).not.toHaveClass("is-visible");
+      expect(osd).not.toHaveClass("is-visible");
+      expect(video.paused).toBe(false);
+    });
+
+    it.each(["touch", "pen"] as const)("clears existing mouse-hover and keyboard-focus pins on %s without blur", (pointerType) => {
+      const { video, bar, region, advance } = setup();
+      const play = screen.getByRole("button", { name: "Pause" });
+      pointer(region, "pointerover", "mouse");
+      fireEvent.keyDown(play, { key: "Tab" }); act(() => play.focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+      pointer(play, "pointerdown", pointerType);
+      advance(); expect(bar).not.toHaveClass("is-visible");
+      expect(document.activeElement).toBe(play);
+      expect(video.paused).toBe(false);
+    });
+
+    it("preserves unclassified assistive or programmatic control focus", () => {
+      const { bar, advance } = setup();
+      act(() => screen.getByRole("button", { name: "Pause" }).focus());
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("hides after touch settings close restores focus to More", () => {
+      const { bar, osd, advance } = setup();
+      const more = screen.getByRole("button", { name: "Playback settings" });
+      pointer(more, "pointerover", "touch"); pointer(more, "pointerdown", "touch");
+      act(() => more.focus()); fireEvent.click(more);
+      advance();
+      expect(bar).toHaveClass("is-visible");
+      const close = screen.getByRole("button", { name: "Close playback settings" });
+      pointer(close, "pointerdown", "touch"); fireEvent.click(close);
+      expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+      expect(document.activeElement).toBe(more);
+      advance();
+      expect(bar).not.toHaveClass("is-visible");
+      expect(osd).not.toHaveClass("is-visible");
+      expect(document.activeElement).toBe(more);
+    });
+
+    it("re-pins keyboard input on an already touch-focused control without another focus event", () => {
+      const { bar, advance } = setup();
+      const play = screen.getByRole("button", { name: "Pause" });
+      pointer(play, "pointerdown", "touch"); act(() => play.focus());
+      advance(); expect(bar).not.toHaveClass("is-visible");
+      fireEvent.keyDown(play, { key: "ArrowDown" });
+      expect(document.activeElement).toBe(play);
+      advance(); expect(bar).toHaveClass("is-visible");
+      expect(document.activeElement).toBe(play);
+      act(() => play.blur());
+      advance(); expect(bar).not.toHaveClass("is-visible");
+    });
+
+    it("preserves keyboard settings-close focus restoration pinning", () => {
+      const { bar, advance } = setup();
+      const more = screen.getByRole("button", { name: "Playback settings" });
+      fireEvent.keyDown(more, { key: "Tab" }); act(() => more.focus());
+      fireEvent.click(more);
+      const close = screen.getByRole("button", { name: "Close playback settings" });
+      fireEvent.keyDown(close, { key: "Escape" });
+      expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+      expect(document.activeElement).toBe(more);
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it.each(["desktop", "touch"] as const)("preserves actual mouse hover in the %s layout until mouse leave", (layout) => {
+      const { bar, region, advance } = setup(layout);
+      pointer(region, "pointerover", "mouse");
+      advance(); expect(bar).toHaveClass("is-visible");
+      pointer(region, "pointerout", "mouse");
+      advance(); expect(bar).not.toHaveClass("is-visible");
+    });
+
+    function touchPress(button: HTMLElement) {
+      pointer(button, "pointerdown", "touch");
+      // fireEvent does not perform the browser's ordinary focus default.
+      act(() => button.focus());
+      pointer(button, "pointerup", "touch");
+      fireEvent.click(button);
+    }
+    function enableNativeAudioChoices() {
+      const tracks = Object.assign(new EventTarget(), {
+        0: { id: "en", label: "English", language: "eng", enabled: true },
+        1: { id: "jp", label: "Japanese", language: "jpn", enabled: false },
+        length: 2,
+        item(index: number) { return this[index as 0 | 1] ?? null; },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", { configurable: true, get: () => tracks });
+    }
+
+    it.each(["settings", "captions", "audio"] as const)("[r3] retires desktop-layout touch %s restoration without losing exact focus or later assistive refocus", (menu) => {
+      captionMenuMode.actual = true;
+      if (menu === "audio") enableNativeAudioChoices();
+      const { video, bar, osd, advance } = setup("desktop");
+      const name = menu === "settings" ? "Playback settings" : menu === "captions" ? "Subtitles" : "Audio track, English";
+      const trigger = screen.getByRole("button", { name });
+      touchPress(trigger);
+      const close = screen.getByRole("button", { name: menu === "captions" ? "Close subtitles menu" : "Close playback settings" });
+      advance(); expect(bar).toHaveClass("is-visible");
+      touchPress(close);
+      expect(trigger).toHaveFocus();
+      advance();
+      expect(bar).not.toHaveClass("is-visible"); expect(osd).not.toHaveClass("is-visible");
+      expect(trigger).toHaveFocus(); expect(video.paused).toBe(false);
+      act(() => trigger.blur()); act(() => trigger.focus());
+      advance(); expect(bar).toHaveClass("is-visible"); expect(trigger).toHaveFocus();
+    });
+
+    it.each(["desktop", "touch"] as const)("[r3] retires %s-layout touch Details restoration after the actual child modal cleanup", (layout) => {
+      const { video, bar, advance } = setup(layout);
+      const trigger = screen.getByRole("button", { name: "Player details and shortcuts" });
+      touchPress(trigger);
+      const dialog = screen.getByRole("dialog", { name: "Player details and shortcuts" });
+      expect(dialog).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+      touchPress(within(dialog).getByRole("button", { name: "Close playback information" }));
+      expect(trigger).toHaveFocus();
+      advance(); expect(bar).not.toHaveClass("is-visible"); expect(trigger).toHaveFocus();
+      expect(video.paused).toBe(false);
+      act(() => trigger.blur()); act(() => trigger.focus());
+      advance(); expect(bar).toHaveClass("is-visible"); expect(trigger).toHaveFocus();
+    });
+
+    it.each(["settings", "captions", "details"] as const)("[r3] keeps keyboard %s modal restoration pinned", (menu) => {
+      captionMenuMode.actual = true;
+      const { bar, advance } = setup("desktop");
+      const trigger = screen.getByRole("button", { name: menu === "settings" ? "Playback settings" : menu === "captions" ? "Subtitles" : "Player details and shortcuts" });
+      fireEvent.keyDown(trigger, { key: "Tab" }); act(() => trigger.focus()); fireEvent.click(trigger);
+      const dialog = screen.getByRole("dialog", { name: menu === "settings" ? "Playback settings" : menu === "captions" ? "Subtitles" : "Player details and shortcuts" });
+      expect(dialog).toHaveFocus();
+      fireEvent.keyDown(dialog, { key: "Escape" });
+      expect(trigger).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("[r3] returns the question-mark shortcut to its actual non-header origin", () => {
+      setup("desktop");
+      const header = screen.getByRole("button", { name: "Player details and shortcuts" });
+      touchPress(header);
+      touchPress(screen.getByRole("button", { name: "Close playback information" }));
+      const pane = screen.getByRole("dialog", { name: "Playing Chrome input" });
+      act(() => pane.focus());
+      const headerFocus = vi.spyOn(header, "focus"); headerFocus.mockClear();
+      fireEvent.keyDown(pane, { key: "?" });
+      const dialog = screen.getByRole("dialog", { name: "Player details and shortcuts" });
+      expect(within(dialog).getByRole("tabpanel", { name: "Shortcuts" })).toBeInTheDocument();
+      fireEvent.keyDown(dialog, { key: "Escape" });
+      expect(pane).toHaveFocus(); expect(headerFocus).not.toHaveBeenCalled();
+    });
+
+    it.each(["disconnected", "other-player", "different-owner"] as const)("[r3] does not add owned Details reconciliation for a %s origin", (stale) => {
+      const { view, props } = setup("desktop");
+      const trigger = screen.getByRole("button", { name: "Player details and shortcuts" });
+      touchPress(trigger);
+      const parent = trigger.parentElement!, next = trigger.nextSibling;
+      const outside = document.createElement("div"); outside.className = "player";
+      if (stale === "disconnected") trigger.remove();
+      if (stale === "other-player") { document.body.append(outside); outside.append(trigger); }
+      if (stale === "different-owner") view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+      const oldFocus = vi.spyOn(trigger, "focus"); oldFocus.mockClear();
+      const fallback = vi.spyOn(screen.getByRole("button", { name: "Close player" }), "focus"); fallback.mockClear();
+      try {
+        touchPress(screen.getByRole("button", { name: "Close playback information" }));
+        // The unchanged generic modal hook attempts its saved origin once.
+        // No new owned reconciliation may re-focus or invent a fallback for it.
+        expect(oldFocus).toHaveBeenCalledTimes(1); expect(fallback).not.toHaveBeenCalled();
+      } finally {
+        if (trigger.parentElement !== parent) parent.insertBefore(trigger, next);
+        outside.remove();
+      }
+    });
+
+    it("[r3] does not substitute Settings for a disconnected desktop captions origin", () => {
+      captionMenuMode.actual = true;
+      setup("desktop");
+      const trigger = screen.getByRole("button", { name: "Subtitles" });
+      const settings = screen.getByRole("button", { name: "Playback settings" });
+      touchPress(trigger);
+      const parent = trigger.parentElement!, next = trigger.nextSibling;
+      trigger.remove();
+      const settingsFocus = vi.spyOn(settings, "focus"); settingsFocus.mockClear();
+      try {
+        touchPress(screen.getByRole("button", { name: "Close subtitles menu" }));
+        expect(settingsFocus).not.toHaveBeenCalled();
+      } finally { parent.insertBefore(trigger, next); }
+    });
+
+    it.each(["paused", "buffering", "settings", "captions", "scrubbing"] as const)("keeps chrome pinned for %s independently of touch focus", (reason) => {
+      const { video, bar, advance } = setup();
+      pointer(document.querySelector(".player")!, "pointerdown", "touch");
+      if (reason === "paused") act(() => video.pause());
+      if (reason === "buffering") fireEvent.waiting(video);
+      if (reason === "settings") fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      if (reason === "captions") fireEvent.click(screen.getByRole("button", { name: "Subtitles" }));
+      if (reason === "scrubbing") pointer(screen.getByTestId("scrub-bar"), "pointerdown", "touch");
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+  });
+
+  describe("touch transport click ownership", () => {
+    function pointer(button: HTMLElement, type: "pointerdown" | "pointerup" | "pointerover" | "pointerout", pointerType = "touch") {
+      fireEvent(button, new PointerEvent(type, { bubbles: true, pointerId: 1, pointerType }));
+    }
+    function setup() {
+      vi.useFakeTimers();
+      deviceKindMock.mockReturnValue("android");
+      Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+        configurable: true,
+        value: { getInsets: vi.fn(() => '{"top":0,"right":0,"bottom":0,"left":0}') },
+      });
+      render(<VideoPlayer url="https://x/transport-focus.mp4" title="Transport focus" onClose={() => {}} />);
+      const player = screen.getByRole("dialog", { name: "Playing Transport focus" });
+      expect(player).toHaveClass("is-touch-player");
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let paused = false;
+      Object.defineProperties(video, {
+        paused: { configurable: true, get: () => paused },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+        duration: { configurable: true, value: 900 },
+        currentTime: { configurable: true, writable: true, value: 240.333 },
+      });
+      const play = vi.mocked(video.play), pause = vi.mocked(video.pause);
+      play.mockImplementation(async () => { paused = false; fireEvent.play(video); fireEvent.playing(video); });
+      pause.mockImplementation(() => { paused = true; fireEvent.pause(video); });
+      fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+      act(() => video.pause());
+      play.mockClear(); pause.mockClear();
+      const bar = player.querySelector(".player-bar")!;
+      const osd = player.querySelector(".player-osd")!;
+      const transport = player.querySelector(".player-touch-transport")!;
+      const advance = () => act(() => vi.advanceTimersByTime(3_201));
+      return { video, play, pause, bar, osd, transport, advance };
+    }
+    function lateTouchFocus(button: HTMLElement) {
+      pointer(button, "pointerdown"); pointer(button, "pointerup");
+      act(() => vi.advanceTimersByTime(1));
+      // Android can deliver native focus after the pointer cleanup turn.
+      act(() => button.focus());
+      fireEvent.click(button, { detail: 1 });
+    }
+
+    it("[transport-focus] retires late touch Play focus after resuming exactly once", () => {
+      const { video, play, pause, bar, osd, transport, advance } = setup();
+      const button = screen.getByRole("button", { name: "Play" });
+      lateTouchFocus(button);
+      expect(play).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false); expect(button).toHaveFocus();
+      advance();
+      expect(bar).not.toHaveClass("is-visible"); expect(osd).not.toHaveClass("is-visible");
+      expect(transport).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+      expect(video.currentTime).toBe(240.333);
+    });
+
+    it.each([["Back 10 seconds", 230.333], ["Forward 10 seconds", 250.333]] as const)("[transport-focus] retires late touch %s focus while seeking exactly once", (name, target) => {
+      const { video, play, pause, bar, osd, transport, advance } = setup();
+      act(() => { void video.play(); }); play.mockClear(); pause.mockClear();
+      let clock = video.currentTime;
+      const writeTime = vi.fn((value: number) => { clock = value; });
+      Object.defineProperty(video, "currentTime", { configurable: true, get: () => clock, set: writeTime });
+      const button = screen.getByRole("button", { name });
+      lateTouchFocus(button);
+      fireEvent.seeking(video); fireEvent.seeked(video);
+      expect(writeTime).toHaveBeenCalledTimes(1); expect(writeTime).toHaveBeenCalledWith(target);
+      expect(video.currentTime).toBe(target); expect(video.paused).toBe(false);
+      expect(pause).not.toHaveBeenCalled(); expect(button).toHaveFocus();
+      advance();
+      expect(bar).not.toHaveClass("is-visible"); expect(osd).not.toHaveClass("is-visible");
+      expect(transport).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+    });
+
+    it("[transport-focus] preserves the pause pin and resumes without retaining late touch Pause focus", () => {
+      const { video, play, pause, bar, advance } = setup();
+      act(() => { void video.play(); }); play.mockClear(); pause.mockClear();
+      const button = screen.getByRole("button", { name: "Pause" });
+      lateTouchFocus(button);
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+      expect(video.paused).toBe(true); expect(button).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+      act(() => { void video.play(); });
+      advance(); expect(bar).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+    });
+
+    it("[transport-focus] preserves keyboard Play activation and its real focus pin", () => {
+      const { video, play, pause, bar, advance } = setup();
+      const button = screen.getByRole("button", { name: "Play" });
+      fireEvent.keyDown(button, { key: "Tab" }); act(() => button.focus());
+      fireEvent.keyDown(button, { key: "Enter" }); fireEvent.click(button, { detail: 0 });
+      expect(play).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false); expect(button).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("[transport-focus] preserves independent assistive Play focus after an expired touch without activation", () => {
+      const { video, play, pause, bar, advance } = setup();
+      const button = screen.getByRole("button", { name: "Play" });
+      pointer(button, "pointerdown"); pointer(button, "pointerup");
+      act(() => vi.advanceTimersByTime(1));
+      act(() => button.focus());
+      fireEvent.click(button, { detail: 0 });
+      expect(play).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false); expect(button).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+    });
+
+    it("[transport-focus] preserves ordinary mouse hover until leave after one Play activation", () => {
+      const { video, play, pause, bar, transport, advance } = setup();
+      const button = screen.getByRole("button", { name: "Play" });
+      pointer(transport as HTMLElement, "pointerover", "mouse");
+      pointer(button, "pointerdown", "mouse"); pointer(button, "pointerup", "mouse");
+      act(() => vi.advanceTimersByTime(1)); act(() => button.focus());
+      fireEvent.click(button, { detail: 1 });
+      expect(play).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false); expect(button).toHaveFocus();
+      advance(); expect(bar).toHaveClass("is-visible");
+      pointer(transport as HTMLElement, "pointerout", "mouse");
+      advance(); expect(bar).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+    });
+  });
+
   it("hides inactive web chrome, preserves it for pause or menus, and reveals it on pointer activity", () => {
     vi.useFakeTimers();
     try {
@@ -10194,6 +10774,146 @@ describe("WebviewPlayer", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("video gesture reveal ownership", () => {
+    function setup(layout: "desktop" | "ios" | "android" = "ios") {
+      vi.useFakeTimers();
+      deviceKindMock.mockReturnValue(layout === "desktop" ? "mac" : layout);
+      if (layout === "android") {
+        (window as unknown as Record<string, unknown>).__YAWF_NATIVE_SAFE_AREA__ = {
+          getInsets: vi.fn(),
+        };
+      }
+      const props = { url: "https://x/gesture.mp4", title: "Gesture ownership", onClose: () => {} };
+      const view = render(<VideoPlayer {...props} />);
+      expect(document.querySelector(".player")!.classList.contains("is-touch-player"))
+        .toBe(layout !== "desktop");
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      let paused = false;
+      Object.defineProperties(video, {
+        paused: { configurable: true, get: () => paused },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+        duration: { configurable: true, value: 900 },
+        currentTime: { configurable: true, writable: true, value: 40 },
+      });
+      const play = vi.mocked(video.play);
+      const pause = vi.mocked(video.pause);
+      play.mockImplementation(async () => {
+        paused = false; fireEvent.play(video); fireEvent.playing(video);
+      });
+      pause.mockImplementation(() => { paused = true; fireEvent.pause(video); });
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+      act(() => vi.advanceTimersByTime(3_201));
+      expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+      play.mockClear(); pause.mockClear();
+      return { video, play, pause, view, props };
+    }
+
+    function pointer(video: HTMLVideoElement, type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel", pointerType = "touch", pointerId = 1) {
+      fireEvent(video, new PointerEvent(type, {
+        bubbles: true, pointerType, pointerId, clientX: 50, clientY: 50,
+      }));
+    }
+    function movingGesture(video: HTMLVideoElement, pointerType = "touch", pointerId = 1) {
+      pointer(video, "pointerdown", pointerType, pointerId);
+      pointer(video, "pointermove", pointerType, pointerId);
+      expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+      pointer(video, "pointerup", pointerType, pointerId);
+      fireEvent.click(video, { detail: 1, clientX: 50, clientY: 50 });
+    }
+
+    it.each(["desktop", "ios", "android"] as const)("[gesture-reveal] keeps a moving hidden touch reveal-only while playing on %s", (layout) => {
+      const { video, play, pause } = setup(layout);
+      movingGesture(video);
+      expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+      expect(play).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false);
+    });
+
+    it.each(["desktop", "ios", "android"] as const)("[gesture-reveal] keeps a moving hidden pen reveal-only while playing on %s", (layout) => {
+      const { video, play, pause } = setup(layout);
+      movingGesture(video, "pen");
+      expect(play).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false);
+    });
+
+    it("[gesture-reveal] does not resume when playback pauses during a hidden reveal gesture", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      act(() => video.pause()); pause.mockClear();
+      pointer(video, "pointerup"); fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(play).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(true);
+    });
+
+    it.each(["touch", "pen"])("[gesture-control] toggles exactly once on the second visible %s gesture", (pointerType) => {
+      const { video, play, pause } = setup();
+      movingGesture(video, pointerType);
+      expect(pause).not.toHaveBeenCalled();
+      movingGesture(video, pointerType, 2);
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+      expect(video.paused).toBe(true);
+    });
+
+    it("[gesture-control] preserves immediate mouse playback toggle after hidden pointer activity", () => {
+      const { video, play, pause } = setup();
+      movingGesture(video, "mouse");
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] leaves keyboard playback available during a pending reveal gesture", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      fireEvent.keyDown(window, { key: " " });
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] clears canceled reveal ownership before an independent click", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove"); pointer(video, "pointercancel");
+      fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] replaces an abandoned hidden gesture with a new visible pointer", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      pointer(video, "pointerdown", "mouse", 2); pointer(video, "pointerup", "mouse", 2);
+      fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] ignores cancellation from a different pointer", () => {
+      const { video, play, pause } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      pointer(video, "pointercancel", "touch", 2);
+      pointer(video, "pointerup"); fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(pause).not.toHaveBeenCalled(); expect(play).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false);
+    });
+
+    it("[gesture-control] consumes reveal ownership before an independent subsequent click", () => {
+      const { video, play, pause } = setup();
+      movingGesture(video);
+      expect(pause).not.toHaveBeenCalled();
+      fireEvent.click(video, { detail: 1, clientX: 50 });
+      expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[gesture-control] does not transfer a hidden gesture to a replacement source", () => {
+      const { video, view, props } = setup();
+      pointer(video, "pointerdown"); pointer(video, "pointermove");
+      view.rerender(<VideoPlayer {...props} url="https://x/next-gesture.mp4" />);
+      const next = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(next).not.toBe(video);
+      Object.defineProperty(next, "paused", { configurable: true, value: false });
+      fireEvent.canPlay(next); fireEvent.play(next); fireEvent.playing(next);
+      const pause = vi.mocked(next.pause); pause.mockClear();
+      fireEvent.click(next, { detail: 1, clientX: 50 });
+      expect(pause).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("announces startup and rebuffering until media is playable again", () => {
@@ -13301,7 +14021,7 @@ describe("server generation HEAD retention", () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>).mockReturnValue("probably");
   }
-  it("expires into manual fresh resolution preserving paused source position instead of restoring an old URL", async () => {
+  it("automatically resolves expiry and keeps manual Retry from restoring an old URL", async () => {
     setupNative();
     let heads = 0;
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
@@ -13318,10 +14038,11 @@ describe("server generation HEAD retention", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
     expect(document.querySelector("video.player-video")).toBeNull();
-    expect(refresh).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25 });
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
     await flushLease();
-    expect(refresh).toHaveBeenCalledWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25 });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenLastCalledWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25 });
     expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
   });
   it("does not offer old-URL Retry when an expired owner has no fresh resolver", async () => {
@@ -13492,8 +14213,6 @@ describe("server generation HEAD retention", () => {
       init?.method === "HEAD" ? new Response(null, { status: 404 }) : new Response(manifest)));
     const view = render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} refreshCurrentSource={() => refresh.promise} onClose={() => {}} />);
     await flushLease();
-    fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
-    await flushLease();
     view.rerender(<VideoPlayer url="https://x/new.mp4" sourceRevision={2} title="New" onClose={() => {}} />);
     await act(async () => { refresh.reject(new Error("late resolution failure")); await Promise.resolve(); });
     await flushLease();
@@ -13576,8 +14295,6 @@ describe("server generation HEAD retention", () => {
       init?.method === "HEAD" ? new Response(null, { status: 404 }) : new Response(manifest)));
     const scenario = suspendedReplacement(() => refresh.promise);
     render(<scenario.Scenario />);
-    await flushLease();
-    fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
     await flushLease();
     expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
     act(() => { startTransition(() => scenario.choose(true)); });
@@ -13847,7 +14564,7 @@ describe("explicit Device Original audio intent", () => {
       fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
     }
   }
-  async function setupMode() {
+  async function setupMode(chooseOriginal = true) {
     deviceKindMock.mockReturnValue("ios");
     vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
@@ -13880,9 +14597,11 @@ describe("explicit Device Original audio intent", () => {
     expect(request).toHaveBeenCalledTimes(2);
     expect(request).toHaveBeenLastCalledWith("360p", position, 1);
     readyMode(document.querySelector("video.player-video") as HTMLVideoElement, position);
-    await settleMode(); await settingsMode();
-    fireEvent.click(screen.getByRole("button", { name: "Device Original" }));
-    await settleMode();
+    if (chooseOriginal) {
+      await settleMode(); await settingsMode();
+      fireEvent.click(screen.getByRole("button", { name: "Device Original" }));
+      await settleMode();
+    }
     const original = document.querySelector("video.player-video") as HTMLVideoElement;
     return { props, view, request, original, onProgress };
   }
@@ -13925,6 +14644,58 @@ describe("explicit Device Original audio intent", () => {
     view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
     const next = document.querySelector("video.player-video") as HTMLVideoElement;
     readyMode(next); await settleMode();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenLastCalledWith("360p", position, 1);
+  });
+
+  it.each([["supported", ["480p", "360p"], "360p"], ["unsupported", ["480p"], "480p"]] as const)(
+    "[quality-continuity] uses %s explicit quality with a fresh semantic Japanese index",
+    async (_support, qualities, expectedQuality) => {
+      const { request, view, props } = await setupMode(false);
+      const nextTracks = [
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 4, language: "ja", label: "Japanese", default: false },
+      ];
+      view.rerender(<VideoPlayer {...props} sourceRevision={1} url="https://server.example/api/stream/fresh-mode"
+        serverOptimized={{ ...props.serverOptimized, qualities: [...qualities], loadSourceInfo: async () => ({ durationSeconds: 180, tracks: nextTracks }) }} />);
+      readyMode(document.querySelector("video.player-video") as HTMLVideoElement);
+      await settleMode();
+      expect(request).toHaveBeenCalledTimes(3);
+      expect(request).toHaveBeenLastCalledWith(expectedQuality, position, 4);
+      const renewed = document.querySelector("video.player-video") as HTMLVideoElement;
+      readyMode(renewed, position); await settleMode();
+      expect(renewed.currentTime).toBeCloseTo(0, 6);
+      expect(renewed.volume).toBe(0.35); expect(renewed.muted).toBe(true); expect(renewed.playbackRate).toBe(1.25);
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+    },
+  );
+
+  it.each([["supported", ["480p", "360p"], "360p"], ["unsupported", ["480p"], "480p"]] as const)(
+    "[quality-continuity] prefers %s remembered quality over a fresh trusted HLS480 source",
+    async (_support, qualities, expectedQuality) => {
+      const { request, view, props } = await setupMode(false);
+      const nextTracks = [
+        { index: 0, language: "eng", label: "English", default: true },
+        { index: 4, language: "ja", label: "Japanese", default: false },
+      ];
+      view.rerender(<VideoPlayer {...props} sourceRevision={1} engine="webview-hls-transcode"
+        url="https://server.example/api/stream/fresh-mode/index.m3u8?quality=480p"
+        serverOptimized={{ ...props.serverOptimized, qualities: [...qualities], loadSourceInfo: async () => ({ durationSeconds: 180, tracks: nextTracks }) }} />);
+      await settleMode();
+      readyMode(document.querySelector("video.player-video") as HTMLVideoElement);
+      await settleMode();
+      expect(request).toHaveBeenCalledTimes(3);
+      expect(request).toHaveBeenLastCalledWith(expectedQuality, position, 4);
+    },
+  );
+
+  it.each(["file", "episode"] as const)("[quality-continuity] clears explicit quality for a different %s scope", async (change) => {
+    const { request, view, props } = await setupMode(false);
+    view.rerender(<VideoPlayer {...props} sourceRevision={1}
+      sourceFileName={change === "file" ? "Other.Movie.mkv" : props.sourceFileName}
+      episode={change === "episode" ? 2 : undefined}
+      playerPreferences={{ defaultAudioLanguage: "jpn" }} />);
+    readyMode(document.querySelector("video.player-video") as HTMLVideoElement); await settleMode();
     expect(request).toHaveBeenCalledTimes(3);
     expect(request).toHaveBeenLastCalledWith("480p", position, 1);
   });
@@ -14001,5 +14772,594 @@ describe("Original pending-generation cancellation contract", () => {
       act(() => { staleOriginal(8); });
       expect(document.querySelector("video.player-video")).toBe(committed);
     } finally { embeddedModeIntentObserver.enabled = false; }
+  });
+});
+
+describe("exact handoff in-flight seek ownership", () => {
+  function observeSeek(video: HTMLVideoElement, clampFirst = false) {
+    let currentTime = 0;
+    let seeking = false;
+    const writes = vi.fn((value: number) => {
+      // Model immediate target readback while the browser's asynchronous seek
+      // is still in flight, rather than treating assignment as completion.
+      currentTime = clampFirst && writes.mock.calls.length === 1 ? 30 : value;
+      seeking = true;
+    });
+    Object.defineProperties(video, {
+      currentTime: { configurable: true, get: () => currentTime, set: writes },
+      seeking: { configurable: true, get: () => seeking },
+      duration: { configurable: true, value: 1_200 },
+      paused: { configurable: true, value: true },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 1_200 } },
+    });
+    return {
+      writes,
+      settle: () => { seeking = false; fireEvent.seeked(video); },
+    };
+  }
+
+  for (const intent of ["playing", "paused", "explicit-play"] as const) {
+    it.each(["loadedmetadata", "loadeddata", "durationchange", "progress", "canplay"])(
+      `does not restart the ${intent} handoff seek on %s`,
+      async (event) => {
+        render(<VideoPlayer url="https://media.example/exact.mp4" title="In-flight exact seek"
+          startPositionSeconds={120}
+          initialHandoffState={{ paused: intent !== "playing", volume: 1, muted: false, playbackRate: 1 }}
+          onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        const probe = observeSeek(video);
+        const play = vi.mocked(HTMLMediaElement.prototype.play);
+        if (intent === "explicit-play") {
+          await userEvent.click(screen.getByRole("button", { name: "Play" }));
+        }
+        fireEvent.loadedMetadata(video);
+        expect(probe.writes.mock.calls).toEqual([[120]]);
+        fireEvent.seeking(video);
+        fireEvent(video, new Event(event));
+        fireEvent(video, new Event(event));
+        expect(probe.writes.mock.calls).toEqual([[120]]);
+        expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+        expect(play).not.toHaveBeenCalled();
+
+        probe.settle();
+        expect(probe.writes.mock.calls).toEqual([[120]]);
+        expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+        expect(play).toHaveBeenCalledTimes(intent === "paused" ? 0 : 1);
+        // Completing a paused handoff must not leave a permanent Play veto.
+        if (intent === "paused") {
+          await userEvent.click(screen.getByRole("button", { name: "Play" }));
+          expect(play).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+  }
+
+  it("retries an exact seek that settled at a clamped wrong position, then confirms only its completed retry", () => {
+    render(<VideoPlayer url="https://media.example/clamped.mp4" title="Clamped exact seek"
+      startPositionSeconds={120}
+      initialHandoffState={{ paused: false, volume: 1, muted: false, playbackRate: 1 }}
+      onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const probe = observeSeek(video, true);
+    const play = vi.mocked(HTMLMediaElement.prototype.play);
+    fireEvent.loadedMetadata(video);
+    expect(video.currentTime).toBe(30);
+    expect(probe.writes.mock.calls).toEqual([[120]]);
+    expect(play).not.toHaveBeenCalled();
+
+    // A completed but clamped seek is not success. The existing seeked handler
+    // must retry immediately, without a polling timer or sticky pending latch.
+    probe.settle();
+    expect(probe.writes.mock.calls).toEqual([[120], [120]]);
+    expect(video.currentTime).toBe(120);
+    expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
+    expect(play).not.toHaveBeenCalled();
+    fireEvent.canPlay(video);
+    expect(probe.writes.mock.calls).toEqual([[120], [120]]);
+    expect(play).not.toHaveBeenCalled();
+
+    probe.settle();
+    expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+    expect(probe.writes.mock.calls).toEqual([[120], [120]]);
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("physical HTML media retirement", () => {
+  function mainVideo(): HTMLVideoElement {
+    const video = document.querySelector<HTMLVideoElement>("video.player-video");
+    if (video == null) throw new Error("Main reader did not mount");
+    return video;
+  }
+  function ready(video: HTMLVideoElement) {
+    Object.defineProperty(video, "duration", { configurable: true, value: 720 });
+    markCurrentMediaDataReady(video);
+    fireEvent.loadedMetadata(video); fireEvent.canPlay(video); fireEvent.play(video);
+  }
+
+  it.each(["direct", "native HLS"] as const)("resets detached %s media after final progress capture and listener disposal", (reader) => {
+    if (reader === "native HLS") {
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    }
+    const url = reader === "direct" ? "https://media.example/original.mp4" : "https://media.example/native.m3u8";
+    const trace: string[] = [];
+    const onProgress = vi.fn((position: number) => { trace.push("progress:" + position); });
+    const view = render(<VideoPlayer url={url} title="Retiring main media" onProgress={onProgress} onClose={() => {}} />);
+    const video = mainVideo(); ready(video); video.currentTime = 240.333;
+    expect(video.getAttribute("src")).toBe(url);
+    const remove = video.removeAttribute.bind(video);
+    vi.spyOn(video, "pause").mockImplementation(() => { trace.push("pause"); fireEvent.pause(video); });
+    vi.spyOn(video, "removeAttribute").mockImplementation((name) => { if (name === "src") trace.push("remove-src"); remove(name); });
+    vi.spyOn(video, "load").mockImplementation(() => {
+      trace.push("load"); expect(video.getAttribute("src")).toBeNull();
+      video.currentTime = 0; fireEvent.timeUpdate(video); fireEvent.loadStart(video);
+    });
+    trace.length = 0; onProgress.mockClear();
+    view.unmount();
+    expect(video.isConnected).toBe(false);
+    expect(trace).toEqual(["progress:240.333", "pause", "remove-src", "load"]);
+    expect(onProgress).toHaveBeenCalledTimes(1); expect(video.getAttribute("src")).toBeNull();
+    expect(video.pause).toHaveBeenCalledTimes(1); expect(video.load).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires the captured old node without resetting its keyed successor or accepting late old media events", async () => {
+    const props = { title: "Keyed source ownership", onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://media.example/old.mp4" />);
+    const old = mainVideo(); ready(old); old.currentTime = 240.333;
+    const oldLoad = vi.spyOn(old, "load"); const oldPause = vi.spyOn(old, "pause");
+    view.rerender(<VideoPlayer {...props} url="https://media.example/new.mp4" sourceRevision={1} />);
+    const successor = mainVideo(); ready(successor); successor.currentTime = 240.333;
+    expect(successor).not.toBe(old); expect(successor.isConnected).toBe(true);
+    expect(old.getAttribute("src")).toBeNull();
+    expect(oldLoad).toHaveBeenCalledTimes(1); expect(oldPause).toHaveBeenCalledTimes(1);
+    // Prototype methods are shared vi.fn boundaries in this suite. Give the
+    // successor its own boundary, not another alias to the old call history.
+    const successorLoad = vi.fn(), successorPause = vi.fn();
+    Object.defineProperties(successor, {
+      load: { configurable: true, value: successorLoad },
+      pause: { configurable: true, value: successorPause },
+    });
+    Object.defineProperty(old, "error", { configurable: true, value: { code: 3 } });
+    fireEvent.error(old); fireEvent.pause(old); fireEvent.play(old); fireEvent.timeUpdate(old); fireEvent.canPlay(old);
+    await act(async () => { await Promise.resolve(); });
+    expect(mainVideo()).toBe(successor); expect(successor.getAttribute("src")).toBe("https://media.example/new.mp4");
+    expect(successor.currentTime).toBe(240.333);
+    expect(successorLoad).not.toHaveBeenCalled(); expect(successorPause).not.toHaveBeenCalled();
+    expect(screen.queryByText("Playback interrupted")).toBeNull();
+    view.unmount();
+  });
+
+  it("does not reset connected StrictMode replay or ordinary listener-effect updates", () => {
+    const url = "https://media.example/connected.mp4";
+    const view = render(<StrictMode><VideoPlayer url={url} title="Connected owner" scrobbleContext={{ tmdbId: 1, type: "movie" }} onClose={() => {}} /></StrictMode>);
+    const video = mainVideo(); ready(video); video.currentTime = 240.333;
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    view.rerender(<StrictMode><VideoPlayer url={url} title="Connected owner" scrobbleContext={{ tmdbId: 2, type: "movie" }} onClose={() => {}} /></StrictMode>);
+    expect(mainVideo()).toBe(video); expect(video.isConnected).toBe(true);
+    expect(video.getAttribute("src")).toBe(url); expect(video.currentTime).toBe(240.333);
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it("does not retire a connected media node during Suspense hide and reveal", () => {
+    const pending = new Promise<void>(() => {});
+    let choose: (hidden: boolean) => void = () => { throw new Error("Scenario not mounted"); };
+    function Gate({ hidden }: { hidden: boolean }) { if (hidden) throw pending; return null; }
+    function Scenario() {
+      const [hidden, setHidden] = useState(false); choose = setHidden;
+      return <Suspense fallback={<div>Retirement suspended</div>}>
+        <VideoPlayer url="https://media.example/suspended.mp4" title="Suspended owner" onClose={() => {}} />
+        <Gate hidden={hidden} />
+      </Suspense>;
+    }
+    const view = render(<Scenario />); const video = mainVideo(); ready(video); video.currentTime = 240.333;
+    act(() => choose(true));
+    expect(screen.getByText("Retirement suspended")).toBeInTheDocument();
+    expect(video.isConnected).toBe(true); expect(video.getAttribute("src")).toBe("https://media.example/suspended.mp4");
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    act(() => choose(false));
+    expect(mainVideo()).toBe(video); expect(video.currentTime).toBe(240.333);
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it("keeps the live original resource while replacement preparation is pending and rejected", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const preparation = deferred<never>(); const request = vi.fn(() => preparation.promise);
+    const view = render(<VideoPlayer url="https://server.example/api/stream/original.mp4" title="Rejected replacement"
+      serverOptimized={{ qualities: ["480p"], request }} onClose={() => {}} />);
+    const original = mainVideo(); ready(original); original.currentTime = 240.333; fireEvent.pause(original);
+    const src = original.getAttribute("src");
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "480p" }));
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    expect(mainVideo()).toBe(original); expect(original.isConnected).toBe(true);
+    expect(original.getAttribute("src")).toBe(src); expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    await act(async () => { preparation.reject(new Error("synthetic preparation failure")); });
+    await screen.findByText(/synthetic preparation failure/);
+    expect(mainVideo()).toBe(original); expect(original.isConnected).toBe(true);
+    expect(original.getAttribute("src")).toBe(src); expect(original.currentTime).toBe(240.333);
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it("runs physical retirement after HLS destruction and ignores the retired HLS retry callback", async () => {
+    const view = render(<VideoPlayer url="https://media.example/stream.m3u8" title="HLS retirement ordering" onClose={() => {}} />);
+    const video = mainVideo();
+    await waitFor(() => expect(hlsInstances[0]?.attachMedia).toHaveBeenCalledWith(video));
+    const instance = hlsInstances[0], trace: string[] = [];
+    instance.destroy.mockImplementation(() => { trace.push("hls-destroy"); });
+    vi.spyOn(video, "pause").mockImplementation(() => { trace.push("pause"); });
+    vi.spyOn(video, "load").mockImplementation(() => { trace.push("load"); });
+    view.unmount();
+    expect(trace).toEqual(["hls-destroy", "pause", "load"]);
+    expect(instance.destroy).toHaveBeenCalledTimes(1);
+    const loads = instance.startLoad.mock.calls.length;
+    act(() => instance.emit("hlsError", { fatal: true, type: "networkError" }));
+    expect(instance.startLoad).toHaveBeenCalledTimes(loads);
+  });
+});
+
+
+describe("interrupted webview header exit", () => {
+  function ready(video: HTMLVideoElement) {
+    Object.defineProperties(video, {
+      paused: { configurable: true, value: false },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+      duration: { configurable: true, value: 900 },
+    });
+    fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+  }
+  function hiddenPlaying(layout: "desktop" | "android" = "desktop") {
+    vi.useFakeTimers();
+    if (layout === "android") {
+      deviceKindMock.mockReturnValue("android"); isTauriMock.mockReturnValue(true);
+      Object.defineProperty(window, "__YAWF_TAURI_ANDROID__", { configurable: true, value: true });
+    }
+    const onClose = vi.fn();
+    const props = { url: "https://x/error-exit.mp4", title: "Error exit", onClose };
+    const view = render(<VideoPlayer {...props} />);
+    const pane = screen.getByRole("dialog", { name: "Playing Error exit" });
+    if (layout === "android") expect(pane).toHaveClass("is-touch-player");
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    ready(video);
+    const bar = pane.querySelector(".player-bar")!;
+    const advance = () => act(() => vi.advanceTimersByTime(3_201));
+    advance();
+    expect(bar).not.toHaveClass("is-visible");
+    expect(screen.queryByRole("button", { name: "Close player" })).toBeNull();
+    return { view, props, video, bar, pane, onClose, advance };
+  }
+
+  it.each(["desktop", "android"] as const)("[error-exit] reveals and pins the %s error header with an accessible normal Close", (layout) => {
+    const { video, bar, pane, onClose, advance } = hiddenPlaying(layout);
+    fireMediaError(video);
+    expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
+    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(bar).toHaveClass("is-visible"); expect(bar).not.toHaveAttribute("aria-hidden", "true");
+    // Ordinary activity must not turn the error header into another transient
+    // 3200ms reveal. Do not focus or hover a control until after this assertion.
+    fireEvent.pointerMove(pane);
+    advance(); advance();
+    expect(bar).toHaveClass("is-visible");
+    const close = screen.getByRole("button", { name: "Close player" });
+    const details = screen.getByRole("button", { name: "Player details and shortcuts" });
+    expect(close.tabIndex).toBe(0); expect(details.tabIndex).toBe(0);
+    fireEvent.keyDown(pane, { key: "Tab" });
+    expect(details).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["retry", "source-owner change"] as const)("[error-exit] releases the error pin after %s becomes playable", (action) => {
+    const { view, props, video, bar, advance } = hiddenPlaying();
+    fireMediaError(video);
+    expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
+    expect(bar).toHaveClass("is-visible");
+    advance(); expect(bar).toHaveClass("is-visible");
+    if (action === "retry") fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    else view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+    expect(screen.queryByText("Playback interrupted")).toBeNull();
+    const successor = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(successor).not.toBeNull(); expect(successor).not.toBe(video);
+    ready(successor);
+    advance();
+    expect(bar).not.toHaveClass("is-visible");
+    expect(screen.queryByRole("button", { name: "Close player" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Close player", hidden: true }).tabIndex).toBe(-1);
+  });
+
+  for (const layout of ["desktop", "android"] as const) {
+    for (const menu of ["settings", "captions"] as const) {
+      it.each(["Close", "Escape"] as const)(`[error-modal] restores ${layout} ${menu} ownership to the error pane for %s`, (exit) => {
+        captionMenuMode.actual = true;
+        const { video, pane, bar, onClose } = hiddenPlaying(layout);
+        fireEvent.pointerMove(pane);
+        const menuName = menu === "settings" ? "Playback settings" : "Subtitles";
+        const trigger = screen.getByRole("button", { name: menuName });
+        fireEvent.click(trigger);
+        const ordinary = screen.getByRole("dialog", { name: menuName });
+        expect(ordinary).toHaveFocus();
+        // A live child dialog still owns Escape; the parent cannot waive its
+        // suspension globally just to repair interrupted playback.
+        fireEvent.keyDown(window, { key: "Escape" });
+        expect(screen.queryByRole("dialog", { name: menuName })).toBeNull();
+        expect(onClose).not.toHaveBeenCalled();
+        fireEvent.click(trigger);
+        expect(screen.getByRole("dialog", { name: menuName })).toHaveFocus();
+        if (layout === "android") expect(bar).toHaveAttribute("inert");
+
+        // Resource errors are delivered even while a modal owns user input.
+        fireMediaError(video);
+        expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
+        expect(screen.queryByRole("dialog", { name: menuName })).toBeNull();
+        expect(document.querySelector("video.player-video")).toBeNull();
+        expect(pane).not.toHaveClass("has-touch-menu");
+        expect(bar).not.toHaveAttribute("inert"); expect(bar).not.toHaveAttribute("aria-hidden", "true");
+        const close = screen.getByRole("button", { name: "Close player" });
+        const details = screen.getByRole("button", { name: "Player details and shortcuts" });
+        fireEvent.keyDown(window, { key: "Tab" });
+        expect(details).toHaveFocus();
+        expect(onClose).not.toHaveBeenCalled();
+        if (exit === "Close") fireEvent.click(close);
+        else fireEvent.keyDown(window, { key: "Escape" });
+        expect(onClose).toHaveBeenCalledTimes(1);
+      });
+    }
+  }
+
+  it.each(["desktop", "android"] as const)("[error-modal] preserves independent %s Details modal ownership on an interrupted pane", (layout) => {
+    const { video, onClose } = hiddenPlaying(layout);
+    fireMediaError(video);
+    fireEvent.click(screen.getByRole("button", { name: "Player details and shortcuts" }));
+    const details = screen.getByRole("dialog", { name: "Player details and shortcuts" });
+    expect(details).toHaveFocus();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Player details and shortcuts" })).toBeNull();
+    expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["ready", "failed"] as const)("[error-exit] preserves the separate %s native external panel header", async (state) => {
+    vi.useFakeTimers(); isTauriMock.mockReturnValue(true);
+    if (state === "failed") {
+      playWithMpvMock.mockRejectedValue(new Error("Synthetic native unavailable"));
+      openInExternalPlayerMock.mockRejectedValue(new Error("Synthetic external unavailable"));
+    }
+    render(<VideoPlayer url="https://x/native.mkv" engine="native-mpv" useBuiltInPlayer={false} title="Native exit" onClose={() => {}} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    expect(document.querySelector("video.player-video")).toBeNull();
+    if (state === "failed") expect(screen.getByText("Could not open a player")).toBeInTheDocument();
+    else expect(screen.getByText(/Playing in the bundled mpv/)).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(6_402));
+    expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+    expect(screen.getByRole("button", { name: "Close player" }).tabIndex).toBe(0);
+    expect(screen.queryByRole("button", { name: "Retry playback" })).toBeNull();
+    expect(playWithMpvMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("mobile background playback lifecycle", () => {
+  const master = "https://server.example/api/stream/resume/index.m3u8?quality=480p";
+  const manifest = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000\n480p.m3u8?generation=transcode-resume\n";
+  const optimized = { qualities: ["480p"] as const, request: vi.fn() };
+  async function flush() {
+    await act(async () => { for (let i = 0; i < 15; i += 1) await Promise.resolve(); });
+  }
+  function layout(android: boolean) {
+    vi.useFakeTimers();
+    if (android) {
+      Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+        configurable: true, value: { getInsets: vi.fn() },
+      });
+    }
+  }
+  function mediaState(video: HTMLVideoElement, paused = false) {
+    const state = { paused, seeking: false, ended: false };
+    for (const key of ["paused", "seeking", "ended"] as const) {
+      Object.defineProperty(video, key, { configurable: true, get: () => state[key] });
+    }
+    fireEvent.canPlay(video);
+    fireEvent(video, new Event(paused ? "pause" : "playing"));
+    return state;
+  }
+  function leaseFetch(status: number) {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    let expired = false;
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "HEAD" ? new Response(null, { status: expired ? status : 200 }) : new Response(manifest));
+    vi.stubGlobal("fetch", fetcher);
+    return { fetcher, expire: () => { expired = true; } };
+  }
+  async function sleepPage(expire: () => void) {
+    act(() => { window.dispatchEvent(new Event("pagehide")); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_001); });
+    expire();
+    act(() => { window.dispatchEvent(new Event("pageshow")); });
+    await flush();
+  }
+
+  it.each([
+    ["generic visibility", false, "visibility"], ["Android visibility", true, "visibility"],
+    ["generic pagehide", false, "pagehide"], ["Android pagehide", true, "pagehide"],
+  ] as const)("[resume-watchdog] suspends %s background time and grants a fresh foreground window", async (_name, android, event) => {
+    layout(android);
+    const restoreVisibility = replaceProperty(document, "visibilityState", "visible");
+    try {
+      const refresh = vi.fn(async () => {});
+      render(<VideoPlayer url="https://x/background.mp4" title="Background" refreshCurrentSource={refresh} onClose={() => {}} />);
+      expect(document.querySelector(".player")!.classList.contains("is-touch-player")).toBe(android);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      video.currentTime = 40; mediaState(video);
+      await act(async () => { await vi.advanceTimersByTimeAsync(29_000); });
+      act(() => {
+        if (event === "visibility") {
+          Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+          document.dispatchEvent(new Event("visibilitychange"));
+        } else window.dispatchEvent(new Event("pagehide"));
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(120_001); });
+      expect(refresh).not.toHaveBeenCalled();
+      expect(document.querySelector("video.player-video")).toBe(video);
+      video.currentTime = 46.25; // Native clock may move while JS is suspended, without a timeupdate.
+      act(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+        if (event === "visibility") document.dispatchEvent(new Event("visibilitychange"));
+        else window.dispatchEvent(new Event("pageshow"));
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
+      expect(refresh).not.toHaveBeenCalled();
+      // Foreground event noise must not postpone a genuine stall indefinitely.
+      act(() => { window.dispatchEvent(new Event("pageshow")); document.dispatchEvent(new Event("visibilitychange")); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(refresh).toHaveBeenCalledExactlyOnceWith(46.25, expect.objectContaining({ paused: false }));
+    } finally { restoreVisibility(); }
+  });
+
+  it("[resume-watchdog] keeps paused, cast, seeking and ended guards after a foreground transition", async () => {
+    layout(true); isTauriMock.mockReturnValue(true);
+    const refresh = vi.fn(async () => {});
+    render(<VideoPlayer url="https://x/background.mp4" title="Background guards" refreshCurrentSource={refresh} onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = mediaState(video);
+    state.paused = true; fireEvent.pause(video);
+    act(() => window.dispatchEvent(new Event("pagehide")));
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_001); });
+    act(() => window.dispatchEvent(new Event("pageshow")));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+    expect(refresh).not.toHaveBeenCalled();
+    state.paused = false; fireEvent.playing(video);
+    fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+    act(() => { window.dispatchEvent(new Event("pagehide")); window.dispatchEvent(new Event("pageshow")); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+    expect(refresh).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "test resume playback" }));
+    state.seeking = true; fireEvent.seeking(video);
+    act(() => { window.dispatchEvent(new Event("pagehide")); window.dispatchEvent(new Event("pageshow")); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+    expect(refresh).not.toHaveBeenCalled();
+    state.seeking = false; fireEvent.seeked(video); state.ended = true;
+    fireEvent.ended(video);
+    act(() => { window.dispatchEvent(new Event("pagehide")); window.dispatchEvent(new Event("pageshow")); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it.each([[404, true], [403, false]] as const)("[resume-lease] automatically replaces expired %s generation preserving paused=%s exact handoff", async (status, paused) => {
+    layout(true);
+    const fixture = leaseFetch(status);
+    const pending = deferred<void>();
+    const refresh = vi.fn((_position: number, _state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => pending.promise);
+    const props = { title: "Resume lease", serverOptimized: optimized, refreshCurrentSource: refresh, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url={master} engine="webview-hls-transcode" timelineOffsetSeconds={46} />);
+    await flush();
+    const old = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = mediaState(old, paused);
+    const initialPlayCalls = vi.mocked(old.play).mock.calls.length;
+    old.currentTime = 7.25; old.volume = 0.4; old.muted = true; old.playbackRate = 1.25;
+    await sleepPage(fixture.expire);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused, volume: 0.4, muted: true, playbackRate: 1.25 });
+    expect(old.play).toHaveBeenCalledTimes(initialPlayCalls);
+    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    act(() => { window.dispatchEvent(new Event("pageshow")); window.dispatchEvent(new Event("pageshow")); });
+    await flush(); expect(refresh).toHaveBeenCalledTimes(1);
+    const handoff = refresh.mock.calls[0]![1];
+    view.rerender(<VideoPlayer {...props} url="https://x/fresh.mp4" sourceRevision={2} startPositionSeconds={53.25} initialHandoffState={handoff} />);
+    pending.resolve(); await flush();
+    const fresh = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(fresh).not.toBe(old); expect(fresh.src).toBe("https://x/fresh.mp4");
+    const freshPlayCalls = vi.mocked(fresh.play).mock.calls.length;
+    Object.defineProperties(fresh, {
+      duration: { configurable: true, value: 720 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+    });
+    fireEvent.loadedMetadata(fresh); fireEvent.seeked(fresh);
+    expect(fresh.currentTime).toBe(53.25);
+    expect(fresh.volume).toBe(0.4); expect(fresh.muted).toBe(true); expect(fresh.playbackRate).toBe(1.25);
+    expect(fresh.play).toHaveBeenCalledTimes(freshPlayCalls + (paused ? 0 : 1));
+    expect(screen.queryByRole("alert")).toBeNull(); expect(state.paused).toBe(paused);
+    expect(fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+
+  it("[resume-lease] bounds StrictMode automatic expiry recovery then retries the same paused snapshot without old attach", async () => {
+    layout(false); deviceKindMock.mockReturnValue("ios");
+    const fixture = leaseFetch(404);
+    const pending = deferred<void>();
+    const retry = deferred<void>();
+    const refresh = vi.fn((_position: number, _state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => pending.promise)
+      .mockImplementationOnce(() => pending.promise).mockImplementationOnce(() => retry.promise);
+    render(<StrictMode><VideoPlayer url={master} engine="webview-hls-transcode" title="Bounded resume" serverOptimized={optimized}
+      refreshCurrentSource={refresh} timelineOffsetSeconds={3600} onClose={() => {}} /></StrictMode>);
+    await flush();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    mediaState(video, true); video.currentTime = 7.25; video.volume = 0.3; video.muted = true; video.playbackRate = 1.5;
+    await sleepPage(fixture.expire);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(FRESH_STREAM_RESOLUTION_TIMEOUT_MS - 1); });
+    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
+    fireEvent.click(screen.getByRole("button", { name: "Preparing fresh stream" }));
+    await flush();
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh.mock.calls[0]).toEqual([3607.25, { paused: true, volume: 0.3, muted: true, playbackRate: 1.5 }]);
+    expect(refresh.mock.calls[1]).toEqual(refresh.mock.calls[0]);
+    pending.resolve(); retry.resolve(); await flush();
+    expect(document.querySelector("video.player-video")).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_001); });
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["revision", "unmount"] as const)("[resume-lease] ignores late expired resolution failure after %s", async (change) => {
+    layout(true); const fixture = leaseFetch(404);
+    const pending = deferred<void>(); const refresh = vi.fn((_position: number, _state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => pending.promise);
+    const props = { url: master, engine: "webview-hls-transcode" as const, title: "Stale resume", serverOptimized: optimized, refreshCurrentSource: refresh, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} sourceRevision={1} />); await flush();
+    mediaState(document.querySelector("video.player-video") as HTMLVideoElement, true);
+    await sleepPage(fixture.expire); expect(refresh).toHaveBeenCalledTimes(1);
+    if (change === "unmount") view.unmount();
+    else view.rerender(<VideoPlayer {...props} sourceRevision={2} serverOptimized={undefined} engine="webview-direct" />);
+    const successor = document.querySelector("video.player-video");
+    recordDiagnosticMock.mockClear();
+    pending.reject(new Error("Old generation resolution failed")); await flush();
+    expect(document.querySelector("video.player-video")).toBe(successor);
+    expect(screen.queryByRole("alert")).toBeNull(); expect(recordDiagnosticMock).not.toHaveBeenCalled();
+  });
+
+  it("[resume-lease] coalesces expiry with the current fresh request instead of starting a second resolver", async () => {
+    layout(false); const fixture = leaseFetch(404);
+    const pending = deferred<void>(); const refresh = vi.fn((_position: number, _state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => pending.promise);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Coalesced" serverOptimized={optimized} refreshCurrentSource={refresh} onClose={() => {}} />);
+    await flush();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    video.currentTime = 40; mediaState(video);
+    fixture.expire();
+    // The watchdog and second HEAD share the deadline; both must use one resolver.
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+  });
+
+  it("[resume-lease] keeps 401 unauthorized handling separate from expired-generation recovery", async () => {
+    layout(false); const fixture = leaseFetch(401); const refresh = vi.fn(async () => {});
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Unauthorized" serverOptimized={optimized} refreshCurrentSource={refresh} onClose={() => {}} />);
+    await flush(); mediaState(document.querySelector("video.player-video") as HTMLVideoElement, true);
+    await sleepPage(fixture.expire);
+    expect(refresh).not.toHaveBeenCalled(); expect(screen.queryByRole("alert")).toBeNull();
+    const heads = fixture.fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD").length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(fixture.fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(heads);
   });
 });

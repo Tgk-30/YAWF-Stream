@@ -1976,17 +1976,16 @@ function usageSinceISO(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-function recordStreamTransfer(
-  db: AppDatabase,
-  input: {
-    sessionId: string;
-    profileId: string;
-    bytes: number;
-    status: number;
-    completed: boolean;
-    error?: string | null;
-  },
-): void {
+interface StreamTransfer {
+  sessionId: string;
+  profileId: string;
+  bytes: number;
+  status: number;
+  completed: boolean;
+  error?: string | null;
+}
+
+function recordStreamTransfer(db: AppDatabase, input: StreamTransfer): void {
   const now = nowISO();
   db.sqlite
     .prepare(
@@ -2010,8 +2009,49 @@ function recordStreamTransfer(
     );
 }
 
+/** Settle response accounting before SQLite closes, even when Node delivers
+ * the stream's terminal events on a later turn of the event loop. */
+function streamTransferRecorder(db: AppDatabase) {
+  const pending = new Set<() => void>();
+  let closed = false;
+  const record = (input: StreamTransfer) => {
+    if (!closed) recordStreamTransfer(db, input);
+  };
+  return {
+    record,
+    start(
+      input: Omit<StreamTransfer, "bytes" | "error">,
+      currentBytes: () => number,
+    ) {
+      let recorded = closed;
+      const settle = (completed: boolean, error?: Error | null) => {
+        if (recorded) return;
+        record({
+          ...input,
+          bytes: currentBytes(),
+          completed: completed && input.completed,
+          error: error?.message ?? null,
+        });
+        // A failed write remains owned and retryable while SQLite is open.
+        recorded = true;
+        pending.delete(shutdown);
+      };
+      const shutdown = () => settle(false);
+      if (!closed) pending.add(shutdown);
+      return settle;
+    },
+    close() {
+      if (closed) return;
+      for (const settle of pending) settle();
+      closed = true;
+    },
+  };
+}
+
+type StreamTransferRecorder = ReturnType<typeof streamTransferRecorder>;
+
 function countedStream(
-  db: AppDatabase,
+  transfers: StreamTransferRecorder,
   input: {
     sessionId: string;
     profileId: string;
@@ -2022,23 +2062,16 @@ function countedStream(
   },
 ) {
   let bytes = 0;
-  let recorded = false;
   const source = demandAwareNodeReadable(input.body, (chunkBytes) => {
     bytes += chunkBytes;
   });
 
-  function record(completed: boolean, error?: Error | null) {
-    if (recorded) return;
-    recorded = true;
-    recordStreamTransfer(db, {
-      sessionId: input.sessionId,
-      profileId: input.profileId,
-      bytes,
-      status: input.status,
-      completed: completed && (input.markComplete ?? true),
-      error: error?.message ?? null,
-    });
-  }
+  const record = transfers.start({
+    sessionId: input.sessionId,
+    profileId: input.profileId,
+    status: input.status,
+    completed: input.markComplete ?? true,
+  }, () => bytes);
 
   source.once("error", (error) => record(false, error));
   source.once("end", () => record(true));
@@ -2104,7 +2137,7 @@ async function readExternalHlsManifest(
 }
 
 function countedNodeStream(
-  db: AppDatabase,
+  transfers: StreamTransferRecorder,
   input: {
     sessionId: string;
     profileId: string;
@@ -2115,7 +2148,6 @@ function countedNodeStream(
   },
 ) {
   let bytes = 0;
-  let recorded = false;
   let lastProgressAt = 0;
   const counter = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
@@ -2128,18 +2160,12 @@ function countedNodeStream(
       callback(null, chunk);
     },
   });
-  const record = (completed: boolean, error?: Error | null) => {
-    if (recorded) return;
-    recorded = true;
-    recordStreamTransfer(db, {
-      sessionId: input.sessionId,
-      profileId: input.profileId,
-      bytes,
-      status: input.status,
-      completed: completed && input.completed,
-      error: error?.message ?? null,
-    });
-  };
+  const record = transfers.start({
+    sessionId: input.sessionId,
+    profileId: input.profileId,
+    status: input.status,
+    completed: input.completed,
+  }, () => bytes);
   input.body.once("error", (error) => record(false, error));
   counter.once("error", (error) => record(false, error));
   counter.once("finish", () => record(true));
@@ -2610,6 +2636,7 @@ function registerRoutes(
     registry: TranscodeRegistry;
   },
   directTorrent: DirectTorrentRegistry | null,
+  transfers: StreamTransferRecorder,
 ): void {
   const rateLimit = createRateLimiter();
   const loginFailures = new Map<string, LoginFailureState>();
@@ -5932,7 +5959,7 @@ function registerRoutes(
         reply.raw.once("close", () => {
           (body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
         });
-        return reply.send(countedNodeStream(db, {
+        return reply.send(countedNodeStream(transfers, {
           sessionId: row.id,
           profileId: row.profile_id,
           status: range.status,
@@ -5992,7 +6019,7 @@ function registerRoutes(
 
       if (request.method === "HEAD" || upstream.body == null) {
         cleanupAbortListener();
-        recordStreamTransfer(db, {
+        transfers.record({
           sessionId: row.id,
           profileId: row.profile_id,
           bytes: 0,
@@ -6003,7 +6030,7 @@ function registerRoutes(
       }
 
       return reply.send(
-        countedStream(db, {
+        countedStream(transfers, {
           sessionId: row.id,
           profileId: row.profile_id,
           status: upstream.status,
@@ -6100,7 +6127,7 @@ function registerRoutes(
         reply.raw.once("close", () => {
           (body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
         });
-        return reply.send(countedNodeStream(db, {
+        return reply.send(countedNodeStream(transfers, {
           sessionId: row.id,
           profileId: row.profile_id,
           status: range.status,
@@ -6185,7 +6212,7 @@ function registerRoutes(
             throw httpError(502, "Unsupported or invalid upstream HLS manifest.");
           }
           externalAssets.register(row.id, row.expires_at, entries);
-          recordStreamTransfer(db, {
+          transfers.record({
             sessionId: row.id, profileId: row.profile_id,
             bytes: Buffer.byteLength(rewritten), status: 200, completed: false,
           });
@@ -6216,7 +6243,7 @@ function registerRoutes(
 
       if (request.method === "HEAD" || upstream.body == null) {
         cleanupAbortListener();
-        recordStreamTransfer(db, {
+        transfers.record({
           sessionId: row.id,
           profileId: row.profile_id,
           bytes: 0,
@@ -6226,7 +6253,7 @@ function registerRoutes(
         return reply.send();
       }
       return reply.send(
-        countedStream(db, {
+        countedStream(transfers, {
           sessionId: row.id,
           profileId: row.profile_id,
           status: upstream.status,
@@ -6519,7 +6546,7 @@ function registerRoutes(
     // count against its profile. Use the proxy's counted stream path so partial
     // client disconnects are not billed as complete transfers.
     return reply.send(
-      countedStream(db, {
+      countedStream(transfers, {
         sessionId: row.id,
         profileId: row.profile_id,
         status: 200,
@@ -6533,6 +6560,7 @@ function registerRoutes(
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   let config = loadConfig(options.config);
   const db = new AppDatabase(config.databasePath);
+  const transfers = streamTransferRecorder(db);
   let directTorrentRegistry: DirectTorrentRegistry | null = null;
   let transcodeRegistry: TranscodeRegistry | null = null;
   let app: FastifyInstance | null = null;
@@ -6545,6 +6573,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       try {
         await transcodeRegistry?.stop();
       } finally {
+        transfers.close();
         db.close();
       }
     }
@@ -6743,7 +6772,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       transcodeCapabilities.audioTrackSelection === true,
     availableVideoEncoders,
     registry: transcodeRegistry,
-  }, directTorrentRegistry);
+  }, directTorrentRegistry, transfers);
   registerStaticApp(app, config);
   return app;
   } catch (error) {

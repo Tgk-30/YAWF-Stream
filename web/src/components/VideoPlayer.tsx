@@ -827,12 +827,15 @@ interface BrowserAudioVideoElement extends HTMLVideoElement {
 const WebviewScrubber = memo(
   forwardRef<
     WebviewScrubberHandle,
-    Omit<React.ComponentProps<typeof ScrubBar>, "currentTime"> & { active: boolean }
+    Omit<React.ComponentProps<typeof ScrubBar>, "currentTime" | "onSeekPreview"> & { active: boolean }
   >(function WebviewScrubber({ duration, active, ...props }, ref) {
     const [currentTime, setCurrentTime] = useState(0);
     const latestTimeRef = useRef(0);
     const activeRef = useRef(active);
     activeRef.current = active;
+    // ScrubBar owns the transient thumb/time preview. Only onSeek may commit
+    // release or keyboard input to media; pointer preview must remain local.
+    const keepPreviewLocal = useCallback(() => {}, []);
 
     const flush = useCallback(() => {
       const next = latestTimeRef.current;
@@ -854,7 +857,7 @@ const WebviewScrubber = memo(
       if (active) flush();
     }, [active, flush]);
 
-    return <ScrubBar {...props} duration={duration} currentTime={currentTime} />;
+    return <ScrubBar {...props} duration={duration} currentTime={currentTime} onSeekPreview={keepPreviewLocal} />;
   }),
 );
 
@@ -907,6 +910,17 @@ export function VideoPlayer({
     scope: string;
     preference: AudioPreference;
   } | null>(null);
+  const [manualServerOptimizedQuality, setManualServerOptimizedQuality] = useState<{
+    scope: string;
+    originOwner: string;
+    quality: ServerTranscodeQuality;
+  } | null>(null);
+  const retainedServerOptimizedQuality =
+    serverAudioRetentionScope != null &&
+    manualServerOptimizedQuality?.scope === serverAudioRetentionScope &&
+    serverOptimized?.qualities.includes(manualServerOptimizedQuality.quality)
+      ? manualServerOptimizedQuality.quality
+      : null;
   const retainedServerAudioPreference =
     serverAudioRetentionScope != null &&
     manualServerAudioPreference?.scope === serverAudioRetentionScope
@@ -914,6 +928,9 @@ export function VideoPlayer({
       : null;
   useLayoutEffect(() => {
     setManualServerAudioPreference((current) =>
+      current?.scope === serverAudioRetentionScope ? current : null,
+    );
+    setManualServerOptimizedQuality((current) =>
       current?.scope === serverAudioRetentionScope ? current : null,
     );
   }, [serverAudioRetentionScope]);
@@ -1083,6 +1100,8 @@ export function VideoPlayer({
   const [externalStatus, setExternalStatus] = useState<string | null>(null);
   const [externalError, setExternalError] = useState<string | null>(null);
   const [detailsSection, setDetailsSection] = useState<"info" | "shortcuts" | null>(null);
+  const detailsTriggerRef = useRef<{ element: HTMLButtonElement; owner: string } | null>(null);
+  const detailsWasOpenRef = useRef(false);
   const [sourceSize, setSourceSize] = useState<PixelSize | null>(null);
   const [webTechnicalStats, setWebTechnicalStats] = useState<
     ReadonlyArray<readonly [string, string]>
@@ -1247,17 +1266,26 @@ export function VideoPlayer({
     mode === "webview" &&
     !androidTVNative &&
     ((dk === "ios" && !underTauri) || androidAppUi);
-  const touchMenuOpen = sharedTouchPlayer && (captionsOpen || webMenuOpen);
+  const webviewChildShown = mode === "webview" && externalError == null;
+  const webviewChildMenuOpen = webviewChildShown && (captionsOpen || webMenuOpen);
+  const touchMenuOpen = sharedTouchPlayer && webviewChildMenuOpen;
   const androidOnCloseRef = useRef(onClose);
   const androidOnProgressRef = useRef(onProgress);
   androidOnCloseRef.current = onClose;
   androidOnProgressRef.current = onProgress;
   const [chromeHovered, setChromeHovered] = useState(false);
   const [chromeFocused, setChromeFocused] = useState(false);
+  const chromeInputModalityRef = useRef<"keyboard" | "pointer" | null>(null);
+  const chromeHoveredOwnerRef = useRef<HTMLElement | null>(null);
+  const chromeFocusedOwnerRef = useRef<HTMLElement | null>(null);
+  const chromePointerFocusTargetRef = useRef<Element | null>(null);
+  const chromePointerFocusTimerRef = useRef<number | undefined>(undefined);
+  const chromeExplicitPointerFocusRef = useRef(false);
   const chromeHideTimer = useRef<number | undefined>(undefined);
   const lastChromeNudgeAt = useRef(Number.NEGATIVE_INFINITY);
+  const webviewErrorPanelShown = mode === "webview" && externalError != null;
   const chromePinned =
-    webviewPending || webviewPaused || webScrubbing || captionsOpen || webMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
+    webviewErrorPanelShown || webviewPending || webviewPaused || webScrubbing || webviewChildMenuOpen || detailsSection != null || chromeHovered || chromeFocused;
   const chromePinnedRef = useRef(chromePinned);
   useLayoutEffect(() => {
     chromePinnedRef.current = chromePinned;
@@ -1265,7 +1293,7 @@ export function VideoPlayer({
   const playerDialogRef = useModalA11y<HTMLDivElement>(
     onClose,
     !useEmbedded,
-    captionsOpen || webMenuOpen || detailsSection != null,
+    webviewChildMenuOpen || detailsSection != null,
   );
 
   const reportAbsolutePosition = useCallback((next: number) => {
@@ -1459,7 +1487,11 @@ export function VideoPlayer({
       ? "This stream has expired. Choose another source or close the player."
       : "This stream has expired. Retry to request a fresh stream, or choose another source.");
     recordDiagnostic("player", "server_generation.expired", "warning");
-  }, [playbackOwner, refreshCurrentSource]);
+    if (refreshCurrentSource != null && !automaticStallRecoveryAttemptedRef.current &&
+      freshStreamRequestRef.current == null) {
+      void recoverPostStartStall(position, handoff);
+    }
+  }, [playbackOwner, recoverPostStartStall, refreshCurrentSource]);
 
   // State is scoped below for render-time safety. Reset it too, so a completed
   // previous source cannot leave stale errors or an automatic-mode latch on the
@@ -1625,28 +1657,136 @@ export function VideoPlayer({
       if (!chromePinnedRef.current) setWebChromeVisible(false);
     }, 3200);
   }, [clearChromeTimer, mode]);
-  const holdChrome = useCallback(() => {
+  const clearChromePointerFocus = useCallback(() => {
+    window.clearTimeout(chromePointerFocusTimerRef.current);
+    chromePointerFocusTimerRef.current = undefined;
+    chromePointerFocusTargetRef.current = null;
+  }, []);
+  useEffect(() => {
+    const finishPointer = () => {
+      window.clearTimeout(chromePointerFocusTimerRef.current);
+      // Let the same input turn deliver native focus/click, but do not retain
+      // pointer classification when a drag ends without a click.
+      chromePointerFocusTimerRef.current = window.setTimeout(clearChromePointerFocus, 0);
+    };
+    window.addEventListener("pointerup", finishPointer);
+    window.addEventListener("pointercancel", clearChromePointerFocus);
+    window.addEventListener("blur", clearChromePointerFocus);
+    return () => {
+      window.removeEventListener("pointerup", finishPointer);
+      window.removeEventListener("pointercancel", clearChromePointerFocus);
+      window.removeEventListener("blur", clearChromePointerFocus);
+      clearChromePointerFocus();
+    };
+  }, [clearChromePointerFocus]);
+  useLayoutEffect(() => {
+    if (chromeHoveredOwnerRef.current?.isConnected === false) {
+      chromeHoveredOwnerRef.current = null;
+      setChromeHovered(false);
+    }
+    const focused = chromeFocusedOwnerRef.current;
+    if (focused != null && (!focused.isConnected || document.activeElement !== focused)) {
+      chromeFocusedOwnerRef.current = null;
+      setChromeFocused(false);
+    }
+    if (chromePointerFocusTargetRef.current?.isConnected === false) clearChromePointerFocus();
+  }, [clearChromePointerFocus, webviewSource]);
+  const holdChrome = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    // Touch and pen can enter controls without ever delivering a hover leave.
+    if (event.pointerType !== "mouse") return;
+    chromeHoveredOwnerRef.current = event.currentTarget;
     setChromeHovered(true);
     nudgeChrome();
   }, [nudgeChrome]);
-  const releaseChrome = useCallback(() => {
+  const releaseChrome = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (event.pointerType !== "mouse" || chromeHoveredOwnerRef.current !== event.currentTarget) return;
+    chromeHoveredOwnerRef.current = null;
     setChromeHovered(false);
     nudgeChrome();
   }, [nudgeChrome]);
-  const focusChrome = useCallback(() => {
-    setChromeFocused(true);
+  const noteChromePointer = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    clearChromePointerFocus();
+    chromeInputModalityRef.current = "pointer";
+    chromePointerFocusTargetRef.current = event.target instanceof Element ? event.target : null;
+    chromeFocusedOwnerRef.current = null;
+    setChromeFocused(false);
+    if (event.pointerType !== "mouse") {
+      chromeHoveredOwnerRef.current = null;
+      setChromeHovered(false);
+    }
+  }, [clearChromePointerFocus]);
+  const noteChromeClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    if (chromePointerFocusTargetRef.current != null || event.detail > 0) {
+      chromeInputModalityRef.current = "pointer";
+    } else if (chromeInputModalityRef.current === "pointer") {
+      chromeInputModalityRef.current = null;
+    }
+  }, []);
+  const noteChromeKeyboard = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
+    clearChromePointerFocus();
+    chromeInputModalityRef.current = "keyboard";
+    // A keyboard can take over an already touch-focused control without a new
+    // focus event. Keep that control visible, including on hybrid devices.
+    const focused = document.activeElement;
+    const ownsFocus = focused instanceof HTMLElement && event.currentTarget.contains(focused) &&
+      focused.closest(".player-bar, .player-osd, .player-touch-transport") != null;
+    chromeFocusedOwnerRef.current = ownsFocus ? focused : null;
+    setChromeFocused(ownsFocus);
+    nudgeChrome();
+  }, [clearChromePointerFocus, nudgeChrome]);
+  const focusChrome = useCallback((event: React.FocusEvent<HTMLElement>) => {
+    const target = event.target;
+    const pointer = chromePointerFocusTargetRef.current;
+    const pointerFocus = chromeExplicitPointerFocusRef.current || (pointer != null &&
+      (target.contains(pointer) || pointer.contains(target)));
+    // Only a current pointer gesture or an explicitly scoped menu restoration
+    // suppresses focus pinning. Later independent/assistive focus is not a tap.
+    chromeFocusedOwnerRef.current = pointerFocus ? null : target;
+    setChromeFocused(!pointerFocus);
     nudgeChrome();
   }, [nudgeChrome]);
+  const focusChromeControl = useCallback((target: HTMLElement | null) => {
+    if (target == null || !target.isConnected) return;
+    const pointerFocus = chromeInputModalityRef.current === "pointer";
+    chromeExplicitPointerFocusRef.current = pointerFocus;
+    try {
+      target.focus({ preventScroll: true });
+      if (document.activeElement === target) {
+        // Modal cleanup may already have focused this exact trigger, so a new
+        // focus event is not guaranteed. Apply this operation's own intent.
+        chromeFocusedOwnerRef.current = pointerFocus ? null : target;
+        setChromeFocused(!pointerFocus);
+      }
+    } finally {
+      chromeExplicitPointerFocusRef.current = false;
+    }
+  }, []);
   const blurChrome = useCallback(
     (event: React.FocusEvent<HTMLElement>) => {
-      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) {
-        return;
-      }
+      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+      const focused = chromeFocusedOwnerRef.current;
+      if (focused != null && !event.currentTarget.contains(focused)) return;
+      chromeFocusedOwnerRef.current = null;
       setChromeFocused(false);
       nudgeChrome();
     },
     [nudgeChrome],
   );
+  useEffect(() => {
+    const open = detailsSection != null;
+    const wasOpen = detailsWasOpenRef.current;
+    detailsWasOpenRef.current = open;
+    if (!wasOpen || open) return;
+    const origin = detailsTriggerRef.current;
+    detailsTriggerRef.current = null;
+    const player = playerDialogRef.current;
+    // The child popover's modal cleanup restores first. Reconcile only this
+    // actual header operation, never a shortcut or a retired player's origin.
+    if (origin == null || origin.owner !== playbackOwner ||
+        origin.owner !== playbackOwnerRef.current || !origin.element.isConnected ||
+        player == null || !player.isConnected || origin.element.closest(".player") !== player) return;
+    focusChromeControl(origin.element);
+  }, [detailsSection, focusChromeControl, playbackOwner, playerDialogRef]);
 
   useEffect(() => {
     recordDiagnostic("player", "session.started", "info", requestedEngine);
@@ -2063,8 +2203,13 @@ export function VideoPlayer({
       audioPreference,
       positionIntent,
       retainAudioPreference,
-    ).then(() => undefined);
-  }, [claimExplicitServerOptimizationChoice, switchToServerOptimized]);
+    ).then((activated) => {
+      if (activated && !retainAudioPreference && serverAudioRetentionScope != null &&
+        playbackOwnerRef.current === playbackOwner) {
+        setManualServerOptimizedQuality({ scope: serverAudioRetentionScope, originOwner: playbackOwner, quality });
+      }
+    });
+  }, [claimExplicitServerOptimizationChoice, playbackOwner, serverAudioRetentionScope, switchToServerOptimized]);
 
   const selectDeviceOriginal = useCallback((
     absolutePositionSeconds: number,
@@ -2773,7 +2918,10 @@ export function VideoPlayer({
         aria-modal="true"
         aria-label={`Playing ${title}`}
         tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e) => { clearChromePointerFocus(); e.stopPropagation(); }}
+        onClickCapture={mode === "webview" ? noteChromeClick : undefined}
+        onPointerDownCapture={mode === "webview" ? noteChromePointer : undefined}
+        onKeyDownCapture={mode === "webview" ? noteChromeKeyboard : undefined}
         onPointerMove={mode === "webview" ? nudgeChrome : undefined}
       >
         <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -2815,9 +2963,14 @@ export function VideoPlayer({
             <button
               type="button"
               className="player-info-button"
-              onClick={() =>
-                setDetailsSection((section) => section === "info" ? null : "info")
-              }
+              onClick={(event) => {
+                const trigger = event.currentTarget;
+                focusChromeControl(trigger);
+                detailsTriggerRef.current = trigger.isConnected
+                  ? { element: trigger, owner: playbackOwner }
+                  : null;
+                setDetailsSection((section) => section === "info" ? null : "info");
+              }}
               aria-label="Player details and shortcuts"
               aria-haspopup="dialog"
               aria-expanded={detailsSection != null}
@@ -2855,7 +3008,7 @@ export function VideoPlayer({
           />
         )}
 
-        {mode === "webview" && externalError == null ? (
+        {webviewChildShown ? (
           <WebviewPlayer
             key={webviewSourceKey}
             presentation={videoPresentation}
@@ -2871,6 +3024,7 @@ export function VideoPlayer({
             onChromeEnter={holdChrome}
             onChromeLeave={releaseChrome}
             onChromeFocus={focusChrome}
+            onChromeControlFocus={focusChromeControl}
             onChromeBlur={blurChrome}
             onActivity={nudgeChrome}
             onPausedChange={setWebviewPaused}
@@ -2883,7 +3037,10 @@ export function VideoPlayer({
             onCastLocalPlaybackChange={setCastSuspended}
             suspended={castSuspended}
             onActiveSubtitleUrlChange={setActiveSubtitleUrl}
-            onOpenShortcuts={() => setDetailsSection("shortcuts")}
+            onOpenShortcuts={() => {
+              detailsTriggerRef.current = null;
+              setDetailsSection("shortcuts");
+            }}
             onSourceSize={setSourceSize}
             onTechnicalStats={updateWebTechnicalStats}
             onProgress={reportProgress}
@@ -2915,6 +3072,8 @@ export function VideoPlayer({
             }
             activeServerAudioPreference={activeOptimized?.audioPreference ?? null}
             retainedServerAudioPreference={retainedServerAudioPreference}
+            retainedServerOptimizedQuality={manualServerOptimizedQuality?.originOwner === playbackOwner
+              ? null : retainedServerOptimizedQuality}
             onRetainedServerAudioPreferenceUnavailable={
               invalidateManualServerAudioPreference
             }
@@ -2984,7 +3143,7 @@ export function VideoPlayer({
                 : undefined
             }
             freshResolutionRequired={serverLeaseExpired}
-            retryPending={manualRecoveryPending}
+            retryPending={manualRecoveryPending || (serverLeaseExpired && webRecoveryPending)}
           />
         )}
         {webRecoveryPending && (
@@ -3016,6 +3175,7 @@ function WebviewPlayer({
   onChromeEnter,
   onChromeLeave,
   onChromeFocus,
+  onChromeControlFocus,
   onChromeBlur,
   onActivity,
   onPausedChange,
@@ -3074,6 +3234,7 @@ function WebviewPlayer({
   initialServerAudioTrackExplicit,
   activeServerAudioPreference,
   retainedServerAudioPreference,
+  retainedServerOptimizedQuality,
   onRetainedServerAudioPreferenceUnavailable,
   serverOptimizationPending,
   serverOptimizationError,
@@ -3093,9 +3254,10 @@ function WebviewPlayer({
   detailsOpen: boolean;
   touchPlayer: boolean;
   chromeVisible: boolean;
-  onChromeEnter: () => void;
-  onChromeLeave: () => void;
-  onChromeFocus: () => void;
+  onChromeEnter: (event: React.PointerEvent<HTMLElement>) => void;
+  onChromeLeave: (event: React.PointerEvent<HTMLElement>) => void;
+  onChromeFocus: (event: React.FocusEvent<HTMLElement>) => void;
+  onChromeControlFocus: (target: HTMLElement | null) => void;
   onChromeBlur: (event: React.FocusEvent<HTMLElement>) => void;
   onActivity: () => void;
   onPausedChange: (paused: boolean) => void;
@@ -3167,6 +3329,7 @@ function WebviewPlayer({
   initialServerAudioTrackExplicit: boolean;
   activeServerAudioPreference: AudioPreference | null;
   retainedServerAudioPreference: AudioPreference | null;
+  retainedServerOptimizedQuality: ServerTranscodeQuality | null;
   onRetainedServerAudioPreferenceUnavailable: (
     owner: string,
     preference: AudioPreference,
@@ -3221,6 +3384,7 @@ function WebviewPlayer({
   const pausedForCastRef = useRef(false);
   const suspendedRef = useRef(suspended);
   suspendedRef.current = suspended;
+  const documentSuspendedRef = useRef(document.visibilityState === "hidden");
   const stallWatchdogRef = useRef<PlaybackStallWatchdog | null>(null);
   const startupReadyRef = useRef(false);
   const stallStateRef = useRef<PlaybackStallState>({
@@ -3248,9 +3412,10 @@ function WebviewPlayer({
   const previousPositionRef = useRef(0);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
-  const touchMenuOpen = touchPlayer && (optionsOpen || captionsOpen);
-  const touchMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const touchMenuWasOpenRef = useRef(false);
+  const menuOpen = optionsOpen || captionsOpen;
+  const touchMenuOpen = touchPlayer && menuOpen;
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuWasOpenRef = useRef(false);
   const optionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const audioShortcutRef = useRef<HTMLButtonElement | null>(null);
   const optionsOriginRef = useRef<"settings" | "audio" | null>(null);
@@ -3352,7 +3517,7 @@ function WebviewPlayer({
     scrubbingRef.current = scrubbing;
     stallStateRef.current = {
       ...stallStateRef.current,
-      suspended,
+      suspended: suspended || documentSuspendedRef.current || document.visibilityState === "hidden",
       seeking: scrubbing || rendererSeekingRef.current,
     };
     stallWatchdogRef.current?.update(stallStateRef.current);
@@ -3401,7 +3566,11 @@ function WebviewPlayer({
   const resolvedServerAudioTrack = activeServerAudioTrack ?? (
     defaultServerAudioTracks.length === 1 ? defaultServerAudioTracks[0].index : null
   );
-  const touchLikePointerRef = useRef(false);
+  const videoPointerGestureRef = useRef<{
+    pointerId: number;
+    touchLike: boolean;
+    chromeWasHidden: boolean;
+  } | null>(null);
   const touchTapRef = useRef<{
     zone: "back" | "forward";
     at: number;
@@ -3427,10 +3596,12 @@ function WebviewPlayer({
 
   useEffect(() => {
     clearPendingTouchTap();
+    videoPointerGestureRef.current = null;
   }, [clearPendingTouchTap, engine, serverAudioOwner, timelineOffsetSeconds, url]);
 
   useEffect(() => () => {
     clearPendingTouchTap();
+    videoPointerGestureRef.current = null;
     if (touchFeedbackTimerRef.current != null) window.clearTimeout(touchFeedbackTimerRef.current);
   }, [clearPendingTouchTap]);
 
@@ -4695,7 +4866,7 @@ function WebviewPlayer({
         ...stallStateRef.current,
         paused: video.paused,
         seeking: video.seeking || rendererSeekingRef.current || scrubbingRef.current,
-        suspended: suspendedRef.current,
+        suspended: suspendedRef.current || documentSuspendedRef.current || document.visibilityState === "hidden",
         ended: video.ended,
       };
       stallStateRef.current = liveState;
@@ -4728,13 +4899,16 @@ function WebviewPlayer({
       started: false,
       paused: true,
       seeking: false,
-      suspended: suspendedRef.current,
+      suspended: suspendedRef.current || documentSuspendedRef.current || document.visibilityState === "hidden",
       ended: false,
       tearingDown: false,
     };
 
     const sync = (patch: Partial<PlaybackStallState> = {}) => {
-      stallStateRef.current = { ...stallStateRef.current, ...patch };
+      stallStateRef.current = {
+        ...stallStateRef.current, ...patch,
+        suspended: suspendedRef.current || documentSuspendedRef.current || document.visibilityState === "hidden",
+      };
       watchdog.update(stallStateRef.current);
     };
     const bufferedFrontier = () => {
@@ -4801,6 +4975,27 @@ function WebviewPlayer({
         watchdog.noteProgress();
       }
     };
+    let pageHidden = false;
+    const onDocumentLifecycle = () => {
+      if (!active || videoRef.current !== video) return;
+      const next = pageHidden || document.visibilityState === "hidden";
+      if (next === documentSuspendedRef.current) return;
+      documentSuspendedRef.current = next;
+      if (!next) {
+        // Background wall time is not a playback stall. Rebaseline the owned
+        // clock and grant a full foreground progress window on resume.
+        lastPosition = Number.isFinite(video.currentTime) ? video.currentTime : lastPosition;
+        lastBufferedFrontier = bufferedFrontier();
+      }
+      sync({
+        paused: video.paused,
+        seeking: video.seeking || rendererSeekingRef.current || scrubbingRef.current,
+        ended: video.ended,
+      });
+      if (!next) watchdog.noteProgress();
+    };
+    const onPageHide = () => { pageHidden = true; onDocumentLifecycle(); };
+    const onPageShow = () => { pageHidden = false; onDocumentLifecycle(); };
 
     video.addEventListener("playing", onPlaying);
     video.addEventListener("pause", onPause);
@@ -4809,6 +5004,9 @@ function WebviewPlayer({
     video.addEventListener("seeked", onSeeked);
     video.addEventListener("timeupdate", onClockProgress);
     video.addEventListener("progress", onBufferProgress);
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("visibilitychange", onDocumentLifecycle);
     return () => {
       active = false;
       sync({ tearingDown: true });
@@ -4821,6 +5019,9 @@ function WebviewPlayer({
       video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("timeupdate", onClockProgress);
       video.removeEventListener("progress", onBufferProgress);
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("visibilitychange", onDocumentLifecycle);
     };
   }, [url]);
 
@@ -4986,6 +5187,9 @@ function WebviewPlayer({
         // available instead of issuing an earlier seek that HLS startup can
         // overwrite with the live edge.
         if (nativeExactHlsFragmentRef.current) return;
+        // Readiness events can arrive before an accepted seek finishes. Let it
+        // settle before retrying; seeked can still retry a clamped wrong target.
+        if (video.seeking) return;
         if (!targetIsAvailable(start)) return;
         try {
           video.currentTime = start;
@@ -5999,8 +6203,8 @@ function WebviewPlayer({
   }, []);
 
   const toggleOptions = () => {
-    optionsTriggerRef.current?.focus({ preventScroll: true });
-    if (touchPlayer && !optionsOpen) touchMenuTriggerRef.current = optionsTriggerRef.current;
+    onChromeControlFocus(optionsTriggerRef.current);
+    if (!optionsOpen) menuTriggerRef.current = optionsTriggerRef.current?.isConnected ? optionsTriggerRef.current : null;
     if (!optionsOpen) optionsOriginRef.current = "settings";
     audioOptionsRequestedRef.current = false;
     setCaptionsOpen(false);
@@ -6243,10 +6447,21 @@ function WebviewPlayer({
   const togglePlayback = togglePlaybackState;
 
   const handleVideoPointerDown = useCallback((event: React.PointerEvent<HTMLVideoElement>) => {
-    touchLikePointerRef.current =
-      event.pointerType === "touch" ||
-      event.pointerType === "pen" ||
-      window.matchMedia?.("(pointer: coarse)").matches === true;
+    videoPointerGestureRef.current = {
+      pointerId: event.pointerId,
+      touchLike: event.pointerType === "touch" ||
+        event.pointerType === "pen" ||
+        window.matchMedia?.("(pointer: coarse)").matches === true,
+      // Pointer movement can reveal chrome before this gesture's click. Its
+      // initial visibility still owns whether the click is reveal-only.
+      chromeWasHidden: !chromeVisible,
+    };
+  }, [chromeVisible]);
+
+  const handleVideoPointerCancel = useCallback((event: React.PointerEvent<HTMLVideoElement>) => {
+    if (videoPointerGestureRef.current?.pointerId === event.pointerId) {
+      videoPointerGestureRef.current = null;
+    }
   }, []);
 
   const showTouchSeekFeedback = useCallback((zone: "back" | "forward") => {
@@ -6261,12 +6476,13 @@ function WebviewPlayer({
   }, []);
 
   const handleVideoClick = useCallback((event: React.MouseEvent<HTMLVideoElement>) => {
+    const gesture = videoPointerGestureRef.current;
+    videoPointerGestureRef.current = null;
     const touchLike =
-      touchLikePointerRef.current ||
+      gesture?.touchLike ||
       window.matchMedia?.("(pointer: coarse)").matches === true;
-    touchLikePointerRef.current = false;
     if (nestedDialogOpen) return;
-    if (touchLike && !chromeVisible) {
+    if (touchLike && (gesture?.chromeWasHidden ?? !chromeVisible)) {
       onActivity();
       return;
     }
@@ -6532,7 +6748,7 @@ function WebviewPlayer({
       }
     }
     appliedServerAudioPreferenceRef.current = true;
-    const quality = activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
+    const quality = retainedServerOptimizedQuality ?? activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
     void onSwitchServerOptimized(
       quality,
       position,
@@ -6552,6 +6768,7 @@ function WebviewPlayer({
   }, [
     resolvedServerAudioTrack,
     activeServerOptimizedQuality,
+    retainedServerOptimizedQuality,
     matchedRetainedServerAudio,
     duration,
     knownAbsoluteDurationSeconds,
@@ -6611,8 +6828,8 @@ function WebviewPlayer({
   }, [optionsOpen]);
 
   const openAudioOptions = () => {
-    audioShortcutRef.current?.focus({ preventScroll: true });
-    if (touchPlayer) touchMenuTriggerRef.current = audioShortcutRef.current;
+    onChromeControlFocus(audioShortcutRef.current);
+    menuTriggerRef.current = audioShortcutRef.current?.isConnected ? audioShortcutRef.current : null;
     optionsOriginRef.current = "audio";
     audioOptionsRequestedRef.current = true;
     setCaptionsOpen(false);
@@ -6626,19 +6843,34 @@ function WebviewPlayer({
     const origin = optionsOriginRef.current;
     optionsOriginRef.current = null;
     if (origin === "audio" && !audioShortcutAvailable) {
-      optionsTriggerRef.current?.focus({ preventScroll: true });
+      onChromeControlFocus(optionsTriggerRef.current);
     }
-  }, [audioShortcutAvailable, optionsOpen]);
+  }, [audioShortcutAvailable, onChromeControlFocus, optionsOpen]);
   useEffect(() => {
     // Restore after modal cleanup and after the background controls are no longer
     // inert. Touch browsers need not focus a button when it is tapped.
-    if (touchMenuWasOpenRef.current && !touchMenuOpen) {
-      const trigger = touchMenuTriggerRef.current;
-      const fallback = optionsTriggerRef.current;
-      (trigger?.isConnected ? trigger : fallback)?.focus({ preventScroll: true });
+    if (menuWasOpenRef.current && !menuOpen) {
+      const trigger = menuTriggerRef.current;
+      menuTriggerRef.current = null;
+      if (trigger?.isConnected) onChromeControlFocus(trigger);
     }
-    touchMenuWasOpenRef.current = touchMenuOpen;
-  }, [touchMenuOpen]);
+    menuWasOpenRef.current = menuOpen;
+  }, [menuOpen, onChromeControlFocus]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video == null) return;
+    // Declare retirement last so final progress, listener/watchdog/seek
+    // cancellation and HLS destruction finish before resetting this owner.
+    return () => {
+      // StrictMode replay and Suspense hiding can clean up effects while the
+      // same media remains connected. They are not physical retirement.
+      if (video.isConnected) return;
+      try { video.pause(); } catch { /* Continue releasing an already-closing element. */ }
+      try { video.removeAttribute("src"); } catch { /* Still attempt the media reset. */ }
+      try { video.load(); } catch { /* Cleanup must not break another owner's teardown. */ }
+    };
+  }, []);
   const touchAudioSheet = touchPlayer && optionsOriginRef.current === "audio";
   const touchAudioFallbackSheet = touchAudioSheet && touchUnavailableAudioShortcut;
 
@@ -6670,6 +6902,7 @@ function WebviewPlayer({
           crossOrigin={isTrustedServerStreamURL(url) ? "use-credentials" : undefined}
           x-webkit-airplay="allow"
           onPointerDown={handleVideoPointerDown}
+          onPointerCancel={handleVideoPointerCancel}
           onClick={handleVideoClick}
           onDoubleClick={handleVideoDoubleClick}
           onError={(event) => {
@@ -6760,7 +6993,6 @@ function WebviewPlayer({
           onHover={thumbs.onHover}
           onLeave={thumbs.onLeave}
           onSeek={seek}
-          onSeekPreview={(time) => seek(time, false)}
           onScrubbingChange={updateScrubbing}
           disabled={!chromeVisible}
         />
@@ -6875,7 +7107,9 @@ function WebviewPlayer({
             <button
               type="button"
               className={`chip player-osd-icon-button${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
-              onClick={() => {
+              onClick={(event) => {
+                onChromeControlFocus(event.currentTarget);
+                if (!captionsOpen) menuTriggerRef.current = event.currentTarget.isConnected ? event.currentTarget : null;
                 setOptionsOpen(false);
                 setCaptionsOpen((open) => !open);
               }}
@@ -6965,7 +7199,10 @@ function WebviewPlayer({
             <button
               type="button"
               className="chip player-touch-skip"
-              onClick={() => relativeSeek(-10)}
+              onClick={(event) => {
+                onChromeControlFocus(event.currentTarget);
+                relativeSeek(-10);
+              }}
               aria-label="Back 10 seconds"
               tabIndex={chromeVisible ? undefined : -1}
             >
@@ -6975,7 +7212,10 @@ function WebviewPlayer({
             <button
               type="button"
               className="chip player-touch-play"
-              onClick={togglePlayback}
+              onClick={(event) => {
+                onChromeControlFocus(event.currentTarget);
+                togglePlayback();
+              }}
               aria-label={playing ? "Pause" : "Play"}
               aria-pressed={playing}
               tabIndex={chromeVisible ? undefined : -1}
@@ -6985,7 +7225,10 @@ function WebviewPlayer({
             <button
               type="button"
               className="chip player-touch-skip"
-              onClick={() => relativeSeek(10)}
+              onClick={(event) => {
+                onChromeControlFocus(event.currentTarget);
+                relativeSeek(10);
+              }}
               aria-label="Forward 10 seconds"
               tabIndex={chromeVisible ? undefined : -1}
             >
@@ -7012,7 +7255,6 @@ function WebviewPlayer({
               onHover={thumbs.onHover}
               onLeave={thumbs.onLeave}
               onSeek={seek}
-              onSeekPreview={(time) => seek(time, false)}
               onScrubbingChange={updateScrubbing}
               disabled={!chromeVisible}
               touchPresentation
@@ -7038,7 +7280,8 @@ function WebviewPlayer({
                   type="button"
                   className={`chip player-touch-action${captionsOpen || subs.activeTrackId != null || embeddedCaptionState.activeTrackId != null ? " is-active" : ""}`}
                   onClick={(event) => {
-                    touchMenuTriggerRef.current = event.currentTarget;
+                    onChromeControlFocus(event.currentTarget);
+                    if (!captionsOpen) menuTriggerRef.current = event.currentTarget.isConnected ? event.currentTarget : null;
                     setOptionsOpen(false);
                     setCaptionsOpen((open) => !open);
                   }}
