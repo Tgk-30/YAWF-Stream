@@ -6639,6 +6639,21 @@ function WebviewPlayer({
     }
     touchMenuWasOpenRef.current = touchMenuOpen;
   }, [touchMenuOpen]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video == null) return;
+    // Declare retirement last so final progress, listener/watchdog/seek
+    // cancellation and HLS destruction finish before resetting this owner.
+    return () => {
+      // StrictMode replay and Suspense hiding can clean up effects while the
+      // same media remains connected. They are not physical retirement.
+      if (video.isConnected) return;
+      try { video.pause(); } catch { /* Continue releasing an already-closing element. */ }
+      try { video.removeAttribute("src"); } catch { /* Still attempt the media reset. */ }
+      try { video.load(); } catch { /* Cleanup must not break another owner's teardown. */ }
+    };
+  }, []);
   const touchAudioSheet = touchPlayer && optionsOriginRef.current === "audio";
   const touchAudioFallbackSheet = touchAudioSheet && touchUnavailableAudioShortcut;
 

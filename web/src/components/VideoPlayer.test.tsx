@@ -2986,10 +2986,11 @@ describe("WebviewPlayer", () => {
       fireMediaError(document.querySelector("video.player-video") as HTMLVideoElement);
       expect(screen.getByText("Playback interrupted")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /Open in external player/ })).toBeNull();
+      const pausesAfterErrorRetirement = pause.mock.calls.length;
       await userEvent.click(screen.getByRole("button", { name: "Copy stream link" }));
       expect(writeText).toHaveBeenCalledTimes(2);
       expect(openAndroidExternalPlayerMock).not.toHaveBeenCalled();
-      expect(pause).not.toHaveBeenCalled();
+      expect(pause).toHaveBeenCalledTimes(pausesAfterErrorRetirement);
     } finally {
       restoreClipboard();
     }
@@ -5410,6 +5411,9 @@ describe("WebviewPlayer", () => {
     // Model only public media observations. Before metadata, duration is unknown
     // and currentTime is 0. Native HLS applies the actual product temporal fragment.
     const media = (video: HTMLVideoElement, duration: number) => {
+      // Queued metadata belongs to this resource even after its retired element
+      // has been emptied. Do not reload or read a new URL from that old node.
+      const mediaSource = video.src;
       let time = 0;
       let ready: number = HTMLMediaElement.HAVE_NOTHING;
       let knownDuration = Number.NaN;
@@ -5423,8 +5427,8 @@ describe("WebviewPlayer", () => {
       return () => {
         knownDuration = duration;
         ready = HTMLMediaElement.HAVE_METADATA;
-        const fragment = Number(new URL(video.src).hash.replace(/^#t=/, ""));
-        if (video.src.includes("#t=")) time = fragment <= 0.001 ? 0 : fragment;
+        const fragment = Number(new URL(mediaSource).hash.replace(/^#t=/, ""));
+        if (mediaSource.includes("#t=")) time = fragment <= 0.001 ? 0 : fragment;
         fireEvent.loadedMetadata(video);
         ready = HTMLMediaElement.HAVE_CURRENT_DATA;
         fireEvent.loadedData(video);
@@ -5720,12 +5724,13 @@ describe("WebviewPlayer", () => {
       vi.useFakeTimers();
       try {
         const { request, optimized } = await setupRecovery();
+        const optimizedSource = optimized.src;
         fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
         fireEvent.click(screen.getByRole("button", { name: "Japanese" }));
         await flushRecovery();
         expect(request).toHaveBeenCalledTimes(2);
         const current = document.querySelector("video.player-video") as HTMLVideoElement;
-        expect(current.src).toBe(optimized.src);
+        expect(current.src).toBe(optimizedSource);
         expect(current).not.toBe(optimized);
         fireMediaError(optimized, 4);
         await flushRecovery();
@@ -14001,5 +14006,141 @@ describe("Original pending-generation cancellation contract", () => {
       act(() => { staleOriginal(8); });
       expect(document.querySelector("video.player-video")).toBe(committed);
     } finally { embeddedModeIntentObserver.enabled = false; }
+  });
+});
+
+describe("physical HTML media retirement", () => {
+  function mainVideo(): HTMLVideoElement {
+    const video = document.querySelector<HTMLVideoElement>("video.player-video");
+    if (video == null) throw new Error("Main reader did not mount");
+    return video;
+  }
+  function ready(video: HTMLVideoElement) {
+    Object.defineProperty(video, "duration", { configurable: true, value: 720 });
+    markCurrentMediaDataReady(video);
+    fireEvent.loadedMetadata(video); fireEvent.canPlay(video); fireEvent.play(video);
+  }
+
+  it.each(["direct", "native HLS"] as const)("resets detached %s media after final progress capture and listener disposal", (reader) => {
+    if (reader === "native HLS") {
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    }
+    const url = reader === "direct" ? "https://media.example/original.mp4" : "https://media.example/native.m3u8";
+    const trace: string[] = [];
+    const onProgress = vi.fn((position: number) => { trace.push("progress:" + position); });
+    const view = render(<VideoPlayer url={url} title="Retiring main media" onProgress={onProgress} onClose={() => {}} />);
+    const video = mainVideo(); ready(video); video.currentTime = 240.333;
+    expect(video.getAttribute("src")).toBe(url);
+    const remove = video.removeAttribute.bind(video);
+    vi.spyOn(video, "pause").mockImplementation(() => { trace.push("pause"); fireEvent.pause(video); });
+    vi.spyOn(video, "removeAttribute").mockImplementation((name) => { if (name === "src") trace.push("remove-src"); remove(name); });
+    vi.spyOn(video, "load").mockImplementation(() => {
+      trace.push("load"); expect(video.getAttribute("src")).toBeNull();
+      video.currentTime = 0; fireEvent.timeUpdate(video); fireEvent.loadStart(video);
+    });
+    trace.length = 0; onProgress.mockClear();
+    view.unmount();
+    expect(video.isConnected).toBe(false);
+    expect(trace).toEqual(["progress:240.333", "pause", "remove-src", "load"]);
+    expect(onProgress).toHaveBeenCalledTimes(1); expect(video.getAttribute("src")).toBeNull();
+    expect(video.pause).toHaveBeenCalledTimes(1); expect(video.load).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires the captured old node without resetting its keyed successor or accepting late old media events", async () => {
+    const props = { title: "Keyed source ownership", onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://media.example/old.mp4" />);
+    const old = mainVideo(); ready(old); old.currentTime = 240.333;
+    const oldLoad = vi.spyOn(old, "load"); const oldPause = vi.spyOn(old, "pause");
+    view.rerender(<VideoPlayer {...props} url="https://media.example/new.mp4" sourceRevision={1} />);
+    const successor = mainVideo(); ready(successor); successor.currentTime = 240.333;
+    expect(successor).not.toBe(old); expect(successor.isConnected).toBe(true);
+    expect(old.getAttribute("src")).toBeNull();
+    expect(oldLoad).toHaveBeenCalledTimes(1); expect(oldPause).toHaveBeenCalledTimes(1);
+    // Prototype methods are shared vi.fn boundaries in this suite. Give the
+    // successor its own boundary, not another alias to the old call history.
+    const successorLoad = vi.fn(), successorPause = vi.fn();
+    Object.defineProperties(successor, {
+      load: { configurable: true, value: successorLoad },
+      pause: { configurable: true, value: successorPause },
+    });
+    Object.defineProperty(old, "error", { configurable: true, value: { code: 3 } });
+    fireEvent.error(old); fireEvent.pause(old); fireEvent.play(old); fireEvent.timeUpdate(old); fireEvent.canPlay(old);
+    await act(async () => { await Promise.resolve(); });
+    expect(mainVideo()).toBe(successor); expect(successor.getAttribute("src")).toBe("https://media.example/new.mp4");
+    expect(successor.currentTime).toBe(240.333);
+    expect(successorLoad).not.toHaveBeenCalled(); expect(successorPause).not.toHaveBeenCalled();
+    expect(screen.queryByText("Playback interrupted")).toBeNull();
+    view.unmount();
+  });
+
+  it("does not reset connected StrictMode replay or ordinary listener-effect updates", () => {
+    const url = "https://media.example/connected.mp4";
+    const view = render(<StrictMode><VideoPlayer url={url} title="Connected owner" scrobbleContext={{ tmdbId: 1, type: "movie" }} onClose={() => {}} /></StrictMode>);
+    const video = mainVideo(); ready(video); video.currentTime = 240.333;
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    view.rerender(<StrictMode><VideoPlayer url={url} title="Connected owner" scrobbleContext={{ tmdbId: 2, type: "movie" }} onClose={() => {}} /></StrictMode>);
+    expect(mainVideo()).toBe(video); expect(video.isConnected).toBe(true);
+    expect(video.getAttribute("src")).toBe(url); expect(video.currentTime).toBe(240.333);
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it("does not retire a connected media node during Suspense hide and reveal", () => {
+    const pending = new Promise<void>(() => {});
+    let choose: (hidden: boolean) => void = () => { throw new Error("Scenario not mounted"); };
+    function Gate({ hidden }: { hidden: boolean }) { if (hidden) throw pending; return null; }
+    function Scenario() {
+      const [hidden, setHidden] = useState(false); choose = setHidden;
+      return <Suspense fallback={<div>Retirement suspended</div>}>
+        <VideoPlayer url="https://media.example/suspended.mp4" title="Suspended owner" onClose={() => {}} />
+        <Gate hidden={hidden} />
+      </Suspense>;
+    }
+    const view = render(<Scenario />); const video = mainVideo(); ready(video); video.currentTime = 240.333;
+    act(() => choose(true));
+    expect(screen.getByText("Retirement suspended")).toBeInTheDocument();
+    expect(video.isConnected).toBe(true); expect(video.getAttribute("src")).toBe("https://media.example/suspended.mp4");
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    act(() => choose(false));
+    expect(mainVideo()).toBe(video); expect(video.currentTime).toBe(240.333);
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it("keeps the live original resource while replacement preparation is pending and rejected", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const preparation = deferred<never>(); const request = vi.fn(() => preparation.promise);
+    const view = render(<VideoPlayer url="https://server.example/api/stream/original.mp4" title="Rejected replacement"
+      serverOptimized={{ qualities: ["480p"], request }} onClose={() => {}} />);
+    const original = mainVideo(); ready(original); original.currentTime = 240.333; fireEvent.pause(original);
+    const src = original.getAttribute("src");
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "480p" }));
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    expect(mainVideo()).toBe(original); expect(original.isConnected).toBe(true);
+    expect(original.getAttribute("src")).toBe(src); expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    await act(async () => { preparation.reject(new Error("synthetic preparation failure")); });
+    await screen.findByText(/synthetic preparation failure/);
+    expect(mainVideo()).toBe(original); expect(original.isConnected).toBe(true);
+    expect(original.getAttribute("src")).toBe(src); expect(original.currentTime).toBe(240.333);
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it("runs physical retirement after HLS destruction and ignores the retired HLS retry callback", async () => {
+    const view = render(<VideoPlayer url="https://media.example/stream.m3u8" title="HLS retirement ordering" onClose={() => {}} />);
+    const video = mainVideo();
+    await waitFor(() => expect(hlsInstances[0]?.attachMedia).toHaveBeenCalledWith(video));
+    const instance = hlsInstances[0], trace: string[] = [];
+    instance.destroy.mockImplementation(() => { trace.push("hls-destroy"); });
+    vi.spyOn(video, "pause").mockImplementation(() => { trace.push("pause"); });
+    vi.spyOn(video, "load").mockImplementation(() => { trace.push("load"); });
+    view.unmount();
+    expect(trace).toEqual(["hls-destroy", "pause", "load"]);
+    expect(instance.destroy).toHaveBeenCalledTimes(1);
+    const loads = instance.startLoad.mock.calls.length;
+    act(() => instance.emit("hlsError", { fatal: true, type: "networkError" }));
+    expect(instance.startLoad).toHaveBeenCalledTimes(loads);
   });
 });
