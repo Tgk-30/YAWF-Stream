@@ -385,6 +385,18 @@ private fun testOrphanDownloadIdentity() {
 }
 
 private fun testRedirectPolicy() {
+  assertThat(
+    Subject.invoke("assetProbeRequiresRange", "https://github.com/Tgk-30/YAWF-Stream/releases/download/$TAG/$APK_NAME") == false,
+    "GitHub redirect lookup must not receive Range",
+  )
+  assertThat(
+    Subject.invoke("assetProbeRequiresRange", "https://release-assets.githubusercontent.com/path?token=opaque") == true,
+    "approved release CDN receives the bounded range probe",
+  )
+  assertThat(
+    Subject.invoke("assetProbeRequiresRange", "https://objects.githubusercontent.com/path") == true,
+    "approved objects CDN receives the bounded range probe",
+  )
   Subject.invoke(
     "requireOfficialAssetUrl",
     "https://github.com/Tgk-30/YAWF-Stream/releases/download/$TAG/$APK_NAME",
