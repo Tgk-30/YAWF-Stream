@@ -83,6 +83,44 @@ describe("AdjustmentRange touch intent", () => {
     expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("0");
   });
 
+  it.each(["touch", "pen"])("[release-without-move] %s rejects a vertical release even when no pointermove was delivered", (type) => {
+    const { slider, changed } = setup();
+    pointer(slider, "pointerdown", type); nativeInput(slider, 23);
+    expect(pointer(slider, "pointerup", type, 102, 125).defaultPrevented).toBe(false);
+    fireEvent.click(slider);
+    expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("0");
+  });
+
+  it.each(["touch", "pen"])("[release-after-small-move] %s uses final displacement when the last move was below the intent threshold", (type) => {
+    const { slider, changed } = setup();
+    pointer(slider, "pointerdown", type); nativeInput(slider, 23);
+    pointer(slider, "pointermove", type, 102, 103); nativeInput(slider, 25);
+    pointer(slider, "pointerup", type, 103, 125);
+    expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("0");
+  });
+
+  it.each(["touch", "pen"])("[horizontal-without-move] %s retains the native value on a deliberate horizontal release", (type) => {
+    const { slider, changed } = setup();
+    pointer(slider, "pointerdown", type); nativeInput(slider, 23);
+    pointer(slider, "pointerup", type, 125, 102);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(23); expect(slider.value).toBe("23");
+  });
+
+  it("[tap-jitter] retains a deliberate tap below the movement threshold", () => {
+    const { slider, changed } = setup();
+    pointer(slider, "pointerdown"); nativeInput(slider, 23);
+    pointer(slider, "pointerup", "touch", 102, 104);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(23);
+  });
+
+  it("[axis-lock] does not reinterpret an already accepted horizontal drag at release", () => {
+    const { slider, changed } = setup();
+    pointer(slider, "pointerdown"); nativeInput(slider, 23);
+    pointer(slider, "pointermove", "touch", 125, 102); nativeInput(slider, 35);
+    pointer(slider, "pointerup", "touch", 125, 150);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(35); expect(slider.value).toBe("35");
+  });
+
   it("[new-gesture] cancelled touch does not veto the next deliberate tap", () => {
     const { slider, changed } = setup();
     pointer(slider, "pointerdown"); nativeInput(slider, 23); pointer(slider, "pointercancel");
@@ -114,6 +152,16 @@ describe("AdjustmentRange touch intent", () => {
     pointer(slider, "pointerup"); nativeInput(slider, 41);
     pointer(slider, "pointerup", "touch", 140, 100, 2, false);
     expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("0");
+  });
+
+  it("[blur] abandons a pending adjustment without blocking later keyboard input", () => {
+    const { slider, changed } = setup();
+    pointer(slider, "pointerdown"); nativeInput(slider, 23);
+    fireEvent.blur(slider);
+    pointer(slider, "pointerup", "touch", 102, 125);
+    expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("0");
+    fireEvent.keyDown(slider, { key: "ArrowRight" }); nativeInput(slider, 1);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(1);
   });
 
   it("[unmount] does not publish a pending adjustment on unmount", () => {
