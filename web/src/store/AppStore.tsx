@@ -168,6 +168,13 @@ export function readNavigationHistoryEntry(
   return candidate as NavigationHistoryEntry;
 }
 
+/** Navigation is written synchronously before React mounts a pending reader. */
+export function isPlayerNavigationPending(): boolean {
+  if (typeof window === "undefined") return false;
+  const layer = readNavigationHistoryEntry(window.history.state)?.layer;
+  return layer === "detail-player" || layer === "detail-player-sources" || layer === "local-player";
+}
+
 function makeNavigationHistoryEntry(
   entry: Omit<NavigationHistoryEntry, "debridStreamerNavigation">,
 ): NavigationHistoryEntry {

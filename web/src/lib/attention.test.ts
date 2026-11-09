@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   IDLE_MS,
   getAttentionParked,
+  getPlayerMounted,
   installAttentionGate,
+  registerPlayerMount,
   setIdleGateSuppressed,
   subscribeAttention,
 } from "./attention";
@@ -29,6 +31,23 @@ afterEach(() => {
 });
 
 describe("installAttentionGate", () => {
+  it("exposes the synchronous player mount guard", () => {
+    expect(getPlayerMounted()).toBe(false);
+    const unregister = registerPlayerMount();
+    expect(getPlayerMounted()).toBe(true);
+    unregister();
+    expect(getPlayerMounted()).toBe(false);
+  });
+
+  it("keeps the synchronous player guard until the last exact registration closes", () => {
+    const first = registerPlayerMount();
+    const second = registerPlayerMount();
+    first(); first();
+    expect(getPlayerMounted()).toBe(true);
+    second(); second();
+    expect(getPlayerMounted()).toBe(false);
+  });
+
   it("parks and wakes the visible but unfocused window", () => {
     const listener = vi.fn();
     const unsubscribe = subscribeAttention(listener);

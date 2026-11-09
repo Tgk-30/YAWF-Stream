@@ -173,6 +173,7 @@ vi.mock("../lib/serverMode", () => ({
 // Imported AFTER mocks (vi.mock is hoisted).
 import {
   AppStoreProvider,
+  isPlayerNavigationPending,
   useAppActions,
   useAppStore,
   useCachedResolutions,
@@ -2036,5 +2037,34 @@ describe("useSimpleMode convenience hook", () => {
       wrapper: makeWrapper(null),
     });
     await waitFor(() => expect(result.current).toBe(false));
+  });
+});
+
+// This read-only guard does not require a provider render or state mutation.
+describe("synchronous player navigation guard", () => {
+  it("recognizes all owned pending player layers before React commits", () => {
+    const original = window.history.state;
+    try {
+      for (const layer of ["detail-player", "detail-player-sources", "local-player"]) {
+        window.history.replaceState({ debridStreamerNavigation: 1, depth: 1, route: "settings", browseContext: null,
+          detailItem: { id: "fixture", type: "movie", title: "Fixture" }, layer,
+          localFilePlayer: layer === "local-player" ? { path: "fixture.mp4", title: "Fixture" } : null }, "");
+        expect(isPlayerNavigationPending()).toBe(true);
+      }
+    } finally { window.history.replaceState(original, ""); }
+  });
+
+  it("excludes ordinary Detail views and unowned or malformed history entries", () => {
+    const original = window.history.state;
+    const owned = { debridStreamerNavigation: 1, depth: 1, route: "settings", browseContext: null,
+      detailItem: { id: "fixture", type: "movie", title: "Fixture" }, localFilePlayer: null, layer: "detail-player" };
+    try {
+      for (const state of [null, { layer: "detail-player" }, { ...owned, debridStreamerNavigation: 2 },
+        { ...owned, depth: -1 }, { ...owned, route: "unknown" }, { ...owned, localFilePlayer: "invalid" },
+        { ...owned, layer: "none" }, { ...owned, layer: "detail-sources" }, { ...owned, layer: "trailer" }]) {
+        window.history.replaceState(state, "");
+        expect(isPlayerNavigationPending()).toBe(false);
+      }
+    } finally { window.history.replaceState(original, ""); }
   });
 });

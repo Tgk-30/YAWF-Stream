@@ -1,0 +1,99 @@
+.browser-update-banner {
+  position: fixed;
+  right: max(var(--sp-xl), var(--safe-area-right));
+  bottom: max(var(--sp-xl), var(--safe-area-bottom));
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-lg);
+  width: min(520px, calc(100vw - 2 * var(--sp-xl)));
+  max-width: 100%;
+  max-height: calc(100vh - max(var(--sp-xl), var(--safe-area-top)) - max(var(--sp-xl), var(--safe-area-bottom)));
+  overflow-y: auto;
+  padding: var(--sp-lg);
+  color: var(--text-primary);
+  background: var(--bg-2);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(18px);
+  animation: browser-update-in 0.25s ease-out;
+}
+
+.browser-update-banner-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.browser-update-banner-body strong {
+  font-size: 0.9rem;
+}
+
+.browser-update-banner-body p,
+.browser-update-banner-status {
+  margin: calc(4px * var(--density-scale)) 0 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.browser-update-banner-status {
+  display: block;
+}
+
+.browser-update-banner-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: var(--sp-xs);
+}
+
+.browser-update-banner-actions .btn {
+  white-space: nowrap;
+}
+
+@keyframes browser-update-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {
+  .browser-update-banner {
+    z-index: 29;
+    right: max(var(--sp-sm), var(--safe-area-right));
+    left: max(var(--sp-sm), var(--safe-area-left));
+    bottom: calc(var(--mobile-nav-bottom) + var(--mobile-nav-height) + var(--sp-sm));
+    max-height: calc(100vh - max(var(--sp-sm), var(--safe-area-top)) - var(--mobile-nav-bottom) - var(--mobile-nav-height) - var(--sp-sm));
+    width: auto;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .browser-update-banner-actions {
+    width: 100%;
+  }
+
+  .browser-update-banner-actions .btn {
+    flex: 1 1 0;
+    min-height: 44px;
+  }
+
+  @supports (height: 100dvh) {
+    .browser-update-banner {
+      max-height: calc(100dvh - max(var(--sp-sm), var(--safe-area-top)) - var(--mobile-nav-bottom) - var(--mobile-nav-height) - var(--sp-sm));
+    }
+  }
+}
+
+@media (max-width: 400px) {
+  .browser-update-banner-actions {
+    flex-direction: column;
+  }
+
+  .browser-update-banner-actions .btn {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .browser-update-banner { animation: none; }
+}

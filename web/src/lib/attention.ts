@@ -66,7 +66,9 @@ function subscribePlayerMount(listener: () => void): () => void {
   return () => playerMountListeners.delete(listener);
 }
 
-function getPlayerMounted(): boolean {
+/** Synchronous guard for destructive or navigation actions that cannot rely on
+ * a React render completing between an async boundary and the final action. */
+export function getPlayerMounted(): boolean {
   return playerMounts > 0;
 }
 
