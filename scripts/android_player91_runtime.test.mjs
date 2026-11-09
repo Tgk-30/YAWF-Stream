@@ -782,3 +782,77 @@ test('reason capture is bounded numeric-only before unchanged policy refusal and
  assert.deepEqual(keys,['bits','clickable','depth','enabled','kind','knownNodes','nodeOrdinal','packageMatches','rawBounds','reasonBits','reasons','schemaVersion','truncated','visible','windowId'].sort());
  assert.ok(java.includes('assertTrue("Diagnostic geometry captured; More DOWN intentionally not admitted", false)'));
 });
+
+const observedExpandedWelcomeTail=()=>{
+ const value=consentInput(),up=126676;
+ Object.assign(value,{downUptimeMs:up-100,eventUptimeMs:[up-100,up-50,up]});
+ const node=(kind,nodeOrdinal,depth,rawBounds,reasonBits=0)=>({kind,nodeOrdinal,depth,packageMatches:true,windowId:10,visible:true,enabled:kind==='SKIP'||kind==='NEXT'?true:null,clickable:kind==='SKIP'||kind==='NEXT'?true:null,rawBounds,reasonBits});
+ const expanded={uptimeMs:127600,rootAvailable:true,ownerValid:true,rootWindowId:10,rootBounds:[0,0,1080,1920],rootKey:'10,0,0,1080,1920',oldPrompt:false,unexpected:true,dialogs:1,titles:1,skips:1,nexts:1,snapshotComplete:true,nodesVisited:17,maxDepth:11,missingChildCount:0,missingChildDepth:-1,missingChildIndex:-1,reasonEvidence:{schemaVersion:1,bits:512,reasons:['KNOWN_OUTSIDE_ROOT'],knownNodes:[node('WELCOME',10,9,[0,0,1082,1922],512),node('TITLE',14,11,[136,724,945,803]),node('SKIP',16,11,[136,1165,262,1275]),node('NEXT',17,11,[779,1162,945,1281])],truncated:false}};
+ const strict=(at)=>{const sample=structuredClone(expanded);sample.uptimeMs=at;sample.unexpected=false;sample.reasonEvidence.bits=0;sample.reasonEvidence.reasons=[];Object.assign(sample.reasonEvidence.knownNodes[0],{rawBounds:[0,0,1080,1920],reasonBits:0});return sample;};
+ const partial={...structuredClone(expanded),uptimeMs:127068,rootWindowId:11,rootBounds:[28,701,1052,1219],rootKey:'11,28,701,1052,1219',unexpected:false,dialogs:0,titles:0,skips:0,nexts:0,snapshotComplete:false,nodesVisited:1,maxDepth:0,missingChildCount:1,missingChildDepth:0,missingChildIndex:0,reasonEvidence:zeroTailReasons()};
+ Object.assign(value.setupTail,{upUptimeMs:up,firstStableUptimeMs:127700,lastStableUptimeMs:127800,finishedUptimeMs:127801,observations:[partial,expanded,strict(127700),strict(127800)]});
+ return {value,expanded,strict};
+};
+
+test('observed Welcome-only expansion is NOTREADY then needs two new strict samples within the unchanged bound',()=>{
+ const {value,expanded,strict}=observedExpandedWelcomeTail();
+ validateUpdateConsentTail(value);
+ for(const mutate of[
+  x=>x.setupTail.observations.splice(2,1),
+  x=>x.setupTail.observations[3].uptimeMs=127799,
+  x=>x.setupTail.firstStableUptimeMs=127600,
+  x=>x.setupTail.observations[2].reasonEvidence.knownNodes[0].rawBounds=[0,0,1081,1921],
+  x=>x.setupTail.observations[1].oldPrompt=true,
+  x=>x.setupTail.observations[1].ownerValid=false,
+  x=>x.setupTail.observations[1].reasonEvidence.truncated=true,
+  x=>x.setupTail.observations[1].reasonEvidence.knownNodes.pop(),
+  x=>x.setupTail.observations[1].reasonEvidence.knownNodes[0].rawBounds[0]=-1,
+  x=>x.setupTail.observations[1].reasonEvidence.knownNodes[0].rawBounds[1]=-1,
+  x=>x.setupTail.observations[1].reasonEvidence.knownNodes[0].rawBounds=[0,0,1079,1922],
+  x=>{const o=x.setupTail.observations[1];o.reasonEvidence.bits|=1;o.reasonEvidence.reasons.unshift('TERMS_TEXT');},
+  x=>{const o=x.setupTail.observations[1];o.reasonEvidence.knownNodes[0].reasonBits=0;o.reasonEvidence.knownNodes[0].rawBounds=[0,0,1080,1920];Object.assign(o.reasonEvidence.knownNodes[1],{reasonBits:512,rawBounds:[-1,0,100,100]});},
+  x=>{const o=x.setupTail.observations[1];o.snapshotComplete=false;o.missingChildCount=1;o.missingChildDepth=0;o.missingChildIndex=0;},
+ ]){const copy=structuredClone(value);mutate(copy);assert.throws(()=>validateUpdateConsentTail(copy));}
+ for(const amount of[1,2,3,100000]){
+  const x=structuredClone(value),o=x.setupTail.observations[1];o.reasonEvidence.knownNodes[0].rawBounds=[0,0,1080+amount,1920+amount];validateUpdateConsentTail(x);
+  const persistent=structuredClone(value);persistent.setupTail.observations=Array.from({length:20},(_,i)=>({...structuredClone(o),uptimeMs:126676+i*100}));assert.throws(()=>validateUpdateConsentTail(persistent));
+ }
+ const reset=structuredClone(value);reset.setupTail.observations=[structuredClone(expanded),strict(127700),{...strict(127750),snapshotComplete:false,missingChildCount:1,missingChildDepth:0,missingChildIndex:0},strict(127850),strict(127950)];Object.assign(reset.setupTail,{firstStableUptimeMs:127850,lastStableUptimeMs:127950,finishedUptimeMs:127951});validateUpdateConsentTail(reset);
+ const partialOnly=structuredClone(reset);partialOnly.setupTail.observations.pop();assert.throws(()=>validateUpdateConsentTail(partialOnly));
+ const late=structuredClone(value);late.setupTail.observations[3].uptimeMs=128677;assert.throws(()=>validateUpdateConsentTail(late));
+});
+
+test('actual Java Welcome expansion classifier never earns readiness and preserves terminal predicates and deadlines',()=>{
+ const definitions=java.slice(java.indexOf('    static final class WelcomeTailPolicy {'),java.indexOf('    private void scanWelcomeTail'));
+ const start=java.indexOf('    private static boolean isWelcomeLayoutSettling('),end=java.indexOf('    private void requireUpdateConsentWelcomeTail');
+ const classifier=start<0?'private static boolean isWelcomeLayoutSettling(WelcomeTailScan scan,boolean owner){return false;}':java.slice(start,end);
+ const support=`static final class Rect{int left,top,right,bottom;Rect(){this(0,0,1080,1920);}Rect(int a,int b,int c,int d){left=a;top=b;right=c;bottom=d;}boolean isEmpty(){return right<=left||bottom<=top;}boolean contains(Rect r){return r.left>=left&&r.top>=top&&r.right<=right&&r.bottom<=bottom;}}
+ static final class AcquisitionPolicy{int nodes,deepest;}
+ static WelcomeTailScan observed(){WelcomeTailScan s=new WelcomeTailScan(new Rect(),10);s.dialogs=s.titles=s.skips=s.nexts=1;s.reasonBits=512;s.unexpected=true;s.knownNodes.add(new KnownTailNode("WELCOME",10,9,true,10,true,null,null,new Rect(0,0,1082,1922),512));s.knownNodes.add(new KnownTailNode("TITLE",14,11,true,10,true,null,null,new Rect(136,724,945,803),0));s.knownNodes.add(new KnownTailNode("SKIP",16,11,true,10,true,true,true,new Rect(136,1165,262,1275),0));s.knownNodes.add(new KnownTailNode("NEXT",17,11,true,10,true,true,true,new Rect(779,1162,945,1281),0));return s;}
+ static boolean sample(WelcomeTailPolicy p,WelcomeTailScan s,long at){boolean settling=isWelcomeLayoutSettling(s,true);return p.observe(at,1000,true,true,true,s.unexpected&&!settling,s.oldPrompt,s.dialogs,s.titles,s.skips,s.nexts,"r",s.complete&&!settling);}
+ static void reject(Runnable r){try{r.run();}catch(IllegalStateException expected){return;}throw new AssertionError("Terminal sample accepted");}
+ static WelcomeTailScan strict(){WelcomeTailScan s=observed();s.unexpected=false;s.reasonBits=0;KnownTailNode n=s.knownNodes.get(0);s.knownNodes.set(0,new KnownTailNode(n.kind,n.nodeOrdinal,n.depth,true,10,true,null,null,new Rect(),0));return s;}`;
+ const checks=`WelcomeTailScan expanded=observed();if(!isWelcomeLayoutSettling(expanded,true))throw new AssertionError("Observed Welcome expansion must be NOTREADY");if(isWelcomeLayoutSettling(expanded,false))throw new AssertionError("Owner waived");WelcomeTailPolicy p=new WelcomeTailPolicy();if(sample(p,expanded,1100)||p.stable!=0)throw new AssertionError("Expansion earned readiness");if(sample(p,strict(),1200))throw new AssertionError();if(!sample(p,strict(),1300))throw new AssertionError("Two strict samples refused");
+ for(int amount:new int[]{1,2,3,100000}){WelcomeTailScan s=observed();s.knownNodes.get(0).rawBounds.right=1080+amount;s.knownNodes.get(0).rawBounds.bottom=1920+amount;if(!isWelcomeLayoutSettling(s,true))throw new AssertionError("Magnitude changes NOTREADY");WelcomeTailPolicy capped=new WelcomeTailPolicy();for(int i=0;i<20;i++)if(sample(capped,s,1000+i*100))throw new AssertionError("Persistent expansion accepted");reject(()->sample(capped,s,3001));}
+ WelcomeTailPolicy reset=new WelcomeTailPolicy();sample(reset,strict(),1100);sample(reset,expanded,1150);if(sample(reset,strict(),1200))throw new AssertionError("Expansion did not reset stability");WelcomeTailScan partial=strict();partial.complete=false;sample(reset,partial,1250);if(sample(reset,strict(),1300))throw new AssertionError("Partial did not reset stability");if(!sample(reset,strict(),1400))throw new AssertionError();
+ for(int i=0;i<10;i++){WelcomeTailScan s=observed();if(i==0)s.reasonBits|=1;if(i==1)s.oldPrompt=true;if(i==2)s.complete=false;if(i==3)s.knownNodesTruncated=true;if(i==4)s.knownNodes.get(0).rawBounds.left=-1;if(i==5)s.knownNodes.get(0).rawBounds.top=-1;if(i==6)s.knownNodes.get(0).rawBounds.right=1079;if(i==7)s.knownNodes.remove(3);if(i==8){KnownTailNode n=s.knownNodes.get(1);s.knownNodes.set(1,new KnownTailNode(n.kind,14,11,false,null,null,null,null,n.rawBounds,32));}if(i==9){KnownTailNode n=s.knownNodes.get(1);s.knownNodes.set(1,new KnownTailNode(n.kind,14,11,true,10,true,null,null,new Rect(-1,0,100,100),512));}if(isWelcomeLayoutSettling(s,true))throw new AssertionError("Other predicate waived "+i);reject(()->sample(new WelcomeTailPolicy(),s,1100));}
+ if(!expanded.unexpected||expanded.reasonBits!=512||expanded.knownNodes.get(0).rawBounds.right!=1082)throw new AssertionError("Raw evidence changed");`;
+ const dir=realpathSync(mkdtempSync(join(process.env.RUNNER_TEMP||process.env.TMPDIR,'welcome-settling-')));
+ writeFileSync(join(dir,'WelcomeSettlingHarness.java'),`public final class WelcomeSettlingHarness{${support}\n${definitions}\n${classifier}\npublic static void main(String[] args){${checks}System.out.println("welcome-settling:passed");}}`);
+ const built=spawnSync(join(process.env.JAVA_HOME,'bin/javac'),[`-J-Djava.io.tmpdir=${dir}`,'-d',dir,join(dir,'WelcomeSettlingHarness.java')],{encoding:'utf8',timeout:20000});assert.equal(built.status,0,built.stderr);
+ const ran=spawnSync(join(process.env.JAVA_HOME,'bin/java'),[`-Djava.io.tmpdir=${dir}`,'-cp',dir,'WelcomeSettlingHarness'],{encoding:'utf8',timeout:20000});assert.equal(ran.status,0,ran.stderr);assert.equal(ran.stdout.trim(),'welcome-settling:passed');
+});
+
+test('Welcome settling classification is readonly and retains raw unexpected evidence before the unchanged policy',()=>{
+ const policy=java.slice(java.indexOf('    static final class WelcomeTailPolicy {'),java.indexOf('    private static final class WelcomeTailScan'));
+ assert.equal(createHash('sha256').update(policy).digest('hex'),'6ff893b46ffa193340d468d3b7bfc155473094d11f2f4834adc4e5c41a9cf39d');
+ const start=java.indexOf('    private static boolean isWelcomeLayoutSettling('),end=java.indexOf('    private void requireUpdateConsentWelcomeTail');assert.ok(start>=0&&end>start);
+ const classifier=java.slice(start,end);assert.doesNotMatch(classifier,/\.getRootInActiveWindow\(|\.clearCache\(|\.getBoundsInScreen\(|\.getWindowId\(|\.isVisibleToUser\(|\.isEnabled\(|\.isClickable\(|inject\(|\.tap\(|\.click\(|SystemClock|scan\.unexpected\s*=(?!=)|scan\.reasonBits\s*=(?!=)|\.rawBounds\.[a-z]+\s*=(?!=)/);
+ const tail=java.slice(end,java.indexOf('    private JSONObject tailReasonEvidence'));
+ assert.ok(tail.includes('scan != null && scan.unexpected).put("dialogs"'));
+ assert.ok(tail.includes('boolean settling = root != null && owner && isWelcomeLayoutSettling(scan, owner);'));
+ assert.ok(tail.includes('scan != null && scan.unexpected && !settling'));
+ assert.ok(tail.includes('root != null && owner && scan.complete && !settling'));
+ assert.doesNotMatch(tail,/\.tap\(|\.click\(|inject\(|pressBack|startActivity/);
+ assert.ok(java.includes('assertTrue("Diagnostic geometry captured; More DOWN intentionally not admitted", false)'));
+});

@@ -809,6 +809,31 @@ public final class RuntimePlayer91MoreFlowTest {
             if (!scan.complete) return;
         }
     }
+    private static boolean isWelcomeLayoutSettling(WelcomeTailScan scan, boolean owner) {
+        if (!owner || scan == null || !scan.complete || !scan.unexpected || scan.oldPrompt ||
+                scan.reasonBits != TailReason.KNOWN_OUTSIDE_ROOT || scan.dialogs != 1 || scan.titles != 1 ||
+                scan.skips != 1 || scan.nexts != 1 || scan.knownNodesTruncated || scan.knownNodes.size() != 4 ||
+                scan.window < 0 || scan.root.isEmpty() || scan.root.left < 0 || scan.root.top < 0) return false;
+        int seen = 0;
+        for (KnownTailNode node : scan.knownNodes) {
+            int kind = "WELCOME".equals(node.kind) ? 1 : "TITLE".equals(node.kind) ? 2 : "SKIP".equals(node.kind) ? 4 : "NEXT".equals(node.kind) ? 8 : 0;
+            if (kind == 0 || (seen & kind) != 0 || !node.packageMatches || node.windowId == null ||
+                    node.windowId != scan.window || !Boolean.TRUE.equals(node.visible) || node.rawBounds.isEmpty()) return false;
+            seen |= kind;
+            if (kind == 1) {
+                if (node.reasonBits != TailReason.KNOWN_OUTSIDE_ROOT || node.enabled != null || node.clickable != null ||
+                        node.rawBounds.left != scan.root.left || node.rawBounds.top != scan.root.top ||
+                        node.rawBounds.right < scan.root.right || node.rawBounds.bottom < scan.root.bottom ||
+                        (node.rawBounds.right == scan.root.right && node.rawBounds.bottom == scan.root.bottom)) return false;
+            } else {
+                if (node.reasonBits != 0 || !scan.root.contains(node.rawBounds)) return false;
+                if (kind == 2) { if (node.enabled != null || node.clickable != null) return false; }
+                else if (!Boolean.TRUE.equals(node.enabled) || !Boolean.TRUE.equals(node.clickable)) return false;
+            }
+        }
+        return seen == 15;
+    }
+
     private void requireUpdateConsentWelcomeTail(FingerState state, JSONArray times, JSONObject inputProof) throws Exception {
         assertTrue("Tail requires acknowledged UP and no active stream", state.upAcknowledged && !state.streamActive);
         long upAt = times.getLong(2);
@@ -844,9 +869,10 @@ public final class RuntimePlayer91MoreFlowTest {
                         .put("maxDepth", scan == null ? 0 : scan.budget.deepest).put("missingChildCount", scan == null ? 0 : scan.missingChildCount)
                         .put("missingChildDepth", scan == null ? -1 : scan.missingChildDepth).put("missingChildIndex", scan == null ? -1 : scan.missingChildIndex)
                         .put("reasonEvidence", tailReasonEvidence(scan)));
+                boolean settling = root != null && owner && isWelcomeLayoutSettling(scan, owner);
                 if (policy.observe(at, upAt, state.upAcknowledged && !state.streamActive, root != null, owner,
-                        scan != null && scan.unexpected, scan != null && scan.oldPrompt, scan == null ? 0 : scan.dialogs,
-                        scan == null ? 0 : scan.titles, scan == null ? 0 : scan.skips, scan == null ? 0 : scan.nexts, key, root != null && owner && scan.complete)) {
+                        scan != null && scan.unexpected && !settling, scan != null && scan.oldPrompt, scan == null ? 0 : scan.dialogs,
+                        scan == null ? 0 : scan.titles, scan == null ? 0 : scan.skips, scan == null ? 0 : scan.nexts, key, root != null && owner && scan.complete && !settling)) {
                     proof.put("ok", true).put("firstStableUptimeMs", policy.firstStable).put("lastStableUptimeMs", policy.lastStable)
                             .put("finishedUptimeMs", now());
                     return;

@@ -223,6 +223,32 @@ export function validateTailReasonEvidence(observation) {
   return e;
 }
 
+export function isWelcomeLayoutSettling(o) {
+  validateTailReasonEvidence(o);
+  const e = o.reasonEvidence, root = o.rootBounds;
+  if (!o.rootAvailable || !o.ownerValid || !o.snapshotComplete || !o.unexpected || o.oldPrompt ||
+    e.bits !== 512 || e.truncated || e.knownNodes.length !== 4 ||
+    o.dialogs !== 1 || o.titles !== 1 || o.skips !== 1 || o.nexts !== 1 ||
+    !Number.isSafeInteger(o.rootWindowId) || o.rootWindowId < 0 || !Array.isArray(root) || root.length !== 4 ||
+    !root.every(Number.isSafeInteger) || root[0] < 0 || root[1] < 0 || root[2] <= root[0] || root[3] <= root[1]) return false;
+  const seen = new Set();
+  for (const n of e.knownNodes) {
+    if (seen.has(n.kind) || !n.packageMatches || n.windowId !== o.rootWindowId || n.visible !== true ||
+      n.rawBounds[2] <= n.rawBounds[0] || n.rawBounds[3] <= n.rawBounds[1]) return false;
+    seen.add(n.kind);
+    if (n.kind === 'WELCOME') {
+      if (n.reasonBits !== 512 || n.enabled !== null || n.clickable !== null ||
+        n.rawBounds[0] !== root[0] || n.rawBounds[1] !== root[1] || n.rawBounds[2] < root[2] || n.rawBounds[3] < root[3] ||
+        (n.rawBounds[2] === root[2] && n.rawBounds[3] === root[3])) return false;
+    } else {
+      if (n.reasonBits !== 0 || n.rawBounds[0] < root[0] || n.rawBounds[1] < root[1] || n.rawBounds[2] > root[2] || n.rawBounds[3] > root[3]) return false;
+      if (n.kind === 'TITLE') { if (n.enabled !== null || n.clickable !== null) return false; }
+      else if (n.enabled !== true || n.clickable !== true) return false;
+    }
+  }
+  return ['WELCOME', 'TITLE', 'SKIP', 'NEXT'].every(kind => seen.has(kind));
+}
+
 export function validateUpdateConsentTail(input) {
   const tail = input.setupTail;
   requireTrue(input.role === 'setup' && input.upAcknowledged === true && input.streamMayRemain === false &&
@@ -236,9 +262,9 @@ export function validateUpdateConsentTail(input) {
   let first = -1, stable = 0, previousKey = null, previousAt = up - 1, completed = false;
   for (const [index, observation] of tail.observations.entries()) {
     const o = observation;
-    validateTailReasonEvidence(o);
+    const settling = isWelcomeLayoutSettling(o);
     requireTrue(!completed && Number.isSafeInteger(o.uptimeMs) && o.uptimeMs > previousAt && o.uptimeMs >= up && o.uptimeMs - up <= 2000 &&
-      typeof o.rootAvailable === 'boolean' && typeof o.ownerValid === 'boolean' && typeof o.oldPrompt === 'boolean' && typeof o.snapshotComplete === 'boolean' && o.unexpected === false &&
+      typeof o.rootAvailable === 'boolean' && typeof o.ownerValid === 'boolean' && typeof o.oldPrompt === 'boolean' && typeof o.snapshotComplete === 'boolean' && (o.unexpected === false || settling) &&
       [o.dialogs, o.titles, o.skips, o.nexts].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 1), 'Tail snapshot invalid, stale, duplicate or unexpected');
     previousAt = o.uptimeMs;
     if (o.rootAvailable) {
@@ -258,7 +284,7 @@ export function validateUpdateConsentTail(input) {
       Number.isSafeInteger(o.missingChildIndex) && o.missingChildIndex >= 0 && o.missingChildIndex < 512, 'Incomplete snapshots must retain the null-child location');
     else requireTrue(o.nodesVisited === 0 && o.maxDepth === 0 && o.missingChildCount === 0 &&
       o.missingChildDepth === -1 && o.missingChildIndex === -1, 'Null-root snapshots cannot fabricate traversal evidence');
-    const ready = o.snapshotComplete && o.rootAvailable && !o.oldPrompt && o.dialogs === 1 && o.titles === 1 && o.skips === 1 && o.nexts === 1;
+    const ready = !settling && o.snapshotComplete && o.rootAvailable && !o.oldPrompt && o.dialogs === 1 && o.titles === 1 && o.skips === 1 && o.nexts === 1;
     if (!ready) { first = -1; stable = 0; previousKey = null; continue; }
     if (o.rootKey !== previousKey) { first = o.uptimeMs; stable = 1; previousKey = o.rootKey; } else stable++;
     completed = stable >= 2 && o.uptimeMs - first >= 100;
