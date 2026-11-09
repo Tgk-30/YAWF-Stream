@@ -174,6 +174,14 @@ test('workflow uses exact source builds test-only harness before owned emulator'
   assert.match(workflow, /if: always\(\)/);
   assert.doesNotMatch(workflow, /QUERY_ALL_PACKAGES|chmod 0?666|secrets\.|VLC|vlc|--wipe-data/);
 });
+test('ADB startup completes and raw device snapshot is retained before the exact empty-device gate', () => {
+  const start = driver.indexOf("save('adb-start-server.txt', await run('adb', ['start-server']))");
+  const acquire = driver.indexOf("const devicesBeforeRun = await run('adb', ['devices'])");
+  const retain = driver.indexOf("save('adb-preexisting-devices.txt', devicesBeforeRun)");
+  const gate = driver.indexOf("requireTrue(devicesBeforeRun.trim() === 'List of devices attached', 'Existing device present before owned run')");
+  assert.ok(start >= 0 && start < acquire && acquire < retain && retain < gate);
+  assert.ok(gate < driver.indexOf("for (const port of [43120, 43121, 5554, 5555])"));
+});
 test('runtime owns fresh AVD fixture and failure evidence before cleanup', () => {
   assert.match(driver, /relative\(parent, path\)/);
   assert.match(driver, /Existing device present before owned run/);

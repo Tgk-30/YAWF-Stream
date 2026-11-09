@@ -198,7 +198,10 @@ async function main() {
     const manifest = await run('apkanalyzer', ['manifest', 'print', apk]);
     requireTrue(/android:versionCode="2003090"/.test(manifest) && /android:versionName="2\.3\.90"/.test(manifest), 'Manifest version/code mismatch');
     save('apk-manifest.xml', manifest);
-    requireTrue((await run('adb', ['devices'])).trim() === 'List of devices attached', 'Existing device present before owned run');
+    save('adb-start-server.txt', await run('adb', ['start-server']));
+    const devicesBeforeRun = await run('adb', ['devices']);
+    save('adb-preexisting-devices.txt', devicesBeforeRun);
+    requireTrue(devicesBeforeRun.trim() === 'List of devices attached', 'Existing device present before owned run');
     for (const port of [43120, 43121, 5554, 5555]) await portFree(port);
     requireTrue(statSync('/dev/kvm').isCharacterDevice(), 'KVM character device required');
     save('acceleration.txt', await run('emulator', ['-accel-check']));
