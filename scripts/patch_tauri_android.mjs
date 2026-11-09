@@ -1174,6 +1174,29 @@ const updaterProvider = `        <provider
 `;
 const installPermission = '    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />\n';
 
+function retainMainActivityForAssetChanges(manifest) {
+  const mainActivities = [...manifest.matchAll(/<activity\s[^>]*>/g)]
+    .map((match) => match[0])
+    .filter((tag) => /\bandroid:name\s*=\s*["']\.MainActivity["']/.test(tag));
+  const unsupported = "Unsupported Android MainActivity configuration template. Refusing to patch generated sources.";
+  if (mainActivities.length !== 1) throw new Error(unsupported);
+  const tag = mainActivities[0];
+  const config = /\bandroid:configChanges="([^"]*)"/.exec(tag);
+  const original = "orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode";
+  const retained = `${original}|assetsPaths`;
+  if (
+    [...tag.matchAll(/\bandroid:name\s*=/g)].length !== 1 ||
+    [...tag.matchAll(/\bandroid:configChanges\s*=/g)].length !== 1 ||
+    config == null ||
+    (config[1] !== original && config[1] !== retained)
+  ) {
+    throw new Error(unsupported);
+  }
+  // Navigation-mode runtime overlays change assetsPaths. Keep the live WebView;
+  // existing onConfigurationChanged delegates resources and refreshes insets.
+  return manifest.replace(tag, tag.replace(config[0], `android:configChanges="${retained}"`));
+}
+
 function replacementState(source, original, replacement, description) {
   if (source.includes(replacement)) return { changed: false, output: source };
   if (!source.includes(original)) {
@@ -1306,6 +1329,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
         .replace(leanbackFeatureTemplate, "")
         .replace(leanbackCategoryTemplate, "")
     : manifest;
+
+  patchedManifest = retainMainActivityForAssetChanges(patchedManifest);
 
   const resizeLine = 'android:windowSoftInputMode="adjustResize"';
   if (/android:windowSoftInputMode\s*=/.test(patchedManifest) && !patchedManifest.includes(resizeLine)) {
