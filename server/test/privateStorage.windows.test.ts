@@ -48,6 +48,16 @@ describe.skipIf(process.platform !== "win32")("native Windows private storage", 
     expect(inventory(path)).toEqual(before);
   }
 
+  it.each(["LOCALAPPDATA", "APPDATA"])("boots using unchanged inherited permissions beneath actual %s", (name) => {
+    const base = process.env[name];
+    if (!base) throw new Error("Native AppData location is required.");
+    const data = mkdtempSync(join(base, "yawf-private-storage-appdata-"));
+    try {
+      loadConfig({ dataDir: data });
+      new AppDatabase(join(data, "database.sqlite")).close();
+    } finally { rmSync(data, { recursive: true, force: true }); }
+  }, 30_000);
+
   it("boots and independently verifies key, DB, lease, WAL, SHM, snapshot and online backup DACLs", async () => {
     const data = parent("private"); const path = join(data, "database.sqlite");
     const config = loadConfig({ dataDir: data });
@@ -153,15 +163,7 @@ describe.skipIf(process.platform !== "win32")("native Windows private storage", 
     expect(existsSync(join(data, "database.sqlite"))).toBe(true);
   }, 30_000);
 
-  it.each(["LOCALAPPDATA", "APPDATA"])("boots using unchanged inherited permissions beneath actual %s", (name) => {
-    const base = process.env[name];
-    if (!base) throw new Error("Native AppData location is required.");
-    const data = mkdtempSync(join(base, "yawf-private-storage-appdata-"));
-    try {
-      loadConfig({ dataDir: data });
-      new AppDatabase(join(data, "database.sqlite")).close();
-    } finally { rmSync(data, { recursive: true, force: true }); }
-  }, 30_000);
+
 
   it("does not let the ACL test fixture change a foreign file through a nested junction", () => {
     const foreign = mkdtempSync(join(tmpdir(), "yawf-foreign-acl-target-"));

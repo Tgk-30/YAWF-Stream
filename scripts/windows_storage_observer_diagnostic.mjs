@@ -19,7 +19,13 @@ const prefix = 'const DESCRIPTOR_OBSERVER = String.raw`';
 const start = source.indexOf(prefix);
 const end = source.indexOf('\n`;', start + prefix.length);
 if (start < 0 || end < start || source.indexOf(prefix, start + 1) >= 0) throw new Error('Observer extraction failed.');
-const observer = source.slice(start + prefix.length, end);
+const originalObserver = source.slice(start + prefix.length, end);
+const observer = '[Console]::Error.WriteLine("phase:start")\n' + originalObserver
+  .replace("Add-Type -TypeDefinition @'", "[Console]::Error.WriteLine(\"phase:add-type\")\nAdd-Type -TypeDefinition @'")
+  .replace("'@\n$entries =", "'@\n[Console]::Error.WriteLine(\"phase:parse-input\")\n$entries =")
+  .replace("$installer = $null", "[Console]::Error.WriteLine(\"phase:identity\")\n$installer = $null")
+  .replace('foreach ($entry in $entries) {', 'foreach ($entry in $entries) {\n[Console]::Error.WriteLine("phase:descriptor")')
+  .replace('[Console]::WriteLine((ConvertTo-Json', '[Console]::Error.WriteLine("phase:serialize")\n[Console]::WriteLine((ConvertTo-Json');
 const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const admitted = new Set(['SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'TEMP', 'TMP', 'USERPROFILE',
   'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'LOCALAPPDATA', 'APPDATA']);
@@ -35,6 +41,7 @@ try {
     entries.push({ id: entries.length, path: parent, kind: 'ancestor' });
     if (dirname(parent) === parent) break;
   }
+  const observerStarted = Date.now();
   try {
     const raw = execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
       Buffer.from(observer, 'utf16le').toString('base64')], { input: JSON.stringify(entries), encoding: 'utf8',
@@ -58,22 +65,34 @@ try {
     result.failure = { name: error.name, status: error.status ?? null, code: error.code ?? null,
       stderr: stderr.slice(0, 6000) };
   }
+  result.observerDurationMs = Date.now() - observerStarted;
+  writeFileSync(output, JSON.stringify(result, null, 2) + '\n');
   const enumControl = String.raw`
 $ErrorActionPreference = 'Stop'
 $flags = [Security.AccessControl.AceFlags]3
 $before = 'completed'
 try { $null = $flags -band [Security.AccessControl.AceFlags]::ObjectInherit } catch { $before = $_.Exception.GetType().Name }
-[Console]::WriteLine((ConvertTo-Json -Compress -InputObject ([ordered]@{
-  underlyingType = [Enum]::GetUnderlyingType([Security.AccessControl.AceFlags]).Name
-  uncastOutcome = $before
-  integerObjectInherit = (([int]$flags -band [int][Security.AccessControl.AceFlags]::ObjectInherit) -ne 0)
-  integerContainerInherit = (([int]$flags -band [int][Security.AccessControl.AceFlags]::ContainerInherit) -ne 0)
-  integerInheritOnly = (([int]$flags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0)
-})))
+[Console]::WriteLine(('{0}|{1}|{2}|{3}|{4}' -f
+  [Enum]::GetUnderlyingType([Security.AccessControl.AceFlags]).Name,
+  $before,
+  (([int]$flags -band [int][Security.AccessControl.AceFlags]::ObjectInherit) -ne 0),
+  (([int]$flags -band [int][Security.AccessControl.AceFlags]::ContainerInherit) -ne 0),
+  (([int]$flags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0)))
 `;
-  result.byteEnumControl = JSON.parse(execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive',
-    '-EncodedCommand', Buffer.from(enumControl, 'utf16le').toString('base64')], { env, encoding: 'utf8',
-    timeout: 7000, maxBuffer: 8000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).replace(/^\uFEFF/, '').trim());
+  const controlStarted = Date.now();
+  try {
+    const rawControl = execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive',
+      '-EncodedCommand', Buffer.from(enumControl, 'utf16le').toString('base64')], { env, encoding: 'utf8',
+      timeout: 7000, maxBuffer: 8000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const match = /^(Byte|Int32)\|(completed|[A-Za-z]+Exception)\|(True|False)\|(True|False)\|(True|False)$/.exec(rawControl);
+    if (!match) throw new Error('Unexpected bounded enum control result.');
+    result.byteEnumControl = { underlyingType: match[1], uncastOutcome: match[2],
+      integerObjectInherit: match[3] === 'True', integerContainerInherit: match[4] === 'True',
+      integerInheritOnly: match[5] === 'True' };
+  } catch (error) {
+    result.byteEnumControlFailure = { name: error.name, code: error.code ?? null, status: error.status ?? null };
+  }
+  result.controlDurationMs = Date.now() - controlStarted;
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

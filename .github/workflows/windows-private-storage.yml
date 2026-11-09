@@ -45,13 +45,15 @@ jobs:
       - name: Typecheck and build actual server
         working-directory: server
         run: npm run build
-      - name: Diagnose the content-free native descriptor observer
-        run: node scripts/windows_storage_observer_diagnostic.mjs "$env:RUNNER_TEMP/windows-storage-observer-diagnostic.json"
       - name: Native private storage and writer checks
         working-directory: server
         env:
           DS_SERVER_SECRET_KEY: ''
         run: node node_modules/vitest/vitest.mjs run test/privateStorage.test.ts test/privateStorage.windows.test.ts --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-results.json"
+      - name: Diagnose the content-free native descriptor observer
+        if: always()
+        continue-on-error: true
+        run: node scripts/windows_storage_observer_diagnostic.mjs "$env:RUNNER_TEMP/windows-storage-observer-diagnostic.json"
       - name: Full server suite on the same native runtime
         working-directory: server
         env:
