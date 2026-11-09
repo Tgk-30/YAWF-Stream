@@ -254,7 +254,7 @@ jobs:
         run: node --test scripts/patch_tauri_android.test.mjs
 
       - name: Android Gradle bootstrap contracts
-        run: node --test scripts/prepare_android_gradle.test.mjs scripts/fetch_android_gradle.test.mjs
+        run: node --test scripts/prepare_android_gradle.test.mjs scripts/fetch_android_gradle.test.mjs scripts/fetch_android_kotlin_compiler.test.mjs
 
       - name: Android external-player runtime harness contracts
         run: node --test scripts/android_external_player_workflow.test.mjs scripts/runtime_external_settings_transaction.test.mjs
@@ -411,6 +411,8 @@ jobs:
           unset yawf_gradle_api_token
           export YAWF_GRADLE_ARCHIVE
           node scripts/prepare_android_gradle.mjs
+          kotlin_maven_root="$(node scripts/fetch_android_kotlin_compiler.mjs "$RUNNER_TEMP/yawf-kotlin-m2")"
+          printf 'GRADLE_OPTS=%s -Dmaven.repo.local=%s\n' "${GRADLE_OPTS:-}" "$kotlin_maven_root" >> "$GITHUB_ENV"
 
       # The real gate. Desktop-only modules (player, keychain, server_host,
       # downloads) are cfg(desktop); this proves what remains actually compiles

@@ -2419,10 +2419,12 @@ describe("native effective duration UI89", () => {
   });
   it("[duration-ui-paused89] updates paused controls on metadata arrival without a new clock, reload or subscription", async () => {
     const view = await startUI({ timelineOffsetSeconds: 100, sourceSwitchState: { paused: true, volume: 1, muted: false, playbackRate: 1 } });
-    const calls = renderPlayerMock.command.mock.calls.length, observes = renderPlayerMock.observeProperties.mock.calls.length, properties = renderPlayerMock.setProperty.mock.calls.length;
+    const calls = renderPlayerMock.command.mock.calls.length, observes = renderPlayerMock.observeProperties.mock.calls.length, properties = renderPlayerMock.setProperty.mock.calls.length, initializations = renderPlayerMock.init.mock.calls.length;
     view.rerender(<EmbeddedPlayer {...view.props} knownAbsoluteDurationSeconds={124} />);
     expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "124");
     fireEvent.click(screen.getByRole("button", { name: "Show total duration" })); expect(screen.getByRole("button", { name: "Show remaining time" })).toHaveTextContent("2:04");
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    expect(renderPlayerMock.init.mock.calls).toHaveLength(initializations);
     expect(renderPlayerMock.command.mock.calls).toHaveLength(calls); expect(renderPlayerMock.observeProperties.mock.calls).toHaveLength(observes); expect(renderPlayerMock.setProperty.mock.calls).toHaveLength(properties);
   });
   it("[duration-ui-owner89] does not reuse old metadata or raw duration after a URL change", async () => {
