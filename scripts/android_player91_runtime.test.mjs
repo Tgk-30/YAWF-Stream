@@ -20,7 +20,7 @@ const environment = () => ({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github
 const guest = () => ({ sdk: '36', abi: 'x86_64', hardware: 'ranchu', pageSize: '4096',
   webview: 'Current WebView package (name, version): (com.google.android.webview, 144.0.7559.0)' });
 const input = (role = 'more') => ({ role, ok: true, tool: 'finger', toolType: 1, durationMs: 100, steps: 2,
-  targetBounds: [10, 10, 100, 100], x: 50, y: 50, foregroundTargetBefore: true, foregroundTargetAfter: true, upAcknowledged: true, streamMayRemain: false,
+  targetBounds: [10, 10, 100, 100], x: 50, y: 50, foregroundTargetBefore: true, foregroundTargetAfter: true, downAdmitted: true, downInjectionAttempted: true, downAcknowledged: true, upAcknowledged: true, streamMayRemain: false,
   cancelAcknowledged: false, downUptimeMs: 1000, eventUptimeMs: [1000, 1050, 1100],
   ...(role === 'reveal' ? { observationEpoch: 'clock-before', x: 55, y: 38.8 } : {}) });
 const receipt = () => ({ schemaVersion: 1, profile: 'private91-hosted-more', outcome: 'PASS', phase: 'complete',
@@ -382,7 +382,11 @@ const menuOnlyReceipt = () => ({ ...receipt(), profile: 'private91-hosted-menu-o
   chromeRevealCount:1,chromeRevealPerformed:true,chromeRevealUpUptimeMs:2100,moreWindowLimitMs:1200,
   chromeAbsenceObservations:[{uptimeMs:1500,visible:false,cacheRefreshed:true},{uptimeMs:1700,visible:false,cacheRefreshed:true}],
   moreAcquisitionStartedUptimeMs:2101,moreAcquiredUptimeMs:2150,moreDownAttemptUptimeMs:2200,
-  inputs:[input('explicit-source'),{...input('reveal'),observationEpoch:'menu-only',downUptimeMs:2000,eventUptimeMs:[2000,2050,2100]},
+  moreAcquisition:{rootPackageMatches:true,playerPackageMatches:true,targetPackageMatches:true,playerCount:1,targetCount:1,
+    clearCacheCount:1,activeRootCount:1,rootWindowId:2,playerWindowId:2,targetWindowId:2,targetIdentity:17,
+    rootBounds:[0,0,1080,1920],playerBounds:[0,0,1080,1920],targetBounds:[10,10,100,100],screenWidth:1080,screenHeight:1920,
+    nodesVisited:100,maxDepth:20,ancestorDistance:1},
+  inputs:[input('explicit-source'),{...input('reveal'),observationEpoch:'menu-only',foregroundAfterUptimeMs:2150,downUptimeMs:2000,eventUptimeMs:[2000,2050,2100]},
     {...input(),downUptimeMs:2200,eventUptimeMs:[2200,2250,2300]}] });
 test('menu-only accepts actual menu proof without clocks and cannot cross-qualify progress profiles', () => {
   validateMenuOnlyReceipt(menuOnlyReceipt());
@@ -419,28 +423,27 @@ test('new91 workflow explicitly selects menu-only below its independently frozen
   assert.match(workflow, /^        run: node scripts\/android_player91_runtime\.mjs menu-only$/m);
   assert.doesNotMatch(workflow, /^        run: node scripts\/android_player91_runtime\.mjs(?: run)?$/m);
 });
-test('91 native critical window has no screenshot diagnostic sleep or repeated guard churn', () => {
+test('91 native critical window uses exactly one bounded SDK snapshot and no UiObject2 before DOWN', () => {
   const flow=java.slice(java.indexOf('    private void flowMenuOnly()'),java.indexOf('    private Rect waitForTwoFreshChromeAbsentObservations()'));
-  assert.equal((flow.match(/observeInitialClockAX\(\)/g)||[]).length,1);
-  assert.equal((flow.match(/tapObject\(more, "more"\)/g)||[]).length,1);
-  assert.equal((flow.match(/finger\(/g)||[]).length,1);
-  assert.match(flow,/Rect bounds = waitForTwoFreshChromeAbsentObservations\(\)/);
-  const window=flow.slice(flow.indexOf('chromeRevealUp ='),flow.indexOf('tapObject(more, "more")'));
-  for(const required of['moreAcquisitionStarted = now()','fresh()','UiObject2 more = menuOnlyMore()','moreAcquired = now()'])assert.ok(window.includes(required));
-  assert.doesNotMatch(window,/capture\(|write\(|guard\(|guardMenuOnlyPlayer\(|step\(|sleep\(/);
-  assert.match(java,/consecutive = visible \? 0 : consecutive \+ 1/);
-  assert.match(java,/if \(consecutive == 2\) return player\(\)\.getVisibleBounds\(\)/);
-  assert.match(java,/Actual More DOWN missed the1200ms reveal-UP window/);
-  assert.match(java,/at >= moreAcquired && at - chromeRevealUp <= 1_200/);
-  assert.match(java,/moreDownAttempt = at/);
-  assert.ok(driver.includes('initial-clock-ax\\.json'));
-  const guard=java.slice(java.indexOf('    private void guardMenuOnlyPlayer()'),java.indexOf('    private void observeInitialClockAX()'));
-  for(const text of['foreground(', 'Playback interrupted','Playback stopped because of an error','0:36 of 0:36, Seek','now() - sourceUp < 30_000'])assert.ok(guard.includes(text));
+  const window=flow.slice(flow.indexOf('chromeRevealUp ='),flow.indexOf('finger(more.target'));
+  for(const required of ['moreAcquisitionStarted = now()', 'AcquiredMore more = acquireMoreOnce(screenWidth, screenHeight)', 'moreAcquired = now()', 'more.root.contains', 'more.admit(', 'reveal.put("foregroundTargetAfter", true)']) assert.ok(window.includes(required),required);
+  assert.doesNotMatch(window,/UiObject2|findObjects|player\(\)|fresh\(|guard\(|refresh\(|getWindows|capture\(|write\(|sleep\(/);
+  assert.ok(window.indexOf('more.root.contains')<window.indexOf('reveal.put('));
+  assert.ok(window.indexOf('more.admit(')<window.indexOf('reveal.put('));
+  const acquire=java.slice(java.indexOf('    private AcquiredMore acquireMoreOnce'),java.indexOf('    private void scanMore'));
+  assert.equal((acquire.match(/automation\.clearCache\(\)/g)||[]).length,1);
+  assert.equal((acquire.match(/automation\.getRootInActiveWindow\(\)/g)||[]).length,1);
+  assert.match(acquire,/root\.recycle\(\)/); assert.match(acquire,/scan\.identity\.recycle\(\)/);
+  const scan=java.slice(java.indexOf('    private void scanMore'),java.indexOf('    private UiObject2 menuOnlyMore'));
+  for(const value of ['scan.policy.visit(path.size())', 'index >= playerIndex && distance <= 6', 'AcquisitionPolicy.windows(', 'scan.identity.equals(candidate)', 'finally { child.recycle(); }', 'children <= 512']) assert.ok(scan.includes(value),value);
+  assert.doesNotMatch(scan,/getParent\(|refresh\(|UiObject2|findObjects|getWindows/);
+  assert.match(java,/down >= moreAcquired && down - chromeRevealUp <= 1_200/);
+  assert.match(java,/moreDownAttempt = down/);
 });
 
 test('91 candidate and workflow artifact source pins are explicit independent constants',()=>{
   assert.deepEqual({source:PIN.source,run:PIN.run,artifactId:PIN.artifactId,sha256:PIN.sha256,bytes:PIN.bytes,version:PIN.version,code:PIN.code,signer:PIN.signer},
-    {source:'8ac8130f7fcc68ee707766f1874e99ba4227a102',run:'42637363492',artifactId:'13683753736',sha256:'75ae7f2e8559d14facef7d4c25e7a711699a0c9075d5ece913a32cfbca24c493',bytes:88710017,version:'2.3.91',code:'2003091',signer:'233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a'});
+    {source:'71ac64423a00df601d35142c2bbae774cff3037b',run:'42643241753',artifactId:'13687171562',sha256:'c25114fe2e6a6e61923162177348c98154733ff0d37bb556698c20c98716adb1',bytes:88705921,version:'2.3.91',code:'2003091',signer:'233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a'});
   assert.match(workflow,/artifact-ids: \$\{\{ env\.CANDIDATE_ARTIFACT_ID \}\}/);
   for(const literal of[PIN.source,PIN.run,PIN.artifactId,PIN.sha256,PIN.code])assert.ok(workflow.includes(literal));
   assert.notEqual(PIN.prefix,'d99110f238492fab16418dbcb17ce27bd9ed91357a4c08ec38a78d61aa40e380');
@@ -468,4 +471,69 @@ test('download shape rejects missing or false flattening and nested destination 
   assert.throws(() => flatCandidateDownloadPath(positive.replace('          merge-multiple: true\n', '')), /must flatten/);
   assert.throws(() => flatCandidateDownloadPath(positive.replace('merge-multiple: true', 'merge-multiple: false')), /must flatten/);
   assert.throws(() => flatCandidateDownloadPath(positive.replace('path: candidate\n', 'path: candidate/android-phone-verification-candidate\n')));
+});
+
+test('91 snapshot admission rejects wrong missing ambiguous stale or unbounded copied proof', () => {
+  validateMenuOnlyReceipt(menuOnlyReceipt());
+  const mutations = [
+    r=>{delete r.moreAcquisition;}, r=>{r.moreAcquisition.rootPackageMatches=false;},
+    r=>{delete r.moreAcquisition.playerPackageMatches;},r=>{r.moreAcquisition.targetPackageMatches=false;},
+    r=>{r.moreAcquisition.playerCount=0;},r=>{r.moreAcquisition.playerCount=2;},r=>{r.moreAcquisition.targetCount=2;},
+    r=>{r.moreAcquisition.clearCacheCount=2;},r=>{r.moreAcquisition.activeRootCount=2;},
+    r=>{r.moreAcquisition.rootWindowId=-1;},r=>{r.moreAcquisition.targetWindowId=3;},r=>{r.moreAcquisition.playerWindowId=3;},
+    r=>{r.moreAcquisition.nodesVisited=513;},r=>{r.moreAcquisition.maxDepth=33;},r=>{r.moreAcquisition.ancestorDistance=7;},
+    r=>{r.moreAcquisition.targetBounds=[1000,1000,1200,2000];},r=>{r.moreAcquisition.screenWidth=100;},
+    r=>{r.inputs[1].foregroundAfterUptimeMs=2100;},r=>{r.inputs[2].downAdmitted=false;},
+    r=>{delete r.inputs[2].downInjectionAttempted;},r=>{r.inputs[2].downAcknowledged=false;},
+    r=>{r.inputs[2].eventUptimeMs.push(2400);},r=>{r.inputs[2].cancelAcknowledged=true;},
+  ];
+  for(const mutate of mutations){const value=structuredClone(menuOnlyReceipt());mutate(value);assert.throws(()=>validateMenuOnlyReceipt(value));}
+});
+test('91 shared reveal proof is deferred until exact acquired root contains the acknowledged reveal point', () => {
+  const flow=java.slice(java.indexOf('    private void flowMenuOnly()'),java.indexOf('    private Rect waitForTwoFreshChromeAbsentObservations()'));
+  for(const value of ['moreAcquired >= chromeRevealUp', 'more.root.contains((int) reveal.getDouble("x"), (int) reveal.getDouble("y"))', 'reveal.getBoolean("downAcknowledged") && reveal.getBoolean("upAcknowledged")', 'more.admit(', 'reveal.put("foregroundTargetAfter", true).put("ok", true)']) assert.ok(flow.includes(value),value);
+  const finger=java.slice(java.indexOf('    private void finger(float x, float y, String role, Rect targetBounds, String observationEpoch, AcquiredMore acquired)'),java.indexOf('    private void inject('));
+  assert.ok(finger.includes('boolean deferredRevealProof = role.equals("reveal") && "menu-only".equals(observationEpoch)'));
+  assert.ok(finger.includes('if (!deferredRevealProof)'));
+  assert.ok(finger.includes('.put("foregroundTargetBefore", false).put("foregroundTargetAfter", false)'));
+  assert.ok(finger.indexOf('acquired.admit(')<finger.indexOf('state.admit()'));
+  assert.ok(finger.indexOf('state.admit()')<finger.indexOf('inject(down, down, MotionEvent.ACTION_DOWN'));
+  assert.ok(finger.includes('if (state.streamActive)'));
+  assert.doesNotMatch(finger,/boolean stream = true|UiObject2|findObjects|getWindows/);
+  const inject=java.slice(java.indexOf('    private void inject('),java.indexOf('    private void assertVisible('));
+  assert.ok(inject.indexOf('state.attemptingDown()')<inject.indexOf('automation.injectInputEvent(event, true)'));
+  assert.ok(inject.indexOf('automation.injectInputEvent(event, true)')<inject.indexOf('state.downAck(acknowledged)'));
+});
+test('actual Java acquisition bounds identities and acknowledged-stream policy compile and execute', () => {
+  const start=java.indexOf('    static final class AcquisitionPolicy {');
+  const end=java.indexOf('    private static final class AcquiredMore',start);
+  const fs=java.indexOf('    static final class FingerState {');const fe=java.indexOf('    private void finger(',fs);
+  assert.ok(start>=0 && end>start && fs>=0 && fe>fs);
+  const constants=['PRODUCT','PLAYER'].map(name=>java.match(new RegExp(`    private static final String ${name} = [^;]+;`))?.[0]);assert.ok(constants.every(Boolean));
+  const checks=`
+    AcquisitionPolicy.owner(PRODUCT,true,2);
+    reject(()->AcquisitionPolicy.owner(null,true,2)); reject(()->AcquisitionPolicy.owner("foreign",true,2));
+    reject(()->AcquisitionPolicy.owner(PRODUCT,false,2)); reject(()->AcquisitionPolicy.owner(PRODUCT,true,-1));
+    if(!AcquisitionPolicy.player(PRODUCT,"android.app.Dialog",PLAYER))throw new AssertionError();
+    if(AcquisitionPolicy.player("foreign","android.app.Dialog",PLAYER) || AcquisitionPolicy.player(PRODUCT,"Other",PLAYER) || AcquisitionPolicy.player(PRODUCT,"android.app.Dialog","foreign"))throw new AssertionError();
+    if(!AcquisitionPolicy.more(PRODUCT,"Playback settings",null) || !AcquisitionPolicy.more(PRODUCT,null,"Playback settings") || AcquisitionPolicy.more(null,"Playback settings",null) || AcquisitionPolicy.more(PRODUCT,"other",null))throw new AssertionError();
+    AcquisitionPolicy.windows(2,2,2);reject(()->AcquisitionPolicy.windows(2,3,2));reject(()->AcquisitionPolicy.windows(2,2,3));
+    AcquisitionPolicy.unique(1,1);reject(()->AcquisitionPolicy.unique(0,1));reject(()->AcquisitionPolicy.unique(2,1));reject(()->AcquisitionPolicy.unique(1,0));reject(()->AcquisitionPolicy.unique(1,2));
+    AcquisitionPolicy.ancestor(0,true);AcquisitionPolicy.ancestor(6,true);reject(()->AcquisitionPolicy.ancestor(7,true));reject(()->AcquisitionPolicy.ancestor(1,false));
+    AcquisitionPolicy budget=new AcquisitionPolicy();for(int i=0;i<512;i++)budget.visit(32);reject(()->budget.visit(32));
+    reject(()->new AcquisitionPolicy().visit(33));reject(()->new AcquisitionPolicy().visit(-1));
+    FingerState refused=new FingerState();if(refused.streamActive || refused.downAdmitted || refused.downInjectionAttempted)throw new AssertionError();
+    reject(()->refused.cancelAck(true));reject(()->refused.attemptingDown());
+    FingerState rejected=new FingerState();rejected.admit();rejected.attemptingDown();rejected.downAck(false);
+    if(rejected.streamActive || rejected.downAcknowledged || !rejected.downInjectionAttempted)throw new AssertionError();reject(()->rejected.cancelAck(true));
+    FingerState open=new FingerState();open.admit();open.attemptingDown();open.downAck(true);if(!open.streamActive)throw new AssertionError();
+    open.upAck(false);if(!open.streamActive)throw new AssertionError();open.cancelAck(true);if(open.streamActive || !open.cancelAcknowledged)throw new AssertionError();
+    FingerState complete=new FingerState();complete.admit();complete.attemptingDown();complete.downAck(true);complete.upAck(true);
+    if(complete.streamActive || !complete.upAcknowledged)throw new AssertionError();reject(()->complete.cancelAck(true));`;
+  const base=process.env.RUNNER_TEMP||process.env.TMPDIR;assert.ok(base?.startsWith('/'));
+  const dir=realpathSync(mkdtempSync(join(base,'native-acquisition-')));
+  writeFileSync(join(dir,'NativeAcquisitionHarness.java'),`public final class NativeAcquisitionHarness {\n${constants.join('\n')}\n${java.slice(start,end)}\n${java.slice(fs,fe)}\nstatic void reject(Runnable r){try{r.run();}catch(IllegalStateException expected){return;}throw new AssertionError("accepted invalid policy");}\npublic static void main(String[] args){${checks}\nSystem.out.println("native-acquisition-policy:passed");}\n}`);
+  const javac=process.env.JAVA_HOME?join(process.env.JAVA_HOME,'bin/javac'):'javac';const javaCommand=process.env.JAVA_HOME?join(process.env.JAVA_HOME,'bin/java'):'java';
+  const compile=spawnSync(javac,[`-J-Djava.io.tmpdir=${dir}`,'-d',dir,join(dir,'NativeAcquisitionHarness.java')],{encoding:'utf8',timeout:20000});assert.equal(compile.status,0,compile.stderr);
+  const run=spawnSync(javaCommand,[`-Djava.io.tmpdir=${dir}`,'-cp',dir,'NativeAcquisitionHarness'],{encoding:'utf8',timeout:20000});assert.equal(run.status,0,run.stderr);assert.equal(run.stdout.trim(),'native-acquisition-policy:passed');
 });

@@ -8,14 +8,14 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const PIN = Object.freeze({
-  source: '8ac8130f7fcc68ee707766f1874e99ba4227a102', run: '42637363492', artifactId: '13683753736',
-  sha256: '75ae7f2e8559d14facef7d4c25e7a711699a0c9075d5ece913a32cfbca24c493',
-  bytes: 88710017, version: '2.3.91', code: '2003091',
+  source: '71ac64423a00df601d35142c2bbae774cff3037b', run: '42643241753', artifactId: '13687171562',
+  sha256: 'c25114fe2e6a6e61923162177348c98154733ff0d37bb556698c20c98716adb1',
+  bytes: 88705921, version: '2.3.91', code: '2003091',
   signer: '233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a',
   image: 'system-images;android-36;google_apis;x86_64', serial: 'emulator-5554',
   avd: 'yawf-private91-more-api36', gpu: 'swiftshader_indirect', guestCores: 4, guestMemoryMiB: 4096,
   fixture: 'bf7e5b5852addbec5ceb9160def48eb4832462924bd8e4073cdce1f67540d157',
-  prefix: '0875e651539279def8cd49cc364eed0ee9d55ea64bcaadeefb78a1671e64786b',
+  prefix: 'a499d5e87cdc480d38e353ca2b7b877b2c42fb8218424febb241257834db4fb0',
 });
 const PRODUCT = 'com.tgk30.debridstreamer';
 const HARNESS = 'com.yawf.runtimeinstrumentation';
@@ -147,6 +147,27 @@ export function validate91Acquisition(receipt) {
     && Number.isSafeInteger(receipt.moreAcquiredUptimeMs) && receipt.moreAcquisitionStartedUptimeMs>=up
     && receipt.moreAcquiredUptimeMs>=receipt.moreAcquisitionStartedUptimeMs && receipt.moreAcquiredUptimeMs<=down,
     'Stale More acquisition is not admitted');
+  const a=receipt.moreAcquisition;
+  requireTrue(a && a.rootPackageMatches===true && a.playerPackageMatches===true && a.targetPackageMatches===true
+    && a.playerCount===1 && a.targetCount===1 && a.clearCacheCount===1 && a.activeRootCount===1,
+    'One exact owned root/player/More snapshot required');
+  requireTrue(Number.isSafeInteger(a.rootWindowId) && a.rootWindowId>=0 && a.playerWindowId===a.rootWindowId
+    && a.targetWindowId===a.rootWindowId && Number.isSafeInteger(a.targetIdentity), 'Acquired window/identity mismatch');
+  requireTrue(Number.isSafeInteger(a.nodesVisited) && a.nodesVisited>=1 && a.nodesVisited<=512
+    && Number.isSafeInteger(a.maxDepth) && a.maxDepth>=0 && a.maxDepth<=32
+    && Number.isSafeInteger(a.ancestorDistance) && a.ancestorDistance>=0 && a.ancestorDistance<=6,
+    'Acquisition traversal/ancestor bound exceeded');
+  const validRect=r=>Array.isArray(r) && r.length===4 && r.every(Number.isSafeInteger)
+    && r[0]>=0 && r[1]>=0 && r[2]>r[0] && r[3]>r[1];
+  const inside=(outer,inner)=>inner[0]>=outer[0] && inner[1]>=outer[1] && inner[2]<=outer[2] && inner[3]<=outer[3];
+  requireTrue(validRect(a.rootBounds) && validRect(a.playerBounds) && validRect(a.targetBounds)
+    && Number.isSafeInteger(a.screenWidth) && Number.isSafeInteger(a.screenHeight)
+    && a.rootBounds[2]<=a.screenWidth && a.rootBounds[3]<=a.screenHeight
+    && inside(a.rootBounds,a.playerBounds) && inside(a.playerBounds,a.targetBounds)
+    && JSON.stringify(a.targetBounds)===JSON.stringify(more[0].targetBounds), 'Copied target bounds escaped owned root/player');
+  requireTrue(reveals[0].foregroundAfterUptimeMs===receipt.moreAcquiredUptimeMs
+    && reveals[0].x>=a.rootBounds[0] && reveals[0].x<a.rootBounds[2]
+    && reveals[0].y>=a.rootBounds[1] && reveals[0].y<a.rootBounds[3], 'Shared root did not prove post-reveal foreground');
   requireTrue(receipt.moreDownAttemptUptimeMs===down && down-up>=0 && down-up<=1200, 'Actual More DOWN exceeded1200ms since reveal UP');
 }
 
@@ -163,7 +184,8 @@ function validateNativeMenuEvidence(receipt, menuOnly) {
       && Number.isFinite(input.x) && Number.isFinite(input.y) && input.x >= input.targetBounds[0] && input.x < input.targetBounds[2]
       && input.y >= input.targetBounds[1] && input.y < input.targetBounds[3], 'Native target escaped fresh measured bounds');
     requireTrue(input.ok === true && input.tool === 'finger' && input.toolType === 1 && input.durationMs === 100 && input.steps === 2
-      && input.foregroundTargetBefore === true && input.foregroundTargetAfter === true && input.upAcknowledged === true
+      && input.foregroundTargetBefore === true && input.foregroundTargetAfter === true
+      && input.downAdmitted === true && input.downInjectionAttempted === true && input.downAcknowledged === true && input.upAcknowledged === true
       && input.streamMayRemain === false && input.cancelAcknowledged === false, 'Native input release/foreground/UP proof failed');
     requireTrue(Array.isArray(input.eventUptimeMs) && input.eventUptimeMs.length === 3 && input.eventUptimeMs.every(Number.isSafeInteger)
       && input.eventUptimeMs[0] >= input.downUptimeMs && input.eventUptimeMs[1] >= input.eventUptimeMs[0]

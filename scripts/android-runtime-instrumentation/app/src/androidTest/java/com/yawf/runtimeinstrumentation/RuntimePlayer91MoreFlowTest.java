@@ -70,6 +70,7 @@ public final class RuntimePlayer91MoreFlowTest {
     private long chromeRevealUp = -1;
     private final JSONArray chromeAbsenceObservations = new JSONArray();
     private long moreAcquisitionStarted = -1, moreAcquired = -1, moreDownAttempt = -1;
+    private JSONObject moreAcquisitionProof;
     private int usernameFocusClicks, passwordFocusClicks, usernameTextSends, passwordTextSends;
     private boolean usernameCommittedBeforePassword, usernameCommittedAfterPassword, passwordTextSendReturned;
 
@@ -116,6 +117,7 @@ public final class RuntimePlayer91MoreFlowTest {
                     .put("chromeAbsenceObservations", chromeAbsenceObservations)
                     .put("moreAcquisitionStartedUptimeMs", moreAcquisitionStarted).put("moreAcquiredUptimeMs", moreAcquired)
                     .put("moreDownAttemptUptimeMs", moreDownAttempt).put("moreWindowLimitMs", 1_200)
+                    .put("moreAcquisition", moreAcquisitionProof)
                     .put("inputs", inputs).put("phases", phases).put("captures", captures)
                     .put("textEntryMethod", "UiObject2.click+Instrumentation.sendStringSync")
                     .put("usernameFocusClicks", usernameFocusClicks).put("passwordFocusClicks", passwordFocusClicks)
@@ -254,15 +256,22 @@ public final class RuntimePlayer91MoreFlowTest {
         step("more-transaction");
         chromeRevealPerformed = true;
         chromeRevealEpochs.add("menu-only");
+        int screenWidth = device.getDisplayWidth(), screenHeight = device.getDisplayHeight();
         finger(bounds.left + bounds.width() * 0.5f, bounds.top + bounds.height() * 0.32f, "reveal", bounds, "menu-only");
         chromeRevealUp = inputs.getJSONObject(inputs.length() - 1).getJSONArray("eventUptimeMs").getLong(2);
-        // Only fresh acquisition and required native foreground/bounds checks occur before More DOWN.
+        // One shared post-reveal/pre-More root, then copied data only until DOWN.
         moreAcquisitionStarted = now();
-        fresh();
-        UiObject2 more = menuOnlyMore();
+        AcquiredMore more = acquireMoreOnce(screenWidth, screenHeight);
         moreAcquired = now();
-        assertNotNull("Fresh More must appear after the one reveal; no retry is admitted", more);
-        tapObject(more, "more");
+        JSONObject reveal = inputs.getJSONObject(inputs.length() - 1);
+        assertTrue("Shared root must follow the actual reveal UP", moreAcquired >= chromeRevealUp);
+        assertTrue("Shared foreground root must contain the acknowledged reveal point",
+                more.root.contains((int) reveal.getDouble("x"), (int) reveal.getDouble("y")));
+        assertTrue("Reveal requires acknowledged DOWN and UP before shared proof", reveal.getBoolean("downAcknowledged") && reveal.getBoolean("upAcknowledged"));
+        more.admit(more.target.exactCenterX(), more.target.exactCenterY());
+        moreAcquisitionProof = more.proof();
+        reveal.put("foregroundTargetAfter", true).put("ok", true).put("foregroundAfterUptimeMs", moreAcquired);
+        finger(more.target.exactCenterX(), more.target.exactCenterY(), "more", more.target, null, more);
         long deadline = now() + 3_000;
         while (now() < deadline) {
             fresh(); guard();
@@ -293,6 +302,132 @@ public final class RuntimePlayer91MoreFlowTest {
             SystemClock.sleep(200);
         } while (now() < deadline);
         throw new AssertionError("Two consecutive fresh chrome-absent AX observations were not established; no reveal admitted");
+    }
+
+    static final class AcquisitionPolicy {
+        int nodes, deepest;
+        void visit(int depth) {
+            if (depth < 0 || depth > 32 || ++nodes > 512) throw new IllegalStateException("Acquisition traversal bound exceeded");
+            deepest = Math.max(deepest, depth);
+        }
+        static void owner(String pkg, boolean visible, int window) {
+            if (!PRODUCT.equals(pkg) || !visible || window < 0) throw new IllegalStateException("Acquisition owner unavailable");
+        }
+        static boolean player(String pkg, String clazz, String text) {
+            return PRODUCT.equals(pkg) && "android.app.Dialog".equals(clazz) && PLAYER.equals(text);
+        }
+        static boolean more(String pkg, String text, String description) {
+            return PRODUCT.equals(pkg) && ("Playback settings".equals(text) || "Playback settings".equals(description));
+        }
+        static void windows(int root, int player, int target) {
+            if (root < 0 || player != root || target != root) throw new IllegalStateException("Acquisition window changed");
+        }
+        static void ancestor(int distance, boolean inside) {
+            if (distance < 0 || distance > 6 || !inside) throw new IllegalStateException("More ancestor escaped player");
+        }
+        static void unique(int players, int targets) {
+            if (players != 1 || targets != 1) throw new IllegalStateException("Missing or ambiguous player/More");
+        }
+    }
+
+    private static final class AcquiredMore {
+        final Rect root, player, target;
+        final int window, playerWindow, targetWindow, width, height, nodes, depth, ancestor, identity;
+        AcquiredMore(Rect root, Rect player, Rect target, int window, int width, int height,
+                     int nodes, int depth, int ancestor, int identity, int playerWindow, int targetWindow) {
+            this.root = new Rect(root); this.player = new Rect(player); this.target = new Rect(target);
+            this.window = window; this.playerWindow = playerWindow; this.targetWindow = targetWindow; this.width = width; this.height = height;
+            this.nodes = nodes; this.depth = depth; this.ancestor = ancestor; this.identity = identity;
+        }
+        void admit(float x, float y) {
+            AcquisitionPolicy.windows(window, playerWindow, targetWindow);
+            assertTrue("Copied root/player/More bounds invalid", width > 0 && height > 0 &&
+                    !root.isEmpty() && root.left >= 0 && root.top >= 0 && root.right <= width && root.bottom <= height &&
+                    !player.isEmpty() && root.contains(player) && !target.isEmpty() && player.contains(target) &&
+                    x >= target.left && x < target.right && y >= target.top && y < target.bottom);
+        }
+        JSONObject proof() throws Exception {
+            return new JSONObject().put("rootPackageMatches", true).put("playerPackageMatches", true).put("targetPackageMatches", true)
+                    .put("rootWindowId", window).put("playerWindowId", playerWindow).put("targetWindowId", targetWindow)
+                    .put("rootBounds", rect(root)).put("playerBounds", rect(player)).put("targetBounds", rect(target))
+                    .put("screenWidth", width).put("screenHeight", height).put("nodesVisited", nodes).put("maxDepth", depth)
+                    .put("ancestorDistance", ancestor).put("targetIdentity", identity).put("playerCount", 1).put("targetCount", 1)
+                    .put("clearCacheCount", 1).put("activeRootCount", 1);
+        }
+    }
+    private static final class MoreScan {
+        final AcquisitionPolicy policy = new AcquisitionPolicy();
+        final Rect root;
+        final int window;
+        int players, targets, ancestor, playerWindow = -1, targetWindow = -1;
+        Rect player, target;
+        AccessibilityNodeInfo identity;
+        MoreScan(Rect root, int window) { this.root = root; this.window = window; }
+    }
+    private AcquiredMore acquireMoreOnce(int width, int height) {
+        assertTrue("Public API36 cache refresh failed", automation.clearCache());
+        AccessibilityNodeInfo root = automation.getRootInActiveWindow();
+        assertNotNull("The owned active root is unavailable", root);
+        MoreScan scan = null;
+        try {
+            AcquisitionPolicy.owner(String.valueOf(root.getPackageName()), root.isVisibleToUser(), root.getWindowId());
+            Rect bounds = new Rect(); root.getBoundsInScreen(bounds);
+            assertTrue("Invalid active root bounds", !bounds.isEmpty() && bounds.left >= 0 && bounds.top >= 0 && bounds.right <= width && bounds.bottom <= height);
+            scan = new MoreScan(bounds, root.getWindowId());
+            scanMore(root, new ArrayList<>(), -1, null, scan);
+            AcquisitionPolicy.unique(scan.players, scan.targets);
+            return new AcquiredMore(bounds, scan.player, scan.target, scan.window, width, height,
+                    scan.policy.nodes, scan.policy.deepest, scan.ancestor, scan.identity.hashCode(), scan.playerWindow, scan.targetWindow);
+        } finally {
+            if (scan != null && scan.identity != null) scan.identity.recycle();
+            root.recycle();
+        }
+    }
+    private void scanMore(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> path, int playerIndex, Rect playerBounds, MoreScan scan) {
+        scan.policy.visit(path.size());
+        path.add(node);
+        try {
+            String pkg = String.valueOf(node.getPackageName()), clazz = String.valueOf(node.getClassName());
+            String text = node.getText() == null ? null : node.getText().toString();
+            String description = node.getContentDescription() == null ? null : node.getContentDescription().toString();
+            if ("android.app.Dialog".equals(clazz) && PLAYER.equals(text)) {
+                assertTrue("Wrong player package or identity", AcquisitionPolicy.player(pkg, clazz, text));
+                AcquisitionPolicy.owner(pkg, node.isVisibleToUser(), node.getWindowId());
+                assertEquals("Player escaped active window", scan.window, node.getWindowId());
+                assertEquals("Ambiguous exact player", 1, ++scan.players);
+                playerBounds = new Rect(); node.getBoundsInScreen(playerBounds);
+                assertTrue("Player escaped active root", !playerBounds.isEmpty() && scan.root.contains(playerBounds));
+                playerIndex = path.size() - 1; scan.player = new Rect(playerBounds); scan.playerWindow = node.getWindowId();
+            }
+            if (playerIndex >= 0 && ("Playback settings".equals(text) || "Playback settings".equals(description))) {
+                assertTrue("Wrong More package or identity", AcquisitionPolicy.more(pkg, text, description));
+                AcquisitionPolicy.owner(pkg, node.isVisibleToUser(), node.getWindowId());
+                boolean found = false;
+                for (int index = path.size() - 1, distance = 0; index >= playerIndex && distance <= 6; index--, distance++) {
+                    AccessibilityNodeInfo candidate = path.get(index);
+                    if (!candidate.isEnabled() || !candidate.isClickable()) continue;
+                    AcquisitionPolicy.ancestor(distance, index >= playerIndex);
+                    AcquisitionPolicy.owner(String.valueOf(candidate.getPackageName()), candidate.isVisibleToUser(), candidate.getWindowId());
+                    AcquisitionPolicy.windows(scan.window, node.getWindowId(), candidate.getWindowId());
+                    Rect target = new Rect(); candidate.getBoundsInScreen(target);
+                    assertTrue("More escaped player", !target.isEmpty() && playerBounds.contains(target));
+                    if (scan.identity == null) {
+                        scan.identity = AccessibilityNodeInfo.obtain(candidate); scan.target = target;
+                        scan.targets = 1; scan.ancestor = distance; scan.targetWindow = candidate.getWindowId();
+                    } else assertTrue("Ambiguous More target", scan.identity.equals(candidate));
+                    found = true; break;
+                }
+                assertTrue("No enabled clickable More ancestor within player", found);
+            }
+            int children = node.getChildCount();
+            assertTrue("Child count exceeds the bounded snapshot", children >= 0 && children <= 512);
+            for (int index = 0; index < children; index++) {
+                AccessibilityNodeInfo child = node.getChild(index);
+                assertNotNull("Snapshot child became unavailable", child);
+                try { scanMore(child, path, playerIndex, playerBounds, scan); }
+                finally { child.recycle(); }
+            }
+        } finally { path.remove(path.size() - 1); }
     }
 
     private UiObject2 menuOnlyMore() {
@@ -535,65 +670,87 @@ public final class RuntimePlayer91MoreFlowTest {
         finger(x, y, role, targetBounds, null);
     }
 
-    private void finger(float x, float y, String role, Rect targetBounds, String observationEpoch) throws Exception {
-        if (role.equals("more")) {
-            assertFalse("A previous injected stream failed", terminalInputFailure);
-            assertTrue("Fresh acquisition must follow the captured reveal UP", chromeRevealUp >= 0 && moreAcquisitionStarted >= chromeRevealUp && moreAcquired >= moreAcquisitionStarted);
-        } else {
-            guard();
+    static final class FingerState {
+        boolean downAdmitted, downInjectionAttempted, downAcknowledged, streamActive, upAcknowledged, cancelAcknowledged;
+        void admit() { downAdmitted = true; }
+        void attemptingDown() {
+            if (!downAdmitted || downInjectionAttempted) throw new IllegalStateException("DOWN is not admitted");
+            downInjectionAttempted = true;
         }
-        Rect before = foreground(x, y);
-        long down = now();
-        boolean stream = true;
-        boolean up = false;
-        boolean cancel = false;
+        void downAck(boolean acknowledged) { if (!downInjectionAttempted) throw new IllegalStateException("DOWN was not attempted"); downAcknowledged = acknowledged; streamActive = acknowledged; }
+        void upAck(boolean acknowledged) { if (!streamActive) throw new IllegalStateException("No acknowledged stream for UP"); if (acknowledged) { upAcknowledged = true; streamActive = false; } }
+        void cancelAck(boolean acknowledged) { if (!streamActive) throw new IllegalStateException("No acknowledged stream for CANCEL"); if (acknowledged) { cancelAcknowledged = true; streamActive = false; } }
+    }
+    private void finger(float x, float y, String role, Rect targetBounds, String observationEpoch) throws Exception {
+        finger(x, y, role, targetBounds, observationEpoch, null);
+    }
+    private void finger(float x, float y, String role, Rect targetBounds, String observationEpoch, AcquiredMore acquired) throws Exception {
+        FingerState state = new FingerState();
+        boolean deferredRevealProof = role.equals("reveal") && "menu-only".equals(observationEpoch);
         JSONArray times = new JSONArray();
         JSONObject proof = new JSONObject().put("role", role).put("tool", "finger").put("toolType", 1)
-                .put("durationMs", 100).put("steps", 2).put("x", x).put("y", y)
-                .put("foregroundTargetBefore", true).put("downUptimeMs", down)
-                .put("targetBounds", rect(targetBounds)).put("foregroundBounds", rect(before));
+                .put("durationMs", 100).put("steps", 2).put("x", x).put("y", y).put("ok", false)
+                .put("foregroundTargetBefore", false).put("foregroundTargetAfter", false).put("downUptimeMs", -1)
+                .put("targetBounds", rect(targetBounds));
         if (observationEpoch != null) proof.put("observationEpoch", observationEpoch);
+        long down = -1;
         try {
-            inject(down, MotionEvent.ACTION_DOWN, x, y, times, role);
+            Rect before;
+            if (role.equals("more")) {
+                assertFalse("A previous injected stream failed", terminalInputFailure);
+                assertNotNull("More requires its single acquired root", acquired);
+                acquired.admit(x, y); before = acquired.root;
+                assertTrue("Fresh acquisition must follow the captured reveal UP", chromeRevealUp >= 0 && moreAcquisitionStarted >= chromeRevealUp && moreAcquired >= moreAcquisitionStarted);
+            } else { guard(); before = foreground(x, y); }
+            proof.put("foregroundTargetBefore", true).put("foregroundBounds", rect(before));
+            down = now();
+            if (role.equals("more")) {
+                moreDownAttempt = down;
+                assertTrue("Actual More DOWN missed the1200ms reveal-UP window", down >= moreAcquired && down - chromeRevealUp <= 1_200);
+            }
+            state.admit();
+            inject(down, down, MotionEvent.ACTION_DOWN, x, y, times, state);
             for (int step = 1; step <= 2; step++) {
                 SystemClock.sleep(Math.max(0, down + 100L * step / 2 - now()));
                 assertTrue("Native input deadline exceeded", now() - down < 2_000);
-                inject(down, step == 2 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE, x, y, times, role);
-                if (step == 2) { up = true; stream = false; }
+                inject(down, now(), step == 2 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE, x, y, times, state);
             }
-            assertEquals("Foreground changed during native input", before, foreground(x, y));
-            proof.put("foregroundTargetAfter", true).put("ok", true);
+            if (!deferredRevealProof) {
+                assertEquals("Foreground changed during native input", before, foreground(x, y));
+                proof.put("foregroundTargetAfter", true).put("ok", true);
+            }
         } catch (Exception | AssertionError failure) {
             terminalInputFailure = true;
-            proof.put("ok", false);
             throw failure;
         } finally {
-            if (stream) {
-                try { inject(down, MotionEvent.ACTION_CANCEL, x, y, times, role); stream = false; cancel = true; }
+            if (state.streamActive) {
+                try { inject(down, now(), MotionEvent.ACTION_CANCEL, x, y, times, state); }
                 catch (Throwable ignored) { terminalInputFailure = true; }
             }
-            proof.put("upAcknowledged", up).put("cancelAcknowledged", cancel).put("streamMayRemain", stream)
+            proof.put("downUptimeMs", down).put("downAdmitted", state.downAdmitted).put("downInjectionAttempted", state.downInjectionAttempted)
+                    .put("downAcknowledged", state.downAcknowledged).put("upAcknowledged", state.upAcknowledged)
+                    .put("cancelAcknowledged", state.cancelAcknowledged).put("streamMayRemain", state.streamActive)
                     .put("eventUptimeMs", times).put("finishedUptimeMs", now());
             inputs.put(proof);
         }
     }
-
-    private void inject(long down, int action, float x, float y, JSONArray times, String role) {
+    private void inject(long down, long at, int action, float x, float y, JSONArray times, FingerState state) {
         MotionEvent.PointerProperties property = new MotionEvent.PointerProperties();
         property.id = 0; property.toolType = MotionEvent.TOOL_TYPE_FINGER;
         MotionEvent.PointerCoords coordinate = new MotionEvent.PointerCoords();
         coordinate.x = x; coordinate.y = y; coordinate.pressure = 1; coordinate.size = 1;
-        long at = now();
-        if (role.equals("more") && action == MotionEvent.ACTION_DOWN) {
-            moreDownAttempt = at;
-            assertTrue("Actual More DOWN missed the1200ms reveal-UP window", at >= moreAcquired && at - chromeRevealUp <= 1_200);
-        }
-        times.put(at);
         MotionEvent event = MotionEvent.obtain(down, at, action, 1,
                 new MotionEvent.PointerProperties[]{property}, new MotionEvent.PointerCoords[]{coordinate},
                 0, 0, 1, 1, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
-        try { assertTrue("SDK input injection was not acknowledged", automation.injectInputEvent(event, true)); }
-        finally { event.recycle(); }
+        try {
+            if (action == MotionEvent.ACTION_DOWN) state.attemptingDown();
+            times.put(at);
+            boolean acknowledged = automation.injectInputEvent(event, true);
+            if (action == MotionEvent.ACTION_DOWN) state.downAck(acknowledged);
+            else if (action == MotionEvent.ACTION_UP) state.upAck(acknowledged);
+            else if (action == MotionEvent.ACTION_CANCEL) state.cancelAck(acknowledged);
+            assertTrue("SDK input injection was not acknowledged", acknowledged);
+        } finally { event.recycle(); }
     }
 
     private void assertVisible(UiObject2 node) {
