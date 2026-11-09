@@ -62,6 +62,8 @@ public final class RuntimePlayer90MoreFlowTest {
     private boolean uniqueMenu;
     private boolean terminalInputFailure;
     private Rect menuBounds;
+    private int usernameFocusClicks, passwordFocusClicks, usernameTextSends, passwordTextSends;
+    private boolean usernameCommittedBeforePassword, usernameCommittedAfterPassword, passwordTextSendReturned;
 
     @Test
     public void production90OpensMoreWithNativeFinger() throws Throwable {
@@ -96,6 +98,12 @@ public final class RuntimePlayer90MoreFlowTest {
                     .put("menuHeading", menuHeading).put("uniqueMenu", uniqueMenu)
                     .put("menuBounds", menuBounds == null ? JSONObject.NULL : rect(menuBounds))
                     .put("inputs", inputs).put("phases", phases).put("captures", captures)
+                    .put("textEntryMethod", "UiObject2.click+Instrumentation.sendStringSync")
+                    .put("usernameFocusClicks", usernameFocusClicks).put("passwordFocusClicks", passwordFocusClicks)
+                    .put("usernameTextSends", usernameTextSends).put("passwordTextSends", passwordTextSends)
+                    .put("usernameCommittedBeforePassword", usernameCommittedBeforePassword)
+                    .put("usernameCommittedAfterPassword", usernameCommittedAfterPassword)
+                    .put("passwordTextSendReturned", passwordTextSendReturned)
                     .put("decodedImageReviewRequired", true).put("bundledPlaybackClaimed", false)
                     .put("externalPlayerClaimed", false).put("singleUiAutomationOwner", true);
             write("receipt.json", receipt.toString(2));
@@ -128,10 +136,17 @@ public final class RuntimePlayer90MoreFlowTest {
         dismissIme();
         click("Open server", 10_000);
         requireText("Sign in", 20_000);
-        List<UiObject2> login = fields(3);
-        login.get(0).setText(USER);
-        login.get(1).setText(PASSWORD);
-        assertEquals("Synthetic username was not entered completely", USER, login.get(0).getText());
+        focusLoginField(0);
+        usernameTextSends++;
+        instrumentation.sendStringSync(USER);
+        usernameCommittedBeforePassword = waitForUsernameCommit();
+        assertTrue("Synthetic username did not commit before password entry", usernameCommittedBeforePassword);
+        focusLoginField(1);
+        passwordTextSends++;
+        instrumentation.sendStringSync(PASSWORD);
+        passwordTextSendReturned = true;
+        usernameCommittedAfterPassword = waitForUsernameCommit();
+        assertTrue("Synthetic username changed during password entry", usernameCommittedAfterPassword);
         dismissIme();
         click("Sign in", 5_000);
         step("hosted-signed-in");
@@ -286,6 +301,30 @@ public final class RuntimePlayer90MoreFlowTest {
         List<UiObject2> values = device.findObjects(By.pkg(PRODUCT).clazz("android.widget.EditText"));
         assertEquals("Editable fields must match the ordinary form exactly", count, values.size());
         return values;
+    }
+
+    private void focusLoginField(int index) {
+        UiObject2 target = fields(3).get(index);
+        assertVisible(target);
+        if (index == 0) { assertEquals(0, usernameFocusClicks++); }
+        else { assertEquals(1, index); assertEquals(0, passwordFocusClicks++); }
+        // Ordinary public focus, not a FINGER proof. The IME may legitimately become active.
+        target.click();
+        long deadline = now() + 3_000;
+        do {
+            if (fields(3).get(index).isFocused()) return;
+            SystemClock.sleep(100);
+        } while (now() < deadline);
+        throw new AssertionError("The ordinary login field focus did not settle");
+    }
+
+    private boolean waitForUsernameCommit() {
+        long deadline = now() + 5_000;
+        do {
+            if (USER.equals(fields(3).get(0).getText())) return true;
+            SystemClock.sleep(100);
+        } while (now() < deadline);
+        return false;
     }
 
     private void dismissIme() {

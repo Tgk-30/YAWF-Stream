@@ -231,6 +231,23 @@ test('runtime owns fresh AVD fixture and failure evidence before cleanup', () =>
   assert.match(driver, /requireTrue\(wait < 10, 'Strict guest IO admission failed'\)/);
   assert.match(driver, /Current boot ANR observed/);
 });
+test('login uses one ordinary field focus and one public SDK text send per fixture field', () => {
+  assert.equal((java.match(/instrumentation\.sendStringSync\(USER\)/g) || []).length, 1);
+  assert.equal((java.match(/instrumentation\.sendStringSync\(PASSWORD\)/g) || []).length, 1);
+  assert.doesNotMatch(java, /\.setText\((?:USER|PASSWORD)\)/);
+  assert.match(java, /private void focusLoginField\(int index\)[\s\S]*?fields\(3\)\.get\(index\)[\s\S]*?target\.click\(\)/);
+  assert.match(java, /\.put\("textEntryMethod", "UiObject2\.click\+Instrumentation\.sendStringSync"\)/);
+});
+test('login waits for fresh exact username commit before password and after its single text send', () => {
+  const before = java.indexOf('usernameCommittedBeforePassword = waitForUsernameCommit()');
+  const password = java.indexOf('instrumentation.sendStringSync(PASSWORD)');
+  const after = java.indexOf('usernameCommittedAfterPassword = waitForUsernameCommit()');
+  assert.ok(before >= 0 && before < password && password < after);
+  assert.match(java, /USER\.equals\(fields\(3\)\.get\(0\)\.getText\(\)\)/);
+  assert.match(java, /fields\(3\)\.get\(index\)\.isFocused\(\)/);
+  for (const key of ['usernameCommittedBeforePassword', 'usernameCommittedAfterPassword', 'passwordTextSendReturned',
+    'usernameFocusClicks', 'passwordFocusClicks', 'usernameTextSends', 'passwordTextSends']) assert.ok(java.includes(`.put("${key}",`));
+});
 test('native enrollment prompt declines using observed exact uppercase NOT NOW', () => {
   assert.match(java, /if \(text\("Enable Android update checks\?"\) != null\) \{\s+click\("NOT NOW", 3_000\);/);
 });
