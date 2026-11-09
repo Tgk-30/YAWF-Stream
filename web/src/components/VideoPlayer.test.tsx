@@ -15750,7 +15750,12 @@ describe("mobile background playback lifecycle", () => {
     f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video);
     f.video.currentTime = 1; fireEvent.timeUpdate(f.video);
     f.video.currentTime = 2; fireEvent.timeUpdate(f.video);
-    if (intent === "Play") { f.state.paused = true; fireEvent.pause(f.video); }
+    fireEvent.pointerMove(f.video); // Reveal controls after the long background interval.
+    if (intent === "Play") {
+      f.state.paused = true; fireEvent.pause(f.video);
+      // Platform pause preserves queued playing intent; issue a real Pause first.
+      fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    }
     fireEvent.click(screen.getByRole("button", { name: intent }));
     f.state.paused = intent === "Pause";
     fireEvent(f.video, new Event(f.state.paused ? "pause" : "play"));
@@ -16567,4 +16572,126 @@ describe("native authoritative metadata89", () => {
     current.resolve({ durationSeconds: 48 }); await settleKnown(); expect(latestKnown()).toBe(48);
   });
 
+});
+
+describe("existing HTML reader foreground ownership90", () => {
+  const restore: Array<() => void> = [];
+  afterEach(() => { while (restore.length) restore.pop()!(); });
+  async function flush90() { await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }); }
+  async function setup90(offset = 0) {
+    vi.useFakeTimers(); deviceKindMock.mockReturnValue("android");
+    restore.push(replaceProperty(window, "__YAWF_NATIVE_SAFE_AREA__", { getInsets: vi.fn() }));
+    restore.push(replaceProperty(document, "visibilityState", "visible"));
+    const tracks = Object.assign(new EventTarget(), { 0: { id: "jp", label: "Japanese", language: "jpn", enabled: true }, length: 1 });
+    restore.push(replaceProperty(HTMLMediaElement.prototype, "audioTracks", tracks));
+    const refresh = vi.fn(async (_position: number, _handoff: PlaybackHandoffState) => {}), progress = vi.fn(), ended = vi.fn(), next = vi.fn();
+    const props = { title: "Lifecycle90", url: "https://x/lifecycle90.mp4", sourceRevision: 0, engine: "webview-direct" as const,
+      timelineOffsetSeconds: offset, refreshCurrentSource: refresh, onProgress: progress, onEnded: ended, onPlayNext: next,
+      serverOptimized: { qualities: ["480p"] as const, request: vi.fn() }, onClose: () => {} };
+    const view = render(<VideoPlayer {...props} />); await flush90();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = { paused: false, seeking: false, ended: false, time: 0 };
+    const writes: number[] = [], attempts: number[] = [];
+    Object.defineProperties(video, {
+      paused: { configurable: true, get: () => state.paused }, seeking: { configurable: true, get: () => state.seeking }, ended: { configurable: true, get: () => state.ended },
+      currentTime: { configurable: true, get: () => state.time, set: (v: number) => { writes.push(v); state.time = v; } },
+      duration: { configurable: true, value: 1000 }, seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 1000 } },
+    });
+    vi.mocked(video.play).mockImplementation(async () => { attempts.push(state.time); state.paused = false; fireEvent.play(video); fireEvent.playing(video); });
+    vi.mocked(video.pause).mockImplementation(() => { state.paused = true; fireEvent.pause(video); });
+    markCurrentMediaDataReady(video); fireEvent.loadedMetadata(video); fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+    state.time = 299; fireEvent.timeUpdate(video); state.time = 300; fireEvent.timeUpdate(video);
+    video.volume = 0.4; video.muted = true; video.playbackRate = 1.25; attempts.length = 0; writes.length = 0; progress.mockClear();
+    const hide = (kind = "page") => act(() => { if (kind === "visibility") { Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" }); document.dispatchEvent(new Event("visibilitychange")); } else window.dispatchEvent(new Event("pagehide")); });
+    const show = (kind = "page") => act(() => { if (kind === "visibility") { Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" }); document.dispatchEvent(new Event("visibilitychange")); } else window.dispatchEvent(new Event("pageshow")); });
+    const platformPause = () => { state.paused = true; fireEvent.pause(video); };
+    return { view, video, state, writes, attempts, refresh, progress, ended, next, props, hide, show, platformPause };
+  }
+  it.each(["page", "visibility"])("[mobile90] resumes existing playing300 once after %s platform pause", async (kind) => {
+    const f = await setup90(); const src = f.video.getAttribute("src"); f.hide(kind); f.platformPause(); f.show(kind); f.show(kind); await flush90();
+    expect(f.attempts).toEqual([300]); expect(document.querySelector("video.player-video")).toBe(f.video); expect(f.video.getAttribute("src")).toBe(src); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[mobile90] retained foreground intent waits for current media readiness without another pageshow", async () => {
+    const f = await setup90(); f.hide(); f.platformPause();
+    Object.defineProperty(f.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_NOTHING });
+    f.show(); await flush90(); expect(f.attempts).toEqual([]);
+    markCurrentMediaDataReady(f.video); fireEvent.loadedData(f.video); fireEvent.canPlay(f.video); await flush90();
+    expect(f.attempts).toEqual([300]); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it.each(["before", "hidden"])("[mobile90] explicit Pause %s suspension cannot auto-resume", async (when) => {
+    const f = await setup90(); if (when === "hidden") { f.hide(); f.platformPause(); }
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    if (when === "before") f.hide(); f.show(); f.show(); await flush90(); expect(f.attempts).toEqual([]); expect(f.state.paused).toBe(true); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it.each([0, 100])("[mobile90] reset replay0 to2 cannot heartbeat and refreshes owned absolute clock offset%s once", async (offset) => {
+    const f = await setup90(offset); f.hide(); f.state.time = 0; f.platformPause(); fireEvent.timeUpdate(f.video); f.show(); await flush90();
+    f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video);
+    for (let i = 1; i <= 40; i += 1) { f.state.time = i / 20; fireEvent.timeUpdate(f.video); Object.defineProperty(f.video, "buffered", { configurable: true, value: { length: 1, start: () => 0, end: () => i + 10 } }); fireEvent.progress(f.video); await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); }
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300 + offset, expect.objectContaining({ paused: false, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: { id: "jp", language: "jpn" } }));
+    fireEvent.ended(f.video); await flush90();
+    expect(f.refresh).toHaveBeenCalledTimes(1);
+    expect(f.attempts).toEqual([]); expect(f.progress.mock.calls.some(([p]) => p < 300 + offset)).toBe(false); expect(f.ended).not.toHaveBeenCalled(); expect(f.next).not.toHaveBeenCalled();
+  });
+  it.each(["ignored", "clamped", "throwing"])("[mobile90] %s seek cannot be mistaken for successful reset restoration", async (behavior) => {
+    const f = await setup90(); Object.defineProperty(f.video, "currentTime", { configurable: true, get: () => f.state.time, set: (v: number) => { f.writes.push(v); if (behavior === "throwing") throw new Error("fixture seek failure"); if (behavior === "clamped") f.state.time = 10; } });
+    f.hide(); f.state.time = 0; fireEvent.timeUpdate(f.video); f.platformPause(); f.show(); await flush90(); expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false })); expect(f.attempts).toEqual([]); expect(f.writes).toEqual([]);
+  });
+  it.each([0, 100])("[mobile90] genuine native seek%s remains authoritative and never fresh-resolves", async (target) => {
+    const f = await setup90(); f.state.seeking = true; fireEvent.seeking(f.video); f.state.time = target; fireEvent.timeUpdate(f.video); f.state.seeking = false; fireEvent.seeked(f.video); f.hide(); f.platformPause(); f.show(); await flush90();
+    expect(f.state.time).toBe(target); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[mobile90] visible play rejection remains one attempt and offers user Play", async () => {
+    const f = await setup90(); vi.mocked(f.video.play).mockImplementation(async () => { f.attempts.push(f.state.time); throw new Error("fixture autoplay denial"); }); f.hide(); f.platformPause(); f.show(); await flush90(); f.show(); await flush90(); expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(true); expect(screen.getByRole("button", { name: "Play" })).toBeVisible(); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[mobile90] pending fresh resolution keeps invalid reader paused and transfers latest explicit intent", async () => {
+    const f = await setup90(); const pending = deferred<void>(); f.refresh.mockImplementation(() => pending.promise);
+    f.hide(); f.state.time = 0; f.platformPause(); fireEvent.timeUpdate(f.video); f.show(); await flush90();
+    expect(f.refresh).toHaveBeenCalledTimes(1);
+    f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video); await flush90();
+    expect(f.state.paused).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    expect(f.refresh.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ paused: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Play" })); await flush90();
+    expect(f.refresh.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ paused: false }));
+    expect(f.state.paused).toBe(true); expect(f.attempts).toEqual([]); expect(f.refresh).toHaveBeenCalledTimes(1);
+    pending.resolve(); await flush90();
+  });
+  it("[mobile90] reset without fresh resolver exposes a bounded visible failure instead of replay", async () => {
+    const f = await setup90(); f.view.rerender(<VideoPlayer {...f.props} refreshCurrentSource={undefined} />); await flush90();
+    f.hide(); f.state.time = 0; f.platformPause(); fireEvent.timeUpdate(f.video); f.show(); await flush90();
+    expect(screen.getByRole("alert")).toHaveTextContent("Retry to request a fresh stream");
+    expect(screen.getByRole("button", { name: "Close player" })).toBeVisible();
+    expect(f.attempts).toEqual([]); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[mobile90] old play rejection cannot overwrite a newer playing intent queued in background", async () => {
+    const f = await setup90(); const old = deferred<void>(); let first = true;
+    vi.mocked(f.video.play).mockImplementation(() => {
+      f.attempts.push(f.state.time); f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video);
+      if (first) { first = false; return old.promise; }
+      return Promise.resolve();
+    });
+    f.hide(); f.platformPause(); f.show(); await flush90();
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    fireEvent.click(screen.getByRole("button", { name: "Play" })); await flush90();
+    f.hide(); f.platformPause(); old.reject(new Error("fixture superseded denial")); await flush90();
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeNull();
+    f.show(); await flush90(); expect(f.state.paused).toBe(false); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[mobile90] foreground play event without playing remains bounded by the existing stall deadline", async () => {
+    const f = await setup90(); const pending = deferred<void>();
+    vi.mocked(f.video.play).mockImplementation(() => { f.attempts.push(f.state.time); f.state.paused = false; fireEvent.play(f.video); return pending.promise; });
+    f.hide(); f.platformPause(); f.show(); await flush90(); expect(f.attempts).toEqual([300]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_001); }); await flush90();
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }));
+    pending.resolve(); await flush90();
+  });
+  it("[mobile90] stale queued reader cannot play after hidden source replacement", async () => {
+    const f = await setup90(); f.hide(); f.platformPause(); f.view.rerender(<VideoPlayer {...f.props} url="https://x/replacement90.mp4" sourceRevision={1} initialHandoffState={{ paused: true, volume: 1, muted: false, playbackRate: 1 }} />); await flush90(); f.show(); await flush90(); expect(f.attempts).toEqual([]); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[mobile90] parent progress/settings rerenders do not reload or renew the active reader", async () => {
+    const f = await setup90(); const src = f.video.getAttribute("src");
+    for (let i = 0; i < 3; i += 1) { f.view.rerender(<VideoPlayer {...f.props} onProgress={vi.fn()} serverOptimized={{ ...f.props.serverOptimized }} />); await flush90(); }
+    expect(document.querySelector("video.player-video")).toBe(f.video); expect(f.video.getAttribute("src")).toBe(src); expect(f.state.time).toBe(300); expect(f.state.paused).toBe(false); expect(f.writes).toEqual([]); expect(f.refresh).not.toHaveBeenCalled();
+  });
 });
