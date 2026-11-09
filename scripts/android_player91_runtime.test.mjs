@@ -558,8 +558,8 @@ test('diagnostic copies raw SDK geometry before every unchanged containment guar
 });
 
 const consentInput = () => ({...input('setup'),setupTail:{action:'UPDATE_NOT_NOW_TO_WELCOME',phase:'launch',sourceClicks:0,declineOrdinal:1,ok:true,maximumMs:2000,maximumSamples:20,upUptimeMs:1100,screenWidth:1080,screenHeight:1920,firstStableUptimeMs:1200,lastStableUptimeMs:1300,finishedUptimeMs:1301,observations:[
- {uptimeMs:1120,rootAvailable:false,ownerValid:false,rootWindowId:-1,rootBounds:null,rootKey:null,oldPrompt:false,unexpected:false,dialogs:0,titles:0,skips:0,nexts:0},
- ...[1200,1300].map(uptimeMs=>({uptimeMs,rootAvailable:true,ownerValid:true,rootWindowId:7,rootBounds:[0,0,1080,1920],rootKey:'7,0,0,1080,1920',oldPrompt:false,unexpected:false,dialogs:1,titles:1,skips:1,nexts:1}))]}});
+ {uptimeMs:1120,rootAvailable:false,ownerValid:false,rootWindowId:-1,rootBounds:null,rootKey:null,oldPrompt:false,unexpected:false,dialogs:0,titles:0,skips:0,nexts:0,snapshotComplete:false,nodesVisited:0,maxDepth:0,missingChildCount:0,missingChildDepth:-1,missingChildIndex:-1},
+ ...[1200,1300].map(uptimeMs=>({uptimeMs,rootAvailable:true,ownerValid:true,rootWindowId:7,rootBounds:[0,0,1080,1920],rootKey:'7,0,0,1080,1920',oldPrompt:false,unexpected:false,dialogs:1,titles:1,skips:1,nexts:1,snapshotComplete:true,nodesVisited:8,maxDepth:3,missingChildCount:0,missingChildDepth:-1,missingChildIndex:-1}))]}});
 test('exact consent tail recomputes delayed-null then stable Welcome and rejects every missing postcondition',()=>{
  validateUpdateConsentTail(consentInput());
  for(const mutate of[
@@ -613,4 +613,68 @@ test('actual Java consent tail policy compiles and executes release ownership ti
  const javac=process.env.JAVA_HOME?join(process.env.JAVA_HOME,'bin/javac'):'javac',binary=process.env.JAVA_HOME?join(process.env.JAVA_HOME,'bin/java'):'java';
  const compiled=spawnSync(javac,[`-J-Djava.io.tmpdir=${dir}`,'-d',dir,join(dir,'ConsentTailHarness.java')],{encoding:'utf8',timeout:20000});assert.equal(compiled.status,0,compiled.stderr);
  const ran=spawnSync(binary,[`-Djava.io.tmpdir=${dir}`,'-cp',dir,'ConsentTailHarness'],{encoding:'utf8',timeout:20000});assert.equal(ran.status,0,ran.stderr);assert.equal(ran.stdout.trim(),'consent-tail-policy:passed');
+});
+
+test('incomplete tail driver resets stability and requires two later complete samples without input retry',()=>{
+ const value=consentInput(), first=structuredClone(value.setupTail.observations[1]);
+ const complete=(at)=>({...first,uptimeMs:at,snapshotComplete:true,nodesVisited:8,maxDepth:3,missingChildCount:0,missingChildDepth:-1,missingChildIndex:-1});
+ value.setupTail.observations=[{...value.setupTail.observations[0],snapshotComplete:false,nodesVisited:0,maxDepth:0,missingChildCount:0,missingChildDepth:-1,missingChildIndex:-1},complete(1200),{...complete(1250),snapshotComplete:false,missingChildCount:1,missingChildDepth:2,missingChildIndex:0},complete(1350),complete(1450)];
+ Object.assign(value.setupTail,{firstStableUptimeMs:1350,lastStableUptimeMs:1450,finishedUptimeMs:1451});
+ validateUpdateConsentTail(value);
+ for(const mutate of[
+  x=>x.setupTail.observations[2].snapshotComplete=true,
+  x=>x.setupTail.observations[2].unexpected=true,
+  x=>x.setupTail.observations[2].ownerValid=false,
+  x=>x.setupTail.observations[2].missingChildCount=0,
+  x=>x.setupTail.observations[2].nodesVisited=513,
+  x=>x.setupTail.observations[2].maxDepth=33,
+  x=>x.setupTail.observations.pop(),
+  x=>x.setupTail.firstStableUptimeMs=1200,
+  x=>x.setupTail.observations[4].uptimeMs=3101,
+  x=>x.setupTail.observations[0].snapshotComplete=true,
+ ]){const copy=structuredClone(value);mutate(copy);assert.throws(()=>validateUpdateConsentTail(copy));}
+ const partialOnly=structuredClone(value);partialOnly.setupTail.observations=Array.from({length:20},(_,i)=>({...value.setupTail.observations[2],uptimeMs:1100+i*100}));assert.throws(()=>validateUpdateConsentTail(partialOnly));
+});
+
+test('incomplete tail actual copied Java scanner preserves partial numeric state and never accepts its tree',()=>{
+ const constants=['PRODUCT','PLAYER'].map(name=>java.match(new RegExp(`    private static final String ${name} = [^;]+;`))[0]);
+ constants.push(java.match(/    private static final Pattern TERMS = [^;]+;/)[0]);
+ const acq=java.slice(java.indexOf('    static final class AcquisitionPolicy {'),java.indexOf('    private static final class AcquiredMore'));
+ const policies=java.slice(java.indexOf('    static final class WelcomeTailPolicy {'),java.indexOf('    private void requireUpdateConsentWelcomeTail'));
+ const support=`
+ static final class Rect {int left,top,right,bottom;Rect(){this(0,0,1080,1920);}Rect(int a,int b,int c,int d){left=a;top=b;right=c;bottom=d;}boolean isEmpty(){return right<=left||bottom<=top;}boolean contains(Rect r){return r.left>=left&&r.top>=top&&r.right<=right&&r.bottom<=bottom;}}
+ static final class AccessibilityNodeInfo {String text,clazz;AccessibilityNodeInfo[] children;AccessibilityNodeInfo(String c,String t,AccessibilityNodeInfo... kids){clazz=c;text=t;children=kids;}CharSequence getText(){return text;}CharSequence getContentDescription(){return null;}CharSequence getClassName(){return clazz;}String getViewIdResourceName(){return null;}CharSequence getPackageName(){return PRODUCT;}int getWindowId(){return 7;}boolean isVisibleToUser(){return true;}boolean isEnabled(){return true;}boolean isClickable(){return clazz.equals("android.widget.Button");}void getBoundsInScreen(Rect r){}int getChildCount(){return children.length;}AccessibilityNodeInfo getChild(int i){return children[i];}void recycle(){}}
+ static void assertTrue(String m,boolean b){if(!b)throw new AssertionError(m);}static void assertNotNull(String m,Object o){if(o==null)throw new AssertionError(m);}
+ static boolean complete(WelcomeTailScan scan)throws Exception{try{return (Boolean)WelcomeTailScan.class.getDeclaredField("complete").get(scan);}catch(NoSuchFieldException old){return true;}}
+ static int numeric(WelcomeTailScan scan,String name)throws Exception{return (Integer)WelcomeTailScan.class.getDeclaredField(name).get(scan);}
+ static boolean sample(WelcomeTailPolicy p,long at,boolean available,boolean owner,boolean unexpected,boolean completed,int d,int t,int s,int n)throws Exception{
+ try{return (Boolean)WelcomeTailPolicy.class.getDeclaredMethod("observe",long.class,long.class,boolean.class,boolean.class,boolean.class,boolean.class,boolean.class,int.class,int.class,int.class,int.class,String.class,boolean.class).invoke(p,at,1000L,true,available,owner,unexpected,false,d,t,s,n,available?"r":null,completed);}catch(NoSuchMethodException old){return p.observe(at,1000,true,available,owner,unexpected,false,d,t,s,n,available?"r":null);}catch(java.lang.reflect.InvocationTargetException failed){if(failed.getCause() instanceof RuntimeException)throw (RuntimeException)failed.getCause();throw failed;}}
+ static void reject(Checked r)throws Exception{try{r.run();}catch(IllegalStateException expected){return;}throw new AssertionError("invalid partial sample accepted");}interface Checked{void run()throws Exception;}
+ `;
+ const checks=`
+ IncompleteTailHarness harness=new IncompleteTailHarness();
+ AccessibilityNodeInfo title=new AccessibilityNodeInfo("android.widget.TextView","Welcome to YAWF Stream");
+ AccessibilityNodeInfo root=new AccessibilityNodeInfo("android.app.Dialog","Welcome",title,null);
+ WelcomeTailScan partial=new WelcomeTailScan(new Rect(),7);
+ try{harness.scanWelcomeTail(root,partial,0);}catch(AssertionError old){throw new AssertionError("R5 null child must be persisted as incomplete, not abort the readonly sampler",old);}
+ if(complete(partial)||numeric(partial,"missingChildCount")!=1||partial.dialogs!=1||partial.titles!=1||partial.budget.nodes!=2)throw new AssertionError("partial numeric state lost");
+ WelcomeTailPolicy p=new WelcomeTailPolicy();
+ if(sample(p,1000,false,false,false,false,0,0,0,0))throw new AssertionError();
+ if(sample(p,1100,true,true,false,true,1,1,1,1))throw new AssertionError();
+ if(sample(p,1200,true,true,false,false,1,1,1,1))throw new AssertionError("partial tree accepted");
+ if(sample(p,1300,true,true,false,true,1,1,1,1))throw new AssertionError("partial tree earned stability");
+ if(!sample(p,1400,true,true,false,true,1,1,1,1))throw new AssertionError("two complete samples refused");
+ reject(()->sample(new WelcomeTailPolicy(),1100,true,true,true,false,1,1,1,1));
+ reject(()->sample(new WelcomeTailPolicy(),1100,true,false,false,false,1,1,1,1));
+ reject(()->sample(new WelcomeTailPolicy(),3001,true,true,false,false,1,1,1,1));
+ WelcomeTailPolicy capped=new WelcomeTailPolicy();for(int i=0;i<20;i++)if(sample(capped,1000+i*50,true,true,false,false,1,1,1,1))throw new AssertionError();reject(()->sample(capped,2000,true,true,false,false,1,1,1,1));
+ `;
+ const dir=realpathSync(mkdtempSync(join(process.env.RUNNER_TEMP||process.env.TMPDIR,'incomplete-tail-')));
+ writeFileSync(join(dir,'IncompleteTailHarness.java'),`import java.util.regex.Pattern;public final class IncompleteTailHarness {${constants.join('\n')}\n${support}\n${acq}\n${policies}\npublic static void main(String[] args)throws Exception{${checks}\nSystem.out.println("incomplete-tail:passed");}}`);
+ const javac=join(process.env.JAVA_HOME,'bin/javac'),binary=join(process.env.JAVA_HOME,'bin/java');
+ const built=spawnSync(javac,[`-J-Djava.io.tmpdir=${dir}`,'-d',dir,join(dir,'IncompleteTailHarness.java')],{encoding:'utf8',timeout:20000});assert.equal(built.status,0,built.stderr);
+ const ran=spawnSync(binary,[`-Djava.io.tmpdir=${dir}`,'-cp',dir,'IncompleteTailHarness'],{encoding:'utf8',timeout:20000});assert.equal(ran.status,0,ran.stderr);assert.equal(ran.stdout.trim(),'incomplete-tail:passed');
+ const tail=java.slice(java.indexOf('    private void requireUpdateConsentWelcomeTail'),java.indexOf('    private void tapObject'));
+ for(const text of ['"snapshotComplete"','"nodesVisited"','"missingChildCount"','"missingChildDepth"','"missingChildIndex"'])assert.ok(tail.includes(text));
+ assert.ok(tail.indexOf('observations.put(')<tail.indexOf('policy.observe('));assert.doesNotMatch(tail,/\.tap\(|\.click\(|inject\(|pressBack|startActivity/);
 });

@@ -185,7 +185,7 @@ export function validateUpdateConsentTail(input) {
   for (const [index, observation] of tail.observations.entries()) {
     const o = observation;
     requireTrue(!completed && Number.isSafeInteger(o.uptimeMs) && o.uptimeMs > previousAt && o.uptimeMs >= up && o.uptimeMs - up <= 2000 &&
-      typeof o.rootAvailable === 'boolean' && typeof o.ownerValid === 'boolean' && typeof o.oldPrompt === 'boolean' && o.unexpected === false &&
+      typeof o.rootAvailable === 'boolean' && typeof o.ownerValid === 'boolean' && typeof o.oldPrompt === 'boolean' && typeof o.snapshotComplete === 'boolean' && o.unexpected === false &&
       [o.dialogs, o.titles, o.skips, o.nexts].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 1), 'Tail snapshot invalid, stale, duplicate or unexpected');
     previousAt = o.uptimeMs;
     if (o.rootAvailable) {
@@ -196,7 +196,16 @@ export function validateUpdateConsentTail(input) {
         o.rootKey === [o.rootWindowId, ...o.rootBounds].join(','), 'Exact owned visible tail root required');
     } else requireTrue(o.ownerValid === false && o.rootWindowId === -1 && o.rootBounds === null && o.rootKey === null &&
       !o.oldPrompt && o.dialogs + o.titles + o.skips + o.nexts === 0, 'Null-root observation must not fabricate landmarks');
-    const ready = o.rootAvailable && !o.oldPrompt && o.dialogs === 1 && o.titles === 1 && o.skips === 1 && o.nexts === 1;
+    requireTrue(Number.isSafeInteger(o.nodesVisited) && o.nodesVisited >= 0 && o.nodesVisited <= 512 &&
+      Number.isSafeInteger(o.maxDepth) && o.maxDepth >= 0 && o.maxDepth <= 32, 'Bounded partial snapshot evidence required');
+    if (o.snapshotComplete) requireTrue(o.rootAvailable && o.nodesVisited >= 1 && o.missingChildCount === 0 &&
+      o.missingChildDepth === -1 && o.missingChildIndex === -1, 'Complete snapshots must have no unavailable children');
+    else if (o.rootAvailable) requireTrue(o.nodesVisited >= 1 && o.missingChildCount === 1 &&
+      Number.isSafeInteger(o.missingChildDepth) && o.missingChildDepth >= 0 && o.missingChildDepth <= 32 &&
+      Number.isSafeInteger(o.missingChildIndex) && o.missingChildIndex >= 0 && o.missingChildIndex < 512, 'Incomplete snapshots must retain the null-child location');
+    else requireTrue(o.nodesVisited === 0 && o.maxDepth === 0 && o.missingChildCount === 0 &&
+      o.missingChildDepth === -1 && o.missingChildIndex === -1, 'Null-root snapshots cannot fabricate traversal evidence');
+    const ready = o.snapshotComplete && o.rootAvailable && !o.oldPrompt && o.dialogs === 1 && o.titles === 1 && o.skips === 1 && o.nexts === 1;
     if (!ready) { first = -1; stable = 0; previousKey = null; continue; }
     if (o.rootKey !== previousKey) { first = o.uptimeMs; stable = 1; previousKey = o.rootKey; } else stable++;
     completed = stable >= 2 && o.uptimeMs - first >= 100;

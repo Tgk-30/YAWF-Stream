@@ -693,9 +693,13 @@ public final class RuntimePlayer91MoreFlowTest {
         String previousRoot;
         boolean observe(long at, long upAt, boolean released, boolean available, boolean owner,
                         boolean unexpected, boolean oldPrompt, int dialogs, int titles, int skips, int nexts, String rootKey) {
+            return observe(at, upAt, released, available, owner, unexpected, oldPrompt, dialogs, titles, skips, nexts, rootKey, true);
+        }
+        boolean observe(long at, long upAt, boolean released, boolean available, boolean owner,
+                        boolean unexpected, boolean oldPrompt, int dialogs, int titles, int skips, int nexts, String rootKey, boolean complete) {
             if (!released || at < upAt || at - upAt > 2000 || ++samples > 20 || (available && !owner) || unexpected ||
                     dialogs > 1 || titles > 1 || skips > 1 || nexts > 1) throw new IllegalStateException("Exact update-consent tail refused");
-            boolean ready = available && !oldPrompt && dialogs == 1 && titles == 1 && skips == 1 && nexts == 1 && rootKey != null;
+            boolean ready = complete && available && !oldPrompt && dialogs == 1 && titles == 1 && skips == 1 && nexts == 1 && rootKey != null;
             if (!ready) { stable = 0; firstStable = -1; previousRoot = null; return false; }
             if (!rootKey.equals(previousRoot)) { stable = 1; firstStable = at; previousRoot = rootKey; }
             else stable++;
@@ -708,7 +712,8 @@ public final class RuntimePlayer91MoreFlowTest {
         final Rect root;
         final int window;
         int dialogs, titles, skips, nexts;
-        boolean oldPrompt, unexpected;
+        boolean oldPrompt, unexpected, complete = true;
+        int missingChildCount, missingChildDepth = -1, missingChildIndex = -1;
         WelcomeTailScan(Rect root, int window) { this.root = root; this.window = window; }
     }
     private void scanWelcomeTail(AccessibilityNodeInfo node, WelcomeTailScan scan, int depth) {
@@ -736,8 +741,12 @@ public final class RuntimePlayer91MoreFlowTest {
         assertTrue("Tail snapshot child bound exceeded", children >= 0 && children <= 512);
         for (int i = 0; i < children; i++) {
             AccessibilityNodeInfo child = node.getChild(i);
-            assertNotNull("Tail snapshot child unavailable", child);
+            if (child == null) {
+                scan.complete = false; scan.missingChildCount++; scan.missingChildDepth = depth; scan.missingChildIndex = i;
+                return;
+            }
             try { scanWelcomeTail(child, scan, depth + 1); } finally { child.recycle(); }
+            if (!scan.complete) return;
         }
     }
     private void requireUpdateConsentWelcomeTail(FingerState state, JSONArray times, JSONObject inputProof) throws Exception {
@@ -770,10 +779,13 @@ public final class RuntimePlayer91MoreFlowTest {
                         .put("rootWindowId", scan == null ? -1 : scan.window).put("rootBounds", bounds == null ? JSONObject.NULL : rect(bounds))
                         .put("rootKey", key == null ? JSONObject.NULL : key).put("oldPrompt", scan != null && scan.oldPrompt)
                         .put("unexpected", scan != null && scan.unexpected).put("dialogs", scan == null ? 0 : scan.dialogs)
-                        .put("titles", scan == null ? 0 : scan.titles).put("skips", scan == null ? 0 : scan.skips).put("nexts", scan == null ? 0 : scan.nexts));
+                        .put("titles", scan == null ? 0 : scan.titles).put("skips", scan == null ? 0 : scan.skips).put("nexts", scan == null ? 0 : scan.nexts)
+                        .put("snapshotComplete", root != null && owner && scan.complete).put("nodesVisited", scan == null ? 0 : scan.budget.nodes)
+                        .put("maxDepth", scan == null ? 0 : scan.budget.deepest).put("missingChildCount", scan == null ? 0 : scan.missingChildCount)
+                        .put("missingChildDepth", scan == null ? -1 : scan.missingChildDepth).put("missingChildIndex", scan == null ? -1 : scan.missingChildIndex));
                 if (policy.observe(at, upAt, state.upAcknowledged && !state.streamActive, root != null, owner,
                         scan != null && scan.unexpected, scan != null && scan.oldPrompt, scan == null ? 0 : scan.dialogs,
-                        scan == null ? 0 : scan.titles, scan == null ? 0 : scan.skips, scan == null ? 0 : scan.nexts, key)) {
+                        scan == null ? 0 : scan.titles, scan == null ? 0 : scan.skips, scan == null ? 0 : scan.nexts, key, root != null && owner && scan.complete)) {
                     proof.put("ok", true).put("firstStableUptimeMs", policy.firstStable).put("lastStableUptimeMs", policy.lastStable)
                             .put("finishedUptimeMs", now());
                     return;
