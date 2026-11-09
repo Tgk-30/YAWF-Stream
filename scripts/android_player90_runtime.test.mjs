@@ -120,6 +120,12 @@ test('immutable root-owned workflow prefix stays byte exact', () => {
   const prefix = workflow.split(marker)[0] + marker;
   assert.equal(createHash('sha256').update(prefix).digest('hex'), PIN.prefix);
 });
+test('workflow explicitly limits setup-android to platform-tools without removed tools default', () => {
+  const block = /      - name: Set up official Android SDK\n([\s\S]*?)(?=      - name: |$)/.exec(workflow)?.[1];
+  assert.ok(block, 'The scoped SDK setup step must exist');
+  assert.match(block, /        uses: android-actions\/setup-android@v3\n        with:\n          packages: platform-tools\n$/);
+  assert.doesNotMatch(block, /(?:^|\s)tools(?:\s|$)/);
+});
 test('workflow uses exact source builds test-only harness before owned emulator', () => {
   assert.match(workflow, /node-version: '24\.17\.0'/);
   assert.match(workflow, /java-version: '17'/);

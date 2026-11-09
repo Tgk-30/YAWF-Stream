@@ -61,6 +61,8 @@ jobs:
           java-version: '17'
       - name: Set up official Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Set up Gradle for the isolated test harness
         uses: gradle/actions/setup-gradle@v4
         with:
