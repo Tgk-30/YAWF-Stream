@@ -2062,23 +2062,40 @@ describe("DebridStreamer server", () => {
     expect(after.some((event) => event.action === "history.upsert")).toBe(false);
   });
 
-  it("caps the admin health audit-event count at 10,000", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "debridstreamer-health-test-"));
-    const databasePath = join(tempDir, "database.sqlite");
-    const healthApp = await buildApp({
-      config: {
-        databasePath,
-        dataDir: tempDir,
-        secretKey: randomBytes(32),
-        cookieSecure: false,
-        logger: false,
-        allowRawStreamUrls: true,
-      },
-    });
+  describe("disk-backed admin health", () => {
+    let tempDir = "";
+    let healthApp: FastifyInstance | null = null;
     let database: DatabaseSync | null = null;
-    try {
-      const owner = await setupOwner(healthApp);
-      database = new DatabaseSync(databasePath);
+    const databasePath = () => join(tempDir, "database.sqlite");
+
+    // Cold native storage admission is setup, not part of the capped-query body.
+    // Keep the existing hook deadline and the test's default five-second deadline.
+    beforeEach(async () => {
+      tempDir = "";
+      healthApp = null;
+      database = null;
+      tempDir = mkdtempSync(join(tmpdir(), "debridstreamer-health-test-"));
+      healthApp = await buildApp({
+        config: {
+          databasePath: databasePath(),
+          dataDir: tempDir,
+          secretKey: randomBytes(32),
+          cookieSecure: false,
+          logger: false,
+          allowRawStreamUrls: true,
+        },
+      });
+    });
+
+    afterEach(async () => {
+      database?.close();
+      await healthApp?.close();
+      if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it("caps the admin health audit-event count at 10,000", async () => {
+      const owner = await setupOwner(healthApp!);
+      database = new DatabaseSync(databasePath());
       database.exec("DELETE FROM audit_log");
       const insert = database.prepare(
         `INSERT INTO audit_log
@@ -2118,11 +2135,7 @@ describe("DebridStreamer server", () => {
         await request(owner, { method: "GET", url: "/api/admin/health" }),
       );
       expect(atCap.counts.auditEvents).toBe(10_000);
-    } finally {
-      database?.close();
-      await healthApp.close();
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    });
   });
 
   it("reports the active hardware transcoder and playback capability matrix", async () => {

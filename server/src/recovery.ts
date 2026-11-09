@@ -1,15 +1,20 @@
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
+  writeSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { hashPassword, nowISO, randomId } from "./crypto.js";
+import { assertPrivateWindowsStorage } from "./privateStorage.js";
 import {
   acquireDatabaseLease,
   DatabaseLeaseBusyError,
@@ -133,6 +138,7 @@ async function createDatabaseBackupWithConnections(
     throw new Error(`Refusing to overwrite an existing backup: ${resolvedOutput}`);
   }
 
+  assertPrivateWindowsStorage([resolvedDatabase, `${resolvedDatabase}-wal`, `${resolvedDatabase}-shm`, `${resolvedDatabase}-journal`, resolvedOutput]);
   mkdirSync(dirname(resolvedOutput), { recursive: true });
   const source = new DatabaseSync(resolvedDatabase);
   connections?.add(source);
@@ -160,6 +166,7 @@ export async function restoreDatabaseBackup(
   if (resolvedDatabase === resolvedInput) {
     throw new Error("Restore input must be different from the live database.");
   }
+  assertPrivateWindowsStorage([resolvedDatabase, `${resolvedDatabase}-wal`, `${resolvedDatabase}-shm`, `${resolvedDatabase}-journal`]);
   mkdirSync(dirname(resolvedDatabase), { recursive: true });
   const lease = acquireRecoveryLease(
     resolvedDatabase,
@@ -188,12 +195,12 @@ async function restoreDatabaseBackupUnderLease(
 
   const staged = `${resolvedDatabase}.restore-${timestampForPath()}.tmp`;
   rmSync(staged, { force: true });
-  copyFileSync(resolvedInput, staged);
-  chmodSync(staged, 0o600);
-  assertHealthyDatabase(staged, connections);
-
   const displaced = `${resolvedDatabase}.replaced-${timestampForPath()}`;
   try {
+    copyRestoreInput(resolvedInput, staged);
+    chmodSync(staged, 0o600);
+    assertPrivateWindowsStorage([staged]);
+    assertHealthyDatabase(staged, connections);
     rmSync(`${resolvedDatabase}-wal`, { force: true });
     rmSync(`${resolvedDatabase}-shm`, { force: true });
     if (existsSync(resolvedDatabase)) renameSync(resolvedDatabase, displaced);
@@ -209,6 +216,34 @@ async function restoreDatabaseBackupUnderLease(
   }
 
   return { restoredFrom: resolvedInput, safetyBackup };
+}
+
+function copyRestoreInput(input: string, staged: string): void {
+  if (process.platform !== "win32") {
+    copyFileSync(input, staged);
+    return;
+  }
+  // Copy bytes, not a source security descriptor. A legacy/shared backup can
+  // be imported into the already-admitted private directory without copying
+  // its broader permissions or buffering the complete database in memory.
+  const source = openSync(input, "r");
+  let destination: number | null = null;
+  try {
+    destination = openSync(staged, "wx", 0o600);
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    for (;;) {
+      const bytes = readSync(source, buffer, 0, buffer.length, null);
+      if (bytes === 0) break;
+      let offset = 0;
+      while (offset < bytes) {
+        const written = writeSync(destination, buffer, offset, bytes - offset);
+        if (written <= 0) throw new Error("Could not stage the private database restore.");
+        offset += written;
+      }
+    }
+  } finally {
+    try { if (destination != null) closeSync(destination); } finally { closeSync(source); }
+  }
 }
 
 export function configuredDatabasePath(): string {
