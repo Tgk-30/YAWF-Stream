@@ -114,7 +114,7 @@ public final class RuntimePlayer90MoreFlowTest {
             guard();
             if (text("How do you want to use YAWF Stream?") != null) break;
             if (text("Enable Android update checks?") != null) {
-                click("Not now", 3_000);
+                click("NOT NOW", 3_000);
             } else if (text("Welcome to YAWF Stream") != null && clickable("Skip") != null) {
                 click("Skip", 3_000);
             }

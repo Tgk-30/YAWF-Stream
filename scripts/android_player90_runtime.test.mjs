@@ -231,6 +231,9 @@ test('runtime owns fresh AVD fixture and failure evidence before cleanup', () =>
   assert.match(driver, /requireTrue\(wait < 10, 'Strict guest IO admission failed'\)/);
   assert.match(driver, /Current boot ANR observed/);
 });
+test('native enrollment prompt declines using observed exact uppercase NOT NOW', () => {
+  assert.match(java, /if \(text\("Enable Android update checks\?"\) != null\) \{\s+click\("NOT NOW", 3_000\);/);
+});
 test('Java source uses one UiAutomation owner real SDK FINGER and exact native bounds', () => {
   assert.equal((java.match(/instrumentation\.getUiAutomation\(\)/g) || []).length, 1);
   assert.match(java, /property\.toolType = MotionEvent\.TOOL_TYPE_FINGER/);
