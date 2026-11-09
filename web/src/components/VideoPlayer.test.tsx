@@ -16578,14 +16578,15 @@ describe("existing HTML reader foreground ownership90", () => {
   const restore: Array<() => void> = [];
   afterEach(() => { while (restore.length) restore.pop()!(); });
   async function flush90() { await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }); }
-  async function setup90(offset = 0) {
-    vi.useFakeTimers(); deviceKindMock.mockReturnValue("android");
+  async function setup90(offset = 0, device: "ios" | "android" = "android", nativeHls = false) {
+    vi.useFakeTimers(); deviceKindMock.mockReturnValue(device);
+    if (nativeHls) vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
     restore.push(replaceProperty(window, "__YAWF_NATIVE_SAFE_AREA__", { getInsets: vi.fn() }));
     restore.push(replaceProperty(document, "visibilityState", "visible"));
     const tracks = Object.assign(new EventTarget(), { 0: { id: "jp", label: "Japanese", language: "jpn", enabled: true }, length: 1 });
     restore.push(replaceProperty(HTMLMediaElement.prototype, "audioTracks", tracks));
     const refresh = vi.fn(async (_position: number, _handoff: PlaybackHandoffState) => {}), progress = vi.fn(), ended = vi.fn(), next = vi.fn();
-    const props = { title: "Lifecycle90", url: "https://x/lifecycle90.mp4", sourceRevision: 0, engine: "webview-direct" as const,
+    const props = { title: "Lifecycle90", url: nativeHls ? "https://x/lifecycle91.m3u8" : "https://x/lifecycle90.mp4", sourceRevision: 0, engine: "webview-direct" as const,
       timelineOffsetSeconds: offset, refreshCurrentSource: refresh, onProgress: progress, onEnded: ended, onPlayNext: next,
       serverOptimized: { qualities: ["480p"] as const, request: vi.fn() }, onClose: () => {} };
     const view = render(<VideoPlayer {...props} />); await flush90();
@@ -16694,6 +16695,111 @@ describe("existing HTML reader foreground ownership90", () => {
     for (let i = 0; i < 3; i += 1) { f.view.rerender(<VideoPlayer {...f.props} onProgress={vi.fn()} serverOptimized={{ ...f.props.serverOptimized }} />); await flush90(); }
     expect(document.querySelector("video.player-video")).toBe(f.video); expect(f.video.getAttribute("src")).toBe(src); expect(f.state.time).toBe(300); expect(f.state.paused).toBe(false); expect(f.writes).toEqual([]); expect(f.refresh).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["ios", "page"], ["ios", "visibility"], ["android", "page"], ["android", "visibility"],
+  ] as const)("[late-platform-pause91] %s %s preserves one owned resume when pause arrives after foreground", async (device, kind) => {
+    const f = await setup90(0, device, true); const src = f.video.getAttribute("src");
+    f.hide(kind); await act(async () => vi.advanceTimersByTimeAsync(160_000));
+    f.show(kind); await flush90(); expect(f.attempts).toEqual([]);
+    f.platformPause(); await flush90();
+    expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(false);
+    expect(document.querySelector("video.player-video")).toBe(f.video); expect(f.video.getAttribute("src")).toBe(src);
+    expect(f.refresh).not.toHaveBeenCalled(); expect(f.ended).not.toHaveBeenCalled(); expect(f.next).not.toHaveBeenCalled();
+  });
+  it("[late-platform-pause91] explicit Pause after foreground cancels the unconsumed playing epoch", async () => {
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
+    fireEvent.click(screen.getByRole("button", { name: "Pause" })); await flush90();
+    f.show(); fireEvent.canPlay(f.video); await flush90();
+    expect(f.attempts).toEqual([]); expect(f.state.paused).toBe(true); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[late-platform-pause91] explicit hidden Pause never creates a late resume epoch", async () => {
+    const f = await setup90(0, "ios", true); f.hide();
+    fireEvent.click(screen.getByRole("button", { name: "Pause" })); f.show(); f.platformPause(); await flush90();
+    expect(f.attempts).toEqual([]); expect(f.state.paused).toBe(true);
+  });
+  it("[late-platform-pause91] verified foreground motion ends the epoch before a normal native pause", async () => {
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
+    f.state.time = 301; fireEvent.timeUpdate(f.video); f.platformPause(); f.show(); await flush90();
+    expect(f.attempts).toEqual([]); expect(f.state.paused).toBe(true); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[late-platform-pause91] stable visible native pause without background remains genuine", async () => {
+    const f = await setup90(0, "ios", true); f.platformPause(); await flush90();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000)); fireEvent.canPlay(f.video); await flush90();
+    expect(f.attempts).toEqual([]); expect(f.state.paused).toBe(true); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[late-platform-pause91] source replacement invalidates the old retained playing epoch", async () => {
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
+    f.view.rerender(<VideoPlayer {...f.props} url="https://x/other91.m3u8" sourceRevision={1} initialHandoffState={{ paused: true, volume: 1, muted: false, playbackRate: 1 }} />); await flush90();
+    f.platformPause(); f.show(); fireEvent.canPlay(f.video); await flush90(); expect(f.attempts).toEqual([]); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[late-platform-pause91] unmount cancels the old retained playing epoch", async () => {
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90(); f.view.unmount();
+    f.platformPause(); f.show(); await flush90(); expect(f.attempts).toEqual([]); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[late-platform-pause91] a late resume rejection is one physical attempt and leaves user Play", async () => {
+    const f = await setup90(0, "ios", true);
+    vi.mocked(f.video.play).mockImplementation(async () => { f.attempts.push(f.state.time); throw new Error("fixture rejected late resume"); });
+    f.hide(); f.show(); f.platformPause(); await flush90();
+    f.platformPause(); f.show(); fireEvent.canPlay(f.video); await flush90();
+    expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(true); expect(screen.getByRole("button", { name: "Play" })).toBeVisible();
+    expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[late-platform-pause91] a second platform pause cannot loop after the single resumed attempt", async () => {
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); f.platformPause(); await flush90();
+    f.platformPause(); f.show(); fireEvent.canPlay(f.video); await flush90(); expect(f.attempts).toEqual([300]);
+    expect(f.state.paused).toBe(true); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[late-platform-pause91] a late pause waits for media readiness without inventing another attempt", async () => {
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
+    Object.defineProperty(f.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_NOTHING });
+    f.platformPause(); await flush90(); expect(f.attempts).toEqual([]);
+    markCurrentMediaDataReady(f.video); fireEvent.loadedData(f.video); fireEvent.canPlay(f.video); await flush90();
+    expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(false);
+  });
+
+  it("[late-platform-pause91] MediaSession Pause synchronously cancels the returned epoch", async () => {
+    const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
+    restore.push(replaceProperty(navigator, "mediaSession", { metadata: null, playbackState: "none",
+      setActionHandler: (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => handlers.set(action, handler),
+      setPositionState: vi.fn() }));
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
+    act(() => handlers.get("pause")?.({ action: "pause" })); await flush90();
+    f.platformPause(); f.show(); await flush90(); expect(f.attempts).toEqual([]); expect(f.state.paused).toBe(true);
+  });
+  it.each(["seek", "cast", "pip", "native-fullscreen", "ended", "error"] as const)("[late-platform-pause91] %s invalidates the returned epoch before a later pause", async (transition) => {
+    if (transition === "cast") isTauriMock.mockReturnValue(true);
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
+    if (transition === "seek") { f.state.seeking = true; fireEvent.seeking(f.video); f.state.time = 100; f.state.seeking = false; fireEvent.seeked(f.video); }
+    else if (transition === "cast") fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+    else if (transition === "pip") fireEvent(f.video, new Event("enterpictureinpicture"));
+    else if (transition === "native-fullscreen") fireEvent(f.video, new Event("webkitbeginfullscreen"));
+    else if (transition === "ended") { f.state.ended = true; f.state.time = 1000; fireEvent.ended(f.video); }
+    else fireMediaError(f.video, 2);
+    await flush90(); f.platformPause(); f.show(); await flush90(); expect(f.attempts).toEqual([]);
+  });
+
+  it("[late-platform-pause91] standard native-video fullscreen cancels before native Pause and later exit", async () => {
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
+    restore.push(replaceProperty(document, "fullscreenElement", f.video));
+    fireEvent(document, new Event("fullscreenchange")); f.platformPause(); await flush90();
+    Object.defineProperty(document, "fullscreenElement", { configurable: true, value: null });
+    fireEvent(document, new Event("fullscreenchange")); fireEvent.canPlay(f.video); f.show(); await flush90();
+    expect(f.attempts).toEqual([]); expect(f.state.paused).toBe(true); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[late-platform-pause91] custom app-container fullscreen does not transfer native playback ownership", async () => {
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
+    restore.push(replaceProperty(document, "fullscreenElement", document.querySelector(".player")));
+    fireEvent(document, new Event("fullscreenchange")); f.platformPause(); await flush90();
+    expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(false); expect(f.refresh).not.toHaveBeenCalled();
+  });
+
+  it("[late-platform-pause91] same-position foreground timeupdate cannot discard the retained Play intent", async () => {
+    const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
+    fireEvent.timeUpdate(f.video); expect(f.state.time).toBe(300); f.platformPause(); await flush90();
+    expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(false); expect(f.refresh).not.toHaveBeenCalled();
+  });
+
 });
 
 describe("interactive chrome pointer lifetime", () => {
