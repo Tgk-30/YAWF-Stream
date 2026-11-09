@@ -166,7 +166,7 @@ test("all three Android entrypoints prepare the wrapper before its first invocat
   assert.ok(android.indexOf("node scripts/prepare_android_gradle.mjs") > android.indexOf("node scripts/fetch_android_gradle.mjs"));
   assert.ok(android.indexOf("node scripts/prepare_android_gradle.mjs") < android.indexOf("run: ./gradlew"));
   const build = phone.slice(phone.indexOf("      - name: Build the Android project"), phone.indexOf("      - name: Sign and verify the phone APK"));
-  const order = /node \.\.\/scripts\/patch_tauri_android\.mjs\s+YAWF_GRADLE_ARCHIVE="\$\(YAWF_GRADLE_API_TOKEN="\$yawf_gradle_api_token" node \.\.\/scripts\/fetch_android_gradle\.mjs\)"\s+unset yawf_gradle_api_token\s+export YAWF_GRADLE_ARCHIVE\s+node \.\.\/scripts\/prepare_android_gradle\.mjs\s+kotlin_maven_root="\$\(node \.\.\/scripts\/fetch_android_kotlin_compiler\.mjs "\$RUNNER_TEMP\/yawf-kotlin-m2"\)"\s+export GRADLE_OPTS="\$\{GRADLE_OPTS:-\} -Dmaven\.repo\.local=\$kotlin_maven_root"\s+npm run tauri -- android build --apk/;
+  const order = /node \.\.\/scripts\/patch_tauri_android\.mjs\s+YAWF_GRADLE_ARCHIVE="\$\(YAWF_GRADLE_API_TOKEN="\$yawf_gradle_api_token" node \.\.\/scripts\/fetch_android_gradle\.mjs\)"\s+unset yawf_gradle_api_token\s+export YAWF_GRADLE_ARCHIVE\s+node \.\.\/scripts\/prepare_android_gradle\.mjs\s+kotlin_maven_root="\$\(node \.\.\/scripts\/fetch_android_kotlin_compiler\.mjs "\$RUNNER_TEMP\/yawf-kotlin-m2"\)"\s+kotlin_gradle_home="\$\(node \.\.\/scripts\/prepare_android_kotlin_gradle\.mjs "\$kotlin_maven_root" "\$RUNNER_TEMP\/yawf-kotlin-gradle-home"\)"\s+export GRADLE_USER_HOME="\$kotlin_gradle_home"\s+npm run tauri -- android build --apk/;
   assert.match(build, order);
   const coordinated = desktop.slice(desktop.indexOf("      - name: Build the Android project"), desktop.indexOf("      - name: Sign and verify the phone APK"));
   assert.match(coordinated, order);
@@ -180,7 +180,8 @@ test("all three Android entrypoints prepare the wrapper before its first invocat
     assert.ok(unset >= 0 && unset < firstConsumer);
   }
   assert.match(patch, /kotlin_maven_root="\$\(node scripts\/fetch_android_kotlin_compiler\.mjs "\$RUNNER_TEMP\/yawf-kotlin-m2"\)"/);
-  assert.match(patch, /GRADLE_OPTS=%s -Dmaven\.repo\.local=%s/);
+  assert.match(patch, /kotlin_gradle_home="\$\(node scripts\/prepare_android_kotlin_gradle\.mjs "\$kotlin_maven_root" "\$RUNNER_TEMP\/yawf-kotlin-gradle-home"\)"/);
+  assert.match(patch, /GRADLE_USER_HOME=%s/);
   assert.match(patch, />> "\$GITHUB_ENV"/);
   assert.ok(patch.indexOf("fetch_android_kotlin_compiler.mjs") > patch.indexOf("unset yawf_gradle_api_token"));
   assert.match(ci, /node --test[^\n]*scripts\/fetch_android_kotlin_compiler\.test\.mjs/);

@@ -315,14 +315,14 @@ check(
     ) &&
     /node --test scripts\/patch_tauri_android\.test\.mjs/.test(ciWorkflow) &&
     /patch_tauri_android\.mjs/.test(ciWorkflow) &&
-    /android init --ci[\s\S]{0,500}patch_tauri_android\.mjs[\s\S]*?node scripts\/prepare_android_gradle\.mjs[\s\S]*?node scripts\/fetch_android_kotlin_compiler\.mjs[\s\S]*?GRADLE_OPTS=%s -Dmaven\.repo\.local=%s[\s\S]*?cargo clean --target aarch64-linux-android -p tauri -p wry/.test(
+    /android init --ci[\s\S]{0,500}patch_tauri_android\.mjs[\s\S]*?node scripts\/prepare_android_gradle\.mjs[\s\S]*?node scripts\/fetch_android_kotlin_compiler\.mjs[\s\S]*?node scripts\/prepare_android_kotlin_gradle\.mjs[\s\S]*?GRADLE_USER_HOME=%s[\s\S]*?cargo clean --target aarch64-linux-android -p tauri -p wry/.test(
       workflowJob(ciWorkflow, "tauri-android"),
     ) &&
     /WRY_ANDROID_KOTLIN_FILES_OUT_DIR/.test(ciWorkflow) &&
     /TauriActivity\.kt/.test(ciWorkflow) &&
     /WryActivity\.kt/.test(ciWorkflow) &&
     /:app:compileArmDebugKotlin -x :app:rustBuildArmDebug/.test(ciWorkflow) &&
-    /android init --ci\s+node \.\.\/scripts\/patch_tauri_android\.mjs\s+YAWF_GRADLE_ARCHIVE="\$\(YAWF_GRADLE_API_TOKEN="\$yawf_gradle_api_token" node \.\.\/scripts\/fetch_android_gradle\.mjs\)"\s+unset yawf_gradle_api_token\s+export YAWF_GRADLE_ARCHIVE\s+node \.\.\/scripts\/prepare_android_gradle\.mjs\s+kotlin_maven_root="\$\(node \.\.\/scripts\/fetch_android_kotlin_compiler\.mjs "\$RUNNER_TEMP\/yawf-kotlin-m2"\)"\s+export GRADLE_OPTS="\$\{GRADLE_OPTS:-\} -Dmaven\.repo\.local=\$kotlin_maven_root"\s+npm run tauri -- android build --apk/.test(
+    /android init --ci\s+node \.\.\/scripts\/patch_tauri_android\.mjs\s+YAWF_GRADLE_ARCHIVE="\$\(YAWF_GRADLE_API_TOKEN="\$yawf_gradle_api_token" node \.\.\/scripts\/fetch_android_gradle\.mjs\)"\s+unset yawf_gradle_api_token\s+export YAWF_GRADLE_ARCHIVE\s+node \.\.\/scripts\/prepare_android_gradle\.mjs\s+kotlin_maven_root="\$\(node \.\.\/scripts\/fetch_android_kotlin_compiler\.mjs "\$RUNNER_TEMP\/yawf-kotlin-m2"\)"\s+kotlin_gradle_home="\$\(node \.\.\/scripts\/prepare_android_kotlin_gradle\.mjs "\$kotlin_maven_root" "\$RUNNER_TEMP\/yawf-kotlin-gradle-home"\)"\s+export GRADLE_USER_HOME="\$kotlin_gradle_home"\s+npm run tauri -- android build --apk/.test(
       releaseWorkflow,
     ),
   "the generated Android project patch must be tested, fail closed on template drift, and run after init before Android checks, Kotlin compilation, and release builds",

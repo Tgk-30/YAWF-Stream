@@ -9,6 +9,10 @@ export const KOTLIN_ASSET_API = "https://api.github.com/repos/JetBrains/kotlin/r
 export const KOTLIN_JAR_BYTES = 59720376;
 export const KOTLIN_JAR_SHA256 = "d3e70fb011675e77ef00f1a68918d3cd91eed26058977d1e3ea2a37a293233af";
 export const KOTLIN_JAR_SHA1 = "c4b47f8e33cdbeedd8c1415ab9f9ade870388162";
+export const KOTLIN_POM_URL = "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.3.21/kotlin-compiler-embeddable-2.3.21.pom";
+export const KOTLIN_POM_BYTES = 2451;
+export const KOTLIN_POM_SHA256 = "9523c8feadcb17f42d04ffa97fe2a9c08e5db18f090f6db903dca5c36c7ae5c4";
+const POM_NAME = "kotlin-compiler-embeddable-2.3.21.pom";
 const PARTS = ["org", "jetbrains", "kotlin", "kotlin-compiler-embeddable", "2.3.21"];
 const NAME = "kotlin-compiler-embeddable-2.3.21.jar";
 const exists = path => { try { return lstatSync(path); } catch (error) { if (error.code === "ENOENT") return null; throw error; } };
@@ -30,7 +34,7 @@ function validateTree(root, depth = 0, allowedStage = null) {
   const expected = depth < PARTS.length ? PARTS[depth] : NAME;
   for (const entry of readdirSync(root)) {
     if (allowedStage != null && depth === PARTS.length && entry === allowedStage) continue;
-    if (entry !== expected) fail();
+    if (entry !== expected && !(depth === PARTS.length && entry === POM_NAME)) fail();
     const path = join(root, entry), child = lstatSync(path);
     if (child.isSymbolicLink()) fail();
     if (depth < PARTS.length) validateTree(path, depth + 1, allowedStage);
@@ -38,6 +42,19 @@ function validateTree(root, depth = 0, allowedStage = null) {
   }
 }
 export function kotlinCompilerArtifactPath(root) { return join(root, ...PARTS, NAME); }
+export function kotlinCompilerPomPath(root) { return join(root, ...PARTS, POM_NAME); }
+export function verifyKotlinCompilerPom(path) {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size !== KOTLIN_POM_BYTES) throw new Error("Kotlin compiler POM size or file type does not match the fixed release.");
+  if (createHash("sha256").update(readFileSync(path)).digest("hex") !== KOTLIN_POM_SHA256) throw new Error("Kotlin compiler POM hash does not match the fixed release.");
+  return path;
+}
+export function verifyKotlinCompilerRepository(root) {
+  validateRoot(root); validateTree(root);
+  if (realpathSync(root) !== root) fail();
+  verifyKotlinCompilerJar(kotlinCompilerArtifactPath(root)); verifyKotlinCompilerPom(kotlinCompilerPomPath(root));
+  return root;
+}
 export function verifyKotlinCompilerJar(path) {
   const stat = lstatSync(path);
   if (stat.isSymbolicLink() || !stat.isFile() || stat.size !== KOTLIN_JAR_BYTES) throw new Error("Kotlin compiler artifact size or file type does not match the fixed release.");
@@ -59,15 +76,16 @@ function prepare(root) {
   if (realpathSync(root) !== root) fail();
   const artifact = kotlinCompilerArtifactPath(root);
   if (exists(artifact) != null) verifyKotlinCompilerJar(artifact);
+  if (exists(kotlinCompilerPomPath(root)) != null) verifyKotlinCompilerPom(kotlinCompilerPomPath(root));
   return artifact;
 }
-function publish(staged, root, stage) {
-  verifyKotlinCompilerJar(staged);
+function publish(staged, root, stage, name = NAME, verify = verifyKotlinCompilerJar) {
+  verify(staged);
   validateRoot(root); validateTree(root, 0, basename(stage));
-  const artifact = kotlinCompilerArtifactPath(root);
+  const artifact = join(root, ...PARTS, name);
   try { linkSync(staged, artifact); }
-  catch (error) { if (error.code !== "EEXIST") throw error; verifyKotlinCompilerJar(artifact); }
-  verifyKotlinCompilerJar(artifact);
+  catch (error) { if (error.code !== "EEXIST") throw error; verify(artifact); }
+  verify(artifact);
   return root;
 }
 export function stageVerifiedKotlinCompiler(source, root) {
@@ -79,6 +97,21 @@ export function stageVerifiedKotlinCompiler(source, root) {
     const staged = join(stage, NAME); copyFileSync(source, staged, constants.COPYFILE_EXCL);
     return publish(staged, root, stage);
   } finally { rmSync(stage, { recursive: true, force: true }); }
+}
+export function stageVerifiedKotlinCompilerPom(source, root) {
+  verifyKotlinCompilerPom(source); prepare(root);
+  if (exists(kotlinCompilerPomPath(root)) != null) return root;
+  const stage = mkdtempSync(join(dirname(kotlinCompilerPomPath(root)), ".kotlin-stage-"));
+  try {
+    const staged = join(stage, POM_NAME); copyFileSync(source, staged, constants.COPYFILE_EXCL);
+    return publish(staged, root, stage, POM_NAME, verifyKotlinCompilerPom);
+  } finally { rmSync(stage, { recursive: true, force: true }); }
+}
+export function kotlinPomDownloadInvocation(output) {
+  const args = kotlinDownloadInvocation(output);
+  args[args.indexOf(String(KOTLIN_JAR_BYTES))] = String(KOTLIN_POM_BYTES);
+  args[args.indexOf(KOTLIN_ASSET_API)] = KOTLIN_POM_URL;
+  return args;
 }
 export function kotlinDownloadInvocation(output) {
   return ["--disable", "--fail", "--silent", "--show-error", "--location", "--max-redirs", "3",
@@ -92,19 +125,25 @@ export function kotlinTransferStatus(result) {
   const http = typeof result.stdout === "string" && /^\d{3}$/.test(result.stdout) ? result.stdout : "unavailable";
   return `curl=${exit}, HTTP=${http}`;
 }
-export function fetchAndroidKotlinCompiler(root) {
-  const artifact = prepare(root);
+function fetchArtifact(root, name, verify, invocation) {
+  prepare(root);
+  const artifact = join(root, ...PARTS, name);
   if (exists(artifact) != null) return root;
   const stage = mkdtempSync(join(dirname(artifact), ".kotlin-stage-"));
   try {
-    const staged = join(stage, NAME), env = { ...process.env };
+    const staged = join(stage, name), env = { ...process.env };
     delete env.GH_TOKEN; delete env.GITHUB_TOKEN; delete env.YAWF_GRADLE_API_TOKEN;
-    const result = spawnSync("/usr/bin/curl", kotlinDownloadInvocation(staged), {
+    const result = spawnSync("/usr/bin/curl", invocation(staged), {
       input: "", env, encoding: "utf8", timeout: 190_000, maxBuffer: 64 * 1024,
     });
     if (result.status !== 0 || result.stdout !== "200") throw new Error(`Official Kotlin transfer failed (${kotlinTransferStatus(result)}).`);
-    return publish(staged, root, stage);
+    return publish(staged, root, stage, name, verify);
   } finally { rmSync(stage, { recursive: true, force: true }); }
+}
+export function fetchAndroidKotlinCompiler(root) {
+  fetchArtifact(root, NAME, verifyKotlinCompilerJar, kotlinDownloadInvocation);
+  fetchArtifact(root, POM_NAME, verifyKotlinCompilerPom, kotlinPomDownloadInvocation);
+  return verifyKotlinCompilerRepository(root);
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (process.argv.length !== 3) throw new Error("Exactly one absolute isolated Maven root is required; no URL, checksum or credential override is accepted.");

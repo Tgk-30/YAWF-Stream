@@ -7,8 +7,10 @@ import { spawnSync } from "node:child_process";
 import {
   KOTLIN_ASSET_API, KOTLIN_JAR_BYTES, KOTLIN_JAR_SHA256, KOTLIN_JAR_SHA1, kotlinDownloadInvocation,
   kotlinTransferStatus, kotlinCompilerArtifactPath, verifyKotlinCompilerJar, stageVerifiedKotlinCompiler, fetchAndroidKotlinCompiler,
+  KOTLIN_POM_URL, KOTLIN_POM_BYTES, KOTLIN_POM_SHA256, kotlinPomDownloadInvocation, kotlinCompilerPomPath, verifyKotlinCompilerPom, stageVerifiedKotlinCompilerPom,
 } from "./fetch_android_kotlin_compiler.mjs";
 const cached = process.env.DS_TEST_KOTLIN_JAR;
+const cachedPom = process.env.DS_TEST_KOTLIN_POM;
 const fixture = () => realpathSync(mkdtempSync(join(tmpdir(), "kotlin-pin-")));
 test("anonymous curl is fixed-origin, TLS-only, curlrc-free and finitely bounded", () => {
   const args = kotlinDownloadInvocation("/owned/artifact.jar");
@@ -54,13 +56,30 @@ test("rejects a JAR leaf symlink without altering its target", () => {
 test("right-size wrong bytes fail the hard hash fence", () => {
   const root = fixture(); try { const p = join(root, "wrong.jar"); writeFileSync(p, ""); truncateSync(p, KOTLIN_JAR_BYTES); assert.throws(() => verifyKotlinCompilerJar(p), /hashes/); } finally { rmSync(root, { recursive: true, force: true }); }
 });
-test("verified cached release stages exact JAR only and is inode-idempotent", { skip: !cached }, () => {
+test("verified cached release stages exact JAR and POM and is inode-idempotent", { skip: !cached || !cachedPom }, () => {
   const root = fixture(); try {
     assert.equal(stageVerifiedKotlinCompiler(cached, root), root); const jar = kotlinCompilerArtifactPath(root); verifyKotlinCompilerJar(jar); const inode = lstatSync(jar).ino;
+    stageVerifiedKotlinCompilerPom(cachedPom, root); verifyKotlinCompilerPom(kotlinCompilerPomPath(root));
     assert.equal(fetchAndroidKotlinCompiler(root), root); assert.equal(stageVerifiedKotlinCompiler(cached, root), root); assert.equal(lstatSync(jar).ino, inode);
-    assert.deepEqual(readdirSync(join(jar, "..")), ["kotlin-compiler-embeddable-2.3.21.jar"]);
+    assert.deepEqual(readdirSync(join(jar, "..")), ["kotlin-compiler-embeddable-2.3.21.jar", "kotlin-compiler-embeddable-2.3.21.pom"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 test("corrupted cached source never publishes a destination", { skip: !cached }, () => {
   const root = fixture(); try { const source = join(root, "source.jar"); copyFileSync(cached, source); const bytes = readFileSync(source); bytes[0] ^= 1; writeFileSync(source, bytes); const maven = join(root, "m2"); assert.throws(() => stageVerifiedKotlinCompiler(source, maven), /hashes/); assert.equal(readdirSync(root).includes("m2"), false); } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("POM transfer has a fixed official URL, exact bounds and immutable hash", () => {
+  const args = kotlinPomDownloadInvocation("/owned/compiler.pom");
+  assert.equal(KOTLIN_POM_URL, "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.3.21/kotlin-compiler-embeddable-2.3.21.pom");
+  assert.equal(args.filter(x => x.startsWith("https://")).length, 1);
+  assert.ok(args.includes(KOTLIN_POM_URL)); assert.equal(args[args.indexOf("--max-filesize") + 1], String(KOTLIN_POM_BYTES));
+  assert.equal(KOTLIN_POM_SHA256, "9523c8feadcb17f42d04ffa97fe2a9c08e5db18f090f6db903dca5c36c7ae5c4");
+});
+test("POM corruption and symlinks fail closed without overwriting the target", { skip: !cachedPom }, () => {
+  const root = fixture(); try {
+    const source = join(root, "wrong.pom"); const data = readFileSync(cachedPom); data[0] ^= 1; writeFileSync(source, data);
+    assert.throws(() => stageVerifiedKotlinCompilerPom(source, join(root, "m2")), /hash/);
+    const link = join(root, "link.pom"); symlinkSync(cachedPom, link);
+    assert.throws(() => stageVerifiedKotlinCompilerPom(link, join(root, "m2")), /size or file type/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
