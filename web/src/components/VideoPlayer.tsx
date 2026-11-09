@@ -36,6 +36,7 @@ const MAX_SOURCE_DURATION_SECONDS = 86_400;
 const SERVER_OPTIMIZED_RETRY_BASE_MS = 500;
 const SERVER_OPTIMIZED_RETRY_MAX_MS = 4_000;
 const TOUCH_DOUBLE_TAP_MS = 320;
+const PRE_BACKGROUND_PAUSE_CORRELATION_MS = 1_000;
 import { Icon } from "./Icon";
 import { useVideoPresentation, type VideoPresentation } from "./useVideoPresentation";
 import {
@@ -3498,6 +3499,7 @@ function WebviewPlayer({
   const autoplayAttemptedRef = useRef(false);
   const playbackAttemptRef = useRef(0);
   const foregroundPlaybackRef = useRef<{ video: HTMLVideoElement; source: string; play: boolean; returnedPosition?: number } | null>(null);
+  const preBackgroundPauseRef = useRef<{ video: HTMLVideoElement; source: string; attempt: number; pausedAt: number } | null>(null);
   const playbackSourceRef = useRef(url);
   useLayoutEffect(() => { playbackSourceRef.current = url; }, [url]);
   const pausedForCastRef = useRef(false);
@@ -3584,6 +3586,7 @@ function WebviewPlayer({
   sourceSwitchStateRef.current = sourceSwitchState;
   const pendingHandoffPlaybackIntentRef = useRef<"play" | "pause" | null>(null);
   const clearReturnedPlayback = useCallback((video: HTMLVideoElement) => {
+    if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
     const pending = foregroundPlaybackRef.current;
     if (pending?.video === video && pending.returnedPosition != null) {
       foregroundPlaybackRef.current = null;
@@ -3795,6 +3798,8 @@ function WebviewPlayer({
       const onRejected = () => {
         if (videoRef.current !== video || playbackSourceRef.current !== url ||
             playbackAttemptRef.current !== attempt || foregroundPlaybackRef.current?.video === video || !video.paused) return;
+        if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
+        ownedPlaybackPausedRef.current = true;
         setPaused(true);
         setPlaying(false);
         onPausedChange(true);
@@ -5294,6 +5299,19 @@ function WebviewPlayer({
           (next || foregroundPlaybackRef.current?.video !== video)) return;
       documentSuspendedRef.current = next;
       if (next && backgroundBlocksPlayback(video)) {
+        const pause = preBackgroundPauseRef.current;
+        preBackgroundPauseRef.current = null;
+        const age = pause == null ? Number.NaN : performance.now() - pause.pausedAt;
+        if (pause?.video === video && pause.source === url && playbackSourceRef.current === url &&
+            pause.attempt === playbackAttemptRef.current && age >= 0 && age <= PRE_BACKGROUND_PAUSE_CORRELATION_MS &&
+            video.paused && video.error == null && !video.ended && !video.controls && !video.seeking &&
+            !rendererSeekingRef.current && !scrubbingRef.current && !suspendedRef.current &&
+            !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null &&
+            terminalRecoveryVideoRef.current !== video && !nativeControlsOwnPlayback(video)) {
+          // WebKit can pause just before reporting hidden. Correlate only this
+          // imminent transition; an ordinary visible pause still takes effect.
+          ownedPlaybackPausedRef.current = false;
+        }
         video.autoplay = false;
         queueOwnedForegroundPlayback();
       }
@@ -5376,6 +5394,7 @@ function WebviewPlayer({
     verifiedPlaybackPlayingRef.current = false;
     ownedPlaybackPausedRef.current = sourceSwitchStateRef.current?.paused ?? false;
     explicitPlaybackIntentRef.current = false;
+    preBackgroundPauseRef.current = null;
     backgroundPauseVideoRef.current = null;
     lastObservedMediaTimeRef.current = Number.isFinite(video.currentTime)
       ? video.currentTime
@@ -5473,6 +5492,9 @@ function WebviewPlayer({
       }
       onAbsolutePositionChange(video.currentTime + timelineOffsetRef.current);
       const previousMediaTime = lastObservedMediaTimeRef.current;
+      if (!video.paused && video.currentTime > previousMediaTime + 0.01 && preBackgroundPauseRef.current?.video === video) {
+        preBackgroundPauseRef.current = null;
+      }
       const returnedPlayback = foregroundPlaybackRef.current;
       if (returnedPlayback?.video === video && returnedPlayback.source === url &&
           returnedPlayback.returnedPosition != null && video.currentTime > returnedPlayback.returnedPosition + 0.01 &&
@@ -5676,6 +5698,11 @@ function WebviewPlayer({
           backgroundPauseVideoRef.current !== video && !recoveryClockWasReset(video) &&
           !video.seeking && !rendererSeekingRef.current &&
           !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null) {
+        if (!ownedPlaybackPausedRef.current && verifiedPlaybackPlayingRef.current && verifiedPlaybackProgressReportedRef.current &&
+            playbackSourceRef.current === url && terminalRecoveryVideoRef.current !== video &&
+            !scrubbingRef.current && !video.controls && !nativeControlsOwnPlayback(video)) {
+          preBackgroundPauseRef.current = { video, source: url, attempt: playbackAttemptRef.current, pausedAt: performance.now() };
+        }
         ownedPlaybackPausedRef.current = true;
       }
       verifiedPlaybackPlayingRef.current = false;
@@ -5719,6 +5746,7 @@ function WebviewPlayer({
     };
     const onPlay = () => {
       if (videoRef.current !== video) return;
+      if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
       if (terminalRecoveryVideoRef.current === video) {
         if (!video.paused) video.pause();
         return;
@@ -5776,6 +5804,7 @@ function WebviewPlayer({
         setPlaybackStatus("seeking");
         return;
       }
+      if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
       verifiedPlaybackPlayingRef.current = true;
       if (Number.isFinite(video.currentTime) && !recoveryClockWasReset(video)) {
         lastObservedMediaTimeRef.current = video.currentTime;
@@ -5864,6 +5893,7 @@ function WebviewPlayer({
     video.addEventListener("volumechange", onVolumeChange);
     video.addEventListener("ratechange", onRateChange);
     return () => {
+      if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
       const pendingPlayback = foregroundPlaybackRef.current;
       if (pendingPlayback?.video === video && pendingPlayback.source === url) foregroundPlaybackRef.current = null;
       pendingHandoffPlaybackIntentRef.current = null;

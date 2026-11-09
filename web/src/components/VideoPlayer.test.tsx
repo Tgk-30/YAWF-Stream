@@ -15699,7 +15699,7 @@ describe("mobile background playback lifecycle", () => {
     expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }));
   });
 
-  it.each([0, 30_000])("[lease-owned-pause-controls] visible native pause held%s ms stays paused through hide", async (held) => {
+  it.each([[0, false], [1001, true], [30_000, true]] as const)("[lease-owned-pause-controls] unattributed raw pause held%s ms uses bounded background correlation", async (held, staysPaused) => {
     const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
     try {
       const f = await ownedLease(404);
@@ -15708,7 +15708,7 @@ describe("mobile background playback lifecycle", () => {
       act(() => window.dispatchEvent(new Event("pagehide")));
       if (held > 0) resetPausedDecoder(f); // A later reset cannot revoke an established pause.
       await foregroundExpired(f);
-      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: true }));
+      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: staysPaused }));
     } finally { clock.mockRestore(); }
   });
 
@@ -16798,6 +16798,79 @@ describe("existing HTML reader foreground ownership90", () => {
     const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
     fireEvent.timeUpdate(f.video); expect(f.state.time).toBe(300); f.platformPause(); await flush90();
     expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(false); expect(f.refresh).not.toHaveBeenCalled();
+  });
+
+  async function setup92(device: "ios" | "android" = "ios") {
+    const f = await setup90(0, device, true);
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    restore.push(() => clock.mockRestore());
+    return f;
+  }
+  it.each([["ios", "visibility"], ["ios", "page"], ["android", "visibility"], ["android", "page"]] as const)(
+    "[pre-background-pause92] %s pause then %s at187ms retains ownedPlay and resumes once", async (device, kind) => {
+      const f = await setup92(device), src = f.video.getAttribute("src");
+      f.platformPause(); expect(screen.getByRole("button", { name: "Play" })).toBeVisible(); expect(f.attempts).toEqual([]);
+      if (device === "ios" && kind === "visibility") { fireEvent.timeUpdate(f.video); f.platformPause(); }
+      await act(async () => vi.advanceTimersByTimeAsync(187)); f.hide(kind);
+      await act(async () => vi.advanceTimersByTimeAsync(160_000)); f.show(kind); f.show(kind); await flush90();
+      expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(false);
+      expect(document.querySelector("video.player-video")).toBe(f.video); expect(f.video.getAttribute("src")).toBe(src);
+      expect(f.writes).toEqual([]); expect(f.refresh).not.toHaveBeenCalled(); expect(f.ended).not.toHaveBeenCalled(); expect(f.next).not.toHaveBeenCalled();
+    });
+  it.each([[1000, true], [1001, false]] as const)("[pre-background-pause92] %sms correlation boundary resumes=%s", async (delay, resumes) => {
+    const f = await setup92(); f.platformPause(); await act(async () => vi.advanceTimersByTimeAsync(delay)); f.hide(); f.show(); await flush90();
+    expect(f.attempts).toEqual(resumes ? [300] : []); expect(f.state.paused).toBe(!resumes); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it("[pre-background-pause92] native self-heal before visible preserves ownership without duplicate appPlay", async () => {
+    const f = await setup92(); f.platformPause(); await act(async () => vi.advanceTimersByTimeAsync(187)); f.hide("visibility");
+    f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video); f.show("visibility"); await flush90();
+    expect(f.attempts).toEqual([]); f.state.time = 301; fireEvent.timeUpdate(f.video);
+    f.hide("visibility"); f.platformPause(); f.show("visibility"); await flush90();
+    expect(f.attempts).toEqual([301]); expect(f.state.paused).toBe(false); expect(f.refresh).not.toHaveBeenCalled();
+  });
+  it.each(["before", "after-candidate"] as const)("[pre-background-pause92] explicit UI Pause %s cancels imminent background auto-resume", async when => {
+    const f = await setup92(); if (when === "after-candidate") f.platformPause();
+    fireEvent.click(screen.getByRole("button", { name: when === "after-candidate" ? "Play" : "Pause" }));
+    if (when === "after-candidate") fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    f.attempts.length = 0; await act(async () => vi.advanceTimersByTimeAsync(187)); f.hide(); f.show(); await flush90();
+    expect(f.attempts).toEqual([]); expect(f.state.paused).toBe(true);
+  });
+  it("[pre-background-pause92] MediaSession Pause after candidate cancels before imminent hide", async () => {
+    const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
+    restore.push(replaceProperty(navigator, "mediaSession", { metadata: null, playbackState: "none", setPositionState: vi.fn(),
+      setActionHandler: (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => handlers.set(action, handler) }));
+    const f = await setup92(); f.platformPause(); act(() => handlers.get("pause")?.({ action: "pause" }));
+    await act(async () => vi.advanceTimersByTimeAsync(187)); f.hide(); f.show(); await flush90();
+    expect(f.attempts).toEqual([]); expect(f.state.paused).toBe(true);
+  });
+  it.each(["seek", "cast", "pip", "webkit-fullscreen", "standard-fullscreen", "inline-controls", "error", "ended"] as const)(
+    "[pre-background-pause92] %s invalidates pause correlation before hide", async transition => {
+      if (transition === "cast") isTauriMock.mockReturnValue(true);
+      const f = await setup92(); f.platformPause();
+      if (transition === "seek") { f.state.seeking = true; fireEvent.seeking(f.video); f.state.time = 100; f.state.seeking = false; fireEvent.seeked(f.video); }
+      else if (transition === "cast") fireEvent.click(screen.getByRole("button", { name: "test suspend playback" }));
+      else if (transition === "pip") fireEvent(f.video, new Event("enterpictureinpicture"));
+      else if (transition === "webkit-fullscreen") fireEvent(f.video, new Event("webkitbeginfullscreen"));
+      else if (transition === "standard-fullscreen") { restore.push(replaceProperty(document, "fullscreenElement", f.video)); fireEvent(document, new Event("fullscreenchange")); }
+      else if (transition === "inline-controls") f.video.controls = true;
+      else if (transition === "error") fireMediaError(f.video, 2);
+      else { f.state.ended = true; f.state.time = 1000; fireEvent.ended(f.video); }
+      await act(async () => vi.advanceTimersByTimeAsync(187)); f.hide(); f.show(); await flush90(); expect(f.attempts).toEqual([]);
+    });
+  it.each(["source", "unmount"] as const)("[pre-background-pause92] %s invalidates old video/source candidate", async change => {
+    const f = await setup92(); f.platformPause();
+    if (change === "source") f.view.rerender(<VideoPlayer {...f.props} url="https://x/new92.m3u8" sourceRevision={1} initialHandoffState={{ paused: true, volume: 1, muted: false, playbackRate: 1 }} />);
+    else f.view.unmount();
+    await flush90(); await act(async () => vi.advanceTimersByTimeAsync(187)); f.hide(); f.show(); await flush90(); expect(f.attempts).toEqual([]);
+  });
+  it("[pre-background-pause92] rejected foreground resume is one attempt and keeps visible userPlay", async () => {
+    const f = await setup92(); vi.mocked(f.video.play).mockImplementation(async () => { f.attempts.push(f.state.time); throw new Error("fixture resume denied"); });
+    f.platformPause(); await act(async () => vi.advanceTimersByTimeAsync(187)); f.hide(); f.show(); await flush90(); f.show(); fireEvent.canPlay(f.video); await flush90();
+    f.hide(); f.show(); await flush90();
+    expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(true); expect(screen.getByRole("button", { name: "Play" })).toBeVisible();
+    vi.mocked(f.video.play).mockImplementation(async () => { f.attempts.push(f.state.time); f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video); });
+    fireEvent.click(screen.getByRole("button", { name: "Play" })); await flush90();
+    expect(f.attempts).toEqual([300, 300]); expect(f.state.paused).toBe(false);
   });
 
 });
