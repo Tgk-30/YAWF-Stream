@@ -1295,6 +1295,13 @@ export function VideoPlayer({
   const chromePointerFocusTimerRef = useRef<number | undefined>(undefined);
   const chromeExplicitPointerFocusRef = useRef(false);
   const chromeHideTimer = useRef<number | undefined>(undefined);
+  const chromeControlPointerHoldRef = useRef<{
+    owner: string;
+    source: typeof webviewSource;
+    pointerId: number;
+    target: HTMLElement;
+  } | null>(null);
+  const chromeControlPointerTimerRef = useRef<number | undefined>(undefined);
   const lastChromeNudgeAt = useRef(Number.NEGATIVE_INFINITY);
   const webviewErrorPanelShown = mode === "webview" && externalError != null;
   const chromePinned =
@@ -1691,9 +1698,42 @@ export function VideoPlayer({
     clearChromeTimer();
     chromeHideTimer.current = window.setTimeout(() => {
       chromeHideTimer.current = undefined;
-      if (!chromePinnedRef.current) setWebChromeVisible(false);
+      const hold = chromeControlPointerHoldRef.current;
+      const ownsControlPointer = hold != null && hold.owner === playbackOwnerRef.current &&
+        hold.source === currentWebviewSourceRef.current && hold.target.isConnected;
+      if (!chromePinnedRef.current && !ownsControlPointer) setWebChromeVisible(false);
     }, 3200);
   }, [clearChromeTimer, mode]);
+  const clearChromeControlPointerHold = useCallback((restartIdle = true) => {
+    const hold = chromeControlPointerHoldRef.current;
+    if (hold == null) return;
+    chromeControlPointerHoldRef.current = null;
+    window.clearTimeout(chromeControlPointerTimerRef.current);
+    chromeControlPointerTimerRef.current = undefined;
+    if (restartIdle && playerMountedRef.current && hold.owner === playbackOwnerRef.current &&
+        hold.source === currentWebviewSourceRef.current) {
+      // A terminal event starts a full idle window, independent of move throttling.
+      clearChromeTimer();
+      nudgeChrome();
+    }
+  }, [clearChromeTimer, nudgeChrome]);
+  useEffect(() => {
+    const finishControlPointer = (event: PointerEvent) => {
+      if (chromeControlPointerHoldRef.current?.pointerId === event.pointerId) clearChromeControlPointerHold();
+    };
+    const cancelControlPointer = () => clearChromeControlPointerHold();
+    window.addEventListener("pointerup", finishControlPointer, true);
+    window.addEventListener("pointercancel", finishControlPointer, true);
+    window.addEventListener("blur", cancelControlPointer);
+    return () => {
+      window.removeEventListener("pointerup", finishControlPointer, true);
+      window.removeEventListener("pointercancel", finishControlPointer, true);
+      window.removeEventListener("blur", cancelControlPointer);
+      clearChromeControlPointerHold(false);
+    };
+  }, [clearChromeControlPointerHold]);
+  useLayoutEffect(() => () => clearChromeControlPointerHold(false),
+    [clearChromeControlPointerHold, playbackOwner, webviewSource]);
   const clearChromePointerFocus = useCallback(() => {
     window.clearTimeout(chromePointerFocusTimerRef.current);
     chromePointerFocusTimerRef.current = undefined;
@@ -1751,14 +1791,34 @@ export function VideoPlayer({
       chromeHoveredOwnerRef.current = null;
       setChromeHovered(false);
     }
-  }, [clearChromePointerFocus]);
+    if (event.isPrimary === false || event.button > 0) return;
+    const control = event.target instanceof Element
+      ? event.target.closest("button, a[href], select, [role='button'], [role='switch']") : null;
+    if (!(control instanceof HTMLElement) || !event.currentTarget.contains(control) ||
+        control.matches(":disabled, [aria-disabled='true']") || !Number.isSafeInteger(event.pointerId)) {
+      clearChromeControlPointerHold();
+      return;
+    }
+    clearChromeControlPointerHold(false);
+    const hold = { owner: playbackOwner, source: webviewSource, pointerId: event.pointerId, target: control };
+    chromeControlPointerHoldRef.current = hold;
+    clearChromeTimer();
+    nudgeChrome();
+    // Lost UP/CANCEL cannot leave a control lease pinned indefinitely. This is
+    // one fixed safety bound, not an extension of the ordinary 3.2-second idle.
+    chromeControlPointerTimerRef.current = window.setTimeout(() => {
+      if (chromeControlPointerHoldRef.current === hold) clearChromeControlPointerHold();
+    }, 10_000);
+  }, [clearChromeControlPointerHold, clearChromePointerFocus, clearChromeTimer, nudgeChrome, playbackOwner, webviewSource]);
   const noteChromeClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
     if (chromePointerFocusTargetRef.current != null || event.detail > 0) {
       chromeInputModalityRef.current = "pointer";
     } else if (chromeInputModalityRef.current === "pointer") {
       chromeInputModalityRef.current = null;
     }
-  }, []);
+    const hold = chromeControlPointerHoldRef.current;
+    if (hold != null && event.target instanceof Node && hold.target.contains(event.target)) clearChromeControlPointerHold();
+  }, [clearChromeControlPointerHold]);
   const noteChromeKeyboard = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
     clearChromePointerFocus();
     chromeInputModalityRef.current = "keyboard";

@@ -16695,3 +16695,226 @@ describe("existing HTML reader foreground ownership90", () => {
     expect(document.querySelector("video.player-video")).toBe(f.video); expect(f.video.getAttribute("src")).toBe(src); expect(f.state.time).toBe(300); expect(f.state.paused).toBe(false); expect(f.writes).toEqual([]); expect(f.refresh).not.toHaveBeenCalled();
   });
 });
+
+describe("interactive chrome pointer lifetime", () => {
+  function pointer(target: Element | Window, type: "pointerdown" | "pointerup" | "pointercancel", pointerId = 7, pointerType = "touch") {
+    const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 });
+    Object.defineProperties(event, {
+      pointerId: { value: pointerId }, pointerType: { value: pointerType }, isPrimary: { value: true },
+    });
+    fireEvent(target, event);
+  }
+  function ready(video: HTMLVideoElement) {
+    let paused = false;
+    const play = vi.fn(async () => { paused = false; fireEvent.play(video); fireEvent.playing(video); });
+    const pause = vi.fn(() => { paused = true; fireEvent.pause(video); });
+    Object.defineProperties(video, {
+      paused: { configurable: true, get: () => paused },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+      duration: { configurable: true, value: 900 },
+      currentTime: { configurable: true, writable: true, value: 40 },
+      play: { configurable: true, value: play }, pause: { configurable: true, value: pause },
+    });
+    fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+    play.mockClear(); pause.mockClear();
+    return { play, pause };
+  }
+  function setup(layout: "ios" | "android" = "ios") {
+    vi.useFakeTimers(); deviceKindMock.mockReturnValue(layout);
+    if (layout === "android") Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+      configurable: true, value: { getInsets: vi.fn() },
+    });
+    const props = { url: "https://x/control-hold.mp4", title: "Interactive control hold", onClose: vi.fn() };
+    const view = render(<VideoPlayer {...props} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const media = ready(video);
+    const bar = document.querySelector(".player-bar") as HTMLElement;
+    expect(document.querySelector(".player")).toHaveClass("is-touch-player");
+    expect(bar).toHaveClass("is-visible");
+    return { props, view, video, bar, ...media };
+  }
+
+  it.each(["ios", "android"] as const)("[chrome-control-hold] retains %s More across the idle deadline until its real click", (layout) => {
+    const { bar, pause, play } = setup(layout);
+    const more = screen.getByRole("button", { name: "Playback settings" });
+    act(() => vi.advanceTimersByTime(3_190));
+    pointer(more.querySelector("[data-icon]")!, "pointerdown");
+    act(() => vi.advanceTimersByTime(20));
+    expect(bar).toHaveClass("is-visible");
+    expect(more.tabIndex).toBe(0);
+    pointer(more, "pointerup"); fireEvent.click(more, { detail: 1 });
+    expect(screen.getByRole("dialog", { name: "Playback settings" })).toBeInTheDocument();
+    expect(pause).not.toHaveBeenCalled(); expect(play).not.toHaveBeenCalled();
+  });
+
+  it.each(["ios", "android"] as const)("[chrome-control-hold] retains %s Pause across the idle deadline and pauses exactly once", (layout) => {
+    const { video, bar, pause, play } = setup(layout);
+    const control = screen.getByRole("button", { name: "Pause" });
+    act(() => vi.advanceTimersByTime(3_190));
+    pointer(control, "pointerdown");
+    act(() => vi.advanceTimersByTime(20));
+    expect(bar).toHaveClass("is-visible");
+    expect(control.tabIndex).toBe(0);
+    pointer(control, "pointerup"); fireEvent.click(control, { detail: 1 });
+    expect(pause).toHaveBeenCalledTimes(1); expect(play).not.toHaveBeenCalled();
+    expect(video.paused).toBe(true);
+    expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+  });
+
+  it("[chrome-control-hold] retains a long pen press and starts a full idle window only after matching UP", () => {
+    const { bar } = setup();
+    const more = screen.getByRole("button", { name: "Playback settings" });
+    pointer(more, "pointerdown", 7, "pen");
+    act(() => vi.advanceTimersByTime(6_000));
+    expect(bar).toHaveClass("is-visible");
+    pointer(window, "pointerup", 7, "pen");
+    act(() => vi.advanceTimersByTime(3_199));
+    expect(bar).toHaveClass("is-visible");
+    act(() => vi.advanceTimersByTime(2));
+    expect(bar).not.toHaveClass("is-visible");
+  });
+
+  it("[chrome-control-hold] matching CANCEL releases with a fresh complete idle window", () => {
+    const { bar } = setup();
+    const more = screen.getByRole("button", { name: "Playback settings" });
+    act(() => vi.advanceTimersByTime(3_190));
+    pointer(more, "pointerdown");
+    act(() => vi.advanceTimersByTime(20));
+    pointer(window, "pointercancel");
+    act(() => vi.advanceTimersByTime(3_199));
+    expect(bar).toHaveClass("is-visible");
+    act(() => vi.advanceTimersByTime(2));
+    expect(bar).not.toHaveClass("is-visible");
+  });
+
+  it("[chrome-control-hold] an unrelated pointer UP cannot release the active control gesture", () => {
+    const { bar } = setup();
+    pointer(screen.getByRole("button", { name: "Playback settings" }), "pointerdown", 7);
+    act(() => vi.advanceTimersByTime(3_210));
+    pointer(window, "pointerup", 8);
+    act(() => vi.advanceTimersByTime(3_210));
+    expect(bar).toHaveClass("is-visible");
+    pointer(window, "pointerup", 7);
+    act(() => vi.advanceTimersByTime(3_201));
+    expect(bar).not.toHaveClass("is-visible");
+  });
+
+  it("[chrome-control-hold] missing UP has a fixed lost-gesture bound and late UP cannot reveal again", () => {
+    const { bar } = setup();
+    pointer(screen.getByRole("button", { name: "Playback settings" }), "pointerdown");
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(bar).toHaveClass("is-visible");
+    act(() => vi.advanceTimersByTime(8_201));
+    expect(bar).not.toHaveClass("is-visible");
+    pointer(window, "pointerup");
+    act(() => vi.advanceTimersByTime(1));
+    expect(bar).not.toHaveClass("is-visible");
+  });
+
+  it("[chrome-control-hold] an ordinary same-owner render does not retire an active control hold", () => {
+    const { bar, view, props } = setup();
+    act(() => vi.advanceTimersByTime(3_190));
+    pointer(screen.getByRole("button", { name: "Playback settings" }), "pointerdown");
+    view.rerender(<VideoPlayer {...props} subtitle="Updated presentation" />);
+    act(() => vi.advanceTimersByTime(4_000));
+    expect(bar).toHaveClass("is-visible");
+    pointer(window, "pointerup");
+    act(() => vi.advanceTimersByTime(3_201));
+    expect(bar).not.toHaveClass("is-visible");
+  });
+
+  it("[chrome-control-hold] a new primary gesture cannot be released by the prior gesture timer or UP", () => {
+    const { bar } = setup();
+    const more = screen.getByRole("button", { name: "Playback settings" });
+    pointer(more, "pointerdown", 7);
+    act(() => vi.advanceTimersByTime(5_000));
+    pointer(more, "pointerdown", 8);
+    act(() => vi.advanceTimersByTime(5_001));
+    pointer(window, "pointerup", 7);
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(bar).toHaveClass("is-visible");
+    pointer(window, "pointerup", 8);
+    act(() => vi.advanceTimersByTime(3_201));
+    expect(bar).not.toHaveClass("is-visible");
+  });
+
+  it("[chrome-control-hold] committed media replacement clears the old control hold without a late wakeup", () => {
+    const { bar, view, props, video } = setup();
+    const more = screen.getByRole("button", { name: "Playback settings" });
+    act(() => vi.advanceTimersByTime(3_190));
+    pointer(more, "pointerdown");
+    view.rerender(<VideoPlayer {...props} sourceRevision={1} />);
+    const next = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(next).not.toBe(video); expect(more.isConnected).toBe(false);
+    ready(next);
+    act(() => vi.advanceTimersByTime(3_201));
+    expect(bar).not.toHaveClass("is-visible");
+    pointer(window, "pointerup");
+    act(() => vi.advanceTimersByTime(10_001));
+    expect(bar).not.toHaveClass("is-visible");
+  });
+
+  it("[chrome-control-hold] unmount cancels the gesture fallback and window release listeners", () => {
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    try {
+      const { view } = setup();
+      const timeout = vi.spyOn(window, "setTimeout");
+      const clear = vi.spyOn(window, "clearTimeout");
+      try {
+        pointer(screen.getByRole("button", { name: "Playback settings" }), "pointerdown");
+        const fallbackIndex = timeout.mock.calls.findIndex(([, delay]) => delay === 10_000);
+        const fallback = fallbackIndex < 0 ? null : timeout.mock.results[fallbackIndex]!.value;
+        const listeners = add.mock.calls.filter(([type, , capture]) =>
+          (type === "pointerup" || type === "pointercancel") && capture === true);
+        view.unmount();
+        // The unchanged baseline has an unrelated deferred timer. Only this
+        // interaction's timeout/listeners are owned by the pointer hold.
+        if (fallback != null) expect(clear).toHaveBeenCalledWith(fallback);
+        for (const [type, listener, capture] of listeners) expect(remove).toHaveBeenCalledWith(type, listener, capture);
+        const remaining = vi.getTimerCount();
+        pointer(window, "pointerup");
+        pointer(window, "pointercancel");
+        expect(vi.getTimerCount()).toBe(remaining);
+      } finally {
+        timeout.mockRestore(); clear.mockRestore();
+      }
+    } finally {
+      add.mockRestore(); remove.mockRestore();
+    }
+  });
+
+  it("[chrome-control-hold] media-surface DOWN is not an interactive-control hold", () => {
+    const { video, bar, pause, play } = setup();
+    act(() => vi.advanceTimersByTime(3_190));
+    pointer(video, "pointerdown");
+    act(() => vi.advanceTimersByTime(20));
+    expect(bar).not.toHaveClass("is-visible");
+    pointer(video, "pointercancel");
+    expect(pause).not.toHaveBeenCalled(); expect(play).not.toHaveBeenCalled();
+  });
+
+  it("[chrome-control-hold] window blur releases without adding a persistent pin", () => {
+    const { bar } = setup();
+    pointer(screen.getByRole("button", { name: "Playback settings" }), "pointerdown");
+    fireEvent(window, new Event("blur"));
+    act(() => vi.advanceTimersByTime(3_201));
+    expect(bar).not.toHaveClass("is-visible");
+  });
+
+  it.each(["pointerup", "lost-UP fallback"] as const)("[chrome-control-hold] same-owner disconnected control releases through %s without a permanent pin", (terminal) => {
+    const { bar } = setup();
+    const more = screen.getByRole("button", { name: "Playback settings" });
+    const parent = more.parentElement!, next = more.nextSibling;
+    pointer(more, "pointerdown");
+    act(() => vi.advanceTimersByTime(4_000));
+    more.remove();
+    try {
+      if (terminal === "pointerup") {
+        pointer(window, "pointerup");
+        act(() => vi.advanceTimersByTime(3_201));
+      } else act(() => vi.advanceTimersByTime(9_201));
+      expect(bar).not.toHaveClass("is-visible");
+    } finally { parent.insertBefore(more, next); }
+  });
+});
