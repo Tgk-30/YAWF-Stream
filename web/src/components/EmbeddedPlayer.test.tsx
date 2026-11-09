@@ -49,6 +49,7 @@ vi.mock("./Icon", () => ({
 
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { POST_START_STALL_TIMEOUT_MS } from "../lib/playbackStall";
+import * as castModule from "../lib/cast";
 
 const initialViewport = {
   width: window.innerWidth,
@@ -1617,6 +1618,62 @@ describe("EmbeddedPlayer decode-failure fallback", () => {
     );
   });
 
+  it("[native-start89] floors fractional handoff only at the bridge and preserves logical state", async () => {
+    const switchOptimized = vi.fn(async () => {});
+    render(<EmbeddedPlayer url="https://example.test/fraction.mkv" title="Fraction"
+      startPositionSeconds={13.875}
+      sourceSwitchState={{ paused: true, volume: 0.64, muted: true, playbackRate: 1.25 }}
+      serverOptimized={{ qualities: ["480p"] }} onSwitchServerOptimized={switchOptimized} onSwitchDeviceOriginal={() => {}}
+      onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("pause", true));
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/fraction.mkv", "replace", "-1", "start=+13"]);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("volume", 64);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("mute", true);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("speed", 1.25);
+    emitProperty("aid", "2");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "480p" }));
+    expect(switchOptimized).toHaveBeenCalledExactlyOnceWith("480p", 13.875, {
+      paused: true, volume: 0.64, muted: true, playbackRate: 1.25,
+      audioPreference: { id: "2", language: null },
+    });
+  });
+
+  it("[native-start89] serializes subsecond playing handoff as integer zero without discarding its clock", async () => {
+    const switchOptimized = vi.fn(async () => {});
+    render(<EmbeddedPlayer url="https://example.test/subsecond.mkv" title="Subsecond"
+      startPositionSeconds={0.5} sourceSwitchState={{ paused: false, volume: 1, muted: false, playbackRate: 1 }}
+      serverOptimized={{ qualities: ["480p"] }} onSwitchServerOptimized={switchOptimized} onSwitchDeviceOriginal={() => {}} onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("pause", false));
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/subsecond.mkv", "replace", "-1", "start=+0"]);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "480p" }));
+    expect(switchOptimized).toHaveBeenCalledWith("480p", 0.5, expect.objectContaining({ paused: false }));
+  });
+
+  it("[native-start89] keeps ordinary fractional bookmark serialization integer-compatible", async () => {
+    render(<EmbeddedPlayer url="https://example.test/bookmark.mkv" title="Bookmark" startPositionSeconds={125.9} onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/bookmark.mkv", "replace", "-1", "start=+125"]));
+  });
+
+  it("[native-start89] omits invalid or unsafe resume options instead of sending an unrepresentable start", async () => {
+    for (const start of [NaN, Infinity, -1, Number.MAX_SAFE_INTEGER + 1, 1e21]) {
+      renderPlayerMock.command.mockClear();
+      const view = render(<EmbeddedPlayer url="https://example.test/invalid.mkv" title="Invalid"
+        startPositionSeconds={start} sourceSwitchState={{ paused: true, volume: 1, muted: false, playbackRate: 1 }} onClose={() => {}} />);
+      await waitFor(() => expect(renderPlayerMock.command).toHaveBeenCalled());
+      expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/invalid.mkv"]);
+      view.unmount();
+      await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    }
+  });
+
+  it("[native-start89] accepts the largest safe integer as decimal bridge-compatible seconds", async () => {
+    render(<EmbeddedPlayer url="https://example.test/safe.mkv" title="Safe"
+      startPositionSeconds={Number.MAX_SAFE_INTEGER} sourceSwitchState={{ paused: true, volume: 1, muted: false, playbackRate: 1 }} onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/safe.mkv", "replace", "-1", "start=+9007199254740991"]));
+  });
+
   it("passes the stream-scoped bearer separately from the playback URL", async () => {
     const authorization = `Bearer ${"A".repeat(43)}`;
     render(
@@ -2389,4 +2446,167 @@ describe("native terminal transport88", () => {
     expect(ended).toHaveBeenCalledExactlyOnceWith(24, 24, expect.any(Object)); expect(fresh).not.toHaveBeenCalled();
   });
 
+});
+
+
+describe("native effective duration UI89", () => {
+  async function startUI(extra: Partial<React.ComponentProps<typeof EmbeddedPlayer>> = {}) {
+    const props = { url: "https://example.test/native-ui.mkv", title: "Native duration UI", onClose: () => {}, ...extra };
+    const view = render(<EmbeddedPlayer {...props} />);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    return { ...view, props };
+  }
+  function midpoint() {
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    vi.spyOn(slider, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 200, height: 10, right: 200, bottom: 10, x: 0, y: 0, toJSON: () => ({}) });
+    const event = new MouseEvent("pointerdown", { bubbles: true, clientX: 100, clientY: 5 });
+    Object.defineProperty(event, "pointerId", { value: 1 }); fireEvent(slider, event); fireEvent.pointerUp(slider);
+  }
+  it("[duration-ui-extent89] renders absolute124 and seeks local12 from midpoint and digit5 without mpv duration", async () => {
+    await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100 });
+    const slider = screen.getByRole("slider", { name: "Seek" }); expect(slider).toHaveAttribute("aria-valuemin", "100"); expect(slider).toHaveAttribute("aria-valuemax", "124");
+    fireEvent.click(screen.getByRole("button", { name: "Show total duration" })); expect(screen.getByRole("button", { name: "Show remaining time" })).toHaveTextContent("2:04");
+    renderPlayerMock.command.mockClear(); midpoint(); fireEvent.keyDown(window, { key: "5" });
+    expect(renderPlayerMock.command.mock.calls).toEqual([["seek", [12, "absolute"]], ["seek", [12, "absolute"]]]);
+  });
+  it("[duration-ui-clamp89] clamps relative seeks to authoritative local24 rather than truncated native13", async () => {
+    await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100 }); emitProperty("duration", 13); emitProperty("time-pos", 12);
+    renderPlayerMock.command.mockClear(); fireEvent.keyDown(window, { key: "ArrowRight", shiftKey: true });
+    expect(renderPlayerMock.command).toHaveBeenCalledExactlyOnceWith("seek", [24, "absolute"]);
+  });
+  it("[duration-ui-paused89] updates paused controls on metadata arrival without a new clock, reload or subscription", async () => {
+    const view = await startUI({ timelineOffsetSeconds: 100, sourceSwitchState: { paused: true, volume: 1, muted: false, playbackRate: 1 } });
+    const calls = renderPlayerMock.command.mock.calls.length, observes = renderPlayerMock.observeProperties.mock.calls.length, properties = renderPlayerMock.setProperty.mock.calls.length, initializations = renderPlayerMock.init.mock.calls.length;
+    view.rerender(<EmbeddedPlayer {...view.props} knownAbsoluteDurationSeconds={124} />);
+    expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "124");
+    fireEvent.click(screen.getByRole("button", { name: "Show total duration" })); expect(screen.getByRole("button", { name: "Show remaining time" })).toHaveTextContent("2:04");
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    expect(renderPlayerMock.init.mock.calls).toHaveLength(initializations);
+    expect(renderPlayerMock.command.mock.calls).toHaveLength(calls); expect(renderPlayerMock.observeProperties.mock.calls).toHaveLength(observes); expect(renderPlayerMock.setProperty.mock.calls).toHaveLength(properties);
+  });
+  it("[duration-ui-owner89] does not reuse old metadata or raw duration after a URL change", async () => {
+    const view = await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100 }); emitProperty("duration", 24);
+    view.rerender(<EmbeddedPlayer {...view.props} url="https://example.test/fresh-ui.mkv" knownAbsoluteDurationSeconds={null} timelineOffsetSeconds={0} />);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "0");
+    renderPlayerMock.command.mockClear(); fireEvent.keyDown(window, { key: "5" }); expect(renderPlayerMock.command).not.toHaveBeenCalled();
+    emitProperty("duration", 40); expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "40");
+  });
+  it("[duration-ui-commit89] does not leak future metadata or offset from a suspended render into an actual seek", async () => {
+    const pending = new Promise<void>(() => {}); function Suspend({ active }: { active: boolean }) { if (active) throw pending; return null; }
+    const props = { url: "https://example.test/committed-ui.mkv", title: "Committed UI", onClose: () => {} };
+    const view = render(<Suspense fallback={<span>Uncommitted UI</span>}><EmbeddedPlayer {...props} knownAbsoluteDurationSeconds={124} timelineOffsetSeconds={100} /><Suspend active={false} /></Suspense>);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    view.rerender(<Suspense fallback={<span>Uncommitted UI</span>}><EmbeddedPlayer {...props} knownAbsoluteDurationSeconds={1020} timelineOffsetSeconds={1000} /><Suspend active /></Suspense>);
+    expect(screen.getByText("Uncommitted UI")).toBeInTheDocument();
+    renderPlayerMock.command.mockClear(); fireEvent.keyDown(window, { key: "5" });
+    expect(renderPlayerMock.command).toHaveBeenCalledExactlyOnceWith("seek", [12, "absolute"]);
+  });
+  it("[duration-ui-invalid89] falls back to raw24 when absolute90 cannot describe an offset100 source", async () => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    await startUI({ knownAbsoluteDurationSeconds: 90, timelineOffsetSeconds: 100, onPlaybackStall: fresh, onEnded: ended }); emitProperty("duration", 24);
+    expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "124");
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(113, expect.objectContaining({ paused: false })); expect(ended).not.toHaveBeenCalled();
+  });
+  it("[duration-ui-unknown89] keeps a true unknown extent without inventing digit seeks or finite completion data", async () => {
+    const ended = vi.fn(), fresh = vi.fn(async () => true); await startUI({ onEnded: ended, onPlaybackStall: fresh });
+    expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "0");
+    renderPlayerMock.command.mockClear(); fireEvent.keyDown(window, { key: "5" }); expect(renderPlayerMock.command).not.toHaveBeenCalled();
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+    expect(ended).toHaveBeenCalledExactlyOnceWith(13, 0, expect.any(Object)); expect(fresh).not.toHaveBeenCalled();
+  });
+  it("[duration-ui-predict89] does not predict true end from truncated native13 when authoritative24 exists", async () => {
+    const next = vi.fn(), fresh = vi.fn(async () => true), ended = vi.fn();
+    await startUI({ knownAbsoluteDurationSeconds: 24, onPlayNext: next, nextLabel: "Next", onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("duration", 13); emitProperty("time-pos", 12); emitProperty("time-pos", 13);
+    expect(screen.queryByRole("dialog", { name: "Next episode: Next" })).toBeNull(); expect(next).not.toHaveBeenCalled();
+    emitProperty("eof-reached", true); expect(fresh).toHaveBeenCalledTimes(1); expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
+  });
+  it("[duration-ui-progress89] reports real progress and final close progress with known extent but no mpv duration", async () => {
+    vi.useFakeTimers(); const progress = vi.fn(), close = vi.fn(); await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100, onProgress: progress, onClose: close });
+    vi.setSystemTime(10000); emitProperty("time-pos", 12);
+    expect(progress).toHaveBeenCalledExactlyOnceWith(112, 124, expect.any(Object));
+    fireEvent.click(screen.getByRole("button", { name: "Close player" }));
+    expect(progress).toHaveBeenCalledTimes(2); expect(progress).toHaveBeenLastCalledWith(112, 124, expect.any(Object)); expect(close).toHaveBeenCalledTimes(1);
+  });
+  it("[duration-ui-hide89] lets ordinary playing chrome hide with known extent and keeps paused chrome visible", async () => {
+    vi.useFakeTimers(); await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100 }); emitProperty("time-pos", 1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3201); }); expect(document.querySelector(".embed-player")).not.toHaveClass("show-controls");
+    emitProperty("pause", true); expect(document.querySelector(".embed-player")).toHaveClass("show-controls");
+  });
+});
+
+describe("EmbeddedPlayer cumulative native clock proof", () => {
+  const visibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+  afterEach(() => { if (visibility) Object.defineProperty(document, "visibilityState", visibility); else delete (document as unknown as { visibilityState?: string }).visibilityState; });
+  async function start(props: Partial<React.ComponentProps<typeof EmbeddedPlayer>> = {}) {
+    vi.useFakeTimers();
+    const fresh = vi.fn(async () => true), fallback = vi.fn(async () => true), ended = vi.fn(), next = vi.fn(), healthy = vi.fn(() => true);
+    const all = { url: "https://example.test/clock.mkv", title: "Clock", onClose: () => {}, onPlaybackStall: fresh, onPlaybackError: fallback, onEnded: ended, onPlayNext: next, onRecoveryPlaybackHealthy: healthy, ...props };
+    const view = render(<EmbeddedPlayer {...all} />);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    return { ...view, props: all, fresh, fallback, ended, next, healthy };
+  }
+  function frames(fps: number, seconds: number) {
+    act(() => { for (let i = 0; i <= fps * seconds; i += 1) renderPlayerMock.callback!({ name: "time-pos", data: i / fps }); });
+  }
+  it("[native-clock89] proves24fps cumulative progress and recovers known partial EOF once", async () => {
+    const v = await start({ knownAbsoluteDurationSeconds: 24 }); emitProperty("duration", 13); frames(24, 13);
+    emitProperty("pause", true); emitProperty("eof-reached", true); emitProperty("end-file", { error: true });
+    expect(v.fresh).toHaveBeenCalledExactlyOnceWith(13, expect.objectContaining({ paused: false }));
+    expect(v.ended).not.toHaveBeenCalled(); expect(v.next).not.toHaveBeenCalled(); expect(v.fallback).not.toHaveBeenCalled();
+  });
+  it("[native-clock89] proves30fps cumulative progress before a post-start ERROR", async () => {
+    const v = await start({ knownAbsoluteDurationSeconds: 24 }); frames(30, 13); emitProperty("end-file", { error: true });
+    expect(v.fresh).toHaveBeenCalledExactlyOnceWith(13, expect.objectContaining({ paused: false })); expect(v.fallback).not.toHaveBeenCalled();
+  });
+  it("[native-clock89] keeps the watchdog alive with subthreshold forward samples then detects a real stop", async () => {
+    const v = await start(); emitProperty("time-pos", 0);
+    for (let i = 1; i <= 35; i += 1) { await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); emitProperty("time-pos", i / 30); }
+    expect(v.fresh).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS); });
+    expect(v.fresh).toHaveBeenCalledTimes(1);
+  });
+  it("[native-clock89] never completes a known partial EOF without decoder proof", async () => {
+    const v = await start({ knownAbsoluteDurationSeconds: 24 }); emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+    expect(v.fresh).not.toHaveBeenCalled(); expect(v.fallback).toHaveBeenCalledTimes(1); expect(v.ended).not.toHaveBeenCalled(); expect(v.next).not.toHaveBeenCalled();
+  });
+  it("[native-clock89] excludes pause cache seeking and cast jumps and seeds on reentry", async () => {
+    for (const kind of ["pause", "paused-for-cache", "seeking", "cast"]) {
+      const castState: castModule.CastState = { phase: "idle", devices: [], device: null, status: null, volume: 50, error: null };
+      const castSpy = kind === "cast" ? vi.spyOn(castModule, "useCastState").mockReturnValue(castState) : null;
+      try {
+        const v = await start({ knownAbsoluteDurationSeconds: 60 }); emitProperty("time-pos", 0);
+        if (kind === "cast") { castState.phase = "casting"; v.rerender(<EmbeddedPlayer {...v.props} />); } else emitProperty(kind, true);
+        emitProperty("time-pos", 6);
+        if (kind === "cast") { castState.phase = "idle"; v.rerender(<EmbeddedPlayer {...v.props} />); } else emitProperty(kind, false);
+        emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+        expect(v.fresh, kind).not.toHaveBeenCalled(); expect(v.fallback, kind).toHaveBeenCalledTimes(1); expect(v.ended, kind).not.toHaveBeenCalled(); v.unmount();
+        await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+      } finally { castSpy?.mockRestore(); }
+    }
+  });
+  it("[native-clock89] does not let the first eligible post-pause jump renew the watchdog", async () => {
+    const v = await start(); emitProperty("time-pos", 0); emitProperty("pause", true); emitProperty("time-pos", 5); emitProperty("pause", false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); }); emitProperty("time-pos", 10);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); }); expect(v.fresh).toHaveBeenCalledTimes(1);
+  });
+  it("[native-clock89] proves hidden decoder progress but never earns a foreground recovery rearm", async () => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    const v = await start({ knownAbsoluteDurationSeconds: 100 });
+    for (let second = 0; second <= 61; second += 1) {
+      if (second > 0) await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      act(() => { for (let frame = 0; frame < 30; frame += 1) renderPlayerMock.callback!({ name: "time-pos", data: second + frame / 30 }); });
+    }
+    expect(v.fresh).not.toHaveBeenCalled(); expect(v.healthy).not.toHaveBeenCalled(); emitProperty("eof-reached", true);
+    expect(v.fresh).toHaveBeenCalledTimes(1); expect(v.ended).not.toHaveBeenCalled(); expect(v.healthy).not.toHaveBeenCalled();
+  });
+  it("[native-clock89] preserves genuine finite and true unknown completion", async () => {
+    for (const known of [24, null]) {
+      const v = await start({ knownAbsoluteDurationSeconds: known }); emitProperty("time-pos", known == null ? 12 : 23); emitProperty("time-pos", known == null ? 13 : 24); emitProperty("eof-reached", true); emitProperty("eof-reached", true);
+      expect(v.ended).toHaveBeenCalledTimes(1); expect(v.fresh).not.toHaveBeenCalled(); expect(v.fallback).not.toHaveBeenCalled(); v.unmount();
+      await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    }
+  });
 });

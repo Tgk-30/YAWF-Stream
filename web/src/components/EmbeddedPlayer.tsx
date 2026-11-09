@@ -267,6 +267,12 @@ const FIRST_FRAME_WATCHDOG_MS = 25_000;
  * completely out of the playback hot path. */
 const SCRUBBER_UPDATE_INTERVAL_MS = 200;
 
+/** Native clocks and commands are local; authoritative metadata is absolute. */
+function localPlaybackDuration(absolute: number | null | undefined, offset: number, native: number): number {
+  if (absolute != null && Number.isFinite(absolute) && absolute > offset) return absolute - offset;
+  return Number.isFinite(native) && native > 0 ? native : 0;
+}
+
 function fmt(s: number): string {
   if (!Number.isFinite(s) || s < 0) return "0:00";
   const t = Math.floor(s);
@@ -685,23 +691,23 @@ export function EmbeddedPlayer({
   const lastReportRef = useRef(0);
   const posRef = useRef(0);
   const durRef = useRef(0);
+  const nativeDurationOwnerRef = useRef(url);
+  const renderedTimelineOffset = Number.isFinite(timelineOffsetSeconds) && timelineOffsetSeconds > 0 ? timelineOffsetSeconds : 0;
+  const timelineOffsetRef = useRef(renderedTimelineOffset);
+  const renderedLocalDuration = localPlaybackDuration(knownAbsoluteDurationSeconds, renderedTimelineOffset, nativeDurationOwnerRef.current === url ? dur : 0);
   const knownAbsoluteDurationRef = useRef<{ url: string; duration: number | null }>({ url, duration: null });
   useLayoutEffect(() => {
+    timelineOffsetRef.current = renderedTimelineOffset;
     knownAbsoluteDurationRef.current = {
       url,
-      duration: knownAbsoluteDurationSeconds != null && Number.isFinite(knownAbsoluteDurationSeconds) && knownAbsoluteDurationSeconds > 0
+      duration: knownAbsoluteDurationSeconds != null && Number.isFinite(knownAbsoluteDurationSeconds) && knownAbsoluteDurationSeconds > renderedTimelineOffset
         ? knownAbsoluteDurationSeconds : null,
     };
-  }, [url, knownAbsoluteDurationSeconds]);
+  }, [url, knownAbsoluteDurationSeconds, renderedTimelineOffset]);
   const ownedPausedRef = useRef(sourceSwitchState?.paused ?? false);
   const clockWasResetRef = useRef(false);
   const pendingSeekRef = useRef<number | null>(null);
   const recoveryProgressRef = useRef<PlaybackRecoveryProgress | null>(null);
-  const timelineOffsetRef = useRef(0);
-  timelineOffsetRef.current =
-    Number.isFinite(timelineOffsetSeconds) && timelineOffsetSeconds > 0
-      ? timelineOffsetSeconds
-      : 0;
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
   const onEndedRef = useRef(onEnded);
@@ -730,6 +736,7 @@ export function EmbeddedPlayer({
   const rendererSeekingRef = useRef(false);
   const scrubbingRef = useRef(false);
   const watchdogPositionRef = useRef(Number.NaN);
+  const decoderProofPositionRef = useRef(Number.NaN);
   const cacheFrontierRef = useRef(0);
   const stallStateRef = useRef<PlaybackStallState>({
     started: false,
@@ -794,7 +801,7 @@ export function EmbeddedPlayer({
   const evaluatePredictiveUpNext = () => {
     const prediction = predictEpisodeEnd({
       position: posRef.current,
-      duration: durRef.current,
+      duration: effectiveLocalDuration(),
       playing: !pausedRef.current && !endedRef.current,
       eligible: onPlayNextRef.current != null,
       chapters: chaptersRef.current,
@@ -820,11 +827,14 @@ export function EmbeddedPlayer({
     posRef.current + timelineOffsetRef.current;
   const knownAbsoluteDuration = () => knownAbsoluteDurationRef.current.url === url
     ? knownAbsoluteDurationRef.current.duration : null;
-  const reportedDuration = () => knownAbsoluteDuration() ?? (
-    durRef.current > 0
-      ? durRef.current + timelineOffsetRef.current
-      : durRef.current
+  const effectiveLocalDuration = () => localPlaybackDuration(
+    knownAbsoluteDuration(), timelineOffsetRef.current,
+    nativeDurationOwnerRef.current === url ? durRef.current : 0,
   );
+  const reportedDuration = () => {
+    const localDuration = effectiveLocalDuration();
+    return localDuration > 0 ? localDuration + timelineOffsetRef.current : 0;
+  };
   const reportedProgressPct = () =>
     playbackProgressPct(reportedPosition(), reportedDuration());
   const handoffState = (): PlaybackHandoffState => ({
@@ -839,11 +849,13 @@ export function EmbeddedPlayer({
 
   useEffect(() => {
     scrubbingRef.current = scrubbing;
+    decoderProofPositionRef.current = Number.NaN;
+    watchdogPositionRef.current = Number.NaN;
     stallStateRef.current = {
       ...stallStateRef.current,
       paused,
       seeking: scrubbing || rendererSeekingRef.current,
-      suspended: castSuspended,
+      suspended: castSuspended || document.visibilityState === "hidden",
       ended,
     };
     stallWatchdogRef.current?.update(stallStateRef.current);
@@ -1107,18 +1119,28 @@ export function EmbeddedPlayer({
       started: false,
       paused: false,
       seeking: false,
-      suspended: castSuspendedRef.current,
+      suspended: castSuspendedRef.current || document.visibilityState === "hidden",
       ended: false,
       tearingDown: false,
     };
     rendererSeekingRef.current = false;
     scrubbingRef.current = false;
     watchdogPositionRef.current = Number.NaN;
+    decoderProofPositionRef.current = Number.NaN;
     cacheFrontierRef.current = 0;
     const syncPostStartWatchdog = (patch: Partial<PlaybackStallState> = {}) => {
-      stallStateRef.current = { ...stallStateRef.current, ...patch };
+      stallStateRef.current = {
+        ...stallStateRef.current, ...patch,
+        suspended: castSuspendedRef.current || document.visibilityState === "hidden",
+      };
       postStartWatchdog.update(stallStateRef.current);
     };
+    const onVisibilityChange = () => {
+      watchdogPositionRef.current = Number.NaN;
+      recoveryProgress.reset();
+      syncPostStartWatchdog();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     // Startup incompatibility uses codec fallback. A proven post-start failure
     // carries its owned snapshot even when only that compatibility path exists.
@@ -1172,6 +1194,8 @@ export function EmbeddedPlayer({
             switch (ev.name) {
               case "pause":
                 pausedRef.current = Boolean(ev.data);
+                decoderProofPositionRef.current = Number.NaN;
+                watchdogPositionRef.current = Number.NaN;
                 recoveryProgress.reset();
                 setPaused(Boolean(ev.data));
                 syncPostStartWatchdog({ paused: Boolean(ev.data) });
@@ -1202,13 +1226,24 @@ export function EmbeddedPlayer({
                   if (verifiedProgress && !seeking && ev.data < previousPosition - 0.25) clockWasResetRef.current = true;
                   if (clockWasResetRef.current && !seeking && ev.data < previousPosition - 0.25) {
                     recoveryProgress.reset();
+                    decoderProofPositionRef.current = Number.NaN;
+                    watchdogPositionRef.current = Number.NaN;
                     break;
                   }
                   clockWasResetRef.current = false;
                   posRef.current = ev.data;
                   if (pendingSeekRef.current != null && Math.abs(ev.data - pendingSeekRef.current) <= 0.25) pendingSeekRef.current = null;
-                  const eligible = !seeking && !pausedRef.current && !cachePaused && !castSuspendedRef.current && !endedRef.current && document.visibilityState !== "hidden";
-                  if (firstFrameRef.current && eligible && ev.data > previousPosition + 0.05) verifiedProgress = true;
+                  const decoderEligible = !seeking && !pausedRef.current && !cachePaused && !castSuspendedRef.current && !endedRef.current;
+                  const proofPosition = decoderProofPositionRef.current;
+                  // Accumulate real forward clocks across sub-frame samples.
+                  // Hidden native decoding proves playback, but earns no rearm.
+                  if (!decoderEligible) decoderProofPositionRef.current = Number.NaN;
+                  else if (!firstFrameRef.current || !Number.isFinite(proofPosition) || ev.data < proofPosition) decoderProofPositionRef.current = ev.data;
+                  else if (ev.data > proofPosition + 0.05) {
+                    verifiedProgress = true;
+                    decoderProofPositionRef.current = ev.data;
+                  }
+                  const eligible = decoderEligible && document.visibilityState !== "hidden";
                   if (recoveryProgress.note(performance.now(), ev.data, speedRef.current, verifiedProgress && eligible)) {
                     if (onRecoveryPlaybackHealthyRef.current?.() === true) recoveryProgress.reset();
                   }
@@ -1245,19 +1280,16 @@ export function EmbeddedPlayer({
                     }
                   }
                   const lastWatchdogPosition = watchdogPositionRef.current;
-                  watchdogPositionRef.current = ev.data;
-                  if (
-                    hadFirstFrame &&
-                    !rendererSeekingRef.current &&
-                    !scrubbingRef.current &&
-                    (!Number.isFinite(lastWatchdogPosition) || ev.data > lastWatchdogPosition + 0.05)
-                  ) {
+                  if (!eligible) watchdogPositionRef.current = Number.NaN;
+                  else if (!hadFirstFrame || !Number.isFinite(lastWatchdogPosition) || ev.data < lastWatchdogPosition) watchdogPositionRef.current = ev.data;
+                  else if (ev.data > lastWatchdogPosition + 0.05) {
+                    watchdogPositionRef.current = ev.data;
                     postStartWatchdog.noteProgress();
                   }
                   const now = Date.now();
                   if (
                     startedRef.current &&
-                    durRef.current > 0 &&
+                    effectiveLocalDuration() > 0 &&
                     now - lastReportRef.current >= 5000
                   ) {
                     lastReportRef.current = now;
@@ -1271,6 +1303,7 @@ export function EmbeddedPlayer({
                 break;
               case "duration":
                 if (typeof ev.data === "number") {
+                  nativeDurationOwnerRef.current = url;
                   durRef.current = ev.data;
                   if (Number.isFinite(ev.data) && ev.data > 0) fullDuration = ev.data;
                   setDur(ev.data);
@@ -1279,6 +1312,8 @@ export function EmbeddedPlayer({
                 break;
               case "paused-for-cache":
                 cachePaused = Boolean(ev.data);
+                decoderProofPositionRef.current = Number.NaN;
+                watchdogPositionRef.current = Number.NaN;
                 recoveryProgress.reset();
                 // Only a real cache stall (after playback has started) toggles the
                 // spinner; before the first frame the initial spinner owns it.
@@ -1286,10 +1321,11 @@ export function EmbeddedPlayer({
                 break;
               case "seeking":
                 rendererSeekingRef.current = Boolean(ev.data);
+                decoderProofPositionRef.current = Number.NaN;
+                watchdogPositionRef.current = Number.NaN;
                 recoveryProgress.reset();
                 if (rendererSeekingRef.current) clockWasResetRef.current = false;
                 if (!rendererSeekingRef.current) {
-                  watchdogPositionRef.current = posRef.current;
                   cacheFrontierRef.current = posRef.current;
                 }
                 syncPostStartWatchdog({
@@ -1348,7 +1384,7 @@ export function EmbeddedPlayer({
                   const absoluteDuration = knownAbsoluteDuration() ?? (
                     fullDuration == null ? null : fullDuration + timelineOffsetRef.current
                   );
-                  if (verifiedProgress && absoluteDuration != null && reportedPosition() < absoluteDuration - 10) {
+                  if (absoluteDuration != null && reportedPosition() < absoluteDuration - 10) {
                     if (!recoverTerminal()) void triggerNativeFallback(new Error("Native playback ended before the media completed"));
                     break;
                   }
@@ -1452,10 +1488,11 @@ export function EmbeddedPlayer({
         const recoveryHandoff = sourceSwitchStateRef.current != null;
         const resumeSeconds =
           Number.isFinite(startPositionSeconds) &&
+          Number.isSafeInteger(Math.floor(startPositionSeconds)) &&
           (recoveryHandoff ? startPositionSeconds >= 0 : startPositionSeconds > 5)
-            ? recoveryHandoff
-              ? Math.max(0, startPositionSeconds)
-              : Math.floor(startPositionSeconds)
+            // The native bridge accepts only integer start seconds. Keep the
+            // fractional logical clock, but never demux ahead of its target.
+            ? Math.floor(startPositionSeconds)
             : null;
         setEnded(false);
         // mpv 0.38 inserted a playlist-index argument before the per-file options
@@ -1571,6 +1608,7 @@ export function EmbeddedPlayer({
     })();
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       recoveryProgress.reset();
       if (recoveryProgressRef.current === recoveryProgress) recoveryProgressRef.current = null;
       syncPostStartWatchdog({ tearingDown: true });
@@ -1623,13 +1661,13 @@ export function EmbeddedPlayer({
         pausedRef.current ||
         menuOpenRef.current ||
         !posRef.current ||
-        durRef.current === 0
+        effectiveLocalDuration() === 0
       ) {
         return;
       }
       setControlsVisible(false);
     }, 3200);
-  }, []);
+  }, [url]);
   useEffect(() => {
     nudgeControls();
     return () => window.clearTimeout(hideTimer.current);
@@ -1663,7 +1701,7 @@ export function EmbeddedPlayer({
   }, [paused, ended, nudgeControls]);
 
   const seekTo = useCallback((to: number) => {
-    const duration = durRef.current;
+    const duration = effectiveLocalDuration();
     const upperBound = Number.isFinite(duration) && duration > 0
       ? duration
       : Number.POSITIVE_INFINITY;
@@ -1681,7 +1719,7 @@ export function EmbeddedPlayer({
     setEnded(false);
     endedRef.current = false;
     void command("seek", [next, "absolute"]);
-  }, []);
+  }, [url]);
 
   const relSeek = useCallback(
     (delta: number) => {
@@ -1974,7 +2012,7 @@ export function EmbeddedPlayer({
         );
       });
     }
-    if (startedRef.current && durRef.current > 0) {
+    if (startedRef.current && effectiveLocalDuration() > 0) {
       onProgress?.(
         reportedPosition(),
         reportedDuration(),
@@ -1988,7 +2026,7 @@ export function EmbeddedPlayer({
       );
     }
     onClose();
-  }, [onClose, onProgress, fullscreen, scrobbleContext]);
+  }, [onClose, onProgress, fullscreen, scrobbleContext, url]);
 
   const openExternalFromSettings = useCallback(() => {
     const callback = externalHandoffCallbackRef.current;
@@ -2133,8 +2171,8 @@ export function EmbeddedPlayer({
           );
           break;
         default:
-          if (/^[0-9]$/.test(e.key) && durRef.current > 0) {
-            seekTo((Number(e.key) / 10) * durRef.current);
+          if (/^[0-9]$/.test(e.key) && effectiveLocalDuration() > 0) {
+            seekTo((Number(e.key) / 10) * effectiveLocalDuration());
           }
       }
       nudgeControls();
@@ -2418,8 +2456,8 @@ export function EmbeddedPlayer({
         <div className="embed-bottom">
           <NativeScrubber
             ref={scrubberRef}
-            duration={dur}
-            timelineOffsetSeconds={timelineOffsetRef.current}
+            duration={renderedLocalDuration}
+            timelineOffsetSeconds={renderedTimelineOffset}
             chapters={chapters}
             active={controlsVisible || menu != null || detailsSection != null}
             onSeek={seekTo}
