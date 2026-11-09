@@ -23,6 +23,12 @@ export function AdjustmentRange({ value, onValueChange, disabled, ...props }: Ad
   valueRef.current = value;
   useEffect(() => () => { gestureRef.current = null; }, []);
 
+  const classifyIntent = (gesture: Gesture, x: number, y: number) => {
+    if (gesture.axis !== "pending") return;
+    const dx = Math.abs(x - gesture.x), dy = Math.abs(y - gesture.y);
+    if (Math.max(dx, dy) < INTENT_DISTANCE) return;
+    gesture.axis = dx > dy ? "horizontal" : "vertical";
+  };
   const restore = (input: HTMLInputElement) => { input.value = String(valueRef.current); };
   const publish = (gesture: Gesture, next: number) => {
     if (next === gesture.committed) return;
@@ -68,10 +74,8 @@ export function AdjustmentRange({ value, onValueChange, disabled, ...props }: Ad
     }}
     onPointerMove={(event) => {
       const gesture = gestureRef.current;
-      if (gesture == null || gesture.id !== event.pointerId || gesture.axis !== "pending") return;
-      const dx = Math.abs(event.clientX - gesture.x), dy = Math.abs(event.clientY - gesture.y);
-      if (Math.max(dx, dy) < INTENT_DISTANCE) return;
-      gesture.axis = dx > dy ? "horizontal" : "vertical";
+      if (gesture == null || gesture.id !== event.pointerId) return;
+      classifyIntent(gesture, event.clientX, event.clientY);
     }}
     onChange={(event) => {
       if (disabled) return;
@@ -89,6 +93,8 @@ export function AdjustmentRange({ value, onValueChange, disabled, ...props }: Ad
       const gesture = gestureRef.current;
       if (gesture == null || !gesture.contacts.delete(event.pointerId) || gesture.contacts.size > 0) return;
       gestureRef.current = null;
+      // A browser can omit moves or release beyond the last delivered move.
+      classifyIntent(gesture, event.clientX, event.clientY);
       if (gesture.axis !== "vertical") publish(gesture, gesture.candidate);
       restore(event.currentTarget);
     }}
