@@ -113,6 +113,21 @@ export function validateReceipt(receipt) {
   'The exact successful explicit-source case was not completed');
   requireTrue(Number.isInteger(receipt.clockBeforeSeconds) && receipt.clockBeforeSeconds > 0
     && Number.isInteger(receipt.clockAfterSeconds) && receipt.clockAfterSeconds >= receipt.clockBeforeSeconds + 1 && receipt.clockAfterSeconds < 30, 'No bounded nonzero playback-clock advance');
+  validateNativeMenuEvidence(receipt, false);
+}
+
+export function validateMenuOnlyReceipt(receipt) {
+  requireTrue(receipt.schemaVersion === 1 && receipt.profile === 'private90-hosted-menu-only' && receipt.outcome === 'PASS'
+    && receipt.phase === 'complete' && receipt.sourceClicks === 1 && receipt.explicitSourceRow === true,
+  'The exact menu-only explicit-source case was not completed');
+  requireTrue(receipt.menuOnlyQualified === true && receipt.clockProgressQualified === false
+    && receipt.playbackContinuityQualified === false && receipt.clockBeforeSeconds === -1 && receipt.clockAfterSeconds === -1,
+  'Menu-only cannot claim clock progress or playback continuity');
+  requireTrue(receipt.initialClockObservationCount === 1, 'One passive initial clock AX observation required');
+  validateNativeMenuEvidence(receipt, true);
+}
+
+function validateNativeMenuEvidence(receipt, menuOnly) {
   requireTrue(receipt.uniqueMenu === true && receipt.menuHeading === true && receipt.singleUiAutomationOwner === true,
     'Actual unique menu semantic proof required');
   requireTrue(Array.isArray(receipt.menuBounds) && receipt.menuBounds.length === 4
@@ -134,15 +149,15 @@ export function validateReceipt(receipt) {
   }
   const more = receipt.inputs.filter((input) => input.role === 'more');
   const reveal = receipt.inputs.filter((input) => input.role === 'reveal');
-  requireTrue(more.length === 1 && reveal.length <= 2, 'One More activation and at most two clock-epoch reveals required');
+  requireTrue(more.length === 1 && reveal.length <= (menuOnly ? 1 : 2), 'One More activation and at most two clock-epoch reveals required');
   requireTrue(receipt.chromeRevealCount === reveal.length && receipt.chromeRevealPerformed === (reveal.length > 0), 'Reveal count must match actual input proofs');
   const epochs = reveal.map((input) => input.observationEpoch);
   for (const input of reveal) requireTrue(Math.abs(input.x - (input.targetBounds[0] + (input.targetBounds[2] - input.targetBounds[0]) * 0.5)) < 0.01
     && Math.abs(input.y - (input.targetBounds[1] + (input.targetBounds[3] - input.targetBounds[1]) * 0.32)) < 0.01,
   'Reveal must use the safe measured video point, not the center transport');
-  requireTrue(epochs.every((epoch) => ['clock-before', 'clock-after'].includes(epoch))
+  requireTrue(epochs.every((epoch) => (menuOnly ? ['menu-only'] : ['clock-before', 'clock-after']).includes(epoch))
     && new Set(epochs).size === epochs.length, 'Only distinct clock observation epochs may reveal');
-  if (reveal.length === 2) requireTrue(epochs[0] === 'clock-before' && epochs[1] === 'clock-after'
+  if (!menuOnly && reveal.length === 2) requireTrue(epochs[0] === 'clock-before' && epochs[1] === 'clock-after'
     && reveal[1].eventUptimeMs[0] - reveal[0].eventUptimeMs[2] >= 2200, 'Clock observation epochs require the real bounded interval');
   let playerInputStarted = false;
   for (const input of receipt.inputs) {
@@ -211,7 +226,13 @@ async function portFree(port) {
   requireTrue(!listening, 'Required owned loopback port is already listening');
 }
 
-async function main() {
+export function parseRuntimeMode(args) {
+  requireTrue(Array.isArray(args) && (args.length === 0 || (args.length === 1 && ['run', 'menu-only'].includes(args[0]))), 'Unexpected runtime driver arguments');
+  return args[0] || 'run';
+}
+
+async function main(mode = 'run') {
+  const menuOnly = mode === 'menu-only';
   validateEnvironment(process.env);
   const repo = realpathSync(process.cwd());
   const temp = realpathSync(process.env.RUNNER_TEMP || fail('RUNNER_TEMP is required'));
@@ -220,7 +241,8 @@ async function main() {
   const root = ownedDirectory(join(temp, 'yawf-private90-more'), temp, true);
   const source = join(repo, 'candidate-source');
   const apk = join(repo, process.env.CANDIDATE_APK);
-  const result = { schemaVersion: 1, outcome: 'FAIL', scope: 'Private90 hosted API36 X86_64 More only', source: PIN.source,
+  const result = { schemaVersion: 1, outcome: 'FAIL', scope: menuOnly ? 'Private90 hosted API36 X86_64 menu semantics only; no clock/continuity proof' : 'Private90 hosted API36 X86_64 More only', source: PIN.source,
+    menuOnlyQualified: false, clockProgressQualified: false, playbackContinuityQualified: false,
     APKsha256: PIN.sha256, guest: null, iowait: [], junit: null, menu: false, decodedImageReviewRequired: true,
     bundledPlaybackClaimed: false, cleanup: {} };
   const save = (name, value) => writeFileSync(join(evidence, name), sanitize(typeof value === 'string' ? value : JSON.stringify(value, null, 2) + '\n'));
@@ -342,19 +364,21 @@ async function main() {
     requireTrue(installed === PIN.sha256, 'Installed product bytes mismatch');
     save('installed.json', { sha256: installed, version: PIN.version, versionCode: PIN.code });
     const instrumentation = await command('adb', ['-s', PIN.serial, 'shell', 'am', 'instrument', '-w', '-r',
-      '-e', 'class', CLASS, '-e', 'evidenceSubdir', 'player90-more', `${HARNESS}.test/androidx.test.runner.AndroidJUnitRunner`], { timeout: Math.min(360_000, Math.max(1, bootAt + 12 * 60_000 - Date.now() - 60_000)) }).done;
+      '-e', 'class', `${CLASS}#${menuOnly ? 'production90OpensMoreMenuOnlyWithNativeFinger' : 'production90OpensMoreWithNativeFinger'}`, '-e', 'evidenceSubdir', 'player90-more', `${HARNESS}.test/androidx.test.runner.AndroidJUnitRunner`], { timeout: Math.min(360_000, Math.max(1, bootAt + 12 * 60_000 - Date.now() - 60_000)) }).done;
     save('instrumentation.txt', instrumentation.output);
     requireTrue(instrumentation.code === 0 && !instrumentation.failure, 'Bounded instrumentation command failed');
     // Collect the receipt and screenshots even when JUnit itself reports failure.
     await collectUi();
     validateJUnit(instrumentation.output);
     const receipt = JSON.parse(readFileSync(join(evidence, 'ui/receipt.json'), 'utf8'));
-    validateReceipt(receipt);
+    if (menuOnly) validateMenuOnlyReceipt(receipt); else validateReceipt(receipt);
     requireTrue(readdirSync(join(evidence, 'ui')).some((name) => /^\d{2}-more-open\.png$/.test(name)), 'Actual More screenshot missing');
     const runtimeEvents = await adb(['logcat', '-b', 'events', '-d', '-v', 'brief']);
     save('runtime-events.txt', runtimeEvents);
     requireTrue(!/\bam_anr\b/.test(runtimeEvents), 'Runtime current boot ANR observed');
-    result.junit = { pass: 1, fail: 0, skip: 0 }; result.menu = true; result.outcome = 'PASS_MORE_ONLY_IMAGE_REVIEW_REQUIRED';
+    result.junit = { pass: 1, fail: 0, skip: 0 }; result.menu = true;
+    result.menuOnlyQualified = menuOnly; result.clockProgressQualified = !menuOnly;
+    result.outcome = menuOnly ? 'PASS_MENU_ONLY_NO_CLOCK_OR_CONTINUITY_CLAIM' : 'PASS_MORE_ONLY_IMAGE_REVIEW_REQUIRED';
   } catch (error) {
     result.error = sanitize(error.message).slice(0, 300);
     if (emulator) {
@@ -392,12 +416,12 @@ async function main() {
     save('FINAL.json', result);
     process.removeListener('SIGTERM', onSignal); process.removeListener('SIGINT', onSignal);
   }
-  requireTrue(!signalFailure && result.outcome === 'PASS_MORE_ONLY_IMAGE_REVIEW_REQUIRED' && result.cleanup.portsFree && result.cleanup.adbEmpty && result.cleanup.ownedAVDDeleted
+  requireTrue(!signalFailure && result.outcome === (menuOnly ? 'PASS_MENU_ONLY_NO_CLOCK_OR_CONTINUITY_CLAIM' : 'PASS_MORE_ONLY_IMAGE_REVIEW_REQUIRED') && result.cleanup.portsFree && result.cleanup.adbEmpty && result.cleanup.ownedAVDDeleted
     && result.cleanup.emulator?.code === 0 && result.cleanup.fixture?.code === 0, 'Private90 More case did not satisfy all gates');
 
   async function collectUi() {
     const names = (await adb(['exec-out', 'run-as', HARNESS, 'ls', '-1', 'files/player90-more'], { timeout: 10_000 })).trim().split(/\r?\n/);
-    requireTrue(names.length > 0 && names.length <= 24 && names.every((name) => /^(?:receipt\.json|\d{2}-[a-z-]+\.(?:png|xml))$/.test(name)), 'Unexpected bounded UI evidence files');
+    requireTrue(names.length > 0 && names.length <= 24 && names.every((name) => /^(?:receipt\.json|initial-clock-ax\.json|\d{2}-[a-z-]+\.(?:png|xml))$/.test(name)), 'Unexpected bounded UI evidence files');
     const out = join(evidence, 'ui'); mkdirSync(out, { recursive: true });
     for (const name of names) {
       const item = command('adb', ['-s', PIN.serial, 'exec-out', 'run-as', HARNESS, 'cat', `files/player90-more/${name}`], { timeout: 10_000 });
@@ -415,6 +439,6 @@ async function main() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     if (process.argv[2] === 'catalog' && process.argv.length === 4) validateCatalog(readFileSync(process.argv[3], 'utf8'));
-    else { requireTrue(process.argv.length === 2, 'Unexpected runtime driver arguments'); await main(); }
+    else await main(parseRuntimeMode(process.argv.slice(2)));
   } catch (error) { console.error(sanitize(error.message)); process.exitCode = 1; }
 }

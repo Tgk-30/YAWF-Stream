@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { PIN, sanitize, validateEnvironment, validateCatalog, cpuSnapshot, iowaitPercent,
-  validateHostResources, validateGuest, validateLauncher, validateJUnit, validateReceipt, ownedDirectory, parseInstalledAPKPaths, parseAPKHashOutput } from './android_player90_runtime.mjs';
+  validateHostResources, validateGuest, validateLauncher, validateJUnit, validateReceipt, validateMenuOnlyReceipt, parseRuntimeMode, ownedDirectory, parseInstalledAPKPaths, parseAPKHashOutput } from './android_player90_runtime.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const java = readFileSync(join(root, 'scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimePlayer90MoreFlowTest.java'), 'utf8');
@@ -234,7 +234,7 @@ test('workflow uses exact source builds test-only harness before owned emulator'
   assert.match(workflow, /java-version: '17'/);
   assert.match(workflow, /candidate-source\/web && npm ci && npm run build/);
   assert.match(workflow, /:app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest/);
-  assert.ok(workflow.indexOf(':app:assembleDebugAndroidTest') < workflow.indexOf('run: node scripts/android_player90_runtime.mjs\n'));
+  assert.ok(workflow.indexOf(':app:assembleDebugAndroidTest') < workflow.indexOf('run: node scripts/android_player90_runtime.mjs'));
   assert.match(workflow, /if: always\(\)/);
   assert.doesNotMatch(workflow, /QUERY_ALL_PACKAGES|chmod 0?666|secrets\.|VLC|vlc|--wipe-data/);
 });
@@ -375,4 +375,66 @@ test('actual source Java SeekBar parser compiles and executes adversarial elapse
   const run = spawnSync(javaCommand, [`-Djava.io.tmpdir=${directory}`, '-cp', directory, 'NativeSeekClockHarness'], { encoding: 'utf8', timeout: 20000 });
   assert.equal(run.status, 0, `actual Java parser cases failed: ${run.stderr}`);
   assert.equal(run.stdout.trim(), `native-seek-clock:${cases.length}`);
+});
+
+const menuOnlyReceipt = () => ({ ...receipt(), profile: 'private90-hosted-menu-only', clockBeforeSeconds: -1, clockAfterSeconds: -1,
+  menuOnlyQualified: true, clockProgressQualified: false, playbackContinuityQualified: false, initialClockObservationCount: 1 });
+test('menu-only accepts actual menu proof without clocks and cannot cross-qualify progress profiles', () => {
+  validateMenuOnlyReceipt(menuOnlyReceipt());
+  assert.throws(() => validateReceipt(menuOnlyReceipt()));
+  assert.throws(() => validateMenuOnlyReceipt(receipt()));
+  for (const changes of [{ clockBeforeSeconds: 2 }, { clockAfterSeconds: 4 }, { clockProgressQualified: true },
+    { playbackContinuityQualified: true }, { menuOnlyQualified: false }, { profile: 'private90-hosted-more' },
+    { initialClockObservationCount: 0 }, { initialClockObservationCount: 2 }, { uniqueMenu: false }, { menuHeading: false }]) {
+    assert.throws(() => validateMenuOnlyReceipt({ ...menuOnlyReceipt(), ...changes }));
+  }
+});
+test('menu-only allows at most one safe reveal and one More with actual release/deadline proof', () => {
+  const value = menuOnlyReceipt(); value.chromeRevealCount = 1; value.chromeRevealPerformed = true;
+  value.inputs = [{ ...input('reveal'), observationEpoch: 'menu-only' }, { ...input(), downUptimeMs: 2000, eventUptimeMs: [2000, 2050, 2100] }];
+  validateMenuOnlyReceipt(value);
+  for (const mutate of [(r) => { r.inputs[0].observationEpoch = 'clock-before'; },
+    (r) => { r.inputs[0].upAcknowledged = false; }, (r) => { r.inputs[0].streamMayRemain = true; },
+    (r) => { r.inputs[0].y = 55; }, (r) => { r.inputs[1].downUptimeMs = 4300; r.inputs[1].eventUptimeMs = [4300, 4350, 4400]; },
+    (r) => { r.inputs.splice(1, 0, { ...input('reveal'), observationEpoch: 'menu-only' }); r.chromeRevealCount = 2; },
+    (r) => { r.inputs.push(input()); }]) {
+    const copy = structuredClone(value); mutate(copy); assert.throws(() => validateMenuOnlyReceipt(copy));
+  }
+});
+test('menu-only CLI selects only its new JUnit method while no-arg and run preserve the progress case', () => {
+  assert.equal(parseRuntimeMode([]), 'run'); assert.equal(parseRuntimeMode(['run']), 'run');
+  assert.equal(parseRuntimeMode(['menu-only']), 'menu-only');
+  for (const args of [['other'], ['run', 'extra'], ['menu-only', 'extra']]) assert.throws(() => parseRuntimeMode(args));
+  assert.ok(driver.includes("`${CLASS}#${menuOnly ? 'production90OpensMoreMenuOnlyWithNativeFinger' : 'production90OpensMoreWithNativeFinger'}`"));
+  assert.ok(java.includes('production90OpensMoreWithNativeFinger() throws Throwable { runCase(false); }'));
+  assert.ok(java.includes('production90OpensMoreMenuOnlyWithNativeFinger() throws Throwable { runCase(true); }'));
+  assert.ok(driver.includes('if (menuOnly) validateMenuOnlyReceipt(receipt); else validateReceipt(receipt)'));
+  const setup = java.slice(java.indexOf('    private void ordinarySetupAndSource()'), java.indexOf('    private void flow()'));
+  const progress = java.slice(java.indexOf('    private void flow()'), java.indexOf('    private void flowMenuOnly()'));
+  const originalFlow = setup.replace('private void ordinarySetupAndSource()', 'private void flow()').replace(/    }\n\n$/, '')
+    + progress.split('        ordinarySetupAndSource();\n')[1];
+  assert.equal(createHash('sha256').update(originalFlow).digest('hex'), '04f4146046e4793d5999c5bcda81457f0390fdab80da86463a2585cd21e51fdf');
+});
+test('root-owned workflow explicitly selects menu-only below its unchanged immutable prefix', () => {
+  assert.match(workflow, /^        run: node scripts\/android_player90_runtime\.mjs menu-only$/m);
+  assert.doesNotMatch(workflow, /^        run: node scripts\/android_player90_runtime\.mjs(?: run)?$/m);
+});
+test('menu-only native flow has no clock dependency, one initial parent-scoped passive AX observation and one More', () => {
+  const flow = java.slice(java.indexOf('    private void flowMenuOnly()'), java.indexOf('    private UiObject2 menuOnlyMore()'));
+  assert.equal((flow.match(/observeInitialClockAX\(\)/g) || []).length, 1);
+  assert.equal((flow.match(/tapObject\(more, "more"\)/g) || []).length, 1);
+  assert.equal((flow.match(/finger\(/g) || []).length, 1);
+  assert.ok(flow.indexOf('observeInitialClockAX()') < flow.indexOf('UiObject2 more = menuOnlyMore()'));
+  assert.match(flow, /if \(more == null\)/);
+  assert.match(flow, /"reveal", bounds, "menu-only"/);
+  assert.doesNotMatch(flow, /clock\(\)|parseSeekClock|clockBefore =|clockAfter =|revealChromeForObservation/);
+  const observe = java.slice(java.indexOf('    private void observeInitialClockAX()'), java.indexOf('    private static String boundedClockAX('));
+  for (const text of ['initialClockObservationCount++', 'current.findObjects(By.clazz("android.widget.SeekBar"))', 'Math.min(4, bars.size())',
+    'timestampUptimeMs', 'bar.getClassName()', 'bar.getApplicationPackage()', 'bar.getText()', 'bar.getContentDescription()',
+    'bar.isEnabled()', 'bar.isClickable()', 'withinPlayer', 'initial-clock-ax.json']) assert.ok(observe.includes(text), text);
+  assert.doesNotMatch(observe, /By.pkg|clock\(\)|parseSeekClock|dumpWindowHierarchy|\.click\(|\.setText\(|finger\(/);
+  assert.match(java, /substring\(0, Math.min\(256, redacted.length\(\)\)\)/);
+  assert.ok(driver.includes('initial-clock-ax\\.json'));
+  const guard = java.slice(java.indexOf('    private void guardMenuOnlyPlayer()'), java.indexOf('    private void observeInitialClockAX()'));
+  for (const text of ['foreground(', 'Playback interrupted', 'Playback stopped because of an error', '0:36 of 0:36, Seek', 'now() - sourceUp < 30_000']) assert.ok(guard.includes(text), text);
 });

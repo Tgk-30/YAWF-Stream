@@ -106,7 +106,7 @@ jobs:
             :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
       - name: One owned API36 native More transaction
         shell: bash
-        run: node scripts/android_player90_runtime.mjs
+        run: node scripts/android_player90_runtime.mjs menu-only
       - name: Retain bounded native evidence even on failure
         if: always()
         uses: actions/upload-artifact@v4

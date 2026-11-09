@@ -57,6 +57,7 @@ public final class RuntimePlayer90MoreFlowTest {
     private long started;
     private String phase = "initializing";
     private int captures;
+    private int initialClockObservationCount;
     private int sourceClicks;
     private int clockBefore = -1;
     private int clockAfter = -1;
@@ -71,7 +72,12 @@ public final class RuntimePlayer90MoreFlowTest {
     private boolean usernameCommittedBeforePassword, usernameCommittedAfterPassword, passwordTextSendReturned;
 
     @Test
-    public void production90OpensMoreWithNativeFinger() throws Throwable {
+    public void production90OpensMoreWithNativeFinger() throws Throwable { runCase(false); }
+
+    @Test
+    public void production90OpensMoreMenuOnlyWithNativeFinger() throws Throwable { runCase(true); }
+
+    private void runCase(boolean menuOnly) throws Throwable {
         instrumentation = InstrumentationRegistry.getInstrumentation();
         automation = instrumentation.getUiAutomation();
         device = UiDevice.getInstance(instrumentation);
@@ -88,7 +94,7 @@ public final class RuntimePlayer90MoreFlowTest {
             assertEquals("ranchu", Build.HARDWARE);
             // A single UiAutomation owner is kept for setup, observations and SDK input.
             Configurator.getInstance().setWaitForIdleTimeout(0);
-            flow();
+            if (menuOnly) flowMenuOnly(); else flow();
             outcome = "PASS";
         } catch (Throwable failure) {
             try { capture("failure"); } catch (Throwable unavailable) { /* The host also captures failure before cleanup. */ }
@@ -96,9 +102,12 @@ public final class RuntimePlayer90MoreFlowTest {
         } finally {
             Configurator.getInstance().setWaitForIdleTimeout(oldIdle);
             JSONObject receipt = new JSONObject();
-            receipt.put("schemaVersion", 1).put("profile", "private90-hosted-more")
+            receipt.put("schemaVersion", 1).put("profile", menuOnly ? "private90-hosted-menu-only" : "private90-hosted-more")
                     .put("outcome", outcome).put("phase", phase).put("durationMs", SystemClock.uptimeMillis() - started)
                     .put("sourceClicks", sourceClicks).put("explicitSourceRow", sourceClicks == 1)
+                    .put("menuOnlyQualified", menuOnly && outcome.equals("PASS"))
+                    .put("clockProgressQualified", !menuOnly && outcome.equals("PASS"))
+                    .put("playbackContinuityQualified", false).put("initialClockObservationCount", initialClockObservationCount)
                     .put("clockBeforeSeconds", clockBefore).put("clockAfterSeconds", clockAfter)
                     .put("menuHeading", menuHeading).put("uniqueMenu", uniqueMenu)
                     .put("menuBounds", menuBounds == null ? JSONObject.NULL : rect(menuBounds))
@@ -117,7 +126,7 @@ public final class RuntimePlayer90MoreFlowTest {
         }
     }
 
-    private void flow() throws Exception {
+    private void ordinarySetupAndSource() throws Exception {
         step("launch");
         instrumentation.getTargetContext().startActivity(new Intent(Intent.ACTION_MAIN)
                 .addCategory(Intent.CATEGORY_LAUNCHER)
@@ -184,6 +193,10 @@ public final class RuntimePlayer90MoreFlowTest {
         sourceClicks++;
         tapObject(source, "explicit-source");
         waitPlayer(15_000);
+    }
+
+    private void flow() throws Exception {
+        ordinarySetupAndSource();
         step("playing");
         fresh(); guard();
         revealChromeForObservation("clock-before");
@@ -226,6 +239,102 @@ public final class RuntimePlayer90MoreFlowTest {
         assertTrue("The native More activation did not open the Playback settings dialog", uniqueMenu && menuHeading);
         capture("more-open");
         step("complete");
+    }
+
+    private void flowMenuOnly() throws Exception {
+        ordinarySetupAndSource();
+        step("menu-only-player");
+        fresh(); guardMenuOnlyPlayer();
+        observeInitialClockAX();
+        UiObject2 more = menuOnlyMore();
+        if (more == null) {
+            assertFalse("Menu-only permits one reveal", chromeRevealPerformed);
+            Rect bounds = player().getVisibleBounds();
+            chromeRevealPerformed = true;
+            chromeRevealEpochs.add("menu-only");
+            finger(bounds.left + bounds.width() * 0.5f, bounds.top + bounds.height() * 0.32f, "reveal", bounds, "menu-only");
+            chromeRevealUp = inputs.getJSONObject(inputs.length() - 1).getJSONArray("eventUptimeMs").getLong(2);
+            long visibleDeadline = chromeRevealUp + 1_200;
+            do {
+                fresh(); guardMenuOnlyPlayer(); more = menuOnlyMore();
+                if (more != null) break;
+                SystemClock.sleep(100);
+            } while (now() < visibleDeadline);
+        }
+        assertNotNull("Menu-only More must be freshly visible after at most one safe reveal", more);
+        if (chromeRevealPerformed) assertTrue("More acquisition exceeded the auto-hide window", now() - chromeRevealUp < 3_200);
+        step("more-transaction");
+        tapObject(more, "more");
+        long deadline = now() + 3_000;
+        while (now() < deadline) {
+            fresh(); guard();
+            UiObject2 menu = dialog("Playback settings");
+            if (menu != null) {
+                menuBounds = menu.getVisibleBounds();
+                List<UiObject2> headings = menu.findObjects(By.text(exact("Playback settings")));
+                assertEquals("More requires its actual unique heading", 1, headings.size());
+                assertVisible(headings.get(0));
+                uniqueMenu = true; menuHeading = true; break;
+            }
+            SystemClock.sleep(100);
+        }
+        assertTrue("The native More activation did not open the Playback settings dialog", uniqueMenu && menuHeading);
+        capture("more-open");
+        step("complete");
+    }
+
+    private UiObject2 menuOnlyMore() {
+        UiObject2 current = player();
+        List<UiObject2> labels = new ArrayList<>(current.findObjects(By.text(exact("Playback settings"))));
+        for (UiObject2 node : current.findObjects(By.desc(exact("Playback settings")))) if (!labels.contains(node)) labels.add(node);
+        List<UiObject2> candidates = new ArrayList<>();
+        for (UiObject2 node : labels) {
+            Rect bounds = node.getVisibleBounds();
+            if (node.isEnabled() && node.isClickable() && !bounds.isEmpty() && current.getVisibleBounds().contains(bounds)) candidates.add(node);
+        }
+        assertTrue("Ambiguous actual player More control", candidates.size() <= 1);
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    private void guardMenuOnlyPlayer() {
+        guard();
+        UiObject2 current = player();
+        Rect bounds = current.getVisibleBounds();
+        foreground(bounds.left + bounds.width() * 0.5f, bounds.top + bounds.height() * 0.32f);
+        for (String label : new String[]{"Playback interrupted", "Playback stopped because of an error", "Playback ended before the original media completed.", "0:36 of 0:36, Seek", "00:36 of 00:36, Seek"}) {
+            assertTrue("An explicit error or fixture EOF is not a menu-only pass", current.findObjects(By.text(exact(label))).isEmpty());
+        }
+        long sourceUp = -1;
+        for (int index = 0; index < inputs.length(); index++) {
+            JSONObject input = inputs.optJSONObject(index);
+            if (input != null && input.optString("role").equals("explicit-source")) sourceUp = input.optJSONArray("eventUptimeMs").optLong(2, -1);
+        }
+        assertTrue("Menu-only must remain before the known36-second fixture completion window", sourceUp >= 0 && now() - sourceUp < 30_000);
+    }
+
+    private void observeInitialClockAX() throws Exception {
+        assertEquals("At most one initial clock AX observation", 0, initialClockObservationCount++);
+        UiObject2 current = player();
+        List<UiObject2> bars = current.findObjects(By.clazz("android.widget.SeekBar"));
+        JSONArray candidates = new JSONArray();
+        for (int index = 0; index < Math.min(4, bars.size()); index++) {
+            UiObject2 bar = bars.get(index);
+            Rect bounds = bar.getVisibleBounds();
+            candidates.put(new JSONObject().put("timestampUptimeMs", now())
+                    .put("className", boundedClockAX(bar.getClassName())).put("packageName", boundedClockAX(bar.getApplicationPackage()))
+                    .put("text", boundedClockAX(bar.getText())).put("contentDescription", boundedClockAX(bar.getContentDescription()))
+                    .put("visible", !bounds.isEmpty()).put("enabled", bar.isEnabled()).put("clickable", bar.isClickable())
+                    .put("bounds", rect(bounds)).put("withinPlayer", current.getVisibleBounds().contains(bounds)));
+        }
+        write("initial-clock-ax.json", new JSONObject().put("schemaVersion", 1).put("scope", "INITIAL_PLAYER_AX_OBSERVATION_ONLY_NO_CLOCK_PARSING")
+                .put("timestampUptimeMs", now()).put("playerBounds", rect(current.getVisibleBounds())).put("totalSeekBars", bars.size())
+                .put("maximumCandidates", 4).put("visibleDefinition", "nonempty-native-visible-bounds").put("candidates", candidates).toString(2));
+    }
+
+    private static String boundedClockAX(String value) {
+        if (value == null) return "";
+        String redacted = sanitize(value);
+        return redacted.substring(0, Math.min(256, redacted.length()));
     }
 
     private boolean playerChromeVisible() {
