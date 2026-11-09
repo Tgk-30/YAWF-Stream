@@ -71,6 +71,7 @@ public final class RuntimePlayer91MoreFlowTest {
     private final JSONArray chromeAbsenceObservations = new JSONArray();
     private long moreAcquisitionStarted = -1, moreAcquired = -1, moreDownAttempt = -1;
     private JSONObject moreAcquisitionProof;
+    private int updateConsentDeclines;
     private int usernameFocusClicks, passwordFocusClicks, usernameTextSends, passwordTextSends;
     private boolean usernameCommittedBeforePassword, usernameCommittedAfterPassword, passwordTextSendReturned;
 
@@ -143,7 +144,7 @@ public final class RuntimePlayer91MoreFlowTest {
             guard();
             if (text("How do you want to use YAWF Stream?") != null) break;
             if (text("Enable Android update checks?") != null) {
-                click("NOT NOW", 3_000);
+                declineUpdateChecksToWelcome();
             } else if (text("Welcome to YAWF Stream") != null && clickable("Skip") != null) {
                 click("Skip", 3_000);
             }
@@ -669,6 +670,120 @@ public final class RuntimePlayer91MoreFlowTest {
         return parseSeekClock(bar.getText());
     }
 
+    private enum InputTail { SAME_FOREGROUND, UPDATE_NOT_NOW_TO_WELCOME }
+
+    private void declineUpdateChecksToWelcome() throws Exception {
+        assertEquals("Only launch may decline update consent", "launch", phase);
+        assertEquals("Consent decline must precede source selection", 0, sourceClicks);
+        assertEquals("Only one exact update-consent decline is admitted", 0, updateConsentDeclines++);
+        assertEquals(1, device.findObjects(By.pkg(PRODUCT).text(exact("Enable Android update checks?"))).size());
+        UiObject2 notNow = clickable("NOT NOW"), enable = clickable("ENABLE");
+        assertNotNull("Exact native NOT NOW is required", notNow);
+        assertNotNull("Exact native ENABLE is required", enable);
+        assertEquals("android.widget.Button", notNow.getClassName());
+        assertEquals("android.widget.Button", enable.getClassName());
+        assertVisible(notNow); assertVisible(enable);
+        Rect bounds = notNow.getVisibleBounds();
+        finger(bounds.exactCenterX(), bounds.exactCenterY(), "setup", bounds, null, null, InputTail.UPDATE_NOT_NOW_TO_WELCOME);
+    }
+
+    static final class WelcomeTailPolicy {
+        int samples, stable;
+        long firstStable = -1, lastStable = -1;
+        String previousRoot;
+        boolean observe(long at, long upAt, boolean released, boolean available, boolean owner,
+                        boolean unexpected, boolean oldPrompt, int dialogs, int titles, int skips, int nexts, String rootKey) {
+            if (!released || at < upAt || at - upAt > 2000 || ++samples > 20 || (available && !owner) || unexpected ||
+                    dialogs > 1 || titles > 1 || skips > 1 || nexts > 1) throw new IllegalStateException("Exact update-consent tail refused");
+            boolean ready = available && !oldPrompt && dialogs == 1 && titles == 1 && skips == 1 && nexts == 1 && rootKey != null;
+            if (!ready) { stable = 0; firstStable = -1; previousRoot = null; return false; }
+            if (!rootKey.equals(previousRoot)) { stable = 1; firstStable = at; previousRoot = rootKey; }
+            else stable++;
+            lastStable = at;
+            return stable >= 2 && at - firstStable >= 100;
+        }
+    }
+    private static final class WelcomeTailScan {
+        final AcquisitionPolicy budget = new AcquisitionPolicy();
+        final Rect root;
+        final int window;
+        int dialogs, titles, skips, nexts;
+        boolean oldPrompt, unexpected;
+        WelcomeTailScan(Rect root, int window) { this.root = root; this.window = window; }
+    }
+    private void scanWelcomeTail(AccessibilityNodeInfo node, WelcomeTailScan scan, int depth) {
+        scan.budget.visit(depth);
+        String text = node.getText() == null ? "" : node.getText().toString();
+        String description = node.getContentDescription() == null ? "" : node.getContentDescription().toString();
+        String clazz = String.valueOf(node.getClassName()), resource = String.valueOf(node.getViewIdResourceName());
+        if (TERMS.matcher(text).matches() || TERMS.matcher(description).matches()) scan.unexpected = true;
+        boolean title = "Welcome to YAWF Stream".equals(text), welcome = "android.app.Dialog".equals(clazz) && "Welcome".equals(text);
+        boolean skip = "Skip".equals(text), next = "Next".equals(text);
+        if ("Enable Android update checks?".equals(text)) scan.oldPrompt = true;
+        if (("android.app.Dialog".equals(clazz) && !"Welcome".equals(text) && !"Enable Android update checks?".equals(text)) ||
+                (resource.equals("android:id/alertTitle") && !"Enable Android update checks?".equals(text)) ||
+                (resource.startsWith("android:id/button") && !"NOT NOW".equals(text) && !"ENABLE".equals(text))) scan.unexpected = true;
+        if (title || welcome || skip || next) {
+            Rect bounds = new Rect(); node.getBoundsInScreen(bounds);
+            if (!PRODUCT.equals(String.valueOf(node.getPackageName())) || node.getWindowId() != scan.window || !node.isVisibleToUser() ||
+                    bounds.isEmpty() || !scan.root.contains(bounds)) scan.unexpected = true;
+            if (title) scan.titles++;
+            if (welcome) scan.dialogs++;
+            if (skip) { if (!node.isEnabled() || !node.isClickable()) scan.unexpected = true; scan.skips++; }
+            if (next) { if (!node.isEnabled() || !node.isClickable()) scan.unexpected = true; scan.nexts++; }
+        }
+        int children = node.getChildCount();
+        assertTrue("Tail snapshot child bound exceeded", children >= 0 && children <= 512);
+        for (int i = 0; i < children; i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            assertNotNull("Tail snapshot child unavailable", child);
+            try { scanWelcomeTail(child, scan, depth + 1); } finally { child.recycle(); }
+        }
+    }
+    private void requireUpdateConsentWelcomeTail(FingerState state, JSONArray times, JSONObject inputProof) throws Exception {
+        assertTrue("Tail requires acknowledged UP and no active stream", state.upAcknowledged && !state.streamActive);
+        long upAt = times.getLong(2);
+        WelcomeTailPolicy policy = new WelcomeTailPolicy();
+        JSONArray observations = new JSONArray();
+        JSONObject proof = new JSONObject().put("action", "UPDATE_NOT_NOW_TO_WELCOME").put("ok", false)
+                .put("maximumMs", 2000).put("maximumSamples", 20).put("upUptimeMs", upAt).put("observations", observations)
+                .put("phase", phase).put("sourceClicks", sourceClicks).put("declineOrdinal", updateConsentDeclines);
+        inputProof.put("setupTail", proof);
+        int width = device.getDisplayWidth(), height = device.getDisplayHeight();
+        proof.put("screenWidth", width).put("screenHeight", height);
+        for (int attempt = 0; attempt < 20; attempt++) {
+            assertTrue("Tail deadline expired", now() - upAt <= 2000 && now() - started < 360_000);
+            assertTrue("Tail cache refresh failed", automation.clearCache());
+            AccessibilityNodeInfo root = automation.getRootInActiveWindow();
+            WelcomeTailScan scan = null; Rect bounds = null; boolean owner = false; String key = null;
+            try {
+                if (root != null) {
+                    bounds = new Rect(); root.getBoundsInScreen(bounds); int window = root.getWindowId();
+                    owner = PRODUCT.equals(String.valueOf(root.getPackageName())) && root.isVisibleToUser() && window >= 0 &&
+                            !bounds.isEmpty() && bounds.left >= 0 && bounds.top >= 0 && bounds.right <= width && bounds.bottom <= height;
+                    scan = new WelcomeTailScan(bounds, window);
+                    if (owner) scanWelcomeTail(root, scan, 0);
+                    key = window + "," + bounds.left + "," + bounds.top + "," + bounds.right + "," + bounds.bottom;
+                }
+                long at = now();
+                observations.put(new JSONObject().put("uptimeMs", at).put("rootAvailable", root != null).put("ownerValid", owner)
+                        .put("rootWindowId", scan == null ? -1 : scan.window).put("rootBounds", bounds == null ? JSONObject.NULL : rect(bounds))
+                        .put("rootKey", key == null ? JSONObject.NULL : key).put("oldPrompt", scan != null && scan.oldPrompt)
+                        .put("unexpected", scan != null && scan.unexpected).put("dialogs", scan == null ? 0 : scan.dialogs)
+                        .put("titles", scan == null ? 0 : scan.titles).put("skips", scan == null ? 0 : scan.skips).put("nexts", scan == null ? 0 : scan.nexts));
+                if (policy.observe(at, upAt, state.upAcknowledged && !state.streamActive, root != null, owner,
+                        scan != null && scan.unexpected, scan != null && scan.oldPrompt, scan == null ? 0 : scan.dialogs,
+                        scan == null ? 0 : scan.titles, scan == null ? 0 : scan.skips, scan == null ? 0 : scan.nexts, key)) {
+                    proof.put("ok", true).put("firstStableUptimeMs", policy.firstStable).put("lastStableUptimeMs", policy.lastStable)
+                            .put("finishedUptimeMs", now());
+                    return;
+                }
+            } finally { if (root != null) root.recycle(); }
+            SystemClock.sleep(100);
+        }
+        throw new AssertionError("Exact Welcome postcondition did not settle; no further input is admitted");
+    }
+
     private void tapObject(UiObject2 target, String role) throws Exception {
         assertVisible(target);
         Rect bounds = target.getVisibleBounds();
@@ -708,6 +823,11 @@ public final class RuntimePlayer91MoreFlowTest {
         finger(x, y, role, targetBounds, observationEpoch, null);
     }
     private void finger(float x, float y, String role, Rect targetBounds, String observationEpoch, AcquiredMore acquired) throws Exception {
+        finger(x, y, role, targetBounds, observationEpoch, acquired, InputTail.SAME_FOREGROUND);
+    }
+    private void finger(float x, float y, String role, Rect targetBounds, String observationEpoch, AcquiredMore acquired, InputTail tail) throws Exception {
+        assertTrue("Only exact setup consent may use this tail", tail == InputTail.SAME_FOREGROUND ||
+                (tail == InputTail.UPDATE_NOT_NOW_TO_WELCOME && role.equals("setup") && observationEpoch == null && acquired == null && updateConsentDeclines == 1));
         FingerState state = new FingerState();
         boolean deferredRevealProof = role.equals("reveal") && "menu-only".equals(observationEpoch);
         JSONArray times = new JSONArray();
@@ -738,7 +858,10 @@ public final class RuntimePlayer91MoreFlowTest {
                 assertTrue("Native input deadline exceeded", now() - down < 2_000);
                 inject(down, now(), step == 2 ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE, x, y, times, state);
             }
-            if (!deferredRevealProof) {
+            if (tail == InputTail.UPDATE_NOT_NOW_TO_WELCOME) {
+                requireUpdateConsentWelcomeTail(state, times, proof);
+                proof.put("foregroundTargetAfter", true).put("ok", true);
+            } else if (!deferredRevealProof) {
                 assertEquals("Foreground changed during native input", before, foreground(x, y));
                 proof.put("foregroundTargetAfter", true).put("ok", true);
             }

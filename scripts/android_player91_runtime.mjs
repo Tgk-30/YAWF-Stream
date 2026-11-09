@@ -171,6 +171,42 @@ export function validate91Acquisition(receipt) {
   requireTrue(receipt.moreDownAttemptUptimeMs===down && down-up>=0 && down-up<=1200, 'Actual More DOWN exceeded1200ms since reveal UP');
 }
 
+export function validateUpdateConsentTail(input) {
+  const tail = input.setupTail;
+  requireTrue(input.role === 'setup' && input.upAcknowledged === true && input.streamMayRemain === false &&
+    tail?.action === 'UPDATE_NOT_NOW_TO_WELCOME' && tail.phase === 'launch' && tail.sourceClicks === 0 && tail.declineOrdinal === 1 &&
+    tail.ok === true && tail.maximumMs === 2000 && tail.maximumSamples === 20 &&
+    tail.upUptimeMs === input.eventUptimeMs?.[2], 'Exact released launch-consent tail required');
+  const up = tail.upUptimeMs;
+  requireTrue(Number.isSafeInteger(up) && Number.isSafeInteger(tail.screenWidth) && tail.screenWidth > 0 && tail.screenWidth <= 16384 &&
+    Number.isSafeInteger(tail.screenHeight) && tail.screenHeight > 0 && tail.screenHeight <= 16384 &&
+    Array.isArray(tail.observations) && tail.observations.length >= 2 && tail.observations.length <= 20, 'Bounded tail snapshots required');
+  let first = -1, stable = 0, previousKey = null, previousAt = up - 1, completed = false;
+  for (const [index, observation] of tail.observations.entries()) {
+    const o = observation;
+    requireTrue(!completed && Number.isSafeInteger(o.uptimeMs) && o.uptimeMs > previousAt && o.uptimeMs >= up && o.uptimeMs - up <= 2000 &&
+      typeof o.rootAvailable === 'boolean' && typeof o.ownerValid === 'boolean' && typeof o.oldPrompt === 'boolean' && o.unexpected === false &&
+      [o.dialogs, o.titles, o.skips, o.nexts].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 1), 'Tail snapshot invalid, stale, duplicate or unexpected');
+    previousAt = o.uptimeMs;
+    if (o.rootAvailable) {
+      requireTrue(o.ownerValid === true && Number.isSafeInteger(o.rootWindowId) && o.rootWindowId >= 0 &&
+        Array.isArray(o.rootBounds) && o.rootBounds.length === 4 && o.rootBounds.every(Number.isSafeInteger) &&
+        o.rootBounds[0] >= 0 && o.rootBounds[1] >= 0 && o.rootBounds[2] > o.rootBounds[0] && o.rootBounds[3] > o.rootBounds[1] &&
+        o.rootBounds[2] <= tail.screenWidth && o.rootBounds[3] <= tail.screenHeight &&
+        o.rootKey === [o.rootWindowId, ...o.rootBounds].join(','), 'Exact owned visible tail root required');
+    } else requireTrue(o.ownerValid === false && o.rootWindowId === -1 && o.rootBounds === null && o.rootKey === null &&
+      !o.oldPrompt && o.dialogs + o.titles + o.skips + o.nexts === 0, 'Null-root observation must not fabricate landmarks');
+    const ready = o.rootAvailable && !o.oldPrompt && o.dialogs === 1 && o.titles === 1 && o.skips === 1 && o.nexts === 1;
+    if (!ready) { first = -1; stable = 0; previousKey = null; continue; }
+    if (o.rootKey !== previousKey) { first = o.uptimeMs; stable = 1; previousKey = o.rootKey; } else stable++;
+    completed = stable >= 2 && o.uptimeMs - first >= 100;
+    if (completed) requireTrue(index === tail.observations.length - 1, 'No tail queries after successful stabilization');
+  }
+  requireTrue(completed && tail.firstStableUptimeMs === first && tail.lastStableUptimeMs === previousAt &&
+    Number.isSafeInteger(tail.finishedUptimeMs) && tail.finishedUptimeMs >= previousAt && tail.finishedUptimeMs - up <= 2000,
+  'Two stable Welcome snapshots within the original tail deadline required');
+}
+
 function validateNativeMenuEvidence(receipt, menuOnly) {
   requireTrue(receipt.uniqueMenu === true && receipt.menuHeading === true && receipt.singleUiAutomationOwner === true,
     'Actual unique menu semantic proof required');
@@ -192,6 +228,9 @@ function validateNativeMenuEvidence(receipt, menuOnly) {
       && input.eventUptimeMs[2] >= input.eventUptimeMs[1] + 1 && input.eventUptimeMs[2] - input.downUptimeMs >= 100
       && input.eventUptimeMs[2] - input.downUptimeMs < 2000, 'Actual MotionEvent timing proof failed');
   }
+  const consentTails = receipt.inputs.filter(input => Object.hasOwn(input, 'setupTail'));
+  requireTrue(consentTails.length <= 1, 'Only one exact native consent tail is admitted');
+  for (const input of consentTails) validateUpdateConsentTail(input);
   const more = receipt.inputs.filter((input) => input.role === 'more');
   const reveal = receipt.inputs.filter((input) => input.role === 'reveal');
   requireTrue(more.length === 1 && reveal.length <= (menuOnly ? 1 : 2), 'One More activation and at most two clock-epoch reveals required');

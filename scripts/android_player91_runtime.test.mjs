@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { PIN, sanitize, validateEnvironment, validateCatalog, cpuSnapshot, iowaitPercent,
-  validateHostResources, validateGuest, validateLauncher, validateJUnit, validateReceipt, validateMenuOnlyReceipt, parseRuntimeMode, ownedDirectory, parseInstalledAPKPaths, parseAPKHashOutput } from './android_player91_runtime.mjs';
+  validateHostResources, validateGuest, validateLauncher, validateJUnit, validateReceipt, validateMenuOnlyReceipt, validateUpdateConsentTail, parseRuntimeMode, ownedDirectory, parseInstalledAPKPaths, parseAPKHashOutput } from './android_player91_runtime.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const java = readFileSync(join(root, 'scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimePlayer91MoreFlowTest.java'), 'utf8');
@@ -298,7 +298,8 @@ test('clock PNG observation keeps the real2200ms interval and actual last UP to 
   assert.match(java, /now\(\) - chromeRevealUp < 3_200/);
 });
 test('native enrollment prompt declines using observed exact uppercase NOT NOW', () => {
-  assert.match(java, /if \(text\("Enable Android update checks\?"\) != null\) \{\s+click\("NOT NOW", 3_000\);/);
+  assert.match(java, /if \(text\("Enable Android update checks\?"\) != null\) \{\s+declineUpdateChecksToWelcome\(\);/);
+  assert.match(java, /UiObject2 notNow = clickable\("NOT NOW"\), enable = clickable\("ENABLE"\)/);
 });
 test('Java source uses one UiAutomation owner real SDK FINGER and exact native bounds', () => {
   assert.equal((java.match(/instrumentation\.getUiAutomation\(\)/g) || []).length, 1);
@@ -342,7 +343,7 @@ test('two distinct measured reveal epochs are transparent; third, duplicate, hid
 });
 
 test('native elapsed clock is the one bounded player-scoped SeekBar, never a naked text clock', () => {
-  const clock = java.slice(java.indexOf('    private int clock()'), java.indexOf('    private void tapObject('));
+  const clock = java.slice(java.indexOf('    private int clock()'), java.indexOf('    private enum InputTail'));
   for (const text of ['UiObject2 current = player()', 'By.pkg(PRODUCT).clazz("android.widget.SeekBar")',
     'bars.size() <= 1', 'assertVisible(bar)', 'current.getVisibleBounds().contains(bar.getVisibleBounds())', 'parseSeekClock(bar.getText())']) assert.ok(clock.includes(text), text);
   assert.doesNotMatch(clock, /By.text|split\(" \/ "\)|getContentDescription/);
@@ -554,4 +555,62 @@ test('diagnostic copies raw SDK geometry before every unchanged containment guar
  assert.match(driver,/scope: 'DIAGNOSTIC_RAW_SDK_GEOMETRY_ONLY_NOT_PRODUCT_QUALIFICATION', diagnosticOnly: true, productQualified: false/);
  assert.match(driver,/result\.menuOnlyQualified = false; result\.clockProgressQualified = false;/);
  assert.match(driver,/DIAGNOSTIC_COMPLETED_MENU_OBSERVED_NOT_PRODUCT_PASS/);
+});
+
+const consentInput = () => ({...input('setup'),setupTail:{action:'UPDATE_NOT_NOW_TO_WELCOME',phase:'launch',sourceClicks:0,declineOrdinal:1,ok:true,maximumMs:2000,maximumSamples:20,upUptimeMs:1100,screenWidth:1080,screenHeight:1920,firstStableUptimeMs:1200,lastStableUptimeMs:1300,finishedUptimeMs:1301,observations:[
+ {uptimeMs:1120,rootAvailable:false,ownerValid:false,rootWindowId:-1,rootBounds:null,rootKey:null,oldPrompt:false,unexpected:false,dialogs:0,titles:0,skips:0,nexts:0},
+ ...[1200,1300].map(uptimeMs=>({uptimeMs,rootAvailable:true,ownerValid:true,rootWindowId:7,rootBounds:[0,0,1080,1920],rootKey:'7,0,0,1080,1920',oldPrompt:false,unexpected:false,dialogs:1,titles:1,skips:1,nexts:1}))]}});
+test('exact consent tail recomputes delayed-null then stable Welcome and rejects every missing postcondition',()=>{
+ validateUpdateConsentTail(consentInput());
+ for(const mutate of[
+  x=>x.role='more',x=>x.upAcknowledged=false,x=>x.streamMayRemain=true,x=>x.setupTail.action='OTHER',x=>x.setupTail.phase='player',x=>x.setupTail.sourceClicks=1,x=>x.setupTail.declineOrdinal=2,
+  x=>x.setupTail.ok=false,x=>x.setupTail.maximumMs=2001,x=>x.setupTail.maximumSamples=21,x=>x.setupTail.upUptimeMs=1099,
+  x=>x.setupTail.observations[1].ownerValid=false,x=>x.setupTail.observations[1].unexpected=true,x=>x.setupTail.observations[1].dialogs=2,
+  x=>x.setupTail.observations[2].skips=0,x=>x.setupTail.observations[2].nexts=0,x=>x.setupTail.observations[2].titles=0,x=>x.setupTail.observations[2].oldPrompt=true,
+  x=>x.setupTail.observations[2].uptimeMs=3200,x=>x.setupTail.observations[2].uptimeMs=1299,x=>x.setupTail.observations[2].rootKey='different',
+  x=>x.setupTail.observations[0].titles=1,x=>x.setupTail.observations[0].rootAvailable=true,x=>x.setupTail.observations.pop(),
+  x=>x.setupTail.observations=Array.from({length:21},()=>x.setupTail.observations[0]),x=>x.setupTail.firstStableUptimeMs=1199,x=>x.setupTail.finishedUptimeMs=3101,
+ ]){const copy=consentInput();mutate(copy);assert.throws(()=>validateUpdateConsentTail(copy));}
+ const value=menuOnlyReceipt();value.inputs.unshift(consentInput());validateMenuOnlyReceipt(value);
+ const duplicate=structuredClone(value);duplicate.inputs.unshift(consentInput());assert.throws(()=>validateMenuOnlyReceipt(duplicate));
+ const wrongRole=structuredClone(value);wrongRole.inputs[0].role='reveal';assert.throws(()=>validateMenuOnlyReceipt(wrongRole));
+});
+test('consent-only tail is after acknowledged release, bounded readonly, and leaves default and More guards intact',()=>{
+ assert.equal((java.match(/"setup", bounds, null, null, InputTail\.UPDATE_NOT_NOW_TO_WELCOME/g)||[]).length,1);
+ const decline=java.slice(java.indexOf('    private void declineUpdateChecksToWelcome'),java.indexOf('    static final class WelcomeTailPolicy'));
+ for(const text of['"launch", phase','0, sourceClicks','0, updateConsentDeclines++','"Enable Android update checks?"','"NOT NOW"','"ENABLE"','"android.widget.Button"'])assert.ok(decline.includes(text),text);
+ const tail=java.slice(java.indexOf('    private void requireUpdateConsentWelcomeTail'),java.indexOf('    private void tapObject'));
+ for(const text of['state.upAcknowledged && !state.streamActive','times.getLong(2)','attempt < 20','now() - upAt <= 2000','automation.clearCache()','automation.getRootInActiveWindow()','SystemClock.sleep(100)','proof.put("ok", true)'])assert.ok(tail.includes(text),text);
+ assert.doesNotMatch(tail,/\.tap\(|\.click\(|inject\(|pressBack|startActivity|\.play\(|\.pause\(/);
+ const finger=java.slice(java.indexOf('    private void finger(float x, float y, String role, Rect targetBounds, String observationEpoch, AcquiredMore acquired, InputTail tail)'),java.indexOf('    private void inject('));
+ assert.ok(finger.indexOf('inject(down, now(), step == 2 ? MotionEvent.ACTION_UP')<finger.indexOf('requireUpdateConsentWelcomeTail(state, times, proof)'));
+ assert.ok(finger.includes('assertEquals("Foreground changed during native input", before, foreground(x, y))'));
+ assert.ok(finger.includes('down - chromeRevealUp <= 1_200'));
+ assert.ok(java.includes('assertTrue("Diagnostic geometry captured; More DOWN intentionally not admitted", false)'));
+});
+test('actual Java consent tail policy compiles and executes release ownership timing and stable-landmark controls',()=>{
+ const start=java.indexOf('    static final class WelcomeTailPolicy {'),end=java.indexOf('    private static final class WelcomeTailScan',start);assert.ok(start>=0&&end>start);
+ const base=process.env.RUNNER_TEMP||process.env.TMPDIR;assert.ok(base?.startsWith('/'));const dir=realpathSync(mkdtempSync(join(base,'consent-tail-')));
+ const checks=`
+ WelcomeTailPolicy p=new WelcomeTailPolicy();
+ if(p.observe(1100,1000,true,false,false,false,false,0,0,0,0,null))throw new AssertionError();
+ if(p.observe(1200,1000,true,true,true,false,false,1,1,1,1,"r"))throw new AssertionError();
+ if(!p.observe(1300,1000,true,true,true,false,false,1,1,1,1,"r"))throw new AssertionError();
+ reject(()->new WelcomeTailPolicy().observe(1000,1000,false,true,true,false,false,1,1,1,1,"r"));
+ reject(()->new WelcomeTailPolicy().observe(1000,1000,true,true,false,false,false,1,1,1,1,"r"));
+ reject(()->new WelcomeTailPolicy().observe(1000,1000,true,true,true,true,false,1,1,1,1,"r"));
+ reject(()->new WelcomeTailPolicy().observe(3001,1000,true,true,true,false,false,1,1,1,1,"r"));
+ reject(()->new WelcomeTailPolicy().observe(999,1000,true,true,true,false,false,1,1,1,1,"r"));
+ reject(()->new WelcomeTailPolicy().observe(1000,1000,true,true,true,false,false,2,1,1,1,"r"));
+ if(new WelcomeTailPolicy().observe(1000,1000,true,true,true,false,true,1,1,1,1,"r"))throw new AssertionError();
+ if(new WelcomeTailPolicy().observe(1000,1000,true,true,true,false,false,1,1,0,1,"r"))throw new AssertionError();
+ WelcomeTailPolicy missing=new WelcomeTailPolicy();for(int i=0;i<20;i++)if(missing.observe(1000+i*50,1000,true,false,false,false,false,0,0,0,0,null))throw new AssertionError();
+ reject(()->missing.observe(2000,1000,true,false,false,false,false,0,0,0,0,null));
+ WelcomeTailPolicy changed=new WelcomeTailPolicy();changed.observe(1100,1000,true,true,true,false,false,1,1,1,1,"r1");
+ if(changed.observe(1200,1000,true,true,true,false,false,1,1,1,1,"r2"))throw new AssertionError();
+ if(!changed.observe(1300,1000,true,true,true,false,false,1,1,1,1,"r2"))throw new AssertionError();`;
+ writeFileSync(join(dir,'ConsentTailHarness.java'),`public final class ConsentTailHarness {\n${java.slice(start,end)}\nstatic void reject(Runnable r){try{r.run();}catch(IllegalStateException ok){return;}throw new AssertionError("invalid tail accepted");}\npublic static void main(String[] args){${checks}\nSystem.out.println("consent-tail-policy:passed");}}`);
+ const javac=process.env.JAVA_HOME?join(process.env.JAVA_HOME,'bin/javac'):'javac',binary=process.env.JAVA_HOME?join(process.env.JAVA_HOME,'bin/java'):'java';
+ const compiled=spawnSync(javac,[`-J-Djava.io.tmpdir=${dir}`,'-d',dir,join(dir,'ConsentTailHarness.java')],{encoding:'utf8',timeout:20000});assert.equal(compiled.status,0,compiled.stderr);
+ const ran=spawnSync(binary,[`-Djava.io.tmpdir=${dir}`,'-cp',dir,'ConsentTailHarness'],{encoding:'utf8',timeout:20000});assert.equal(ran.status,0,ran.stderr);assert.equal(ran.stdout.trim(),'consent-tail-policy:passed');
 });
