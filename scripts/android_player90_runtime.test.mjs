@@ -21,9 +21,11 @@ const guest = () => ({ sdk: '36', abi: 'x86_64', hardware: 'ranchu', pageSize: '
   webview: 'Current WebView package (name, version): (com.google.android.webview, 144.0.7559.0)' });
 const input = (role = 'more') => ({ role, ok: true, tool: 'finger', toolType: 1, durationMs: 100, steps: 2,
   targetBounds: [10, 10, 100, 100], x: 50, y: 50, foregroundTargetBefore: true, foregroundTargetAfter: true, upAcknowledged: true, streamMayRemain: false,
-  cancelAcknowledged: false, downUptimeMs: 1000, eventUptimeMs: [1000, 1050, 1100] });
+  cancelAcknowledged: false, downUptimeMs: 1000, eventUptimeMs: [1000, 1050, 1100],
+  ...(role === 'reveal' ? { observationEpoch: 'clock-before', x: 55, y: 38.8 } : {}) });
 const receipt = () => ({ schemaVersion: 1, profile: 'private90-hosted-more', outcome: 'PASS', phase: 'complete',
   sourceClicks: 1, explicitSourceRow: true, clockBeforeSeconds: 2, clockAfterSeconds: 4,
+  chromeRevealPerformed: false, chromeRevealCount: 0,
   uniqueMenu: true, menuHeading: true, singleUiAutomationOwner: true, menuBounds: [0, 500, 1080, 1800], inputs: [input()] });
 const junit = 'INSTRUMENTATION_STATUS: numtests=1\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n';
 
@@ -152,7 +154,7 @@ test('native FINGER proof requires foreground UP certainty and no outstanding st
   }
 });
 test('More actual DOWN must fall inside single reveal auto-hide window', () => {
-  const value = receipt(); value.inputs.unshift(input('reveal'));
+  const value = receipt(); value.inputs.unshift(input('reveal')); value.chromeRevealCount = 1; value.chromeRevealPerformed = true;
   value.inputs[1] = { ...input(), downUptimeMs: 2000, eventUptimeMs: [2000, 2050, 2100] };
   validateReceipt(value);
   value.inputs[1] = { ...input(), downUptimeMs: 4300, eventUptimeMs: [4300, 4350, 4400] };
@@ -272,20 +274,26 @@ test('login waits for fresh exact username commit before password and after its 
   for (const key of ['usernameCommittedBeforePassword', 'usernameCommittedAfterPassword', 'passwordTextSendReturned',
     'usernameFocusClicks', 'passwordFocusClicks', 'usernameTextSends', 'passwordTextSends']) assert.ok(java.includes(`.put("${key}",`));
 });
-test('clock observation exposes hidden chrome before baseline with only one shared native reveal', () => {
-  const reveal = java.indexOf('if (clock() < 0) revealChromeOnce()');
-  assert.ok(reveal >= 0 && reveal < java.indexOf('long clockDeadline'));
-  assert.match(java, /assertFalse\("Only one chrome reveal is admitted", chromeRevealPerformed\)/);
-  assert.match(java, /finger\(bounds\.exactCenterX\(\), bounds\.exactCenterY\(\), "reveal", bounds\)/);
-  assert.equal((java.match(/"reveal", bounds\)/g) || []).length, 1);
+test('two clock observation epochs reveal only absent chrome at the safe non-transport point', () => {
+  const before = java.indexOf('revealChromeForObservation("clock-before")');
+  const after = java.indexOf('revealChromeForObservation("clock-after")');
+  assert.ok(before >= 0 && before < java.indexOf('long clockDeadline') && after > before);
+  assert.match(java, /if \(playerChromeVisible\(\)\) return/);
+  assert.match(java, /chromeRevealEpochs\.contains\(observationEpoch\)/);
+  assert.match(java, /chromeRevealEpochs\.size\(\) < 2/);
+  assert.match(java, /bounds\.left \+ bounds\.width\(\) \* 0\.5f, bounds\.top \+ bounds\.height\(\) \* 0\.32f, "reveal", bounds, observationEpoch/);
+  assert.match(java, /proof\.put\("observationEpoch", observationEpoch\)/);
+  const more = java.slice(java.indexOf('step("more-transaction")'), java.indexOf('long menuDeadline'));
+  assert.doesNotMatch(more, /revealChromeForObservation\(/);
+  assert.match(more, /no third reveal is admitted/);
   assert.match(java, /clockBefore > 0 && clockBefore < 25/);
   assert.match(java, /clockAfter >= clockBefore \+ 1 && clockAfter < 30/);
 });
-test('clock PNG observation avoids XML latency and preserves actual UP to More deadline', () => {
+test('clock PNG observation keeps the real2200ms interval and actual last UP to More deadline', () => {
   assert.match(java, /capture\("clock-before", false\)/);
   assert.match(java, /capture\("clock-after", false\)/);
   assert.match(java, /if \(!includeHierarchy\) return/);
-  assert.match(java, /SystemClock\.sleep\(1_100\)/);
+  assert.match(java, /SystemClock\.sleep\(2_200\)/);
   assert.match(java, /chromeRevealUp = inputs\.getJSONObject\(inputs\.length\(\) - 1\)\.getJSONArray\("eventUptimeMs"\)\.getLong\(2\)/);
   assert.match(java, /now\(\) - chromeRevealUp < 3_200/);
 });
@@ -311,4 +319,60 @@ test('Java no state injection or invisible menu surrogate and preserves idle pol
   assert.match(java, /Missing unique explicit stream row; hero Play is not admitted/);
   assert.match(java, /More requires its actual unique heading/);
   assert.match(java, /The native More activation did not open the Playback settings dialog/);
+});
+
+test('two distinct measured reveal epochs are transparent; third, duplicate, hidden setup and late More reject', () => {
+  const value = receipt();
+  value.chromeRevealCount = 2; value.chromeRevealPerformed = true;
+  value.inputs = [input('explicit-source'), input('reveal'),
+    { ...input('reveal'), observationEpoch: 'clock-after', downUptimeMs: 3500, eventUptimeMs: [3500, 3550, 3600] },
+    { ...input(), downUptimeMs: 4000, eventUptimeMs: [4000, 4050, 4100] }];
+  validateReceipt(value);
+  for (const mutate of [
+    (r) => { r.inputs[2].observationEpoch = 'clock-before'; },
+    (r) => { r.inputs[2].observationEpoch = 'more'; },
+    (r) => { r.inputs[1].y = 55; },
+    (r) => { r.inputs[2].downUptimeMs = 3000; r.inputs[2].eventUptimeMs = [3000, 3050, 3100]; },
+    (r) => { r.inputs[3].downUptimeMs = 6800; r.inputs[3].eventUptimeMs = [6800, 6850, 6900]; },
+    (r) => { r.chromeRevealCount = 1; },
+    (r) => { r.inputs.splice(3, 0, { ...input('reveal'), observationEpoch: 'clock-after' }); r.chromeRevealCount = 3; },
+    (r) => { r.inputs.splice(3, 0, input('setup')); },
+    (r) => { r.inputs[3].observationEpoch = 'clock-after'; },
+  ]) { const copy = structuredClone(value); mutate(copy); assert.throws(() => validateReceipt(copy)); }
+});
+
+test('native elapsed clock is the one bounded player-scoped SeekBar, never a naked text clock', () => {
+  const clock = java.slice(java.indexOf('    private int clock()'), java.indexOf('    private void tapObject('));
+  for (const text of ['UiObject2 current = player()', 'By.pkg(PRODUCT).clazz("android.widget.SeekBar")',
+    'bars.size() <= 1', 'assertVisible(bar)', 'current.getVisibleBounds().contains(bar.getVisibleBounds())', 'parseSeekClock(bar.getText())']) assert.ok(clock.includes(text), text);
+  assert.doesNotMatch(clock, /By.text|split\(" \/ "\)|getContentDescription/);
+  const visible = java.slice(java.indexOf('    private boolean playerChromeVisible()'), java.indexOf('    private void fresh()'));
+  for (const text of ['android.widget.SeekBar', 'Playback settings', 'Play', 'Pause', 'if (playerChromeVisible()) return']) assert.ok(visible.includes(text), text);
+});
+
+test('actual source Java SeekBar parser compiles and executes adversarial elapsed-duration cases', () => {
+  const start = java.indexOf('    static int parseSeekClock(String label) {');
+  const end = java.indexOf('\n    private int clock()', start);
+  assert.ok(start >= 0 && end > start, 'actual Java parser method required');
+  const actualMethod = java.slice(start, end);
+  const cases = [
+    ['0:00 of 0:36, Seek', 0], ['0:01 of 0:36, Seek', 1], ['0:35 of 0:36, Seek', 35],
+    ['00:05 of 00:36, Seek', 5], ['0:36 of 0:36, Seek', -1], ['0:37 of 0:36, Seek', -1],
+    ['0:01 of 0:35, Seek', -1], ['0:01 of 1:36, Seek', -1], ['0:60 of 0:36, Seek', -1],
+    ['0:01', -1], ['0:01 / 0:36', -1], ['0:01 of 0:36', -1], ['0:01 of 0:36, seek', -1],
+    [' 0:01 of 0:36, Seek', -1], ['0:01 of 0:36, Seek\n', -1], ['0:00:01 of 0:00:36, Seek', -1],
+    ['-0:01 of 0:36, Seek', -1], [null, -1], ['x'.repeat(65), -1],
+  ];
+  const base = process.env.RUNNER_TEMP || process.env.TMPDIR;
+  assert.ok(base?.startsWith('/'), 'explicit Work/runner-owned temporary root required');
+  const directory = realpathSync(mkdtempSync(join(base, 'native-seek-clock-')));
+  const checks = cases.map(([text, expected], index) => `if (parseSeekClock(${JSON.stringify(text)}) != ${expected}) throw new AssertionError("case${index}");`).join('\n');
+  writeFileSync(join(directory, 'NativeSeekClockHarness.java'), `import java.util.regex.Pattern;\npublic final class NativeSeekClockHarness {\n${actualMethod}\npublic static void main(String[] args) {\n${checks}\nSystem.out.println("native-seek-clock:${cases.length}");\n}\n}\n`);
+  const javac = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/javac') : 'javac';
+  const javaCommand = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/java') : 'java';
+  const compile = spawnSync(javac, [`-J-Djava.io.tmpdir=${directory}`, '-d', directory, join(directory, 'NativeSeekClockHarness.java')], { encoding: 'utf8', timeout: 20000 });
+  assert.equal(compile.status, 0, `actual Java parser compilation failed: ${compile.stderr}`);
+  const run = spawnSync(javaCommand, [`-Djava.io.tmpdir=${directory}`, '-cp', directory, 'NativeSeekClockHarness'], { encoding: 'utf8', timeout: 20000 });
+  assert.equal(run.status, 0, `actual Java parser cases failed: ${run.stderr}`);
+  assert.equal(run.stdout.trim(), `native-seek-clock:${cases.length}`);
 });

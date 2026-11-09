@@ -134,9 +134,29 @@ export function validateReceipt(receipt) {
   }
   const more = receipt.inputs.filter((input) => input.role === 'more');
   const reveal = receipt.inputs.filter((input) => input.role === 'reveal');
-  requireTrue(more.length === 1 && reveal.length <= 1, 'One More activation and at most one reveal required');
-  if (reveal.length) requireTrue(more[0].eventUptimeMs[0] - reveal[0].eventUptimeMs[2] >= 0
-    && more[0].eventUptimeMs[0] - reveal[0].eventUptimeMs[2] < 3200, 'More DOWN missed auto-hide window');
+  requireTrue(more.length === 1 && reveal.length <= 2, 'One More activation and at most two clock-epoch reveals required');
+  requireTrue(receipt.chromeRevealCount === reveal.length && receipt.chromeRevealPerformed === (reveal.length > 0), 'Reveal count must match actual input proofs');
+  const epochs = reveal.map((input) => input.observationEpoch);
+  for (const input of reveal) requireTrue(Math.abs(input.x - (input.targetBounds[0] + (input.targetBounds[2] - input.targetBounds[0]) * 0.5)) < 0.01
+    && Math.abs(input.y - (input.targetBounds[1] + (input.targetBounds[3] - input.targetBounds[1]) * 0.32)) < 0.01,
+  'Reveal must use the safe measured video point, not the center transport');
+  requireTrue(epochs.every((epoch) => ['clock-before', 'clock-after'].includes(epoch))
+    && new Set(epochs).size === epochs.length, 'Only distinct clock observation epochs may reveal');
+  if (reveal.length === 2) requireTrue(epochs[0] === 'clock-before' && epochs[1] === 'clock-after'
+    && reveal[1].eventUptimeMs[0] - reveal[0].eventUptimeMs[2] >= 2200, 'Clock observation epochs require the real bounded interval');
+  let playerInputStarted = false;
+  for (const input of receipt.inputs) {
+    requireTrue(['setup', 'explicit-source', 'reveal', 'more'].includes(input.role), 'Unknown native input role');
+    if (input.role !== 'reveal') requireTrue(!Object.hasOwn(input, 'observationEpoch'), 'Only actual reveal inputs may claim clock epochs');
+    requireTrue(!(playerInputStarted && input.role === 'setup'), 'Post-source player inputs cannot be hidden as setup');
+    if (input.role !== 'setup') playerInputStarted = true;
+  }
+  if (reveal.length) {
+    const last = reveal.at(-1);
+    requireTrue(more[0].eventUptimeMs[0] - last.eventUptimeMs[2] >= 0
+      && more[0].eventUptimeMs[0] - last.eventUptimeMs[2] < 3200, 'More DOWN missed auto-hide window');
+  }
+
 }
 
 export function ownedDirectory(path, parent, fresh = false) {

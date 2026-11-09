@@ -31,6 +31,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /** One black-box hosted More transaction. No WebView evaluation or application-state writes. */
@@ -63,6 +65,7 @@ public final class RuntimePlayer90MoreFlowTest {
     private boolean terminalInputFailure;
     private Rect menuBounds;
     private boolean chromeRevealPerformed;
+    private final Set<String> chromeRevealEpochs = new HashSet<>();
     private long chromeRevealUp = -1;
     private int usernameFocusClicks, passwordFocusClicks, usernameTextSends, passwordTextSends;
     private boolean usernameCommittedBeforePassword, usernameCommittedAfterPassword, passwordTextSendReturned;
@@ -100,6 +103,7 @@ public final class RuntimePlayer90MoreFlowTest {
                     .put("menuHeading", menuHeading).put("uniqueMenu", uniqueMenu)
                     .put("menuBounds", menuBounds == null ? JSONObject.NULL : rect(menuBounds))
                     .put("chromeRevealPerformed", chromeRevealPerformed).put("chromeRevealUpUptimeMs", chromeRevealUp)
+                    .put("chromeRevealCount", chromeRevealEpochs.size())
                     .put("inputs", inputs).put("phases", phases).put("captures", captures)
                     .put("textEntryMethod", "UiObject2.click+Instrumentation.sendStringSync")
                     .put("usernameFocusClicks", usernameFocusClicks).put("passwordFocusClicks", passwordFocusClicks)
@@ -182,7 +186,7 @@ public final class RuntimePlayer90MoreFlowTest {
         waitPlayer(15_000);
         step("playing");
         fresh(); guard();
-        if (clock() < 0) revealChromeOnce();
+        revealChromeForObservation("clock-before");
         long clockDeadline = now() + 10_000;
         while (now() < clockDeadline) {
             fresh(); guard();
@@ -192,25 +196,17 @@ public final class RuntimePlayer90MoreFlowTest {
         }
         assertTrue("A nonzero initial media clock was not observed", clockBefore > 0 && clockBefore < 25);
         capture("clock-before", false);
-        SystemClock.sleep(1_100);
+        SystemClock.sleep(2_200);
         fresh(); guard();
+        revealChromeForObservation("clock-after");
         clockAfter = clock();
         assertTrue("Rendered playback clock did not advance", clockAfter >= clockBefore + 1 && clockAfter < 30);
         capture("clock-after", false);
         step("more-transaction");
-        // At most one reveal and one More activation, using measured native bounds.
+        // No reveal is admitted here: the two clock epochs have already finished.
         fresh(); guard();
         UiObject2 more = clickable("Playback settings");
-        if (more == null) {
-            revealChromeOnce();
-            long visibleDeadline = chromeRevealUp + 1_200;
-            do {
-                fresh(); guard(); more = clickable("Playback settings");
-                if (more != null) break;
-                SystemClock.sleep(100);
-            } while (now() < visibleDeadline);
-        }
-        assertNotNull("More was not freshly visible after the single reveal", more);
+        assertNotNull("More is no longer freshly visible after clock observation; no third reveal is admitted", more);
         if (chromeRevealPerformed) assertTrue("More acquisition exceeded the auto-hide window", now() - chromeRevealUp < 3_200);
         tapObject(more, "more");
         long menuDeadline = now() + 3_000;
@@ -232,11 +228,26 @@ public final class RuntimePlayer90MoreFlowTest {
         step("complete");
     }
 
-    private void revealChromeOnce() throws Exception {
-        assertFalse("Only one chrome reveal is admitted", chromeRevealPerformed);
+    private boolean playerChromeVisible() {
+        UiObject2 current = player();
+        if (!current.findObjects(By.pkg(PRODUCT).clazz("android.widget.SeekBar")).isEmpty()) return true;
+        for (String label : new String[]{"Playback settings", "Play", "Pause"}) {
+            if (!current.findObjects(By.text(exact(label))).isEmpty()
+                    || !current.findObjects(By.desc(exact(label))).isEmpty()) return true;
+        }
+        return false;
+    }
+
+    private void revealChromeForObservation(String observationEpoch) throws Exception {
+        assertTrue("Unknown clock observation epoch", observationEpoch.equals("clock-before") || observationEpoch.equals("clock-after"));
+        fresh(); guard();
+        if (playerChromeVisible()) return;
+        assertFalse("A clock epoch may reveal only once", chromeRevealEpochs.contains(observationEpoch));
+        assertTrue("Only two distinct clock observation reveals are admitted", chromeRevealEpochs.size() < 2);
+        chromeRevealEpochs.add(observationEpoch);
         Rect bounds = player().getVisibleBounds();
-        finger(bounds.exactCenterX(), bounds.exactCenterY(), "reveal", bounds);
         chromeRevealPerformed = true;
+        finger(bounds.left + bounds.width() * 0.5f, bounds.top + bounds.height() * 0.32f, "reveal", bounds, observationEpoch);
         chromeRevealUp = inputs.getJSONObject(inputs.length() - 1).getJSONArray("eventUptimeMs").getLong(2);
     }
 
@@ -359,16 +370,24 @@ public final class RuntimePlayer90MoreFlowTest {
         throw new AssertionError("No movie player after the explicit stream row");
     }
 
+    static int parseSeekClock(String label) {
+        if (label == null || label.length() > 64) return -1;
+        java.util.regex.Matcher match = Pattern.compile("\\A(\\d{1,2}):([0-5]\\d) of (\\d{1,2}):([0-5]\\d), Seek\\z").matcher(label);
+        if (!match.matches()) return -1;
+        int current = Integer.parseInt(match.group(1)) * 60 + Integer.parseInt(match.group(2));
+        int duration = Integer.parseInt(match.group(3)) * 60 + Integer.parseInt(match.group(4));
+        return duration == 36 && current >= 0 && current <= 35 ? current : -1;
+    }
+
     private int clock() {
-        List<Integer> values = new ArrayList<>();
-        for (UiObject2 node : player().findObjects(By.text(Pattern.compile("\\A\\d{1,2}:\\d{2}(?::\\d{2})?(?: / \\d{1,2}:\\d{2}(?::\\d{2})?)?\\z")))) {
-            String[] parts = node.getText().split(" / ")[0].split(":");
-            int seconds = 0;
-            for (String part : parts) seconds = seconds * 60 + Integer.parseInt(part);
-            if (seconds < 35 && !values.contains(seconds)) values.add(seconds);
-        }
-        assertTrue("Ambiguous elapsed clock", values.size() <= 1);
-        return values.isEmpty() ? -1 : values.get(0);
+        UiObject2 current = player();
+        List<UiObject2> bars = current.findObjects(By.pkg(PRODUCT).clazz("android.widget.SeekBar"));
+        assertTrue("Ambiguous native player SeekBar", bars.size() <= 1);
+        if (bars.isEmpty()) return -1;
+        UiObject2 bar = bars.get(0);
+        assertVisible(bar);
+        assertTrue("Native SeekBar escaped the current player", current.getVisibleBounds().contains(bar.getVisibleBounds()));
+        return parseSeekClock(bar.getText());
     }
 
     private void tapObject(UiObject2 target, String role) throws Exception {
@@ -392,6 +411,10 @@ public final class RuntimePlayer90MoreFlowTest {
     }
 
     private void finger(float x, float y, String role, Rect targetBounds) throws Exception {
+        finger(x, y, role, targetBounds, null);
+    }
+
+    private void finger(float x, float y, String role, Rect targetBounds, String observationEpoch) throws Exception {
         guard();
         Rect before = foreground(x, y);
         long down = now();
@@ -403,6 +426,7 @@ public final class RuntimePlayer90MoreFlowTest {
                 .put("durationMs", 100).put("steps", 2).put("x", x).put("y", y)
                 .put("foregroundTargetBefore", true).put("downUptimeMs", down)
                 .put("targetBounds", rect(targetBounds)).put("foregroundBounds", rect(before));
+        if (observationEpoch != null) proof.put("observationEpoch", observationEpoch);
         try {
             inject(down, MotionEvent.ACTION_DOWN, x, y, times);
             for (int step = 1; step <= 2; step++) {
