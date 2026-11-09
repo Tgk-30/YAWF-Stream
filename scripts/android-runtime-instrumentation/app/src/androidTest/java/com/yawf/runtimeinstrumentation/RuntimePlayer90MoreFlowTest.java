@@ -62,6 +62,8 @@ public final class RuntimePlayer90MoreFlowTest {
     private boolean uniqueMenu;
     private boolean terminalInputFailure;
     private Rect menuBounds;
+    private boolean chromeRevealPerformed;
+    private long chromeRevealUp = -1;
     private int usernameFocusClicks, passwordFocusClicks, usernameTextSends, passwordTextSends;
     private boolean usernameCommittedBeforePassword, usernameCommittedAfterPassword, passwordTextSendReturned;
 
@@ -97,6 +99,7 @@ public final class RuntimePlayer90MoreFlowTest {
                     .put("clockBeforeSeconds", clockBefore).put("clockAfterSeconds", clockAfter)
                     .put("menuHeading", menuHeading).put("uniqueMenu", uniqueMenu)
                     .put("menuBounds", menuBounds == null ? JSONObject.NULL : rect(menuBounds))
+                    .put("chromeRevealPerformed", chromeRevealPerformed).put("chromeRevealUpUptimeMs", chromeRevealUp)
                     .put("inputs", inputs).put("phases", phases).put("captures", captures)
                     .put("textEntryMethod", "UiObject2.click+Instrumentation.sendStringSync")
                     .put("usernameFocusClicks", usernameFocusClicks).put("passwordFocusClicks", passwordFocusClicks)
@@ -178,6 +181,8 @@ public final class RuntimePlayer90MoreFlowTest {
         tapObject(source, "explicit-source");
         waitPlayer(15_000);
         step("playing");
+        fresh(); guard();
+        if (clock() < 0) revealChromeOnce();
         long clockDeadline = now() + 10_000;
         while (now() < clockDeadline) {
             fresh(); guard();
@@ -186,22 +191,19 @@ public final class RuntimePlayer90MoreFlowTest {
             SystemClock.sleep(200);
         }
         assertTrue("A nonzero initial media clock was not observed", clockBefore > 0 && clockBefore < 25);
-        capture("clock-before");
-        SystemClock.sleep(2_200);
+        capture("clock-before", false);
+        SystemClock.sleep(1_100);
         fresh(); guard();
         clockAfter = clock();
         assertTrue("Rendered playback clock did not advance", clockAfter >= clockBefore + 1 && clockAfter < 30);
-        capture("clock-after");
+        capture("clock-after", false);
         step("more-transaction");
         // At most one reveal and one More activation, using measured native bounds.
         fresh(); guard();
         UiObject2 more = clickable("Playback settings");
-        long revealedAt = -1;
         if (more == null) {
-            Rect player = player().getVisibleBounds();
-            finger(player.left + player.width() * 0.85f, player.top + player.height() * 0.30f, "reveal", player);
-            revealedAt = now();
-            long visibleDeadline = revealedAt + 1_200;
+            revealChromeOnce();
+            long visibleDeadline = chromeRevealUp + 1_200;
             do {
                 fresh(); guard(); more = clickable("Playback settings");
                 if (more != null) break;
@@ -209,7 +211,7 @@ public final class RuntimePlayer90MoreFlowTest {
             } while (now() < visibleDeadline);
         }
         assertNotNull("More was not freshly visible after the single reveal", more);
-        if (revealedAt >= 0) assertTrue("More acquisition exceeded the auto-hide window", now() - revealedAt < 2_500);
+        if (chromeRevealPerformed) assertTrue("More acquisition exceeded the auto-hide window", now() - chromeRevealUp < 3_200);
         tapObject(more, "more");
         long menuDeadline = now() + 3_000;
         while (now() < menuDeadline) {
@@ -228,6 +230,14 @@ public final class RuntimePlayer90MoreFlowTest {
         assertTrue("The native More activation did not open the Playback settings dialog", uniqueMenu && menuHeading);
         capture("more-open");
         step("complete");
+    }
+
+    private void revealChromeOnce() throws Exception {
+        assertFalse("Only one chrome reveal is admitted", chromeRevealPerformed);
+        Rect bounds = player().getVisibleBounds();
+        finger(bounds.exactCenterX(), bounds.exactCenterY(), "reveal", bounds);
+        chromeRevealPerformed = true;
+        chromeRevealUp = inputs.getJSONObject(inputs.length() - 1).getJSONArray("eventUptimeMs").getLong(2);
     }
 
     private void fresh() {
@@ -437,12 +447,15 @@ public final class RuntimePlayer90MoreFlowTest {
                 && value.right <= device.getDisplayWidth() && value.bottom <= device.getDisplayHeight());
     }
 
-    private void capture(String name) throws Exception {
+    private void capture(String name) throws Exception { capture(name, true); }
+
+    private void capture(String name, boolean includeHierarchy) throws Exception {
         assertTrue("Evidence capture bound exceeded", captures < 10);
         String prefix = String.format(java.util.Locale.ROOT, "%02d-%s", captures++, name);
         File png = new File(folder, prefix + ".png");
         assertTrue("Native screenshot failed", device.takeScreenshot(png));
         assertTrue("PNG exceeded bound", png.length() > 0 && png.length() <= 8L * 1024 * 1024);
+        if (!includeHierarchy) return;
         File raw = new File(folder, prefix + ".raw");
         try {
             device.dumpWindowHierarchy(raw);

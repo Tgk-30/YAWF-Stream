@@ -272,6 +272,23 @@ test('login waits for fresh exact username commit before password and after its 
   for (const key of ['usernameCommittedBeforePassword', 'usernameCommittedAfterPassword', 'passwordTextSendReturned',
     'usernameFocusClicks', 'passwordFocusClicks', 'usernameTextSends', 'passwordTextSends']) assert.ok(java.includes(`.put("${key}",`));
 });
+test('clock observation exposes hidden chrome before baseline with only one shared native reveal', () => {
+  const reveal = java.indexOf('if (clock() < 0) revealChromeOnce()');
+  assert.ok(reveal >= 0 && reveal < java.indexOf('long clockDeadline'));
+  assert.match(java, /assertFalse\("Only one chrome reveal is admitted", chromeRevealPerformed\)/);
+  assert.match(java, /finger\(bounds\.exactCenterX\(\), bounds\.exactCenterY\(\), "reveal", bounds\)/);
+  assert.equal((java.match(/"reveal", bounds\)/g) || []).length, 1);
+  assert.match(java, /clockBefore > 0 && clockBefore < 25/);
+  assert.match(java, /clockAfter >= clockBefore \+ 1 && clockAfter < 30/);
+});
+test('clock PNG observation avoids XML latency and preserves actual UP to More deadline', () => {
+  assert.match(java, /capture\("clock-before", false\)/);
+  assert.match(java, /capture\("clock-after", false\)/);
+  assert.match(java, /if \(!includeHierarchy\) return/);
+  assert.match(java, /SystemClock\.sleep\(1_100\)/);
+  assert.match(java, /chromeRevealUp = inputs\.getJSONObject\(inputs\.length\(\) - 1\)\.getJSONArray\("eventUptimeMs"\)\.getLong\(2\)/);
+  assert.match(java, /now\(\) - chromeRevealUp < 3_200/);
+});
 test('native enrollment prompt declines using observed exact uppercase NOT NOW', () => {
   assert.match(java, /if \(text\("Enable Android update checks\?"\) != null\) \{\s+click\("NOT NOW", 3_000\);/);
 });
