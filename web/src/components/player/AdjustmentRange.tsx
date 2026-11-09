@@ -23,6 +23,12 @@ export function AdjustmentRange({ value, onValueChange, disabled, ...props }: Ad
   valueRef.current = value;
   useEffect(() => () => { gestureRef.current = null; }, []);
 
+  const classifyIntent = (gesture: Gesture, x: number, y: number) => {
+    if (gesture.axis !== "pending") return;
+    const dx = Math.abs(x - gesture.x), dy = Math.abs(y - gesture.y);
+    if (Math.max(dx, dy) < INTENT_DISTANCE) return;
+    gesture.axis = dx > dy ? "horizontal" : "vertical";
+  };
   const restore = (input: HTMLInputElement) => { input.value = String(valueRef.current); };
   const publish = (gesture: Gesture, next: number) => {
     if (next === gesture.committed) return;
@@ -48,7 +54,9 @@ export function AdjustmentRange({ value, onValueChange, disabled, ...props }: Ad
   };
   return <input {...props} type="range" value={value} disabled={disabled}
     onPointerDown={(event) => {
-      if (disabled || (event.pointerType !== "touch" && event.pointerType !== "pen")) return;
+      // Older WebViews can omit the device type on genuine pointer events.
+      if (disabled || event.pointerType === "mouse" || !Number.isSafeInteger(event.pointerId) || event.pointerId < 0 ||
+          !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
       const previous = gestureRef.current;
       if (previous != null) {
         previous.contacts.add(event.pointerId);
@@ -60,7 +68,7 @@ export function AdjustmentRange({ value, onValueChange, disabled, ...props }: Ad
       }
       gestureRef.current = {
         id: event.pointerId, contacts: new Set([event.pointerId]), x: event.clientX, y: event.clientY,
-        axis: event.isPrimary ? "pending" : "vertical",
+        axis: event.isPrimary !== false ? "pending" : "vertical",
         initial: valueRef.current, candidate: valueRef.current, committed: valueRef.current,
       };
       // Pointer capture does not suppress pan-y: a browser scroll cancels this gesture.
@@ -68,10 +76,8 @@ export function AdjustmentRange({ value, onValueChange, disabled, ...props }: Ad
     }}
     onPointerMove={(event) => {
       const gesture = gestureRef.current;
-      if (gesture == null || gesture.id !== event.pointerId || gesture.axis !== "pending") return;
-      const dx = Math.abs(event.clientX - gesture.x), dy = Math.abs(event.clientY - gesture.y);
-      if (Math.max(dx, dy) < INTENT_DISTANCE) return;
-      gesture.axis = dx > dy ? "horizontal" : "vertical";
+      if (gesture == null || gesture.id !== event.pointerId) return;
+      classifyIntent(gesture, event.clientX, event.clientY);
     }}
     onChange={(event) => {
       if (disabled) return;
@@ -89,6 +95,8 @@ export function AdjustmentRange({ value, onValueChange, disabled, ...props }: Ad
       const gesture = gestureRef.current;
       if (gesture == null || !gesture.contacts.delete(event.pointerId) || gesture.contacts.size > 0) return;
       gestureRef.current = null;
+      // A browser may deliver the release without intermediate pointer moves.
+      classifyIntent(gesture, event.clientX, event.clientY);
       if (gesture.axis !== "vertical") publish(gesture, gesture.candidate);
       restore(event.currentTarget);
     }}

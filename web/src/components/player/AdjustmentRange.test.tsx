@@ -154,3 +154,93 @@ it("[wiring] retains all four native adjustment ranges and their vertical-pan CS
   expect(css.match(/\.player-options-sliders input\[type="range"\] \{([^}]+)\}/)?.[1]).toContain("touch-action: pan-y");
   expect(css).toContain("padding-inline-end: 44px");
 });
+
+
+function legacyPointer(slider: HTMLElement, type: string, pointerType: unknown, x = 100, y = 100, id: unknown = 3, primary?: unknown) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 });
+  const fields: PropertyDescriptorMap = { pointerId: { value: id } };
+  if (pointerType !== undefined) fields.pointerType = { value: pointerType };
+  const actualPrimary = arguments.length >= 7 ? primary : true;
+  if (actualPrimary !== undefined) fields.isPrimary = { value: actualPrimary };
+  Object.defineProperties(event, fields); fireEvent(slider, event); return event;
+}
+
+describe("AdjustmentRange legacy pointer89", () => {
+  it.each([[null, true], [undefined, true], ["", true], ["legacy", true], ["", undefined], [undefined, undefined]] as const)("[legacy-recorded89] buffers type=%s primary=%s through recorded vertical cancel order", (type, primary) => {
+    const changed = vi.fn();
+    function Zoom() { const [value, setValue] = useState(1); return <AdjustmentRange aria-label="Zoom" min={1} max={3} step={0.05} value={value} onValueChange={(next) => { changed(next); setValue(next); }} />; }
+    render(<Zoom />); const slider = screen.getByRole("slider", { name: "Zoom" }) as HTMLInputElement;
+    // R2 capture: down(id3,237.037/408), touchstart, input2.45 before
+    // moves403.354/393.546, cancel, lost capture; no pointerup occurred.
+    expect(legacyPointer(slider, "pointerdown", type, 237.0370330810547, 408, 3, primary).defaultPrevented).toBe(false);
+    fireEvent(slider, new Event("touchstart", { bubbles: true })); nativeInput(slider, 2.45);
+    expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("1");
+    legacyPointer(slider, "pointermove", type, 237.0370330810547, 403.35406494140625, 3, primary);
+    legacyPointer(slider, "pointermove", type, 237.0370330810547, 393.5460205078125, 3, primary);
+    legacyPointer(slider, "pointercancel", type, 0, 0, 3, primary); legacyPointer(slider, "lostpointercapture", type, 0, 0, 3, primary);
+    expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("1");
+  });
+  it.each([[undefined, undefined], ["", true], ["other", true]] as const)("[legacy-horizontal89] preserves intentional drag for type=%s primary=%s", (type, primary) => {
+    const { slider, changed } = setup();
+    legacyPointer(slider, "pointerdown", type, 100, 100, 3, primary); nativeInput(slider, 23); expect(changed).not.toHaveBeenCalled();
+    legacyPointer(slider, "pointermove", type, 125, 101, 3, primary); nativeInput(slider, 35);
+    legacyPointer(slider, "pointerup", type, 125, 101, 3, primary);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(35); expect(slider.value).toBe("35");
+  });
+  it.each([[undefined, undefined], ["", true], ["other", true]] as const)("[legacy-tap89] preserves deliberate tap for type=%s primary=%s", (type, primary) => {
+    const { slider, changed } = setup();
+    legacyPointer(slider, "pointerdown", type, 100, 100, 3, primary); nativeInput(slider, 23); expect(changed).not.toHaveBeenCalled();
+    legacyPointer(slider, "pointerup", type, 100, 100, 3, primary);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(23);
+  });
+  it.each(["touch", "pen", ""])("[legacy-endpoint89] rejects a vertical endpoint without pointermove for type=%s", (type) => {
+    const { slider, changed } = setup();
+    legacyPointer(slider, "pointerdown", type); nativeInput(slider, 23);
+    legacyPointer(slider, "pointerup", type, 100, 130);
+    expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("0");
+  });
+  it.each([undefined, ""])("[legacy-secondary89] rejects explicit secondary type=%s", (type) => {
+    const { slider, changed } = setup();
+    legacyPointer(slider, "pointerdown", type, 100, 100, 3, false); nativeInput(slider, 23);
+    legacyPointer(slider, "pointermove", type, 130, 100, 3, false); nativeInput(slider, 35);
+    legacyPointer(slider, "pointerup", type, 130, 100, 3, false);
+    expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("0");
+  });
+  it.each(["primary-first", "secondary-first"] as const)("[legacy-multitouch89] retains cancellation ownership with %s release", (order) => {
+    const { slider, changed } = setup();
+    legacyPointer(slider, "pointerdown", "", 100, 100, 3, undefined); nativeInput(slider, 23);
+    legacyPointer(slider, "pointerdown", "other", 140, 100, 4, false); nativeInput(slider, 40);
+    const first = order === "primary-first" ? 3 : 4, last = first === 3 ? 4 : 3;
+    legacyPointer(slider, "pointercancel", "", 0, 0, first); nativeInput(slider, 41);
+    legacyPointer(slider, "lostpointercapture", "", 0, 0, last);
+    expect(changed).not.toHaveBeenCalled(); expect(slider.value).toBe("0");
+  });
+  it("[legacy-keyboard89] releases a cancelled unknown gesture without vetoing keyboard or AT", () => {
+    const { slider, changed } = setup(); legacyPointer(slider, "pointerdown", ""); nativeInput(slider, 23);
+    legacyPointer(slider, "pointercancel", "", 0, 0); legacyPointer(slider, "lostpointercapture", "", 0, 0);
+    fireEvent.keyDown(slider, { key: "ArrowRight" }); nativeInput(slider, 1); nativeInput(slider, 20);
+    expect(changed.mock.calls).toEqual([[1], [20]]);
+  });
+  it("[legacy-disabled89] leaves disabled ranges noninteractive", () => {
+    const changed = vi.fn(); render(<AdjustmentRange aria-label="Disabled" min={0} max={50} value={0} disabled onValueChange={changed} />);
+    const slider = screen.getByRole("slider", { name: "Disabled" }) as HTMLInputElement;
+    legacyPointer(slider, "pointerdown", ""); nativeInput(slider, 23); legacyPointer(slider, "pointerup", "");
+    expect(slider).toBeDisabled(); expect(changed).not.toHaveBeenCalled();
+  });
+  it.each(["touch", "pen"])("[legacy-primary89] accepts an absent primary flag for valid type=%s", (type) => {
+    const { slider, changed } = setup();
+    legacyPointer(slider, "pointerdown", type, 100, 100, 3, undefined); nativeInput(slider, 23);
+    expect(changed).not.toHaveBeenCalled(); legacyPointer(slider, "pointerup", type, 100, 100, 3, undefined);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(23);
+  });
+  it.each([undefined, Number.NaN, -1])("[legacy-owner-control89] does not retain ownership without a valid id=%s", (id) => {
+    const { slider, changed } = setup();
+    // Explicitly overwrite the id after construction so undefined is absent,
+    // rather than replaced by the convenience helper's default argument.
+    const event = new MouseEvent("pointerdown", { bubbles: true, clientX: 100, clientY: 100 });
+    Object.defineProperties(event, { pointerType: { value: "" }, pointerId: { value: id }, isPrimary: { value: true } });
+    fireEvent(slider, event); nativeInput(slider, 23);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(23);
+  });
+
+});
