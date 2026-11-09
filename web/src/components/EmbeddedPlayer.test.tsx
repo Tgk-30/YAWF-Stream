@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { readFileSync } from "node:fs";
+import { Suspense } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -2308,6 +2309,84 @@ describe("native terminal transport88", () => {
     emitProperty("duration", 3600); emitProperty("time-pos", position); emitProperty("eof-reached", true);
     emitProperty("end-file", { error: true, code: -12 }); emitProperty("end-file", { error: true, code: -12 });
     expect(fallback).toHaveBeenCalledExactlyOnceWith(expect.any(Error)); expect(fresh).not.toHaveBeenCalled();
+  });
+
+  it.each([[0, false], [0, true], [100, false], [100, true]] as const)("[known-native89] recovers no-mpv-duration EOF with offset=%s paused=%s", async (offset, paused) => {
+    const fresh = vi.fn(async () => true), ended = vi.fn(), next = vi.fn();
+    await startNative({ knownAbsoluteDurationSeconds: 24 + offset, timelineOffsetSeconds: offset, onPlaybackStall: fresh, onEnded: ended, onPlayNext: next });
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13);
+    if (paused) fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    emitProperty("eof-reached", true); emitProperty("pause", true); emitProperty("time-pos", 13.1); emitProperty("eof-reached", true);
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(13 + offset, expect.objectContaining({ paused }));
+    expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
+  });
+  it.each([0, 100])("[known-native-end89] completes exactly once at the absolute true end, offset=%s", async (offset) => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    await startNative({ knownAbsoluteDurationSeconds: 24 + offset, timelineOffsetSeconds: offset, onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("time-pos", 23); emitProperty("time-pos", 24); emitProperty("eof-reached", true); emitProperty("eof-reached", true);
+    expect(ended).toHaveBeenCalledExactlyOnceWith(24 + offset, 24 + offset, expect.any(Object)); expect(fresh).not.toHaveBeenCalled();
+  });
+  it.each([undefined, null, 0, -1, Number.NaN, Number.POSITIVE_INFINITY])("[known-native-invalid89] preserves true-unknown behavior for metadata=%s", async (duration) => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    await startNative({ knownAbsoluteDurationSeconds: duration, onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+    expect(ended).toHaveBeenCalledExactlyOnceWith(13, 0, expect.any(Object)); expect(fresh).not.toHaveBeenCalled();
+  });
+  it("[known-native-fallback89] retains the positive mpv-duration fallback with an offset", async () => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    await startNative({ knownAbsoluteDurationSeconds: null, timelineOffsetSeconds: 100, onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("duration", 24); emitProperty("time-pos", 12); emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(113, expect.objectContaining({ paused: false })); expect(ended).not.toHaveBeenCalled();
+  });
+  it.each([[13, 13, true], [1000, 24, false]] as const)("[known-native-priority89] prefers authoritative duration over mpv=%s at clock=%s early=%s", async (mpvDuration, position, early) => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    await startNative({ knownAbsoluteDurationSeconds: 24, onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("duration", mpvDuration); emitProperty("time-pos", position - 1); emitProperty("time-pos", position); emitProperty("eof-reached", true);
+    if (early) { expect(fresh).toHaveBeenCalledTimes(1); expect(ended).not.toHaveBeenCalled(); }
+    else { expect(ended).toHaveBeenCalledExactlyOnceWith(24, 24, expect.any(Object)); expect(fresh).not.toHaveBeenCalled(); }
+  });
+  it("[known-native-update89] accepts later committed metadata without reloading the decoder", async () => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    const view = await startNative({ knownAbsoluteDurationSeconds: null, onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13);
+    const loads = renderPlayerMock.command.mock.calls.filter(([name]) => name === "loadfile").length;
+    view.rerender(<EmbeddedPlayer {...view.props} knownAbsoluteDurationSeconds={24} />);
+    emitProperty("eof-reached", true);
+    expect(renderPlayerMock.command.mock.calls.filter(([name]) => name === "loadfile")).toHaveLength(loads);
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(13, expect.objectContaining({ paused: false })); expect(ended).not.toHaveBeenCalled();
+  });
+  it("[known-native-owner89] does not inherit metadata or old EOF callbacks after reader replacement", async () => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    const view = await startNative({ knownAbsoluteDurationSeconds: 24, onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13); const old = renderPlayerMock.callback!;
+    view.rerender(<EmbeddedPlayer {...view.props} url="https://example.test/other.mkv" knownAbsoluteDurationSeconds={null} />);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    act(() => { old({ name: "eof-reached", data: true }); });
+    expect(ended).not.toHaveBeenCalled(); expect(fresh).not.toHaveBeenCalled();
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+    expect(ended).toHaveBeenCalledExactlyOnceWith(13, 0, expect.any(Object)); expect(fresh).not.toHaveBeenCalled();
+  });
+
+  it("[known-native-clear89] clears invalid replacement metadata on the same reader", async () => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    const view = await startNative({ knownAbsoluteDurationSeconds: 24, onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13);
+    view.rerender(<EmbeddedPlayer {...view.props} knownAbsoluteDurationSeconds={Number.NaN} />);
+    emitProperty("eof-reached", true);
+    expect(ended).toHaveBeenCalledExactlyOnceWith(13, 0, expect.any(Object)); expect(fresh).not.toHaveBeenCalled();
+  });
+  it("[known-native-commit89] keeps committed metadata when an attempted replacement render suspends", async () => {
+    const pending = new Promise<void>(() => {});
+    function Suspend({ active }: { active: boolean }) { if (active) throw pending; return null; }
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    const props = { url: "https://example.test/committed.mkv", title: "Committed native", onClose: () => {}, onPlaybackStall: fresh, onEnded: ended };
+    const view = render(<Suspense fallback={<span>Preparing replacement</span>}><EmbeddedPlayer {...props} knownAbsoluteDurationSeconds={24} /><Suspend active={false} /></Suspense>);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    emitProperty("time-pos", 23); emitProperty("time-pos", 24);
+    view.rerender(<Suspense fallback={<span>Preparing replacement</span>}><EmbeddedPlayer {...props} knownAbsoluteDurationSeconds={1000} /><Suspend active /></Suspense>);
+    expect(screen.getByText("Preparing replacement")).toBeInTheDocument();
+    emitProperty("eof-reached", true);
+    expect(ended).toHaveBeenCalledExactlyOnceWith(24, 24, expect.any(Object)); expect(fresh).not.toHaveBeenCalled();
   });
 
 });

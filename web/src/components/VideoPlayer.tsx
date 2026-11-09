@@ -1605,7 +1605,7 @@ export function VideoPlayer({
   useEffect(() => {
     const loadSourceInfo = serverOptimized?.loadSourceInfo;
     if (
-      mode !== "webview" ||
+      (mode !== "webview" && !useEmbedded) ||
       loadSourceInfo == null ||
       sourceInfoLoadOwnerRef.current === playbackOwner
     ) {
@@ -1668,7 +1668,7 @@ export function VideoPlayer({
         });
       }, SERVER_SOURCE_INFO_RETRY_DELAY_MS);
     });
-  }, [mode, playbackOwner, rememberServerSourceInfo, serverOptimized?.loadSourceInfo]);
+  }, [mode, playbackOwner, rememberServerSourceInfo, serverOptimized?.loadSourceInfo, useEmbedded]);
 
   const clearChromeTimer = useCallback(() => {
     window.clearTimeout(chromeHideTimer.current);
@@ -2926,6 +2926,7 @@ export function VideoPlayer({
         startPositionSeconds={effectiveStartPositionSeconds}
         sourceSwitchState={activeSourceSwitchState}
         timelineOffsetSeconds={effectiveTimelineOffsetSeconds}
+        knownAbsoluteDurationSeconds={activeKnownAbsoluteDuration}
         serverOptimized={serverOptimized}
         activeServerOptimizedQuality={activeOptimized?.quality ?? null}
         serverOptimizationPending={serverOptimizationPending}

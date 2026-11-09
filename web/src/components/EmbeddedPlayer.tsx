@@ -13,6 +13,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -108,6 +109,8 @@ interface Props {
   /** Original-media time represented by native time zero for a seek-offset
    * server transcode. */
   timelineOffsetSeconds?: number;
+  /** Owner-scoped original-media duration, independent of native probe output. */
+  knownAbsoluteDurationSeconds?: number | null;
   /** Remembered audio/subtitle/speed for this title, restored after load. */
   savedPrefs?: PlaybackPrefs | null;
   /** Optional global defaults supplied by Settings. This component does not persist them. */
@@ -574,6 +577,7 @@ export function EmbeddedPlayer({
   startPositionSeconds = 0,
   sourceSwitchState = null,
   timelineOffsetSeconds = 0,
+  knownAbsoluteDurationSeconds = null,
   savedPrefs,
   playerPreferences = null,
   subtitleClient = null,
@@ -681,6 +685,14 @@ export function EmbeddedPlayer({
   const lastReportRef = useRef(0);
   const posRef = useRef(0);
   const durRef = useRef(0);
+  const knownAbsoluteDurationRef = useRef<{ url: string; duration: number | null }>({ url, duration: null });
+  useLayoutEffect(() => {
+    knownAbsoluteDurationRef.current = {
+      url,
+      duration: knownAbsoluteDurationSeconds != null && Number.isFinite(knownAbsoluteDurationSeconds) && knownAbsoluteDurationSeconds > 0
+        ? knownAbsoluteDurationSeconds : null,
+    };
+  }, [url, knownAbsoluteDurationSeconds]);
   const ownedPausedRef = useRef(sourceSwitchState?.paused ?? false);
   const clockWasResetRef = useRef(false);
   const pendingSeekRef = useRef<number | null>(null);
@@ -806,10 +818,13 @@ export function EmbeddedPlayer({
 
   const reportedPosition = () =>
     posRef.current + timelineOffsetRef.current;
-  const reportedDuration = () =>
+  const knownAbsoluteDuration = () => knownAbsoluteDurationRef.current.url === url
+    ? knownAbsoluteDurationRef.current.duration : null;
+  const reportedDuration = () => knownAbsoluteDuration() ?? (
     durRef.current > 0
       ? durRef.current + timelineOffsetRef.current
-      : durRef.current;
+      : durRef.current
+  );
   const reportedProgressPct = () =>
     playbackProgressPct(reportedPosition(), reportedDuration());
   const handoffState = (): PlaybackHandoffState => ({
@@ -1330,7 +1345,10 @@ export function EmbeddedPlayer({
                 break;
               case "eof-reached":
                 if (ev.data === true && !endedRef.current) {
-                  if (verifiedProgress && fullDuration != null && posRef.current < fullDuration - 10) {
+                  const absoluteDuration = knownAbsoluteDuration() ?? (
+                    fullDuration == null ? null : fullDuration + timelineOffsetRef.current
+                  );
+                  if (verifiedProgress && absoluteDuration != null && reportedPosition() < absoluteDuration - 10) {
                     if (!recoverTerminal()) void triggerNativeFallback(new Error("Native playback ended before the media completed"));
                     break;
                   }

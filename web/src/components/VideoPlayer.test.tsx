@@ -387,6 +387,7 @@ const embeddedModeIntentObserver = vi.hoisted(() => ({
     onPlaybackError?: (error: Error, snapshot?: { position: number; state: { paused: boolean; volume: number; muted: boolean; playbackRate: number; audioPreference?: { id: string | null; language: string | null } | null } }) => boolean | Promise<boolean>;
     onPlaybackStall?: (position: number, state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => boolean | Promise<boolean>;
     onRecoveryPlaybackHealthy?: () => boolean;
+    knownAbsoluteDurationSeconds?: number | null;
   }>,
 }));
 vi.mock("./EmbeddedPlayer", () => ({
@@ -398,6 +399,7 @@ vi.mock("./EmbeddedPlayer", () => ({
     onPlaybackError?: (error: Error, snapshot?: { position: number; state: { paused: boolean; volume: number; muted: boolean; playbackRate: number } }) => boolean | Promise<boolean>;
     onPlaybackStall?: (position: number, state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => boolean | Promise<boolean>;
     onRecoveryPlaybackHealthy?: () => boolean;
+    knownAbsoluteDurationSeconds?: number | null;
     onOpenExternalPlayer?: () => void | Promise<void>;
     externalActionStatus?: string | null;
     onSwitchServerOptimized?: (quality: ServerTranscodeQuality, position: number) => Promise<void>;
@@ -16511,4 +16513,58 @@ describe("native parent transport88", () => {
     let earned: boolean | undefined; act(() => { earned = currentNative().onRecoveryPlaybackHealthy?.(); }); expect(earned).toBe(true);
     await act(async () => { await currentNative().onPlaybackStall!(150.25, state); }); expect(refresh).toHaveBeenCalledTimes(2);
   });
+});
+
+
+describe("native authoritative metadata89", () => {
+  async function settleKnown() { await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }); }
+  function latestKnown() { return embeddedModeIntentObserver.props.at(-1)?.knownAbsoluteDurationSeconds ?? null; }
+  beforeEach(() => { isTauriMock.mockReturnValue(true); embeddedModeIntentObserver.enabled = true; embeddedModeIntentObserver.props.length = 0; });
+  afterEach(() => { embeddedModeIntentObserver.enabled = false; embeddedModeIntentObserver.props.length = 0; });
+  it("[known-parent89] loads existing source metadata for a native-first reader and passes the absolute total", async () => {
+    const info = deferred<{ durationSeconds: number }>(); const loadSourceInfo = vi.fn(() => info.promise);
+    render(<VideoPlayer url="https://server.example/api/stream/native89" engine="native-mpv" title="Known native" onClose={() => {}}
+      serverOptimized={{ qualities: ["480p"], request: vi.fn(), loadSourceInfo }} />);
+    expect(screen.getByTestId("embedded-player")).toBeInTheDocument(); expect(latestKnown()).toBeNull();
+    await settleKnown(); expect(loadSourceInfo).toHaveBeenCalledExactlyOnceWith();
+    info.resolve({ durationSeconds: 24 }); await settleKnown();
+    expect(latestKnown()).toBe(24); expect(screen.getByTestId("embedded-player")).toHaveAttribute("data-url", "https://server.example/api/stream/native89");
+    expect(playWithMpvMock).not.toHaveBeenCalled();
+  });
+  it.each(["url", "revision"] as const)("[known-parent-owner89] rejects an old %s source-info reply and does not inherit its total", async (change) => {
+    const old = deferred<{ durationSeconds: number }>(), current = deferred<{ durationSeconds: number }>();
+    const loadSourceInfo = vi.fn().mockImplementationOnce(() => old.promise).mockImplementationOnce(() => current.promise);
+    const props = { url: "https://server.example/api/stream/native-old89", engine: "native-mpv" as const, title: "Known owner", onClose: () => {}, serverOptimized: { qualities: ["480p" as const], request: vi.fn(), loadSourceInfo } };
+    const view = render(<VideoPlayer {...props} />); await settleKnown();
+    view.rerender(<VideoPlayer {...props} url={change === "url" ? "https://server.example/api/stream/native-new89" : props.url} sourceRevision={change === "revision" ? 1 : 0} />); await settleKnown();
+    expect(loadSourceInfo).toHaveBeenCalledTimes(2);
+    old.resolve({ durationSeconds: 24 }); await settleKnown(); expect(latestKnown()).toBeNull();
+    current.resolve({ durationSeconds: 48 }); await settleKnown(); expect(latestKnown()).toBe(48);
+  });
+  it.each(["failure", "timeout"] as const)("[known-parent-optional89] leaves native playback mounted during optional metadata %s", async (kind) => {
+    vi.useFakeTimers(); const info = deferred<{ durationSeconds: number }>();
+    const loadSourceInfo = vi.fn(() => kind === "failure" ? Promise.reject(new Error("Unavailable")) : info.promise);
+    render(<VideoPlayer url="https://server.example/api/stream/native-optional89" engine="native-mpv" title="Optional native" onClose={() => {}}
+      serverOptimized={{ qualities: ["480p"], request: vi.fn(), loadSourceInfo }} />);
+    const native = screen.getByTestId("embedded-player"); await settleKnown(); expect(loadSourceInfo).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(8001); });
+    info.resolve({ durationSeconds: 24 }); await settleKnown();
+    expect(screen.getByTestId("embedded-player")).toBe(native); expect(latestKnown()).toBeNull(); expect(screen.queryByRole("alert")).toBeNull();
+  });
+  it("[known-parent-external89] does not add metadata work to opted-out external playback", async () => {
+    const loadSourceInfo = vi.fn(async () => ({ durationSeconds: 24 }));
+    render(<VideoPlayer url="https://server.example/api/stream/native-external89" engine="native-mpv" useBuiltInPlayer={false} title="External native" onClose={() => {}}
+      serverOptimized={{ qualities: ["480p"], request: vi.fn(), loadSourceInfo }} />);
+    await settleKnown(); expect(loadSourceInfo).not.toHaveBeenCalled(); expect(screen.queryByTestId("embedded-player")).toBeNull();
+  });
+  it("[known-parent-clear89] drops an already published duration immediately for a fresh source", async () => {
+    const current = deferred<{ durationSeconds: number }>();
+    const loadSourceInfo = vi.fn().mockResolvedValueOnce({ durationSeconds: 24 }).mockImplementationOnce(() => current.promise);
+    const props = { engine: "native-mpv" as const, title: "Fresh native", onClose: () => {}, serverOptimized: { qualities: ["480p" as const], request: vi.fn(), loadSourceInfo } };
+    const view = render(<VideoPlayer {...props} url="https://server.example/api/stream/known-old89" />); await settleKnown(); expect(latestKnown()).toBe(24);
+    view.rerender(<VideoPlayer {...props} url="https://server.example/api/stream/known-fresh89" sourceRevision={1} />);
+    expect(latestKnown()).toBeNull(); await settleKnown(); expect(latestKnown()).toBeNull();
+    current.resolve({ durationSeconds: 48 }); await settleKnown(); expect(latestKnown()).toBe(48);
+  });
+
 });
