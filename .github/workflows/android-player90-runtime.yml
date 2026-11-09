@@ -77,6 +77,11 @@ jobs:
           sdkmanager --list --channel=0 > "$RUNNER_TEMP/yawf90-sdk/catalog.txt"
           node scripts/android_player90_runtime.mjs catalog "$RUNNER_TEMP/yawf90-sdk/catalog.txt"
           sdkmanager platform-tools emulator 'platforms;android-36' 'build-tools;36.0.0' "$SYSTEM_IMAGE_PACKAGE"
+          test -n "$ANDROID_HOME"
+          test -x "$ANDROID_HOME/emulator/emulator"
+          export PATH="$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          test "$(command -v emulator)" = "$ANDROID_HOME/emulator/emulator"
           test -c /dev/kvm
           if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
             sudo chown "$(id -u):$(id -g)" /dev/kvm

@@ -1,6 +1,7 @@
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdirSync, mkdtempSync, symlinkSync, realpathSync } from 'node:fs';
+import { readFileSync, mkdirSync, mkdtempSync, symlinkSync, realpathSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -125,6 +126,44 @@ test('workflow explicitly limits setup-android to platform-tools without removed
   assert.ok(block, 'The scoped SDK setup step must exist');
   assert.match(block, /        uses: android-actions\/setup-android@v3\n        with:\n          packages: platform-tools\n$/);
   assert.doesNotMatch(block, /(?:^|\s)tools(?:\s|$)/);
+});
+test('workflow admits exact SDK emulator in both current and subsequent step PATH', () => {
+  assert.match(workflow, /test -n "\$ANDROID_HOME"/);
+  assert.match(workflow, /test -x "\$ANDROID_HOME\/emulator\/emulator"/);
+  assert.match(workflow, /export PATH="\$ANDROID_HOME\/emulator:\$PATH"/);
+  assert.match(workflow, /printf '%s\\n' "\$ANDROID_HOME\/emulator" >> "\$GITHUB_PATH"/);
+  assert.match(workflow, /test "\$\(command -v emulator\)" = "\$ANDROID_HOME\/emulator\/emulator"/);
+  assert.ok(workflow.indexOf('export PATH="$ANDROID_HOME/emulator:$PATH"') < workflow.indexOf('emulator -accel-check'));
+});
+test('SDK emulator PATH shell block fails closed without configured executable and persists official path', () => {
+  const begin = workflow.indexOf('          test -n "$ANDROID_HOME"');
+  const end = workflow.indexOf('          test -c /dev/kvm', begin);
+  assert.ok(begin >= 0 && end > begin, 'Scoped emulator PATH admission block is required');
+  const shell = workflow.slice(begin, end).replace(/^          /gm, '');
+  const parent = process.env.RUNNER_TEMP || process.env.TMPDIR;
+  assert.ok(parent && parent.startsWith('/'));
+  const base = realpathSync(mkdtempSync(join(parent, 'emulator-path-contract-')));
+  const sdk = join(base, 'sdk'); const official = join(sdk, 'emulator'); const old = join(base, 'old-bin');
+  mkdirSync(official, { recursive: true }); mkdirSync(old);
+  for (const path of [join(official, 'emulator'), join(old, 'emulator')]) {
+    writeFileSync(path, '#!/bin/sh\nexit 99\n'); chmodSync(path, 0o700);
+  }
+  const invoke = (tag) => {
+    const githubPath = join(base, tag);
+    const run = spawnSync('/bin/bash', ['-euc', shell + '\nprintf "current=%s\\n" "$(command -v emulator)"'], {
+      encoding: 'utf8', env: { ...process.env, ANDROID_HOME: sdk, GITHUB_PATH: githubPath, PATH: old }, timeout: 5000,
+    });
+    return { run, githubPath };
+  };
+  const good = invoke('good-path');
+  assert.equal(good.run.status, 0, good.run.stderr);
+  assert.equal(good.run.stdout.trim(), `current=${official}/emulator`);
+  assert.ok(existsSync(good.githubPath), 'Subsequent steps require the persisted SDK emulator directory');
+  assert.equal(readFileSync(good.githubPath, 'utf8'), official + '\n');
+  chmodSync(join(official, 'emulator'), 0o600);
+  const missing = invoke('missing-path');
+  assert.notEqual(missing.run.status, 0);
+  assert.equal(existsSync(missing.githubPath), false, 'Unusable configured SDK must not persist an alternative PATH');
 });
 test('workflow uses exact source builds test-only harness before owned emulator', () => {
   assert.match(workflow, /node-version: '24\.17\.0'/);
