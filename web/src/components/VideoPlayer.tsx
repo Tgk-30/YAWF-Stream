@@ -3497,7 +3497,7 @@ function WebviewPlayer({
   const appliedServerAudioPreferenceRef = useRef(false);
   const autoplayAttemptedRef = useRef(false);
   const playbackAttemptRef = useRef(0);
-  const foregroundPlaybackRef = useRef<{ video: HTMLVideoElement; source: string; play: boolean } | null>(null);
+  const foregroundPlaybackRef = useRef<{ video: HTMLVideoElement; source: string; play: boolean; returnedPosition?: number } | null>(null);
   const playbackSourceRef = useRef(url);
   useLayoutEffect(() => { playbackSourceRef.current = url; }, [url]);
   const pausedForCastRef = useRef(false);
@@ -3583,6 +3583,17 @@ function WebviewPlayer({
   const sourceSwitchStateRef = useRef(sourceSwitchState);
   sourceSwitchStateRef.current = sourceSwitchState;
   const pendingHandoffPlaybackIntentRef = useRef<"play" | "pause" | null>(null);
+  const clearReturnedPlayback = useCallback((video: HTMLVideoElement) => {
+    const pending = foregroundPlaybackRef.current;
+    if (pending?.video === video && pending.returnedPosition != null) {
+      foregroundPlaybackRef.current = null;
+      pendingHandoffPlaybackIntentRef.current = null;
+    }
+  }, []);
+  const nativeControlsOwnPlayback = (video: HTMLVideoElement) =>
+    document.pictureInPictureElement === video || document.fullscreenElement === video ||
+    (video as WebKitVideoElement).webkitPresentationMode === "picture-in-picture" ||
+    (video as WebKitVideoElement).webkitPresentationMode === "fullscreen";
   const pendingNativeHlsSeekSequenceRef = useRef(0);
   const pendingNativeHlsSeekRef = useRef<PendingNativeHlsSeek | null>(null);
   const verifiedPlaybackProgressReportedRef = useRef(false);
@@ -3659,14 +3670,17 @@ function WebviewPlayer({
   }, [endPrediction.show]);
   useEffect(() => {
     scrubbingRef.current = scrubbing;
-    if (scrubbing || suspended) recoveryProgressWindowRef.current?.reset();
+    if (scrubbing || suspended) {
+      recoveryProgressWindowRef.current?.reset();
+      if (videoRef.current != null) clearReturnedPlayback(videoRef.current);
+    }
     stallStateRef.current = {
       ...stallStateRef.current,
       suspended: suspended || documentSuspendedRef.current || document.visibilityState === "hidden",
       seeking: scrubbing || rendererSeekingRef.current,
     };
     stallWatchdogRef.current?.update(stallStateRef.current);
-  }, [scrubbing, suspended]);
+  }, [clearReturnedPlayback, scrubbing, suspended]);
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
       if (event.key === "Escape" && (ended || endPrediction.show)) {
@@ -3765,6 +3779,14 @@ function WebviewPlayer({
       if (!shouldPlay && !video.paused) video.pause();
       return;
     }
+    const pending = foregroundPlaybackRef.current;
+    if (shouldPlay && !video.paused && pending?.video === video && pending.source === url &&
+        !nativeControlsOwnPlayback(video)) {
+      // Foreground can precede a delayed platform pause. Keep this one owned
+      // intent until an actual forward frame or a physical play attempt.
+      pending.returnedPosition ??= video.currentTime;
+      return;
+    }
     // Consume before the platform call, including synchronous media callbacks.
     foregroundPlaybackRef.current = null;
     pendingHandoffPlaybackIntentRef.current = null;
@@ -3787,6 +3809,7 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     explicitPlaybackIntentRef.current = true;
+    clearReturnedPlayback(video);
     playbackAttemptRef.current += 1;
     video.autoplay = false;
     // Play/Pause changes intent, not ownership of a decoder-reset clock.
@@ -3836,7 +3859,7 @@ function WebviewPlayer({
     } else {
       video.pause();
     }
-  }, [applyOwnedPlayback, onPausedChange, onPendingHandoffPausedChange]);
+  }, [applyOwnedPlayback, clearReturnedPlayback, onPausedChange, onPendingHandoffPausedChange]);
 
   useLayoutEffect(() => {
     const pauseOwnedReader = (video: HTMLVideoElement) => {
@@ -5116,7 +5139,8 @@ function WebviewPlayer({
     };
     const queueOwnedForegroundPlayback = () => {
       if (active && videoRef.current === video && backgroundBlocksPlayback(video) &&
-          verifiedPlaybackProgressReportedRef.current && !ownedPlaybackPausedRef.current && !video.ended) {
+          verifiedPlaybackProgressReportedRef.current && !ownedPlaybackPausedRef.current && !video.ended &&
+          !nativeControlsOwnPlayback(video)) {
         backgroundPauseVideoRef.current = video;
         foregroundPlaybackRef.current = { video, source: url, play: true };
         pendingHandoffPlaybackIntentRef.current = "play";
@@ -5167,9 +5191,12 @@ function WebviewPlayer({
       sync({ paused: video.paused });
     };
     const onPause = () => { queueOwnedForegroundPlayback(); recoveryProgress.reset(); sync({ paused: true }); };
-    const onEndedForWatchdog = () => { if (quarantineResetClock()) return; recoveryProgress.reset(); sync({ ended: true, paused: true }); };
+    const onEndedForWatchdog = () => { clearReturnedPlayback(video); if (quarantineResetClock()) return; recoveryProgress.reset(); sync({ ended: true, paused: true }); };
+    const onNativeControls = () => clearReturnedPlayback(video);
+    const onNativeFullscreen = () => { if (document.fullscreenElement === video) clearReturnedPlayback(video); };
     const onWaiting = () => { recoveryBuffering = true; recoveryProgress.reset(); };
     const onSeeking = () => {
+      clearReturnedPlayback(video);
       recoveryProgress.reset();
       rendererSeekingRef.current = true;
       sync({ seeking: true });
@@ -5295,6 +5322,8 @@ function WebviewPlayer({
     const onPageShow = () => { pageHidden = false; onDocumentLifecycle(); };
 
     video.addEventListener("playing", onPlaying);
+    for (const event of ["error", "enterpictureinpicture", "webkitbeginfullscreen", "webkitpresentationmodechanged"]) video.addEventListener(event, onNativeControls);
+    document.addEventListener("fullscreenchange", onNativeFullscreen);
     video.addEventListener("play", onPlayForWatchdog);
     video.addEventListener("pause", onPause);
     video.addEventListener("waiting", onWaiting);
@@ -5316,6 +5345,8 @@ function WebviewPlayer({
       watchdog.stop();
       if (stallWatchdogRef.current === watchdog) stallWatchdogRef.current = null;
       video.removeEventListener("playing", onPlaying);
+      for (const event of ["error", "enterpictureinpicture", "webkitbeginfullscreen", "webkitpresentationmodechanged"]) video.removeEventListener(event, onNativeControls);
+      document.removeEventListener("fullscreenchange", onNativeFullscreen);
       video.removeEventListener("play", onPlayForWatchdog);
       video.removeEventListener("pause", onPause);
       video.removeEventListener("waiting", onWaiting);
@@ -5330,7 +5361,7 @@ function WebviewPlayer({
       window.removeEventListener("pageshow", onPageShow);
       document.removeEventListener("visibilitychange", onDocumentLifecycle);
     };
-  }, [applyOwnedPlayback, url]);
+  }, [applyOwnedPlayback, clearReturnedPlayback, url]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -5442,6 +5473,11 @@ function WebviewPlayer({
       }
       onAbsolutePositionChange(video.currentTime + timelineOffsetRef.current);
       const previousMediaTime = lastObservedMediaTimeRef.current;
+      const returnedPlayback = foregroundPlaybackRef.current;
+      if (returnedPlayback?.video === video && returnedPlayback.source === url &&
+          returnedPlayback.returnedPosition != null && video.currentTime > returnedPlayback.returnedPosition + 0.01 &&
+          !video.paused && !video.seeking && !rendererSeekingRef.current && !scrubbingRef.current &&
+          !suspendedRef.current && !backgroundBlocksPlayback(video)) clearReturnedPlayback(video);
       lastObservedMediaTimeRef.current = video.currentTime;
       if (!video.paused && !documentSuspendedRef.current && document.visibilityState !== "hidden") {
         backgroundPauseVideoRef.current = null;
@@ -5632,7 +5668,10 @@ function WebviewPlayer({
     };
     const onPause = () => {
       if (videoRef.current !== video) return;
-      if (video.error == null && !video.ended && !suspendedRef.current &&
+      const returnedPlayback = foregroundPlaybackRef.current;
+      const retainsReturnedPlay = returnedPlayback?.video === video && returnedPlayback.source === url &&
+        playbackSourceRef.current === url && returnedPlayback.play && returnedPlayback.returnedPosition != null;
+      if (!retainsReturnedPlay && video.error == null && !video.ended && !suspendedRef.current &&
           !documentSuspendedRef.current && document.visibilityState !== "hidden" &&
           backgroundPauseVideoRef.current !== video && !recoveryClockWasReset(video) &&
           !video.seeking && !rendererSeekingRef.current &&
@@ -5640,6 +5679,15 @@ function WebviewPlayer({
         ownedPlaybackPausedRef.current = true;
       }
       verifiedPlaybackPlayingRef.current = false;
+      if (returnedPlayback?.video === video && returnedPlayback.source === url && returnedPlayback.play &&
+          returnedPlayback.returnedPosition != null && !ownedPlaybackPausedRef.current && video.error == null &&
+          !video.ended && !video.seeking && !rendererSeekingRef.current && !scrubbingRef.current &&
+          !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null &&
+          !suspendedRef.current && !backgroundBlocksPlayback(video) && !nativeControlsOwnPlayback(video) &&
+          !recoveryClockWasReset(video) && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        applyDeferredHandoffPlayback(video, true);
+        return;
+      }
       if (pendingNativeHlsSeekRef.current != null) {
         setPaused(true);
         setPlaying(false);
@@ -5846,6 +5894,7 @@ function WebviewPlayer({
   }, [
     applyDeferredHandoffPlayback,
     applyOwnedPlayback,
+    clearReturnedPlayback,
     confirmPendingNativeHlsSeek,
     onAbsolutePositionChange,
     onPausedChange,
