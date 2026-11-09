@@ -80,6 +80,7 @@ let localProfileUnlocked = true;
 let store: StoreSlice;
 
 vi.mock("./store/AppStore", () => ({
+  isPlayerNavigationPending: () => false,
   useAppStore: () => store,
   useAppActions: () => ({ search }),
   isLocalProfileUnlocked: () => localProfileUnlocked,

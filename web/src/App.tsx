@@ -57,6 +57,7 @@ import { GlobalSearch } from "./components/GlobalSearch";
 import { ProfileMenu } from "./components/ProfileMenu";
 import { Spinner } from "./components/Spinner";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { BrowserUpdateBanner } from "./components/BrowserUpdateBanner";
 import { BandwidthWarningBanner } from "./components/BandwidthWarningBanner";
 import { HostAvailabilityBanner } from "./components/HostAvailabilityBanner";
 import { InstallPrompt, isInstallPromptEligible } from "./components/InstallPrompt";
@@ -340,6 +341,8 @@ export function App() {
     route,
     navigate,
     detailItem,
+    detailPlayerOpen,
+    localFilePlayer,
     browseContext,
     closeBrowse,
     openDetail,
@@ -839,6 +842,12 @@ export function App() {
         autoCheck={settings.autoUpdateChecks}
         autoInstall={settings.autoInstallUpdates}
         networkMode={settings.networkMode}
+      />
+      <BrowserUpdateBanner
+        autoCheck={settings.autoUpdateChecks}
+        networkMode={settings.networkMode}
+        playerMounted={playerMounted}
+        playerPending={detailPlayerOpen || localFilePlayer != null}
       />
     </div>
   );

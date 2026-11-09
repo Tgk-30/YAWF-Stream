@@ -25,7 +25,7 @@ import { createPortal } from "react-dom";
 import QRCode from "qrcode";
 import { checkAndroidAppUpdates, hasLocalAndroidUpdater } from "../lib/androidUpdates";
 import { isAndroidAppUiContext } from "../lib/androidExternalPlayer";
-import { useAppStore } from "../store/AppStore";
+import { isPlayerNavigationPending, useAppStore } from "../store/AppStore";
 import {
   useServerSession,
   useTranscodeAvailable,
@@ -137,7 +137,7 @@ import {
 } from "../lib/tauri";
 import { getDownloadsBridge } from "../lib/downloadsBridge";
 import { getAppVersion } from "../lib/appVersion";
-import { usePlayerMounted } from "../lib/attention";
+import { getPlayerMounted, usePlayerMounted } from "../lib/attention";
 import {
   assertBrowserAppRefreshAllowed,
   prepareBrowserAppRefresh,
@@ -1523,7 +1523,7 @@ function UpdatesTab({
   async function refreshBrowserApp(): Promise<void> {
     if (!browserRefresh || browserRefreshRunningRef.current) return;
     const startingGuards = browserRefreshGuardsRef.current;
-    if (startingGuards.hasUnsavedChanges || startingGuards.playerMounted) return;
+    if (startingGuards.hasUnsavedChanges || startingGuards.playerMounted || getPlayerMounted() || isPlayerNavigationPending()) return;
 
     browserRefreshRunningRef.current = true;
     setBrowserRefreshRunning(true);
@@ -1542,7 +1542,7 @@ function UpdatesTab({
         );
         return;
       }
-      if (latestGuards.playerMounted) {
+      if (latestGuards.playerMounted || getPlayerMounted() || isPlayerNavigationPending()) {
         setBrowserRefreshStatus(
           "Reload cancelled because a player opened. Close it, then try again.",
         );
@@ -1550,6 +1550,12 @@ function UpdatesTab({
       }
       assertBrowserAppRefreshAllowed();
       if (!browserRefreshIsCurrent(request, owner)) return;
+      if (getPlayerMounted() || isPlayerNavigationPending()) {
+        setBrowserRefreshStatus(
+          "Reload cancelled because a player opened. Close it, then try again.",
+        );
+        return;
+      }
       setBrowserRefreshStatus("Reloading this page...");
       reloadBrowserAppPage();
     } catch (error) {

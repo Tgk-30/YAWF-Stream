@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultSettings, type AppSettings } from "../data/settings";
 
 let mockSettings: AppSettings;
 let mockPlayerMounted = false;
+let mockLivePlayerMounted = false;
 let mockIsTauri = false;
 let mockIsDesktopTauri = false;
 let mockAndroidUpdater = false;
@@ -16,8 +17,10 @@ let refreshAllowed = true;
 const updateSettings = vi.fn();
 const prepareBrowserAppRefresh = vi.hoisted(() => vi.fn());
 const reloadBrowserAppPage = vi.hoisted(() => vi.fn());
+const assertBrowserAppRefreshAllowed = vi.hoisted(() => vi.fn());
 
-vi.mock("../store/AppStore", () => ({
+vi.mock("../store/AppStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../store/AppStore")>()),
   useAppStore: () => ({
     settings: mockSettings,
     services: { debrid: null },
@@ -33,14 +36,17 @@ vi.mock("../store/AppStore", () => ({
   useSimpleMode: () => false,
 }));
 
-vi.mock("../lib/attention", () => ({
-  usePlayerMounted: () => mockPlayerMounted,
-}));
+vi.mock("../lib/attention", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/attention")>();
+  return {
+    ...actual,
+    usePlayerMounted: () => mockPlayerMounted,
+    getPlayerMounted: () => mockLivePlayerMounted || actual.getPlayerMounted(),
+  };
+});
 
 vi.mock("../lib/browserAppRefresh", () => ({
-  assertBrowserAppRefreshAllowed: () => {
-    if (!refreshAllowed) throw new Error("updates blocked by current policy");
-  },
+  assertBrowserAppRefreshAllowed,
   prepareBrowserAppRefresh,
   reloadBrowserAppPage,
 }));
@@ -103,6 +109,7 @@ vi.mock("qrcode", () => ({
 }));
 
 import { Settings } from "./Settings";
+import { registerPlayerMount } from "../lib/attention";
 
 function renderUpdates() {
   const view = render(<Settings />);
@@ -122,6 +129,7 @@ beforeEach(() => {
     debridTokens: [{ service: "real_debrid", apiToken: "configured" }],
   };
   mockPlayerMounted = false;
+  mockLivePlayerMounted = false;
   mockIsTauri = false;
   mockIsDesktopTauri = false;
   mockAndroidUpdater = false;
@@ -132,6 +140,10 @@ beforeEach(() => {
   prepareBrowserAppRefresh.mockReset();
   prepareBrowserAppRefresh.mockResolvedValue(undefined);
   reloadBrowserAppPage.mockReset();
+  assertBrowserAppRefreshAllowed.mockReset();
+  assertBrowserAppRefreshAllowed.mockImplementation(() => {
+    if (!refreshAllowed) throw new Error("updates blocked by current policy");
+  });
 });
 
 afterEach(() => {
@@ -239,6 +251,61 @@ describe("Settings browser app refresh", () => {
     expect(reloadBrowserAppPage).not.toHaveBeenCalled();
     expect(screen.getByRole("status")).toHaveTextContent(/could not reload/i);
     policyView.unmount();
+  });
+
+  it("catches a player mount before preparation and across the async refresh race", async () => {
+    renderUpdates();
+    mockLivePlayerMounted = true;
+    await userEvent.click(reloadButton());
+    expect(prepareBrowserAppRefresh).not.toHaveBeenCalled();
+    expect(reloadBrowserAppPage).not.toHaveBeenCalled();
+
+    mockLivePlayerMounted = false;
+    let resolvePrepare!: () => void;
+    prepareBrowserAppRefresh.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolvePrepare = resolve; }),
+    );
+    fireEvent.click(reloadButton());
+    await waitFor(() => expect(prepareBrowserAppRefresh).toHaveBeenCalledTimes(1));
+    mockLivePlayerMounted = true;
+    await act(async () => resolvePrepare());
+    expect(reloadBrowserAppPage).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent(/player opened/i);
+  });
+
+  it("uses the real synchronous player registry before preparation and immediately before reload", async () => {
+    renderUpdates();
+    const close = registerPlayerMount();
+    try {
+      fireEvent.click(reloadButton());
+      expect(prepareBrowserAppRefresh).not.toHaveBeenCalled();
+      expect(reloadBrowserAppPage).not.toHaveBeenCalled();
+    } finally { close(); }
+    let closeLate: (() => void) | undefined;
+    assertBrowserAppRefreshAllowed.mockImplementationOnce(() => { closeLate = registerPlayerMount(); });
+    try {
+      await userEvent.click(reloadButton());
+      expect(prepareBrowserAppRefresh).toHaveBeenCalledTimes(1);
+      expect(reloadBrowserAppPage).not.toHaveBeenCalled();
+      expect(screen.getByRole("status")).toHaveTextContent(/player opened/i);
+    } finally { closeLate?.(); }
+  });
+
+  it("blocks same-tick owned player navigation before hooks or props update", async () => {
+    const original = window.history.state;
+    const entry = { debridStreamerNavigation: 1, depth: 1, route: "settings", browseContext: null,
+      detailItem: { id: "fixture", type: "movie", title: "Fixture" }, layer: "detail-player", localFilePlayer: null };
+    renderUpdates();
+    try {
+      window.history.replaceState(entry, "");
+      fireEvent.click(reloadButton());
+      expect(prepareBrowserAppRefresh).not.toHaveBeenCalled();
+      window.history.replaceState(original, "");
+      assertBrowserAppRefreshAllowed.mockImplementationOnce(() => window.history.replaceState(entry, ""));
+      await userEvent.click(reloadButton());
+      expect(prepareBrowserAppRefresh).toHaveBeenCalledTimes(1);
+      expect(reloadBrowserAppPage).not.toHaveBeenCalled();
+    } finally { window.history.replaceState(original, ""); }
   });
 
   it("deduplicates a pending refresh request", async () => {
