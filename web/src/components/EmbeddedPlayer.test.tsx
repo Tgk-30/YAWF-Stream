@@ -2390,3 +2390,90 @@ describe("native terminal transport88", () => {
   });
 
 });
+
+
+describe("native effective duration UI89", () => {
+  async function startUI(extra: Partial<React.ComponentProps<typeof EmbeddedPlayer>> = {}) {
+    const props = { url: "https://example.test/native-ui.mkv", title: "Native duration UI", onClose: () => {}, ...extra };
+    const view = render(<EmbeddedPlayer {...props} />);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    return { ...view, props };
+  }
+  function midpoint() {
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    vi.spyOn(slider, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 200, height: 10, right: 200, bottom: 10, x: 0, y: 0, toJSON: () => ({}) });
+    const event = new MouseEvent("pointerdown", { bubbles: true, clientX: 100, clientY: 5 });
+    Object.defineProperty(event, "pointerId", { value: 1 }); fireEvent(slider, event); fireEvent.pointerUp(slider);
+  }
+  it("[duration-ui-extent89] renders absolute124 and seeks local12 from midpoint and digit5 without mpv duration", async () => {
+    await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100 });
+    const slider = screen.getByRole("slider", { name: "Seek" }); expect(slider).toHaveAttribute("aria-valuemin", "100"); expect(slider).toHaveAttribute("aria-valuemax", "124");
+    fireEvent.click(screen.getByRole("button", { name: "Show total duration" })); expect(screen.getByRole("button", { name: "Show remaining time" })).toHaveTextContent("2:04");
+    renderPlayerMock.command.mockClear(); midpoint(); fireEvent.keyDown(window, { key: "5" });
+    expect(renderPlayerMock.command.mock.calls).toEqual([["seek", [12, "absolute"]], ["seek", [12, "absolute"]]]);
+  });
+  it("[duration-ui-clamp89] clamps relative seeks to authoritative local24 rather than truncated native13", async () => {
+    await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100 }); emitProperty("duration", 13); emitProperty("time-pos", 12);
+    renderPlayerMock.command.mockClear(); fireEvent.keyDown(window, { key: "ArrowRight", shiftKey: true });
+    expect(renderPlayerMock.command).toHaveBeenCalledExactlyOnceWith("seek", [24, "absolute"]);
+  });
+  it("[duration-ui-paused89] updates paused controls on metadata arrival without a new clock, reload or subscription", async () => {
+    const view = await startUI({ timelineOffsetSeconds: 100, sourceSwitchState: { paused: true, volume: 1, muted: false, playbackRate: 1 } });
+    const calls = renderPlayerMock.command.mock.calls.length, observes = renderPlayerMock.observeProperties.mock.calls.length, properties = renderPlayerMock.setProperty.mock.calls.length;
+    view.rerender(<EmbeddedPlayer {...view.props} knownAbsoluteDurationSeconds={124} />);
+    expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "124");
+    fireEvent.click(screen.getByRole("button", { name: "Show total duration" })); expect(screen.getByRole("button", { name: "Show remaining time" })).toHaveTextContent("2:04");
+    expect(renderPlayerMock.command.mock.calls).toHaveLength(calls); expect(renderPlayerMock.observeProperties.mock.calls).toHaveLength(observes); expect(renderPlayerMock.setProperty.mock.calls).toHaveLength(properties);
+  });
+  it("[duration-ui-owner89] does not reuse old metadata or raw duration after a URL change", async () => {
+    const view = await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100 }); emitProperty("duration", 24);
+    view.rerender(<EmbeddedPlayer {...view.props} url="https://example.test/fresh-ui.mkv" knownAbsoluteDurationSeconds={null} timelineOffsetSeconds={0} />);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "0");
+    renderPlayerMock.command.mockClear(); fireEvent.keyDown(window, { key: "5" }); expect(renderPlayerMock.command).not.toHaveBeenCalled();
+    emitProperty("duration", 40); expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "40");
+  });
+  it("[duration-ui-commit89] does not leak future metadata or offset from a suspended render into an actual seek", async () => {
+    const pending = new Promise<void>(() => {}); function Suspend({ active }: { active: boolean }) { if (active) throw pending; return null; }
+    const props = { url: "https://example.test/committed-ui.mkv", title: "Committed UI", onClose: () => {} };
+    const view = render(<Suspense fallback={<span>Uncommitted UI</span>}><EmbeddedPlayer {...props} knownAbsoluteDurationSeconds={124} timelineOffsetSeconds={100} /><Suspend active={false} /></Suspense>);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    view.rerender(<Suspense fallback={<span>Uncommitted UI</span>}><EmbeddedPlayer {...props} knownAbsoluteDurationSeconds={1020} timelineOffsetSeconds={1000} /><Suspend active /></Suspense>);
+    expect(screen.getByText("Uncommitted UI")).toBeInTheDocument();
+    renderPlayerMock.command.mockClear(); fireEvent.keyDown(window, { key: "5" });
+    expect(renderPlayerMock.command).toHaveBeenCalledExactlyOnceWith("seek", [12, "absolute"]);
+  });
+  it("[duration-ui-invalid89] falls back to raw24 when absolute90 cannot describe an offset100 source", async () => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    await startUI({ knownAbsoluteDurationSeconds: 90, timelineOffsetSeconds: 100, onPlaybackStall: fresh, onEnded: ended }); emitProperty("duration", 24);
+    expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "124");
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(113, expect.objectContaining({ paused: false })); expect(ended).not.toHaveBeenCalled();
+  });
+  it("[duration-ui-unknown89] keeps a true unknown extent without inventing digit seeks or finite completion data", async () => {
+    const ended = vi.fn(), fresh = vi.fn(async () => true); await startUI({ onEnded: ended, onPlaybackStall: fresh });
+    expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuemax", "0");
+    renderPlayerMock.command.mockClear(); fireEvent.keyDown(window, { key: "5" }); expect(renderPlayerMock.command).not.toHaveBeenCalled();
+    emitProperty("time-pos", 12); emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+    expect(ended).toHaveBeenCalledExactlyOnceWith(13, 0, expect.any(Object)); expect(fresh).not.toHaveBeenCalled();
+  });
+  it("[duration-ui-predict89] does not predict true end from truncated native13 when authoritative24 exists", async () => {
+    const next = vi.fn(), fresh = vi.fn(async () => true), ended = vi.fn();
+    await startUI({ knownAbsoluteDurationSeconds: 24, onPlayNext: next, nextLabel: "Next", onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("duration", 13); emitProperty("time-pos", 12); emitProperty("time-pos", 13);
+    expect(screen.queryByRole("dialog", { name: "Next episode: Next" })).toBeNull(); expect(next).not.toHaveBeenCalled();
+    emitProperty("eof-reached", true); expect(fresh).toHaveBeenCalledTimes(1); expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
+  });
+  it("[duration-ui-progress89] reports real progress and final close progress with known extent but no mpv duration", async () => {
+    vi.useFakeTimers(); const progress = vi.fn(), close = vi.fn(); await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100, onProgress: progress, onClose: close });
+    vi.setSystemTime(10000); emitProperty("time-pos", 12);
+    expect(progress).toHaveBeenCalledExactlyOnceWith(112, 124, expect.any(Object));
+    fireEvent.click(screen.getByRole("button", { name: "Close player" }));
+    expect(progress).toHaveBeenCalledTimes(2); expect(progress).toHaveBeenLastCalledWith(112, 124, expect.any(Object)); expect(close).toHaveBeenCalledTimes(1);
+  });
+  it("[duration-ui-hide89] lets ordinary playing chrome hide with known extent and keeps paused chrome visible", async () => {
+    vi.useFakeTimers(); await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100 }); emitProperty("time-pos", 1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3201); }); expect(document.querySelector(".embed-player")).not.toHaveClass("show-controls");
+    emitProperty("pause", true); expect(document.querySelector(".embed-player")).toHaveClass("show-controls");
+  });
+});

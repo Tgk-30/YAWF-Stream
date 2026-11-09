@@ -267,6 +267,12 @@ const FIRST_FRAME_WATCHDOG_MS = 25_000;
  * completely out of the playback hot path. */
 const SCRUBBER_UPDATE_INTERVAL_MS = 200;
 
+/** Native clocks and commands are local; authoritative metadata is absolute. */
+function localPlaybackDuration(absolute: number | null | undefined, offset: number, native: number): number {
+  if (absolute != null && Number.isFinite(absolute) && absolute > offset) return absolute - offset;
+  return Number.isFinite(native) && native > 0 ? native : 0;
+}
+
 function fmt(s: number): string {
   if (!Number.isFinite(s) || s < 0) return "0:00";
   const t = Math.floor(s);
@@ -685,23 +691,23 @@ export function EmbeddedPlayer({
   const lastReportRef = useRef(0);
   const posRef = useRef(0);
   const durRef = useRef(0);
+  const nativeDurationOwnerRef = useRef(url);
+  const renderedTimelineOffset = Number.isFinite(timelineOffsetSeconds) && timelineOffsetSeconds > 0 ? timelineOffsetSeconds : 0;
+  const timelineOffsetRef = useRef(renderedTimelineOffset);
+  const renderedLocalDuration = localPlaybackDuration(knownAbsoluteDurationSeconds, renderedTimelineOffset, nativeDurationOwnerRef.current === url ? dur : 0);
   const knownAbsoluteDurationRef = useRef<{ url: string; duration: number | null }>({ url, duration: null });
   useLayoutEffect(() => {
+    timelineOffsetRef.current = renderedTimelineOffset;
     knownAbsoluteDurationRef.current = {
       url,
-      duration: knownAbsoluteDurationSeconds != null && Number.isFinite(knownAbsoluteDurationSeconds) && knownAbsoluteDurationSeconds > 0
+      duration: knownAbsoluteDurationSeconds != null && Number.isFinite(knownAbsoluteDurationSeconds) && knownAbsoluteDurationSeconds > renderedTimelineOffset
         ? knownAbsoluteDurationSeconds : null,
     };
-  }, [url, knownAbsoluteDurationSeconds]);
+  }, [url, knownAbsoluteDurationSeconds, renderedTimelineOffset]);
   const ownedPausedRef = useRef(sourceSwitchState?.paused ?? false);
   const clockWasResetRef = useRef(false);
   const pendingSeekRef = useRef<number | null>(null);
   const recoveryProgressRef = useRef<PlaybackRecoveryProgress | null>(null);
-  const timelineOffsetRef = useRef(0);
-  timelineOffsetRef.current =
-    Number.isFinite(timelineOffsetSeconds) && timelineOffsetSeconds > 0
-      ? timelineOffsetSeconds
-      : 0;
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
   const onEndedRef = useRef(onEnded);
@@ -794,7 +800,7 @@ export function EmbeddedPlayer({
   const evaluatePredictiveUpNext = () => {
     const prediction = predictEpisodeEnd({
       position: posRef.current,
-      duration: durRef.current,
+      duration: effectiveLocalDuration(),
       playing: !pausedRef.current && !endedRef.current,
       eligible: onPlayNextRef.current != null,
       chapters: chaptersRef.current,
@@ -820,11 +826,14 @@ export function EmbeddedPlayer({
     posRef.current + timelineOffsetRef.current;
   const knownAbsoluteDuration = () => knownAbsoluteDurationRef.current.url === url
     ? knownAbsoluteDurationRef.current.duration : null;
-  const reportedDuration = () => knownAbsoluteDuration() ?? (
-    durRef.current > 0
-      ? durRef.current + timelineOffsetRef.current
-      : durRef.current
+  const effectiveLocalDuration = () => localPlaybackDuration(
+    knownAbsoluteDuration(), timelineOffsetRef.current,
+    nativeDurationOwnerRef.current === url ? durRef.current : 0,
   );
+  const reportedDuration = () => {
+    const localDuration = effectiveLocalDuration();
+    return localDuration > 0 ? localDuration + timelineOffsetRef.current : 0;
+  };
   const reportedProgressPct = () =>
     playbackProgressPct(reportedPosition(), reportedDuration());
   const handoffState = (): PlaybackHandoffState => ({
@@ -1257,7 +1266,7 @@ export function EmbeddedPlayer({
                   const now = Date.now();
                   if (
                     startedRef.current &&
-                    durRef.current > 0 &&
+                    effectiveLocalDuration() > 0 &&
                     now - lastReportRef.current >= 5000
                   ) {
                     lastReportRef.current = now;
@@ -1271,6 +1280,7 @@ export function EmbeddedPlayer({
                 break;
               case "duration":
                 if (typeof ev.data === "number") {
+                  nativeDurationOwnerRef.current = url;
                   durRef.current = ev.data;
                   if (Number.isFinite(ev.data) && ev.data > 0) fullDuration = ev.data;
                   setDur(ev.data);
@@ -1623,13 +1633,13 @@ export function EmbeddedPlayer({
         pausedRef.current ||
         menuOpenRef.current ||
         !posRef.current ||
-        durRef.current === 0
+        effectiveLocalDuration() === 0
       ) {
         return;
       }
       setControlsVisible(false);
     }, 3200);
-  }, []);
+  }, [url]);
   useEffect(() => {
     nudgeControls();
     return () => window.clearTimeout(hideTimer.current);
@@ -1663,7 +1673,7 @@ export function EmbeddedPlayer({
   }, [paused, ended, nudgeControls]);
 
   const seekTo = useCallback((to: number) => {
-    const duration = durRef.current;
+    const duration = effectiveLocalDuration();
     const upperBound = Number.isFinite(duration) && duration > 0
       ? duration
       : Number.POSITIVE_INFINITY;
@@ -1681,7 +1691,7 @@ export function EmbeddedPlayer({
     setEnded(false);
     endedRef.current = false;
     void command("seek", [next, "absolute"]);
-  }, []);
+  }, [url]);
 
   const relSeek = useCallback(
     (delta: number) => {
@@ -1974,7 +1984,7 @@ export function EmbeddedPlayer({
         );
       });
     }
-    if (startedRef.current && durRef.current > 0) {
+    if (startedRef.current && effectiveLocalDuration() > 0) {
       onProgress?.(
         reportedPosition(),
         reportedDuration(),
@@ -1988,7 +1998,7 @@ export function EmbeddedPlayer({
       );
     }
     onClose();
-  }, [onClose, onProgress, fullscreen, scrobbleContext]);
+  }, [onClose, onProgress, fullscreen, scrobbleContext, url]);
 
   const openExternalFromSettings = useCallback(() => {
     const callback = externalHandoffCallbackRef.current;
@@ -2133,8 +2143,8 @@ export function EmbeddedPlayer({
           );
           break;
         default:
-          if (/^[0-9]$/.test(e.key) && durRef.current > 0) {
-            seekTo((Number(e.key) / 10) * durRef.current);
+          if (/^[0-9]$/.test(e.key) && effectiveLocalDuration() > 0) {
+            seekTo((Number(e.key) / 10) * effectiveLocalDuration());
           }
       }
       nudgeControls();
@@ -2418,8 +2428,8 @@ export function EmbeddedPlayer({
         <div className="embed-bottom">
           <NativeScrubber
             ref={scrubberRef}
-            duration={dur}
-            timelineOffsetSeconds={timelineOffsetRef.current}
+            duration={renderedLocalDuration}
+            timelineOffsetSeconds={renderedTimelineOffset}
             chapters={chapters}
             active={controlsVisible || menu != null || detailsSection != null}
             onSeek={seekTo}
