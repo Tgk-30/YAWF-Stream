@@ -271,6 +271,7 @@ public final class RuntimePlayer91MoreFlowTest {
         more.admit(more.target.exactCenterX(), more.target.exactCenterY());
         moreAcquisitionProof = more.proof();
         reveal.put("foregroundTargetAfter", true).put("ok", true).put("foregroundAfterUptimeMs", moreAcquired);
+        assertTrue("Diagnostic geometry captured; More DOWN intentionally not admitted", false);
         finger(more.target.exactCenterX(), more.target.exactCenterY(), "more", more.target, null, more);
         long deadline = now() + 3_000;
         while (now() < deadline) {
@@ -358,13 +359,30 @@ public final class RuntimePlayer91MoreFlowTest {
     private static final class MoreScan {
         final AcquisitionPolicy policy = new AcquisitionPolicy();
         final Rect root;
-        final int window;
+        final int window, width, height;
         int players, targets, ancestor, playerWindow = -1, targetWindow = -1;
         Rect player, target;
         AccessibilityNodeInfo identity;
-        MoreScan(Rect root, int window) { this.root = root; this.window = window; }
+        MoreScan(Rect root, int window, int width, int height) { this.root = root; this.window = window; this.width = width; this.height = height; }
     }
-    private AcquiredMore acquireMoreOnce(int width, int height) {
+    // Diagnostic evidence uses only this already acquired snapshot, never another SDK query.
+    private void persistRawMoreGeometry(MoreScan scan, String stage) throws Exception {
+        persistRawMoreGeometry(scan, stage, scan.target, scan.targetWindow);
+    }
+    private void persistRawMoreGeometry(MoreScan scan, String stage, Rect target, int targetWindow) throws Exception {
+        JSONObject raw = new JSONObject().put("schemaVersion", 1).put("diagnosticOnly", true)
+                .put("productQualified", false).put("stage", stage).put("uptimeMs", now())
+                .put("rootBounds", rect(scan.root)).put("rootWindowId", scan.window)
+                .put("playerBounds", scan.player == null ? JSONObject.NULL : rect(scan.player)).put("playerWindowId", scan.playerWindow)
+                .put("moreBounds", target == null ? JSONObject.NULL : rect(target)).put("moreWindowId", targetWindow)
+                .put("displayWidth", scan.width).put("displayHeight", scan.height)
+                .put("screenBounds", new JSONArray().put(0).put(0).put(scan.width).put(scan.height))
+                .put("nodesVisited", scan.policy.nodes).put("maxDepth", scan.policy.deepest)
+                .put("playerCount", scan.players).put("targetCount", scan.targets)
+                .put("moreDownAttemptUptimeMs", moreDownAttempt).put("additionalSDKQueries", 0);
+        write("more-acquisition-raw.json", raw.toString(2));
+    }
+    private AcquiredMore acquireMoreOnce(int width, int height) throws Exception {
         assertTrue("Public API36 cache refresh failed", automation.clearCache());
         AccessibilityNodeInfo root = automation.getRootInActiveWindow();
         assertNotNull("The owned active root is unavailable", root);
@@ -372,8 +390,9 @@ public final class RuntimePlayer91MoreFlowTest {
         try {
             AcquisitionPolicy.owner(String.valueOf(root.getPackageName()), root.isVisibleToUser(), root.getWindowId());
             Rect bounds = new Rect(); root.getBoundsInScreen(bounds);
+            scan = new MoreScan(bounds, root.getWindowId(), width, height);
+            persistRawMoreGeometry(scan, "root-before-containment");
             assertTrue("Invalid active root bounds", !bounds.isEmpty() && bounds.left >= 0 && bounds.top >= 0 && bounds.right <= width && bounds.bottom <= height);
-            scan = new MoreScan(bounds, root.getWindowId());
             scanMore(root, new ArrayList<>(), -1, null, scan);
             AcquisitionPolicy.unique(scan.players, scan.targets);
             return new AcquiredMore(bounds, scan.player, scan.target, scan.window, width, height,
@@ -383,7 +402,7 @@ public final class RuntimePlayer91MoreFlowTest {
             root.recycle();
         }
     }
-    private void scanMore(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> path, int playerIndex, Rect playerBounds, MoreScan scan) {
+    private void scanMore(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> path, int playerIndex, Rect playerBounds, MoreScan scan) throws Exception {
         scan.policy.visit(path.size());
         path.add(node);
         try {
@@ -396,8 +415,10 @@ public final class RuntimePlayer91MoreFlowTest {
                 assertEquals("Player escaped active window", scan.window, node.getWindowId());
                 assertEquals("Ambiguous exact player", 1, ++scan.players);
                 playerBounds = new Rect(); node.getBoundsInScreen(playerBounds);
+                scan.player = new Rect(playerBounds); scan.playerWindow = node.getWindowId();
+                persistRawMoreGeometry(scan, "player-before-containment");
                 assertTrue("Player escaped active root", !playerBounds.isEmpty() && scan.root.contains(playerBounds));
-                playerIndex = path.size() - 1; scan.player = new Rect(playerBounds); scan.playerWindow = node.getWindowId();
+                playerIndex = path.size() - 1;
             }
             if (playerIndex >= 0 && ("Playback settings".equals(text) || "Playback settings".equals(description))) {
                 assertTrue("Wrong More package or identity", AcquisitionPolicy.more(pkg, text, description));
@@ -407,13 +428,15 @@ public final class RuntimePlayer91MoreFlowTest {
                     AccessibilityNodeInfo candidate = path.get(index);
                     if (!candidate.isEnabled() || !candidate.isClickable()) continue;
                     AcquisitionPolicy.ancestor(distance, index >= playerIndex);
-                    AcquisitionPolicy.owner(String.valueOf(candidate.getPackageName()), candidate.isVisibleToUser(), candidate.getWindowId());
-                    AcquisitionPolicy.windows(scan.window, node.getWindowId(), candidate.getWindowId());
+                    int targetWindow = candidate.getWindowId();
+                    AcquisitionPolicy.owner(String.valueOf(candidate.getPackageName()), candidate.isVisibleToUser(), targetWindow);
+                    AcquisitionPolicy.windows(scan.window, node.getWindowId(), targetWindow);
                     Rect target = new Rect(); candidate.getBoundsInScreen(target);
+                    persistRawMoreGeometry(scan, "more-before-containment", target, targetWindow);
                     assertTrue("More escaped player", !target.isEmpty() && playerBounds.contains(target));
                     if (scan.identity == null) {
                         scan.identity = AccessibilityNodeInfo.obtain(candidate); scan.target = target;
-                        scan.targets = 1; scan.ancestor = distance; scan.targetWindow = candidate.getWindowId();
+                        scan.targets = 1; scan.ancestor = distance; scan.targetWindow = targetWindow;
                     } else assertTrue("Ambiguous More target", scan.identity.equals(candidate));
                     found = true; break;
                 }

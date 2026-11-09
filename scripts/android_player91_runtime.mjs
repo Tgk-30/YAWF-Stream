@@ -287,7 +287,7 @@ async function main(mode = 'menu-only') {
   const root = ownedDirectory(join(temp, 'yawf-private91-more'), temp, true);
   const source = join(repo, 'candidate-source');
   const apk = join(repo, process.env.CANDIDATE_APK);
-  const result = { schemaVersion: 1, outcome: 'FAIL', scope: menuOnly ? 'Private91 hosted API36 X86_64 menu semantics only; no clock/continuity proof' : 'Private91 hosted API36 X86_64 More only', source: PIN.source,
+  const result = { schemaVersion: 1, outcome: 'FAIL', scope: 'DIAGNOSTIC_RAW_SDK_GEOMETRY_ONLY_NOT_PRODUCT_QUALIFICATION', diagnosticOnly: true, productQualified: false, source: PIN.source,
     menuOnlyQualified: false, clockProgressQualified: false, playbackContinuityQualified: false,
     APKsha256: PIN.sha256, guest: null, iowait: [], junit: null, menu: false, decodedImageReviewRequired: true,
     bundledPlaybackClaimed: false, cleanup: {} };
@@ -423,8 +423,8 @@ async function main(mode = 'menu-only') {
     save('runtime-events.txt', runtimeEvents);
     requireTrue(!/\bam_anr\b/.test(runtimeEvents), 'Runtime current boot ANR observed');
     result.junit = { pass: 1, fail: 0, skip: 0 }; result.menu = true;
-    result.menuOnlyQualified = menuOnly; result.clockProgressQualified = !menuOnly;
-    result.outcome = menuOnly ? 'PASS_MENU_ONLY_NO_CLOCK_OR_CONTINUITY_CLAIM' : 'PASS_MORE_ONLY_IMAGE_REVIEW_REQUIRED';
+    result.menuOnlyQualified = false; result.clockProgressQualified = false;
+    result.outcome = 'DIAGNOSTIC_COMPLETED_MENU_OBSERVED_NOT_PRODUCT_PASS';
   } catch (error) {
     result.error = sanitize(error.message).slice(0, 300);
     if (emulator) {

@@ -537,3 +537,21 @@ test('actual Java acquisition bounds identities and acknowledged-stream policy c
   const compile=spawnSync(javac,[`-J-Djava.io.tmpdir=${dir}`,'-d',dir,join(dir,'NativeAcquisitionHarness.java')],{encoding:'utf8',timeout:20000});assert.equal(compile.status,0,compile.stderr);
   const run=spawnSync(javaCommand,[`-Djava.io.tmpdir=${dir}`,'-cp',dir,'NativeAcquisitionHarness'],{encoding:'utf8',timeout:20000});assert.equal(run.status,0,run.stderr);assert.equal(run.stdout.trim(),'native-acquisition-policy:passed');
 });
+
+test('diagnostic copies raw SDK geometry before every unchanged containment guard without new queries',()=>{
+ const acquire=java.slice(java.indexOf('    private AcquiredMore acquireMoreOnce'),java.indexOf('    private void scanMore'));
+ const scan=java.slice(java.indexOf('    private void scanMore'),java.indexOf('    private UiObject2 menuOnlyMore'));
+ const before=(body,persist,guard)=>{const at=body.indexOf(persist);assert.ok(at>=0&&body.indexOf(guard)>at,persist);};
+ before(acquire,'persistRawMoreGeometry(scan, "root-before-containment")','assertTrue("Invalid active root bounds"');
+ before(scan,'persistRawMoreGeometry(scan, "player-before-containment")','assertTrue("Player escaped active root"');
+ before(scan,'persistRawMoreGeometry(scan, "more-before-containment", target, targetWindow)','assertTrue("More escaped player"');
+ const flow=java.slice(java.indexOf('    private void flowMenuOnly()'),java.indexOf('    private Rect waitForTwoFreshChromeAbsentObservations()'));
+ before(flow,'assertTrue("Diagnostic geometry captured; More DOWN intentionally not admitted", false)','finger(more.target');
+ const raw=java.slice(java.indexOf('    private void persistRawMoreGeometry'),java.indexOf('    private AcquiredMore acquireMoreOnce'));
+ for(const key of ['rootBounds','playerBounds','moreBounds','rootWindowId','playerWindowId','moreWindowId','displayWidth','displayHeight','screenBounds','moreDownAttemptUptimeMs','additionalSDKQueries'])assert.ok(raw.includes('"'+key+'"'),key);
+ assert.doesNotMatch(raw,/getRootInActiveWindow|clearCache|getBoundsInScreen|getWindowId|getDisplay|findObjects|getWindows|injectInputEvent|capture\(/);
+ assert.ok(raw.includes('write("more-acquisition-raw.json", raw.toString(2))'));
+ assert.match(driver,/scope: 'DIAGNOSTIC_RAW_SDK_GEOMETRY_ONLY_NOT_PRODUCT_QUALIFICATION', diagnosticOnly: true, productQualified: false/);
+ assert.match(driver,/result\.menuOnlyQualified = false; result\.clockProgressQualified = false;/);
+ assert.match(driver,/DIAGNOSTIC_COMPLETED_MENU_OBSERVED_NOT_PRODUCT_PASS/);
+});
