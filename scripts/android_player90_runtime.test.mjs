@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { PIN, sanitize, validateEnvironment, validateCatalog, cpuSnapshot, iowaitPercent,
-  validateGuest, validateLauncher, validateJUnit, validateReceipt, ownedDirectory } from './android_player90_runtime.mjs';
+  validateGuest, validateLauncher, validateJUnit, validateReceipt, ownedDirectory, parseInstalledAPKPaths, parseAPKHashOutput } from './android_player90_runtime.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const java = readFileSync(join(root, 'scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimePlayer90MoreFlowTest.java'), 'utf8');
@@ -58,6 +58,44 @@ test('guest fences API ABI hardware page size and actual WebView', () => {
     ['webview', 'Current WebView package (name, version): (com.google.android.webview, 89.0.1.2)'], ['webview', 'provider unknown']]) {
     assert.throws(() => validateGuest({ ...guest(), [key]: bad }));
   }
+});
+test('provider APK metadata accepts factory names and all installed base plus splits', () => {
+  for (const path of ['/product/app/WebViewGoogle/WebViewGoogle.apk', '/system/app/WebView/WebView.apk',
+    '/system_ext/app/WebView/WebViewStub.apk', '/data/app/~~safe+code==/com.google.android.webview-code==/WebViewGoogle.apk']) {
+    assert.deepEqual(parseInstalledAPKPaths(`package:${path}\n`), [path]);
+  }
+  const paths = ['/data/app/~~safe==/webview-code==/base.apk', '/data/app/~~safe==/webview-code==/split_config.x86_64.apk'];
+  assert.deepEqual(parseInstalledAPKPaths(paths.map((path) => 'package:' + path).join('\r\n') + '\r\n'), paths);
+  const eight = Array.from({ length: 8 }, (_, i) => `/system/app/webview/split${i}.apk`);
+  assert.deepEqual(parseInstalledAPKPaths(eight.map((path) => 'package:' + path).join('\n')), eight);
+});
+test('provider APK metadata rejects bad roots traversal shell input duplicates and extra lines', () => {
+  const good = 'package:/system/app/WebView/WebView.apk\n';
+  for (const text of ['', good.repeat(2), good + '\n', good + 'daemon started\n', 'notice\n' + good,
+    Array.from({ length: 9 }, (_, i) => `package:/system/app/webview/split${i}.apk`).join('\n'),
+    ...['/vendor/app/webview.apk', '/data/app-staging/base.apk', '/system/app/../base.apk', '/system/app/a..b.apk',
+      '/system/app/%2e%2e/base.apk', '/system/app//base.apk', '/system/app/./base.apk', '/system/app/a b.apk',
+      '/system/app/base.apk;id', '/system/app/$(id).apk', '/system/app/base*.apk', '/system/app/a\\b.apk',
+      '/system/app/a\tb.apk', '/system/app/a\u0000.apk', '/system/app/base.apk '].map((path) => `package:${path}\n`)]) {
+    assert.throws(() => parseInstalledAPKPaths(text), text);
+  }
+});
+test('every provider APK hash is exact hexadecimal bound to its requested full path', () => {
+  const path = '/system_ext/app/WebView/WebViewGoogle.apk'; const digest = 'a'.repeat(64);
+  assert.equal(parseAPKHashOutput(`${digest}  ${path}\n`, path), digest);
+  assert.equal(parseAPKHashOutput(`${digest} ${path}\r\n`, path), digest);
+  for (const output of [`${'g'.repeat(64)}  ${path}\n`, `${'a'.repeat(63)}  ${path}\n`, `${digest}  /system/app/other.apk\n`,
+    `${digest}  ${path}\n\n`, `${digest}  ${path}\nextra`, `${digest}  ${path}\n${digest}  ${path}\n`, `${digest}   ${path}\n`, ` ${digest}  ${path}\n`]) {
+    assert.throws(() => parseAPKHashOutput(output, path));
+  }
+});
+test('raw provider paths are retained before validation and all parsed APKs are hashed', () => {
+  const retain = driver.indexOf("save('webview-package-paths.txt', installedWebview)");
+  const parse = driver.indexOf('const providerPaths = parseInstalledAPKPaths(installedWebview)');
+  assert.ok(retain >= 0 && retain < parse);
+  assert.match(driver, /for \(const path of providerPaths\)/);
+  assert.match(driver, /sha256: parseAPKHashOutput\(output, path\)/);
+  assert.match(driver, /save\('webview-apks\.json', \{ \.\.\.webview, APKs: providerAPKs \}\)/);
 });
 test('resumed launcher admission is not boot-complete alone', () => {
   validateLauncher('mResumedActivity: ActivityRecord{abc u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t1}');

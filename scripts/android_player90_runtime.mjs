@@ -70,6 +70,29 @@ export function validateGuest({ sdk, abi, hardware, pageSize, webview }) {
   requireTrue(provider && Number(provider[2].split('.')[0]) >= 90, 'Actual WebView provider/version is not admitted');
   return { package: provider[1], version: provider[2] };
 }
+export function parseInstalledAPKPaths(text) {
+  requireTrue(typeof text === 'string' && Buffer.byteLength(text) <= 65536, 'Bounded installed APK metadata required');
+  const lines = text.split(/\r?\n/);
+  if (lines.at(-1) === '') lines.pop();
+  requireTrue(lines.length >= 1 && lines.length <= 8, 'One to eight installed provider APKs required');
+  const paths = lines.map((line) => {
+    requireTrue(line.startsWith('package:'), 'Unexpected installed APK metadata line');
+    const path = line.slice(8);
+    requireTrue(path.length <= 4096 && /^\/(?:data\/app|product|system|system_ext)\//.test(path)
+      && path.endsWith('.apk') && path.slice(1).split('/').every((part) =>
+        /^[A-Za-z0-9._~+=-]{1,255}$/.test(part) && !part.includes('..') && part !== '.'),
+    'Unsafe installed provider APK path');
+    return path;
+  });
+  requireTrue(new Set(paths).size === paths.length, 'Duplicate installed provider APK path');
+  return paths;
+}
+export function parseAPKHashOutput(text, expectedPath) {
+  parseInstalledAPKPaths(`package:${expectedPath}\n`);
+  const match = typeof text === 'string' && /^([a-f0-9]{64}) {1,2}([^\r\n]+)\r?\n?$/.exec(text);
+  requireTrue(match && match[0] === text && match[2] === expectedPath, 'Exact installed APK hash output required');
+  return match[1];
+}
 export function validateLauncher(text) {
   requireTrue(/(?:mResumedActivity|topResumedActivity)[^\n]*(?:com\.google\.android\.apps\.nexuslauncher\/[^\s}]+|com\.android\.launcher3\/[^\s}]+)/.test(text),
     'A responsive admitted launcher was not resumed');
@@ -256,9 +279,15 @@ async function main() {
       validateLauncher(await adb(['shell', 'dumpsys', 'activity', 'activities']));
     }
     const installedWebview = await adb(['shell', 'pm', 'path', webview.package]);
-    const providerPath = /^package:(\/data\/app\/[^\r\n]+\/base\.apk|\/product\/[^\r\n]+\.apk|\/system\/[^\r\n]+\.apk)\r?\n?$/.exec(installedWebview);
-    requireTrue(providerPath, 'Unexpected actual WebView package paths');
-    save('webview-apk-sha256.txt', await adb(['shell', 'sha256sum', providerPath[1]]));
+    save('webview-package-paths.txt', installedWebview);
+    const providerPaths = parseInstalledAPKPaths(installedWebview);
+    const providerAPKs = [];
+    for (const path of providerPaths) {
+      const output = await adb(['shell', 'sha256sum', path]);
+      save(`webview-apk-${providerAPKs.length}-sha256.txt`, output);
+      providerAPKs.push({ path, sha256: parseAPKHashOutput(output, path) });
+    }
+    save('webview-apks.json', { ...webview, APKs: providerAPKs });
     for (const port of [43120, 43121]) await adb(['reverse', `tcp:${port}`, `tcp:${port}`]);
     for (const path of [apk, join(repo, 'scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk'),
       join(repo, 'scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk')]) {
