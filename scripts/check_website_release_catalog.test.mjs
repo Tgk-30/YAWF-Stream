@@ -8,12 +8,12 @@ test("website release catalog accepts the published platform channels", () => {
   assert.deepEqual(validateWebsiteReleaseCatalog(source), []);
 });
 
-test("website release catalog rejects server88 while leaving independent channels unchanged", () => {
+test("website release catalog rejects server89 while leaving independent channels unchanged", () => {
   const previous = source.replace(
+    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.90', tag: 'v2.3.90' };",
     "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.89', tag: 'v2.3.89' };",
-    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.88', tag: 'v2.3.88' };",
   );
-  assert.notEqual(previous, source, "fixture must contain the server89 mutation target");
+  assert.notEqual(previous, source, "fixture must contain the server90 mutation target");
   assert.deepEqual(validateWebsiteReleaseCatalog(previous), ["SERVER_RELEASE must retain its published version and tag"]);
 });
 
@@ -55,23 +55,23 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.89', tag: 'v2.3.89' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.90', tag: 'v2.3.90' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.89'",
+    from: "tag: 'v2.3.90'",
     to: "tag: 'v2.3.51'",
   },
   {
     name: "stale server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.89', tag: 'v2.3.89' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.88', tag: 'v2.3.88' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.90', tag: 'v2.3.90' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.89', tag: 'v2.3.89' };",
   },
   {
     name: "unpublished future server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.89', tag: 'v2.3.89' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.90', tag: 'v2.3.90' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.90', tag: 'v2.3.90' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.91', tag: 'v2.3.91' };",
   },
   {
     name: "server Debian filename",
