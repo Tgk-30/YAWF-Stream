@@ -36,6 +36,8 @@ const MAX_SOURCE_DURATION_SECONDS = 86_400;
 const SERVER_OPTIMIZED_RETRY_BASE_MS = 500;
 const SERVER_OPTIMIZED_RETRY_MAX_MS = 4_000;
 const TOUCH_DOUBLE_TAP_MS = 320;
+const PRE_BACKGROUND_PAUSE_CORRELATION_MS = 1_000;
+const FOREGROUND_BUFFERLESS_TIMEOUT_MS = 3_000;
 import { Icon } from "./Icon";
 import { useVideoPresentation, type VideoPresentation } from "./useVideoPresentation";
 import {
@@ -1129,6 +1131,7 @@ export function VideoPlayer({
   const [webviewPaused, setWebviewPaused] = useState(false);
   const externalHandoffVideoRef = useRef<HTMLVideoElement | null>(null);
   const externalHandoffPauseRef = useRef<((video: HTMLVideoElement) => boolean) | null>(null);
+  const ownedWebviewStateRef = useRef<{ video: HTMLVideoElement; source: { key: string }; read: () => PlaybackHandoffState | null } | null>(null);
   const pauseWebviewForExternalHandoff = useCallback(() => {
     const video = externalHandoffVideoRef.current;
     if (video != null && externalHandoffPauseRef.current?.(video) !== true) video.pause();
@@ -1162,6 +1165,19 @@ export function VideoPlayer({
   // an identity token so callbacks from an earlier visit to the same URL cannot
   // change the current source's presentation readiness.
   const webviewSource = useMemo(() => ({ key: webviewSourceKey }), [webviewSourceKey]);
+  const retainedPhysicalReaderRef = useRef<{ key: string; owner: string; scope: string; handoff: PlaybackHandoffState; adopted: boolean } | null>(null);
+  const physicalContentScope = serverAudioRetentionScope ?? JSON.stringify([imdbId, season, episode, sourceFileName, title, subtitle]);
+  const retainedReader = retainedPhysicalReaderRef.current;
+  const retainPhysicalReader = retainedReader != null && retainedReader.scope === physicalContentScope &&
+    (retainedReader.owner === playbackOwner || (!retainedReader.adopted && initialHandoffState === retainedReader.handoff));
+  const physicalReaderKey = retainPhysicalReader ? retainedReader.key : webviewSourceKey;
+  const physicalReaderKeyRef = useRef(physicalReaderKey);
+  useLayoutEffect(() => {
+    physicalReaderKeyRef.current = physicalReaderKey;
+    if (retainedPhysicalReaderRef.current !== retainedReader || retainedReader == null) return;
+    if (!retainPhysicalReader) { retainedPhysicalReaderRef.current = null; return; }
+    if (retainedReader.owner !== playbackOwner) { retainedReader.owner = playbackOwner; retainedReader.adopted = true; }
+  }, [physicalReaderKey, playbackOwner, retainPhysicalReader, retainedReader]);
   const currentWebviewSourceRef = useRef(webviewSource);
   const failedWebviewRecoveryRef = useRef<{
     owner: string;
@@ -1280,6 +1296,9 @@ export function VideoPlayer({
     !androidTVNative &&
     ((dk === "ios" && !underTauri) || androidAppUi);
   const webviewChildShown = mode === "webview" && externalError == null;
+  useLayoutEffect(() => {
+    if (!webviewChildShown) retainedPhysicalReaderRef.current = null;
+  }, [webviewChildShown]);
   const webviewChildMenuOpen = webviewChildShown && (captionsOpen || webMenuOpen);
   const touchMenuOpen = sharedTouchPlayer && webviewChildMenuOpen;
   const androidOnCloseRef = useRef(onClose);
@@ -1373,6 +1392,11 @@ export function VideoPlayer({
   ): PlaybackHandoffState | null => {
     const video = externalHandoffVideoRef.current;
     if (video == null) return fallback ?? null;
+    const reader = ownedWebviewStateRef.current;
+    if (reader?.video === video && reader.source === currentWebviewSourceRef.current) {
+      const state = reader.read();
+      if (state != null) return state;
+    }
     return {
       paused: video.paused,
       volume: Number.isFinite(video.volume)
@@ -1456,6 +1480,7 @@ export function VideoPlayer({
       return false;
     }
     const request = { owner, source };
+    retainedPhysicalReaderRef.current = { key: physicalReaderKeyRef.current, owner, scope: physicalContentScope, handoff, adopted: false };
     freshStreamRequestRef.current = request;
     const ownsRequest = () => ownsSource() && freshStreamRequestRef.current === request;
     automaticStallRecoveryAttemptedRef.current = true;
@@ -1481,7 +1506,7 @@ export function VideoPlayer({
         setWebRecoveryPending(false);
       }
     }
-  }, [playbackOwner, refreshCurrentSource, webviewSource]);
+  }, [physicalContentScope, playbackOwner, refreshCurrentSource, webviewSource]);
 
   const retryFreshStream = useCallback(async (): Promise<void> => {
     const context = lastStallContextRef.current;
@@ -2198,6 +2223,9 @@ export function VideoPlayer({
                 language: appliedTrack?.language?.trim() || null,
                 label: appliedTrack?.label?.trim() || null,
               };
+        if ((purpose === "ordinary" || purpose === "native-hls-seek") && retainedPhysicalReaderRef.current?.owner === owner) {
+          retainedPhysicalReaderRef.current = null;
+        }
         setFallbackSource(null);
         setSourceSwitchPosition({
           originOwner: owner,
@@ -2330,6 +2358,7 @@ export function VideoPlayer({
       optimizationPendingRef.current = null;
       setServerOptimizationPending(false);
     }
+    if (retainedPhysicalReaderRef.current?.owner === playbackOwner) retainedPhysicalReaderRef.current = null;
     switchToDeviceOriginal(absolutePositionSeconds, handoffState);
   }, [claimExplicitServerOptimizationChoice, playbackOwner, switchToDeviceOriginal]);
 
@@ -3114,7 +3143,9 @@ export function VideoPlayer({
 
         {webviewChildShown ? (
           <WebviewPlayer
-            key={webviewSourceKey}
+            key={physicalReaderKey}
+            sourceIdentity={webviewSource}
+            ownedPlaybackStateRef={ownedWebviewStateRef}
             presentation={videoPresentation}
             onPresentationChange={changeVideoPresentation}
             url={effectiveUrl}
@@ -3245,6 +3276,7 @@ export function VideoPlayer({
                       recordDiagnostic("player", "webview.retry_requested");
                       setExternalError(null);
                       explicitOptimizationIntentRef.current += 1;
+                      if (retainedPhysicalReaderRef.current?.owner === playbackOwner) retainedPhysicalReaderRef.current = null;
                       setPlaybackAttempt((attempt) => attempt + 1);
                     }
                 : undefined
@@ -3269,6 +3301,8 @@ export function VideoPlayer({
  * OSD. Split out so the subtitle/thumbnail hooks mount only on this path (never
  * for the external mpv/VLC hand-off, where there's no frame source). */
 function WebviewPlayer({
+  sourceIdentity,
+  ownedPlaybackStateRef,
   presentation,
   onPresentationChange,
   url,
@@ -3354,6 +3388,8 @@ function WebviewPlayer({
   onSelectDeviceOriginal,
   onAbsolutePositionChange,
 }: {
+  sourceIdentity: { key: string };
+  ownedPlaybackStateRef: { current: { video: HTMLVideoElement; source: { key: string }; read: () => PlaybackHandoffState | null } | null };
   presentation: VideoPresentation;
   onPresentationChange: (patch: Partial<VideoPresentation>) => void;
   url: string;
@@ -3476,6 +3512,22 @@ function WebviewPlayer({
   onAbsolutePositionChange: (absolutePositionSeconds: number) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const committedSourceRef = useRef(sourceIdentity);
+  const sourceLoadRef = useRef<{ source: typeof sourceIdentity; reused: boolean; started: boolean; expected: string | null }>({ source: sourceIdentity, reused: false, started: true, expected: null });
+  function ownsSource(video: HTMLVideoElement): boolean {
+    return videoRef.current === video && committedSourceRef.current === sourceIdentity;
+  }
+  function mediaEventsCurrent(video: HTMLVideoElement): boolean {
+    return ownsSource(video) && sourceLoadRef.current.source === sourceIdentity && sourceLoadRef.current.started;
+  }
+  function currentMediaEvent(video: HTMLVideoElement, minimumReadyState = 0): boolean {
+    return mediaEventsCurrent(video) && (!sourceLoadRef.current.reused || video.readyState >= minimumReadyState);
+  }
+  const assignedSourceRef = useRef<{ source: typeof sourceIdentity; url: string } | null>(null);
+  const terminalRecoverySourceRef = useRef<typeof sourceIdentity | null>(null);
+  function terminalRecoveryOwns(video: HTMLVideoElement): boolean {
+    return ownsSource(video) && terminalRecoveryVideoRef.current === video && terminalRecoverySourceRef.current === sourceIdentity;
+  }
   const terminalRecoveryVideoRef = useRef<HTMLVideoElement | null>(null);
   const terminalRecoveryStateRef = useRef<PlaybackHandoffState | null>(null);
   const captionViewportRef = useRef<HTMLDivElement | null>(null);
@@ -3498,8 +3550,10 @@ function WebviewPlayer({
   const autoplayAttemptedRef = useRef(false);
   const playbackAttemptRef = useRef(0);
   const foregroundPlaybackRef = useRef<{ video: HTMLVideoElement; source: string; play: boolean; returnedPosition?: number } | null>(null);
+  const preBackgroundPauseRef = useRef<{ video: HTMLVideoElement; source: string; attempt: number; pausedAt: number } | null>(null);
+  const foregroundIdleRecoveryRef = useRef<{ video: HTMLVideoElement; source: string; attempt: number; token: object | null; timer: number } | null>(null);
   const playbackSourceRef = useRef(url);
-  useLayoutEffect(() => { playbackSourceRef.current = url; }, [url]);
+  useLayoutEffect(() => { playbackSourceRef.current = url; }, [sourceIdentity, url]);
   const pausedForCastRef = useRef(false);
   const suspendedRef = useRef(suspended);
   suspendedRef.current = suspended;
@@ -3583,13 +3637,21 @@ function WebviewPlayer({
   const sourceSwitchStateRef = useRef(sourceSwitchState);
   sourceSwitchStateRef.current = sourceSwitchState;
   const pendingHandoffPlaybackIntentRef = useRef<"play" | "pause" | null>(null);
+  const cancelForegroundIdleRecovery = useCallback((video: HTMLVideoElement) => {
+    const pending = foregroundIdleRecoveryRef.current;
+    if (pending?.video !== video) return;
+    window.clearTimeout(pending.timer);
+    foregroundIdleRecoveryRef.current = null;
+  }, []);
   const clearReturnedPlayback = useCallback((video: HTMLVideoElement) => {
+    cancelForegroundIdleRecovery(video);
+    if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
     const pending = foregroundPlaybackRef.current;
     if (pending?.video === video && pending.returnedPosition != null) {
       foregroundPlaybackRef.current = null;
       pendingHandoffPlaybackIntentRef.current = null;
     }
-  }, []);
+  }, [cancelForegroundIdleRecovery]);
   const nativeControlsOwnPlayback = (video: HTMLVideoElement) =>
     document.pictureInPictureElement === video || document.fullscreenElement === video ||
     (video as WebKitVideoElement).webkitPresentationMode === "picture-in-picture" ||
@@ -3644,7 +3706,7 @@ function WebviewPlayer({
     return pending?.video === video && pending.sequence === recoverySeekSequenceRef.current ? pending : null;
   };
   const recoveryClockWasReset = (video: HTMLVideoElement): boolean => {
-    if (videoRef.current !== video) return true;
+    if (!ownsSource(video)) return true;
     if (pendingRecoverySeekFor(video) != null || pendingNativeHlsSeekRef.current != null ||
         exactHandoffPendingRef.current || video.seeking || rendererSeekingRef.current) return false;
     const reset = lastObservedMediaTimeRef.current > 0 &&
@@ -3656,6 +3718,45 @@ function WebviewPlayer({
     return reset;
   };
   const scrubbingRef = useRef(false);
+  useLayoutEffect(() => {
+    if (committedSourceRef.current === sourceIdentity) return;
+    committedSourceRef.current = sourceIdentity;
+    sourceLoadRef.current = { source: sourceIdentity, reused: true, started: false, expected: null };
+    const video = videoRef.current;
+    if (video != null) cancelForegroundIdleRecovery(video);
+    terminalRecoveryVideoRef.current = null;
+    terminalRecoverySourceRef.current = null;
+    terminalRecoveryStateRef.current = null;
+    foregroundPlaybackRef.current = null;
+    preBackgroundPauseRef.current = null;
+    backgroundPauseVideoRef.current = null;
+    autoplayAttemptedRef.current = false;
+    playbackAttemptRef.current += 1;
+    pendingHandoffPlaybackIntentRef.current = null;
+    pendingNativeHlsSeekSequenceRef.current += 1;
+    if (pendingNativeHlsSeekRef.current?.timer != null) window.clearTimeout(pendingNativeHlsSeekRef.current.timer);
+    pendingNativeHlsSeekRef.current = null;
+    recoverySeekSequenceRef.current += 1;
+    pendingRecoverySeekRef.current = null;
+    exactHandoffPendingRef.current = requiresExactHandoffRef.current;
+    didSeekRef.current = false;
+    explicitInitialSeekRef.current = null;
+    nativeExactHlsFragmentRef.current = false;
+    rendererSeekingRef.current = false;
+    verifiedPlaybackProgressReportedRef.current = false;
+    verifiedPlaybackPlayingRef.current = false;
+    ownedPlaybackPausedRef.current = sourceSwitchStateRef.current?.paused ?? false;
+    explicitPlaybackIntentRef.current = false;
+    startupReadyRef.current = false;
+    lastObservedMediaTimeRef.current = 0;
+    appliedHlsAudioPreferenceRef.current = false;
+    appliedBrowserAudioPreferenceRef.current = false;
+    appliedServerAudioPreferenceRef.current = false;
+    audioPreferenceRef.current = sourceSwitchStateRef.current?.audioPreference ?? { id: null, language: null };
+    setDuration(0);
+    setPaused(ownedPlaybackPausedRef.current);
+    setPlaying(!ownedPlaybackPausedRef.current);
+  }, [cancelForegroundIdleRecovery, sourceIdentity]);
   // Set when the video reaches its natural end - drives the Up-next card.
   const [ended, setEnded] = useState(false);
   const endPrediction = useMemo(() => predictEpisodeEnd({
@@ -3765,10 +3866,10 @@ function WebviewPlayer({
   }, [clearPendingTouchTap]);
 
   const applyOwnedPlayback = useCallback((video: HTMLVideoElement, shouldPlay: boolean) => {
-    if (videoRef.current !== video || playbackSourceRef.current !== url) return;
+    if (!ownsSource(video) || playbackSourceRef.current !== url) return;
     const attempt = ++playbackAttemptRef.current;
     video.autoplay = false;
-    if (terminalRecoveryVideoRef.current === video) {
+    if (terminalRecoveryOwns(video)) {
       if (!video.paused) video.pause();
       return;
     }
@@ -3785,6 +3886,8 @@ function WebviewPlayer({
       // Foreground can precede a delayed platform pause. Keep this one owned
       // intent until an actual forward frame or a physical play attempt.
       pending.returnedPosition ??= video.currentTime;
+      const idle = foregroundIdleRecoveryRef.current;
+      if (idle?.video === video && idle.source === url && idle.token === pending) idle.attempt = attempt;
       return;
     }
     // Consume before the platform call, including synchronous media callbacks.
@@ -3793,8 +3896,10 @@ function WebviewPlayer({
     autoplayAttemptedRef.current = true;
     if (shouldPlay && video.paused) {
       const onRejected = () => {
-        if (videoRef.current !== video || playbackSourceRef.current !== url ||
+        if (!ownsSource(video) || playbackSourceRef.current !== url ||
             playbackAttemptRef.current !== attempt || foregroundPlaybackRef.current?.video === video || !video.paused) return;
+        if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
+        ownedPlaybackPausedRef.current = true;
         setPaused(true);
         setPlaying(false);
         onPausedChange(true);
@@ -3803,18 +3908,18 @@ function WebviewPlayer({
     } else if (!shouldPlay && !video.paused) {
       video.pause();
     }
-  }, [onPausedChange, url]);
+  }, [onPausedChange, sourceIdentity, url]);
 
   const requestPlaybackState = useCallback((shouldPlay: boolean) => {
     const video = videoRef.current;
-    if (video == null) return;
+    if (video == null || !ownsSource(video)) return;
     explicitPlaybackIntentRef.current = true;
     clearReturnedPlayback(video);
     playbackAttemptRef.current += 1;
     video.autoplay = false;
     // Play/Pause changes intent, not ownership of a decoder-reset clock.
     ownedPlaybackPausedRef.current = !shouldPlay;
-    if (terminalRecoveryVideoRef.current === video) {
+    if (terminalRecoveryOwns(video)) {
       if (terminalRecoveryStateRef.current != null) terminalRecoveryStateRef.current.paused = !shouldPlay;
       setPaused(!shouldPlay);
       setPlaying(shouldPlay);
@@ -3863,7 +3968,7 @@ function WebviewPlayer({
 
   useLayoutEffect(() => {
     const pauseOwnedReader = (video: HTMLVideoElement) => {
-      if (videoRef.current !== video || playbackSourceRef.current !== url) return false;
+      if (!ownsSource(video) || playbackSourceRef.current !== url) return false;
       requestPlaybackState(false);
       return true;
     };
@@ -3871,7 +3976,7 @@ function WebviewPlayer({
     return () => {
       if (externalHandoffPauseRef.current === pauseOwnedReader) externalHandoffPauseRef.current = null;
     };
-  }, [externalHandoffPauseRef, requestPlaybackState, url]);
+  }, [externalHandoffPauseRef, requestPlaybackState, sourceIdentity, url]);
 
   const applyDeferredHandoffPlayback = useCallback((
     video: HTMLVideoElement,
@@ -3882,6 +3987,20 @@ function WebviewPlayer({
     onPausedChange(!shouldPlay);
     applyOwnedPlayback(video, shouldPlay);
   }, [applyOwnedPlayback, onPausedChange]);
+
+  useLayoutEffect(() => {
+    const video = videoRef.current;
+    if (video == null) return;
+    const reader = { video, source: sourceIdentity, read: () => {
+      if (!ownsSource(video)) return null;
+      const { audioPreference, ...state } = currentRecoveryState(video);
+      const intent = pendingHandoffPlaybackIntentRef.current;
+      return { ...state, ...(audioPreference == null ? {} : { audioPreference }),
+        paused: intent === "play" ? false : intent === "pause" ? true : state.paused };
+    } };
+    ownedPlaybackStateRef.current = reader;
+    return () => { if (ownedPlaybackStateRef.current === reader) ownedPlaybackStateRef.current = null; };
+  }, [ownedPlaybackStateRef, sourceIdentity]);
 
   const togglePlaybackState = useCallback(() => {
     const video = videoRef.current;
@@ -3896,9 +4015,9 @@ function WebviewPlayer({
     const pendingIntent = pendingHandoffPlaybackIntentRef.current;
     const hasDeferredHandoffIntent = exactHandoffPendingRef.current ||
       foregroundPlaybackRef.current?.video === video ||
-      terminalRecoveryVideoRef.current === video ||
+      terminalRecoveryOwns(video) ||
       (suspendedRef.current && pendingIntent != null);
-    if (terminalRecoveryVideoRef.current === video) {
+    if (terminalRecoveryOwns(video)) {
       requestPlaybackState(ownedPlaybackPausedRef.current);
       return;
     }
@@ -4238,7 +4357,7 @@ function WebviewPlayer({
       }
     };
     const refresh = () => {
-      if (!active || videoRef.current !== video || updating) return;
+      if (!active || !ownsSource(video) || updating) return;
       updating = true;
       try {
         const choices = inventory();
@@ -4302,7 +4421,7 @@ function WebviewPlayer({
     const controller = {
       refresh,
       selectEmbedded: (id: string | null) => {
-        if (!active || videoRef.current !== video) return;
+        if (!active || !ownsSource(video)) return;
         const choice = id == null ? null : inventory().find((track) => track.id === id);
         if (id != null && choice == null) return;
         preferencePending = false;
@@ -4318,7 +4437,7 @@ function WebviewPlayer({
         refresh();
       },
       selectDownloaded: (id: string | null) => {
-        if (!active || videoRef.current !== video) return;
+        if (!active || !ownsSource(video)) return;
         preferencePending = false;
         downloadedId = id;
         mode = id == null ? "off" : "downloaded";
@@ -4351,7 +4470,7 @@ function WebviewPlayer({
       video.removeEventListener("loadedmetadata", refresh);
       if (captionControllerRef.current === controller) captionControllerRef.current = null;
     };
-  }, [engine, url]);
+  }, [engine, sourceIdentity, url]);
   useEffect(() => {
     captionControllerRef.current?.updateDownloaded(subs.activeTrackId);
   }, [subs.activeTrackId, subs.tracks]);
@@ -4376,7 +4495,7 @@ function WebviewPlayer({
       try { Object.assign(cue, geometry); } catch { /* A browser may have disposed an expired native cue. */ }
     };
     const apply = () => {
-      if (!active || videoRef.current !== video || !video.isConnected) return;
+      if (!active || !ownsSource(video) || !video.isConnected) return;
       const tracks = new Set(Array.from(video.textTracks));
       for (const [track, listener] of trackListeners) {
         if (tracks.has(track)) continue;
@@ -4503,7 +4622,7 @@ function WebviewPlayer({
       if (oldFont) video.style.setProperty("--player-caption-font-size", oldFont);
       else video.style.removeProperty("--player-caption-font-size");
     };
-  }, [engine, url]);
+  }, [engine, sourceIdentity, url]);
   useLayoutEffect(() => {
     refreshCaptionLayoutRef.current?.();
   }, [chromeVisible, videoFit, videoZoom, videoPanX, videoPanY, subtitlePosition,
@@ -4606,7 +4725,7 @@ function WebviewPlayer({
       }
     };
     const sync = () => {
-      if (reconcilingBrowserAudioSelectionRef.current) return;
+      if (!mediaEventsCurrent(video) || reconcilingBrowserAudioSelectionRef.current) return;
       const available = choices();
       setBrowserAudioTracks(available);
       const enabled = available.filter((choice) => trackAt(choice.index)?.enabled);
@@ -4680,7 +4799,7 @@ function WebviewPlayer({
       list.removeEventListener("change", sync);
       video.removeEventListener("loadedmetadata", sync);
     };
-  }, [savedPrefs, url]);
+  }, [savedPrefs, sourceIdentity, url]);
 
   // Lock-screen / hardware-media controls. A browser can expose Media Session
   // while supporting only a subset of actions, so every handler registration
@@ -5028,7 +5147,7 @@ function WebviewPlayer({
     if (
       pending == null ||
       pending.fallbackStarted ||
-      videoRef.current !== video ||
+      !ownsSource(video) ||
       video.seeking ||
       video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
       !Number.isFinite(video.currentTime) ||
@@ -5056,7 +5175,7 @@ function WebviewPlayer({
       activated ||
       pendingNativeHlsSeekRef.current !== pending ||
       pendingNativeHlsSeekSequenceRef.current !== pending.sequence ||
-      videoRef.current !== video
+      !ownsSource(video)
     ) {
       return;
     }
@@ -5067,7 +5186,7 @@ function WebviewPlayer({
     setPaused(true);
     setPlaying(false);
     onPausedChange(true);
-  }, [onPausedChange]);
+  }, [onPausedChange, sourceIdentity]);
 
   useEffect(() => () => {
     invalidatePendingNativeHlsSeek();
@@ -5080,6 +5199,7 @@ function WebviewPlayer({
     serverAudioOwner,
     subtitle,
     title,
+    sourceIdentity,
     url,
   ]);
 
@@ -5094,8 +5214,8 @@ function WebviewPlayer({
     let lastPosition = Number.isFinite(video.currentTime) ? video.currentTime : 0;
     let lastBufferedFrontier = Number.NaN;
     const watchdog = new PlaybackStallWatchdog(() => {
-      if (!active || videoRef.current !== video || stallWatchdogRef.current !== watchdog ||
-        terminalRecoveryVideoRef.current === video) return;
+      if (!active || !ownsSource(video) || stallWatchdogRef.current !== watchdog ||
+        terminalRecoveryOwns(video)) return;
       if (quarantineResetClock()) return;
       const liveState = {
         ...stallStateRef.current,
@@ -5138,7 +5258,7 @@ function WebviewPlayer({
       watchdog.update(stallStateRef.current);
     };
     const queueOwnedForegroundPlayback = () => {
-      if (active && videoRef.current === video && backgroundBlocksPlayback(video) &&
+      if (active && ownsSource(video) && backgroundBlocksPlayback(video) &&
           verifiedPlaybackProgressReportedRef.current && !ownedPlaybackPausedRef.current && !video.ended &&
           !nativeControlsOwnPlayback(video)) {
         backgroundPauseVideoRef.current = video;
@@ -5147,11 +5267,11 @@ function WebviewPlayer({
       }
     };
     const quarantineResetClock = (): boolean => {
-      if (terminalRecoveryVideoRef.current === video) {
+      if (terminalRecoveryOwns(video)) {
         if (!video.paused) video.pause();
         return true;
       }
-      if (!active || videoRef.current !== video || !verifiedPlaybackProgressReportedRef.current ||
+      if (!active || !ownsSource(video) || !verifiedPlaybackProgressReportedRef.current ||
           !recoveryClockWasReset(video)) return false;
       recoveryProgress.reset();
       // Retain intent, but never let a replay clock earn health or keep decoding.
@@ -5172,7 +5292,45 @@ function WebviewPlayer({
       }
       return Number.NaN;
     };
+    const decodedFrameCount = (): number | null => {
+      try {
+        const count = video.getVideoPlaybackQuality?.().totalVideoFrames;
+        return count != null && Number.isSafeInteger(count) && count >= 0 ? count : null;
+      } catch { return null; }
+    };
+    const foregroundReturnOwned = () =>
+      active && ownsSource(video) && video.isConnected && playbackSourceRef.current === url &&
+        canRefreshSourceRef.current && verifiedPlaybackProgressReportedRef.current &&
+        !ownedPlaybackPausedRef.current && !video.paused && !video.ended && video.error == null &&
+        !terminalRecoveryOwns(video) && !video.controls && !nativeControlsOwnPlayback(video) &&
+        !video.seeking && !rendererSeekingRef.current && !scrubbingRef.current && pendingRecoverySeekFor(video) == null &&
+        !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null && !suspendedRef.current &&
+        !backgroundBlocksPlayback(video) && document.visibilityState === "visible" && document.hasFocus();
+    const bufferlessReturnEligible = () => {
+      const total = absoluteDurationFor(video.duration);
+      return foregroundReturnOwned() && verifiedPlaybackPlayingRef.current &&
+        video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && video.networkState === HTMLMediaElement.NETWORK_IDLE &&
+        Number.isFinite(video.currentTime) && !Number.isFinite(bufferedFrontier()) &&
+        total != null && total - (video.currentTime + timelineOffsetRef.current) >= 5;
+    };
+    const armForegroundIdleRecovery = () => {
+      cancelForegroundIdleRecovery(video);
+      const frames = decodedFrameCount();
+      if (frames == null || !foregroundReturnOwned() || !Number.isFinite(video.currentTime)) return;
+      const position = video.currentTime;
+      const pending = { video, source: url, attempt: playbackAttemptRef.current, token: foregroundPlaybackRef.current,
+        timer: window.setTimeout(() => {
+        if (foregroundIdleRecoveryRef.current !== pending) return;
+        // Consume before entering the existing terminal/source-resolution fence.
+        foregroundIdleRecoveryRef.current = null;
+        if (!bufferlessReturnEligible() || playbackAttemptRef.current !== pending.attempt ||
+            Math.abs(video.currentTime - position) > 0.01 || decodedFrameCount() !== frames) return;
+        recoverTerminalPlayback(video);
+      }, FOREGROUND_BUFFERLESS_TIMEOUT_MS) };
+      foregroundIdleRecoveryRef.current = pending;
+    };
     const onPlaying = () => {
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_CURRENT_DATA) || (sourceLoadRef.current.reused && video.paused)) return;
       if (quarantineResetClock()) return;
       recoveryBuffering = false;
       recoveryProgress.reset();
@@ -5183,26 +5341,31 @@ function WebviewPlayer({
       if (advanced) watchdog.noteProgress();
     };
     const onPlayForWatchdog = () => {
-      if (!active || videoRef.current !== video || backgroundBlocksPlayback(video) || suspendedRef.current ||
+      if (!currentMediaEvent(video) || (sourceLoadRef.current.reused && video.paused)) return;
+      if (!active || !ownsSource(video) || backgroundBlocksPlayback(video) || suspendedRef.current ||
           exactHandoffPendingRef.current || pendingNativeHlsSeekRef.current != null || video.seeking || rendererSeekingRef.current) return;
       if (quarantineResetClock()) return;
       // A resumed play request can stall before playing. Keep its existing
       // deadline live without awarding readiness or healthy progress.
       sync({ paused: video.paused });
     };
-    const onPause = () => { queueOwnedForegroundPlayback(); recoveryProgress.reset(); sync({ paused: true }); };
-    const onEndedForWatchdog = () => { clearReturnedPlayback(video); if (quarantineResetClock()) return; recoveryProgress.reset(); sync({ ended: true, paused: true }); };
-    const onNativeControls = () => clearReturnedPlayback(video);
-    const onNativeFullscreen = () => { if (document.fullscreenElement === video) clearReturnedPlayback(video); };
-    const onWaiting = () => { recoveryBuffering = true; recoveryProgress.reset(); };
+    const onPause = () => {
+      if (!currentMediaEvent(video) || (sourceLoadRef.current.reused && !video.paused)) return;
+      queueOwnedForegroundPlayback(); recoveryProgress.reset(); sync({ paused: true });
+    };
+    const onEndedForWatchdog = () => { if (!currentMediaEvent(video) || (sourceLoadRef.current.reused && !video.ended)) return; clearReturnedPlayback(video); if (quarantineResetClock()) return; recoveryProgress.reset(); sync({ ended: true, paused: true }); };
+    const onNativeControls = () => { if (ownsSource(video)) clearReturnedPlayback(video); };
+    const onNativeFullscreen = () => { if (ownsSource(video) && document.fullscreenElement === video) clearReturnedPlayback(video); };
+    const onWaiting = () => { if (!currentMediaEvent(video)) return; recoveryBuffering = true; recoveryProgress.reset(); };
     const onSeeking = () => {
+      if (!currentMediaEvent(video) || (sourceLoadRef.current.reused && !video.seeking)) return;
       clearReturnedPlayback(video);
       recoveryProgress.reset();
       rendererSeekingRef.current = true;
       sync({ seeking: true });
     };
     const onSeeked = () => {
-      if (!active || videoRef.current !== video) return;
+      if (!active || !currentMediaEvent(video, HTMLMediaElement.HAVE_CURRENT_DATA)) return;
       recoveryProgress.reset();
       lastPosition = Number.isFinite(video.currentTime) ? video.currentTime : lastPosition;
       const frontier = bufferedFrontier();
@@ -5219,6 +5382,7 @@ function WebviewPlayer({
       sync({ seeking: scrubbingRef.current });
     };
     const onBufferProgress = () => {
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_CURRENT_DATA)) return;
       if (quarantineResetClock()) return;
       const next = bufferedFrontier();
       if (!Number.isFinite(next)) {
@@ -5235,15 +5399,18 @@ function WebviewPlayer({
         return;
       }
       if (next > lastBufferedFrontier + 0.05) {
+        cancelForegroundIdleRecovery(video);
         lastBufferedFrontier = next;
         watchdog.noteProgress();
       }
     };
     const onClockProgress = () => {
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_CURRENT_DATA)) return;
       if (quarantineResetClock()) return;
+      if (Math.abs(video.currentTime - lastPosition) > 0.01) cancelForegroundIdleRecovery(video);
       const pending = pendingRecoverySeekFor(video);
       if (pending != null) {
-        const healthy = active && videoRef.current === video && terminalRecoveryVideoRef.current !== video &&
+        const healthy = active && ownsSource(video) && !terminalRecoveryOwns(video) &&
           video.error == null && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
           verifiedPlaybackProgressReportedRef.current && verifiedPlaybackPlayingRef.current &&
           !video.paused && !video.ended && !video.seeking && !scrubbingRef.current &&
@@ -5269,7 +5436,7 @@ function WebviewPlayer({
           pending.healthyMediaTime = null;
         }
       }
-      const eligible = active && videoRef.current === video && terminalRecoveryVideoRef.current !== video &&
+      const eligible = active && ownsSource(video) && !terminalRecoveryOwns(video) &&
         video.error == null && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
         verifiedPlaybackProgressReportedRef.current && verifiedPlaybackPlayingRef.current &&
         !video.paused && !video.ended && !video.seeking && !rendererSeekingRef.current && !scrubbingRef.current &&
@@ -5288,12 +5455,27 @@ function WebviewPlayer({
     };
     let pageHidden = false;
     const onDocumentLifecycle = () => {
-      if (!active || videoRef.current !== video) return;
+      if (!active || !ownsSource(video)) return;
       const next = pageHidden || document.visibilityState === "hidden";
+      const returning = documentSuspendedRef.current && !next;
       if (next === documentSuspendedRef.current &&
           (next || foregroundPlaybackRef.current?.video !== video)) return;
       documentSuspendedRef.current = next;
+      if (next) cancelForegroundIdleRecovery(video);
       if (next && backgroundBlocksPlayback(video)) {
+        const pause = preBackgroundPauseRef.current;
+        preBackgroundPauseRef.current = null;
+        const age = pause == null ? Number.NaN : performance.now() - pause.pausedAt;
+        if (pause?.video === video && pause.source === url && playbackSourceRef.current === url &&
+            pause.attempt === playbackAttemptRef.current && age >= 0 && age <= PRE_BACKGROUND_PAUSE_CORRELATION_MS &&
+            video.paused && video.error == null && !video.ended && !video.controls && !video.seeking &&
+            !rendererSeekingRef.current && !scrubbingRef.current && !suspendedRef.current &&
+            !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null &&
+            !terminalRecoveryOwns(video) && !nativeControlsOwnPlayback(video)) {
+          // WebKit can pause just before reporting hidden. Correlate only this
+          // imminent transition; an ordinary visible pause still takes effect.
+          ownedPlaybackPausedRef.current = false;
+        }
         video.autoplay = false;
         queueOwnedForegroundPlayback();
       }
@@ -5317,6 +5499,7 @@ function WebviewPlayer({
           !video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         applyOwnedPlayback(video, pendingPlayback.play);
       }
+      if (returning) armForegroundIdleRecovery();
     };
     const onPageHide = () => { pageHidden = true; onDocumentLifecycle(); };
     const onPageShow = () => { pageHidden = false; onDocumentLifecycle(); };
@@ -5338,6 +5521,7 @@ function WebviewPlayer({
     window.addEventListener("pageshow", onPageShow);
     document.addEventListener("visibilitychange", onDocumentLifecycle);
     return () => {
+      cancelForegroundIdleRecovery(video);
       active = false;
       recoveryProgress.reset();
       if (recoveryProgressWindowRef.current === recoveryProgress) recoveryProgressWindowRef.current = null;
@@ -5361,7 +5545,7 @@ function WebviewPlayer({
       window.removeEventListener("pageshow", onPageShow);
       document.removeEventListener("visibilitychange", onDocumentLifecycle);
     };
-  }, [applyOwnedPlayback, clearReturnedPlayback, url]);
+  }, [applyOwnedPlayback, cancelForegroundIdleRecovery, clearReturnedPlayback, sourceIdentity, url]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -5376,8 +5560,9 @@ function WebviewPlayer({
     verifiedPlaybackPlayingRef.current = false;
     ownedPlaybackPausedRef.current = sourceSwitchStateRef.current?.paused ?? false;
     explicitPlaybackIntentRef.current = false;
+    preBackgroundPauseRef.current = null;
     backgroundPauseVideoRef.current = null;
-    lastObservedMediaTimeRef.current = Number.isFinite(video.currentTime)
+    lastObservedMediaTimeRef.current = !sourceLoadRef.current.started ? 0 : Number.isFinite(video.currentTime)
       ? video.currentTime
       : 0;
     onSourceSizeRef.current(null);
@@ -5448,6 +5633,7 @@ function WebviewPlayer({
       return true;
     };
     const onTimeUpdate = () => {
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_CURRENT_DATA)) return;
       // A failed decoder's reset clock is not confirmed playback or history.
       if (video.error != null) return;
       // A decoder reset is not an owned seek to zero or a new resume decision.
@@ -5473,6 +5659,9 @@ function WebviewPlayer({
       }
       onAbsolutePositionChange(video.currentTime + timelineOffsetRef.current);
       const previousMediaTime = lastObservedMediaTimeRef.current;
+      if (!video.paused && video.currentTime > previousMediaTime + 0.01 && preBackgroundPauseRef.current?.video === video) {
+        preBackgroundPauseRef.current = null;
+      }
       const returnedPlayback = foregroundPlaybackRef.current;
       if (returnedPlayback?.video === video && returnedPlayback.source === url &&
           returnedPlayback.returnedPosition != null && video.currentTime > returnedPlayback.returnedPosition + 0.01 &&
@@ -5528,7 +5717,7 @@ function WebviewPlayer({
     // - seeking into an unknown/zero seekable range just gets clamped to 0 and,
     // since we'd have marked it done, would never resume.
     const applyResume = () => {
-      if (didSeekRef.current) return;
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_METADATA) || didSeekRef.current) return;
       const start = explicitInitialSeekRef.current ?? startPositionRef.current ?? 0;
       const recoveryHandoff = requiresExactHandoffRef.current;
       if (recoveryHandoff) {
@@ -5574,6 +5763,7 @@ function WebviewPlayer({
       }
     };
     const onLoadedMeta = () => {
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_METADATA)) return;
       if (Number.isFinite(video.duration)) {
         setDuration(video.duration);
         const sourceDuration = video.duration + timelineOffsetRef.current;
@@ -5591,6 +5781,7 @@ function WebviewPlayer({
       applyResume();
     };
     const onDurationChange = () => {
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_METADATA)) return;
       if (Number.isFinite(video.duration)) {
         setDuration(video.duration);
         const sourceDuration = video.duration + timelineOffsetRef.current;
@@ -5599,6 +5790,7 @@ function WebviewPlayer({
       applyResume();
     };
     const onSeekedForResume = () => {
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_CURRENT_DATA)) return;
       if (pendingNativeHlsSeekRef.current != null) {
         confirmPendingNativeHlsSeek(video);
         if (pendingNativeHlsSeekRef.current != null) return;
@@ -5614,8 +5806,9 @@ function WebviewPlayer({
       );
     };
     const onVideoEnded = () => {
+      if (!currentMediaEvent(video) || (sourceLoadRef.current.reused && !video.ended)) return;
       // A queued EOS from this failed reader cannot complete or advance its title.
-      if (terminalRecoveryVideoRef.current === video) return;
+      if (terminalRecoveryOwns(video)) return;
       if (exactHandoffPendingRef.current) {
         applyResume();
         return;
@@ -5667,7 +5860,7 @@ function WebviewPlayer({
       if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
     const onPause = () => {
-      if (videoRef.current !== video) return;
+      if (!currentMediaEvent(video) || (sourceLoadRef.current.reused && !video.paused)) return;
       const returnedPlayback = foregroundPlaybackRef.current;
       const retainsReturnedPlay = returnedPlayback?.video === video && returnedPlayback.source === url &&
         playbackSourceRef.current === url && returnedPlayback.play && returnedPlayback.returnedPosition != null;
@@ -5676,6 +5869,11 @@ function WebviewPlayer({
           backgroundPauseVideoRef.current !== video && !recoveryClockWasReset(video) &&
           !video.seeking && !rendererSeekingRef.current &&
           !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null) {
+        if (!ownedPlaybackPausedRef.current && verifiedPlaybackPlayingRef.current && verifiedPlaybackProgressReportedRef.current &&
+            playbackSourceRef.current === url && !terminalRecoveryOwns(video) &&
+            !scrubbingRef.current && !video.controls && !nativeControlsOwnPlayback(video)) {
+          preBackgroundPauseRef.current = { video, source: url, attempt: playbackAttemptRef.current, pausedAt: performance.now() };
+        }
         ownedPlaybackPausedRef.current = true;
       }
       verifiedPlaybackPlayingRef.current = false;
@@ -5694,7 +5892,7 @@ function WebviewPlayer({
         onPausedChange(true);
         return;
       }
-      if (terminalRecoveryVideoRef.current === video) {
+      if (terminalRecoveryOwns(video)) {
         const wantsPlay = !ownedPlaybackPausedRef.current;
         setPaused(!wantsPlay);
         setPlaying(wantsPlay);
@@ -5718,8 +5916,9 @@ function WebviewPlayer({
       }
     };
     const onPlay = () => {
-      if (videoRef.current !== video) return;
-      if (terminalRecoveryVideoRef.current === video) {
+      if (!currentMediaEvent(video) || (sourceLoadRef.current.reused && video.paused)) return;
+      if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
+      if (terminalRecoveryOwns(video)) {
         if (!video.paused) video.pause();
         return;
       }
@@ -5756,26 +5955,38 @@ function WebviewPlayer({
       }
     };
     const onVolumeChange = () => {
+      if (!ownsSource(video)) return;
       if (video.volume > 0) lastAudibleVolumeRef.current = video.volume;
       setMuted(video.muted);
       setVolume(video.volume);
     };
-    const onRateChange = () => setPlaybackRate(video.playbackRate);
-    const onLoadStart = () => setPlaybackStatus(
-      exactHandoffPendingRef.current ? "seeking" : "starting",
-    );
+    const onRateChange = () => { if (ownsSource(video)) setPlaybackRate(video.playbackRate); };
+    const onLoadStart = () => {
+      if (!ownsSource(video)) return;
+      const load = sourceLoadRef.current;
+      if (!load.started && load.expected != null) {
+        try {
+          const actual = new URL(video.currentSrc), expected = new URL(load.expected);
+          actual.hash = ""; expected.hash = "";
+          if (actual.href === expected.href) load.started = true;
+        } catch { /* Wait for the current native resource selection. */ }
+      }
+      if (mediaEventsCurrent(video)) setPlaybackStatus(exactHandoffPendingRef.current ? "seeking" : "starting");
+    };
     // Network stalled can occur while buffered media is still playing. Keep
     // readiness unchanged until waiting actually reports buffer starvation.
-    const onWaiting = () => setPlaybackStatus(
+    const onWaiting = () => { if (currentMediaEvent(video)) setPlaybackStatus(
       exactHandoffPendingRef.current ? "seeking" : "buffering",
-    );
+    ); };
     const onPlaying = () => {
-      if (video.error != null || terminalRecoveryVideoRef.current === video) return;
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_CURRENT_DATA) ||
+          (sourceLoadRef.current.reused && video.paused) || video.error != null || terminalRecoveryOwns(video)) return;
       if (exactHandoffPendingRef.current || pendingNativeHlsSeekRef.current != null) {
         video.pause();
         setPlaybackStatus("seeking");
         return;
       }
+      if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
       verifiedPlaybackPlayingRef.current = true;
       if (Number.isFinite(video.currentTime) && !recoveryClockWasReset(video)) {
         lastObservedMediaTimeRef.current = video.currentTime;
@@ -5784,6 +5995,7 @@ function WebviewPlayer({
       setPlaybackStatus(null);
     };
     const onCanPlay = () => {
+      if (!currentMediaEvent(video, HTMLMediaElement.HAVE_CURRENT_DATA)) return;
       if (exactHandoffPendingRef.current || pendingNativeHlsSeekRef.current != null) {
         setPlaybackStatus("seeking");
         return;
@@ -5819,6 +6031,7 @@ function WebviewPlayer({
     }
     const attemptAutoplay = () => {
       if (
+        !currentMediaEvent(video, HTMLMediaElement.HAVE_CURRENT_DATA) ||
         autoplayAttemptedRef.current ||
         suspendedRef.current ||
         exactHandoffPendingRef.current ||
@@ -5864,6 +6077,7 @@ function WebviewPlayer({
     video.addEventListener("volumechange", onVolumeChange);
     video.addEventListener("ratechange", onRateChange);
     return () => {
+      if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
       const pendingPlayback = foregroundPlaybackRef.current;
       if (pendingPlayback?.video === video && pendingPlayback.source === url) foregroundPlaybackRef.current = null;
       pendingHandoffPlaybackIntentRef.current = null;
@@ -5885,11 +6099,12 @@ function WebviewPlayer({
       video.removeEventListener("volumechange", onVolumeChange);
       video.removeEventListener("ratechange", onRateChange);
       if (
+        committedSourceRef.current === sourceIdentity &&
         !exactHandoffPendingRef.current &&
         onProgressRef.current != null &&
         video.currentTime > 0
       ) report();
-      if (scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
+      if (committedSourceRef.current === sourceIdentity && scrobbleContext != null) scrobblePlaybackStop(scrobbleContext, progressPct());
     };
   }, [
     applyDeferredHandoffPlayback,
@@ -5900,13 +6115,14 @@ function WebviewPlayer({
     onPausedChange,
     onVerifiedPlaybackProgress,
     scrobbleContext,
+    sourceIdentity,
     url,
   ]);
 
   useEffect(() => {
     startupReadyRef.current = false;
     setPlaybackStatus(exactHandoffPendingRef.current ? "seeking" : "starting");
-  }, [url]);
+  }, [sourceIdentity, url]);
 
   useEffect(() => {
     if (suspended || startupReadyRef.current) return;
@@ -5923,14 +6139,14 @@ function WebviewPlayer({
       active = false;
       window.clearTimeout(timer);
     };
-  }, [engine, suspended, url]);
+  }, [engine, sourceIdentity, suspended, url]);
 
   const needsServerPreparation = isHls && serverOptimized != null && isTrustedServerHlsManifestURL(url);
-  const [initialLeasePreparation, setInitialLeasePreparation] = useState<{ source: string; target: string | null } | null>(null);
-  const leasePreparationReady = !needsServerPreparation || preparedLeaseTarget !== undefined || initialLeasePreparation?.source === url;
+  const [initialLeasePreparation, setInitialLeasePreparation] = useState<{ source: string; identity: typeof sourceIdentity; target: string | null } | null>(null);
+  const leasePreparationReady = !needsServerPreparation || preparedLeaseTarget !== undefined || (initialLeasePreparation?.source === url && initialLeasePreparation.identity === sourceIdentity);
   const leaseTarget = preparedLeaseTarget !== undefined
     ? preparedLeaseTarget
-    : initialLeasePreparation?.source === url ? initialLeasePreparation.target : null;
+    : (initialLeasePreparation?.source === url && initialLeasePreparation.identity === sourceIdentity) ? initialLeasePreparation.target : null;
   const leaseExpiredCallbackRef = useRef(onServerLeaseExpired);
   useLayoutEffect(() => {
     leaseExpiredCallbackRef.current = onServerLeaseExpired;
@@ -5941,9 +6157,10 @@ function WebviewPlayer({
   useEffect(() => {
     if (!needsServerPreparation || preparedLeaseTarget !== undefined) return;
     const video = videoRef.current;
+    if (video == null) return;
     const controller = new AbortController();
     let active = true;
-    const owns = () => active && !controller.signal.aborted && videoRef.current === video;
+    const owns = () => active && !controller.signal.aborted && ownsSource(video);
     const deadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
     void (async () => {
       let delay = SERVER_OPTIMIZED_RETRY_BASE_MS;
@@ -5964,16 +6181,16 @@ function WebviewPlayer({
           "Server optimized playback timed out.", () => controller.abort());
         if (!owns()) return;
         if (!manifest.startsWith("#EXTM3U")) throw new Error("The server did not return a playable HLS manifest.");
-        setInitialLeasePreparation({ source: url, target: serverHlsLeaseTarget(url, manifest) });
+        setInitialLeasePreparation({ source: url, identity: sourceIdentity, target: serverHlsLeaseTarget(url, manifest) });
         return;
       }
     })().catch((error: unknown) => {
-      if (active && videoRef.current === video) {
+      if (active && ownsSource(video)) {
         onPlaybackErrorRef.current(error instanceof Error ? error.message : "Server playback preparation failed.", exactHandoffPendingRef.current);
       }
     });
     return () => { active = false; controller.abort(); };
-  }, [needsServerPreparation, preparedLeaseTarget, url]);
+  }, [needsServerPreparation, preparedLeaseTarget, sourceIdentity, url]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -5985,7 +6202,7 @@ function WebviewPlayer({
     let controller: AbortController | null = null;
     let lastAttempt = leaseLastAttemptRef.current?.target === leaseTarget
       ? leaseLastAttemptRef.current.at : -Infinity;
-    const owns = () => active && videoRef.current === video;
+    const owns = () => active && ownsSource(video);
     const stop = () => {
       terminal = true;
       window.clearTimeout(timer);
@@ -6036,19 +6253,27 @@ function WebviewPlayer({
       window.removeEventListener("pageshow", onPageShow);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [ended, leasePreparationReady, leaseTarget, serverOptimizationPending, suspended, url]);
+  }, [ended, leasePreparationReady, leaseTarget, serverOptimizationPending, sourceIdentity, suspended, url]);
 
   // Wire hls.js for HLS streams when the browser can't play them natively.
   useEffect(() => {
     const video = videoRef.current;
     if (video == null || !leasePreparationReady) return;
     nativeExactHlsFragmentRef.current = false;
+    const forceReload = assignedSourceRef.current != null && assignedSourceRef.current.source !== sourceIdentity && assignedSourceRef.current.url === url;
+    assignedSourceRef.current = { source: sourceIdentity, url };
+    const assignNativeSource = (sourceUrl: string) => {
+      if (!ownsSource(video)) return;
+      sourceLoadRef.current.expected = sourceUrl;
+      if (video.src !== sourceUrl) video.src = sourceUrl;
+      if (forceReload) video.load();
+    };
 
     if (!isHls) {
       setNativeHlsPlayback(false);
       // Only (re)assign on an actual URL change - reassigning the same src
       // invokes the media load algorithm and restarts playback from 0.
-      if (video.src !== url) video.src = url;
+      assignNativeSource(url);
       return;
     }
     if (shouldUseNativeHls(video)) {
@@ -6064,7 +6289,7 @@ function WebviewPlayer({
         ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
         : url;
       nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
-      if (video.src !== sourceUrl) video.src = sourceUrl;
+      assignNativeSource(sourceUrl);
       return;
     }
 
@@ -6119,9 +6344,9 @@ function WebviewPlayer({
     void import("hls.js").then(({ default: Hls }) => {
       // The effect can be torn down (or the URL swapped) while the chunk is in
       // flight; without this we would attach a player to a stale <video>.
-      if (cancelled) return;
+      if (cancelled || committedSourceRef.current !== sourceIdentity) return;
       const element = videoRef.current;
-      if (element == null) return;
+      if (element == null || !ownsSource(element)) return;
       if (!Hls.isSupported()) {
         if (element.canPlayType("application/vnd.apple.mpegurl") !== "") {
           setNativeHlsPlayback(true);
@@ -6134,7 +6359,7 @@ function WebviewPlayer({
             ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
             : url;
           nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
-          if (element.src !== sourceUrl) element.src = sourceUrl;
+          assignNativeSource(sourceUrl);
           return;
         }
         onPlaybackErrorRef.current(
@@ -6180,15 +6405,18 @@ function WebviewPlayer({
       });
       hlsRef.current = instance;
       const ownedInstance = instance;
+      instance.on(Hls.Events.MEDIA_ATTACHED, () => {
+        if (!cancelled && ownsSource(element) && hlsRef.current === ownedInstance) sourceLoadRef.current.started = true;
+      });
       rearmRecovery = (video) => {
-        if (cancelled || video !== element || videoRef.current !== element ||
+        if (cancelled || video !== element || !ownsSource(element) ||
             hlsRef.current !== ownedInstance || retryTimer != null) return;
         recovery.networkRetries = 0;
         recovery.mediaRecoveries = 0;
       };
       rearmHlsRecoveryRef.current = rearmRecovery;
       const refreshCaptions = () => {
-        if (!cancelled && hlsRef.current === instance) captionControllerRef.current?.refresh();
+        if (!cancelled && ownsSource(element) && hlsRef.current === instance) captionControllerRef.current?.refresh();
       };
       instance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, refreshCaptions);
       instance.on(Hls.Events.SUBTITLE_TRACK_SWITCH, refreshCaptions);
@@ -6199,7 +6427,7 @@ function WebviewPlayer({
       };
       refreshCaptions();
       instance.on(Hls.Events.ERROR, (_event, data) => {
-        if (cancelled || !data.fatal || instance == null || hlsRef.current !== instance || videoRef.current !== element) return;
+        if (cancelled || !data.fatal || instance == null || hlsRef.current !== instance || !ownsSource(element)) return;
         // Each fault must earn a fresh contiguous healthy window, not reuse
         // playback credit accumulated before this recovery attempt.
         recoveryProgressWindowRef.current?.reset();
@@ -6211,7 +6439,7 @@ function WebviewPlayer({
           retryTimer = window.setTimeout(
             () => {
               retryTimer = undefined;
-              if (cancelled || instance == null || hlsRef.current !== instance || videoRef.current !== element) return;
+              if (cancelled || instance == null || hlsRef.current !== instance || !ownsSource(element)) return;
               if (
                 data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
                 data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT
@@ -6244,6 +6472,7 @@ function WebviewPlayer({
         );
       });
       instance.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (cancelled || !ownsSource(element) || hlsRef.current !== ownedInstance) return;
         refreshCaptions();
         setHlsLevels(
           instance?.levels.map((level, index) => ({
@@ -6280,9 +6509,11 @@ function WebviewPlayer({
         }
       });
       instance.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
+        if (cancelled || !ownsSource(element) || hlsRef.current !== ownedInstance) return;
         setHlsLevel(data.level);
       });
       instance.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
+        if (cancelled || !ownsSource(element) || hlsRef.current !== ownedInstance) return;
         const audioChoices = instance?.audioTracks.map((track, index) => ({
           index,
           id: String(index),
@@ -6294,6 +6525,7 @@ function WebviewPlayer({
         applyHlsAudioPreference(audioChoices);
       });
       instance.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => {
+        if (cancelled || !ownsSource(element) || hlsRef.current !== ownedInstance) return;
         setHlsAudioTrack(data.id);
         const selected = instance?.audioTracks[data.id];
         if (!serverAudioModeRef.current) {
@@ -6324,7 +6556,7 @@ function WebviewPlayer({
       setHlsAudioTracks([]);
       setHlsAudioInventoryKnown(false);
     };
-  }, [engine, url, isHls, leasePreparationReady]);
+  }, [engine, sourceIdentity, url, isHls, leasePreparationReady]);
 
   const beginConfirmedNativeHlsSeek = (
     video: HTMLVideoElement,
@@ -6367,7 +6599,7 @@ function WebviewPlayer({
       if (
         pendingNativeHlsSeekRef.current !== pending ||
         pendingNativeHlsSeekSequenceRef.current !== sequence ||
-        videoRef.current !== video ||
+        !ownsSource(video) ||
         !nativeHlsPlaybackRef.current
       ) {
         return;
@@ -6455,7 +6687,7 @@ function WebviewPlayer({
   const recoverTerminalPlayback = (video: HTMLVideoElement, allowMissingResolver = false): boolean => {
     if (
       (!canRefreshSourceRef.current && !allowMissingResolver) ||
-      videoRef.current !== video ||
+      !ownsSource(video) ||
       !verifiedPlaybackProgressReportedRef.current ||
       exactHandoffPendingRef.current ||
       pendingNativeHlsSeekRef.current != null
@@ -6465,8 +6697,9 @@ function WebviewPlayer({
     // instead of preparing another decoder against the potentially dead grant.
     // Fence synchronously: the browser can queue error, pause and ended before
     // the asynchronous parent resolver publishes a replacement.
-    if (terminalRecoveryVideoRef.current === video) return true;
+    if (terminalRecoveryOwns(video)) return true;
     terminalRecoveryVideoRef.current = video;
+    terminalRecoverySourceRef.current = sourceIdentity;
     const snapshot = captureRecoverySnapshot(video);
     terminalRecoveryStateRef.current = snapshot.state;
     stopLeaseRef.current();
@@ -6968,12 +7201,13 @@ function WebviewPlayer({
     const video = videoRef.current;
     const pendingIntent = pendingHandoffPlaybackIntentRef.current;
     return {
-      paused: pendingIntent === "play" ? false : pendingIntent === "pause" ? true : video?.paused ?? paused,
+      paused: pendingIntent === "play" ? false : pendingIntent === "pause" ? true
+        : video != null && ownsSource(video) ? currentRecoveryState(video).paused : paused,
       volume: video?.volume ?? volume,
       muted: video?.muted ?? muted,
       playbackRate: video?.playbackRate ?? playbackRate,
     };
-  }, [muted, paused, playbackRate, volume]);
+  }, [muted, paused, playbackRate, sourceIdentity, volume]);
 
   const selectServerOptimizedQuality = useCallback((quality: ServerTranscodeQuality) => {
     const selected = serverAudioTracks.find(
@@ -7352,6 +7586,7 @@ function WebviewPlayer({
             if (isHls && hlsRef.current != null) {
               return;
             }
+            if (!currentMediaEvent(event.currentTarget)) return;
             const mediaError = event.currentTarget.error;
             // Older Android WebViews can emit an `error` event while trying to
             // resolve their internal default poster URI, without setting a

@@ -101,13 +101,28 @@ test("rejects a raw latest rule and every removed required version or ref rule",
     "type=ref,event=branch",
     "type=ref,event=tag",
     "type=semver,pattern={{version}}",
-    "type=semver,pattern={{major}}.{{minor}}",
     "type=raw,value=${{ steps.release-version.outputs.version }},enable=${{ steps.release-version.outputs.enabled }}",
-    "type=raw,value=${{ steps.release-version.outputs.major_minor }},enable=${{ steps.release-version.outputs.enabled }}",
   ];
   for (const rule of requiredRules) {
     expectPolicyFailure(replaceOnce(workflow, `            ${rule}\n`, ""));
   }
+});
+
+test("rejects either minor alias, major aliases, and latest from the tag publisher", () => {
+  const firstRule = "            type=ref,event=branch\n";
+  for (const alias of [
+    "type=semver,pattern={{major}}.{{minor}}",
+    "type=raw,value=${{ steps.release-version.outputs.major_minor }},enable=${{ steps.release-version.outputs.enabled }}",
+    "type=semver,pattern={{major}}",
+    "type=raw,value=2.3",
+    "type=raw,value=2",
+    "type=raw,value=latest",
+  ]) {
+    expectPolicyFailure(
+      replaceOnce(workflow, firstRule, `${firstRule}            ${alias}\n`),
+    );
+  }
+  assert.doesNotMatch(workflow, /major_minor/);
 });
 
 test("binds the named publish step to build-push-action and metadata tags only", () => {

@@ -9,9 +9,7 @@ const REQUIRED_TAG_RULES = [
   "type=ref,event=branch",
   "type=ref,event=tag",
   "type=semver,pattern={{version}}",
-  "type=semver,pattern={{major}}.{{minor}}",
   "type=raw,value=${{ steps.release-version.outputs.version }},enable=${{ steps.release-version.outputs.enabled }}",
-  "type=raw,value=${{ steps.release-version.outputs.major_minor }},enable=${{ steps.release-version.outputs.enabled }}",
 ];
 
 function normalizeName(value) {

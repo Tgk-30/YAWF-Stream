@@ -843,10 +843,10 @@ check(
   "Desktop release tags publish stable server image versions",
   /version="\$\{REF_NAME#v\}"/.test(dockerWorkflow) &&
     /version="\$\{version%-web\}"/.test(dockerWorkflow) &&
-    /major_minor=\$\{version%\.\*\}/.test(dockerWorkflow) &&
     /steps\.release-version\.outputs\.version/.test(dockerWorkflow) &&
-    /steps\.release-version\.outputs\.major_minor/.test(dockerWorkflow),
-  ".github/workflows/docker-image.yml must turn vX.Y.Z-web into X.Y.Z and X.Y server image tags",
+    !/major_minor/.test(dockerWorkflow) &&
+    dockerLatestTagPolicyFailures.length === 0,
+  ".github/workflows/docker-image.yml must turn vX.Y.Z-web into full X.Y.Z server image tags without minor, major or latest aliases",
 );
 check(
   "Pull requests and manual dispatch verify Docker without publishing",
