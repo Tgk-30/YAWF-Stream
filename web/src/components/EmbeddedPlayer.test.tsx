@@ -2146,3 +2146,168 @@ describe("EmbeddedPlayer predictive up next", () => {
     expect(screen.getByText("Up next")).toBeTruthy();
   });
 });
+
+
+describe("native terminal transport88", () => {
+  async function startNative(extra: Partial<React.ComponentProps<typeof EmbeddedPlayer>> = {}) {
+    const props = { url: "https://example.test/transport.mkv", title: "Transport", onClose: () => {}, ...extra };
+    const view = render(<EmbeddedPlayer {...props} />);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    return { ...view, props };
+  }
+  function progressNative() {
+    emitProperty("duration", 3600);
+    emitProperty("time-pos", 89.25); emitProperty("time-pos", 90.25);
+  }
+  it("[native-reset88] retains confirmed clock and intent through terminal decoder reset", async () => {
+    const fresh = vi.fn(async () => true), fallback = vi.fn(async () => true), ended = vi.fn(), next = vi.fn(), progress = vi.fn();
+    await startNative({ timelineOffsetSeconds: 100, onPlaybackStall: fresh, onPlaybackError: fallback, onEnded: ended, onPlayNext: next, onProgress: progress });
+    progressNative(); progress.mockClear();
+    emitProperty("time-pos", 0); emitProperty("pause", true);
+    emitProperty("end-file", { error: true, code: -13 });
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(190.25, expect.objectContaining({ paused: false }));
+    expect(fallback).not.toHaveBeenCalled(); expect(progress).not.toHaveBeenCalled(); expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
+  });
+  it("[native-order88] fences early EOF then ERROR and duplicate EOF while fresh resolution is pending", async () => {
+    const pending = deferred<boolean>(), fresh = vi.fn(() => pending.promise), ended = vi.fn(), next = vi.fn();
+    await startNative({ onPlaybackStall: fresh, onEnded: ended, onPlayNext: next }); progressNative();
+    emitProperty("eof-reached", true); emitProperty("end-file", { error: true, code: -13 }); emitProperty("eof-reached", true);
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(90.25, expect.objectContaining({ paused: false }));
+    expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled(); pending.resolve(true);
+  });
+  it("[native-sync88] snapshots native state and logical audio before React commits", async () => {
+    renderPlayerMock.getProperty.mockImplementation(async (name: string) => name === "track-list" ? [{ id: 2, type: "audio", lang: "jpn" }] : []);
+    const fresh = vi.fn(async () => true);
+    await startNative({ onPlaybackStall: fresh }); progressNative();
+    emitProperty("track-list/count", 1);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    act(() => {
+      const emit = renderPlayerMock.callback!;
+      for (const [name, data] of [["pause", true], ["volume", 35], ["mute", true], ["speed", 1.25], ["aid", "2"]] as const) emit({ name, data });
+      emit({ name: "end-file", data: { error: true, code: -13 } });
+    });
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(90.25, { paused: true, volume: 0.35, muted: true, playbackRate: 1.25, audioPreference: { id: "2", language: "jpn" } });
+  });
+  it("[native-fallback88] passes current owned snapshot to compatibility fallback without a fresh resolver", async () => {
+    const fallback = vi.fn(async () => true);
+    await startNative({ timelineOffsetSeconds: 100, onPlaybackError: fallback }); progressNative();
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    emitProperty("end-file", { error: true, code: -13 });
+    expect(fallback).toHaveBeenCalledExactlyOnceWith(expect.any(Error), { position: 190.25, state: expect.objectContaining({ paused: true }) });
+  });
+  it("[native-seek88] accepts an explicitly requested seek to zero rather than resurrecting the old clock", async () => {
+    const fresh = vi.fn(async () => true);
+    await startNative({ onPlaybackStall: fresh }); progressNative();
+    fireEvent.keyDown(screen.getByRole("slider", { name: "Seek" }), { key: "Home" });
+    emitProperty("seeking", true); emitProperty("time-pos", 0); emitProperty("seeking", false);
+    emitProperty("end-file", { error: true, code: -13 });
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(0, expect.objectContaining({ paused: false }));
+  });
+  it.each(["startup", "unknown", "complete"] as const)("[native-controls88] preserves %s terminal semantics", async (kind) => {
+    const fresh = vi.fn(async () => true), fallback = vi.fn(async () => true), ended = vi.fn();
+    await startNative({ onPlaybackStall: fresh, onPlaybackError: fallback, onEnded: ended });
+    if (kind === "startup") {
+      emitProperty("time-pos", 0); emitProperty("end-file", { error: true, code: -12 });
+      expect(fallback).toHaveBeenCalledTimes(1); expect(ended).not.toHaveBeenCalled();
+    } else {
+      if (kind === "complete") emitProperty("duration", 91);
+      emitProperty("time-pos", 89); emitProperty("time-pos", 90); emitProperty("eof-reached", true);
+      expect(ended).toHaveBeenCalledTimes(1); expect(fallback).not.toHaveBeenCalled();
+    }
+    expect(fresh).not.toHaveBeenCalled();
+  });
+  it("[native-stale88] rejects old reader callbacks after replacement", async () => {
+    const fresh = vi.fn(async () => true);
+    const view = await startNative({ onPlaybackStall: fresh }); progressNative(); const old = renderPlayerMock.callback!;
+    view.rerender(<EmbeddedPlayer {...view.props} url="https://example.test/new.mkv" />);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    act(() => { old({ name: "time-pos", data: 300 }); old({ name: "end-file", data: { error: true } }); });
+    expect(fresh).not.toHaveBeenCalled();
+  });
+  it("[native-earned88] reports recovery health only after60s of actual eligible progress", async () => {
+    vi.useFakeTimers();
+    const healthy = vi.fn(() => true);
+    await startNative({ onRecoveryPlaybackHealthy: healthy }); progressNative();
+    for (let i = 1; i <= 59; i += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); emitProperty("time-pos", 90.25 + i);
+    }
+    expect(healthy).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); emitProperty("time-pos", 150.25);
+    expect(healthy).toHaveBeenCalledTimes(1);
+  });
+  it.each(["paused", "seeking", "buffering", "jump"] as const)("[native-health-controls88] does not earn recovery from %s clocks", async (kind) => {
+    vi.useFakeTimers(); const healthy = vi.fn(() => true);
+    await startNative({ onRecoveryPlaybackHealthy: healthy }); progressNative();
+    if (kind === "paused") emitProperty("pause", true);
+    if (kind === "seeking") emitProperty("seeking", true);
+    if (kind === "buffering") emitProperty("paused-for-cache", true);
+    for (let i = 1; i <= 61; i += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); emitProperty("time-pos", 90.25 + i * (kind === "jump" ? 10 : 1));
+    }
+    expect(healthy).not.toHaveBeenCalled();
+  });
+
+  it("[native-replay-controls88] keeps observing clocks after genuine EOF and Replay", async () => {
+    const fresh = vi.fn(async () => true), ended = vi.fn(), progress = vi.fn();
+    await startNative({ onPlaybackStall: fresh, onEnded: ended, onProgress: progress });
+    emitProperty("duration", 91); emitProperty("time-pos", 89); emitProperty("time-pos", 90);
+    emitProperty("eof-reached", true); emitProperty("eof-reached", true); expect(ended).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    emitProperty("seeking", true); emitProperty("time-pos", 0); emitProperty("seeking", false);
+    emitProperty("time-pos", 1); emitProperty("time-pos", 2);
+    emitProperty("volume", 45); emitProperty("end-file", { error: true, code: -13 });
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(2, expect.objectContaining({ paused: false, volume: 0.45 }));
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("seek", [0, "absolute"]);
+  });
+  it("[native-duration-controls88] accepts a corrected positive duration and ignores a terminal zero", async () => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    await startNative({ onPlaybackStall: fresh, onEnded: ended }); progressNative();
+    emitProperty("duration", 91); emitProperty("duration", 0); emitProperty("eof-reached", true);
+    expect(fresh).not.toHaveBeenCalled(); expect(ended).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])("[native-eof-intent88] preserves command-owned paused=%s across mpv keep-open auto-pause", async (paused) => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    await startNative({ onPlaybackStall: fresh, onEnded: ended }); progressNative();
+    if (paused) fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    emitProperty("pause", true); emitProperty("eof-reached", true);
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(90.25, expect.objectContaining({ paused }));
+    expect(ended).not.toHaveBeenCalled();
+  });
+  it("[native-select-audio88] claims a user audio selection before native echo or React commit", async () => {
+    renderPlayerMock.getProperty.mockImplementation(async (name: string) => name === "track-list" ? [
+      { id: 1, type: "audio", lang: "eng", title: "English" }, { id: 2, type: "audio", lang: "jpn", title: "Japanese" },
+    ] : []);
+    const fresh = vi.fn(async () => true);
+    await startNative({ onPlaybackStall: fresh }); progressNative(); emitProperty("aid", "1");
+    fireEvent.click(screen.getByRole("button", { name: "Audio" }));
+    await act(async () => { await Promise.resolve(); });
+    renderPlayerMock.setProperty.mockImplementation(async (name: string, value: unknown) => {
+      if (name === "aid" && value === "2") renderPlayerMock.callback!({ name: "end-file", data: { error: true, code: -13 } });
+    });
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /Japanese/ }));
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(90.25, expect.objectContaining({ audioPreference: { id: "2", language: "jpn" } }));
+  });
+
+  it("[native-unknown-error88] retains unknown EOF behavior but does not swallow a later authoritative ERROR", async () => {
+    const fresh = vi.fn(async () => true), ended = vi.fn();
+    await startNative({ onPlaybackStall: fresh, onEnded: ended });
+    emitProperty("time-pos", 89); emitProperty("time-pos", 90); emitProperty("eof-reached", true);
+    expect(ended).toHaveBeenCalledTimes(1); expect(fresh).not.toHaveBeenCalled();
+    emitProperty("end-file", { error: true, code: -13 }); emitProperty("end-file", { error: true, code: -13 }); emitProperty("eof-reached", true);
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(90, expect.objectContaining({ paused: false }));
+    // Existing unknown-duration completion cannot be retracted without an
+    // authoritative normal end-file reason from the native event contract.
+    expect(ended).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([0, 90])("[native-startup-eof-controls88] still falls back after unverified finite EOF at%s then ERROR", async (position) => {
+    const fresh = vi.fn(async () => true), fallback = vi.fn(async () => true);
+    await startNative({ onPlaybackStall: fresh, onPlaybackError: fallback });
+    emitProperty("duration", 3600); emitProperty("time-pos", position); emitProperty("eof-reached", true);
+    emitProperty("end-file", { error: true, code: -12 }); emitProperty("end-file", { error: true, code: -12 });
+    expect(fallback).toHaveBeenCalledExactlyOnceWith(expect.any(Error)); expect(fresh).not.toHaveBeenCalled();
+  });
+
+});
