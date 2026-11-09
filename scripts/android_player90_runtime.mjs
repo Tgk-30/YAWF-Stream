@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
+import { availableParallelism, cpus, totalmem } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,7 +13,7 @@ export const PIN = Object.freeze({
   bytes: 88673153, version: '2.3.90', code: '2003090',
   signer: '233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a',
   image: 'system-images;android-36;google_apis;x86_64', serial: 'emulator-5554',
-  avd: 'yawf-private90-more-api36', gpu: 'swiftshader_indirect',
+  avd: 'yawf-private90-more-api36', gpu: 'swiftshader_indirect', guestCores: 4, guestMemoryMiB: 4096,
   fixture: 'bf7e5b5852addbec5ceb9160def48eb4832462924bd8e4073cdce1f67540d157',
   prefix: 'd99110f238492fab16418dbcb17ce27bd9ed91357a4c08ec38a78d61aa40e380',
 });
@@ -45,6 +46,11 @@ export function validateEnvironment(env) {
   requireTrue(env.CANDIDATE_ARTIFACT === 'android-phone-verification-candidate', 'Fixed artifact mismatch');
 }
 
+export function validateHostResources(host) {
+  requireTrue(Number.isSafeInteger(host.availableCPUs) && host.availableCPUs >= 4
+    && Number.isSafeInteger(host.memoryBytes) && host.memoryBytes >= 8 * 1024 ** 3,
+  'Hosted profile requires at least four available CPUs and eight GiB RAM');
+}
 export function validateCatalog(text) {
   const rows = text.split(/\r?\n/).map((line) => line.split('|').map((part) => part.trim()));
   requireTrue(rows.some((row) => row.length >= 3 && row[0] === PIN.image && /^\d+(?:\.\d+)*$/.test(row[1])),
@@ -215,6 +221,13 @@ async function main() {
     requireTrue(assets.length === 1, 'Exactly one compiled source90 player required');
     save('fixture-player.json', { filename: assets[0], sha256: hash(readFileSync(join(source, 'web/dist/assets', assets[0]))) });
     save('runner.json', { imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion, node: process.version });
+    const hostResources = { availableCPUs: availableParallelism(), logicalCPUs: cpus().length, memoryBytes: totalmem() };
+    save('host-resources-before-boot.json', hostResources);
+    validateHostResources(hostResources);
+    save('configured-guest-before-boot.json', { cores: PIN.guestCores, memoryMiB: PIN.guestMemoryMiB,
+      image: PIN.image, GPU: PIN.gpu, profile: 'hosted-api36-4c4g' });
+    result.hostResources = hostResources;
+    result.configuredGuest = { cores: PIN.guestCores, memoryMiB: PIN.guestMemoryMiB };
     save('apk-static.txt', await run('python3', [join(source, 'scripts/verify_android_apk.py'), '--apk', apk,
       '--version', PIN.version, '--certificate-pin', join(source, 'web/src-tauri/SIGNING_CERT_SHA256'), '--sdk', process.env.ANDROID_HOME], { timeout: 120_000 }));
     requireTrue(readFileSync(join(source, 'web/src-tauri/SIGNING_CERT_SHA256'), 'utf8').trim().replaceAll(':', '').toLowerCase() === PIN.signer, 'Production signer pin mismatch');
@@ -250,7 +263,7 @@ async function main() {
     bootAt = Date.now(); result.bootUTC = new Date(bootAt).toISOString();
     emulator = command('emulator', ['-avd', PIN.avd, '-port', '5554', '-accel', 'on', '-gpu', PIN.gpu,
       '-no-window', '-no-audio', '-no-boot-anim', '-no-snapshot', '-camera-back', 'none', '-camera-front', 'none',
-      '-cores', '2', '-memory', '2048'], { timeout: 12 * 60_000 });
+      '-cores', String(PIN.guestCores), '-memory', String(PIN.guestMemoryMiB)], { timeout: 12 * 60_000 });
     result.ownedEmulatorPID = emulator.child.pid; result.ownedFixturePID = fixture.child.pid;
     const bootDeadline = bootAt + 300_000;
     while (true) {
@@ -266,17 +279,27 @@ async function main() {
       webview: await adb(['shell', 'dumpsys', 'webviewupdate']) };
     const webview = validateGuest(identity);
     result.guest = { ...identity, webview }; save('guest.json', result.guest);
+    save('guest-cpu-online.txt', await adb(['shell', 'cat', '/sys/devices/system/cpu/online']));
+    save('guest-meminfo.txt', await adb(['shell', 'cat', '/proc/meminfo']));
     logcat = command('adb', ['-s', PIN.serial, 'logcat', '-v', 'threadtime'], { timeout: 12 * 60_000 });
     await adb(['shell', 'input', 'keyevent', '3']);
-    let previous = cpuSnapshot(await adb(['shell', 'cat', '/proc/stat']));
+    const initialCPU = await adb(['shell', 'cat', '/proc/stat']);
+    save('readiness-initial-cpu.txt', initialCPU);
+    let previous = cpuSnapshot(initialCPU);
     for (let interval = 0; interval < 2; interval++) {
       await sleep(30_000);
-      const current = cpuSnapshot(await adb(['shell', 'cat', '/proc/stat']));
+      const rawCPU = await adb(['shell', 'cat', '/proc/stat']);
+      save(`readiness-${interval}-cpu.txt`, rawCPU);
+      const rawEvents = await adb(['logcat', '-b', 'events', '-d', '-v', 'brief']);
+      save(`readiness-${interval}-events.txt`, rawEvents);
+      const rawLauncher = await adb(['shell', 'dumpsys', 'activity', 'activities']);
+      save(`readiness-${interval}-launcher.txt`, rawLauncher);
+      const current = cpuSnapshot(rawCPU);
       const wait = iowaitPercent(previous, current); previous = current;
       result.iowait.push({ atUTC: new Date().toISOString(), percent: wait });
       requireTrue(wait < 10, 'Strict guest IO admission failed');
-      requireTrue(!/\bam_anr\b/.test(await adb(['logcat', '-b', 'events', '-d', '-v', 'brief'])), 'Current boot ANR observed');
-      validateLauncher(await adb(['shell', 'dumpsys', 'activity', 'activities']));
+      requireTrue(!/\bam_anr\b/.test(rawEvents), 'Current boot ANR observed');
+      validateLauncher(rawLauncher);
     }
     const installedWebview = await adb(['shell', 'pm', 'path', webview.package]);
     save('webview-package-paths.txt', installedWebview);
@@ -308,7 +331,9 @@ async function main() {
     const receipt = JSON.parse(readFileSync(join(evidence, 'ui/receipt.json'), 'utf8'));
     validateReceipt(receipt);
     requireTrue(readdirSync(join(evidence, 'ui')).some((name) => /^\d{2}-more-open\.png$/.test(name)), 'Actual More screenshot missing');
-    requireTrue(!/\bam_anr\b/.test(await adb(['logcat', '-b', 'events', '-d', '-v', 'brief'])), 'Runtime current boot ANR observed');
+    const runtimeEvents = await adb(['logcat', '-b', 'events', '-d', '-v', 'brief']);
+    save('runtime-events.txt', runtimeEvents);
+    requireTrue(!/\bam_anr\b/.test(runtimeEvents), 'Runtime current boot ANR observed');
     result.junit = { pass: 1, fail: 0, skip: 0 }; result.menu = true; result.outcome = 'PASS_MORE_ONLY_IMAGE_REVIEW_REQUIRED';
   } catch (error) {
     result.error = sanitize(error.message).slice(0, 300);

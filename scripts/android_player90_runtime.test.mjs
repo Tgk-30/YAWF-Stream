@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { PIN, sanitize, validateEnvironment, validateCatalog, cpuSnapshot, iowaitPercent,
-  validateGuest, validateLauncher, validateJUnit, validateReceipt, ownedDirectory, parseInstalledAPKPaths, parseAPKHashOutput } from './android_player90_runtime.mjs';
+  validateHostResources, validateGuest, validateLauncher, validateJUnit, validateReceipt, ownedDirectory, parseInstalledAPKPaths, parseAPKHashOutput } from './android_player90_runtime.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const java = readFileSync(join(root, 'scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimePlayer90MoreFlowTest.java'), 'utf8');
@@ -37,6 +37,30 @@ test('candidate source run APK code image serial and renderer are indivisible pi
     'CANDIDATE_VERSION_CODE', 'SYSTEM_IMAGE_PACKAGE', 'AVD_NAME', 'EMULATOR_SERIAL', 'EMULATOR_GPU', 'CANDIDATE_APK', 'CANDIDATE_ARTIFACT']) {
     assert.throws(() => validateEnvironment({ ...environment(), [key]: 'wrong' }), key);
   }
+});
+test('four-core guest profile requires actual host four CPUs and eight GiB without fallback', () => {
+  validateHostResources({ availableCPUs: 4, memoryBytes: 8 * 1024 ** 3 });
+  for (const host of [{ availableCPUs: 3, memoryBytes: 16 * 1024 ** 3 }, { availableCPUs: 4, memoryBytes: 8 * 1024 ** 3 - 1 },
+    { availableCPUs: NaN, memoryBytes: 16 * 1024 ** 3 }, { availableCPUs: 4, memoryBytes: Infinity }]) {
+    assert.throws(() => validateHostResources(host));
+  }
+});
+test('resource receipts precede boot and raw readiness evidence precedes all interval assertions', () => {
+  assert.equal(PIN.guestCores, 4); assert.equal(PIN.guestMemoryMiB, 4096);
+  assert.match(driver, /'-cores', String\(PIN\.guestCores\), '-memory', String\(PIN\.guestMemoryMiB\)/);
+  const boot = driver.indexOf("emulator = command('emulator'");
+  const mustPrecede = (needle, after) => {
+    const at = driver.indexOf(needle); assert.ok(at >= 0 && after > at);
+  };
+  mustPrecede("save('host-resources-before-boot.json'", driver.indexOf('validateHostResources(hostResources)'));
+  mustPrecede("save('configured-guest-before-boot.json'", boot);
+  for (const kind of ['cpu', 'events', 'launcher']) {
+    const save = driver.indexOf('save(`readiness-${interval}-' + kind + '.txt`');
+    assert.ok(save >= 0 && save < driver.indexOf('const current = cpuSnapshot(rawCPU)'));
+  }
+  mustPrecede("save('runtime-events.txt', runtimeEvents)", driver.indexOf("'Runtime current boot ANR observed'"));
+  assert.match(driver, /wait < 10, 'Strict guest IO admission failed'/);
+  assert.match(driver, /!\/\\bam_anr\\b\/\.test\(rawEvents\)/);
 });
 test('stable SDK catalog must contain exact official API36 x86 package row', () => {
   validateCatalog(`Available Packages:\n ${PIN.image} | 11 | Google APIs Intel x86_64\n`);
