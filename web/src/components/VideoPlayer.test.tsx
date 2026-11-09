@@ -16578,7 +16578,7 @@ describe("existing HTML reader foreground ownership90", () => {
   const restore: Array<() => void> = [];
   afterEach(() => { while (restore.length) restore.pop()!(); });
   async function flush90() { await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }); }
-  async function setup90(offset = 0, device: "ios" | "android" = "android", nativeHls = false) {
+  async function setup90(offset = 0, device: "ios" | "android" = "android", nativeHls = false, mediaDuration = 1000) {
     vi.useFakeTimers(); deviceKindMock.mockReturnValue(device);
     if (nativeHls) vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
     restore.push(replaceProperty(window, "__YAWF_NATIVE_SAFE_AREA__", { getInsets: vi.fn() }));
@@ -16596,7 +16596,7 @@ describe("existing HTML reader foreground ownership90", () => {
     Object.defineProperties(video, {
       paused: { configurable: true, get: () => state.paused }, seeking: { configurable: true, get: () => state.seeking }, ended: { configurable: true, get: () => state.ended },
       currentTime: { configurable: true, get: () => state.time, set: (v: number) => { writes.push(v); state.time = v; } },
-      duration: { configurable: true, value: 1000 }, seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 1000 } },
+      duration: { configurable: true, value: mediaDuration }, seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 1000 } },
     });
     vi.mocked(video.play).mockImplementation(async () => { attempts.push(state.time); state.paused = false; fireEvent.play(video); fireEvent.playing(video); });
     vi.mocked(video.pause).mockImplementation(() => { state.paused = true; fireEvent.pause(video); });
@@ -16798,6 +16798,82 @@ describe("existing HTML reader foreground ownership90", () => {
     const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
     fireEvent.timeUpdate(f.video); expect(f.state.time).toBe(300); f.platformPause(); await flush90();
     expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(false); expect(f.refresh).not.toHaveBeenCalled();
+  });
+
+  async function setupForegroundIdle92(offset = 0, mediaDuration = 1000) {
+    const f = await setup90(offset, "ios", true, mediaDuration);
+    restore.push(replaceProperty(document, "hasFocus", () => true));
+    const frames = { total: 145 };
+    restore.push(replaceProperty(f.video, "getVideoPlaybackQuality", () => ({ totalVideoFrames: frames.total,
+      droppedVideoFrames: 0, creationTime: 0 })));
+    Object.defineProperties(f.video, {
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+      networkState: { configurable: true, value: HTMLMediaElement.NETWORK_IDLE },
+      buffered: { configurable: true, value: { length: 0, start: () => 0, end: () => 0 } },
+    });
+    const returned = async () => { f.hide("visibility"); await act(async () => vi.advanceTimersByTimeAsync(10_000)); f.show("visibility"); await flush90(); };
+    return { ...f, frames, returned };
+  }
+  it.each([0, 100])("[foreground-bufferless92] refreshes static connected idle return at3s with owned absolute clock offset%s", async offset => {
+    const f = await setupForegroundIdle92(offset); const pending = deferred<void>(); f.refresh.mockImplementation(() => pending.promise);
+    await f.returned(); f.show("visibility"); fireEvent.canPlay(f.video); await flush90();
+    f.state.time += 0.000001; fireEvent.timeUpdate(f.video);
+    await act(async () => vi.advanceTimersByTimeAsync(2999)); expect(f.refresh).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300.000001 + offset, expect.objectContaining({ paused: false,
+      volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: { id: "jp", language: "jpn" } }));
+    await act(async () => vi.advanceTimersByTimeAsync(35_000)); fireEvent.ended(f.video); await flush90();
+    expect(f.refresh).toHaveBeenCalledTimes(1); expect(f.attempts).toEqual([]); expect(f.writes).toEqual([]);
+    expect(f.ended).not.toHaveBeenCalled(); expect(f.next).not.toHaveBeenCalled(); pending.resolve(); await flush90();
+  });
+  it("[foreground-bufferless92] observes return loading with unchanged old buffer then idle bufferless at1s", async () => {
+    const f = await setupForegroundIdle92();
+    Object.defineProperties(f.video, { networkState: { configurable: true, value: HTMLMediaElement.NETWORK_LOADING },
+      buffered: { configurable: true, value: { length: 1, start: () => 0, end: () => 455 } } });
+    await f.returned(); fireEvent.progress(f.video);
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    Object.defineProperties(f.video, { networkState: { configurable: true, value: HTMLMediaElement.NETWORK_IDLE },
+      buffered: { configurable: true, value: { length: 0, start: () => 0, end: () => 0 } } });
+    await act(async () => vi.advanceTimersByTimeAsync(1999)); expect(f.refresh).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }));
+    expect(f.attempts).toEqual([]); expect(f.writes).toEqual([]);
+  });
+  it("[foreground-bufferless92] latest explicit Pause transfers while fresh resolution is pending", async () => {
+    const f = await setupForegroundIdle92(); const pending = deferred<void>(); f.refresh.mockImplementation(() => pending.promise);
+    await f.returned(); await act(async () => vi.advanceTimersByTimeAsync(3000)); expect(f.refresh).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(window, { key: " ", code: "Space" }); await flush90();
+    expect(f.refresh.mock.calls[0]![1].paused).toBe(true); expect(f.state.paused).toBe(true);
+    pending.resolve(); await flush90(); expect(f.refresh).toHaveBeenCalledTimes(1); expect(f.attempts).toEqual([]);
+  });
+  it.each(["command-pause", "clock", "frames", "buffer", "network", "readiness", "unknown-duration", "near-end", "focus", "native-controls", "pip", "seek", "hidden", "source", "owner", "unmount", "missing-frame-counter", "throwing-frame-counter"] as const)(
+    "[foreground-bufferless92] %s excludes or cancels the fast return epoch", async change => {
+      const f = await setupForegroundIdle92(0, change === "unknown-duration" ? NaN : change === "near-end" ? 304.9 : 1000); await f.returned();
+      if (change === "command-pause") fireEvent.keyDown(window, { key: " ", code: "Space" });
+      else if (change === "clock") { f.state.time = 301; fireEvent.timeUpdate(f.video); }
+      else if (change === "frames") f.frames.total += 1;
+      else if (change === "buffer") Object.defineProperty(f.video, "buffered", { configurable: true, value: { length: 1, start: () => 299, end: () => 305 } });
+      else if (change === "network") Object.defineProperty(f.video, "networkState", { configurable: true, value: HTMLMediaElement.NETWORK_LOADING });
+      else if (change === "readiness") markCurrentMediaDataReady(f.video);
+      else if (change === "unknown-duration" || change === "near-end") { /* Initial metadata establishes this duration policy. */ }
+      else if (change === "focus") Object.defineProperty(document, "hasFocus", { configurable: true, value: () => false });
+      else if (change === "native-controls") f.video.controls = true;
+      else if (change === "pip") fireEvent(f.video, new Event("enterpictureinpicture"));
+      else if (change === "seek") { f.state.seeking = true; fireEvent.seeking(f.video); }
+      else if (change === "hidden") f.hide("visibility");
+      else if (change === "source" || change === "owner") { f.view.rerender(<VideoPlayer {...f.props} url={change === "source" ? "https://x/new-idle92.m3u8" : f.props.url} sourceRevision={1}
+        initialHandoffState={{ paused: true, volume: 1, muted: false, playbackRate: 1 }} />); await flush90(); }
+      else if (change === "unmount") f.view.unmount();
+      else if (change === "missing-frame-counter") Object.defineProperty(f.video, "getVideoPlaybackQuality", { configurable: true, value: undefined });
+      else Object.defineProperty(f.video, "getVideoPlaybackQuality", { configurable: true, value: () => { throw new Error("unsupported frames"); } });
+      await act(async () => vi.advanceTimersByTimeAsync(3100)); await flush90(); expect(f.refresh).not.toHaveBeenCalled();
+    });
+  it("[foreground-bufferless92] missing resolver keeps the normal direct reader usable without early terminalization", async () => {
+    const f = await setupForegroundIdle92(); f.view.rerender(<VideoPlayer {...f.props} refreshCurrentSource={undefined} />); await flush90();
+    await f.returned(); await act(async () => vi.advanceTimersByTimeAsync(3000)); await flush90();
+    expect(screen.queryByRole("alert")).toBeNull(); expect(f.refresh).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: " ", code: "Space" }); fireEvent.keyDown(window, { key: " ", code: "Space" }); await flush90();
+    expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(false);
   });
 
   async function setup92(device: "ios" | "android" = "ios") {

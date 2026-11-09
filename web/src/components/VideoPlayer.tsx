@@ -37,6 +37,7 @@ const SERVER_OPTIMIZED_RETRY_BASE_MS = 500;
 const SERVER_OPTIMIZED_RETRY_MAX_MS = 4_000;
 const TOUCH_DOUBLE_TAP_MS = 320;
 const PRE_BACKGROUND_PAUSE_CORRELATION_MS = 1_000;
+const FOREGROUND_BUFFERLESS_TIMEOUT_MS = 3_000;
 import { Icon } from "./Icon";
 import { useVideoPresentation, type VideoPresentation } from "./useVideoPresentation";
 import {
@@ -3500,6 +3501,7 @@ function WebviewPlayer({
   const playbackAttemptRef = useRef(0);
   const foregroundPlaybackRef = useRef<{ video: HTMLVideoElement; source: string; play: boolean; returnedPosition?: number } | null>(null);
   const preBackgroundPauseRef = useRef<{ video: HTMLVideoElement; source: string; attempt: number; pausedAt: number } | null>(null);
+  const foregroundIdleRecoveryRef = useRef<{ video: HTMLVideoElement; source: string; attempt: number; token: object | null; timer: number } | null>(null);
   const playbackSourceRef = useRef(url);
   useLayoutEffect(() => { playbackSourceRef.current = url; }, [url]);
   const pausedForCastRef = useRef(false);
@@ -3585,14 +3587,21 @@ function WebviewPlayer({
   const sourceSwitchStateRef = useRef(sourceSwitchState);
   sourceSwitchStateRef.current = sourceSwitchState;
   const pendingHandoffPlaybackIntentRef = useRef<"play" | "pause" | null>(null);
+  const cancelForegroundIdleRecovery = useCallback((video: HTMLVideoElement) => {
+    const pending = foregroundIdleRecoveryRef.current;
+    if (pending?.video !== video) return;
+    window.clearTimeout(pending.timer);
+    foregroundIdleRecoveryRef.current = null;
+  }, []);
   const clearReturnedPlayback = useCallback((video: HTMLVideoElement) => {
+    cancelForegroundIdleRecovery(video);
     if (preBackgroundPauseRef.current?.video === video) preBackgroundPauseRef.current = null;
     const pending = foregroundPlaybackRef.current;
     if (pending?.video === video && pending.returnedPosition != null) {
       foregroundPlaybackRef.current = null;
       pendingHandoffPlaybackIntentRef.current = null;
     }
-  }, []);
+  }, [cancelForegroundIdleRecovery]);
   const nativeControlsOwnPlayback = (video: HTMLVideoElement) =>
     document.pictureInPictureElement === video || document.fullscreenElement === video ||
     (video as WebKitVideoElement).webkitPresentationMode === "picture-in-picture" ||
@@ -3788,6 +3797,8 @@ function WebviewPlayer({
       // Foreground can precede a delayed platform pause. Keep this one owned
       // intent until an actual forward frame or a physical play attempt.
       pending.returnedPosition ??= video.currentTime;
+      const idle = foregroundIdleRecoveryRef.current;
+      if (idle?.video === video && idle.source === url && idle.token === pending) idle.attempt = attempt;
       return;
     }
     // Consume before the platform call, including synchronous media callbacks.
@@ -5177,6 +5188,43 @@ function WebviewPlayer({
       }
       return Number.NaN;
     };
+    const decodedFrameCount = (): number | null => {
+      try {
+        const count = video.getVideoPlaybackQuality?.().totalVideoFrames;
+        return count != null && Number.isSafeInteger(count) && count >= 0 ? count : null;
+      } catch { return null; }
+    };
+    const foregroundReturnOwned = () =>
+      active && videoRef.current === video && video.isConnected && playbackSourceRef.current === url &&
+        canRefreshSourceRef.current && verifiedPlaybackProgressReportedRef.current &&
+        !ownedPlaybackPausedRef.current && !video.paused && !video.ended && video.error == null &&
+        terminalRecoveryVideoRef.current !== video && !video.controls && !nativeControlsOwnPlayback(video) &&
+        !video.seeking && !rendererSeekingRef.current && !scrubbingRef.current && pendingRecoverySeekFor(video) == null &&
+        !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null && !suspendedRef.current &&
+        !backgroundBlocksPlayback(video) && document.visibilityState === "visible" && document.hasFocus();
+    const bufferlessReturnEligible = () => {
+      const total = absoluteDurationFor(video.duration);
+      return foregroundReturnOwned() && verifiedPlaybackPlayingRef.current &&
+        video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && video.networkState === HTMLMediaElement.NETWORK_IDLE &&
+        Number.isFinite(video.currentTime) && !Number.isFinite(bufferedFrontier()) &&
+        total != null && total - (video.currentTime + timelineOffsetRef.current) >= 5;
+    };
+    const armForegroundIdleRecovery = () => {
+      cancelForegroundIdleRecovery(video);
+      const frames = decodedFrameCount();
+      if (frames == null || !foregroundReturnOwned() || !Number.isFinite(video.currentTime)) return;
+      const position = video.currentTime;
+      const pending = { video, source: url, attempt: playbackAttemptRef.current, token: foregroundPlaybackRef.current,
+        timer: window.setTimeout(() => {
+        if (foregroundIdleRecoveryRef.current !== pending) return;
+        // Consume before entering the existing terminal/source-resolution fence.
+        foregroundIdleRecoveryRef.current = null;
+        if (!bufferlessReturnEligible() || playbackAttemptRef.current !== pending.attempt ||
+            Math.abs(video.currentTime - position) > 0.01 || decodedFrameCount() !== frames) return;
+        recoverTerminalPlayback(video);
+      }, FOREGROUND_BUFFERLESS_TIMEOUT_MS) };
+      foregroundIdleRecoveryRef.current = pending;
+    };
     const onPlaying = () => {
       if (quarantineResetClock()) return;
       recoveryBuffering = false;
@@ -5240,12 +5288,14 @@ function WebviewPlayer({
         return;
       }
       if (next > lastBufferedFrontier + 0.05) {
+        cancelForegroundIdleRecovery(video);
         lastBufferedFrontier = next;
         watchdog.noteProgress();
       }
     };
     const onClockProgress = () => {
       if (quarantineResetClock()) return;
+      if (Math.abs(video.currentTime - lastPosition) > 0.01) cancelForegroundIdleRecovery(video);
       const pending = pendingRecoverySeekFor(video);
       if (pending != null) {
         const healthy = active && videoRef.current === video && terminalRecoveryVideoRef.current !== video &&
@@ -5295,9 +5345,11 @@ function WebviewPlayer({
     const onDocumentLifecycle = () => {
       if (!active || videoRef.current !== video) return;
       const next = pageHidden || document.visibilityState === "hidden";
+      const returning = documentSuspendedRef.current && !next;
       if (next === documentSuspendedRef.current &&
           (next || foregroundPlaybackRef.current?.video !== video)) return;
       documentSuspendedRef.current = next;
+      if (next) cancelForegroundIdleRecovery(video);
       if (next && backgroundBlocksPlayback(video)) {
         const pause = preBackgroundPauseRef.current;
         preBackgroundPauseRef.current = null;
@@ -5335,6 +5387,7 @@ function WebviewPlayer({
           !video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         applyOwnedPlayback(video, pendingPlayback.play);
       }
+      if (returning) armForegroundIdleRecovery();
     };
     const onPageHide = () => { pageHidden = true; onDocumentLifecycle(); };
     const onPageShow = () => { pageHidden = false; onDocumentLifecycle(); };
@@ -5356,6 +5409,7 @@ function WebviewPlayer({
     window.addEventListener("pageshow", onPageShow);
     document.addEventListener("visibilitychange", onDocumentLifecycle);
     return () => {
+      cancelForegroundIdleRecovery(video);
       active = false;
       recoveryProgress.reset();
       if (recoveryProgressWindowRef.current === recoveryProgress) recoveryProgressWindowRef.current = null;
@@ -5379,7 +5433,7 @@ function WebviewPlayer({
       window.removeEventListener("pageshow", onPageShow);
       document.removeEventListener("visibilitychange", onDocumentLifecycle);
     };
-  }, [applyOwnedPlayback, clearReturnedPlayback, url]);
+  }, [applyOwnedPlayback, cancelForegroundIdleRecovery, clearReturnedPlayback, url]);
 
   useEffect(() => {
     const video = videoRef.current;
