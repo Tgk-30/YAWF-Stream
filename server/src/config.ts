@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { normalizeSecretKey } from "./crypto.js";
 import type { CookieSameSite, ServerConfig } from "./types.js";
+import { assertPrivateWindowsStorage } from "./privateStorage.js";
 import {
   DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS,
   DEFAULT_UPSTREAM_RESPONSE_TIMEOUT_MS,
@@ -65,8 +66,9 @@ function loadOrCreateSecretKey(dataDir: string): Buffer {
     return normalizeSecretKey(envSecret);
   }
 
-  mkdirSync(dataDir, { recursive: true });
   const path = join(dataDir, "server.key");
+  assertPrivateWindowsStorage([path]);
+  mkdirSync(dataDir, { recursive: true });
   if (existsSync(path)) {
     return normalizeSecretKey(readFileSync(path, "utf8"));
   }
