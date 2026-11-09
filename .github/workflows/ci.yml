@@ -47,9 +47,11 @@ jobs:
         working-directory: server
         run: npm ci
 
+      # Preserve races inside each scenario and their original deadlines,
+      # without running independent native process-heavy files simultaneously.
       - name: Test server
         working-directory: server
-        run: npm test
+        run: npm test -- --maxWorkers=1 --no-file-parallelism
 
       - name: Typecheck server
         working-directory: server
