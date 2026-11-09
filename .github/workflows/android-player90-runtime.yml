@@ -1,0 +1,110 @@
+name: Private Android 90 player runtime
+
+on:
+  push:
+    branches: [codex/android90-native-more]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-player90-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  more90:
+    if: github.ref_type == 'branch' && github.repository == 'Tgk-30/YAWF-Stream'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE_RUN_ID: '42592433811'
+      CANDIDATE_SOURCE_SHA: e2362818bcc3ff9258c1bde9ffc684f28d62abb3
+      CANDIDATE_APK_SHA256: cf1a87ef353a02623084478492f832d4fd30e7c742c6af92d0bf8d0b7b183319
+      CANDIDATE_VERSION: 2.3.90
+      CANDIDATE_VERSION_CODE: '2003090'
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.90.apk
+      CANDIDATE_ARTIFACT: android-phone-verification-candidate
+      SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
+      AVD_NAME: yawf-private90-more-api36
+      EMULATOR_SERIAL: emulator-5554
+      EMULATOR_GPU: swiftshader_indirect
+      EVIDENCE: android-player90-runtime-evidence
+    steps:
+      - name: Checkout test driver
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout exact application fixture source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SOURCE_SHA }}
+          path: candidate-source
+          persist-credentials: false
+      - name: Download exact private production-signed candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT }}
+          path: candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ env.CANDIDATE_RUN_ID }}
+      # BEGIN OWNED TEST-ONLY EXECUTION
+      - name: Set up Node24 and JDK17
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.17.0'
+      - name: Set up JDK17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up official Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Set up Gradle for the isolated test harness
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.1'
+      - name: Validate test-only contracts and exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate-source rev-parse HEAD)" = "$CANDIDATE_SOURCE_SHA"
+          node --test scripts/android_player90_runtime.test.mjs
+          mkdir -m 700 "$RUNNER_TEMP/yawf90-sdk"
+          sdkmanager --list --channel=0 > "$RUNNER_TEMP/yawf90-sdk/catalog.txt"
+          node scripts/android_player90_runtime.mjs catalog "$RUNNER_TEMP/yawf90-sdk/catalog.txt"
+          sdkmanager platform-tools emulator 'platforms;android-36' 'build-tools;36.0.0' "$SYSTEM_IMAGE_PACKAGE"
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          test -r /dev/kvm -a -w /dev/kvm
+          emulator -accel-check
+      - name: Prepare unchanged fixture and test-only driver before boot
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMPDIR="$RUNNER_TEMP/yawf90-build-tmp"
+          export GRADLE_USER_HOME="$RUNNER_TEMP/yawf90-build-gradle"
+          mkdir -m 700 "$TMPDIR" "$GRADLE_USER_HOME"
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          ffmpeg -hide_banner -filters 2>&1 | grep -E '\bdrawtext\b'
+          test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+          (cd candidate-source/web && npm ci && npm run build)
+          (cd candidate-source/server && npm ci)
+          gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=1 \
+            :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: One owned API36 native More transaction
+        shell: bash
+        run: node scripts/android_player90_runtime.mjs
+      - name: Retain bounded native evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: private90-api36-x86-more-runtime
+          path: android-player90-runtime-evidence
+          if-no-files-found: warn
+          retention-days: 14
