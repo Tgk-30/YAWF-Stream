@@ -445,3 +445,27 @@ test('91 candidate and workflow artifact source pins are explicit independent co
   for(const literal of[PIN.source,PIN.run,PIN.artifactId,PIN.sha256,PIN.code])assert.ok(workflow.includes(literal));
   assert.notEqual(PIN.prefix,'d99110f238492fab16418dbcb17ce27bd9ed91357a4c08ec38a78d61aa40e380');
 });
+
+function flatCandidateDownloadPath(text) {
+  const blocks = [...text.matchAll(/      - name: Download exact private production-signed candidate\n([\s\S]*?)(?=      # BEGIN OWNED|      - name: |$)/g)];
+  assert.equal(blocks.length, 1, 'One exact candidate download step required');
+  assert.match(blocks[0][1], /^        uses: actions\/download-artifact@v4$/m);
+  const fields = [...blocks[0][1].matchAll(/^          ([a-z-]+): (.+)$/gm)];
+  assert.equal(new Set(fields.map((field) => field[1])).size, fields.length, 'Duplicate download inputs rejected');
+  const inputs = Object.fromEntries(fields.map((field) => [field[1], field[2]]));
+  assert.equal(inputs['artifact-ids'], '${{ env.CANDIDATE_ARTIFACT_ID }}');
+  assert.equal(inputs['merge-multiple'], 'true', 'ID-selected artifact must flatten into the driver candidate directory');
+  assert.equal(inputs.path, 'candidate');
+  return `${inputs.path}/YAWF.Stream_Android_2.3.91.apk`;
+}
+test('exact ID download shape places APK at the existing flat driver path', () => {
+  assert.equal(flatCandidateDownloadPath(workflow), environment().CANDIDATE_APK);
+});
+test('download shape rejects missing or false flattening and nested destination without changing pins', () => {
+  const positive = workflow.includes('          merge-multiple: true\n') ? workflow
+    : workflow.replace('          path: candidate\n', '          merge-multiple: true\n          path: candidate\n');
+  assert.equal(flatCandidateDownloadPath(positive), environment().CANDIDATE_APK);
+  assert.throws(() => flatCandidateDownloadPath(positive.replace('          merge-multiple: true\n', '')), /must flatten/);
+  assert.throws(() => flatCandidateDownloadPath(positive.replace('merge-multiple: true', 'merge-multiple: false')), /must flatten/);
+  assert.throws(() => flatCandidateDownloadPath(positive.replace('path: candidate\n', 'path: candidate/android-phone-verification-candidate\n')));
+});

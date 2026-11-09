@@ -15,7 +15,7 @@ export const PIN = Object.freeze({
   image: 'system-images;android-36;google_apis;x86_64', serial: 'emulator-5554',
   avd: 'yawf-private91-more-api36', gpu: 'swiftshader_indirect', guestCores: 4, guestMemoryMiB: 4096,
   fixture: 'bf7e5b5852addbec5ceb9160def48eb4832462924bd8e4073cdce1f67540d157',
-  prefix: '52860c4867b825173600a8ec579400642a4cefd40f929d47c35a6f14cce62cfb',
+  prefix: '0875e651539279def8cd49cc364eed0ee9d55ea64bcaadeefb78a1671e64786b',
 });
 const PRODUCT = 'com.tgk30.debridstreamer';
 const HARNESS = 'com.yawf.runtimeinstrumentation';

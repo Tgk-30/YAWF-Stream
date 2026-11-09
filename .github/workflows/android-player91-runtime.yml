@@ -47,6 +47,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ env.CANDIDATE_ARTIFACT_ID }}
+          merge-multiple: true
           path: candidate
           github-token: ${{ github.token }}
           run-id: ${{ env.CANDIDATE_RUN_ID }}
