@@ -58,6 +58,22 @@ try {
     result.failure = { name: error.name, status: error.status ?? null, code: error.code ?? null,
       stderr: stderr.slice(0, 6000) };
   }
+  const enumControl = String.raw`
+$ErrorActionPreference = 'Stop'
+$flags = [Security.AccessControl.AceFlags]3
+$before = 'completed'
+try { $null = $flags -band [Security.AccessControl.AceFlags]::ObjectInherit } catch { $before = $_.Exception.GetType().Name }
+[Console]::WriteLine((ConvertTo-Json -Compress -InputObject ([ordered]@{
+  underlyingType = [Enum]::GetUnderlyingType([Security.AccessControl.AceFlags]).Name
+  uncastOutcome = $before
+  integerObjectInherit = (([int]$flags -band [int][Security.AccessControl.AceFlags]::ObjectInherit) -ne 0)
+  integerContainerInherit = (([int]$flags -band [int][Security.AccessControl.AceFlags]::ContainerInherit) -ne 0)
+  integerInheritOnly = (([int]$flags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0)
+})))
+`;
+  result.byteEnumControl = JSON.parse(execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive',
+    '-EncodedCommand', Buffer.from(enumControl, 'utf16le').toString('base64')], { env, encoding: 'utf8',
+    timeout: 7000, maxBuffer: 8000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).replace(/^\uFEFF/, '').trim());
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

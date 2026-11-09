@@ -4,7 +4,7 @@ import { dirname, join, parse, resolve } from "node:path";
 
 export class PrivateStorageError extends Error {
   constructor() {
-    super("Windows storage permissions are not private. Use a private data or backup folder owned by your account. Existing permissions and files were not changed.");
+    super("Windows storage privacy could not be verified. Use a private data or backup folder owned by your account and ensure native permission checks are available. Existing permissions and files were not changed.");
     this.name = "PrivateStorageError";
   }
 }
@@ -105,7 +105,7 @@ $installer = $null
 try { $installer = ([Security.Principal.NTAccount]::new('NT SERVICE', 'TrustedInstaller')).Translate([Security.Principal.SecurityIdentifier]).Value } catch {}
 $result = @()
 foreach ($entry in $entries) {
-  $item = Get-Item -LiteralPath $entry.path -Force
+  $attributes = [IO.File]::GetAttributes($entry.path)
   $raw = [Security.AccessControl.RawSecurityDescriptor]::new([YawfNativeSecurity]::Read($entry.path), 0)
   $rules = @()
   $types = @()
@@ -113,14 +113,15 @@ foreach ($entry in $entries) {
     foreach ($ace in $raw.DiscretionaryAcl) {
       $types += [int]$ace.AceType
       if ($ace -isnot [Security.AccessControl.CommonAce] -or [int]$ace.AceType -notin @(0, 1)) { continue }
+      $aceFlags = [int]$ace.AceFlags
       $rules += [ordered]@{
         sid = $ace.SecurityIdentifier.Value
         allow = [int]$ace.AceType -eq 0
         rights = ([int64]$ace.AccessMask -band 4294967295)
-        inheritOnly = ($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly) -ne 0
-        objectInherit = ($ace.AceFlags -band [Security.AccessControl.AceFlags]::ObjectInherit) -ne 0
-        containerInherit = ($ace.AceFlags -band [Security.AccessControl.AceFlags]::ContainerInherit) -ne 0
-        noPropagate = ($ace.AceFlags -band [Security.AccessControl.AceFlags]::NoPropagateInherit) -ne 0
+        inheritOnly = ($aceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0
+        objectInherit = ($aceFlags -band [int][Security.AccessControl.AceFlags]::ObjectInherit) -ne 0
+        containerInherit = ($aceFlags -band [int][Security.AccessControl.AceFlags]::ContainerInherit) -ne 0
+        noPropagate = ($aceFlags -band [int][Security.AccessControl.AceFlags]::NoPropagateInherit) -ne 0
       }
     }
   }
@@ -130,8 +131,8 @@ foreach ($entry in $entries) {
     currentSid = $current
     ownerSid = $raw.Owner.Value
     trustedInstallerSid = $installer
-    directory = $item.PSIsContainer
-    reparse = $item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)
+    directory = $attributes.HasFlag([IO.FileAttributes]::Directory)
+    reparse = $attributes.HasFlag([IO.FileAttributes]::ReparsePoint)
     daclPresent = ($raw.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -ne 0
     daclNull = $null -eq $raw.DiscretionaryAcl
     rawAceTypes = $types
