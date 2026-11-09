@@ -384,6 +384,9 @@ const embeddedModeIntentObserver = vi.hoisted(() => ({
     onSwitchServerOptimized?: (quality: ServerTranscodeQuality, position: number) => Promise<void>;
     onSwitchDeviceOriginal?: (position: number) => void;
     serverOptimizationPending?: boolean;
+    onPlaybackError?: (error: Error, snapshot?: { position: number; state: { paused: boolean; volume: number; muted: boolean; playbackRate: number; audioPreference?: { id: string | null; language: string | null } | null } }) => boolean | Promise<boolean>;
+    onPlaybackStall?: (position: number, state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => boolean | Promise<boolean>;
+    onRecoveryPlaybackHealthy?: () => boolean;
   }>,
 }));
 vi.mock("./EmbeddedPlayer", () => ({
@@ -392,7 +395,9 @@ vi.mock("./EmbeddedPlayer", () => ({
     url: string;
     engine: string;
     playbackAuthorization?: string;
-    onPlaybackError?: (error: Error) => boolean | Promise<boolean>;
+    onPlaybackError?: (error: Error, snapshot?: { position: number; state: { paused: boolean; volume: number; muted: boolean; playbackRate: number } }) => boolean | Promise<boolean>;
+    onPlaybackStall?: (position: number, state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => boolean | Promise<boolean>;
+    onRecoveryPlaybackHealthy?: () => boolean;
     onOpenExternalPlayer?: () => void | Promise<void>;
     externalActionStatus?: string | null;
     onSwitchServerOptimized?: (quality: ServerTranscodeQuality, position: number) => Promise<void>;
@@ -16077,7 +16082,7 @@ describe("terminal post-start source recovery", () => {
     expect(refresh).toHaveBeenLastCalledWith(160, expect.objectContaining({ paused: false }));
   });
 
-  it.each([[2, false, 0], [2, true, 0], [4, false, 1.25]] as const)("[terminal-network] refreshes confirmed error=%s with owned paused=%s and failed clock=%s", async (code, paused, failedClock) => {
+  it.each([[2, false, 0], [2, true, 0], [4, false, 1.25], [3, false, 0], [3, true, 0]] as const)("[terminal-network] refreshes confirmed error=%s with owned paused=%s and failed clock=%s", async (code, paused, failedClock) => {
     const tracks = Object.assign(new EventTarget(), {
       0: { id: "jp", label: "Japanese", language: "jpn", enabled: true }, length: 1,
     });
@@ -16188,6 +16193,23 @@ describe("terminal post-start source recovery", () => {
       paused, volume: 0.35, muted: true, playbackRate: 1.25,
     }));
     expect(onEnded).not.toHaveBeenCalled(); expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it.each(["direct", "native-hls"] as const)("[early-eof88] refreshes known premature %s EOF without completing", async (transport) => {
+    if (transport === "native-hls") {
+      deviceKindMock.mockReturnValue("ios");
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    }
+    const refresh = vi.fn(async () => {}), ended = vi.fn(), next = vi.fn();
+    render(<VideoPlayer url={`https://x/premature.${transport === "direct" ? "mp4" : "m3u8"}`}
+      engine={transport === "direct" ? "webview-direct" : "webview-hls-transcode"} title="Premature transport"
+      refreshCurrentSource={refresh} onEnded={ended} onPlayNext={next} upNext={{ label: "Next" }} onClose={() => {}} />);
+    await flushTerminal();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = terminalMedia(video);
+    state.ended = true; state.paused = true; fireEvent.ended(video); await flushTerminal();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(25.75, expect.objectContaining({ paused: false }));
+    expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
   });
 
   it.each(["direct", "native-hls"] as const)("[terminal-nonpartial-natural] preserves %s genuine completion and next action", async (transport) => {
@@ -16412,12 +16434,12 @@ describe("terminal post-start source recovery", () => {
     expect(refresh).not.toHaveBeenCalled(); expect(fallback).toHaveBeenCalledTimes(1);
   });
 
-  it("[terminal-controls] keeps a post-start decode error in codec fallback", async () => {
+  it("[terminal-decode88] refreshes a post-start decode error instead of retrying a dead transport", async () => {
     const refresh = vi.fn(async () => {}), fallback = vi.fn(async () => "https://x/compatible.mp4");
     render(<VideoPlayer url="https://x/decoder.mp4" title="Decoder" refreshCurrentSource={refresh} requestWebviewFallback={fallback} onClose={() => {}} />);
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
     terminalError(video, terminalMedia(video), 3); await flushTerminal();
-    expect(refresh).not.toHaveBeenCalled(); expect(fallback).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(25.75, expect.objectContaining({ paused: false })); expect(fallback).not.toHaveBeenCalled();
   });
 
   it("[terminal-controls] keeps pending exact handoff errors out of fresh resolution", async () => {
@@ -16456,5 +16478,37 @@ describe("terminal post-start source recovery", () => {
     video.currentTime = 98; fireEvent.timeUpdate(video);
     state.ended = true; state.paused = true; video.currentTime = 100; fireEvent.ended(video);
     await flushTerminal(); expect(refresh).not.toHaveBeenCalled(); expect(ended).toHaveBeenCalledTimes(1); expect(next).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("native parent transport88", () => {
+  const state = { paused: true, volume: 0.35, muted: true, playbackRate: 1.25, audioPreference: { id: "2", language: "jpn" } };
+  async function flushNative() { await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }); }
+  function currentNative() { return embeddedModeIntentObserver.props.at(-1)!; }
+  beforeEach(() => { isTauriMock.mockReturnValue(true); embeddedModeIntentObserver.enabled = true; embeddedModeIntentObserver.props.length = 0; });
+  afterEach(() => { embeddedModeIntentObserver.enabled = false; embeddedModeIntentObserver.props.length = 0; });
+  it("[native-parent-fallback88] mounts compatibility fallback at the terminal clock and state", async () => {
+    const fallback = vi.fn(async () => "https://x/native-compatible.mp4");
+    render(<VideoPlayer url="https://x/native-old.mkv" title="Native fallback" requestWebviewFallback={fallback} onClose={() => {}} />);
+    await flushNative();
+    await act(async () => { await currentNative().onPlaybackError!(new Error("Terminal"), { position: 190.25, state }); });
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(video).not.toBeNull();
+    Object.defineProperty(video, "duration", { configurable: true, value: 3600 });
+    markCurrentMediaDataReady(video); fireEvent.loadedMetadata(video); fireEvent.canPlay(video); await flushNative();
+    expect(video.currentTime).toBe(190.25); expect(video.volume).toBe(0.35); expect(video.muted).toBe(true); expect(video.playbackRate).toBe(1.25);
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+  });
+  it("[native-parent-rearm88] shares the parent one-shot latch and accepts health only from the successor", async () => {
+    const refresh = vi.fn(async () => {});
+    const props = { title: "Native budget", refreshCurrentSource: refresh, serverAudioRetentionScope: "same-file", onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://x/native-a.mkv" />); await flushNative();
+    const old = currentNative();
+    await act(async () => { await old.onPlaybackStall!(90.25, state); }); expect(refresh).toHaveBeenCalledTimes(1);
+    view.rerender(<VideoPlayer {...props} url="https://x/native-b.mkv" sourceRevision={1} />); await flushNative();
+    expect(old.onRecoveryPlaybackHealthy?.()).toBe(false);
+    let earned: boolean | undefined; act(() => { earned = currentNative().onRecoveryPlaybackHealthy?.(); }); expect(earned).toBe(true);
+    await act(async () => { await currentNative().onPlaybackStall!(150.25, state); }); expect(refresh).toHaveBeenCalledTimes(2);
   });
 });

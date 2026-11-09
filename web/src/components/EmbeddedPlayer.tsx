@@ -45,6 +45,7 @@ import {
 } from "../lib/audioTrackLabel";
 import {
   PlaybackStallWatchdog,
+  PlaybackRecoveryProgress,
   type PlaybackStallState,
 } from "../lib/playbackStall";
 import type { PlayerPreferenceDefaults } from "./VideoPlayer";
@@ -81,6 +82,12 @@ interface PlaybackHandoffState {
   volume: number;
   muted: boolean;
   playbackRate: number;
+  audioPreference?: { id: string | null; language: string | null } | null;
+}
+
+interface NativeRecoverySnapshot {
+  position: number;
+  state: PlaybackHandoffState;
 }
 
 interface Props {
@@ -128,11 +135,12 @@ interface Props {
   playbackDecision?: "Direct Play" | "Transcode";
   /** Give the parent one chance to switch to a compatible webview source when
    * native initialization or loading fails. Returning true means it recovered. */
-  onPlaybackError?: (error: Error) => boolean | Promise<boolean>;
+  onPlaybackError?: (error: Error, recovery?: NativeRecoverySnapshot) => boolean | Promise<boolean>;
   onPlaybackStall?: (
     absolutePositionSeconds: number,
     handoffState: PlaybackHandoffState,
   ) => boolean | Promise<boolean>;
+  onRecoveryPlaybackHealthy?: () => boolean;
   onRetryFreshStream?: () => Promise<void>;
   /** Server Mode selector. Selecting a rendition transfers this native player
    * to credentialed webview HLS only after the manifest is ready. */
@@ -583,6 +591,7 @@ export function EmbeddedPlayer({
   playbackDecision = "Direct Play",
   onPlaybackError,
   onPlaybackStall,
+  onRecoveryPlaybackHealthy,
   onRetryFreshStream,
   serverOptimized,
   activeServerOptimizedQuality = null,
@@ -672,6 +681,10 @@ export function EmbeddedPlayer({
   const lastReportRef = useRef(0);
   const posRef = useRef(0);
   const durRef = useRef(0);
+  const ownedPausedRef = useRef(sourceSwitchState?.paused ?? false);
+  const clockWasResetRef = useRef(false);
+  const pendingSeekRef = useRef<number | null>(null);
+  const recoveryProgressRef = useRef<PlaybackRecoveryProgress | null>(null);
   const timelineOffsetRef = useRef(0);
   timelineOffsetRef.current =
     Number.isFinite(timelineOffsetSeconds) && timelineOffsetSeconds > 0
@@ -687,6 +700,8 @@ export function EmbeddedPlayer({
   onPlaybackErrorRef.current = onPlaybackError;
   const onPlaybackStallRef = useRef(onPlaybackStall);
   onPlaybackStallRef.current = onPlaybackStall;
+  const onRecoveryPlaybackHealthyRef = useRef(onRecoveryPlaybackHealthy);
+  onRecoveryPlaybackHealthyRef.current = onRecoveryPlaybackHealthy;
   const playerPreferencesRef = useRef(playerPreferences);
   playerPreferencesRef.current = playerPreferences;
   const sourceSwitchStateRef = useRef(sourceSwitchState);
@@ -799,9 +814,12 @@ export function EmbeddedPlayer({
     playbackProgressPct(reportedPosition(), reportedDuration());
   const handoffState = (): PlaybackHandoffState => ({
     paused: pausedRef.current,
-    volume: Math.min(1, Math.max(0, volume / 100)),
-    muted,
-    playbackRate: speed,
+    volume: Math.min(1, Math.max(0, volumeRef.current / 100)),
+    muted: mutedRef.current,
+    playbackRate: speedRef.current,
+    ...(/^\d+$/.test(activeAidRef.current)
+      ? { audioPreference: { id: activeAidRef.current, language: audioTracksRef.current.find((track) => String(track.id) === activeAidRef.current)?.lang ?? null } }
+      : {}),
   });
 
   useEffect(() => {
@@ -817,6 +835,11 @@ export function EmbeddedPlayer({
   }, [castSuspended, ended, paused, scrubbing]);
 
   const audioTracks = useMemo(() => tracks.filter((t) => t.type === "audio"), [tracks]);
+  const audioTracksRef = useRef(audioTracks);
+  audioTracksRef.current = audioTracks;
+  const activeAidRef = useRef(activeAid);
+  activeAidRef.current = activeAid;
+
   const volumeIsSilent = muted || volume === 0;
   const subTracks = useMemo(() => tracks.filter((t) => t.type === "sub"), [tracks]);
   const activeSubtitleUrl = useMemo(
@@ -987,6 +1010,15 @@ export function EmbeddedPlayer({
     // an mpv end-file ERROR event, and the first-frame watchdog - can each request
     // the webview fallback, but only the FIRST one does (later ones no-op).
     let fallbackTried = false;
+    let terminalRecovery = false;
+    let verifiedProgress = false;
+    let fullDuration: number | null = null;
+    let cachePaused = false;
+    const recoveryProgress = new PlaybackRecoveryProgress();
+    recoveryProgressRef.current = recoveryProgress;
+    ownedPausedRef.current = sourceSwitchStateRef.current?.paused ?? false;
+    clockWasResetRef.current = false;
+    pendingSeekRef.current = null;
     // Armed after loadfile; fires if no first frame arrives in time.
     let watchdog: number | undefined;
     let retryTimer: number | undefined;
@@ -1000,7 +1032,7 @@ export function EmbeddedPlayer({
     upNextWarningShownRef.current = false;
     setUpNextDismissed(false);
     setPredictiveUpNext(null);
-    posRef.current = 0;
+    posRef.current = Math.max(0, Number.isFinite(startPositionSeconds) ? startPositionSeconds : 0);
     durRef.current = 0;
     scrubberRef.current?.updatePlayback({ pos: 0, bufferedTo: 0 }, true);
     activeChapterIndexRef.current = -1;
@@ -1017,26 +1049,42 @@ export function EmbeddedPlayer({
     setColorPrimaries("");
     setTransferFunction("");
     let unlisten: (() => void) | undefined;
-    const postStartWatchdog = new PlaybackStallWatchdog(() => {
-      const onStall = onPlaybackStallRef.current;
+    const recoverySnapshot = (): NativeRecoverySnapshot => ({
+      position: (pendingSeekRef.current ?? posRef.current) + timelineOffsetRef.current,
+      // mpv keep-open auto-pauses at EOF. Only app commands or a source
+      // handoff own the intent used to resume a replacement reader.
+      state: { ...handoffState(), paused: ownedPausedRef.current },
+    });
+    const recoverTerminal = (): boolean => {
+      if (cancelled || !verifiedProgress || onPlaybackStallRef.current == null) return false;
+      if (terminalRecovery) return true;
+      terminalRecovery = true;
+      recoveryProgress.reset();
       postStartWatchdog.stop();
+      window.clearTimeout(watchdog);
+      const snapshot = recoverySnapshot();
+      void Promise.resolve(onPlaybackStallRef.current(snapshot.position, snapshot.state)).then((recovered) => {
+        if (!cancelled && recovered !== true) setError("Playback stopped making progress. Retry with a fresh stream.");
+      }).catch(() => {
+        if (!cancelled) setError("A fresh stream could not be prepared. Retry, or choose another source.");
+      });
+      return true;
+    };
+    const postStartWatchdog = new PlaybackStallWatchdog(() => {
+      if (recoverTerminal()) return;
+      postStartWatchdog.stop();
+      // Preserve the existing first-frame stall path, including slow initial clocks.
+      const onStall = onPlaybackStallRef.current;
       if (onStall == null) {
         setError("Playback stopped making progress. Retry with a fresh stream.");
         return;
       }
-      void Promise.resolve(onStall(reportedPosition(), {
-        paused: false,
-        volume: Math.min(1, Math.max(0, volumeRef.current / 100)),
-        muted: mutedRef.current,
-        playbackRate: speedRef.current,
-      })).then((recovered) => {
-        if (!cancelled && recovered !== true) {
-          setError("Playback stopped making progress. Retry with a fresh stream.");
-        }
+      terminalRecovery = true;
+      const snapshot = recoverySnapshot();
+      void Promise.resolve(onStall(snapshot.position, snapshot.state)).then((recovered) => {
+        if (!cancelled && recovered !== true) setError("Playback stopped making progress. Retry with a fresh stream.");
       }).catch(() => {
-        if (!cancelled) {
-          setError("A fresh stream could not be prepared. Retry, or choose another source.");
-        }
+        if (!cancelled) setError("A fresh stream could not be prepared. Retry, or choose another source.");
       });
     });
     stallWatchdogRef.current = postStartWatchdog;
@@ -1057,19 +1105,22 @@ export function EmbeddedPlayer({
       postStartWatchdog.update(stallStateRef.current);
     };
 
-    // Route every native-failure signal through one place: ask the parent to
-    // switch to a compatible webview source (the HLS transcode, which is handed
-    // the SAME startPositionSeconds, so resume is preserved across the swap), and
-    // only when it can't recover fall through to the built-in error card. Runs at
-    // most once per file - a decode error and the watchdog can't double-fire it.
+    // Startup incompatibility uses codec fallback. A proven post-start failure
+    // carries its owned snapshot even when only that compatibility path exists.
+    // The terminal fence is claimed before invoking any asynchronous callback.
     const triggerNativeFallback = async (err: Error): Promise<void> => {
-      if (cancelled || fallbackTried) return;
+      if (cancelled || fallbackTried || terminalRecovery) return;
       fallbackTried = true;
+      terminalRecovery = true;
+      recoveryProgress.reset();
+      postStartWatchdog.stop();
       window.clearTimeout(watchdog); // a concrete signal supersedes the watchdog
       let recovered = false;
       if (onPlaybackErrorRef.current != null) {
         try {
-          recovered = (await onPlaybackErrorRef.current(err)) === true;
+          recovered = (await (verifiedProgress
+            ? onPlaybackErrorRef.current(err, recoverySnapshot())
+            : onPlaybackErrorRef.current(err))) === true;
         } catch {
           // The native error card remains the terminal fallback.
         }
@@ -1102,9 +1153,11 @@ export function EmbeddedPlayer({
           (ev: { name: string; data: unknown }) => {
             // A late event can arrive after unmount (before unlisten lands) or
             // after the guarded teardown - never touch state on a dead component.
-            if (cancelled) return;
+            if (cancelled || terminalRecovery) return;
             switch (ev.name) {
               case "pause":
+                pausedRef.current = Boolean(ev.data);
+                recoveryProgress.reset();
                 setPaused(Boolean(ev.data));
                 syncPostStartWatchdog({ paused: Boolean(ev.data) });
                 if (ev.data === false) evaluatePredictiveUpNext();
@@ -1126,8 +1179,24 @@ export function EmbeddedPlayer({
                 if (typeof ev.data === "number") {
                   // Keep command/keyboard math exact at native event cadence,
                   // while NativeScrubber coalesces its React state to 5Hz.
+                  if (!Number.isFinite(ev.data) || ev.data < 0) break;
                   const previousPosition = posRef.current;
+                  const seeking = rendererSeekingRef.current || scrubbingRef.current || pendingSeekRef.current != null;
+                  // A decoder reset is not a seek. Keep the owned timeline until
+                  // an actual seek or a return to that timeline confirms it.
+                  if (verifiedProgress && !seeking && ev.data < previousPosition - 0.25) clockWasResetRef.current = true;
+                  if (clockWasResetRef.current && !seeking && ev.data < previousPosition - 0.25) {
+                    recoveryProgress.reset();
+                    break;
+                  }
+                  clockWasResetRef.current = false;
                   posRef.current = ev.data;
+                  if (pendingSeekRef.current != null && Math.abs(ev.data - pendingSeekRef.current) <= 0.25) pendingSeekRef.current = null;
+                  const eligible = !seeking && !pausedRef.current && !cachePaused && !castSuspendedRef.current && !endedRef.current && document.visibilityState !== "hidden";
+                  if (firstFrameRef.current && eligible && ev.data > previousPosition + 0.05) verifiedProgress = true;
+                  if (recoveryProgress.note(performance.now(), ev.data, speedRef.current, verifiedProgress && eligible)) {
+                    if (onRecoveryPlaybackHealthyRef.current?.() === true) recoveryProgress.reset();
+                  }
                   onAbsolutePositionChangeRef.current?.(reportedPosition());
                   if (ev.data < previousPosition - 2) {
                     upNextDismissedRef.current = false;
@@ -1188,17 +1257,22 @@ export function EmbeddedPlayer({
               case "duration":
                 if (typeof ev.data === "number") {
                   durRef.current = ev.data;
+                  if (Number.isFinite(ev.data) && ev.data > 0) fullDuration = ev.data;
                   setDur(ev.data);
                   evaluatePredictiveUpNext();
                 }
                 break;
               case "paused-for-cache":
+                cachePaused = Boolean(ev.data);
+                recoveryProgress.reset();
                 // Only a real cache stall (after playback has started) toggles the
                 // spinner; before the first frame the initial spinner owns it.
                 if (firstFrameRef.current) setBuffering(Boolean(ev.data));
                 break;
               case "seeking":
                 rendererSeekingRef.current = Boolean(ev.data);
+                recoveryProgress.reset();
+                if (rendererSeekingRef.current) clockWasResetRef.current = false;
                 if (!rendererSeekingRef.current) {
                   watchdogPositionRef.current = posRef.current;
                   cacheFrontierRef.current = posRef.current;
@@ -1210,15 +1284,17 @@ export function EmbeddedPlayer({
               case "volume":
                 if (typeof ev.data === "number") {
                   const nextVolume = Math.round(ev.data);
+                  volumeRef.current = nextVolume;
                   setVolume(nextVolume);
                   if (nextVolume > 0) lastAudibleVolume.current = nextVolume;
                 }
                 break;
               case "mute":
+                mutedRef.current = Boolean(ev.data);
                 setMuted(Boolean(ev.data));
                 break;
               case "speed":
-                if (typeof ev.data === "number") setSpeed(ev.data);
+                if (typeof ev.data === "number") { speedRef.current = ev.data; recoveryProgress.reset(); setSpeed(ev.data); }
                 break;
               case "demuxer-cache-time":
                 // Absolute timestamp of the last buffered demuxer data (the
@@ -1243,7 +1319,8 @@ export function EmbeddedPlayer({
                 }
                 break;
               case "aid":
-                setActiveAid(ev.data == null ? "no" : String(ev.data));
+                activeAidRef.current = ev.data == null ? "no" : String(ev.data);
+                setActiveAid(activeAidRef.current);
                 break;
               case "sid":
                 setActiveSid(ev.data == null ? "no" : String(ev.data));
@@ -1252,7 +1329,12 @@ export function EmbeddedPlayer({
                 void refreshTracks();
                 break;
               case "eof-reached":
-                if (ev.data === true) {
+                if (ev.data === true && !endedRef.current) {
+                  if (verifiedProgress && fullDuration != null && posRef.current < fullDuration - 10) {
+                    if (!recoverTerminal()) void triggerNativeFallback(new Error("Native playback ended before the media completed"));
+                    break;
+                  }
+                  recoveryProgress.reset();
                   endedRef.current = true;
                   syncPostStartWatchdog({ ended: true });
                   setPredictiveUpNext(
@@ -1287,15 +1369,12 @@ export function EmbeddedPlayer({
                   }
                 }
                 break;
-              // A genuine playback FAILURE reported by mpv AFTER loadfile
-              // succeeded (corrupt data / an undecodable codec) - the case the
-              // init try/catch can't see, because loadfile returns success and the
-              // decode error only surfaces here. Only reason=ERROR reaches us (the
-              // Rust core never forwards a normal EOF/stop/quit/redirect), so any
-              // end-file event is a hand-off to the webview transcode.
+              // Only reason=ERROR reaches this event. Verified post-start
+              // failures need a fresh source, not another read of a dead URL.
               case "end-file": {
                 const d = ev.data as { error?: boolean; code?: number } | null;
                 if (d?.error) {
+                  if (recoverTerminal()) break;
                   void triggerNativeFallback(
                     new Error(
                       `Native playback failed (mpv error ${d.code ?? "unknown"})`,
@@ -1389,6 +1468,8 @@ export function EmbeddedPlayer({
         const configuredVolume = configuredPreferences?.defaultVolume;
         if (configuredVolume != null && Number.isFinite(configuredVolume)) {
           const initialVolume = Math.round(Math.min(100, Math.max(0, configuredVolume)));
+          volumeRef.current = initialVolume;
+          mutedRef.current = initialVolume === 0;
           setVolume(initialVolume);
           setMuted(initialVolume === 0);
           if (initialVolume > 0) lastAudibleVolume.current = initialVolume;
@@ -1400,6 +1481,7 @@ export function EmbeddedPlayer({
           : savedPrefs?.playbackSpeed;
         const initialSpeed = titleSpeed ?? configuredPreferences?.defaultPlaybackSpeed;
         if (initialSpeed != null && Number.isFinite(initialSpeed) && initialSpeed > 0) {
+          speedRef.current = initialSpeed;
           setSpeed(initialSpeed);
           await setProperty("speed", initialSpeed);
         }
@@ -1427,6 +1509,11 @@ export function EmbeddedPlayer({
           const handoffRate = Number.isFinite(handoff.playbackRate) && handoff.playbackRate > 0
             ? handoff.playbackRate
             : 1;
+          volumeRef.current = handoffVolume;
+          mutedRef.current = handoff.muted;
+          speedRef.current = handoffRate;
+          pausedRef.current = handoff.paused;
+          ownedPausedRef.current = handoff.paused;
           setVolume(handoffVolume);
           setMuted(handoff.muted);
           setSpeed(handoffRate);
@@ -1466,6 +1553,8 @@ export function EmbeddedPlayer({
     })();
     return () => {
       cancelled = true;
+      recoveryProgress.reset();
+      if (recoveryProgressRef.current === recoveryProgress) recoveryProgressRef.current = null;
       syncPostStartWatchdog({ tearingDown: true });
       postStartWatchdog.stop();
       if (stallWatchdogRef.current === postStartWatchdog) {
@@ -1538,15 +1627,20 @@ export function EmbeddedPlayer({
 
   // ── Playback controls ──────────────────────────────────────────────────────
   const togglePause = useCallback(() => {
+    ownedPausedRef.current = ended ? false : !pausedRef.current;
+    pausedRef.current = ownedPausedRef.current;
+    recoveryProgressRef.current?.reset();
     if (ended) {
+      pendingSeekRef.current = 0;
+      clockWasResetRef.current = false;
       setEnded(false);
       endedRef.current = false;
       void command("seek", [0, "absolute"]);
       void setProperty("pause", false);
       return;
     }
-    setPaused((current) => !current);
-    void setProperty("pause", !paused);
+    setPaused(ownedPausedRef.current);
+    void setProperty("pause", ownedPausedRef.current);
     nudgeControls();
   }, [paused, ended, nudgeControls]);
 
@@ -1556,6 +1650,9 @@ export function EmbeddedPlayer({
       ? duration
       : Number.POSITIVE_INFINITY;
     const next = Math.min(upperBound, Math.max(0, to));
+    pendingSeekRef.current = next;
+    clockWasResetRef.current = false;
+    recoveryProgressRef.current?.reset();
     posRef.current = next;
     scrubberRef.current?.updatePlayback({ pos: next }, true);
     const nextChapterIndex = chapterIndexAt(next, chaptersRef.current);
@@ -1578,6 +1675,8 @@ export function EmbeddedPlayer({
 
   const changeVolume = useCallback((v: number) => {
     const next = Math.min(130, Math.max(0, Math.round(v)));
+    volumeRef.current = next;
+    mutedRef.current = next === 0;
     setVolume(next);
     setMuted(next === 0);
     if (next > 0) lastAudibleVolume.current = next;
@@ -1588,6 +1687,8 @@ export function EmbeddedPlayer({
     if (volumeIsSilent) {
       const restored = volume > 0 ? volume : Math.max(1, lastAudibleVolume.current);
       lastAudibleVolume.current = restored;
+      mutedRef.current = false;
+      volumeRef.current = restored;
       setMuted(false);
       setVolume(restored);
       void setProperty("mute", false);
@@ -1595,16 +1696,20 @@ export function EmbeddedPlayer({
       return;
     }
     lastAudibleVolume.current = volume;
+    mutedRef.current = true;
     setMuted(true);
     void setProperty("mute", true);
   }, [volume, volumeIsSilent]);
 
   const applySpeed = useCallback((s: number) => {
+    speedRef.current = s;
+    recoveryProgressRef.current?.reset();
     setSpeed(s);
     void setProperty("speed", s);
   }, []);
 
   const selectAudio = useCallback((id: string) => {
+    activeAidRef.current = id;
     setActiveAid(id);
     void setProperty("aid", id);
   }, []);
