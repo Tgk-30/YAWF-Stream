@@ -1,0 +1,66 @@
+name: Restore qualified server minor channel
+on:
+  push:
+    branches: [codex/restore-minor90]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  restore:
+    if: github.repository == 'Tgk-30/YAWF-Stream' && github.actor == github.repository_owner
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/tgk-30/yawf-stream
+      QUALIFIED: sha256:57116f11a4ba1e7bbee6adaf9c0f2a5f89fab157cb49942d4d0f74f53a1e6888
+      WITHHELD: sha256:c2de0a37e4eaf8c80d18994d9feaf686d80512ed27cbdc1c1d78425fd110b558
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Revalidate the public qualified release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/promote_server_latest.mjs prepare \
+            --version 2.3.90 \
+            --expected-source-revision e2362818bcc3ff9258c1bde9ffc684f28d62abb3 \
+            --expected-image-digest "$QUALIFIED" \
+            --output "$RUNNER_TEMP/qualified-release.json"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Restore only the guarded mutable minor alias
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest() {
+            docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" \
+              | node -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).digest))'
+          }
+          test "$(digest "$IMAGE@$QUALIFIED")" = "$QUALIFIED"
+          test "$(digest "$IMAGE:latest")" = "$QUALIFIED"
+          test "$(digest "$IMAGE:2.3")" = "$WITHHELD"
+          docker buildx imagetools create --tag "$IMAGE:2.3" "$IMAGE@$QUALIFIED"
+          test "$(digest "$IMAGE:2.3")" = "$QUALIFIED"
+          test "$(digest "$IMAGE:latest")" = "$QUALIFIED"
+          node -e 'require("node:fs").writeFileSync(process.env.RUNNER_TEMP+"/minor-channel-restored.json",JSON.stringify({schemaVersion:1,tag:"2.3",before:process.env.WITHHELD,after:process.env.QUALIFIED,latestUnchanged:true,versionTagsAndHistoryUnchanged:true,run:process.env.GITHUB_RUN_ID})+"\n")'
+      - name: Retain channel receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-minor-channel-restore-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/qualified-release.json
+            ${{ runner.temp }}/minor-channel-restored.json
+          if-no-files-found: warn
