@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import * as runtime from './android_player91_runtime.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdirSync, mkdtempSync, symlinkSync, realpathSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -557,9 +558,10 @@ test('diagnostic copies raw SDK geometry before every unchanged containment guar
  assert.match(driver,/DIAGNOSTIC_COMPLETED_MENU_OBSERVED_NOT_PRODUCT_PASS/);
 });
 
+const zeroTailReasons = () => ({schemaVersion:1,bits:0,reasons:[],knownNodes:[],truncated:false});
 const consentInput = () => ({...input('setup'),setupTail:{action:'UPDATE_NOT_NOW_TO_WELCOME',phase:'launch',sourceClicks:0,declineOrdinal:1,ok:true,maximumMs:2000,maximumSamples:20,upUptimeMs:1100,screenWidth:1080,screenHeight:1920,firstStableUptimeMs:1200,lastStableUptimeMs:1300,finishedUptimeMs:1301,observations:[
- {uptimeMs:1120,rootAvailable:false,ownerValid:false,rootWindowId:-1,rootBounds:null,rootKey:null,oldPrompt:false,unexpected:false,dialogs:0,titles:0,skips:0,nexts:0,snapshotComplete:false,nodesVisited:0,maxDepth:0,missingChildCount:0,missingChildDepth:-1,missingChildIndex:-1},
- ...[1200,1300].map(uptimeMs=>({uptimeMs,rootAvailable:true,ownerValid:true,rootWindowId:7,rootBounds:[0,0,1080,1920],rootKey:'7,0,0,1080,1920',oldPrompt:false,unexpected:false,dialogs:1,titles:1,skips:1,nexts:1,snapshotComplete:true,nodesVisited:8,maxDepth:3,missingChildCount:0,missingChildDepth:-1,missingChildIndex:-1}))]}});
+ {uptimeMs:1120,rootAvailable:false,ownerValid:false,rootWindowId:-1,rootBounds:null,rootKey:null,oldPrompt:false,unexpected:false,dialogs:0,titles:0,skips:0,nexts:0,snapshotComplete:false,nodesVisited:0,maxDepth:0,missingChildCount:0,missingChildDepth:-1,missingChildIndex:-1,reasonEvidence:zeroTailReasons()},
+ ...[1200,1300].map(uptimeMs=>({uptimeMs,rootAvailable:true,ownerValid:true,rootWindowId:7,rootBounds:[0,0,1080,1920],rootKey:'7,0,0,1080,1920',oldPrompt:false,unexpected:false,dialogs:1,titles:1,skips:1,nexts:1,snapshotComplete:true,nodesVisited:8,maxDepth:3,missingChildCount:0,missingChildDepth:-1,missingChildIndex:-1,reasonEvidence:zeroTailReasons()}))]}});
 test('exact consent tail recomputes delayed-null then stable Welcome and rejects every missing postcondition',()=>{
  validateUpdateConsentTail(consentInput());
  for(const mutate of[
@@ -677,4 +679,106 @@ test('incomplete tail actual copied Java scanner preserves partial numeric state
  const tail=java.slice(java.indexOf('    private void requireUpdateConsentWelcomeTail'),java.indexOf('    private void tapObject'));
  for(const text of ['"snapshotComplete"','"nodesVisited"','"missingChildCount"','"missingChildDepth"','"missingChildIndex"'])assert.ok(tail.includes(text));
  assert.ok(tail.indexOf('observations.put(')<tail.indexOf('policy.observe('));assert.doesNotMatch(tail,/\.tap\(|\.click\(|inject\(|pressBack|startActivity/);
+});
+
+test('tail reason JSON accepts exact bounded enums and raw geometry but rejects unknown schema or text',()=>{
+ const observation=()=>structuredClone(consentInput().setupTail.observations[1]);
+ const validate=runtime.validateTailReasonEvidence;assert.equal(typeof validate,'function','Diagnostic reason validator is required');
+ validate(observation());
+ const names=['TERMS_TEXT','TERMS_DESCRIPTION','UNKNOWN_DIALOG','UNKNOWN_ALERT_TITLE','UNKNOWN_NATIVE_BUTTON','KNOWN_PACKAGE','KNOWN_WINDOW','KNOWN_NOT_VISIBLE','KNOWN_EMPTY_BOUNDS','KNOWN_OUTSIDE_ROOT','SKIP_DISABLED','SKIP_NOT_CLICKABLE','NEXT_DISABLED','NEXT_NOT_CLICKABLE'];
+ for(let i=0;i<names.length;i++){
+  const o=observation(),bit=1<<i;o.unexpected=true;Object.assign(o.reasonEvidence,{bits:bit,reasons:[names[i]]});
+  if(i>=5){
+   const node={kind:i>=12?'NEXT':i>=10?'SKIP':'TITLE',nodeOrdinal:1,depth:0,packageMatches:true,windowId:7,visible:true,enabled:i>=10?true:null,clickable:i>=10?true:null,rawBounds:[0,0,100,100],reasonBits:bit};
+   if(i===5)Object.assign(node,{packageMatches:false,windowId:null,visible:null});
+   if(i===6)Object.assign(node,{windowId:-1,visible:null});
+   if(i===7)node.visible=false;
+   if(i===8)node.rawBounds=[10,10,10,10];
+   if(i===9)node.rawBounds=[-3,0,100,100];
+   if(i===10||i===12)Object.assign(node,{enabled:false,clickable:null});
+   if(i===11||i===13)node.clickable=false;
+   o.reasonEvidence.knownNodes=[node];
+  }
+  validate(o);
+  const input=consentInput();input.setupTail.observations[1]=o;assert.throws(()=>validateUpdateConsentTail(input),'Diagnostics must never waive unexpected refusal');
+ }
+ const valid=observation();valid.reasonEvidence.knownNodes=[{kind:'TITLE',nodeOrdinal:1,depth:0,packageMatches:true,windowId:7,visible:true,enabled:null,clickable:null,rawBounds:[0,0,100,100],reasonBits:0}];validate(valid);
+ for(const mutate of[
+  o=>o.reasonEvidence.schemaVersion=2,o=>o.reasonEvidence.bits=16384,o=>o.reasonEvidence.bits=-1,o=>o.reasonEvidence.bits=1.5,
+  o=>o.reasonEvidence.reasons=['OTHER'],o=>o.reasonEvidence.reasons=['TERMS_TEXT'],o=>o.reasonEvidence.reasons.push('TERMS_TEXT'),
+  o=>o.reasonEvidence.bits=1,o=>o.unexpected=true,o=>o.reasonEvidence.text='unowned text',o=>o.text='unowned text',o=>o.reasonEvidence.url='https://invalid.example/',
+  o=>o.reasonEvidence.knownNodes[0].text='unowned text',o=>o.reasonEvidence.knownNodes[0].kind='OTHER',
+  o=>o.reasonEvidence.knownNodes[0].windowId='7',o=>o.reasonEvidence.knownNodes[0].visible=null,
+  o=>o.reasonEvidence.knownNodes[0].rawBounds=[0,0,100,2147483648],o=>o.reasonEvidence.knownNodes[0].rawBounds[0]=NaN,
+  o=>o.reasonEvidence.knownNodes[0].nodeOrdinal=513,o=>o.reasonEvidence.knownNodes[0].depth=33,
+  o=>o.reasonEvidence.knownNodes[0].enabled=true,o=>o.reasonEvidence.knownNodes[0].reasonBits=32,
+  o=>o.reasonEvidence.knownNodes=Array.from({length:9},()=>o.reasonEvidence.knownNodes[0]),o=>o.reasonEvidence.truncated=1,
+  o=>Object.assign(o.reasonEvidence.knownNodes[0],{packageMatches:false,windowId:7}),
+  o=>Object.assign(o.reasonEvidence.knownNodes[0],{kind:'SKIP',enabled:false,clickable:false}),
+ ]){const o=structuredClone(valid);mutate(o);assert.throws(()=>validate(o));}
+ const unknown=consentInput();unknown.setupTail.observations[1].rawText='not permitted';assert.throws(()=>validateUpdateConsentTail(unknown));
+});
+
+test('actual copied Java reason scanner attributes all fourteen existing predicates without extra SDK reads',()=>{
+ const constants=['PRODUCT','PLAYER'].map(name=>java.match(new RegExp(`    private static final String ${name} = [^;]+;`))[0]);
+ constants.push(java.match(/    private static final Pattern TERMS = [^;]+;/)[0]);
+ const acq=java.slice(java.indexOf('    static final class AcquisitionPolicy {'),java.indexOf('    private static final class AcquiredMore'));
+ const scanner=java.slice(java.indexOf('    private static final class WelcomeTailScan'),java.indexOf('    private void requireUpdateConsentWelcomeTail'));
+ const support=`
+ static final class Rect {int left,top,right,bottom;Rect(){this(0,0,1080,1920);}Rect(int a,int b,int c,int d){left=a;top=b;right=c;bottom=d;}boolean isEmpty(){return right<=left||bottom<=top;}boolean contains(Rect r){return r.left>=left&&r.top>=top&&r.right<=right&&r.bottom<=bottom;}}
+ static final class AccessibilityNodeInfo {String text,clazz,description,resource,pkg=PRODUCT;int window=7,windowReads,visibleReads,enabledReads,clickableReads;boolean visible=true,enabled=true,clickable=true;Rect bounds=new Rect(0,0,100,100);AccessibilityNodeInfo[] children=new AccessibilityNodeInfo[0];AccessibilityNodeInfo(String c,String t){clazz=c;text=t;}CharSequence getText(){return text;}CharSequence getContentDescription(){return description;}CharSequence getClassName(){return clazz;}String getViewIdResourceName(){return resource;}CharSequence getPackageName(){return pkg;}int getWindowId(){windowReads++;return window;}boolean isVisibleToUser(){visibleReads++;return visible;}boolean isEnabled(){enabledReads++;return enabled;}boolean isClickable(){clickableReads++;return clickable;}void getBoundsInScreen(Rect r){r.left=bounds.left;r.top=bounds.top;r.right=bounds.right;r.bottom=bounds.bottom;}int getChildCount(){return children.length;}AccessibilityNodeInfo getChild(int i){return children[i];}void recycle(){}}
+ static void assertTrue(String m,boolean b){if(!b)throw new AssertionError(m);}static void assertNotNull(String m,Object o){if(o==null)throw new AssertionError(m);}
+ static int reasons(WelcomeTailScan scan)throws Exception{try{return (Integer)WelcomeTailScan.class.getDeclaredField("reasonBits").get(scan);}catch(NoSuchFieldException old){return 0;}}
+ static Object field(Object o,String name)throws Exception{var f=o.getClass().getDeclaredField(name);f.setAccessible(true);return f.get(o);}
+ `;
+ const checks=`
+ TailReasonsHarness h=new TailReasonsHarness();
+ for(int i=0;i<14;i++){
+  AccessibilityNodeInfo n=new AccessibilityNodeInfo("android.widget.TextView", "Welcome to YAWF Stream");
+  if(i==0)n.text="Terms of Service";
+  if(i==1){n.text="";n.description="Terms of Service";}
+  if(i==2){n.clazz="android.app.Dialog";n.text="Unknown";}
+  if(i==3){n.text="";n.resource="android:id/alertTitle";}
+  if(i==4){n.text="";n.resource="android:id/button2";}
+  if(i==5)n.pkg="other.package";
+  if(i==6)n.window=8;
+  if(i==7)n.visible=false;
+  if(i==8)n.bounds=new Rect(10,10,10,10);
+  if(i==9)n.bounds=new Rect(-3,0,100,100);
+  if(i>=10){n.text=i>=12?"Next":"Skip";n.clazz="android.widget.Button";if(i%2==0)n.enabled=false;else n.clickable=false;}
+  WelcomeTailScan scan=new WelcomeTailScan(new Rect(),7);h.scanWelcomeTail(n,scan,0);
+  if(!scan.unexpected||reasons(scan)!=(1<<i))throw new AssertionError("predicate "+i+" expected "+(1<<i)+" got "+reasons(scan));
+  if(n.windowReads!=(i>=6?1:0)||n.visibleReads!=(i>=7?1:0)||n.enabledReads!=(i>=10?1:0)||n.clickableReads!=(i>=10&&i%2==1?1:0))throw new AssertionError("short-circuit SDK reads changed for "+i);
+  if(i>=5){java.util.List<?> nodes=(java.util.List<?>)field(scan,"knownNodes");Object record=nodes.get(0);
+   if(i==5&&(field(record,"windowId")!=null||field(record,"visible")!=null))throw new AssertionError("unread metadata fabricated");
+   if(i==6&&field(record,"visible")!=null)throw new AssertionError("unread visibility fabricated");
+   if(i==9&&((Rect)field(record,"rawBounds")).left!=-3)throw new AssertionError("raw bounds clipped");
+   if((i==10||i==12)&&field(record,"clickable")!=null)throw new AssertionError("unread clickable fabricated");
+  }
+ }
+ AccessibilityNodeInfo healthy=new AccessibilityNodeInfo("android.app.Dialog","Welcome");healthy.children=new AccessibilityNodeInfo[]{new AccessibilityNodeInfo("android.widget.TextView","Welcome to YAWF Stream"),new AccessibilityNodeInfo("android.widget.Button","Skip"),new AccessibilityNodeInfo("android.widget.Button","Next")};
+ WelcomeTailScan good=new WelcomeTailScan(new Rect(),7);h.scanWelcomeTail(healthy,good,0);if(good.unexpected||reasons(good)!=0||good.dialogs!=1||good.titles!=1||good.skips!=1||good.nexts!=1)throw new AssertionError("valid original Welcome refused");
+ AccessibilityNodeInfo nativePrompt=new AccessibilityNodeInfo("android.app.Dialog","Enable Android update checks?");AccessibilityNodeInfo alert=new AccessibilityNodeInfo("android.widget.TextView","Enable Android update checks?");alert.resource="android:id/alertTitle";AccessibilityNodeInfo no=new AccessibilityNodeInfo("android.widget.Button","NOT NOW");no.resource="android:id/button2";AccessibilityNodeInfo yes=new AccessibilityNodeInfo("android.widget.Button","ENABLE");yes.resource="android:id/button1";nativePrompt.children=new AccessibilityNodeInfo[]{alert,no,yes};
+ WelcomeTailScan prompt=new WelcomeTailScan(new Rect(),7);h.scanWelcomeTail(nativePrompt,prompt,0);if(!prompt.oldPrompt||prompt.unexpected||reasons(prompt)!=0)throw new AssertionError("known native prompt reclassified");
+ AccessibilityNodeInfo repeated=new AccessibilityNodeInfo("android.view.View","");repeated.children=new AccessibilityNodeInfo[9];for(int i=0;i<9;i++)repeated.children[i]=new AccessibilityNodeInfo("android.widget.TextView","Welcome to YAWF Stream");WelcomeTailScan cap=new WelcomeTailScan(new Rect(),7);h.scanWelcomeTail(repeated,cap,0);if(((java.util.List<?>)field(cap,"knownNodes")).size()!=8||!(Boolean)field(cap,"knownNodesTruncated")||cap.unexpected)throw new AssertionError("diagnostic cap changed policy");
+ `;
+ const dir=realpathSync(mkdtempSync(join(process.env.RUNNER_TEMP||process.env.TMPDIR,'tail-reasons-')));
+ writeFileSync(join(dir,'TailReasonsHarness.java'),`import java.util.regex.Pattern;public final class TailReasonsHarness {${constants.join('\n')}\n${support}\n${acq}\n${scanner}\npublic static void main(String[] args)throws Exception{${checks}\nSystem.out.println("tail-reasons:14-predicates-passed");}}`);
+ const built=spawnSync(join(process.env.JAVA_HOME,'bin/javac'),[`-J-Djava.io.tmpdir=${dir}`,'-d',dir,join(dir,'TailReasonsHarness.java')],{encoding:'utf8',timeout:20000});assert.equal(built.status,0,built.stderr);
+ const ran=spawnSync(join(process.env.JAVA_HOME,'bin/java'),[`-Djava.io.tmpdir=${dir}`,'-cp',dir,'TailReasonsHarness'],{encoding:'utf8',timeout:20000});assert.equal(ran.status,0,ran.stderr);assert.equal(ran.stdout.trim(),'tail-reasons:14-predicates-passed');
+});
+
+test('reason capture is bounded numeric-only before unchanged policy refusal and does not query SDK again',()=>{
+ const scan=java.slice(java.indexOf('    private void scanWelcomeTail'),java.indexOf('    private void requireUpdateConsentWelcomeTail'));
+ for(const method of ['getBoundsInScreen','getPackageName','getWindowId','isVisibleToUser'])assert.equal((scan.match(new RegExp(`node\\.${method}\\(`,'g'))||[]).length,1,method);
+ assert.equal((scan.match(/node\.isEnabled\(/g)||[]).length,2);assert.equal((scan.match(/node\.isClickable\(/g)||[]).length,2);
+ assert.match(scan,/knownNodes\.size\(\) < 8/);assert.match(scan,/else scan\.knownNodesTruncated = true/);
+ const tail=java.slice(java.indexOf('    private void requireUpdateConsentWelcomeTail'),java.indexOf('    private JSONObject tailReasonEvidence'));
+ const evidenceAt=tail.indexOf('.put("reasonEvidence", tailReasonEvidence(scan))');
+ assert.ok(evidenceAt>=0 && evidenceAt<tail.indexOf('policy.observe('));
+ const serialize=java.slice(java.indexOf('    private JSONObject tailReasonEvidence'),java.indexOf('    private void tapObject'));
+ assert.doesNotMatch(serialize,/node\.|getText|getContentDescription|getClassName|getViewIdResourceName|getPackageName|getWindowId|isVisibleToUser|isEnabled|isClickable|URL|\.play\(|\.pause\(/);
+ const keys=[...serialize.matchAll(/\.put\("([A-Za-z]+)"/g)].map(m=>m[1]).sort();
+ assert.deepEqual(keys,['bits','clickable','depth','enabled','kind','knownNodes','nodeOrdinal','packageMatches','rawBounds','reasonBits','reasons','schemaVersion','truncated','visible','windowId'].sort());
+ assert.ok(java.includes('assertTrue("Diagnostic geometry captured; More DOWN intentionally not admitted", false)'));
 });

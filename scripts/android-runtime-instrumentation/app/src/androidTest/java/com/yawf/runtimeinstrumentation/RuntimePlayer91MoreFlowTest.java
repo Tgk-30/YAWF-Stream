@@ -711,32 +711,92 @@ public final class RuntimePlayer91MoreFlowTest {
         final AcquisitionPolicy budget = new AcquisitionPolicy();
         final Rect root;
         final int window;
-        int dialogs, titles, skips, nexts;
+        int dialogs, titles, skips, nexts, reasonBits;
+        final java.util.ArrayList<KnownTailNode> knownNodes = new java.util.ArrayList<>();
+        boolean knownNodesTruncated;
         boolean oldPrompt, unexpected, complete = true;
         int missingChildCount, missingChildDepth = -1, missingChildIndex = -1;
         WelcomeTailScan(Rect root, int window) { this.root = root; this.window = window; }
+    }
+    static final class TailReason {
+        static final int TERMS_TEXT=1, TERMS_DESCRIPTION=2, UNKNOWN_DIALOG=4, UNKNOWN_ALERT_TITLE=8, UNKNOWN_NATIVE_BUTTON=16,
+                KNOWN_PACKAGE=32, KNOWN_WINDOW=64, KNOWN_NOT_VISIBLE=128, KNOWN_EMPTY_BOUNDS=256, KNOWN_OUTSIDE_ROOT=512,
+                SKIP_DISABLED=1024, SKIP_NOT_CLICKABLE=2048, NEXT_DISABLED=4096, NEXT_NOT_CLICKABLE=8192;
+        static final String[] NAMES = {"TERMS_TEXT","TERMS_DESCRIPTION","UNKNOWN_DIALOG","UNKNOWN_ALERT_TITLE","UNKNOWN_NATIVE_BUTTON",
+                "KNOWN_PACKAGE","KNOWN_WINDOW","KNOWN_NOT_VISIBLE","KNOWN_EMPTY_BOUNDS","KNOWN_OUTSIDE_ROOT",
+                "SKIP_DISABLED","SKIP_NOT_CLICKABLE","NEXT_DISABLED","NEXT_NOT_CLICKABLE"};
+        static int firstKnown(boolean pkg, Integer window, int expectedWindow, Boolean visible, boolean empty, boolean inside) {
+            if (!pkg) return KNOWN_PACKAGE;
+            if (window != expectedWindow) return KNOWN_WINDOW;
+            if (!visible) return KNOWN_NOT_VISIBLE;
+            if (empty) return KNOWN_EMPTY_BOUNDS;
+            return !inside ? KNOWN_OUTSIDE_ROOT : 0;
+        }
+    }
+    private static final class KnownTailNode {
+        final String kind;
+        final int nodeOrdinal, depth, reasonBits;
+        final boolean packageMatches;
+        final Integer windowId;
+        final Boolean visible, enabled, clickable;
+        final Rect rawBounds;
+        KnownTailNode(String kind, int ordinal, int depth, boolean pkg, Integer window, Boolean visible,
+                      Boolean enabled, Boolean clickable, Rect bounds, int reasons) {
+            this.kind=kind; this.nodeOrdinal=ordinal; this.depth=depth; this.packageMatches=pkg; this.windowId=window;
+            this.visible=visible; this.enabled=enabled; this.clickable=clickable;
+            this.rawBounds=new Rect(bounds.left,bounds.top,bounds.right,bounds.bottom); this.reasonBits=reasons;
+        }
     }
     private void scanWelcomeTail(AccessibilityNodeInfo node, WelcomeTailScan scan, int depth) {
         scan.budget.visit(depth);
         String text = node.getText() == null ? "" : node.getText().toString();
         String description = node.getContentDescription() == null ? "" : node.getContentDescription().toString();
         String clazz = String.valueOf(node.getClassName()), resource = String.valueOf(node.getViewIdResourceName());
-        if (TERMS.matcher(text).matches() || TERMS.matcher(description).matches()) scan.unexpected = true;
+        int nodeReasons = 0;
+        if (TERMS.matcher(text).matches() || TERMS.matcher(description).matches()) {
+            scan.unexpected = true;
+            if (TERMS.matcher(text).matches()) nodeReasons |= TailReason.TERMS_TEXT;
+            if (TERMS.matcher(description).matches()) nodeReasons |= TailReason.TERMS_DESCRIPTION;
+        }
         boolean title = "Welcome to YAWF Stream".equals(text), welcome = "android.app.Dialog".equals(clazz) && "Welcome".equals(text);
         boolean skip = "Skip".equals(text), next = "Next".equals(text);
         if ("Enable Android update checks?".equals(text)) scan.oldPrompt = true;
         if (("android.app.Dialog".equals(clazz) && !"Welcome".equals(text) && !"Enable Android update checks?".equals(text)) ||
                 (resource.equals("android:id/alertTitle") && !"Enable Android update checks?".equals(text)) ||
-                (resource.startsWith("android:id/button") && !"NOT NOW".equals(text) && !"ENABLE".equals(text))) scan.unexpected = true;
+                (resource.startsWith("android:id/button") && !"NOT NOW".equals(text) && !"ENABLE".equals(text))) {
+            scan.unexpected = true;
+            if ("android.app.Dialog".equals(clazz) && !"Welcome".equals(text) && !"Enable Android update checks?".equals(text)) nodeReasons |= TailReason.UNKNOWN_DIALOG;
+            if (resource.equals("android:id/alertTitle") && !"Enable Android update checks?".equals(text)) nodeReasons |= TailReason.UNKNOWN_ALERT_TITLE;
+            if (resource.startsWith("android:id/button") && !"NOT NOW".equals(text) && !"ENABLE".equals(text)) nodeReasons |= TailReason.UNKNOWN_NATIVE_BUTTON;
+        }
         if (title || welcome || skip || next) {
             Rect bounds = new Rect(); node.getBoundsInScreen(bounds);
-            if (!PRODUCT.equals(String.valueOf(node.getPackageName())) || node.getWindowId() != scan.window || !node.isVisibleToUser() ||
-                    bounds.isEmpty() || !scan.root.contains(bounds)) scan.unexpected = true;
+            boolean packageMatches = PRODUCT.equals(String.valueOf(node.getPackageName()));
+            Integer window = null; Boolean visible = null, enabled = null, clickable = null;
+            if (!packageMatches || (window = node.getWindowId()) != scan.window || !(visible = node.isVisibleToUser()) ||
+                    bounds.isEmpty() || !scan.root.contains(bounds)) {
+                scan.unexpected = true;
+                nodeReasons |= TailReason.firstKnown(packageMatches, window, scan.window, visible, bounds.isEmpty(), scan.root.contains(bounds));
+            }
             if (title) scan.titles++;
             if (welcome) scan.dialogs++;
-            if (skip) { if (!node.isEnabled() || !node.isClickable()) scan.unexpected = true; scan.skips++; }
-            if (next) { if (!node.isEnabled() || !node.isClickable()) scan.unexpected = true; scan.nexts++; }
+            if (skip) {
+                if (!(enabled = node.isEnabled()) || !(clickable = node.isClickable())) {
+                    scan.unexpected = true; nodeReasons |= !enabled ? TailReason.SKIP_DISABLED : TailReason.SKIP_NOT_CLICKABLE;
+                }
+                scan.skips++;
+            }
+            if (next) {
+                if (!(enabled = node.isEnabled()) || !(clickable = node.isClickable())) {
+                    scan.unexpected = true; nodeReasons |= !enabled ? TailReason.NEXT_DISABLED : TailReason.NEXT_NOT_CLICKABLE;
+                }
+                scan.nexts++;
+            }
+            if (scan.knownNodes.size() < 8) scan.knownNodes.add(new KnownTailNode(title ? "TITLE" : welcome ? "WELCOME" : skip ? "SKIP" : "NEXT",
+                    scan.budget.nodes, depth, packageMatches, window, visible, enabled, clickable, bounds, nodeReasons));
+            else scan.knownNodesTruncated = true;
         }
+        scan.reasonBits |= nodeReasons;
         int children = node.getChildCount();
         assertTrue("Tail snapshot child bound exceeded", children >= 0 && children <= 512);
         for (int i = 0; i < children; i++) {
@@ -782,7 +842,8 @@ public final class RuntimePlayer91MoreFlowTest {
                         .put("titles", scan == null ? 0 : scan.titles).put("skips", scan == null ? 0 : scan.skips).put("nexts", scan == null ? 0 : scan.nexts)
                         .put("snapshotComplete", root != null && owner && scan.complete).put("nodesVisited", scan == null ? 0 : scan.budget.nodes)
                         .put("maxDepth", scan == null ? 0 : scan.budget.deepest).put("missingChildCount", scan == null ? 0 : scan.missingChildCount)
-                        .put("missingChildDepth", scan == null ? -1 : scan.missingChildDepth).put("missingChildIndex", scan == null ? -1 : scan.missingChildIndex));
+                        .put("missingChildDepth", scan == null ? -1 : scan.missingChildDepth).put("missingChildIndex", scan == null ? -1 : scan.missingChildIndex)
+                        .put("reasonEvidence", tailReasonEvidence(scan)));
                 if (policy.observe(at, upAt, state.upAcknowledged && !state.streamActive, root != null, owner,
                         scan != null && scan.unexpected, scan != null && scan.oldPrompt, scan == null ? 0 : scan.dialogs,
                         scan == null ? 0 : scan.titles, scan == null ? 0 : scan.skips, scan == null ? 0 : scan.nexts, key, root != null && owner && scan.complete)) {
@@ -794,6 +855,19 @@ public final class RuntimePlayer91MoreFlowTest {
             SystemClock.sleep(100);
         }
         throw new AssertionError("Exact Welcome postcondition did not settle; no further input is admitted");
+    }
+
+    private JSONObject tailReasonEvidence(WelcomeTailScan scan) throws Exception {
+        int bits = scan == null ? 0 : scan.reasonBits;
+        JSONArray reasons = new JSONArray(), nodes = new JSONArray();
+        for (int i=0; i<TailReason.NAMES.length; i++) if ((bits & (1<<i)) != 0) reasons.put(TailReason.NAMES[i]);
+        if (scan != null) for (KnownTailNode n : scan.knownNodes) nodes.put(new JSONObject().put("kind", n.kind)
+                .put("nodeOrdinal", n.nodeOrdinal).put("depth", n.depth).put("packageMatches", n.packageMatches)
+                .put("windowId", n.windowId == null ? JSONObject.NULL : n.windowId).put("visible", n.visible == null ? JSONObject.NULL : n.visible)
+                .put("enabled", n.enabled == null ? JSONObject.NULL : n.enabled).put("clickable", n.clickable == null ? JSONObject.NULL : n.clickable)
+                .put("rawBounds", rect(n.rawBounds)).put("reasonBits", n.reasonBits));
+        return new JSONObject().put("schemaVersion", 1).put("bits", bits).put("reasons", reasons).put("knownNodes", nodes)
+                .put("truncated", scan != null && scan.knownNodesTruncated);
     }
 
     private void tapObject(UiObject2 target, String role) throws Exception {

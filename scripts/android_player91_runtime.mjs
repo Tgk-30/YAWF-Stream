@@ -171,6 +171,58 @@ export function validate91Acquisition(receipt) {
   requireTrue(receipt.moreDownAttemptUptimeMs===down && down-up>=0 && down-up<=1200, 'Actual More DOWN exceeded1200ms since reveal UP');
 }
 
+const TAIL_REASONS = Object.freeze(['TERMS_TEXT', 'TERMS_DESCRIPTION', 'UNKNOWN_DIALOG', 'UNKNOWN_ALERT_TITLE', 'UNKNOWN_NATIVE_BUTTON',
+  'KNOWN_PACKAGE', 'KNOWN_WINDOW', 'KNOWN_NOT_VISIBLE', 'KNOWN_EMPTY_BOUNDS', 'KNOWN_OUTSIDE_ROOT',
+  'SKIP_DISABLED', 'SKIP_NOT_CLICKABLE', 'NEXT_DISABLED', 'NEXT_NOT_CLICKABLE']);
+const TAIL_OBSERVATION_KEYS = Object.freeze(['uptimeMs', 'rootAvailable', 'ownerValid', 'rootWindowId', 'rootBounds', 'rootKey',
+  'oldPrompt', 'unexpected', 'dialogs', 'titles', 'skips', 'nexts', 'snapshotComplete', 'nodesVisited', 'maxDepth',
+  'missingChildCount', 'missingChildDepth', 'missingChildIndex', 'reasonEvidence']);
+const exactKeys = (object, keys) => object !== null && typeof object === 'object' && !Array.isArray(object)
+  && Object.keys(object).length === keys.length && keys.every(key => Object.hasOwn(object, key));
+
+export function validateTailReasonEvidence(observation) {
+  const o = observation, e = o?.reasonEvidence;
+  requireTrue(exactKeys(o, TAIL_OBSERVATION_KEYS) && exactKeys(e, ['schemaVersion', 'bits', 'reasons', 'knownNodes', 'truncated']) &&
+    e.schemaVersion === 1 && Number.isSafeInteger(e.bits) && e.bits >= 0 && e.bits <= 16383 &&
+    typeof o.unexpected === 'boolean' && o.unexpected === (e.bits !== 0) && typeof e.truncated === 'boolean' &&
+    Array.isArray(e.reasons) && JSON.stringify(e.reasons) === JSON.stringify(TAIL_REASONS.filter((_, i) => e.bits & (1 << i))) &&
+    Array.isArray(e.knownNodes) && e.knownNodes.length <= 8, 'Exact bounded unexpected-reason schema required');
+  const int32 = value => Number.isInteger(value) && value >= -2147483648 && value <= 2147483647;
+  const nullableBoolean = value => value === null || typeof value === 'boolean';
+  let previousOrdinal = 0;
+  for (const n of e.knownNodes) {
+    requireTrue(exactKeys(n, ['kind', 'nodeOrdinal', 'depth', 'packageMatches', 'windowId', 'visible', 'enabled', 'clickable', 'rawBounds', 'reasonBits']) &&
+      ['TITLE', 'WELCOME', 'SKIP', 'NEXT'].includes(n.kind) && Number.isSafeInteger(n.nodeOrdinal) && n.nodeOrdinal > previousOrdinal && n.nodeOrdinal <= o.nodesVisited &&
+      Number.isSafeInteger(n.depth) && n.depth >= 0 && n.depth <= o.maxDepth && typeof n.packageMatches === 'boolean' &&
+      (n.windowId === null || int32(n.windowId)) && nullableBoolean(n.visible) && nullableBoolean(n.enabled) && nullableBoolean(n.clickable) &&
+      Array.isArray(n.rawBounds) && n.rawBounds.length === 4 && n.rawBounds.every(int32) &&
+      Number.isSafeInteger(n.reasonBits) && n.reasonBits >= 0 && n.reasonBits <= 16383 && (n.reasonBits & e.bits) === n.reasonBits,
+    'Known-node reason evidence must contain only bounded enums and raw primitives');
+    previousOrdinal = n.nodeOrdinal;
+    let expected = 0;
+    if (!n.packageMatches) {
+      requireTrue(n.windowId === null && n.visible === null, 'Unread SDK metadata must remain null'); expected = 32;
+    } else {
+      requireTrue(n.windowId !== null, 'Read SDK window metadata required');
+      if (n.windowId !== o.rootWindowId) { requireTrue(n.visible === null, 'Unread visibility must remain null'); expected = 64; }
+      else {
+        requireTrue(typeof n.visible === 'boolean', 'Read SDK visibility metadata required');
+        if (!n.visible) expected = 128;
+        else if (n.rawBounds[2] <= n.rawBounds[0] || n.rawBounds[3] <= n.rawBounds[1]) expected = 256;
+        else if (!(Array.isArray(o.rootBounds) && n.rawBounds[0] >= o.rootBounds[0] && n.rawBounds[1] >= o.rootBounds[1] &&
+          n.rawBounds[2] <= o.rootBounds[2] && n.rawBounds[3] <= o.rootBounds[3])) expected = 512;
+      }
+    }
+    if (n.kind === 'SKIP' || n.kind === 'NEXT') {
+      requireTrue(typeof n.enabled === 'boolean' && (n.enabled ? typeof n.clickable === 'boolean' : n.clickable === null), 'Preserved short-circuit control metadata required');
+      if (!n.enabled) expected |= n.kind === 'SKIP' ? 1024 : 4096;
+      else if (!n.clickable) expected |= n.kind === 'SKIP' ? 2048 : 8192;
+    } else requireTrue(n.enabled === null && n.clickable === null, 'Unqueried title/dialog controls must remain null');
+    requireTrue((n.reasonBits & 16352) === expected, 'Known-node reason must match the original unexpected predicate');
+  }
+  return e;
+}
+
 export function validateUpdateConsentTail(input) {
   const tail = input.setupTail;
   requireTrue(input.role === 'setup' && input.upAcknowledged === true && input.streamMayRemain === false &&
@@ -184,6 +236,7 @@ export function validateUpdateConsentTail(input) {
   let first = -1, stable = 0, previousKey = null, previousAt = up - 1, completed = false;
   for (const [index, observation] of tail.observations.entries()) {
     const o = observation;
+    validateTailReasonEvidence(o);
     requireTrue(!completed && Number.isSafeInteger(o.uptimeMs) && o.uptimeMs > previousAt && o.uptimeMs >= up && o.uptimeMs - up <= 2000 &&
       typeof o.rootAvailable === 'boolean' && typeof o.ownerValid === 'boolean' && typeof o.oldPrompt === 'boolean' && typeof o.snapshotComplete === 'boolean' && o.unexpected === false &&
       [o.dialogs, o.titles, o.skips, o.nexts].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 1), 'Tail snapshot invalid, stale, duplicate or unexpected');
