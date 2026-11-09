@@ -45,6 +45,8 @@ jobs:
       - name: Typecheck and build actual server
         working-directory: server
         run: npm run build
+      - name: Diagnose the content-free native descriptor observer
+        run: node scripts/windows_storage_observer_diagnostic.mjs "$env:RUNNER_TEMP/windows-storage-observer-diagnostic.json"
       - name: Native private storage and writer checks
         working-directory: server
         env:
@@ -63,6 +65,7 @@ jobs:
           name: windows-private-storage-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/windows-private-storage-binding.json
+            ${{ runner.temp }}/windows-storage-observer-diagnostic.json
             ${{ runner.temp }}/windows-private-storage-results.json
             ${{ runner.temp }}/windows-private-storage-full-results.json
           if-no-files-found: error
