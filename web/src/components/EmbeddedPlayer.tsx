@@ -13,6 +13,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -45,6 +46,7 @@ import {
 } from "../lib/audioTrackLabel";
 import {
   PlaybackStallWatchdog,
+  PlaybackRecoveryProgress,
   type PlaybackStallState,
 } from "../lib/playbackStall";
 import type { PlayerPreferenceDefaults } from "./VideoPlayer";
@@ -81,6 +83,12 @@ interface PlaybackHandoffState {
   volume: number;
   muted: boolean;
   playbackRate: number;
+  audioPreference?: { id: string | null; language: string | null } | null;
+}
+
+interface NativeRecoverySnapshot {
+  position: number;
+  state: PlaybackHandoffState;
 }
 
 interface Props {
@@ -101,6 +109,8 @@ interface Props {
   /** Original-media time represented by native time zero for a seek-offset
    * server transcode. */
   timelineOffsetSeconds?: number;
+  /** Owner-scoped original-media duration, independent of native probe output. */
+  knownAbsoluteDurationSeconds?: number | null;
   /** Remembered audio/subtitle/speed for this title, restored after load. */
   savedPrefs?: PlaybackPrefs | null;
   /** Optional global defaults supplied by Settings. This component does not persist them. */
@@ -128,11 +138,12 @@ interface Props {
   playbackDecision?: "Direct Play" | "Transcode";
   /** Give the parent one chance to switch to a compatible webview source when
    * native initialization or loading fails. Returning true means it recovered. */
-  onPlaybackError?: (error: Error) => boolean | Promise<boolean>;
+  onPlaybackError?: (error: Error, recovery?: NativeRecoverySnapshot) => boolean | Promise<boolean>;
   onPlaybackStall?: (
     absolutePositionSeconds: number,
     handoffState: PlaybackHandoffState,
   ) => boolean | Promise<boolean>;
+  onRecoveryPlaybackHealthy?: () => boolean;
   onRetryFreshStream?: () => Promise<void>;
   /** Server Mode selector. Selecting a rendition transfers this native player
    * to credentialed webview HLS only after the manifest is ready. */
@@ -255,6 +266,12 @@ const FIRST_FRAME_WATCHDOG_MS = 25_000;
  * need that precision, and keeping it at 5Hz leaves the rest of the chrome
  * completely out of the playback hot path. */
 const SCRUBBER_UPDATE_INTERVAL_MS = 200;
+
+/** Native clocks and commands are local; authoritative metadata is absolute. */
+function localPlaybackDuration(absolute: number | null | undefined, offset: number, native: number): number {
+  if (absolute != null && Number.isFinite(absolute) && absolute > offset) return absolute - offset;
+  return Number.isFinite(native) && native > 0 ? native : 0;
+}
 
 function fmt(s: number): string {
   if (!Number.isFinite(s) || s < 0) return "0:00";
@@ -566,6 +583,7 @@ export function EmbeddedPlayer({
   startPositionSeconds = 0,
   sourceSwitchState = null,
   timelineOffsetSeconds = 0,
+  knownAbsoluteDurationSeconds = null,
   savedPrefs,
   playerPreferences = null,
   subtitleClient = null,
@@ -583,6 +601,7 @@ export function EmbeddedPlayer({
   playbackDecision = "Direct Play",
   onPlaybackError,
   onPlaybackStall,
+  onRecoveryPlaybackHealthy,
   onRetryFreshStream,
   serverOptimized,
   activeServerOptimizedQuality = null,
@@ -672,11 +691,23 @@ export function EmbeddedPlayer({
   const lastReportRef = useRef(0);
   const posRef = useRef(0);
   const durRef = useRef(0);
-  const timelineOffsetRef = useRef(0);
-  timelineOffsetRef.current =
-    Number.isFinite(timelineOffsetSeconds) && timelineOffsetSeconds > 0
-      ? timelineOffsetSeconds
-      : 0;
+  const nativeDurationOwnerRef = useRef(url);
+  const renderedTimelineOffset = Number.isFinite(timelineOffsetSeconds) && timelineOffsetSeconds > 0 ? timelineOffsetSeconds : 0;
+  const timelineOffsetRef = useRef(renderedTimelineOffset);
+  const renderedLocalDuration = localPlaybackDuration(knownAbsoluteDurationSeconds, renderedTimelineOffset, nativeDurationOwnerRef.current === url ? dur : 0);
+  const knownAbsoluteDurationRef = useRef<{ url: string; duration: number | null }>({ url, duration: null });
+  useLayoutEffect(() => {
+    timelineOffsetRef.current = renderedTimelineOffset;
+    knownAbsoluteDurationRef.current = {
+      url,
+      duration: knownAbsoluteDurationSeconds != null && Number.isFinite(knownAbsoluteDurationSeconds) && knownAbsoluteDurationSeconds > renderedTimelineOffset
+        ? knownAbsoluteDurationSeconds : null,
+    };
+  }, [url, knownAbsoluteDurationSeconds, renderedTimelineOffset]);
+  const ownedPausedRef = useRef(sourceSwitchState?.paused ?? false);
+  const clockWasResetRef = useRef(false);
+  const pendingSeekRef = useRef<number | null>(null);
+  const recoveryProgressRef = useRef<PlaybackRecoveryProgress | null>(null);
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
   const onEndedRef = useRef(onEnded);
@@ -687,6 +718,8 @@ export function EmbeddedPlayer({
   onPlaybackErrorRef.current = onPlaybackError;
   const onPlaybackStallRef = useRef(onPlaybackStall);
   onPlaybackStallRef.current = onPlaybackStall;
+  const onRecoveryPlaybackHealthyRef = useRef(onRecoveryPlaybackHealthy);
+  onRecoveryPlaybackHealthyRef.current = onRecoveryPlaybackHealthy;
   const playerPreferencesRef = useRef(playerPreferences);
   playerPreferencesRef.current = playerPreferences;
   const sourceSwitchStateRef = useRef(sourceSwitchState);
@@ -703,6 +736,7 @@ export function EmbeddedPlayer({
   const rendererSeekingRef = useRef(false);
   const scrubbingRef = useRef(false);
   const watchdogPositionRef = useRef(Number.NaN);
+  const decoderProofPositionRef = useRef(Number.NaN);
   const cacheFrontierRef = useRef(0);
   const stallStateRef = useRef<PlaybackStallState>({
     started: false,
@@ -767,7 +801,7 @@ export function EmbeddedPlayer({
   const evaluatePredictiveUpNext = () => {
     const prediction = predictEpisodeEnd({
       position: posRef.current,
-      duration: durRef.current,
+      duration: effectiveLocalDuration(),
       playing: !pausedRef.current && !endedRef.current,
       eligible: onPlayNextRef.current != null,
       chapters: chaptersRef.current,
@@ -791,32 +825,48 @@ export function EmbeddedPlayer({
 
   const reportedPosition = () =>
     posRef.current + timelineOffsetRef.current;
-  const reportedDuration = () =>
-    durRef.current > 0
-      ? durRef.current + timelineOffsetRef.current
-      : durRef.current;
+  const knownAbsoluteDuration = () => knownAbsoluteDurationRef.current.url === url
+    ? knownAbsoluteDurationRef.current.duration : null;
+  const effectiveLocalDuration = () => localPlaybackDuration(
+    knownAbsoluteDuration(), timelineOffsetRef.current,
+    nativeDurationOwnerRef.current === url ? durRef.current : 0,
+  );
+  const reportedDuration = () => {
+    const localDuration = effectiveLocalDuration();
+    return localDuration > 0 ? localDuration + timelineOffsetRef.current : 0;
+  };
   const reportedProgressPct = () =>
     playbackProgressPct(reportedPosition(), reportedDuration());
   const handoffState = (): PlaybackHandoffState => ({
     paused: pausedRef.current,
-    volume: Math.min(1, Math.max(0, volume / 100)),
-    muted,
-    playbackRate: speed,
+    volume: Math.min(1, Math.max(0, volumeRef.current / 100)),
+    muted: mutedRef.current,
+    playbackRate: speedRef.current,
+    ...(/^\d+$/.test(activeAidRef.current)
+      ? { audioPreference: { id: activeAidRef.current, language: audioTracksRef.current.find((track) => String(track.id) === activeAidRef.current)?.lang ?? null } }
+      : {}),
   });
 
   useEffect(() => {
     scrubbingRef.current = scrubbing;
+    decoderProofPositionRef.current = Number.NaN;
+    watchdogPositionRef.current = Number.NaN;
     stallStateRef.current = {
       ...stallStateRef.current,
       paused,
       seeking: scrubbing || rendererSeekingRef.current,
-      suspended: castSuspended,
+      suspended: castSuspended || document.visibilityState === "hidden",
       ended,
     };
     stallWatchdogRef.current?.update(stallStateRef.current);
   }, [castSuspended, ended, paused, scrubbing]);
 
   const audioTracks = useMemo(() => tracks.filter((t) => t.type === "audio"), [tracks]);
+  const audioTracksRef = useRef(audioTracks);
+  audioTracksRef.current = audioTracks;
+  const activeAidRef = useRef(activeAid);
+  activeAidRef.current = activeAid;
+
   const volumeIsSilent = muted || volume === 0;
   const subTracks = useMemo(() => tracks.filter((t) => t.type === "sub"), [tracks]);
   const activeSubtitleUrl = useMemo(
@@ -987,6 +1037,15 @@ export function EmbeddedPlayer({
     // an mpv end-file ERROR event, and the first-frame watchdog - can each request
     // the webview fallback, but only the FIRST one does (later ones no-op).
     let fallbackTried = false;
+    let terminalRecovery = false;
+    let verifiedProgress = false;
+    let fullDuration: number | null = null;
+    let cachePaused = false;
+    const recoveryProgress = new PlaybackRecoveryProgress();
+    recoveryProgressRef.current = recoveryProgress;
+    ownedPausedRef.current = sourceSwitchStateRef.current?.paused ?? false;
+    clockWasResetRef.current = false;
+    pendingSeekRef.current = null;
     // Armed after loadfile; fires if no first frame arrives in time.
     let watchdog: number | undefined;
     let retryTimer: number | undefined;
@@ -1000,7 +1059,7 @@ export function EmbeddedPlayer({
     upNextWarningShownRef.current = false;
     setUpNextDismissed(false);
     setPredictiveUpNext(null);
-    posRef.current = 0;
+    posRef.current = Math.max(0, Number.isFinite(startPositionSeconds) ? startPositionSeconds : 0);
     durRef.current = 0;
     scrubberRef.current?.updatePlayback({ pos: 0, bufferedTo: 0 }, true);
     activeChapterIndexRef.current = -1;
@@ -1017,26 +1076,42 @@ export function EmbeddedPlayer({
     setColorPrimaries("");
     setTransferFunction("");
     let unlisten: (() => void) | undefined;
-    const postStartWatchdog = new PlaybackStallWatchdog(() => {
-      const onStall = onPlaybackStallRef.current;
+    const recoverySnapshot = (): NativeRecoverySnapshot => ({
+      position: (pendingSeekRef.current ?? posRef.current) + timelineOffsetRef.current,
+      // mpv keep-open auto-pauses at EOF. Only app commands or a source
+      // handoff own the intent used to resume a replacement reader.
+      state: { ...handoffState(), paused: ownedPausedRef.current },
+    });
+    const recoverTerminal = (): boolean => {
+      if (cancelled || !verifiedProgress || onPlaybackStallRef.current == null) return false;
+      if (terminalRecovery) return true;
+      terminalRecovery = true;
+      recoveryProgress.reset();
       postStartWatchdog.stop();
+      window.clearTimeout(watchdog);
+      const snapshot = recoverySnapshot();
+      void Promise.resolve(onPlaybackStallRef.current(snapshot.position, snapshot.state)).then((recovered) => {
+        if (!cancelled && recovered !== true) setError("Playback stopped making progress. Retry with a fresh stream.");
+      }).catch(() => {
+        if (!cancelled) setError("A fresh stream could not be prepared. Retry, or choose another source.");
+      });
+      return true;
+    };
+    const postStartWatchdog = new PlaybackStallWatchdog(() => {
+      if (recoverTerminal()) return;
+      postStartWatchdog.stop();
+      // Preserve the existing first-frame stall path, including slow initial clocks.
+      const onStall = onPlaybackStallRef.current;
       if (onStall == null) {
         setError("Playback stopped making progress. Retry with a fresh stream.");
         return;
       }
-      void Promise.resolve(onStall(reportedPosition(), {
-        paused: false,
-        volume: Math.min(1, Math.max(0, volumeRef.current / 100)),
-        muted: mutedRef.current,
-        playbackRate: speedRef.current,
-      })).then((recovered) => {
-        if (!cancelled && recovered !== true) {
-          setError("Playback stopped making progress. Retry with a fresh stream.");
-        }
+      terminalRecovery = true;
+      const snapshot = recoverySnapshot();
+      void Promise.resolve(onStall(snapshot.position, snapshot.state)).then((recovered) => {
+        if (!cancelled && recovered !== true) setError("Playback stopped making progress. Retry with a fresh stream.");
       }).catch(() => {
-        if (!cancelled) {
-          setError("A fresh stream could not be prepared. Retry, or choose another source.");
-        }
+        if (!cancelled) setError("A fresh stream could not be prepared. Retry, or choose another source.");
       });
     });
     stallWatchdogRef.current = postStartWatchdog;
@@ -1044,32 +1119,45 @@ export function EmbeddedPlayer({
       started: false,
       paused: false,
       seeking: false,
-      suspended: castSuspendedRef.current,
+      suspended: castSuspendedRef.current || document.visibilityState === "hidden",
       ended: false,
       tearingDown: false,
     };
     rendererSeekingRef.current = false;
     scrubbingRef.current = false;
     watchdogPositionRef.current = Number.NaN;
+    decoderProofPositionRef.current = Number.NaN;
     cacheFrontierRef.current = 0;
     const syncPostStartWatchdog = (patch: Partial<PlaybackStallState> = {}) => {
-      stallStateRef.current = { ...stallStateRef.current, ...patch };
+      stallStateRef.current = {
+        ...stallStateRef.current, ...patch,
+        suspended: castSuspendedRef.current || document.visibilityState === "hidden",
+      };
       postStartWatchdog.update(stallStateRef.current);
     };
+    const onVisibilityChange = () => {
+      watchdogPositionRef.current = Number.NaN;
+      recoveryProgress.reset();
+      syncPostStartWatchdog();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
-    // Route every native-failure signal through one place: ask the parent to
-    // switch to a compatible webview source (the HLS transcode, which is handed
-    // the SAME startPositionSeconds, so resume is preserved across the swap), and
-    // only when it can't recover fall through to the built-in error card. Runs at
-    // most once per file - a decode error and the watchdog can't double-fire it.
+    // Startup incompatibility uses codec fallback. A proven post-start failure
+    // carries its owned snapshot even when only that compatibility path exists.
+    // The terminal fence is claimed before invoking any asynchronous callback.
     const triggerNativeFallback = async (err: Error): Promise<void> => {
-      if (cancelled || fallbackTried) return;
+      if (cancelled || fallbackTried || terminalRecovery) return;
       fallbackTried = true;
+      terminalRecovery = true;
+      recoveryProgress.reset();
+      postStartWatchdog.stop();
       window.clearTimeout(watchdog); // a concrete signal supersedes the watchdog
       let recovered = false;
       if (onPlaybackErrorRef.current != null) {
         try {
-          recovered = (await onPlaybackErrorRef.current(err)) === true;
+          recovered = (await (verifiedProgress
+            ? onPlaybackErrorRef.current(err, recoverySnapshot())
+            : onPlaybackErrorRef.current(err))) === true;
         } catch {
           // The native error card remains the terminal fallback.
         }
@@ -1102,9 +1190,13 @@ export function EmbeddedPlayer({
           (ev: { name: string; data: unknown }) => {
             // A late event can arrive after unmount (before unlisten lands) or
             // after the guarded teardown - never touch state on a dead component.
-            if (cancelled) return;
+            if (cancelled || terminalRecovery) return;
             switch (ev.name) {
               case "pause":
+                pausedRef.current = Boolean(ev.data);
+                decoderProofPositionRef.current = Number.NaN;
+                watchdogPositionRef.current = Number.NaN;
+                recoveryProgress.reset();
                 setPaused(Boolean(ev.data));
                 syncPostStartWatchdog({ paused: Boolean(ev.data) });
                 if (ev.data === false) evaluatePredictiveUpNext();
@@ -1126,8 +1218,35 @@ export function EmbeddedPlayer({
                 if (typeof ev.data === "number") {
                   // Keep command/keyboard math exact at native event cadence,
                   // while NativeScrubber coalesces its React state to 5Hz.
+                  if (!Number.isFinite(ev.data) || ev.data < 0) break;
                   const previousPosition = posRef.current;
+                  const seeking = rendererSeekingRef.current || scrubbingRef.current || pendingSeekRef.current != null;
+                  // A decoder reset is not a seek. Keep the owned timeline until
+                  // an actual seek or a return to that timeline confirms it.
+                  if (verifiedProgress && !seeking && ev.data < previousPosition - 0.25) clockWasResetRef.current = true;
+                  if (clockWasResetRef.current && !seeking && ev.data < previousPosition - 0.25) {
+                    recoveryProgress.reset();
+                    decoderProofPositionRef.current = Number.NaN;
+                    watchdogPositionRef.current = Number.NaN;
+                    break;
+                  }
+                  clockWasResetRef.current = false;
                   posRef.current = ev.data;
+                  if (pendingSeekRef.current != null && Math.abs(ev.data - pendingSeekRef.current) <= 0.25) pendingSeekRef.current = null;
+                  const decoderEligible = !seeking && !pausedRef.current && !cachePaused && !castSuspendedRef.current && !endedRef.current;
+                  const proofPosition = decoderProofPositionRef.current;
+                  // Accumulate real forward clocks across sub-frame samples.
+                  // Hidden native decoding proves playback, but earns no rearm.
+                  if (!decoderEligible) decoderProofPositionRef.current = Number.NaN;
+                  else if (!firstFrameRef.current || !Number.isFinite(proofPosition) || ev.data < proofPosition) decoderProofPositionRef.current = ev.data;
+                  else if (ev.data > proofPosition + 0.05) {
+                    verifiedProgress = true;
+                    decoderProofPositionRef.current = ev.data;
+                  }
+                  const eligible = decoderEligible && document.visibilityState !== "hidden";
+                  if (recoveryProgress.note(performance.now(), ev.data, speedRef.current, verifiedProgress && eligible)) {
+                    if (onRecoveryPlaybackHealthyRef.current?.() === true) recoveryProgress.reset();
+                  }
                   onAbsolutePositionChangeRef.current?.(reportedPosition());
                   if (ev.data < previousPosition - 2) {
                     upNextDismissedRef.current = false;
@@ -1161,19 +1280,16 @@ export function EmbeddedPlayer({
                     }
                   }
                   const lastWatchdogPosition = watchdogPositionRef.current;
-                  watchdogPositionRef.current = ev.data;
-                  if (
-                    hadFirstFrame &&
-                    !rendererSeekingRef.current &&
-                    !scrubbingRef.current &&
-                    (!Number.isFinite(lastWatchdogPosition) || ev.data > lastWatchdogPosition + 0.05)
-                  ) {
+                  if (!eligible) watchdogPositionRef.current = Number.NaN;
+                  else if (!hadFirstFrame || !Number.isFinite(lastWatchdogPosition) || ev.data < lastWatchdogPosition) watchdogPositionRef.current = ev.data;
+                  else if (ev.data > lastWatchdogPosition + 0.05) {
+                    watchdogPositionRef.current = ev.data;
                     postStartWatchdog.noteProgress();
                   }
                   const now = Date.now();
                   if (
                     startedRef.current &&
-                    durRef.current > 0 &&
+                    effectiveLocalDuration() > 0 &&
                     now - lastReportRef.current >= 5000
                   ) {
                     lastReportRef.current = now;
@@ -1187,20 +1303,29 @@ export function EmbeddedPlayer({
                 break;
               case "duration":
                 if (typeof ev.data === "number") {
+                  nativeDurationOwnerRef.current = url;
                   durRef.current = ev.data;
+                  if (Number.isFinite(ev.data) && ev.data > 0) fullDuration = ev.data;
                   setDur(ev.data);
                   evaluatePredictiveUpNext();
                 }
                 break;
               case "paused-for-cache":
+                cachePaused = Boolean(ev.data);
+                decoderProofPositionRef.current = Number.NaN;
+                watchdogPositionRef.current = Number.NaN;
+                recoveryProgress.reset();
                 // Only a real cache stall (after playback has started) toggles the
                 // spinner; before the first frame the initial spinner owns it.
                 if (firstFrameRef.current) setBuffering(Boolean(ev.data));
                 break;
               case "seeking":
                 rendererSeekingRef.current = Boolean(ev.data);
+                decoderProofPositionRef.current = Number.NaN;
+                watchdogPositionRef.current = Number.NaN;
+                recoveryProgress.reset();
+                if (rendererSeekingRef.current) clockWasResetRef.current = false;
                 if (!rendererSeekingRef.current) {
-                  watchdogPositionRef.current = posRef.current;
                   cacheFrontierRef.current = posRef.current;
                 }
                 syncPostStartWatchdog({
@@ -1210,15 +1335,17 @@ export function EmbeddedPlayer({
               case "volume":
                 if (typeof ev.data === "number") {
                   const nextVolume = Math.round(ev.data);
+                  volumeRef.current = nextVolume;
                   setVolume(nextVolume);
                   if (nextVolume > 0) lastAudibleVolume.current = nextVolume;
                 }
                 break;
               case "mute":
+                mutedRef.current = Boolean(ev.data);
                 setMuted(Boolean(ev.data));
                 break;
               case "speed":
-                if (typeof ev.data === "number") setSpeed(ev.data);
+                if (typeof ev.data === "number") { speedRef.current = ev.data; recoveryProgress.reset(); setSpeed(ev.data); }
                 break;
               case "demuxer-cache-time":
                 // Absolute timestamp of the last buffered demuxer data (the
@@ -1243,7 +1370,8 @@ export function EmbeddedPlayer({
                 }
                 break;
               case "aid":
-                setActiveAid(ev.data == null ? "no" : String(ev.data));
+                activeAidRef.current = ev.data == null ? "no" : String(ev.data);
+                setActiveAid(activeAidRef.current);
                 break;
               case "sid":
                 setActiveSid(ev.data == null ? "no" : String(ev.data));
@@ -1252,7 +1380,15 @@ export function EmbeddedPlayer({
                 void refreshTracks();
                 break;
               case "eof-reached":
-                if (ev.data === true) {
+                if (ev.data === true && !endedRef.current) {
+                  const absoluteDuration = knownAbsoluteDuration() ?? (
+                    fullDuration == null ? null : fullDuration + timelineOffsetRef.current
+                  );
+                  if (absoluteDuration != null && reportedPosition() < absoluteDuration - 10) {
+                    if (!recoverTerminal()) void triggerNativeFallback(new Error("Native playback ended before the media completed"));
+                    break;
+                  }
+                  recoveryProgress.reset();
                   endedRef.current = true;
                   syncPostStartWatchdog({ ended: true });
                   setPredictiveUpNext(
@@ -1287,15 +1423,12 @@ export function EmbeddedPlayer({
                   }
                 }
                 break;
-              // A genuine playback FAILURE reported by mpv AFTER loadfile
-              // succeeded (corrupt data / an undecodable codec) - the case the
-              // init try/catch can't see, because loadfile returns success and the
-              // decode error only surfaces here. Only reason=ERROR reaches us (the
-              // Rust core never forwards a normal EOF/stop/quit/redirect), so any
-              // end-file event is a hand-off to the webview transcode.
+              // Only reason=ERROR reaches this event. Verified post-start
+              // failures need a fresh source, not another read of a dead URL.
               case "end-file": {
                 const d = ev.data as { error?: boolean; code?: number } | null;
                 if (d?.error) {
+                  if (recoverTerminal()) break;
                   void triggerNativeFallback(
                     new Error(
                       `Native playback failed (mpv error ${d.code ?? "unknown"})`,
@@ -1355,10 +1488,11 @@ export function EmbeddedPlayer({
         const recoveryHandoff = sourceSwitchStateRef.current != null;
         const resumeSeconds =
           Number.isFinite(startPositionSeconds) &&
+          Number.isSafeInteger(Math.floor(startPositionSeconds)) &&
           (recoveryHandoff ? startPositionSeconds >= 0 : startPositionSeconds > 5)
-            ? recoveryHandoff
-              ? Math.max(0, startPositionSeconds)
-              : Math.floor(startPositionSeconds)
+            // The native bridge accepts only integer start seconds. Keep the
+            // fractional logical clock, but never demux ahead of its target.
+            ? Math.floor(startPositionSeconds)
             : null;
         setEnded(false);
         // mpv 0.38 inserted a playlist-index argument before the per-file options
@@ -1389,6 +1523,8 @@ export function EmbeddedPlayer({
         const configuredVolume = configuredPreferences?.defaultVolume;
         if (configuredVolume != null && Number.isFinite(configuredVolume)) {
           const initialVolume = Math.round(Math.min(100, Math.max(0, configuredVolume)));
+          volumeRef.current = initialVolume;
+          mutedRef.current = initialVolume === 0;
           setVolume(initialVolume);
           setMuted(initialVolume === 0);
           if (initialVolume > 0) lastAudibleVolume.current = initialVolume;
@@ -1400,6 +1536,7 @@ export function EmbeddedPlayer({
           : savedPrefs?.playbackSpeed;
         const initialSpeed = titleSpeed ?? configuredPreferences?.defaultPlaybackSpeed;
         if (initialSpeed != null && Number.isFinite(initialSpeed) && initialSpeed > 0) {
+          speedRef.current = initialSpeed;
           setSpeed(initialSpeed);
           await setProperty("speed", initialSpeed);
         }
@@ -1427,6 +1564,11 @@ export function EmbeddedPlayer({
           const handoffRate = Number.isFinite(handoff.playbackRate) && handoff.playbackRate > 0
             ? handoff.playbackRate
             : 1;
+          volumeRef.current = handoffVolume;
+          mutedRef.current = handoff.muted;
+          speedRef.current = handoffRate;
+          pausedRef.current = handoff.paused;
+          ownedPausedRef.current = handoff.paused;
           setVolume(handoffVolume);
           setMuted(handoff.muted);
           setSpeed(handoffRate);
@@ -1466,6 +1608,9 @@ export function EmbeddedPlayer({
     })();
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      recoveryProgress.reset();
+      if (recoveryProgressRef.current === recoveryProgress) recoveryProgressRef.current = null;
       syncPostStartWatchdog({ tearingDown: true });
       postStartWatchdog.stop();
       if (stallWatchdogRef.current === postStartWatchdog) {
@@ -1516,13 +1661,13 @@ export function EmbeddedPlayer({
         pausedRef.current ||
         menuOpenRef.current ||
         !posRef.current ||
-        durRef.current === 0
+        effectiveLocalDuration() === 0
       ) {
         return;
       }
       setControlsVisible(false);
     }, 3200);
-  }, []);
+  }, [url]);
   useEffect(() => {
     nudgeControls();
     return () => window.clearTimeout(hideTimer.current);
@@ -1538,24 +1683,32 @@ export function EmbeddedPlayer({
 
   // ── Playback controls ──────────────────────────────────────────────────────
   const togglePause = useCallback(() => {
+    ownedPausedRef.current = ended ? false : !pausedRef.current;
+    pausedRef.current = ownedPausedRef.current;
+    recoveryProgressRef.current?.reset();
     if (ended) {
+      pendingSeekRef.current = 0;
+      clockWasResetRef.current = false;
       setEnded(false);
       endedRef.current = false;
       void command("seek", [0, "absolute"]);
       void setProperty("pause", false);
       return;
     }
-    setPaused((current) => !current);
-    void setProperty("pause", !paused);
+    setPaused(ownedPausedRef.current);
+    void setProperty("pause", ownedPausedRef.current);
     nudgeControls();
   }, [paused, ended, nudgeControls]);
 
   const seekTo = useCallback((to: number) => {
-    const duration = durRef.current;
+    const duration = effectiveLocalDuration();
     const upperBound = Number.isFinite(duration) && duration > 0
       ? duration
       : Number.POSITIVE_INFINITY;
     const next = Math.min(upperBound, Math.max(0, to));
+    pendingSeekRef.current = next;
+    clockWasResetRef.current = false;
+    recoveryProgressRef.current?.reset();
     posRef.current = next;
     scrubberRef.current?.updatePlayback({ pos: next }, true);
     const nextChapterIndex = chapterIndexAt(next, chaptersRef.current);
@@ -1566,7 +1719,7 @@ export function EmbeddedPlayer({
     setEnded(false);
     endedRef.current = false;
     void command("seek", [next, "absolute"]);
-  }, []);
+  }, [url]);
 
   const relSeek = useCallback(
     (delta: number) => {
@@ -1578,6 +1731,8 @@ export function EmbeddedPlayer({
 
   const changeVolume = useCallback((v: number) => {
     const next = Math.min(130, Math.max(0, Math.round(v)));
+    volumeRef.current = next;
+    mutedRef.current = next === 0;
     setVolume(next);
     setMuted(next === 0);
     if (next > 0) lastAudibleVolume.current = next;
@@ -1588,6 +1743,8 @@ export function EmbeddedPlayer({
     if (volumeIsSilent) {
       const restored = volume > 0 ? volume : Math.max(1, lastAudibleVolume.current);
       lastAudibleVolume.current = restored;
+      mutedRef.current = false;
+      volumeRef.current = restored;
       setMuted(false);
       setVolume(restored);
       void setProperty("mute", false);
@@ -1595,16 +1752,20 @@ export function EmbeddedPlayer({
       return;
     }
     lastAudibleVolume.current = volume;
+    mutedRef.current = true;
     setMuted(true);
     void setProperty("mute", true);
   }, [volume, volumeIsSilent]);
 
   const applySpeed = useCallback((s: number) => {
+    speedRef.current = s;
+    recoveryProgressRef.current?.reset();
     setSpeed(s);
     void setProperty("speed", s);
   }, []);
 
   const selectAudio = useCallback((id: string) => {
+    activeAidRef.current = id;
     setActiveAid(id);
     void setProperty("aid", id);
   }, []);
@@ -1851,7 +2012,7 @@ export function EmbeddedPlayer({
         );
       });
     }
-    if (startedRef.current && durRef.current > 0) {
+    if (startedRef.current && effectiveLocalDuration() > 0) {
       onProgress?.(
         reportedPosition(),
         reportedDuration(),
@@ -1865,7 +2026,7 @@ export function EmbeddedPlayer({
       );
     }
     onClose();
-  }, [onClose, onProgress, fullscreen, scrobbleContext]);
+  }, [onClose, onProgress, fullscreen, scrobbleContext, url]);
 
   const openExternalFromSettings = useCallback(() => {
     const callback = externalHandoffCallbackRef.current;
@@ -2010,8 +2171,8 @@ export function EmbeddedPlayer({
           );
           break;
         default:
-          if (/^[0-9]$/.test(e.key) && durRef.current > 0) {
-            seekTo((Number(e.key) / 10) * durRef.current);
+          if (/^[0-9]$/.test(e.key) && effectiveLocalDuration() > 0) {
+            seekTo((Number(e.key) / 10) * effectiveLocalDuration());
           }
       }
       nudgeControls();
@@ -2295,8 +2456,8 @@ export function EmbeddedPlayer({
         <div className="embed-bottom">
           <NativeScrubber
             ref={scrubberRef}
-            duration={dur}
-            timelineOffsetSeconds={timelineOffsetRef.current}
+            duration={renderedLocalDuration}
+            timelineOffsetSeconds={renderedTimelineOffset}
             chapters={chapters}
             active={controlsVisible || menu != null || detailsSection != null}
             onSeek={seekTo}
