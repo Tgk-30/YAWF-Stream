@@ -49,6 +49,7 @@ vi.mock("./Icon", () => ({
 
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { POST_START_STALL_TIMEOUT_MS } from "../lib/playbackStall";
+import * as castModule from "../lib/cast";
 
 const initialViewport = {
   width: window.innerWidth,
@@ -2533,5 +2534,79 @@ describe("native effective duration UI89", () => {
     vi.useFakeTimers(); await startUI({ knownAbsoluteDurationSeconds: 124, timelineOffsetSeconds: 100 }); emitProperty("time-pos", 1);
     await act(async () => { await vi.advanceTimersByTimeAsync(3201); }); expect(document.querySelector(".embed-player")).not.toHaveClass("show-controls");
     emitProperty("pause", true); expect(document.querySelector(".embed-player")).toHaveClass("show-controls");
+  });
+});
+
+describe("EmbeddedPlayer cumulative native clock proof", () => {
+  const visibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+  afterEach(() => { if (visibility) Object.defineProperty(document, "visibilityState", visibility); else delete (document as unknown as { visibilityState?: string }).visibilityState; });
+  async function start(props: Partial<React.ComponentProps<typeof EmbeddedPlayer>> = {}) {
+    vi.useFakeTimers();
+    const fresh = vi.fn(async () => true), fallback = vi.fn(async () => true), ended = vi.fn(), next = vi.fn(), healthy = vi.fn(() => true);
+    const all = { url: "https://example.test/clock.mkv", title: "Clock", onClose: () => {}, onPlaybackStall: fresh, onPlaybackError: fallback, onEnded: ended, onPlayNext: next, onRecoveryPlaybackHealthy: healthy, ...props };
+    const view = render(<EmbeddedPlayer {...all} />);
+    await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    return { ...view, props: all, fresh, fallback, ended, next, healthy };
+  }
+  function frames(fps: number, seconds: number) {
+    act(() => { for (let i = 0; i <= fps * seconds; i += 1) renderPlayerMock.callback!({ name: "time-pos", data: i / fps }); });
+  }
+  it("[native-clock89] proves24fps cumulative progress and recovers known partial EOF once", async () => {
+    const v = await start({ knownAbsoluteDurationSeconds: 24 }); emitProperty("duration", 13); frames(24, 13);
+    emitProperty("pause", true); emitProperty("eof-reached", true); emitProperty("end-file", { error: true });
+    expect(v.fresh).toHaveBeenCalledExactlyOnceWith(13, expect.objectContaining({ paused: false }));
+    expect(v.ended).not.toHaveBeenCalled(); expect(v.next).not.toHaveBeenCalled(); expect(v.fallback).not.toHaveBeenCalled();
+  });
+  it("[native-clock89] proves30fps cumulative progress before a post-start ERROR", async () => {
+    const v = await start({ knownAbsoluteDurationSeconds: 24 }); frames(30, 13); emitProperty("end-file", { error: true });
+    expect(v.fresh).toHaveBeenCalledExactlyOnceWith(13, expect.objectContaining({ paused: false })); expect(v.fallback).not.toHaveBeenCalled();
+  });
+  it("[native-clock89] keeps the watchdog alive with subthreshold forward samples then detects a real stop", async () => {
+    const v = await start(); emitProperty("time-pos", 0);
+    for (let i = 1; i <= 35; i += 1) { await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); emitProperty("time-pos", i / 30); }
+    expect(v.fresh).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(POST_START_STALL_TIMEOUT_MS); });
+    expect(v.fresh).toHaveBeenCalledTimes(1);
+  });
+  it("[native-clock89] never completes a known partial EOF without decoder proof", async () => {
+    const v = await start({ knownAbsoluteDurationSeconds: 24 }); emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+    expect(v.fresh).not.toHaveBeenCalled(); expect(v.fallback).toHaveBeenCalledTimes(1); expect(v.ended).not.toHaveBeenCalled(); expect(v.next).not.toHaveBeenCalled();
+  });
+  it("[native-clock89] excludes pause cache seeking and cast jumps and seeds on reentry", async () => {
+    for (const kind of ["pause", "paused-for-cache", "seeking", "cast"]) {
+      const castState: castModule.CastState = { phase: "idle", devices: [], device: null, status: null, volume: 50, error: null };
+      const castSpy = kind === "cast" ? vi.spyOn(castModule, "useCastState").mockReturnValue(castState) : null;
+      try {
+        const v = await start({ knownAbsoluteDurationSeconds: 60 }); emitProperty("time-pos", 0);
+        if (kind === "cast") { castState.phase = "casting"; v.rerender(<EmbeddedPlayer {...v.props} />); } else emitProperty(kind, true);
+        emitProperty("time-pos", 6);
+        if (kind === "cast") { castState.phase = "idle"; v.rerender(<EmbeddedPlayer {...v.props} />); } else emitProperty(kind, false);
+        emitProperty("time-pos", 13); emitProperty("eof-reached", true);
+        expect(v.fresh, kind).not.toHaveBeenCalled(); expect(v.fallback, kind).toHaveBeenCalledTimes(1); expect(v.ended, kind).not.toHaveBeenCalled(); v.unmount();
+        await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+      } finally { castSpy?.mockRestore(); }
+    }
+  });
+  it("[native-clock89] does not let the first eligible post-pause jump renew the watchdog", async () => {
+    const v = await start(); emitProperty("time-pos", 0); emitProperty("pause", true); emitProperty("time-pos", 5); emitProperty("pause", false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); }); emitProperty("time-pos", 10);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); }); expect(v.fresh).toHaveBeenCalledTimes(1);
+  });
+  it("[native-clock89] proves hidden decoder progress but never earns a foreground recovery rearm", async () => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    const v = await start({ knownAbsoluteDurationSeconds: 100 });
+    for (let second = 0; second <= 61; second += 1) {
+      if (second > 0) await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      act(() => { for (let frame = 0; frame < 30; frame += 1) renderPlayerMock.callback!({ name: "time-pos", data: second + frame / 30 }); });
+    }
+    expect(v.fresh).not.toHaveBeenCalled(); expect(v.healthy).not.toHaveBeenCalled(); emitProperty("eof-reached", true);
+    expect(v.fresh).toHaveBeenCalledTimes(1); expect(v.ended).not.toHaveBeenCalled(); expect(v.healthy).not.toHaveBeenCalled();
+  });
+  it("[native-clock89] preserves genuine finite and true unknown completion", async () => {
+    for (const known of [24, null]) {
+      const v = await start({ knownAbsoluteDurationSeconds: known }); emitProperty("time-pos", known == null ? 12 : 23); emitProperty("time-pos", known == null ? 13 : 24); emitProperty("eof-reached", true); emitProperty("eof-reached", true);
+      expect(v.ended).toHaveBeenCalledTimes(1); expect(v.fresh).not.toHaveBeenCalled(); expect(v.fallback).not.toHaveBeenCalled(); v.unmount();
+      await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    }
   });
 });

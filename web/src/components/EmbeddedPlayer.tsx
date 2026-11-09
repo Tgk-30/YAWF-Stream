@@ -736,6 +736,7 @@ export function EmbeddedPlayer({
   const rendererSeekingRef = useRef(false);
   const scrubbingRef = useRef(false);
   const watchdogPositionRef = useRef(Number.NaN);
+  const decoderProofPositionRef = useRef(Number.NaN);
   const cacheFrontierRef = useRef(0);
   const stallStateRef = useRef<PlaybackStallState>({
     started: false,
@@ -848,11 +849,13 @@ export function EmbeddedPlayer({
 
   useEffect(() => {
     scrubbingRef.current = scrubbing;
+    decoderProofPositionRef.current = Number.NaN;
+    watchdogPositionRef.current = Number.NaN;
     stallStateRef.current = {
       ...stallStateRef.current,
       paused,
       seeking: scrubbing || rendererSeekingRef.current,
-      suspended: castSuspended,
+      suspended: castSuspended || document.visibilityState === "hidden",
       ended,
     };
     stallWatchdogRef.current?.update(stallStateRef.current);
@@ -1116,18 +1119,28 @@ export function EmbeddedPlayer({
       started: false,
       paused: false,
       seeking: false,
-      suspended: castSuspendedRef.current,
+      suspended: castSuspendedRef.current || document.visibilityState === "hidden",
       ended: false,
       tearingDown: false,
     };
     rendererSeekingRef.current = false;
     scrubbingRef.current = false;
     watchdogPositionRef.current = Number.NaN;
+    decoderProofPositionRef.current = Number.NaN;
     cacheFrontierRef.current = 0;
     const syncPostStartWatchdog = (patch: Partial<PlaybackStallState> = {}) => {
-      stallStateRef.current = { ...stallStateRef.current, ...patch };
+      stallStateRef.current = {
+        ...stallStateRef.current, ...patch,
+        suspended: castSuspendedRef.current || document.visibilityState === "hidden",
+      };
       postStartWatchdog.update(stallStateRef.current);
     };
+    const onVisibilityChange = () => {
+      watchdogPositionRef.current = Number.NaN;
+      recoveryProgress.reset();
+      syncPostStartWatchdog();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     // Startup incompatibility uses codec fallback. A proven post-start failure
     // carries its owned snapshot even when only that compatibility path exists.
@@ -1181,6 +1194,8 @@ export function EmbeddedPlayer({
             switch (ev.name) {
               case "pause":
                 pausedRef.current = Boolean(ev.data);
+                decoderProofPositionRef.current = Number.NaN;
+                watchdogPositionRef.current = Number.NaN;
                 recoveryProgress.reset();
                 setPaused(Boolean(ev.data));
                 syncPostStartWatchdog({ paused: Boolean(ev.data) });
@@ -1211,13 +1226,24 @@ export function EmbeddedPlayer({
                   if (verifiedProgress && !seeking && ev.data < previousPosition - 0.25) clockWasResetRef.current = true;
                   if (clockWasResetRef.current && !seeking && ev.data < previousPosition - 0.25) {
                     recoveryProgress.reset();
+                    decoderProofPositionRef.current = Number.NaN;
+                    watchdogPositionRef.current = Number.NaN;
                     break;
                   }
                   clockWasResetRef.current = false;
                   posRef.current = ev.data;
                   if (pendingSeekRef.current != null && Math.abs(ev.data - pendingSeekRef.current) <= 0.25) pendingSeekRef.current = null;
-                  const eligible = !seeking && !pausedRef.current && !cachePaused && !castSuspendedRef.current && !endedRef.current && document.visibilityState !== "hidden";
-                  if (firstFrameRef.current && eligible && ev.data > previousPosition + 0.05) verifiedProgress = true;
+                  const decoderEligible = !seeking && !pausedRef.current && !cachePaused && !castSuspendedRef.current && !endedRef.current;
+                  const proofPosition = decoderProofPositionRef.current;
+                  // Accumulate real forward clocks across sub-frame samples.
+                  // Hidden native decoding proves playback, but earns no rearm.
+                  if (!decoderEligible) decoderProofPositionRef.current = Number.NaN;
+                  else if (!firstFrameRef.current || !Number.isFinite(proofPosition) || ev.data < proofPosition) decoderProofPositionRef.current = ev.data;
+                  else if (ev.data > proofPosition + 0.05) {
+                    verifiedProgress = true;
+                    decoderProofPositionRef.current = ev.data;
+                  }
+                  const eligible = decoderEligible && document.visibilityState !== "hidden";
                   if (recoveryProgress.note(performance.now(), ev.data, speedRef.current, verifiedProgress && eligible)) {
                     if (onRecoveryPlaybackHealthyRef.current?.() === true) recoveryProgress.reset();
                   }
@@ -1254,13 +1280,10 @@ export function EmbeddedPlayer({
                     }
                   }
                   const lastWatchdogPosition = watchdogPositionRef.current;
-                  watchdogPositionRef.current = ev.data;
-                  if (
-                    hadFirstFrame &&
-                    !rendererSeekingRef.current &&
-                    !scrubbingRef.current &&
-                    (!Number.isFinite(lastWatchdogPosition) || ev.data > lastWatchdogPosition + 0.05)
-                  ) {
+                  if (!eligible) watchdogPositionRef.current = Number.NaN;
+                  else if (!hadFirstFrame || !Number.isFinite(lastWatchdogPosition) || ev.data < lastWatchdogPosition) watchdogPositionRef.current = ev.data;
+                  else if (ev.data > lastWatchdogPosition + 0.05) {
+                    watchdogPositionRef.current = ev.data;
                     postStartWatchdog.noteProgress();
                   }
                   const now = Date.now();
@@ -1289,6 +1312,8 @@ export function EmbeddedPlayer({
                 break;
               case "paused-for-cache":
                 cachePaused = Boolean(ev.data);
+                decoderProofPositionRef.current = Number.NaN;
+                watchdogPositionRef.current = Number.NaN;
                 recoveryProgress.reset();
                 // Only a real cache stall (after playback has started) toggles the
                 // spinner; before the first frame the initial spinner owns it.
@@ -1296,10 +1321,11 @@ export function EmbeddedPlayer({
                 break;
               case "seeking":
                 rendererSeekingRef.current = Boolean(ev.data);
+                decoderProofPositionRef.current = Number.NaN;
+                watchdogPositionRef.current = Number.NaN;
                 recoveryProgress.reset();
                 if (rendererSeekingRef.current) clockWasResetRef.current = false;
                 if (!rendererSeekingRef.current) {
-                  watchdogPositionRef.current = posRef.current;
                   cacheFrontierRef.current = posRef.current;
                 }
                 syncPostStartWatchdog({
@@ -1358,7 +1384,7 @@ export function EmbeddedPlayer({
                   const absoluteDuration = knownAbsoluteDuration() ?? (
                     fullDuration == null ? null : fullDuration + timelineOffsetRef.current
                   );
-                  if (verifiedProgress && absoluteDuration != null && reportedPosition() < absoluteDuration - 10) {
+                  if (absoluteDuration != null && reportedPosition() < absoluteDuration - 10) {
                     if (!recoverTerminal()) void triggerNativeFallback(new Error("Native playback ended before the media completed"));
                     break;
                   }
@@ -1582,6 +1608,7 @@ export function EmbeddedPlayer({
     })();
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       recoveryProgress.reset();
       if (recoveryProgressRef.current === recoveryProgress) recoveryProgressRef.current = null;
       syncPostStartWatchdog({ tearingDown: true });
