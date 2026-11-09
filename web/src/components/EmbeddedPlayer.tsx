@@ -1462,10 +1462,11 @@ export function EmbeddedPlayer({
         const recoveryHandoff = sourceSwitchStateRef.current != null;
         const resumeSeconds =
           Number.isFinite(startPositionSeconds) &&
+          Number.isSafeInteger(Math.floor(startPositionSeconds)) &&
           (recoveryHandoff ? startPositionSeconds >= 0 : startPositionSeconds > 5)
-            ? recoveryHandoff
-              ? Math.max(0, startPositionSeconds)
-              : Math.floor(startPositionSeconds)
+            // The native bridge accepts only integer start seconds. Keep the
+            // fractional logical clock, but never demux ahead of its target.
+            ? Math.floor(startPositionSeconds)
             : null;
         setEnded(false);
         // mpv 0.38 inserted a playlist-index argument before the per-file options

@@ -1617,6 +1617,62 @@ describe("EmbeddedPlayer decode-failure fallback", () => {
     );
   });
 
+  it("[native-start89] floors fractional handoff only at the bridge and preserves logical state", async () => {
+    const switchOptimized = vi.fn(async () => {});
+    render(<EmbeddedPlayer url="https://example.test/fraction.mkv" title="Fraction"
+      startPositionSeconds={13.875}
+      sourceSwitchState={{ paused: true, volume: 0.64, muted: true, playbackRate: 1.25 }}
+      serverOptimized={{ qualities: ["480p"] }} onSwitchServerOptimized={switchOptimized} onSwitchDeviceOriginal={() => {}}
+      onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("pause", true));
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/fraction.mkv", "replace", "-1", "start=+13"]);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("volume", 64);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("mute", true);
+    expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("speed", 1.25);
+    emitProperty("aid", "2");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "480p" }));
+    expect(switchOptimized).toHaveBeenCalledExactlyOnceWith("480p", 13.875, {
+      paused: true, volume: 0.64, muted: true, playbackRate: 1.25,
+      audioPreference: { id: "2", language: null },
+    });
+  });
+
+  it("[native-start89] serializes subsecond playing handoff as integer zero without discarding its clock", async () => {
+    const switchOptimized = vi.fn(async () => {});
+    render(<EmbeddedPlayer url="https://example.test/subsecond.mkv" title="Subsecond"
+      startPositionSeconds={0.5} sourceSwitchState={{ paused: false, volume: 1, muted: false, playbackRate: 1 }}
+      serverOptimized={{ qualities: ["480p"] }} onSwitchServerOptimized={switchOptimized} onSwitchDeviceOriginal={() => {}} onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.setProperty).toHaveBeenCalledWith("pause", false));
+    expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/subsecond.mkv", "replace", "-1", "start=+0"]);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "480p" }));
+    expect(switchOptimized).toHaveBeenCalledWith("480p", 0.5, expect.objectContaining({ paused: false }));
+  });
+
+  it("[native-start89] keeps ordinary fractional bookmark serialization integer-compatible", async () => {
+    render(<EmbeddedPlayer url="https://example.test/bookmark.mkv" title="Bookmark" startPositionSeconds={125.9} onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/bookmark.mkv", "replace", "-1", "start=+125"]));
+  });
+
+  it("[native-start89] omits invalid or unsafe resume options instead of sending an unrepresentable start", async () => {
+    for (const start of [NaN, Infinity, -1, Number.MAX_SAFE_INTEGER + 1, 1e21]) {
+      renderPlayerMock.command.mockClear();
+      const view = render(<EmbeddedPlayer url="https://example.test/invalid.mkv" title="Invalid"
+        startPositionSeconds={start} sourceSwitchState={{ paused: true, volume: 1, muted: false, playbackRate: 1 }} onClose={() => {}} />);
+      await waitFor(() => expect(renderPlayerMock.command).toHaveBeenCalled());
+      expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/invalid.mkv"]);
+      view.unmount();
+      await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    }
+  });
+
+  it("[native-start89] accepts the largest safe integer as decimal bridge-compatible seconds", async () => {
+    render(<EmbeddedPlayer url="https://example.test/safe.mkv" title="Safe"
+      startPositionSeconds={Number.MAX_SAFE_INTEGER} sourceSwitchState={{ paused: true, volume: 1, muted: false, playbackRate: 1 }} onClose={() => {}} />);
+    await waitFor(() => expect(renderPlayerMock.command).toHaveBeenCalledWith("loadfile", ["https://example.test/safe.mkv", "replace", "-1", "start=+9007199254740991"]));
+  });
+
   it("passes the stream-scoped bearer separately from the playback URL", async () => {
     const authorization = `Bearer ${"A".repeat(43)}`;
     render(
