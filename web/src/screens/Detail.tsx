@@ -117,6 +117,26 @@ const VideoPlayer = lazy(() =>
   import("../components/VideoPlayer").then((m) => ({ default: m.VideoPlayer })),
 );
 
+// Commit this alongside the lazy player, not its loading fallback. The player
+// renders its controls in a body portal, outside the covered Detail subtree.
+function CoverDetailForPlayer({ detail }: { detail: React.RefObject<HTMLDivElement | null> }) {
+  useLayoutEffect(() => {
+    const element = detail.current;
+    if (element == null) return;
+    const inert = element.getAttribute("inert");
+    const hidden = element.getAttribute("aria-hidden");
+    element.setAttribute("inert", "");
+    element.setAttribute("aria-hidden", "true");
+    return () => {
+      if (inert == null) element.removeAttribute("inert");
+      else element.setAttribute("inert", inert);
+      if (hidden == null) element.removeAttribute("aria-hidden");
+      else element.setAttribute("aria-hidden", hidden);
+    };
+  }, [detail]);
+  return null;
+}
+
 // Persisted per-title episode selection (see selectEpisode below).
 const EPISODE_OVERRIDES_KEY = "ds_episode_overrides";
 export const MOBILE_TRANSCODE_LOOKUP_TIMEOUT_MS = 8_000;
@@ -2363,6 +2383,7 @@ export function Detail() {
 
       {player && (
         <Suspense fallback={<Spinner variant="overlay" label="Loading player…" />}>
+          <>
           <VideoPlayer
             key={playbackRecoverySessionIdentity(
               detailItem.id,
@@ -2478,6 +2499,8 @@ export function Detail() {
             onPlayNext={handlePlayNext}
             autoCountdown={Boolean(settings.autoAdvanceEpisodes) && !settings.dataSaver}
           />
+          <CoverDetailForPlayer detail={rootRef} />
+          </>
         </Suspense>
       )}
 
