@@ -1,8 +1,6 @@
 name: windows-private-storage
 
 on:
-  push:
-    branches: [codex/windows-private-storage86]
   workflow_dispatch:
 
 permissions:
@@ -36,6 +34,8 @@ jobs:
           $source = git rev-parse HEAD
           if ($source -ne '${{ github.sha }}') { throw 'Source binding failed.' }
           node -e "const fs=require('node:fs'); fs.writeFileSync(process.env.RUNNER_TEMP+'/windows-private-storage-binding.json',JSON.stringify({sourceRevision:process.argv[1],node:process.version,platform:process.platform,arch:process.arch},null,2)+'\n')" $source
+      - name: Verify sanitized observer contracts
+        run: node --test scripts/windows_native_observer_preload.test.mjs
       - name: Install shared web dependencies
         working-directory: web
         run: npm ci --no-audit --no-fund
@@ -43,6 +43,7 @@ jobs:
         working-directory: server
         run: npm ci --no-audit --no-fund
       - name: Typecheck and build actual server
+        id: server-build
         working-directory: server
         run: npm run build
       - name: Native private storage and writer checks
@@ -50,16 +51,23 @@ jobs:
         env:
           DS_SERVER_SECRET_KEY: ''
         run: node node_modules/vitest/vitest.mjs run test/privateStorage.test.ts test/privateStorage.windows.test.ts --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-results.json"
-      - name: Diagnose the content-free native descriptor observer
-        if: always()
-        continue-on-error: true
-        run: node scripts/windows_storage_observer_diagnostic.mjs "$env:RUNNER_TEMP/windows-storage-observer-diagnostic.json"
       - name: Full server suite on the same native runtime
+        id: observer
+        if: ${{ !cancelled() && steps.server-build.outcome == 'success' }}
         working-directory: server
+        shell: pwsh
         env:
           DS_SERVER_SECRET_KEY: ''
           YAWF_TEST_LEASE_PHASES: '1'
-        run: node node_modules/vitest/vitest.mjs run --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-full-results.json"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $directory = node -e "process.stdout.write(require('node:fs').mkdtempSync(require('node:path').join(process.env.RUNNER_TEMP,'yawf-native-observer-')))"
+          "directory=$directory" >> $env:GITHUB_OUTPUT
+          $preload = node -e "process.stdout.write(require('node:url').pathToFileURL(require('node:path').resolve('../scripts/windows_native_observer_preload.mjs')).href)"
+          $env:YAWF_NATIVE_OBSERVER_DIR = $directory
+          $env:NODE_OPTIONS = ($env:NODE_OPTIONS + ' --import=' + $preload).Trim()
+          node node_modules/vitest/vitest.mjs run --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-full-results.json"
+          exit $LASTEXITCODE
       - name: Retain exact native results
         if: always()
         uses: actions/upload-artifact@v4
@@ -67,7 +75,7 @@ jobs:
           name: windows-private-storage-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/windows-private-storage-binding.json
-            ${{ runner.temp }}/windows-storage-observer-diagnostic.json
+            ${{ steps.observer.outputs.directory || format('{0}/yawf-native-observer-unavailable', runner.temp) }}/*.jsonl
             ${{ runner.temp }}/windows-private-storage-results.json
             ${{ runner.temp }}/windows-private-storage-full-results.json
           if-no-files-found: error

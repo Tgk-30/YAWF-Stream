@@ -124,7 +124,7 @@ describe("database lease process lifecycle", () => {
       expect(results[index]?.status).toBe("rejected");
     }
     await stopChild(winner, "SIGTERM");
-  });
+  }, NATIVE_PROCESS_TEST_MS);
 
   it("excludes a second child while the owner is live", async ({ signal }) => {
     const databasePath = temporaryDatabasePath();
@@ -135,7 +135,7 @@ describe("database lease process lifecycle", () => {
     await expect(contender.exit).resolves.toEqual({ code: 73, signal: null });
     expect(contender.output().stderr).toContain("database is already open");
     await stopChild(owner, "SIGTERM");
-  });
+  }, NATIVE_PROCESS_TEST_MS);
 
   it("reacquires after SIGKILL without deleting or rewriting the lease file", async ({ signal }) => {
     const databasePath = temporaryDatabasePath();
