@@ -22,9 +22,9 @@ function validRelease(text) {
     && body.includes("${{ runner.temp }}/yawf-stapler-staple.jsonl")
     && body.includes("${{ runner.temp }}/yawf-stapler-validate.jsonl")
     && !/xcrun stapler (?:staple|validate)/.test(body)
-    && /android-tv:\n\s+name: Signed Android TV APK\n\s+needs: release/.test(text)
-    && /finalize-release-assets:\n\s+name: Checksums and provenance\n\s+needs: \[release, android-tv, android-app-publish\]/.test(text)
-    && /clean-install:\n\s+name: Verify clean installs\n\s+needs: finalize-release-assets/.test(text);
+    && /android-tv:\n\s+name: Signed Android TV APK\n\s+needs: \[release-scope, release\]/.test(text)
+    && /finalize-release-assets:\n\s+name: Checksums and provenance\n\s+needs: \[release-scope, release, android-tv, android-app-publish\]/.test(text)
+    && /clean-install:\n\s+name: Verify clean installs\n\s+needs: \[release-scope, finalize-release-assets\]/.test(text);
 }
 
 function validClean(text) {
@@ -54,8 +54,8 @@ test("individual release-order, validation and evidence mutations are rejected",
     release.replace(upload, "").replace('          STAPLER_RETRY_RECEIPT="$RUNNER_TEMP/yawf-stapler-staple.jsonl"', `${upload}\n          STAPLER_RETRY_RECEIPT="$RUNNER_TEMP/yawf-stapler-staple.jsonl"`),
     release.replace("Preserve macOS stapler evidence\n        if: always()", "Preserve macOS stapler evidence\n        if: success()"),
     release.replace("${{ runner.temp }}/yawf-stapler-validate.jsonl", "missing.jsonl"),
-    release.replace("needs: [release, android-tv, android-app-publish]", "needs: release"),
-    release.replace("needs: finalize-release-assets", "needs: release"),
+    release.replace("needs: [release-scope, release, android-tv, android-app-publish]", "needs: [release-scope, release]"),
+    release.replace("needs: [release-scope, finalize-release-assets]", "needs: [release-scope, release]"),
   ];
   for (const mutant of mutants) { assert.notEqual(mutant, release); assert.ok(validRelease(release)); assert.equal(validRelease(mutant), false); }
 });

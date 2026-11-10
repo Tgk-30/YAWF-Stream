@@ -34,15 +34,85 @@ function everyAndroidSetupInstallsPlatformTools(workflow) {
   );
 }
 
-function workflowJob(workflow, jobId) {
-  const escaped = jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return workflow.match(
-    new RegExp(`(?:^|\\n)  ${escaped}:\\n[\\s\\S]*?(?=\\n  [a-z][a-z0-9-]*:\\n|$)`),
+function anchoredBlock(source, id, indent) {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return source.match(
+    new RegExp(`(?:^|\\n) {${indent}}${escaped}:\\n[\\s\\S]*?(?=\\n {${indent}}[a-z][a-z0-9_-]*:(?:\\s|$)|$)`),
   )?.[0] ?? "";
 }
 
-function jobRequiresPushTag(job) {
-  return /^    if: github\.event_name == 'push' && github\.ref_type == 'tag'$/m.test(job);
+function workflowJob(workflow, jobId) {
+  const jobs = /^jobs:\s*\n/m.exec(workflow);
+  return jobs ? anchoredBlock(workflow.slice(jobs.index + jobs[0].length), jobId, 2) : "";
+}
+
+function anchoredScalar(source, key, indent) {
+  const lines = source.split("\n");
+  const prefix = " ".repeat(indent) + key + ":";
+  const positions = lines.flatMap((line, index) => line.startsWith(prefix) ? [index] : []);
+  if (positions.length !== 1) return "";
+  const index = positions[0];
+  const first = lines[index].slice(prefix.length).trim();
+  if (![">-", ">", "|", "|-"].includes(first)) return first;
+  const body = [];
+  for (const line of lines.slice(index + 1)) {
+    if (line.trim() !== "" && !line.startsWith(" ".repeat(indent + 2))) break;
+    body.push(line.slice(indent + 2));
+  }
+  return first.startsWith("|") ? body.join("\n") : body.map(line => line.trim()).join(" ");
+}
+
+const normalizeCondition = value => value.replace(/\s+/g, " ").trim();
+const PUSH_TAG = "github.event_name == 'push' && github.ref_type == 'tag'";
+const SCOPE_SUCCESS = "needs.release-scope.result == 'success'";
+const COORDINATED_SCOPE = "needs.release-scope.outputs.desktop_only == 'false'";
+const KNOWN_SCOPE = "(needs.release-scope.outputs.desktop_only == 'true' || needs.release-scope.outputs.desktop_only == 'false')";
+const FINALIZER_CONDITION = `always() && !cancelled() && ${PUSH_TAG} && ${SCOPE_SUCCESS} && needs.release.result == 'success' && ((needs.release-scope.outputs.desktop_only == 'true' && needs.android-tv.result == 'skipped' && needs.android-app-publish.result == 'skipped') || (${COORDINATED_SCOPE} && needs.android-tv.result == 'success' && needs.android-app-publish.result == 'success'))`;
+const CLEAN_INSTALL_CONDITION = `always() && !cancelled() && ${PUSH_TAG} && ${SCOPE_SUCCESS} && needs.finalize-release-assets.result == 'success' && ${KNOWN_SCOPE}`;
+const MANUAL_PHONE_CONDITION = `always() && ${SCOPE_SUCCESS} && ${COORDINATED_SCOPE} && ((${PUSH_TAG} && needs.release.result == 'success') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'))`;
+const PUBLISH_CONDITIONS = {
+  release: `${PUSH_TAG} && ${SCOPE_SUCCESS} && ${KNOWN_SCOPE}`,
+  "android-tv": `${PUSH_TAG} && ${SCOPE_SUCCESS} && ${COORDINATED_SCOPE}`,
+  "android-app-publish": `${PUSH_TAG} && ${SCOPE_SUCCESS} && ${COORDINATED_SCOPE}`,
+  "finalize-release-assets": FINALIZER_CONDITION,
+  "clean-install": CLEAN_INSTALL_CONDITION,
+};
+
+function jobConditionMatches(job, expected) {
+  return normalizeCondition(anchoredScalar(job, "if", 4)) === normalizeCondition(expected);
+}
+
+function jobRequiresPushTag(job, jobId) {
+  return Object.hasOwn(PUBLISH_CONDITIONS, jobId) && jobConditionMatches(job, PUBLISH_CONDITIONS[jobId]);
+}
+
+function jobNeedsExactly(job, expected) {
+  const value = anchoredScalar(job, "needs", 4);
+  if (!/^\[[a-z0-9, _-]+\]$/.test(value)) return false;
+  return JSON.stringify(value.slice(1, -1).split(",").map(name => name.trim())) === JSON.stringify(expected);
+}
+
+function cleanInstallDefaultsAndroid(workflow) {
+  const trigger = anchoredBlock(workflow, "on", 0);
+  return ["workflow_call", "workflow_dispatch"].every(event => {
+    const inputs = anchoredBlock(anchoredBlock(trigger, event, 2), "inputs", 4);
+    return ["include_android", "include_server"].every(name => {
+      const input = anchoredBlock(inputs, name, 6);
+      return anchoredScalar(input, "default", 8) === "true" && anchoredScalar(input, "type", 8) === "boolean";
+    });
+  });
+}
+
+function inventoryRequiresAndroid(workflow) {
+  const manifest = workflowJob(workflow, "manifest");
+  const start = /^      - name: Verify updater channels and signed assets\n/m.exec(manifest);
+  if (!start) return false;
+  const remaining = manifest.slice(start.index);
+  const next = /^      - /m.exec(remaining.slice(start[0].length));
+  const step = next ? remaining.slice(0, start[0].length + next.index) : remaining;
+  const body = anchoredScalar(step, "run", 8);
+  const guard = /^\s*if \[ "\$INCLUDE_ANDROID" = "true" \]; then\n([\s\S]*?)(?=^\s*(?:elif|else|fi)\b)/m.exec(body)?.[1] ?? "";
+  return /for asset in \\\s*"YAWF\.Stream_Android\.TV_\$\{expected_version\}\.apk" \\\s*"YAWF\.Stream_Android_\$\{expected_version\}\.apk"; do[\s\S]*?grep -Fxq "\$asset" "\$ASSET_NAMES"[\s\S]*?exit 1[\s\S]*?done/.test(guard);
 }
 
 const tauri = JSON.parse(read("web/src-tauri/tauri.conf.json"));
@@ -75,6 +145,8 @@ const cleanInstallWorkflow = read(".github/workflows/clean-install.yml");
 const releaseAndroidPhoneJob = workflowJob(releaseWorkflow, "android-app");
 const releaseAndroidPhonePublisherJob = workflowJob(releaseWorkflow, "android-app-publish");
 const cleanInstallAndroidPhoneJob = workflowJob(cleanInstallWorkflow, "android-phone");
+const releaseFinalizerJob = workflowJob(releaseWorkflow, "finalize-release-assets");
+const releaseCleanInstallJob = workflowJob(releaseWorkflow, "clean-install");
 const dockerWorkflow = read(".github/workflows/docker-image.yml");
 const dockerLatestTagPolicyFailures = validateDockerLatestTagPolicy(dockerWorkflow);
 const ciWorkflow = read(".github/workflows/ci.yml");
@@ -210,7 +282,8 @@ check(
     /YAWF\.Stream_Android\.TV_\$\{version\}\.apk/.test(releaseWorkflow) &&
     /apksigner verify/.test(releaseWorkflow) &&
     /SIGNING_CERT_SHA256/.test(releaseWorkflow) &&
-    /needs:\s*\[release, android-tv(?:,\s*[a-z][a-z0-9-]*)*\]/.test(releaseWorkflow),
+    jobNeedsExactly(releaseFinalizerJob, ["release-scope", "release", "android-tv", "android-app-publish"]) &&
+    jobConditionMatches(releaseFinalizerJob, FINALIZER_CONDITION),
   ".github/workflows/web-release.yml must test, lint, sign, verify, and upload Android TV before checksums are finalized",
 );
 check(
@@ -228,8 +301,8 @@ check(
 check(
   "Manual Android verification cannot enter a publication job",
   ["release", "android-tv", "android-app-publish", "finalize-release-assets", "clean-install"]
-    .every((name) => jobRequiresPushTag(workflowJob(releaseWorkflow, name))) &&
-    /if: always\(\) && \(\(github\.event_name == 'push' && github\.ref_type == 'tag' && needs\.release\.result == 'success'\) \|\| \(github\.event_name == 'workflow_dispatch' && github\.ref_type == 'branch'\)\)/.test(releaseAndroidPhoneJob) &&
+    .every((name) => jobRequiresPushTag(workflowJob(releaseWorkflow, name), name)) &&
+    jobConditionMatches(releaseAndroidPhoneJob, MANUAL_PHONE_CONDITION) &&
     !/gh release (?:create|upload|edit)/.test(releaseAndroidPhoneJob),
   "manual branch dispatch may build a signed verification artifact, but every release-writing job must require a pushed tag",
 );
@@ -399,18 +472,17 @@ check(
 );
 check(
   "Release workflow gates drafts on clean installs",
-  /clean-install:\s*[\s\S]{0,120}needs:\s*finalize-release-assets/.test(
-    releaseWorkflow,
-  ) &&
-    /uses:\s*\.\/\.github\/workflows\/clean-install\.yml/.test(releaseWorkflow) &&
-    /tag:\s*\$\{\{\s*github\.ref_name\s*\}\}/.test(releaseWorkflow),
+  jobNeedsExactly(releaseCleanInstallJob, ["release-scope", "finalize-release-assets"]) &&
+    jobConditionMatches(releaseCleanInstallJob, CLEAN_INSTALL_CONDITION) &&
+    anchoredScalar(releaseCleanInstallJob, "uses", 4) === "./.github/workflows/clean-install.yml" &&
+    anchoredScalar(releaseCleanInstallJob, "tag", 6) === "${{ github.ref_name }}" &&
+    anchoredScalar(releaseCleanInstallJob, "include_android", 6) === "${{ needs.release-scope.outputs.include_android == 'true' }}" &&
+    anchoredScalar(releaseCleanInstallJob, "include_server", 6) === "${{ needs.release-scope.outputs.include_server == 'true' }}",
   ".github/workflows/web-release.yml must run the reusable clean-install workflow against tag assets",
 );
 check(
   "Release workflow grants draft asset access to clean installs",
-  /clean-install:\s*[\s\S]{0,260}permissions:\s*[\s\S]{0,80}contents:\s*write/.test(
-    releaseWorkflow,
-  ),
+  anchoredScalar(anchoredBlock(releaseCleanInstallJob, "permissions", 4), "contents", 6) === "write",
   ".github/workflows/web-release.yml must grant contents: write to the reusable clean-install job so it can download draft assets",
 );
 check(
@@ -449,8 +521,9 @@ check(
     /python3 scripts\/verify_android_apk\.py[\s\S]{0,260}--apk "\$RUNNER_TEMP\/phone-assets\/\$asset"[\s\S]{0,260}--certificate-pin web\/src-tauri\/SIGNING_CERT_SHA256/.test(
       cleanInstallAndroidPhoneJob,
     ) &&
-    !/^\s*if:/m.test(cleanInstallAndroidPhoneJob),
-  "the reusable clean-install workflow must require the versioned phone APK and always download and verify it as a release job",
+    jobConditionMatches(cleanInstallAndroidPhoneJob, "inputs.include_android") &&
+    cleanInstallDefaultsAndroid(cleanInstallWorkflow) && inventoryRequiresAndroid(cleanInstallWorkflow),
+  "the reusable clean-install workflow must require and verify the versioned phone APK when included, with Android/server verification enabled by default",
 );
 check(
   "Clean-install workflow verifies trust and first launch",
@@ -592,7 +665,7 @@ check(
   // The optimize/remux engine shells out to bundled ffmpeg/ffprobe, so every
   // macOS consumes separately verified source builds; other targets retain
   // their pinned downloads. All CLIs must be present before packaging.
-  /needs:\s*macos-media-runtime/.test(releaseWorkflow) &&
+  jobNeedsExactly(workflowJob(releaseWorkflow, "release"), ["release-scope", "macos-media-runtime"]) &&
     /name:\s*macos-media-runtime-\$\{\{ matrix\.media_arch \}\}/.test(releaseWorkflow) &&
     /media-candidate\/ffmpeg/.test(releaseWorkflow) &&
     /produce_macos_media_runtime\.py[\s\S]*--prepare-source/.test(macosMediaWorkflow) &&
