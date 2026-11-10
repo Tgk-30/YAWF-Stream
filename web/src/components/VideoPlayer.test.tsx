@@ -18108,6 +18108,26 @@ describe("automatic starvation95 adaptation", () => {
     expect(screen.queryByText(/Auto reduced playback/)).toBeNull();
   });
 
+  it.each([[false, 0.001], [false, 0.033], [true, 0.001], [true, 0.033]] as const)("[starvation95] adapts default-direct/Auto=%s despite native %ss settling after each waiting episode", async (auto, regression) => {
+    const p = await setup({ auto });
+    for (let i = 0; i < 2; i++) {
+      p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+      p.video.currentTime -= regression; fireEvent.timeUpdate(p.video);
+      fireEvent.waiting(p.video); await settle(); expect(p.request).not.toHaveBeenCalled();
+    }
+    p.episode(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
+    expect(p.video.isConnected).toBe(false);
+  });
+
+  it.each([false, true])("[starvation95] explicit tiny seek clears prior episodes in default-direct/Auto=%s", async auto => {
+    const p = await setup({ auto }); p.episode(); p.episode(); await settle();
+    p.video.currentTime -= 0.001; fireEvent.seeking(p.video); fireEvent.seeked(p.video); await settle();
+    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
+  });
+
   it("[starvation95] refuses unconfirmed selected audio without replacing the reader", async () => {
     const p = await setup({ pending: true, audio: true }); p.episodes(); await settle();
     await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n")); }); await settle();

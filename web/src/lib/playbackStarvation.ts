@@ -1,5 +1,7 @@
 import type { ServerTranscodeQuality } from "./serverApi";
 
+const CLOCK_REGRESSION_TOLERANCE_SECONDS = 0.05;
+
 /** One foreground episode needs new owned clock progress, not another waiting event. */
 export class PlaybackStarvation {
   private lastPosition: number | null = null;
@@ -34,7 +36,13 @@ export class PlaybackStarvation {
 
   progress(position: number, eligible: boolean): void {
     if (!eligible || !Number.isFinite(position)) { this.interrupt(); return; }
-    if (this.lastPosition != null && position < this.lastPosition) this.interrupt();
+    if (this.lastPosition != null && position < this.lastPosition) {
+      // Native decoders can settle a few milliseconds backward after buffer
+      // depletion. Keep the high-water sample: this is not resumed progress,
+      // and repeated small corrections must not accumulate into a rewind.
+      if (position >= this.lastPosition - CLOCK_REGRESSION_TOLERANCE_SECONDS) return;
+      this.interrupt();
+    }
     this.resumePosition ??= position;
     if (position > this.resumePosition + 0.25) this.progressed = true;
     this.lastPosition = position;

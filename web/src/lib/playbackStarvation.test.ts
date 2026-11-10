@@ -81,6 +81,38 @@ describe("PlaybackStarvation", () => {
     policy.progress(13, true); expect(policy.waiting(30, 0, true)).toBe(true);
   });
 
+  it.each([0.001, 0.033, 0.05])("preserves episodes across native depleted-clock settling of %ss without treating settling as resumed progress", regression => {
+    const policy = new PlaybackStarvation();
+    policy.progress(70.272, true); policy.progress(71.775, true);
+    expect(policy.waiting(1_000, 0.097, true)).toBe(false);
+    policy.progress(71.775 - regression, true);
+    expect(policy.waiting(2_000, 0.097, true)).toBe(false);
+    policy.progress(77.903, true);
+    expect(policy.waiting(14_000, 0.097, true)).toBe(false);
+    policy.progress(77.903 - regression, true);
+    expect(policy.waiting(15_000, 0.097, true)).toBe(false);
+    policy.progress(83.919, true);
+    expect(policy.waiting(26_000, 0.097, true)).toBe(true);
+  });
+
+  it.each([0.050001, 0.051, 0.25, 1])("retires earlier episodes for a genuine %ss backward clock", regression => {
+    const policy = new PlaybackStarvation();
+    policy.progress(10, true); policy.progress(11, true); policy.waiting(1_000, 0, true);
+    policy.progress(12, true); policy.waiting(2_000, 0, true);
+    policy.progress(12 - regression, true); policy.progress(13, true);
+    expect(policy.waiting(3_000, 0, true)).toBe(false);
+    policy.progress(14, true); expect(policy.waiting(4_000, 0, true)).toBe(false);
+    policy.progress(15, true); expect(policy.waiting(5_000, 0, true)).toBe(true);
+  });
+
+  it("keeps the high-water anchor so repeated small regressions cannot accumulate into an accepted rewind", () => {
+    const policy = new PlaybackStarvation();
+    policy.progress(10, true); policy.progress(11, true); policy.waiting(1_000, 0, true);
+    policy.progress(12, true); policy.waiting(2_000, 0, true);
+    policy.progress(11.97, true); policy.progress(11.94, true); policy.progress(13, true);
+    expect(policy.waiting(3_000, 0, true)).toBe(false);
+  });
+
   it("invalidates progress and history on a backwards clock", () => {
     const policy = new PlaybackStarvation();
     policy.progress(10, true); policy.progress(11, true); policy.waiting(1, 0, true);
