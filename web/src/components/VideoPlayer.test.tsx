@@ -14729,6 +14729,186 @@ describe("explicit Device Original audio intent", () => {
 });
 
 
+describe("matching-audio retained quality93", () => {
+  const position = 90.25;
+  async function settleQuality93() {
+    await act(async () => { for (let i = 0; i < 24; i += 1) await Promise.resolve(); });
+  }
+  async function setupQuality93(language: "eng" | "jpn" = "eng", outcome: "ready" | "failed" | "pending" = "ready") {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const states = new WeakMap<HTMLVideoElement, { time: number; paused: boolean }>();
+    const plays: Array<{ time: number | null; src: string }> = [];
+    vi.mocked(HTMLMediaElement.prototype.play).mockImplementation(function (this: HTMLVideoElement) {
+      const state = states.get(this);
+      plays.push({ time: state?.time ?? null, src: this.src });
+      if (state != null) { state.paused = false; fireEvent.play(this); fireEvent.playing(this); }
+      return Promise.resolve();
+    });
+    vi.mocked(HTMLMediaElement.prototype.pause).mockImplementation(function (this: HTMLVideoElement) {
+      const state = states.get(this);
+      if (state != null && !state.paused) { state.paused = true; fireEvent.pause(this); }
+    });
+    const pendingManifest = deferred<Response>();
+    let generation = 0;
+    let implicitAudioIndex = language === "eng" ? 0 : 1;
+    const request = vi.fn(async (quality: ServerTranscodeQuality, absolute: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/quality93-${++generation}/index.m3u8?quality=${quality}&start=${absolute}${audioTrack == null ? "" : `&audio=${audioTrack}`}`,
+      timelineOffsetSeconds: absolute, startPositionSeconds: 0, quality, audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("quality93-1/")) {
+        if (outcome === "pending") return pendingManifest.promise;
+        if (outcome === "failed") return new Response(null, { status: 500 });
+      }
+      return new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": new URL(String(input)).searchParams.get("audio") ?? String(implicitAudioIndex) } });
+    }));
+    const tracks = [
+      { index: 0, language: "eng", label: "English", default: language === "eng" },
+      { index: 1, language: "jpn", label: "Japanese", default: language === "jpn" },
+    ];
+    const props = {
+      url: "https://server.example/api/stream/quality93-original/fixture.mp4", title: "Quality continuity93",
+      sourceFileName: "Quality93.Movie.mkv", imdbId: "tt-quality93", startPositionSeconds: position,
+      initialHandoffState: { paused: true, volume: 0.35, muted: true, playbackRate: 1.25 },
+      playerPreferences: { defaultAudioLanguage: language },
+      serverOptimized: { qualities: ["480p", "360p"] as ServerTranscodeQuality[], defaultQuality: null,
+        loadSourceInfo: async () => ({ durationSeconds: 720, tracks }), request },
+      onClose: vi.fn(),
+    };
+    const view = render(<VideoPlayer {...props} />);
+    const ready = async (video: HTMLVideoElement, offset = 0) => {
+      const state = { time: Number(/#t=(\d+(?:\.\d+)?)/.exec(video.src)?.[1] ?? 0), paused: true };
+      states.set(video, state);
+      Object.defineProperties(video, {
+        currentSrc: { configurable: true, value: video.src }, error: { configurable: true, value: null },
+        currentTime: { configurable: true, get: () => state.time, set: (value: number) => { state.time = value; } },
+        duration: { configurable: true, value: 720 - offset }, readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+        paused: { configurable: true, get: () => state.paused }, seeking: { configurable: true, value: false },
+        ended: { configurable: true, value: false },
+        seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 720 - offset } },
+      });
+      fireEvent.loadStart(video); fireEvent.loadedMetadata(video); fireEvent.loadedData(video); fireEvent.seeked(video); fireEvent.canPlay(video);
+      await settleQuality93(); return state;
+    };
+    const settings = () => {
+      if (screen.queryByRole("button", { name: "Close playback settings" }) == null)
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    };
+    await ready(document.querySelector("video.player-video") as HTMLVideoElement);
+    settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settleQuality93();
+    expect(request).toHaveBeenCalledTimes(1);
+    if (outcome === "ready") await ready(document.querySelector("video.player-video") as HTMLVideoElement, position);
+    const replace = async (transport: "raw" | "360p" | "480p" = "raw", options: { otherContent?: boolean; handoff?: PlaybackHandoffState; offset?: number; absolute?: number; preferredLanguage?: string; explicitAudioZero?: boolean } = {}) => {
+      const sourceInfo = deferred<{ durationSeconds: number; tracks: ServerAudioTrack[] }>();
+      const nextTracks = language === "jpn"
+        ? [{ index: 0, language: "eng", label: "English", default: false }, { index: 4, language: "jpn", label: "Japanese", default: true }]
+        : tracks;
+      implicitAudioIndex = language === "eng" ? 0 : 4;
+      const absolute = options.absolute ?? position;
+      const offset = options.offset ?? (transport === "raw" ? 0 : absolute);
+      const fresh = transport === "raw" ? "https://server.example/api/stream/quality93-fresh/fixture.mp4"
+        : `https://server.example/api/stream/quality93-fresh/index.m3u8?quality=${transport}&start=${offset}${options.explicitAudioZero ? "&audio=0" : ""}`;
+      view.rerender(<VideoPlayer {...props} url={fresh} sourceRevision={1} engine={transport === "raw" ? "webview-direct" : "webview-hls-transcode"}
+        sourceFileName={options.otherContent ? "Other93.Movie.mkv" : props.sourceFileName}
+        playerPreferences={{ defaultAudioLanguage: options.preferredLanguage ?? language }}
+        startPositionSeconds={absolute - offset} timelineOffsetSeconds={offset} initialHandoffState={options.handoff ?? props.initialHandoffState}
+        serverOptimized={{ ...props.serverOptimized, loadSourceInfo: () => sourceInfo.promise }} />);
+      await settleQuality93();
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      await ready(video, offset);
+      await act(async () => { sourceInfo.resolve({ durationSeconds: 720, tracks: nextTracks }); });
+      await settleQuality93();
+      return { video, fresh };
+    };
+    return { props, view, request, states, ready, settings, replace, pendingManifest, plays };
+  }
+
+  it.each([["eng", "raw"], ["eng", "360p"], ["jpn", "raw"], ["jpn", "360p"]] as const)(
+    "[quality-match93] restores480 with matching %s audio after %s successor", async (language, transport) => {
+      const f = await setupQuality93(language); await f.replace(transport);
+      expect(f.request).toHaveBeenCalledTimes(2);
+      // Quality-only restoration must not turn the fresh server's implicit default into explicit audio=0/4.
+      const expectedPosition = position + (transport === "raw" ? 0 : 0.001);
+      expect(f.request.mock.lastCall, JSON.stringify(f.request.mock.calls)).toEqual(["480p", expectedPosition]);
+      const optimized = document.querySelector("video.player-video") as HTMLVideoElement;
+      const state = await f.ready(optimized, expectedPosition);
+      expect(state.time).toBe(0.001);
+      expect(state.time + expectedPosition).toBeCloseTo(expectedPosition + 0.001, 6);
+      expect(optimized.volume).toBe(0.35); expect(optimized.muted).toBe(true); expect(optimized.playbackRate).toBe(1.25);
+      expect(screen.getByRole("button", { name: "Play" })).toBeVisible();
+    },
+  );
+  it("[quality-match93] automatic recovery keeps the authorized node and latest playing handoff", async () => {
+    const f = await setupQuality93();
+    const old = document.querySelector("video.player-video") as HTMLVideoElement;
+    const pending = deferred<void>();
+    const refresh = vi.fn((_absolute: number, _handoff: PlaybackHandoffState) => pending.promise);
+    f.view.rerender(<VideoPlayer {...f.props} refreshCurrentSource={refresh} />); await settleQuality93();
+    const closeSettings = screen.queryByRole("button", { name: "Close playback settings" });
+    if (closeSettings != null) fireEvent.click(closeSettings);
+    fireEvent.click(screen.getByRole("button", { name: "Play" }));
+    const state = f.states.get(old)!;
+    state.time = 1; fireEvent.timeUpdate(old); state.time = 2; fireEvent.timeUpdate(old);
+    fireMediaError(old, 2); await settleQuality93();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(position + 2, expect.objectContaining({ paused: false }));
+    const [absolute, handoff] = refresh.mock.calls[0]!;
+    await act(async () => { pending.resolve(); }); await settleQuality93();
+    // The controlled parent publishes Detail's exact captured handoff after resolution.
+    await f.replace("raw", { handoff, absolute });
+    const successor = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(successor).toBe(old); expect(f.request).toHaveBeenCalledTimes(2);
+    expect(f.request).toHaveBeenLastCalledWith("480p", position + 2);
+    // replace() already delivered this resource's loadstart/readiness and Play.
+    // Inspect the live state rather than manufacture another load on the same resource.
+    const resumed = f.states.get(successor)!;
+    expect(document.querySelector("video.player-video")).toBe(old);
+    expect(resumed.time + position + 2).toBeCloseTo(position + 2.001, 6);
+    expect(resumed.paused, JSON.stringify({ plays: f.plays, calls: f.request.mock.calls, handoff })).toBe(false); expect(successor.volume).toBe(0.35);
+    expect(successor.muted).toBe(true); expect(successor.playbackRate).toBe(1.25);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
+  });
+  it("[quality-match93] keeps explicit audio zero while restoring quality", async () => {
+    const f = await setupQuality93(); await f.replace("360p", { explicitAudioZero: true, preferredLanguage: "jpn" });
+    expect(f.request).toHaveBeenCalledTimes(2); expect(f.request).toHaveBeenLastCalledWith("480p", position + 0.001, 0);
+  });
+  it("[quality-match93] retained manual Japanese still outranks a fresh explicit default zero", async () => {
+    const f = await setupQuality93("jpn"); f.settings();
+    fireEvent.click(screen.getByRole("button", { name: "Japanese" })); await settleQuality93();
+    expect(f.request).toHaveBeenCalledTimes(2); expect(f.request).toHaveBeenLastCalledWith("480p", position + 0.001, 1);
+    await f.ready(document.querySelector("video.player-video") as HTMLVideoElement, position + 0.001);
+    await f.replace("360p", { explicitAudioZero: true });
+    expect(f.request).toHaveBeenCalledTimes(3);
+    expect(f.request).toHaveBeenLastCalledWith("480p", position + 0.001, 4);
+  });
+  it("[quality-match93] leaves already active480 with matching audio alone", async () => {
+    const f = await setupQuality93(); const { fresh } = await f.replace("480p");
+    expect(f.request).toHaveBeenCalledTimes(1); expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toContain(fresh);
+  });
+  it("[quality-match93] explicit Original keeps the same owner unoptimized", async () => {
+    const f = await setupQuality93(); f.settings(); fireEvent.click(screen.getByRole("button", { name: "Device Original" })); await settleQuality93();
+    await f.ready(document.querySelector("video.player-video") as HTMLVideoElement);
+    expect(f.request).toHaveBeenCalledTimes(1); f.settings();
+    expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "true");
+  });
+  it("[quality-match93] failed manual quality is not retained by a fresh owner", async () => {
+    const f = await setupQuality93("eng", "failed"); await f.replace();
+    expect(f.request).toHaveBeenCalledTimes(1);
+  });
+  it("[quality-match93] superseded pending manual quality cannot become retained", async () => {
+    const f = await setupQuality93("eng", "pending");
+    // A committed new source supersedes the pending owner; a disabled Original button is not a command.
+    await f.replace();
+    await act(async () => { f.pendingManifest.resolve(new Response("#EXTM3U\n")); }); await settleQuality93();
+    expect(f.request.mock.calls, JSON.stringify(f.request.mock.calls)).toHaveLength(1);
+  });
+  it("[quality-match93] a different file cannot inherit the retained quality", async () => {
+    const f = await setupQuality93(); await f.replace("raw", { otherContent: true });
+    expect(f.request).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("Original pending-generation cancellation contract", () => {
   it("allows Original during pending preparation and rejects its late same-owner manifest", async () => {
     isTauriMock.mockReturnValue(true);

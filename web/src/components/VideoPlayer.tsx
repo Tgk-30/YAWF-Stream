@@ -3547,6 +3547,7 @@ function WebviewPlayer({
   const serverAudioModeRef = useRef(serverOptimized?.loadAudioTracks != null);
   serverAudioModeRef.current = serverOptimized?.loadAudioTracks != null;
   const appliedServerAudioPreferenceRef = useRef(false);
+  const appliedRetainedServerQualityOwnerRef = useRef<string | null>(null);
   const autoplayAttemptedRef = useRef(false);
   const playbackAttemptRef = useRef(0);
   const foregroundPlaybackRef = useRef<{ video: HTMLVideoElement; source: string; play: boolean; returnedPosition?: number } | null>(null);
@@ -7367,8 +7368,13 @@ function WebviewPlayer({
   ]);
 
   useEffect(() => {
+    if (retainedServerOptimizedQuality != null && retainedServerOptimizedQuality === activeServerOptimizedQuality) {
+      appliedRetainedServerQualityOwnerRef.current = serverAudioOwner;
+    }
+    const restoreRetainedQuality = appliedRetainedServerQualityOwnerRef.current !== serverAudioOwner &&
+      retainedServerOptimizedQuality != null && retainedServerOptimizedQuality !== activeServerOptimizedQuality;
     if (
-      appliedServerAudioPreferenceRef.current ||
+      (appliedServerAudioPreferenceRef.current && !restoreRetainedQuality) ||
       serverAudioInventoryStatus !== "ready" ||
       serverAudioTracks.length === 0 ||
       serverOptimizationPending
@@ -7380,7 +7386,9 @@ function WebviewPlayer({
       ? null
       : savedPrefs;
     const selected =
-      matchedRetainedServerAudio ?? findPreferredLanguageMatch(
+      (appliedServerAudioPreferenceRef.current
+        ? serverAudioTracks.find((track) => track.index === resolvedServerAudioTrack)
+        : null) ?? matchedRetainedServerAudio ?? findPreferredLanguageMatch(
         perTitlePrefs?.preferredAudioLang,
         serverAudioTracks,
         (track) => track.language,
@@ -7398,7 +7406,8 @@ function WebviewPlayer({
       ) ??
       serverAudioTracks.find((track) => track.isDefault) ??
       serverAudioTracks[0];
-    if (selected.index === resolvedServerAudioTrack || serverOptimized == null) {
+    const audioMatches = selected.index === resolvedServerAudioTrack;
+    if ((audioMatches && !restoreRetainedQuality) || serverOptimized == null) {
       appliedServerAudioPreferenceRef.current = true;
       return;
     }
@@ -7420,7 +7429,12 @@ function WebviewPlayer({
       }
     }
     appliedServerAudioPreferenceRef.current = true;
+    appliedRetainedServerQualityOwnerRef.current = serverAudioOwner;
     const quality = retainedServerOptimizedQuality ?? activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
+    // A quality-only restore keeps an implicit server default implicit. An
+    // explicit track, including zero, and a retained audio choice remain owned.
+    const implicitAudio = audioMatches && matchedRetainedServerAudio == null &&
+      activeServerAudioPreference == null && !initialServerAudioTrackExplicit;
     void onSwitchServerOptimized(
       quality,
       position,
@@ -7431,8 +7445,8 @@ function WebviewPlayer({
         return { ...state, paused: intent === "play" ? false : intent === "pause" ? true
           : sourceSwitchStateRef.current?.paused ?? state.paused };
       },
-      selected.index,
-      { id: selected.id, language: selected.language, label: selected.logicalLabel },
+      implicitAudio ? undefined : selected.index,
+      implicitAudio ? undefined : { id: selected.id, language: selected.language, label: selected.logicalLabel },
       "follow-current",
       false,
       "remembered-audio",
@@ -7440,6 +7454,9 @@ function WebviewPlayer({
   }, [
     resolvedServerAudioTrack,
     activeServerOptimizedQuality,
+    activeServerAudioPreference,
+    initialServerAudioTrackExplicit,
+    serverAudioOwner,
     retainedServerOptimizedQuality,
     matchedRetainedServerAudio,
     duration,
