@@ -274,6 +274,11 @@ public final class RuntimeOtaFlowTest {
     private int appsPreActionCount;
     private int appsTapActionDelta;
     private boolean cleanupFailureDiagnosticCaptured;
+    private InitialOfferObservation latestInitialOfferGeometry;
+    private int initialOfferGeometryPhase;
+    private int initialOfferGeometryPoll;
+    private long initialOfferGeometryAt;
+    private long initialOfferGeometryDeadline;
 
     @Test
     public void updateOfficialPublicBaselineThroughNativeUi() throws Throwable {
@@ -4524,6 +4529,11 @@ public final class RuntimeOtaFlowTest {
         final Rect target = new Rect();
         final Rect action = new Rect();
         final Rect container = new Rect();
+        String geometryReason = "none";
+        int geometryNodeIndex = -1;
+        int geometryNodeDepth = -1;
+        final Rect root = new Rect();
+        final Rect offender = new Rect();
 
         boolean sameBinding(InitialOfferObservation previous) {
             return previous != null && windowId == previous.windowId && width == previous.width
@@ -4578,9 +4588,12 @@ public final class RuntimeOtaFlowTest {
             if (result.windowId < 0 || root.getWindowId() != result.windowId) { result.status = "incomplete"; return result; }
             active.getBoundsInScreen(result.window);
             Rect rootBounds = new Rect(); root.getBoundsInScreen(rootBounds);
+            result.root.set(rootBounds);
             Rect display = new Rect(0, 0, width, height);
             if (display.isEmpty() || result.window.isEmpty() || rootBounds.isEmpty()
                     || !display.contains(result.window) || !result.window.contains(rootBounds)) {
+                result.geometryReason = "root-window";
+                result.offender.set(rootBounds);
                 result.status = "geometry"; return result;
             }
             nodes.add(root); parents.add(-1); depths.add(0); pending.add(0);
@@ -4594,6 +4607,10 @@ public final class RuntimeOtaFlowTest {
                 }
                 Rect raw = new Rect(); node.getBoundsInScreen(raw);
                 if (node.isVisibleToUser() && (raw.isEmpty() || !rootBounds.contains(raw) || !result.window.contains(raw))) {
+                    result.geometryReason = "visible-node";
+                    result.geometryNodeIndex = cursor;
+                    result.geometryNodeDepth = depths.get(cursor);
+                    result.offender.set(raw);
                     result.status = "geometry"; return result;
                 }
                 int count = node.getChildCount();
@@ -4646,6 +4663,13 @@ public final class RuntimeOtaFlowTest {
             }
             if (!bounds.get(panel).contains(bounds.get(target)) || !bounds.get(panel).contains(bounds.get(action))
                     || (phase == 1 && !bounds.get(panel).contains(bounds.get(title)))) {
+                int offender = !bounds.get(panel).contains(bounds.get(target)) ? target
+                        : !bounds.get(panel).contains(bounds.get(action)) ? action : title;
+                result.geometryReason = "action-container";
+                result.geometryNodeIndex = offender;
+                result.geometryNodeDepth = depths.get(offender);
+                result.offender.set(bounds.get(offender));
+                result.container.set(bounds.get(panel));
                 result.status = "geometry"; return result;
             }
             result.title.set(bounds.get(title)); result.target.set(bounds.get(target));
@@ -4686,9 +4710,16 @@ public final class RuntimeOtaFlowTest {
             assertTrue("Initial-offer observer clock regressed", now >= before);
             assertEquals("Initial-offer observer must not issue inputs", beforeActions, actions.size());
             previousTime = now; status = snapshot.status;
+            if (status.equals("geometry")) {
+                latestInitialOfferGeometry = snapshot;
+                initialOfferGeometryPhase = phase;
+                initialOfferGeometryPoll = polls + 1;
+                initialOfferGeometryAt = now;
+                initialOfferGeometryDeadline = deadline;
+            }
             if (now >= deadline) break;
             assertTrue("Initial-offer observer refused unsafe snapshot: " + status,
-                    !status.equals("foreign") && !status.equals("ambiguous") && !status.equals("geometry")
+                    !status.equals("foreign") && !status.equals("ambiguous") && (phase == 2 || !status.equals("geometry"))
                             && !status.equals("duplicate") && !status.equals("budget"));
             if (status.equals("ready")) {
                 stable = snapshot.sameBinding(previous) ? stable + 1 : 1;
@@ -4714,6 +4745,29 @@ public final class RuntimeOtaFlowTest {
         assertTrue("Initial-offer cleanup observer is profile-only", isPublic88To96OfferMode());
         assertTrue("Cleanup target requires the admitted Apps acquisition", appsWindowGate != null && appsWindowGate.ready != null);
         awaitInitialOfferObservation(2, appsWindowGate.deadline);
+    }
+
+    private void appendInitialOfferGeometryFailure(JSONObject receipt, String outcome) throws Exception {
+        InitialOfferObservation geometry = latestInitialOfferGeometry;
+        if (!isPublic88To96OfferMode() || !"failed".equals(outcome) || geometry == null) return;
+        assertTrue("Unknown initial-offer geometry reason", geometry.geometryReason.equals("root-window")
+                || geometry.geometryReason.equals("visible-node") || geometry.geometryReason.equals("action-container"));
+        JSONObject proof = new JSONObject();
+        proof.put("schemaVersion", 1);
+        proof.put("reason", geometry.geometryReason);
+        proof.put("phase", initialOfferGeometryPhase);
+        proof.put("poll", initialOfferGeometryPoll);
+        proof.put("observedAtUptimeMs", initialOfferGeometryAt);
+        proof.put("deadlineUptimeMs", initialOfferGeometryDeadline);
+        proof.put("nodeIndex", geometry.geometryNodeIndex);
+        proof.put("nodeDepth", geometry.geometryNodeDepth);
+        proof.put("displayBounds", new JSONArray(new int[] {0, 0, geometry.width, geometry.height}));
+        proof.put("windowBounds", new JSONArray(new int[] {geometry.window.left, geometry.window.top, geometry.window.right, geometry.window.bottom}));
+        proof.put("rootBounds", new JSONArray(new int[] {geometry.root.left, geometry.root.top, geometry.root.right, geometry.root.bottom}));
+        proof.put("offenderBounds", new JSONArray(new int[] {geometry.offender.left, geometry.offender.top, geometry.offender.right, geometry.offender.bottom}));
+        proof.put("containerBounds", new JSONArray(new int[] {geometry.container.left, geometry.container.top, geometry.container.right, geometry.container.bottom}));
+        assertTrue("Initial-offer geometry diagnostic exceeded bound", proof.toString().getBytes(StandardCharsets.UTF_8).length <= 2048);
+        receipt.put("initialOfferGeometryDiagnostic", proof);
     }
 
     private static final class AppsWindowSnapshot {
@@ -5576,6 +5630,7 @@ public final class RuntimeOtaFlowTest {
         }
         if (isPublic88To96OfferMode()) {
             appendPublic88To96OfferReceipt(receipt);
+            appendInitialOfferGeometryFailure(receipt, outcome);
         }
         receipt.put("captures", captureIndex);
         receipt.put(

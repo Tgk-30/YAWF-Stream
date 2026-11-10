@@ -1129,6 +1129,12 @@ class InitialOfferR4ObserverTests(unittest.TestCase):
  void awaitInitialOfferCleanupTarget(){throw new AssertionError("observer absent");}
  String observedStatus(int phase){return "observer-absent";}
 '''
+        geometry_fields = "\n".join(re.findall(
+            r"    private [^\n;]+ (?:latestInitialOfferGeometry|initialOfferGeometry\w+);", source))
+        if "private void appendInitialOfferGeometryFailure(" in source:
+            methods += java_method(source, "appendInitialOfferGeometryFailure")
+        else:
+            methods += '\n void appendInitialOfferGeometryFailure(JSONObject receipt,String outcome){}\n'
         confirmation = java_method(source, "confirmSystemInstaller")
         end = confirmation.index("        installerSuccessObserved = true;")
         marker = "        if (isPublic88To96OfferMode()) {"
@@ -1156,11 +1162,19 @@ class InitialOfferR4ObserverTests(unittest.TestCase):
             factories.append("  n0.root=true;return n0;\n }")
         probe = r'''
 import java.util.*;
+import java.nio.charset.StandardCharsets;
 public final class ObserverProbe {
  static final long UI_WAIT_MS=90000,SHORT_WAIT_MS=20000;
- static long time=10000;static String scenario;static int phase,inputs,getters,lookups,scrollQueries,readyReads;static ObserverProbe live;
+ static long time=10000;static String scenario;static int phase,inputs,getters,lookups,scrollQueries,readyReads,lookupReadyReads;static ObserverProbe live;
  final FakeInstrumentation instrumentation=new FakeInstrumentation();final FakeDevice device=new FakeDevice();
  final List<String> actions=new ArrayList<>();AppsWindowGate appsWindowGate;
+'''+geometry_fields+r'''
+ static class JSONObject {
+  final Map<String,Object> values=new LinkedHashMap<>();JSONObject put(String key,Object value){values.put(key,value);return this;}
+  public String toString(){StringJoiner out=new StringJoiner(",","{","}");for(var entry:values.entrySet())out.add(json(entry.getKey())+":"+json(entry.getValue()));return out.toString();}
+ }
+ static class JSONArray {final int[] values;JSONArray(int[] v){values=v.clone();}public String toString(){return Arrays.toString(values);}}
+ static String json(Object value){if(value instanceof String)return "\""+((String)value).replace("\\","\\\\").replace("\"","\\\"")+"\"";return String.valueOf(value);}
  static class OtaFlowPolicy {static final String SETTINGS_PACKAGE="com.android.settings";}
  static class Build {static class VERSION {static final int SDK_INT=36;}static class VERSION_CODES {static final int UPSIDE_DOWN_CAKE=34;}}
  static class SystemClock {static long uptimeMillis(){return time;}static void sleep(long ms){assertTrue("bounded conditional poll",ms>0&&ms<=100);time+=ms;}}
@@ -1177,7 +1191,7 @@ public final class ObserverProbe {
   CharSequence getContentDescription(){return description;}String getViewIdResourceName(){return resource;}int getWindowId(){return id;}
   boolean isVisibleToUser(){return visible;}boolean isEnabled(){return enabled;}boolean isClickable(){return clickable;}boolean isScrollable(){return scrollable;}
   void getBoundsInScreen(Rect r){r.set(bounds);}int getChildCount(){return declared>=0?declared:children.size();}AccessibilityNodeInfo getChild(int i){return i<children.size()?children.get(i):null;}
-  void recycle(){if(root&&scenario.endsWith("late")&&readyReads>=2)time=phase==1?100000:90000;}
+  void recycle(){if(root&&scenario.endsWith("late")&&readyReads>=(scenario.equals("cleanup-geometry-then-late")?3:2))time=phase==1?100000:90000;}
  }
  static class AccessibilityWindowInfo {
   static final int TYPE_APPLICATION=1;int id=5,type=1;boolean active=true,focused=true;Rect bounds=new Rect(0,0,1080,1920);
@@ -1201,6 +1215,8 @@ public final class ObserverProbe {
   if(scenario.endsWith("disabled"))action.enabled=false;
   if(scenario.endsWith("hidden"))action.visible=false;
   if(scenario.endsWith("clipped"))target.bounds.right=1081;
+  if((scenario.startsWith("cleanup-geometry-then-")&&readyReads==0)||(scenario.equals("cleanup-stable-reset")&&readyReads==1))target.bounds.right=1081;
+  if(scenario.equals("cleanup-container-geometry"))target.bounds.top=1100;
   if(scenario.endsWith("incomplete"))target.declared=1;
   if(scenario.endsWith("duplicate"))r.children.add(target);
   if(scenario.endsWith("duplicate-role")){AccessibilityNodeInfo other=phase==1?byText(installerBody(5),"Open"):byText(cleanupBody(5),"YAWF Stream");r.children.add(other);}
@@ -1242,7 +1258,7 @@ public final class ObserverProbe {
  }
  static class FakeDevice {
   int getDisplayWidth(){return 1080;}int getDisplayHeight(){return 1920;}
-  UiObject2 findObject(BySelector selector){live.instrumentation.a.getWindows();if(selector.scrollable){scrollQueries++;return null;}lookups++;AccessibilityNodeInfo n=byText(live.instrumentation.a.current,selector.text);return n==null?null:new UiObject2(n);}
+  UiObject2 findObject(BySelector selector){if("YAWF Stream".equals(selector.text))lookupReadyReads=readyReads;live.instrumentation.a.getWindows();if(selector.scrollable){scrollQueries++;return null;}lookups++;AccessibilityNodeInfo n=byText(live.instrumentation.a.current,selector.text);return n==null?null:new UiObject2(n);}
   void waitForIdle(long ms){}
  }
  boolean isPublic88To96OfferMode(){return true;}
@@ -1253,7 +1269,7 @@ public final class ObserverProbe {
  static void assertEquals(String label,Object expected,Object value){assertTrue(label,Objects.equals(expected,value));}
  static void fail(String message){throw new AssertionError(message);}
 '''+"\n".join(classes)+methods+r'''
- public static void main(String[] args){
+ public static void main(String[] args)throws Exception{
   scenario=args[0];boolean snapshot=scenario.startsWith("snapshot:");if(snapshot)scenario=scenario.substring(9);
   phase=scenario.startsWith("success")?1:2;ObserverProbe p=new ObserverProbe();live=p;
   p.appsWindowGate=new AppsWindowGate(0);p.appsWindowGate.ready=new AppsWindowSnapshot();p.appsWindowGate.ready.windowId=5;
@@ -1261,12 +1277,18 @@ public final class ObserverProbe {
   if(snapshot){time=10500;System.out.println("SNAPSHOT="+p.observedStatus(phase));return;}
   try {
    if(phase==1)p.exerciseSuccessRegion("com.google.android.packageinstaller");else p.exerciseCleanupRegion();
-  }catch(Throwable failure){System.err.println("REFUSED;inputs="+inputs+";getters="+getters+";scrollQueries="+scrollQueries);throw failure;}
+  }catch(Throwable failure){
+   JSONObject receipt=new JSONObject();p.appendInitialOfferGeometryFailure(receipt,"failed");System.out.println("DIAGNOSTIC="+receipt);
+   System.err.println("REFUSED;inputs="+inputs+";getters="+getters+";scrollQueries="+scrollQueries+";time="+time);throw failure;
+  }
   System.out.println("OBSERVER_RETURNED");
+  JSONObject passed=new JSONObject();p.appendInitialOfferGeometryFailure(passed,"passed");System.out.println("PASS_DIAGNOSTIC="+passed);
   assertEquals("no retained success getter",0,getters);
   assertEquals("exact normal input count",phase==1?0:1,inputs);
   assertEquals("no forced scroll queries",0,scrollQueries);
   if(phase==2){assertEquals("one unchanged target lookup",1,lookups);assertEquals("captured page fits without scrolling",0,scrolls(p.instrumentation.a.current));assertTrue("shared cleanup deadline",time<90000);}
+  if(scenario.equals("cleanup-geometry-then-valid"))assertEquals("two valid samples after rejected geometry",3,lookupReadyReads);
+  if(scenario.equals("cleanup-stable-reset"))assertEquals("invalid snapshot resets consecutive samples",4,lookupReadyReads);
   assertTrue("two fresh ready samples",readyReads>=2);
   System.out.println("PASS;inputs="+inputs+";getters="+getters+";refreshes="+p.instrumentation.a.refreshes+";time="+time);
  }
@@ -1328,6 +1350,91 @@ public final class ObserverProbe {
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("OBSERVER_RETURNED", result.stdout)
                 self.assertIn("REFUSED;inputs=0;getters=0", result.stderr)
+
+    def test_cleanup_geometry_waits_for_two_complete_valid_samples(self):
+        # R5 did not retain the offending raw rectangle. These are explicit perturbations,
+        # not a claim that the later complete XML reproduced the rejected snapshot.
+        result = self.probe("cleanup-geometry-then-valid")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS;inputs=1;getters=0", result.stdout)
+        self.assertIn("time=10400", result.stdout)
+        self.assertIn("PASS_DIAGNOSTIC={}", result.stdout)
+
+    def test_cleanup_geometry_resets_stability_between_valid_samples(self):
+        result = self.probe("cleanup-stable-reset")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("time=10500", result.stdout)
+        self.assertIn("PASS_DIAGNOSTIC={}", result.stdout)
+
+    def test_cleanup_geometry_keeps_original_deadline_and_other_hard_refusals(self):
+        persistent = self.probe("cleanup-clipped")
+        self.assertNotEqual(persistent.returncode, 0)
+        self.assertIn("timed out phase=2 status=geometry", persistent.stderr)
+        self.assertIn(";time=90000", persistent.stderr)
+        self.assertNotIn("OBSERVER_RETURNED", persistent.stdout)
+        late = self.probe("cleanup-geometry-then-late")
+        self.assertNotEqual(late.returncode, 0)
+        self.assertIn(";time=90000", late.stderr)
+        self.assertNotIn("OBSERVER_RETURNED", late.stdout)
+        for scenario, at in (("success-clipped", 10200), ("cleanup-foreign", 10200),
+                             ("cleanup-multiple-windows", 10000), ("cleanup-duplicate", 10200),
+                             ("cleanup-duplicate-role", 10200), ("cleanup-depth-budget", 10200)):
+            with self.subTest(scenario=scenario):
+                result = self.probe(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("observer refused unsafe snapshot", result.stderr)
+                self.assertIn(f";time={at}", result.stderr)
+                self.assertNotIn("OBSERVER_RETURNED", result.stdout)
+                self.assertIn("REFUSED;inputs=0;getters=0;scrollQueries=0", result.stderr)
+
+    def test_geometry_diagnostic_is_latest_bounded_failure_only_and_pass_schema_is_exact(self):
+        expected = {"schemaVersion", "reason", "phase", "poll", "observedAtUptimeMs", "deadlineUptimeMs",
+                    "nodeIndex", "nodeDepth", "displayBounds", "windowBounds", "rootBounds",
+                    "offenderBounds", "containerBounds"}
+        for scenario, reason, offender in (("cleanup-clipped", "visible-node", [189, 1169, 1081, 1231]),
+                                           ("cleanup-window-geometry", "root-window", [0, 0, 1080, 1920]),
+                                           ("cleanup-container-geometry", "action-container", [189, 1100, 517, 1231])):
+            with self.subTest(scenario=scenario):
+                result = self.probe(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                match = re.search(r"^DIAGNOSTIC=(.*)$", result.stdout, re.MULTILINE)
+                self.assertIsNotNone(match, result.stdout)
+                receipt = json.loads(match.group(1))
+                self.assertEqual(set(receipt), {"initialOfferGeometryDiagnostic"})
+                proof = receipt["initialOfferGeometryDiagnostic"]
+                self.assertEqual(set(proof), expected)
+                self.assertEqual(proof["reason"], reason)
+                self.assertEqual(proof["schemaVersion"], 1)
+                self.assertEqual(proof["phase"], 2)
+                self.assertEqual(proof["poll"], 800)
+                self.assertEqual(proof["observedAtUptimeMs"], 89900)
+                self.assertEqual(proof["deadlineUptimeMs"], 90000)
+                self.assertEqual(proof["displayBounds"], [0, 0, 1080, 1920])
+                self.assertEqual(proof["rootBounds"], [0, 0, 1080, 1920])
+                self.assertEqual(proof["offenderBounds"], offender)
+                self.assertLessEqual(len(json.dumps(proof).encode()), 2048)
+                self.assertTrue(-1 <= proof["nodeIndex"] < 512)
+                self.assertTrue(-1 <= proof["nodeDepth"] <= 65)
+                self.assertIn("REFUSED;inputs=0;getters=0;scrollQueries=0;time=90000", result.stderr)
+        passed = self.probe("cleanup-geometry-then-valid")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertIn("PASS_DIAGNOSTIC={}", passed.stdout)
+        binding = host.load_public88_to96_offer_binding(dict(host.PUBLIC88_TO96_OFFER_ADMISSION))
+        host.validate_receipt(valid_receipt(), binding.ota_mode, binding)
+        with self.assertRaises(host.RuntimeGateError):
+            host.validate_receipt({**valid_receipt(), "initialOfferGeometryDiagnostic": {}}, binding.ota_mode, binding)
+        source = JAVA.read_text()
+        diagnostic = java_method(source, "appendInitialOfferGeometryFailure")
+        self.assertIn('!isPublic88To96OfferMode() || !"failed".equals(outcome) || geometry == null', diagnostic)
+        self.assertIn("length <= 2048", diagnostic)
+        self.assertNotRegex(diagnostic, r"getText|getViewIdResourceName|actions\.|writeBounded|capture\(")
+        self.assertIn("appendInitialOfferGeometryFailure(receipt, outcome);", java_method(source, "writeReceipt"))
+        collector = java_method(source, "collectInitialOfferObservation")
+        for predicate in (
+                "display.isEmpty() || result.window.isEmpty() || rootBounds.isEmpty()\n                    || !display.contains(result.window) || !result.window.contains(rootBounds)",
+                "node.isVisibleToUser() && (raw.isEmpty() || !rootBounds.contains(raw) || !result.window.contains(raw))",
+                "!bounds.get(panel).contains(bounds.get(target)) || !bounds.get(panel).contains(bounds.get(action))\n                    || (phase == 1 && !bounds.get(panel).contains(bounds.get(title)))"):
+            self.assertIn(predicate, collector)
 
 
 if __name__ == "__main__":
