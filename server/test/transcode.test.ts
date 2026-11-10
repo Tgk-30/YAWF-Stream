@@ -29,6 +29,36 @@ function completeProbe(payload: unknown) {
 describe("real transcoder source probe", () => {
   beforeEach(() => spawnMock.mockReset());
 
+  it("reads the first mapped video's unrotated height in the existing probe", async () => {
+    await expect(completeProbe({ streams: [
+      { codec_type: "audio" },
+      { codec_type: "video", height: 480, side_data_list: [{ rotation: 0 }] },
+      { codec_type: "video", height: 1080 },
+    ] })).resolves.toMatchObject({ videoHeight: 480 });
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0]?.[1]).toContain(
+      "stream=index,codec_type,height:stream_tags=language,title,rotate:stream_side_data=rotation:stream_disposition=default:format=duration",
+    );
+  });
+
+  it.each([
+    { height: "480" }, { height: 0 }, { height: 480.5 }, { height: 16385 },
+    { height: 480, tags: { rotate: "90" } },
+    { height: 480, tags: { rotate: "unknown" } },
+    { height: 480, tags: { rotate: null } },
+    { height: 480, tags: null },
+    { height: 480, tags: [] },
+    { height: 480, side_data_list: [{ rotation: -90 }] },
+    { height: 480, side_data_list: [{ rotation: "0" }] },
+    { height: 480, side_data_list: [{}] },
+    { height: 480, side_data_list: null },
+    { height: 480, side_data_list: [null] },
+    { height: 480, side_data_list: "unknown" },
+  ])("keeps uncertain or rotated source height out of ladder selection: %j", async (metadata) => {
+    await expect(completeProbe({ streams: [{ codec_type: "video", ...metadata }] }))
+      .resolves.toMatchObject({ videoHeight: null });
+  });
+
   it("requests format duration and returns a bounded original-source duration", async () => {
     const result = completeProbe({
       streams: [
