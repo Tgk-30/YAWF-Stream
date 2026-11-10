@@ -17761,7 +17761,8 @@ describe("automatic starvation95 adaptation", () => {
     p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
     p.episode(); await settle();
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
-    expect(p.video.isConnected).toBe(false);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("/starvation95/index.m3u8"));
     expect(screen.getByText("Auto reduced playback to 480p to help with repeated buffering.")).toBeInTheDocument();
     p.settings(); expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "false");
@@ -17844,9 +17845,10 @@ describe("automatic starvation95 adaptation", () => {
     p.progress(); p.progress();
     if (quietClock) p.video.currentTime = 109.5;
     const localTarget = quietClock ? 3.5 : 2;
+    vi.mocked(p.video.play).mockClear();
     await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "1" } })); }); await settle();
     const next = document.querySelector("video.player-video") as HTMLVideoElement;
-    expect(next).not.toBe(p.video); expect(next.volume).toBe(0.35); expect(next.muted).toBe(true); expect(next.playbackRate).toBe(1.25);
+    expect(next).toBe(p.video); expect(next.volume).toBe(0.35); expect(next.muted).toBe(true); expect(next.playbackRate).toBe(1.25);
     expect(hlsInstances.at(-1)?.config.startPosition).toBe(localTarget);
     expect(next.play).not.toHaveBeenCalled();
     Object.defineProperties(next, {
@@ -17856,7 +17858,9 @@ describe("automatic starvation95 adaptation", () => {
       seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 794 } },
       seeking: { configurable: true, value: false },
     });
-    fireEvent.loadedMetadata(next); fireEvent.loadedData(next); fireEvent.seeked(next); await settle();
+    p.setPaused(true);
+    act(() => hlsInstances.at(-1)?.emit("hlsMediaAttached"));
+    fireEvent.loadStart(next); fireEvent.loadedMetadata(next); fireEvent.loadedData(next); fireEvent.seeked(next); await settle();
     expect(next.currentTime).toBe(localTarget); expect(next.play).toHaveBeenCalled();
     p.settings(); expect(screen.getByRole("button", { name: "Japanese" })).toHaveAttribute("aria-pressed", "true");
   });
@@ -17991,7 +17995,8 @@ describe("automatic starvation95 adaptation", () => {
     expect(p.request).not.toHaveBeenCalled(); p.episodes(); await settle();
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 7);
     await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "7" } })); }); await settle();
-    expect(p.video.isConnected).toBe(false);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("/starvation95/index.m3u8"));
     p.settings(); expect(screen.getByRole("button", { name: "Japanese Main" })).toHaveAttribute("aria-pressed", "true");
   });
 
@@ -18031,7 +18036,8 @@ describe("automatic starvation95 adaptation", () => {
     ]); }); await settle();
     expect(p.loadAudioTracks).toHaveBeenCalledTimes(1);
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
-    expect(p.video.isConnected).toBe(false);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("/starvation95/index.m3u8"));
   });
 
   it.each(["failed", "ambiguous"] as const)("[starvation95] bounds automatic idle-audio probing after %s and keeps selected native audio", async lazyAudio => {
@@ -18071,7 +18077,8 @@ describe("automatic starvation95 adaptation", () => {
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 7);
     // A different confirmed source index is required, not HLS-local audio0.
     await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "7" } })); }); await settle();
-    expect(p.video.isConnected).toBe(false);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("/starvation95/index.m3u8"));
   });
 
   it.each(["native", "hls.js"])("[starvation95] refuses known English Commentary versus source English Main for %s", async renderer => {
@@ -18117,7 +18124,8 @@ describe("automatic starvation95 adaptation", () => {
     }
     p.episode(); await settle();
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
-    expect(p.video.isConnected).toBe(false);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("/starvation95/index.m3u8"));
   });
 
   it.each([false, true])("[starvation95] explicit tiny seek clears prior episodes in default-direct/Auto=%s", async auto => {
@@ -18133,5 +18141,185 @@ describe("automatic starvation95 adaptation", () => {
     await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n")); }); await settle();
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
     expect(document.querySelector("video.player-video")).toBe(p.video); expect(p.clock()).toBe(106);
+  });
+
+  async function automaticHandoff96(options: { auto?: boolean; deferredPlay?: boolean; rejectPlay?: boolean } = {}) {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    const p = await setup({ pending: true, audio: true, auto: options.auto });
+    p.video.volume = 0.35; p.video.muted = false; p.video.playbackRate = 1.25;
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+    // The source keeps advancing while the manifest warms. This target is
+    // intentionally nonzero, so accepting the first replacement frame replays.
+    p.video.currentTime = 109.5;
+    await act(async () => p.manifest.resolve(new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "1" } })));
+    await settle();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const state = { time: 0, paused: true, seeking: true, duration: Number.POSITIVE_INFINITY,
+      ready: HTMLMediaElement.HAVE_METADATA as number, range: null as null | [number, number], buffered: 20 };
+    const seekWrites: number[] = [];
+    Object.defineProperties(video, {
+      currentSrc: { configurable: true, get: () => video.src },
+      currentTime: { configurable: true, get: () => state.time, set: (value: number) => { seekWrites.push(value); state.time = value; state.seeking = true; } },
+      duration: { configurable: true, get: () => state.duration },
+      readyState: { configurable: true, get: () => state.ready },
+      paused: { configurable: true, get: () => state.paused },
+      seeking: { configurable: true, get: () => state.seeking },
+      buffered: { configurable: true, get: () => ({ length: 1, start: () => 0, end: () => state.buffered }) },
+      seekable: { configurable: true, get: () => ({ length: state.range == null ? 0 : 1,
+        start: () => state.range![0], end: () => state.range![1] }) },
+      error: { configurable: true, value: null }, ended: { configurable: true, value: false },
+    });
+    const pendingPlay = deferred<void>();
+    const attempts: Array<{ retained: boolean; time: number; seeking: boolean }> = [];
+    const queuedPauses: Array<() => void> = [];
+    vi.mocked(video.play).mockImplementation(function (this: HTMLVideoElement) {
+      attempts.push({ retained: this === p.video, time: state.time, seeking: state.seeking });
+      // Model per-element permission, not an automatically successful play().
+      // This is a contract fixture, not evidence of the native rejection cause.
+      if (this !== p.video || options.rejectPlay) return Promise.reject(new DOMException("Synthetic denial", "NotAllowedError"));
+      state.paused = false;
+      fireEvent.play(this); fireEvent.playing(this);
+      return options.deferredPlay ? pendingPlay.promise : Promise.resolve();
+    });
+    vi.mocked(video.pause).mockImplementation(() => {
+      if (state.paused) return;
+      state.paused = true;
+      queuedPauses.push(() => fireEvent.pause(video));
+    });
+    const load = () => { fireEvent.loadStart(video); fireEvent.loadedMetadata(video); };
+    const readinessWhileSeeking = () => {
+      state.time = 3.5; state.ready = HTMLMediaElement.HAVE_CURRENT_DATA;
+      fireEvent.loadedData(video); fireEvent.canPlay(video); fireEvent.playing(video);
+    };
+    const confirm = () => {
+      state.seeking = false; fireEvent.timeUpdate(video); fireEvent.seeked(video); fireEvent.playing(video);
+    };
+    return { ...p, replacement: video, state, seekWrites, pendingPlay, attempts, queuedPauses, load, readinessWhileSeeking, confirm };
+  }
+
+  it.each([false, true])("[handoff96] retains the permitted direct/Auto=%s reader and resumes only the exact available target", async auto => {
+    const p = await automaticHandoff96({ auto });
+    p.load(); p.readinessWhileSeeking(); await settle();
+    expect(p.attempts).toEqual([]);
+    expect(screen.getByText("Synchronizing playback…")).toBeVisible();
+    expect(p.seekWrites).toEqual([]);
+    // Buffered frames are not a seekable range and cannot authorize adoption.
+    p.confirm(); await settle(); expect(p.attempts).toEqual([]);
+    p.state.range = [10, 20]; fireEvent.progress(p.replacement); p.confirm(); await settle();
+    expect(p.attempts).toEqual([]);
+    p.state.range = [0, 20]; fireEvent.progress(p.replacement); await settle();
+    expect(p.replacement).toBe(p.video);
+    expect(p.attempts).toEqual([{ retained: true, time: 3.5, seeking: false }]);
+    expect(p.state.paused).toBe(false);
+    expect(p.replacement.volume).toBe(0.35); expect(p.replacement.muted).toBe(false); expect(p.replacement.playbackRate).toBe(1.25);
+    expect(p.replacement.src).toContain("#t=3.5"); expect(p.seekWrites).toEqual([]);
+    p.state.time = 4.5; fireEvent.timeUpdate(p.replacement); await settle();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
+    expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+    p.settings(); expect(screen.getByRole("button", { name: "Japanese" })).toHaveAttribute("aria-pressed", "true");
+    expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[handoff96] allows finite-duration exact readiness without inventing a buffered-only seekable range", async () => {
+    const p = await automaticHandoff96(); p.load(); p.readinessWhileSeeking();
+    p.state.duration = 794; p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    expect(p.attempts).toEqual([{ retained: true, time: 3.5, seeking: false }]);
+    expect(p.state.paused).toBe(false);
+    expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[handoff96] rejects a delayed internal pause event after the exact retained reader has started", async () => {
+    const p = await automaticHandoff96(); p.load();
+    // WebKit can begin decoding before our exact seek. Its internal pause task
+    // is delivered after seek completion and the successful owned play call.
+    p.state.paused = false; p.readinessWhileSeeking();
+    expect(p.queuedPauses).toHaveLength(1);
+    p.state.range = [0, 20]; p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    expect(p.state.paused).toBe(false);
+    for (const dispatch of p.queuedPauses) dispatch();
+    await settle();
+    expect(p.attempts).toEqual([{ retained: true, time: 3.5, seeking: false }]);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
+    expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+  });
+
+  it("[handoff96] newer explicit Pause wins before exact confirmation on the retained automatic reader", async () => {
+    const p = await automaticHandoff96(); p.load(); p.readinessWhileSeeking();
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    p.state.range = [0, 20]; p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    expect(p.attempts).toEqual([]); expect(p.state.paused).toBe(true);
+    expect(screen.getByRole("button", { name: "Play" })).toBeVisible();
+    expect(screen.queryByText("Synchronizing playback…")).toBeNull();
+  });
+
+  it("[handoff96] rejected play is bounded and a late internal pause cannot restart the denied reader", async () => {
+    const p = await automaticHandoff96({ rejectPlay: true }); p.load(); p.readinessWhileSeeking();
+    p.state.range = [0, 20]; p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    expect(p.attempts).toEqual([{ retained: true, time: 3.5, seeking: false }]);
+    fireEvent.pause(p.replacement); fireEvent.canPlay(p.replacement); fireEvent.seeked(p.replacement); await settle();
+    expect(p.attempts).toHaveLength(1); expect(p.state.paused).toBe(true);
+    expect(screen.getByRole("button", { name: "Play" })).toBeVisible();
+  });
+
+  it("[handoff96] late rejected play cannot overwrite a newer explicit Pause then Play", async () => {
+    const p = await automaticHandoff96({ deferredPlay: true }); p.load(); p.readinessWhileSeeking();
+    p.state.range = [0, 20]; p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    p.queuedPauses.shift()!(); await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Play" }));
+    p.pendingPlay.reject(new DOMException("Synthetic superseded play", "AbortError")); await settle();
+    for (const dispatch of p.queuedPauses) dispatch();
+    await settle();
+    expect(p.state.paused).toBe(false); expect(p.attempts).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
+    expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[handoff96] newer explicit seek replaces the retained automatic target before confirmation", async () => {
+    const p = await automaticHandoff96(); p.load(); p.readinessWhileSeeking();
+    p.state.range = [0, 20];
+    act(() => scrubBarMock.mock.lastCall![0].onSeek(114));
+    expect(p.state.time).toBe(8); expect(p.seekWrites).toEqual([8]); expect(p.attempts).toEqual([]);
+    p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    expect(p.state.time).toBe(8); expect(p.state.paused).toBe(false);
+    expect(p.attempts).toEqual([{ retained: true, time: 8, seeking: false }]);
+    expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[handoff96] newer source owns its Pause despite stale events and rejection from the retained automatic reader", async () => {
+    const p = await automaticHandoff96({ deferredPlay: true }); p.load(); p.readinessWhileSeeking();
+    p.state.range = [0, 20]; p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    p.view.rerender(<VideoPlayer {...p.props} url="https://server.example/api/stream/new-intent96/movie.mp4"
+      sourceRevision={1} startPositionSeconds={44} initialHandoffState={{ paused: true, volume: 0.7, muted: true, playbackRate: 1 }} />);
+    await settle();
+    const newer = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(newer).not.toBe(p.video);
+    p.pendingPlay.reject(new DOMException("Synthetic old source", "AbortError"));
+    fireEvent.pause(p.replacement); fireEvent.seeked(p.replacement); fireEvent.canPlay(p.replacement); await settle();
+    expect(newer.src).toContain("/new-intent96/movie.mp4");
+    expect(p.attempts).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Play" })).toBeVisible();
+    expect(newer.volume).toBe(0.7); expect(newer.muted).toBe(true);
+    expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[handoff96] an ordinary manual quality change still remounts after automatic reader retention", async () => {
+    const p = await automaticHandoff96(); p.load(); p.readinessWhileSeeking();
+    p.state.range = [0, 20]; p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    vi.mocked(fetch).mockImplementation(async () => new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "1" } }));
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: "360p" })); await settle();
+    expect(p.request).toHaveBeenCalledTimes(2);
+    expect(document.querySelector("video.player-video")).not.toBe(p.video);
+    expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toContain("quality=360p");
   });
 });

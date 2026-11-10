@@ -2262,7 +2262,15 @@ export function VideoPlayer({
                 language: appliedTrack?.language?.trim() || null,
                 label: appliedTrack?.label?.trim() || null,
               };
-        if ((purpose === "ordinary" || purpose === "native-hls-seek" || purpose === "automatic-starvation") && retainedPhysicalReaderRef.current?.owner === owner) {
+        if (purpose === "automatic-starvation" && activationHandoffState != null) {
+          // Keep the user's permitted media element for this automatic change.
+          // A new Safari element can reject play() after the asynchronous
+          // preparation, even though its exact handoff has already completed.
+          retainedPhysicalReaderRef.current = {
+            key: physicalReaderKeyRef.current, owner, scope: physicalContentScope,
+            handoff: activationHandoffState, adopted: true,
+          };
+        } else if ((purpose === "ordinary" || purpose === "native-hls-seek") && retainedPhysicalReaderRef.current?.owner === owner) {
           retainedPhysicalReaderRef.current = null;
         }
         setFallbackSource(null);
@@ -2304,6 +2312,7 @@ export function VideoPlayer({
     [
       currentWebviewHandoffState,
       activeKnownSourceAudio,
+      physicalContentScope,
       playbackOwner,
       rememberManualServerAudioPreference,
       serverOptimized,
