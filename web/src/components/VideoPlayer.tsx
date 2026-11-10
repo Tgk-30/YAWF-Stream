@@ -74,6 +74,7 @@ import { AdjustmentRange } from "./player/AdjustmentRange";
 import { CaptionsMenu, type EmbeddedCaptions } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { CastControls } from "./CastControls";
+import { PlaybackStarvation, lowerStarvationQuality } from "../lib/playbackStarvation";
 import { predictEpisodeEnd } from "../lib/endPredictor";
 import type { PlaybackPrefs } from "../storage/models";
 import {
@@ -92,6 +93,7 @@ import { mediaErrorMessage, nextHlsRecovery } from "../lib/playerReliability";
 import {
   findPreferredLanguageMatch,
   normalizeLanguagePreference,
+  PLAYBACK_LANGUAGE_OPTIONS,
 } from "../lib/languagePreference";
 import { audioTrackLabel } from "../lib/audioTrackLabel";
 import { captionLayout, type CaptionRect } from "../lib/captionLayout";
@@ -165,7 +167,7 @@ type PendingRecoverySeek = WebviewRecoverySnapshot & {
 };
 
 type ServerOptimizedPositionIntent = "follow-current" | "fixed";
-type ServerOptimizationPurpose = "ordinary" | "native-hls-seek" | "remembered-audio" | "automatic-default" | "recovery";
+type ServerOptimizationPurpose = "ordinary" | "native-hls-seek" | "remembered-audio" | "automatic-default" | "automatic-starvation" | "recovery";
 type PendingNativeHlsSeek = {
   sequence: number;
   absoluteTarget: number;
@@ -994,9 +996,22 @@ export function VideoPlayer({
   const [videoPresentation, changeVideoPresentation] = useVideoPresentation(
     serverAudioRetentionScope ?? playbackOwner,
   );
-  // The original URL, engine, and caller-issued revision define media identity.
-  // Internal optimized/fallback URLs never change this owner, while a fresh
-  // external resolution cannot inherit duration from an older file by accident.
+  // Fresh transport URLs cannot rearm this content's automatic budget or
+  // explicit intent. Without a file identity, conservatively share the budget
+  // for the same content within this mounted player instead of retrying it.
+  const automaticQualityOwner = serverAudioRetentionScope ?? JSON.stringify([
+    scrobbleContext?.type, scrobbleContext?.tmdbId, imdbId, season, episode, title, subtitle,
+  ]);
+  const [qualityIntent, setQualityIntent] = useState<{ owner: string; automatic: boolean } | null>(null);
+  const automaticQualityIntent = qualityIntent?.owner === automaticQualityOwner
+    ? qualityIntent.automatic
+    : retainedServerOptimizedQuality === "auto" || (retainedServerOptimizedQuality == null &&
+      (serverOptimized?.defaultQuality == null || serverOptimized.defaultQuality === "auto") &&
+      (serverOptimizedQualityFromURL(url, serverOptimized?.qualities ?? []) == null ||
+        serverOptimizedQualityFromURL(url, serverOptimized?.qualities ?? []) === "auto"));
+  const starvationPolicy = useMemo(() => new PlaybackStarvation(), [automaticQualityOwner]);
+  const [automaticReduction, setAutomaticReduction] = useState<{ owner: string; quality: ServerTranscodeQuality } | null>(null);
+  // Duration remains generation-local even when the same file is re-resolved.
   const durationOwner = playbackOwner;
   const activeKnownAbsoluteDuration =
     knownAbsoluteDuration?.originOwner === durationOwner
@@ -1886,6 +1901,7 @@ export function VideoPlayer({
       chromeExplicitPointerFocusRef.current = false;
     }
   }, []);
+  const hidingChromeFocusRef = useRef(false);
   const blurChrome = useCallback(
     (event: React.FocusEvent<HTMLElement>) => {
       if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
@@ -1893,9 +1909,10 @@ export function VideoPlayer({
       if (focused != null && !event.currentTarget.contains(focused)) return;
       chromeFocusedOwnerRef.current = null;
       setChromeFocused(false);
-      nudgeChrome();
+      const hidingTouchChrome = sharedTouchPlayer && !webChromeVisible && !chromePinned;
+      if (!hidingChromeFocusRef.current && !hidingTouchChrome && event.currentTarget.closest("[inert]") == null) nudgeChrome();
     },
-    [nudgeChrome],
+    [chromePinned, nudgeChrome, sharedTouchPlayer, webChromeVisible],
   );
   useEffect(() => {
     const open = detailsSection != null;
@@ -1941,6 +1958,17 @@ export function VideoPlayer({
   }, [chromePinned, clearChromeTimer, mode, nudgeChrome]);
   const webChromeShown = mode !== "webview" || webChromeVisible || chromePinned;
   const hiddenWebChrome = mode === "webview" && !webChromeShown;
+  useLayoutEffect(() => {
+    if (!hiddenWebChrome || !sharedTouchPlayer) return;
+    const focused = document.activeElement;
+    const player = playerDialogRef.current;
+    if (!(focused instanceof HTMLElement) || player == null || !player.contains(focused) ||
+      focused.closest(".player-bar, .player-osd, .player-touch-transport") == null) return;
+    // Inert/aria-hidden alone do not retire WebView's already-focused native
+    // accessibility node. This blur belongs to hiding, not fresh user activity.
+    hidingChromeFocusRef.current = true;
+    try { focused.blur(); } finally { hidingChromeFocusRef.current = false; }
+  }, [hiddenWebChrome, playerDialogRef, sharedTouchPlayer]);
 
   useEffect(() => {
     setSourceSize(null);
@@ -2069,7 +2097,7 @@ export function VideoPlayer({
         return false;
       }
       const blockedIntent = automaticAudioIntentFenceRef.current;
-      if ((purpose === "remembered-audio" || purpose === "recovery") && blockedIntent?.owner === owner &&
+      if ((purpose === "remembered-audio" || purpose === "automatic-starvation" || purpose === "recovery") && blockedIntent?.owner === owner &&
         blockedIntent.intentEpoch === explicitOptimizationIntentRef.current) return false;
       if (optimizationPendingRef.current?.owner === owner) {
         if (purpose === "native-hls-seek") {
@@ -2084,6 +2112,7 @@ export function VideoPlayer({
         : 0;
       const request = ++optimizationRequestSequenceRef.current;
       const intentEpoch = explicitOptimizationIntentRef.current;
+      const source = currentWebviewSourceRef.current;
       const controller = new AbortController();
       optimizationPendingRef.current?.controller.abort();
       optimizationPendingRef.current = { owner, request, controller, purpose };
@@ -2091,7 +2120,9 @@ export function VideoPlayer({
         playerMountedRef.current &&
         playbackOwnerRef.current === owner &&
         optimizationPendingRef.current?.owner === owner &&
-        optimizationPendingRef.current.request === request;
+        optimizationPendingRef.current.request === request &&
+        (purpose !== "automatic-starvation" ||
+          (currentWebviewSourceRef.current === source && explicitOptimizationIntentRef.current === intentEpoch));
       setServerOptimizationPending(true);
       setServerOptimizationError(null);
       try {
@@ -2115,7 +2146,7 @@ export function VideoPlayer({
         const manifestDeadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
         let retryDelayMs = SERVER_OPTIMIZED_RETRY_BASE_MS;
         let manifest: string | null = null;
-        let preparedAudioTrack = purpose === "recovery" ? next.audioTrack : audioTrack ?? next.audioTrack;
+        let preparedAudioTrack = (purpose === "recovery" || purpose === "automatic-starvation") ? next.audioTrack : audioTrack ?? next.audioTrack;
         while (manifest == null) {
           if (!ownsRequest() || controller.signal.aborted) return false;
           const remainingMs = manifestDeadline - Date.now();
@@ -2171,6 +2202,11 @@ export function VideoPlayer({
           throw new Error("The server did not return a playable HLS manifest.");
         }
         if (!ownsRequest()) return false;
+        // Automatic reduction samples the owned decoder again at adoption,
+        // including clock movement since its most recent timeupdate event.
+        const automaticHandoffState = purpose === "automatic-starvation" && typeof handoffState === "function"
+          ? handoffState() : null;
+        if (!ownsRequest()) return false;
         // Ordinary quality switches follow playback while the manifest warms.
         // An explicit out-of-window seek instead owns its requested position;
         // a late clock event from the old media must not undo that user action.
@@ -2179,7 +2215,7 @@ export function VideoPlayer({
           : latestAbsolutePositionRef.current;
         // A user seek can move before an already-prepared audio generation.
         // Keep the original source rather than clamp that newer intent forward.
-        if (purpose === "remembered-audio" && activationPosition < next.timelineOffsetSeconds) {
+        if ((purpose === "remembered-audio" || purpose === "automatic-starvation") && activationPosition < next.timelineOffsetSeconds) {
           return false;
         }
         latestAbsolutePositionRef.current = activationPosition;
@@ -2187,9 +2223,9 @@ export function VideoPlayer({
           0,
           activationPosition - next.timelineOffsetSeconds,
         );
-        const requestedHandoffState = typeof handoffState === "function"
+        const requestedHandoffState = automaticHandoffState ?? (typeof handoffState === "function"
           ? handoffState()
-          : handoffState ?? null;
+          : handoffState ?? null);
         if (!ownsRequest()) return false;
         const currentHandoffState = currentWebviewHandoffState(requestedHandoffState);
         const failureState = optimizationPendingRef.current?.failureState?.();
@@ -2206,7 +2242,7 @@ export function VideoPlayer({
           audioPreference != null &&
           audioTrack != null &&
           preparedAudioTrack === audioTrack;
-        if (purpose === "recovery" && audioTrack != null && !requestedAudioConfirmed) {
+        if ((purpose === "recovery" || purpose === "automatic-starvation") && audioTrack != null && !requestedAudioConfirmed) {
           throw new Error("Optimized playback could not preserve the selected audio track. Open an external player or choose another source.");
         }
         if (retainAudioPreference && requestedAudioConfirmed) {
@@ -2226,7 +2262,15 @@ export function VideoPlayer({
                 language: appliedTrack?.language?.trim() || null,
                 label: appliedTrack?.label?.trim() || null,
               };
-        if ((purpose === "ordinary" || purpose === "native-hls-seek") && retainedPhysicalReaderRef.current?.owner === owner) {
+        if (purpose === "automatic-starvation" && activationHandoffState != null) {
+          // Keep the user's permitted media element for this automatic change.
+          // A new Safari element can reject play() after the asynchronous
+          // preparation, even though its exact handoff has already completed.
+          retainedPhysicalReaderRef.current = {
+            key: physicalReaderKeyRef.current, owner, scope: physicalContentScope,
+            handoff: activationHandoffState, adopted: true,
+          };
+        } else if ((purpose === "ordinary" || purpose === "native-hls-seek") && retainedPhysicalReaderRef.current?.owner === owner) {
           retainedPhysicalReaderRef.current = null;
         }
         setFallbackSource(null);
@@ -2234,7 +2278,9 @@ export function VideoPlayer({
           originOwner: owner,
           position: activationPosition,
         });
-        setSourceSwitchState(activationHandoffState);
+        setSourceSwitchState(purpose === "automatic-starvation" && requestedAudioConfirmed && activationHandoffState != null
+          ? { ...activationHandoffState, audioPreference }
+          : activationHandoffState);
         setOptimizedSource({
           ...next,
           audioTrack: preparedAudioTrack,
@@ -2266,6 +2312,7 @@ export function VideoPlayer({
     [
       currentWebviewHandoffState,
       activeKnownSourceAudio,
+      physicalContentScope,
       playbackOwner,
       rememberManualServerAudioPreference,
       serverOptimized,
@@ -2275,6 +2322,15 @@ export function VideoPlayer({
   const cancelNativeHlsSeekOptimization = useCallback(() => {
     const pending = optimizationPendingRef.current;
     if (pending?.purpose !== "native-hls-seek") return;
+    optimizationRequestSequenceRef.current += 1;
+    pending.controller.abort();
+    optimizationPendingRef.current = null;
+    setServerOptimizationPending(false);
+  }, []);
+
+  const cancelAutomaticQualityReduction = useCallback(() => {
+    const pending = optimizationPendingRef.current;
+    if (pending?.purpose !== "automatic-starvation") return;
     optimizationRequestSequenceRef.current += 1;
     pending.controller.abort();
     optimizationPendingRef.current = null;
@@ -2310,7 +2366,13 @@ export function VideoPlayer({
       return false;
     }
     if (freshAttempt) {
-      if (optimizationPendingRef.current?.owner === playbackOwner) return false;
+      const pending = optimizationPendingRef.current;
+      if (pending?.owner === playbackOwner) {
+        if (pending.purpose !== "automatic-starvation") return false;
+        pending.controller.abort();
+        optimizationPendingRef.current = null;
+        setServerOptimizationPending(false);
+      }
       explicitOptimizationIntentRef.current += 1;
     }
     autoOptimizationAttemptedRef.current = playbackOwner;
@@ -2327,6 +2389,10 @@ export function VideoPlayer({
     retainAudioPreference = false,
   ): Promise<void> => {
     if (!claimExplicitServerOptimizationChoice(true)) return Promise.resolve();
+    if (!retainAudioPreference) {
+      setQualityIntent({ owner: automaticQualityOwner, automatic: quality === "auto" });
+      setAutomaticReduction(null);
+    }
     return switchToServerOptimized(
       quality,
       absolutePositionSeconds,
@@ -2341,13 +2407,15 @@ export function VideoPlayer({
         setManualServerOptimizedQuality({ scope: serverAudioRetentionScope, originOwner: playbackOwner, quality });
       }
     });
-  }, [claimExplicitServerOptimizationChoice, playbackOwner, serverAudioRetentionScope, switchToServerOptimized]);
+  }, [automaticQualityOwner, claimExplicitServerOptimizationChoice, playbackOwner, serverAudioRetentionScope, switchToServerOptimized]);
 
   const selectDeviceOriginal = useCallback((
     absolutePositionSeconds: number,
     handoffState?: PlaybackHandoffState,
   ) => {
     if (!claimExplicitServerOptimizationChoice()) return;
+    setQualityIntent({ owner: automaticQualityOwner, automatic: false });
+    setAutomaticReduction(null);
     automaticAudioIntentFenceRef.current = {
       owner: playbackOwner,
       intentEpoch: ++explicitOptimizationIntentRef.current,
@@ -2363,7 +2431,30 @@ export function VideoPlayer({
     }
     if (retainedPhysicalReaderRef.current?.owner === playbackOwner) retainedPhysicalReaderRef.current = null;
     switchToDeviceOriginal(absolutePositionSeconds, handoffState);
-  }, [claimExplicitServerOptimizationChoice, playbackOwner, switchToDeviceOriginal]);
+  }, [automaticQualityOwner, claimExplicitServerOptimizationChoice, playbackOwner, switchToDeviceOriginal]);
+
+  const selectLocalQualityIntent = useCallback((automatic: boolean) => {
+    if (!claimExplicitServerOptimizationChoice(true)) return;
+    setQualityIntent({ owner: automaticQualityOwner, automatic });
+    setAutomaticReduction(null);
+  }, [automaticQualityOwner, claimExplicitServerOptimizationChoice]);
+
+  const reduceAutomaticQuality = useCallback((
+    quality: ServerTranscodeQuality,
+    handoff: () => PlaybackHandoffState,
+    audioTrack?: number,
+    audioPreference?: AudioPreference,
+  ) => {
+    if (!automaticQualityIntent || serverLeaseExpired || manualRecoveryPending || webRecoveryPending ||
+      recoveryPendingRef.current != null || stallRecoveryPendingRef.current || optimizationPendingRef.current != null ||
+      currentWebviewSourceRef.current !== webviewSource || playbackOwnerRef.current !== playbackOwner) return;
+    const intentEpoch = explicitOptimizationIntentRef.current;
+    void switchToServerOptimized(quality, latestAbsolutePositionRef.current, handoff, audioTrack,
+      audioPreference, "follow-current", false, "automatic-starvation").then((activated) => {
+        if (activated && playbackOwnerRef.current === playbackOwner && explicitOptimizationIntentRef.current === intentEpoch) setAutomaticReduction({ owner: playbackOwner, quality });
+      });
+  }, [automaticQualityIntent, manualRecoveryPending, playbackOwner, serverLeaseExpired,
+    switchToServerOptimized, webRecoveryPending, webviewSource]);
 
   const updatePendingHandoffPaused = useCallback((paused: boolean) => {
     if (
@@ -2469,7 +2560,7 @@ export function VideoPlayer({
           };
         const preparing = optimizationPendingRef.current;
         if (preparing?.owner === owner) {
-          if (preparing.purpose !== "automatic-default" && preparing.purpose !== "remembered-audio") {
+          if (preparing.purpose !== "automatic-default" && preparing.purpose !== "remembered-audio" && preparing.purpose !== "automatic-starvation") {
             // An actual failure does not cancel a user's chosen quality/audio.
             // Preserve that operation while replacing its decoder-lost state.
             preparing.failureState = () => readRecovery().state;
@@ -3071,8 +3162,13 @@ export function VideoPlayer({
                   : "Playback playing"
                 : "Opening native playback"}
         </span>
+        {automaticReduction?.owner === playbackOwner && (
+          <span className="sr-only" role="status">
+            Auto reduced playback to {automaticReduction.quality} to help with repeated buffering.
+          </span>
+        )}
         <div
-          ref={(element) => element?.toggleAttribute("inert", touchMenuOpen)}
+          ref={(element) => element?.toggleAttribute("inert", touchMenuOpen || (sharedTouchPlayer && hiddenWebChrome))}
           className={`player-bar${webChromeShown ? " is-visible" : ""}`}
           aria-hidden={hiddenWebChrome || touchMenuOpen || undefined}
           onPointerEnter={holdChrome}
@@ -3217,6 +3313,13 @@ export function VideoPlayer({
             onRetainedServerAudioPreferenceUnavailable={
               invalidateManualServerAudioPreference
             }
+            automaticReductionQuality={automaticReduction?.owner === playbackOwner ? automaticReduction.quality : null}
+            onCancelAutomaticQualityReduction={cancelAutomaticQualityReduction}
+            automaticQualityReductionPending={serverOptimizationPending && optimizationPendingRef.current?.purpose === "automatic-starvation"}
+            onLocalQualityIntentChange={selectLocalQualityIntent}
+            starvationPolicy={starvationPolicy}
+            automaticQualityIntent={automaticQualityIntent && !serverLeaseExpired && !manualRecoveryPending && !webRecoveryPending}
+            onAutomaticQualityReduction={reduceAutomaticQuality}
             serverOptimizationPending={serverOptimizationPending}
             serverOptimizationError={serverOptimizationError}
             onSwitchServerOptimized={switchToServerOptimized}
@@ -3323,6 +3426,13 @@ function WebviewPlayer({
   onChromeBlur,
   onActivity,
   onPausedChange,
+  starvationPolicy,
+  automaticReductionQuality,
+  onLocalQualityIntentChange,
+  onCancelAutomaticQualityReduction,
+  automaticQualityReductionPending,
+  automaticQualityIntent,
+  onAutomaticQualityReduction,
   onPlaybackPendingChange,
   onPendingHandoffPausedChange,
   onVerifiedPlaybackProgress,
@@ -3410,6 +3520,14 @@ function WebviewPlayer({
   onChromeBlur: (event: React.FocusEvent<HTMLElement>) => void;
   onActivity: () => void;
   onPausedChange: (paused: boolean) => void;
+  automaticReductionQuality: ServerTranscodeQuality | null;
+  onCancelAutomaticQualityReduction: () => void;
+  automaticQualityReductionPending: boolean;
+  onLocalQualityIntentChange: (automatic: boolean) => void;
+  starvationPolicy: PlaybackStarvation;
+  automaticQualityIntent: boolean;
+  onAutomaticQualityReduction: (quality: ServerTranscodeQuality, handoff: () => PlaybackHandoffState,
+    audioTrack?: number, audioPreference?: AudioPreference) => void;
   onPlaybackPendingChange: (pending: boolean) => void;
   onPendingHandoffPausedChange: (paused: boolean) => void;
   onVerifiedPlaybackProgress: () => void;
@@ -3698,9 +3816,13 @@ function WebviewPlayer({
   });
   const [scrubbing, setScrubbing] = useState(false);
   const updateScrubbing = useCallback((next: boolean) => {
+    if (next) {
+      starvationPolicy.interrupt();
+      onCancelAutomaticQualityReduction();
+    }
     setScrubbing(next);
     onScrubbingChange(next);
-  }, [onScrubbingChange]);
+  }, [onCancelAutomaticQualityReduction, onScrubbingChange, starvationPolicy]);
   useEffect(() => () => onScrubbingChange(false), [onScrubbingChange]);
   const rendererSeekingRef = useRef(false);
   const pendingRecoverySeekRef = useRef<PendingRecoverySeek | null>(null);
@@ -6497,6 +6619,7 @@ function WebviewPlayer({
           index,
           id: String(index),
           label: audioTrackLabel(track.name, track.lang, `Audio ${index + 1}`),
+          logicalLabel: track.name?.trim() || null,
           language: track.lang ?? null,
         })) ?? [];
         setHlsAudioInventoryKnown(true);
@@ -6527,6 +6650,7 @@ function WebviewPlayer({
           index,
           id: String(index),
           label: audioTrackLabel(track.name, track.lang, `Audio ${index + 1}`),
+          logicalLabel: track.name?.trim() || null,
           language: track.lang ?? null,
         })) ?? [];
         setHlsAudioInventoryKnown(true);
@@ -6732,6 +6856,8 @@ function WebviewPlayer({
   const seekAbsolute = (t: number, allowPreparation = true) => {
     const video = videoRef.current;
     if (video == null || !Number.isFinite(t)) return;
+    onCancelAutomaticQualityReduction();
+    starvationPolicy.interrupt();
     const knownDuration = knownAbsoluteDurationRef.current;
     if (knownDuration == null && !optimizedTimelineIsPartial) {
       const localDuration = Number.isFinite(video.duration) && video.duration > 0
@@ -7218,6 +7344,178 @@ function WebviewPlayer({
     };
   }, [muted, paused, playbackRate, sourceIdentity, volume]);
 
+  const [automaticReductionLimitation, setAutomaticReductionLimitation] = useState<string | null>(null);
+  const starvationHlsAudio = hlsAudioTracks.find((track) => track.index === hlsAudioTrack);
+  const starvationSelectionIdentity = JSON.stringify([
+    browserAudioTrack, hlsAudioTrack,
+    // A manifest update can change a track's meaning without changing its
+    // renderer-local index. That is new audio intent, not object churn.
+    starvationHlsAudio?.id ?? null, starvationHlsAudio?.language ?? null,
+    starvationHlsAudio?.logicalLabel ?? null,
+    initialServerAudioTrackExplicit ? resolvedServerAudioTrack : null,
+    activeServerAudioPreference?.id ?? null,
+    activeServerAudioPreference?.language ?? null,
+    activeServerAudioPreference?.label ?? null,
+  ]);
+  const starvationInventoryIdentity = serverAudioInventoryStatus !== "ready" || serverAudioTracks.length === 0
+    ? null : JSON.stringify(serverAudioTracks.map((track) => [track.index, track.id, track.language, track.logicalLabel]));
+  const starvationAudioSnapshotRef = useRef<{ source: typeof sourceIdentity; selection: string; inventory: string | null } | null>(null);
+  const starvationQualities = serverOptimized?.qualities.slice().sort().join(",") ?? null;
+  useEffect(() => {
+    starvationPolicy.interrupt();
+    return () => starvationPolicy.interrupt();
+  }, [automaticQualityIntent, scrubbing, serverOptimizationPending, sourceIdentity,
+    starvationPolicy, starvationQualities, suspended]);
+  useEffect(() => {
+    const previous = starvationAudioSnapshotRef.current;
+    // First inventory discovery is knowledge, not a user track change. Keep
+    // already observed episodes. Later changed inventory or actual selection
+    // retires both the episode window and any stale automatic preparation.
+    if (previous == null || previous.source !== sourceIdentity || previous.selection !== starvationSelectionIdentity ||
+      (previous.inventory != null && previous.inventory !== starvationInventoryIdentity)) {
+      starvationPolicy.interrupt();
+      onCancelAutomaticQualityReduction();
+      setAutomaticReductionLimitation(null);
+    }
+    starvationAudioSnapshotRef.current = {
+      source: sourceIdentity, selection: starvationSelectionIdentity, inventory: starvationInventoryIdentity,
+    };
+  }, [onCancelAutomaticQualityReduction, sourceIdentity, starvationInventoryIdentity,
+    starvationPolicy, starvationSelectionIdentity]);
+  useEffect(() => {
+    setAutomaticReductionLimitation(null);
+    return onCancelAutomaticQualityReduction;
+  }, [automaticQualityIntent, onCancelAutomaticQualityReduction, sourceIdentity]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video == null) return;
+    const lowerQuality = () => lowerStarvationQuality(video.videoHeight, serverOptimized?.qualities ?? []);
+    const eligible = () => automaticQualityIntent && serverOptimized != null && lowerQuality() != null &&
+      currentMediaEvent(video) && video.readyState >= HTMLMediaElement.HAVE_METADATA && verifiedPlaybackProgressReportedRef.current &&
+      verifiedPlaybackPlayingRef.current && !ownedPlaybackPausedRef.current && !video.paused && !video.ended &&
+      video.error == null && !video.seeking && !rendererSeekingRef.current && !scrubbingRef.current &&
+      !suspendedRef.current && !documentSuspendedRef.current && document.visibilityState !== "hidden" &&
+      !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null && pendingRecoverySeekFor(video) == null &&
+      !terminalRecoveryOwns(video) && !recoveryClockWasReset(video) && backgroundPauseVideoRef.current !== video &&
+      foregroundPlaybackRef.current == null && !serverOptimizationPending;
+    const readLocalAudioSelection = activeServerOptimizedQuality == null ||
+      (activeServerAudioPreference == null && !initialServerAudioTrackExplicit);
+    const needsLocalAudioInventory = () => readLocalAudioSelection &&
+      (((video as BrowserAudioVideoElement).audioTracks?.length ?? 0) > 0 || hlsAudioTrack >= 0) &&
+      serverAudioTracks.length === 0 && serverAudioLoaderAvailable;
+    const inventoryPending = () => needsLocalAudioInventory() &&
+      (serverAudioLoadPendingRef.current || serverAudioInventoryStatus === "loading" ||
+        (serverAudioInventoryStatus === "idle" && !starvationPolicy.audioInventoryLoadAttempted));
+    const progress = () => {
+      if (!eligible()) { starvationPolicy.interrupt(); return; }
+      // Depletion can emit timeupdate at metadata readiness before waiting.
+      // It is neither resumed decoded progress nor a new playback context.
+      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+      starvationPolicy.progress(video.currentTime, true);
+      if (needsLocalAudioInventory() && serverAudioInventoryStatus === "idle" &&
+        starvationPolicy.claimAudioInventoryLoad()) startServerAudioInventoryLoad(false);
+    };
+    const reduce = () => {
+      const quality = lowerQuality();
+      if (quality == null) return;
+      // Native and hls.js IDs are local to the renderer, not source indices.
+      // On Original, read the actual enabled native track rather than allowing
+      // a server default to overwrite that decoder's independent selection.
+      const nativeList = (video as BrowserAudioVideoElement).audioTracks;
+      let localPreference: AudioPreference | null = null;
+      let unresolvedLocalSelection = false;
+      if (readLocalAudioSelection && nativeList != null && nativeList.length > 0) {
+        const enabled: BrowserAudioTrack[] = [];
+        for (let index = 0; index < nativeList.length; index += 1) {
+          const track = nativeList[index] ?? nativeList.item?.(index);
+          if (track?.enabled) enabled.push(track);
+        }
+        unresolvedLocalSelection = enabled.length !== 1;
+        if (enabled.length === 1) localPreference = {
+          id: enabled[0].id ?? null, language: enabled[0].language ?? null,
+          label: enabled[0].label ?? null,
+        };
+      } else if (readLocalAudioSelection && hlsAudioTrack >= 0) {
+        const track = hlsAudioTracks.find((candidate) => candidate.index === hlsAudioTrack);
+        unresolvedLocalSelection = track == null;
+        if (track != null) localPreference = { id: track.id, language: track.language, label: track.logicalLabel ?? track.label };
+      }
+      const localLabel = normalizedSourceAudioLabel(localPreference?.label);
+      const localLanguage = normalizeLanguagePreference(localPreference?.language);
+      // A bare language name/code or generated ordinal is not a semantic
+      // track label. Specific labels such as Commentary must constrain a
+      // match, even when only one source track has that language.
+      const genericLocalLabel = localLabel == null || /^audio(?: track)? \d+$/.test(localLabel) ||
+        (localLanguage != null && (localLabel === localLanguage ||
+          (/^[a-z]{2,3}$/.test(localLabel) && normalizeLanguagePreference(localLabel) === localLanguage) ||
+          localLabel === normalizedSourceAudioLabel(localPreference?.language) ||
+          PLAYBACK_LANGUAGE_OPTIONS.some((language) => language.value === localLanguage &&
+            normalizedSourceAudioLabel(language.label) === localLabel)));
+      const selected = localPreference != null
+        ? retainedServerAudioMatch({ ...localPreference, label: genericLocalLabel ? null : localPreference.label }, serverAudioTracks)
+        : serverAudioTracks.find((track) => track.index === resolvedServerAudioTrack) ?? null;
+      const unmappedAudio = unresolvedLocalSelection || (localPreference != null && selected == null) ||
+        (resolvedServerAudioTrack == null && selected == null &&
+          (audioPreferenceRef.current.id != null || audioPreferenceRef.current.language != null));
+      if (unmappedAudio) {
+        setAutomaticReductionLimitation("Auto cannot safely match the selected audio track. Playback stays on the current stream. Check Audio in Playback settings, open an external player, or choose another source.");
+        return;
+      }
+      const sourceAudioTrack = selected?.index ?? resolvedServerAudioTrack;
+      onAutomaticQualityReduction(quality, () => {
+        if (currentMediaEvent(video) && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.error == null && !video.seeking &&
+          !rendererSeekingRef.current && !recoveryClockWasReset(video) && !terminalRecoveryOwns(video)) {
+          onAbsolutePositionChange(absolutePlaybackPosition());
+        }
+        return playbackHandoffState();
+      }, sourceAudioTrack ?? undefined,
+        sourceAudioTrack == null ? undefined : {
+          id: selected?.id ?? activeServerAudioPreference?.id ?? String(sourceAudioTrack),
+          language: selected?.language ?? activeServerAudioPreference?.language ?? null,
+          label: selected?.logicalLabel ?? activeServerAudioPreference?.label ?? null,
+        });
+    };
+    const waiting = () => {
+      let ahead = 0;
+      try {
+        for (let index = 0; index < video.buffered.length; index += 1) {
+          if (video.buffered.start(index) <= video.currentTime && video.buffered.end(index) >= video.currentTime) {
+            ahead = video.buffered.end(index) - video.currentTime;
+            break;
+          }
+        }
+      } catch { starvationPolicy.interrupt(); return; }
+      if (starvationPolicy.waiting(Date.now(), ahead, eligible(), !inventoryPending())) reduce();
+    };
+    // A bounded inventory probe can finish after the third episode. Complete
+    // that already-earned decision without fabricating another waiting event.
+    if (!inventoryPending() && starvationPolicy.claimAttempt(Date.now(), eligible())) reduce();
+    const interrupt = () => { starvationPolicy.interrupt(); onCancelAutomaticQualityReduction(); };
+    const seeking = interrupt;
+    const nativeAudio = (video as BrowserAudioVideoElement).audioTracks;
+    nativeAudio?.addEventListener?.("change", interrupt);
+    video.addEventListener("timeupdate", progress);
+    video.addEventListener("waiting", waiting);
+    video.addEventListener("seeking", seeking);
+    video.addEventListener("pause", interrupt);
+    document.addEventListener("visibilitychange", interrupt);
+    window.addEventListener("pagehide", interrupt);
+    return () => {
+      nativeAudio?.removeEventListener?.("change", interrupt);
+      video.removeEventListener("timeupdate", progress);
+      video.removeEventListener("waiting", waiting);
+      video.removeEventListener("seeking", seeking);
+      video.removeEventListener("pause", interrupt);
+      document.removeEventListener("visibilitychange", interrupt);
+      window.removeEventListener("pagehide", interrupt);
+    };
+  }, [absolutePlaybackPosition, activeServerAudioPreference, activeServerOptimizedQuality, automaticQualityIntent, hlsAudioTrack,
+    hlsAudioTracks, initialServerAudioTrackExplicit, onAbsolutePositionChange, onAutomaticQualityReduction,
+    onCancelAutomaticQualityReduction, playbackHandoffState, resolvedServerAudioTrack,
+    serverAudioInventoryStatus, serverAudioLoaderAvailable, serverAudioTracks, serverOptimized,
+    serverOptimizationPending, sourceIdentity, starvationPolicy, startServerAudioInventoryLoad]);
+
   const selectServerOptimizedQuality = useCallback((quality: ServerTranscodeQuality) => {
     const selected = serverAudioTracks.find(
       (track) => track.index === resolvedServerAudioTrack,
@@ -7285,6 +7583,7 @@ function WebviewPlayer({
   const changeHlsLevel = (next: number) => {
     const hls = hlsRef.current;
     if (hls == null) return;
+    onLocalQualityIntentChange(next === -1);
     hls.currentLevel = next;
     setHlsLevel(next);
   };
@@ -7586,6 +7885,9 @@ function WebviewPlayer({
           ? ` Subtitle delay ${(activeSubtitle.delayMs / 1000).toFixed(1)} seconds.`
           : ""}
       </span>
+      {automaticReductionLimitation != null && !optionsOpen && (
+        <span className="sr-only" role="status">{automaticReductionLimitation}</span>
+      )}
       <div className="player-stage">
         <video
           ref={setVideoElement}
@@ -7887,8 +8189,8 @@ function WebviewPlayer({
       ) : (
         <div
           className="player-touch-controls"
-          ref={(element) => element?.toggleAttribute("inert", touchMenuOpen)}
-          aria-hidden={touchMenuOpen || undefined}
+          ref={(element) => element?.toggleAttribute("inert", touchMenuOpen || !chromeVisible)}
+          aria-hidden={touchMenuOpen || !chromeVisible || undefined}
         >
           <div
             className={`player-touch-transport${chromeVisible ? " is-visible" : ""}`}
@@ -8320,9 +8622,9 @@ function WebviewPlayer({
               <div className="player-options-choice-row">
                 <button
                   type="button"
-                  className={`chip${activeServerOptimizedQuality == null ? " is-active" : ""}`}
-                  aria-pressed={activeServerOptimizedQuality == null}
-                  disabled={serverOptimizationPending}
+                  className={`chip${!automaticQualityIntent && activeServerOptimizedQuality == null ? " is-active" : ""}`}
+                  aria-pressed={!automaticQualityIntent && activeServerOptimizedQuality == null}
+                  disabled={serverOptimizationPending && !automaticQualityReductionPending}
                   onClick={selectDeviceOriginal}
                 >
                   Device Original
@@ -8333,9 +8635,9 @@ function WebviewPlayer({
                 {serverOptimized.qualities.map((quality) => (
                   <button
                     type="button"
-                    className={`chip${activeServerOptimizedQuality === quality ? " is-active" : ""}`}
-                    aria-pressed={activeServerOptimizedQuality === quality}
-                    disabled={serverOptimizationPending}
+                    className={`chip${(automaticQualityIntent ? quality === "auto" : activeServerOptimizedQuality === quality) ? " is-active" : ""}`}
+                    aria-pressed={automaticQualityIntent ? quality === "auto" : activeServerOptimizedQuality === quality}
+                    disabled={serverOptimizationPending && !automaticQualityReductionPending}
                     onClick={() => selectServerOptimizedQuality(quality)}
                     key={quality}
                   >
@@ -8346,6 +8648,17 @@ function WebviewPlayer({
               <small className="t-secondary">
                 Server Optimized reduces data use and needs server processing. Device Original keeps the source quality.
               </small>
+              {automaticReductionLimitation != null && (
+                <p className="player-options-status" role="status">{automaticReductionLimitation}</p>
+              )}
+              {automaticQualityIntent && activeServerOptimizedQuality == null && !serverOptimized.qualities.includes("auto") && (
+                <p className="player-options-status">Auto uses Device Original until repeated buffering needs a lower quality.</p>
+              )}
+              {automaticQualityIntent && automaticReductionQuality != null && (
+                <p className="player-options-status">
+                  Auto is using {automaticReductionQuality} to help with repeated buffering.
+                </p>
+              )}
               {serverOptimizationPending && (
                 <p className="player-options-status" role="status">Preparing optimized playback while the current stream continues…</p>
               )}
