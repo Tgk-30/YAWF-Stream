@@ -418,15 +418,32 @@ describe("useAppActions", () => {
 
 describe("useCachedResolutions", () => {
   it("updates cache subscribers without re-rendering AppStore-only consumers", async () => {
+    const initialWatchlist = [media("hydration-watch"), media("resolved")];
+    const initialHistory = [media("hydration-history")];
+    const initialContinue = [{ mediaId: "hydration-continue" }];
+    const initialCache = [{ mediaId: "hydration-watch" }];
+    const watchlistPending = deferred<MediaPreview[]>();
+    const historyPending = deferred<MediaPreview[]>();
+    const continuePending = deferred<unknown[]>();
+    const calendarPending = deferred<number>();
+    const cachePending = deferred<Array<{ mediaId: string }>>();
+    loadWatchlist.mockReturnValue(watchlistPending.promise);
+    loadHistory.mockReturnValue(historyPending.promise);
+    loadContinueWatching.mockReturnValue(continuePending.promise);
+    loadCalendarLastSeenAt.mockReturnValue(calendarPending.promise);
+    getCachedResolutions.mockReturnValueOnce(cachePending.promise);
+
     let appStoreRenders = 0;
     let actionRenders = 0;
     let cacheRenders = 0;
     let hydrated = false;
     let refresh!: () => void;
     let latestCache: Record<string, CachedResolutionRecord> = {};
+    let latestStore!: ReturnType<typeof useAppStore>;
 
     function AppStoreProbe() {
       const store = useAppStore();
+      latestStore = store;
       hydrated = store.hydrated;
       appStoreRenders += 1;
       return null;
@@ -453,6 +470,31 @@ describe("useCachedResolutions", () => {
     );
     await waitFor(() => expect(refresh).toBeTypeOf("function"));
     await waitFor(() => expect(hydrated).toBe(true));
+    // Critical hydration precedes these independent reads. Measure only after
+    // their actual context commits, including the watchlist-keyed cache map.
+    await act(async () => {
+      watchlistPending.resolve(initialWatchlist);
+      historyPending.resolve(initialHistory);
+      continuePending.resolve(initialContinue);
+      calendarPending.resolve(123);
+      cachePending.resolve(initialCache);
+      await Promise.all([
+        watchlistPending.promise,
+        historyPending.promise,
+        continuePending.promise,
+        calendarPending.promise,
+        cachePending.promise,
+      ]);
+    });
+    await waitFor(() => {
+      expect(latestStore.watchlist).toBe(initialWatchlist);
+      expect(latestStore.history).toBe(initialHistory);
+      expect(latestStore.continueWatching).toBe(initialContinue);
+      expect(latestStore.calendarLastSeenAt).toBe(123);
+      expect(latestCache["hydration-watch"]).toBe(initialCache[0]);
+    });
+    expect(getCachedResolutions).toHaveBeenCalledTimes(1);
+    expect(getCachedResolutions).toHaveBeenNthCalledWith(1, ["hydration-watch", "resolved"]);
     const appRendersBeforeCacheUpdate = appStoreRenders;
     const actionRendersBeforeCacheUpdate = actionRenders;
     const cacheRendersBeforeCacheUpdate = cacheRenders;
@@ -468,6 +510,7 @@ describe("useCachedResolutions", () => {
     expect(actionRenders).toBe(actionRendersBeforeCacheUpdate);
     expect(refresh).toBe(refreshBeforeCacheUpdate);
     expect(cacheRenders).toBe(cacheRendersBeforeCacheUpdate + 1);
+    expect(getCachedResolutions).toHaveBeenCalledTimes(2);
   });
 });
 
