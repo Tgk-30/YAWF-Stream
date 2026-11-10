@@ -1,6 +1,9 @@
 import type { ServerTranscodeQuality } from "./serverApi";
 
 const CLOCK_REGRESSION_TOLERANCE_SECONDS = 0.05;
+export const STARVATION_WAIT_CONFIRMATION_MS = 2_000;
+const WAIT_CONFIRMATION_MAX_AGE_MS = 5_000;
+type WaitingConfirmation = Readonly<{ at: number; position: number; playbackIntent: number }>;
 
 /** One foreground episode needs new owned clock progress, not another waiting event. */
 export class PlaybackStarvation {
@@ -10,6 +13,11 @@ export class PlaybackStarvation {
   private episodes: number[] = [];
   private attempted = false;
   private audioInventoryAttempted = false;
+  private confirmation: WaitingConfirmation | null = null;
+
+  get waitingConfirmation(): WaitingConfirmation | null { return this.confirmation; }
+
+  cancelWaitingConfirmation(): void { this.confirmation = null; }
 
   get audioInventoryLoadAttempted(): boolean { return this.audioInventoryAttempted; }
 
@@ -32,10 +40,12 @@ export class PlaybackStarvation {
     this.resumePosition = null;
     this.progressed = false;
     this.episodes = [];
+    this.confirmation = null;
   }
 
   progress(position: number, eligible: boolean): void {
     if (!eligible || !Number.isFinite(position)) { this.interrupt(); return; }
+    if (this.confirmation != null && position !== this.confirmation.position) this.confirmation = null;
     if (this.lastPosition != null && position < this.lastPosition) {
       // Native decoders can settle a few milliseconds backward after buffer
       // depletion. Keep the high-water sample: this is not resumed progress,
@@ -51,6 +61,30 @@ export class PlaybackStarvation {
   waiting(now: number, bufferedAhead: number, eligible: boolean, attemptReady = true): boolean {
     if (!eligible) { this.interrupt(); return false; }
     if (this.attempted || !this.progressed || !Number.isFinite(bufferedAhead) || bufferedAhead > 0.5) return false;
+    return this.episode(now, attemptReady);
+  }
+
+  beginWaitingConfirmation(now: number, position: number, playbackIntent: number, eligible: boolean): WaitingConfirmation | null {
+    if (!eligible || !Number.isFinite(now)) { this.interrupt(); return null; }
+    this.progress(position, true);
+    if (this.attempted || !this.progressed) return null;
+    return this.confirmation ??= { at: now, position, playbackIntent };
+  }
+
+  confirmWaiting(pending: WaitingConfirmation, now: number, position: number, playbackIntent: number, eligible: boolean, attemptReady = true): boolean {
+    if (this.confirmation !== pending) return false;
+    if (!eligible || playbackIntent !== pending.playbackIntent) { this.interrupt(); return false; }
+    if (position !== pending.position) { this.progress(position, true); this.confirmation = null; return false; }
+    // A timer is corroboration only while this same wait is recent. Delayed
+    // callbacks after a busy/suspended document cannot manufacture an episode.
+    const age = now - pending.at;
+    if (!Number.isFinite(age) || age < 0 || age > WAIT_CONFIRMATION_MAX_AGE_MS) { this.confirmation = null; return false; }
+    if (age < STARVATION_WAIT_CONFIRMATION_MS) return false;
+    return this.episode(now, attemptReady);
+  }
+
+  private episode(now: number, attemptReady: boolean): boolean {
+    this.confirmation = null;
     this.progressed = false;
     this.resumePosition = this.lastPosition;
     this.episodes = this.episodes.filter((at) => now >= at && now - at <= 45_000);

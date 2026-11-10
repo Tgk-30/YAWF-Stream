@@ -122,6 +122,116 @@ describe("PlaybackStarvation", () => {
     policy.progress(13, true);
     expect(policy.waiting(4, 0, true)).toBe(false);
   });
+
+  it("[starvation96-policy] confirms three distinct unchanged-clock waits, never duplicates or another attempt", () => {
+    const policy = new PlaybackStarvation();
+    policy.progress(70, true);
+    for (let i = 0; i < 3; i++) {
+      const at = i * 12_000;
+      policy.progress(71 + i * 6, true);
+      expect(policy.waiting(at, 2.5, true)).toBe(false);
+      const pending = policy.beginWaitingConfirmation(at, 71 + i * 6, 1, true)!;
+      expect(pending).not.toBeNull();
+      expect(policy.beginWaitingConfirmation(at + 1_000, pending.position, 1, true)).toBe(pending);
+      expect(policy.confirmWaiting(pending, at + 1_999, pending.position, 1, true)).toBe(false);
+      expect(policy.confirmWaiting(pending, at + 2_000, pending.position, 1, true)).toBe(i === 2);
+      expect(policy.confirmWaiting(pending, at + 3_000, pending.position, 1, true)).toBe(false);
+      expect(policy.beginWaitingConfirmation(at + 3_000, pending.position, 1, true)).toBeNull();
+    }
+    policy.interrupt(); policy.progress(90, true); policy.progress(91, true);
+    expect(policy.beginWaitingConfirmation(40_000, 91, 1, true)).toBeNull();
+  });
+
+  it("[starvation96-policy] needs real resumed progress and shares each episode with the fast depletion path", () => {
+    const policy = new PlaybackStarvation();
+    expect(policy.beginWaitingConfirmation(0, 10, 1, true)).toBeNull();
+    policy.progress(11, true);
+    const pending = policy.beginWaitingConfirmation(0, 11, 1, true)!;
+    expect(policy.waiting(100, 0.5, true)).toBe(false);
+    expect(policy.confirmWaiting(pending, 2_000, 11, 1, true)).toBe(false);
+    expect(policy.beginWaitingConfirmation(3_000, 11.25, 1, true)).toBeNull();
+    const second = policy.beginWaitingConfirmation(3_000, 11.251, 1, true)!;
+    expect(policy.confirmWaiting(second, 5_000, 11.251, 1, true)).toBe(false);
+    policy.progress(12, true);
+    expect(policy.waiting(6_000, 0, true)).toBe(true);
+  });
+
+  it("[starvation96-policy] cancels reported or quiet clock movement rather than confirming a stale sample", () => {
+    for (const delta of [0.001, 0.3, -0.001, -1, NaN]) {
+      const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
+      const pending = policy.beginWaitingConfirmation(0, 11, 1, true)!;
+      expect(policy.confirmWaiting(pending, 2_000, 11 + delta, 1, true)).toBe(false);
+      expect(policy.waitingConfirmation).toBeNull();
+      expect(policy.confirmWaiting(pending, 3_000, 11, 1, true)).toBe(false);
+    }
+    const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
+    const pending = policy.beginWaitingConfirmation(0, 11, 1, true)!;
+    policy.progress(11.001, true);
+    expect(policy.waitingConfirmation).toBeNull();
+    expect(policy.confirmWaiting(pending, 2_000, 11, 1, true)).toBe(false);
+  });
+
+  it("[starvation96-policy] fences cancelled and interrupted tokens and newer explicit playback intent", () => {
+    const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
+    const first = policy.beginWaitingConfirmation(0, 11, 1, true)!;
+    policy.cancelWaitingConfirmation();
+    const second = policy.beginWaitingConfirmation(100, 11, 1, true)!;
+    expect(policy.confirmWaiting(first, 2_100, 11, 1, true)).toBe(false);
+    expect(policy.waitingConfirmation).toBe(second);
+    expect(policy.confirmWaiting(second, 2_100, 11, 2, true)).toBe(false);
+    expect(policy.waitingConfirmation).toBeNull();
+    expect(policy.beginWaitingConfirmation(2_200, 11, 2, true)).toBeNull();
+    policy.progress(12, true); expect(policy.waiting(2_250, 0, true)).toBe(false);
+    policy.progress(13, true); expect(policy.waiting(2_300, 0, true)).toBe(false);
+    policy.progress(14, true);
+    const third = policy.beginWaitingConfirmation(3_000, 14, 2, true)!;
+    policy.interrupt();
+    expect(policy.confirmWaiting(third, 5_000, 14, 2, true)).toBe(false);
+    expect(policy.beginWaitingConfirmation(5_000, 14, 2, true)).toBeNull();
+  });
+
+  it("[starvation96-policy] rejects expired backwards nonfinite or ineligible confirmation clocks", () => {
+    for (const now of [-1, 5_001, NaN, Infinity]) {
+      const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
+      const pending = policy.beginWaitingConfirmation(0, 11, 1, true)!;
+      expect(policy.confirmWaiting(pending, now, 11, 1, true)).toBe(false);
+      expect(policy.waitingConfirmation).toBeNull();
+      policy.progress(12, true); expect(policy.waiting(6_000, 0, true)).toBe(false);
+      policy.progress(13, true); expect(policy.waiting(7_000, 0, true)).toBe(false);
+      policy.progress(14, true); expect(policy.waiting(8_000, 0, true)).toBe(true);
+    }
+    const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
+    const pending = policy.beginWaitingConfirmation(0, 11, 1, true)!;
+    expect(policy.confirmWaiting(pending, 2_000, 11, 1, false)).toBe(false);
+    expect(policy.beginWaitingConfirmation(2_000, 11, 1, true)).toBeNull();
+    policy.progress(12, true);
+    expect(policy.beginWaitingConfirmation(NaN, 12, 1, true)).toBeNull();
+    expect(policy.beginWaitingConfirmation(3_000, 12, 1, true)).toBeNull();
+  });
+
+  it("[starvation96-policy] can finish confirmed episodes after bounded audio discovery without another wait", () => {
+    const policy = new PlaybackStarvation(); expect(policy.claimAudioInventoryLoad()).toBe(true);
+    policy.progress(10, true);
+    for (let i = 0; i < 3; i++) {
+      policy.progress(11 + i, true);
+      const pending = policy.beginWaitingConfirmation(i * 4_000, 11 + i, 1, true)!;
+      expect(policy.confirmWaiting(pending, i * 4_000 + 2_000, 11 + i, 1, true, false)).toBe(false);
+    }
+    expect(policy.claimAttempt(10_001, true)).toBe(true);
+    expect(policy.claimAttempt(10_002, true)).toBe(false);
+    expect(policy.claimAudioInventoryLoad()).toBe(false);
+  });
+
+  it("[starvation96-policy] applies the same45-second window to confirmed and fast episodes", () => {
+    const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
+    const first = policy.beginWaitingConfirmation(0, 11, 1, true)!;
+    expect(policy.confirmWaiting(first, 2_000, 11, 1, true)).toBe(false);
+    policy.progress(12, true); expect(policy.waiting(48_000, 0, true)).toBe(false);
+    policy.progress(13, true);
+    const second = policy.beginWaitingConfirmation(49_000, 13, 1, true)!;
+    expect(policy.confirmWaiting(second, 51_000, 13, 1, true)).toBe(false);
+    policy.progress(14, true); expect(policy.waiting(52_000, 0, true)).toBe(true);
+  });
 });
 
 describe("lowerStarvationQuality", () => {
