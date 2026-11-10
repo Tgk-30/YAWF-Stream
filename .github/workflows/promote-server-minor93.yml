@@ -1,0 +1,75 @@
+name: Promote qualified server93 minor channel
+on:
+  push:
+    branches: [codex/promote-minor93]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  restore:
+    if: github.repository == 'Tgk-30/YAWF-Stream' && github.actor == github.repository_owner
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/tgk-30/yawf-stream
+      QUALIFIED: sha256:882ff0e78489ba7c8b6dc507edd039fc8aca6c4e610dd1e9d72d16aff130c7be
+      PRIOR_MINOR: sha256:975cafa9df30835714ec8cad4e15e5d0c78178d5108003a5d6de5676408ed72b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Revalidate the public qualified release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/promote_server_latest.mjs prepare \
+            --version 2.3.93 \
+            --expected-source-revision f702cf0ab44e2eab2134fbee9596e0b42536751e \
+            --expected-image-digest "$QUALIFIED" \
+            --output "$RUNNER_TEMP/qualified-release.json" \
+            --github-output "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote only the guarded mutable minor alias
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest() {
+            docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" \
+              | node -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).digest))'
+          }
+          test "$(digest "$IMAGE@$QUALIFIED")" = "$QUALIFIED"
+          test "$(digest "$IMAGE:latest")" = "$QUALIFIED"
+          test "$(digest "$IMAGE:2.3")" = "$PRIOR_MINOR"
+          test "$(digest "$IMAGE:2.3.90")" = "sha256:57116f11a4ba1e7bbee6adaf9c0f2a5f89fab157cb49942d4d0f74f53a1e6888"
+          test "$(digest "$IMAGE:2.3.91")" = "sha256:c2de0a37e4eaf8c80d18994d9feaf686d80512ed27cbdc1c1d78425fd110b558"
+          test "$(digest "$IMAGE:2.3.92")" = "$PRIOR_MINOR"
+          test "$(digest "$IMAGE:2.3.93")" = "$QUALIFIED"
+          docker buildx imagetools create --tag "$IMAGE:2.3" "$IMAGE@$QUALIFIED"
+          test "$(digest "$IMAGE:2.3")" = "$QUALIFIED"
+          test "$(digest "$IMAGE:latest")" = "$QUALIFIED"
+          test "$(digest "$IMAGE:2.3.90")" = "sha256:57116f11a4ba1e7bbee6adaf9c0f2a5f89fab157cb49942d4d0f74f53a1e6888"
+          test "$(digest "$IMAGE:2.3.91")" = "sha256:c2de0a37e4eaf8c80d18994d9feaf686d80512ed27cbdc1c1d78425fd110b558"
+          test "$(digest "$IMAGE:2.3.92")" = "$PRIOR_MINOR"
+          test "$(digest "$IMAGE:2.3.93")" = "$QUALIFIED"
+          node -e 'require("node:fs").writeFileSync(process.env.RUNNER_TEMP+"/minor-channel-promoted.json",JSON.stringify({schemaVersion:1,tag:"2.3",before:process.env.PRIOR_MINOR,after:process.env.QUALIFIED,latestUnchanged:true,versionTagsAndHistoryUnchanged:true,run:process.env.GITHUB_RUN_ID})+"\n")'
+      - name: Retain channel receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-minor-channel-promote-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/qualified-release.json
+            ${{ runner.temp }}/minor-channel-promoted.json
+          if-no-files-found: warn
