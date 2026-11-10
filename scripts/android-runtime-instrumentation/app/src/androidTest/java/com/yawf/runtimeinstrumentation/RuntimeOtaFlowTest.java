@@ -17,6 +17,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -267,6 +268,12 @@ public final class RuntimeOtaFlowTest {
     private int initialOfferEnableSelections;
     private boolean initialOfferObserved;
     private boolean weeklyOnAtInitialOffer;
+    private AppsWindowGate appsWindowGate;
+    private int appsPreActionDelta;
+    private int appsPostActionDelta;
+    private int appsPreActionCount;
+    private int appsTapActionDelta;
+    private boolean cleanupFailureDiagnosticCaptured;
 
     @Test
     public void updateOfficialPublicBaselineThroughNativeUi() throws Throwable {
@@ -348,6 +355,7 @@ public final class RuntimeOtaFlowTest {
             }
         } catch (Throwable cleanupFailure) {
             log("Permission cleanup failed: " + safe(cleanupFailure.getMessage()));
+            if (isPublic88To96OfferMode()) captureInitialOfferCleanupFailure();
             if (primary == null) {
                 primary = cleanupFailure;
             }
@@ -4502,6 +4510,265 @@ public final class RuntimeOtaFlowTest {
         return false;
     }
 
+    private static final class AppsWindowSnapshot {
+        String status = "missing";
+        String kind = "none";
+        int windowId = -1;
+        int nodes;
+        int width;
+        int height;
+        final Rect window = new Rect();
+        final Rect candidate = new Rect();
+
+        boolean sameReadyBody(AppsWindowSnapshot other) {
+            return other != null && windowId == other.windowId && kind.equals(other.kind)
+                    && width == other.width && height == other.height
+                    && window.equals(other.window) && candidate.equals(other.candidate);
+        }
+    }
+
+    private static final class AppsWindowGate {
+        interface Reader { AppsWindowSnapshot read(long deadline); }
+        interface Clock { long now(); void poll(long millis); }
+        final long startedAt;
+        final long deadline;
+        long preAt;
+        long tapAt;
+        long readyAt;
+        int polls;
+        int stableSamples;
+        String lastStatus = "not-started";
+        AppsWindowSnapshot pre;
+        AppsWindowSnapshot ready;
+
+        AppsWindowGate(long startedAt) {
+            this.startedAt = startedAt;
+            deadline = startedAt + UI_WAIT_MS;
+        }
+
+        AppsWindowSnapshot await(boolean afterTap, Reader reader, Clock clock) {
+            assertTrue("Apps post-acquisition requires its pre-tap observation",
+                    !afterTap || (pre != null && tapAt >= preAt));
+            long previousTime = afterTap ? tapAt : startedAt;
+            AppsWindowSnapshot previousReady = null;
+            while (polls < UI_WAIT_MS / 100L + 2L) {
+                long before = clock.now();
+                assertTrue("Apps acquisition clock regressed", before >= previousTime);
+                if (before >= deadline) break;
+                AppsWindowSnapshot snapshot = reader.read(deadline);
+                polls++;
+                long now = clock.now();
+                assertTrue("Apps acquisition clock regressed", now >= before);
+                previousTime = now;
+                lastStatus = snapshot.status;
+                if (now >= deadline) break;
+                assertTrue("Apps acquisition refused unsafe window: " + lastStatus,
+                        !lastStatus.equals("foreign") && !lastStatus.equals("ambiguous")
+                                && !lastStatus.equals("geometry") && !lastStatus.equals("budget")
+                                && !lastStatus.equals("duplicate"));
+                if (lastStatus.equals("ready") && (!afterTap || snapshot.windowId != pre.windowId)) {
+                    if (!afterTap) {
+                        pre = snapshot;
+                        preAt = now;
+                        return snapshot;
+                    }
+                    stableSamples = snapshot.sameReadyBody(previousReady) ? stableSamples + 1 : 1;
+                    previousReady = snapshot;
+                    if (stableSamples == 2) {
+                        ready = snapshot;
+                        readyAt = now;
+                        return snapshot;
+                    }
+                } else {
+                    if (lastStatus.equals("ready")) lastStatus = "old-window";
+                    stableSamples = 0;
+                    previousReady = null;
+                }
+                long after = clock.now();
+                assertTrue("Apps acquisition clock regressed", after >= now);
+                long remaining = deadline - after;
+                if (remaining <= 0L) break;
+                clock.poll(Math.min(100L, remaining));
+            }
+            throw new AssertionError("Apps window acquisition timed out: " + lastStatus);
+        }
+    }
+
+    private static AppsWindowSnapshot collectAppsWindow(
+            List<AccessibilityWindowInfo> windows, AccessibilityNodeInfo root,
+            int width, int height, long deadline, AppsWindowGate.Clock clock, boolean appsBody) {
+        AppsWindowSnapshot result = new AppsWindowSnapshot();
+        result.width = width;
+        result.height = height;
+        List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+        List<Integer> parents = new ArrayList<>();
+        List<Integer> depths = new ArrayList<>();
+        List<Integer> pending = new ArrayList<>();
+        try {
+            if (windows == null || root == null) return result;
+            if (windows.size() > 16) { result.status = "budget"; return result; }
+            AccessibilityWindowInfo active = null;
+            for (AccessibilityWindowInfo window : windows) {
+                if (window == null) { result.status = "incomplete"; return result; }
+                if (window.isActive()) {
+                    if (active != null) { result.status = "ambiguous"; return result; }
+                    active = window;
+                }
+            }
+            if (active == null) return result;
+            if (active.getType() != AccessibilityWindowInfo.TYPE_APPLICATION
+                    || !OtaFlowPolicy.SETTINGS_PACKAGE.contentEquals(root.getPackageName() == null ? "" : root.getPackageName())) {
+                result.status = "foreign"; return result;
+            }
+            if (!active.isFocused()) { result.status = "incomplete"; return result; }
+            result.windowId = active.getId();
+            if (result.windowId < 0 || root.getWindowId() != result.windowId) {
+                result.status = "incomplete"; return result;
+            }
+            active.getBoundsInScreen(result.window);
+            Rect display = new Rect(0, 0, width, height);
+            Rect rootBounds = new Rect();
+            root.getBoundsInScreen(rootBounds);
+            if (display.isEmpty() || result.window.isEmpty() || rootBounds.isEmpty()
+                    || !display.contains(result.window) || !result.window.contains(rootBounds)) {
+                result.status = "geometry"; return result;
+            }
+            nodes.add(root); parents.add(-1); depths.add(0); pending.add(0);
+            int headers = 0;
+            int controls = 0;
+            int scrolls = 0;
+            Rect controlBounds = new Rect();
+            Rect scrollBounds = new Rect();
+            while (!pending.isEmpty()) {
+                int cursor = pending.remove(pending.size() - 1);
+                if (clock.now() >= deadline) { result.status = "deadline"; return result; }
+                AccessibilityNodeInfo node = nodes.get(cursor);
+                if (node.getWindowId() != result.windowId) { result.status = "incomplete"; return result; }
+                if (!OtaFlowPolicy.SETTINGS_PACKAGE.contentEquals(node.getPackageName() == null ? "" : node.getPackageName())) {
+                    result.status = "foreign"; return result;
+                }
+                Rect bounds = new Rect(); node.getBoundsInScreen(bounds);
+                if (node.isVisibleToUser() && bounds.isEmpty()) { result.status = "geometry"; return result; }
+                boolean contained = node.isVisibleToUser() && node.isEnabled()
+                        && !bounds.isEmpty() && rootBounds.contains(bounds) && result.window.contains(bounds);
+                String text = node.getText() == null ? "" : node.getText().toString();
+                if (contained && "Apps".equals(text) && !node.isClickable()
+                        && "android.widget.TextView".contentEquals(node.getClassName() == null ? "" : node.getClassName())) headers++;
+                if (contained && node.isScrollable()) { scrolls++; scrollBounds.set(bounds); }
+                if (contained && "Special app access".equals(text)) {
+                    boolean actionable = node.isClickable();
+                    for (int parent = parents.get(cursor); !actionable && parent >= 0; parent = parents.get(parent)) {
+                        AccessibilityNodeInfo ancestor = nodes.get(parent);
+                        Rect ancestorBounds = new Rect(); ancestor.getBoundsInScreen(ancestorBounds);
+                        actionable = ancestor.isVisibleToUser() && ancestor.isEnabled() && ancestor.isClickable()
+                                && !ancestorBounds.isEmpty() && result.window.contains(ancestorBounds)
+                                && ancestorBounds.contains(bounds);
+                    }
+                    if (actionable) { controls++; controlBounds.set(bounds); }
+                }
+                int count = node.getChildCount();
+                if (count < 0 || count > 128 || depths.get(cursor) > 64) { result.status = "budget"; return result; }
+                for (int index = 0; index < count; index++) {
+                    AccessibilityNodeInfo child = node.getChild(index);
+                    if (child == null) { result.status = "incomplete"; return result; }
+                    if (nodes.contains(child)) { child.recycle(); result.status = "duplicate"; return result; }
+                    nodes.add(child); parents.add(cursor); depths.add(depths.get(cursor) + 1);
+                    pending.add(nodes.size() - 1);
+                    if (nodes.size() > 512) { result.status = "budget"; return result; }
+                }
+            }
+            result.nodes = nodes.size();
+            if (appsBody && (headers != 1 || controls > 1 || (controls == 0 && scrolls != 1))) {
+                result.status = headers > 1 || controls > 1 || scrolls > 1 ? "ambiguous" : "body-missing";
+                return result;
+            }
+            result.kind = appsBody ? (controls == 1 ? "special-access" : "scroll") : "pre-apps";
+            result.candidate.set(controls == 1 ? controlBounds : scrollBounds);
+            result.status = "ready";
+            return result;
+        } finally {
+            for (int index = 1; index < nodes.size(); index++) nodes.get(index).recycle();
+        }
+    }
+
+    private AppsWindowSnapshot readInitialOfferAppsWindow(long deadline, boolean appsBody) {
+        assertTrue("Apps cache refresh requires API 34", Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        assertTrue("Apps cache refresh failed", instrumentation.getUiAutomation().clearCache());
+        List<AccessibilityWindowInfo> windows = instrumentation.getUiAutomation().getWindows();
+        AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
+        try {
+            return collectAppsWindow(windows, root, device.getDisplayWidth(), device.getDisplayHeight(),
+                    deadline, initialOfferAppsClock(), appsBody);
+        } finally {
+            if (root != null) root.recycle();
+            if (windows != null) for (AccessibilityWindowInfo window : windows) if (window != null) window.recycle();
+        }
+    }
+
+    private AppsWindowGate.Clock initialOfferAppsClock() {
+        return new AppsWindowGate.Clock() {
+            public long now() { return SystemClock.uptimeMillis(); }
+            public void poll(long millis) { SystemClock.sleep(millis); }
+        };
+    }
+
+    private void captureInitialOfferPreAppsWindow() {
+        appsWindowGate = new AppsWindowGate(SystemClock.uptimeMillis());
+        int before = actions.size();
+        appsWindowGate.await(false, deadline -> readInitialOfferAppsWindow(deadline, false), initialOfferAppsClock());
+        appsPreActionDelta = actions.size() - before;
+        appsPreActionCount = actions.size();
+        assertEquals("Apps pre-acquisition must be input-free", 0, appsPreActionDelta);
+    }
+
+    private void awaitInitialOfferAppsWindow() {
+        appsWindowGate.tapAt = SystemClock.uptimeMillis();
+        appsTapActionDelta = actions.size() - appsPreActionCount;
+        assertEquals("Apps navigation must be one logged ordinary tap", 1, appsTapActionDelta);
+        int before = actions.size();
+        appsWindowGate.await(true, deadline -> readInitialOfferAppsWindow(deadline, true), initialOfferAppsClock());
+        appsPostActionDelta = actions.size() - before;
+        assertEquals("Apps post-acquisition must be input-free", 0, appsPostActionDelta);
+    }
+
+    private JSONObject initialOfferAppsProof() throws Exception {
+        JSONObject proof = new JSONObject();
+        if (appsWindowGate == null) return proof;
+        AppsWindowGate gate = appsWindowGate;
+        proof.put("schemaVersion", 1); proof.put("status", gate.lastStatus);
+        proof.put("startedAtUptimeMs", gate.startedAt); proof.put("deadlineUptimeMs", gate.deadline);
+        proof.put("preObservedAtUptimeMs", gate.preAt); proof.put("tapCompletedAtUptimeMs", gate.tapAt);
+        proof.put("readyAtUptimeMs", gate.readyAt); proof.put("polls", gate.polls);
+        proof.put("cacheRefreshes", gate.polls); proof.put("stableSamples", gate.stableSamples);
+        proof.put("acquisitionActionLogDelta", appsPreActionDelta + appsPostActionDelta);
+        proof.put("appsTapActionLogDelta", appsTapActionDelta);
+        proof.put("complete", gate.ready != null); proof.put("activeWindowCount", gate.ready == null ? 0 : 1);
+        proof.put("preWindowId", gate.pre == null ? -1 : gate.pre.windowId);
+        proof.put("preNodeCount", gate.pre == null ? 0 : gate.pre.nodes);
+        if (gate.ready != null) {
+            AppsWindowSnapshot ready = gate.ready;
+            proof.put("readyWindowId", ready.windowId); proof.put("readyNodeCount", ready.nodes);
+            proof.put("kind", ready.kind); proof.put("displayWidth", ready.width); proof.put("displayHeight", ready.height);
+            proof.put("windowBounds", new JSONArray(new int[] {ready.window.left, ready.window.top, ready.window.right, ready.window.bottom}));
+            proof.put("candidateBounds", new JSONArray(new int[] {ready.candidate.left, ready.candidate.top, ready.candidate.right, ready.candidate.bottom}));
+        }
+        return proof;
+    }
+
+    private void captureInitialOfferCleanupFailure() {
+        try {
+            File png = new File(evidenceDir, "cleanup-failure.png");
+            File xml = new File(evidenceDir, "cleanup-failure.xml");
+            assertTrue("Cleanup failure screenshot unavailable", device.takeScreenshot(png));
+            device.dumpWindowHierarchy(xml);
+            assertTrue("Cleanup failure diagnostic bounds", png.length() > 0 && png.length() <= MAX_SCREENSHOT_BYTES
+                    && xml.length() > 0 && xml.length() <= MAX_HIERARCHY_BYTES);
+            cleanupFailureDiagnosticCaptured = true;
+        } catch (Throwable diagnosticFailure) {
+            log("Cleanup failure diagnostic unavailable: " + diagnosticFailure.getClass().getSimpleName());
+        }
+    }
+
     private void cleanupUnknownSourcePermissionThroughVisibleSettings() throws Exception {
         boolean coreTransactionPassed = updatedProductObserved
                 && installerSuccessObserved
@@ -4516,7 +4783,9 @@ public final class RuntimeOtaFlowTest {
         }
         launchVisibleAppFromLauncher("Settings", OtaFlowPolicy.SETTINGS_PACKAGE,
                 "visible unknown-source cleanup");
+        if (isPublic88To96OfferMode()) captureInitialOfferPreAppsWindow();
         clickSystemText("Apps", UI_WAIT_MS);
+        if (isPublic88To96OfferMode()) awaitInitialOfferAppsWindow();
         scrollUntilVisibleSystemText("Special app access", Direction.DOWN).click();
         device.waitForIdle(750);
         scrollUntilVisibleSystemText("Install unknown apps", Direction.DOWN).click();
@@ -4900,6 +5169,8 @@ public final class RuntimeOtaFlowTest {
     }
 
     private void appendPublic88To96OfferReceipt(JSONObject receipt) throws Exception {
+        receipt.put("appsWindowAcquisition", initialOfferAppsProof());
+        receipt.put("cleanupFailureDiagnosticCaptured", cleanupFailureDiagnosticCaptured);
         receipt.put("runtimeProfile", PUBLIC88_TO96_OFFER_PROFILE);
         receipt.put("baselineSourceRevision", admittedBaselineSourceRevision);
         receipt.put("targetSourceRevision", admittedTargetSourceRevision);

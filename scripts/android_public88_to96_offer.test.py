@@ -48,7 +48,7 @@ admission = module("offer_admission_under_test", ROOT / "scripts/android_public8
 
 
 def java_method(text, name):
-    match = re.search(r"    private [^\n]*\b" + name + r"\([^\n]*\) [^{\n]*\{", text)
+    match = re.search(r"    private [^\n]*\b" + name + r"\([^)]*\) [^{]*\{", text)
     assert match is not None, name
     start = text.index("{", match.start())
     depth, end = 1, start + 1
@@ -58,8 +58,22 @@ def java_method(text, name):
     return text[match.start():end]
 
 
+def valid_apps_proof():
+    return {
+        "schemaVersion": 1, "status": "ready", "complete": True, "activeWindowCount": 1,
+        "stableSamples": 2, "acquisitionActionLogDelta": 0, "appsTapActionLogDelta": 1,
+        "startedAtUptimeMs": 10000, "deadlineUptimeMs": 100000,
+        "preObservedAtUptimeMs": 10000, "tapCompletedAtUptimeMs": 10063,
+        "readyAtUptimeMs": 12163, "polls": 23, "cacheRefreshes": 23,
+        "preWindowId": 4, "readyWindowId": 5, "preNodeCount": 10, "readyNodeCount": 30,
+        "displayWidth": 1080, "displayHeight": 1920, "kind": "scroll",
+        "windowBounds": [0, 0, 1080, 1920], "candidateBounds": [0, 500, 1080, 1850],
+    }
+
+
 def valid_receipt():
     return {
+        "appsWindowAcquisition": valid_apps_proof(), "cleanupFailureDiagnosticCaptured": False,
         "outcome": "passed", "persistentUiAutomationSession": True,
         "productPackage": "com.tgk30.debridstreamer",
         "runtimeProfile": "public88-to96-initial-offer-native-install-v1",
@@ -275,7 +289,11 @@ class OfferHostTests(unittest.TestCase):
             "waitFor": "5553ff4278afe8cd92c4e8ecc1bb0452dc5ae473506b69d5d189e44dfb00c660",
         }
         for name, digest in expected.items():
-            self.assertEqual(hashlib.sha256(java_method(JAVA.read_text(), name).encode()).hexdigest(), digest, name)
+            body = java_method(JAVA.read_text(), name)
+            if name == "cleanupUnknownSourcePermissionThroughVisibleSettings":
+                body = body.replace("        if (isPublic88To96OfferMode()) captureInitialOfferPreAppsWindow();\n", "")
+                body = body.replace("        if (isPublic88To96OfferMode()) awaitInitialOfferAppsWindow();\n", "")
+            self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), digest, name)
 
     def test_native_dispatch_and_nonclaims_remain_separate(self):
         self.binding()
@@ -302,6 +320,50 @@ class OfferHostTests(unittest.TestCase):
         for forbidden in ("cancelInitialManualCheckBeforeResult", "runAutomaticFlow", "completeNormalSetupExact",
                           "seedMeaningfulLocalState", "returnToProductThroughVisibleLauncher", "pressBack", "pressHome"):
             self.assertTrue(forbidden not in flow, forbidden)
+
+    def test_apps_proof_is_exact_bounded_and_cannot_promote_old_or_partial_windows(self):
+        valid = valid_apps_proof()
+        self.assertIs(host.validate_initial_offer_apps_acquisition(valid), valid)
+        for key in valid:
+            missing = dict(valid); del missing[key]
+            with self.subTest(missing=key), self.assertRaises(host.RuntimeGateError):
+                host.validate_initial_offer_apps_acquisition(missing)
+            with self.subTest(wrongtype=key), self.assertRaises(host.RuntimeGateError):
+                host.validate_initial_offer_apps_acquisition({**valid, key: None})
+        variants = [
+            {"extra": 1}, {"complete": False}, {"activeWindowCount": 2}, {"stableSamples": 1},
+            {"acquisitionActionLogDelta": 1}, {"appsTapActionLogDelta": 2}, {"cacheRefreshes": 22},
+            {"preWindowId": 5}, {"readyWindowId": -1}, {"preNodeCount": 0}, {"readyNodeCount": 513},
+            {"polls": 903}, {"deadlineUptimeMs": 100001}, {"readyAtUptimeMs": 100000},
+            {"readyAtUptimeMs": 10064}, {"tapCompletedAtUptimeMs": 9999}, {"kind": "unknown"},
+            {"windowBounds": [-1, 0, 1080, 1920]}, {"candidateBounds": [0, 0, 1081, 1900]},
+            {"candidateBounds": [3, 3, 3, 4]}, {"windowBounds": [0, 501, 1080, 1920]},
+            {"stableSamples": True}, {"complete": 1},
+        ]
+        for change in variants:
+            with self.subTest(change=change), self.assertRaises(host.RuntimeGateError):
+                host.validate_initial_offer_apps_acquisition({**valid, **change})
+        producer = java_method(JAVA.read_text(), "initialOfferAppsProof")
+        self.assertEqual(set(re.findall(r'proof\.put\("([^"]+)"', producer)), set(valid))
+
+    def test_cleanup_failure_evidence_is_readable_only_in_new_profile_and_never_passes(self):
+        binding = self.binding()
+        for name in ("cleanup-failure.png", "cleanup-failure.xml"):
+            self.assertTrue(host.admitted_harness_evidence_name(name, binding))
+            self.assertFalse(host.admitted_harness_evidence_name(name, host.LEGACY_BINDING))
+            self.assertFalse(host.admitted_harness_evidence_name("../" + name, binding))
+            self.assertFalse(host.admitted_harness_evidence_name(name + ".bak", binding))
+        value = valid_receipt(); value["cleanupFailureDiagnosticCaptured"] = True
+        with self.assertRaises(host.RuntimeGateError):
+            host.validate_receipt(value, binding.ota_mode, binding)
+        source = JAVA.read_text()
+        cleanup = java_method(source, "cleanupUnknownSourcePermissionThroughVisibleSettings")
+        self.assertLess(cleanup.index("captureInitialOfferPreAppsWindow()"), cleanup.index('clickSystemText("Apps"'))
+        self.assertLess(cleanup.index("awaitInitialOfferAppsWindow()"), cleanup.index('scrollUntilVisibleSystemText("Special app access"'))
+        diagnostic = java_method(source, "captureInitialOfferCleanupFailure")
+        self.assertNotIn("captureIndex", diagnostic)
+        self.assertNotIn('capture("', diagnostic)
+        self.assertIn('new File(evidenceDir, "cleanup-failure.xml")', diagnostic)
 
     def test_workflow_is_separate_fixed_and_fresh_ci_only(self):
         self.binding()
@@ -559,6 +621,217 @@ public final class OfferProbe {
                     self.assertIn("REJECTED_CLICKS=[click:ENABLE]", result.stderr)
                 elif fault == "repeat-install":
                     self.assertIn("REJECTED_CLICKS=[click:ENABLE, click:Update]", result.stderr)
+
+
+class AppsWindowAcquisitionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory(prefix="ota88-apps-acquisition-")
+        cls.directory = Path(cls.temporary.name)
+        home = os.environ.get("JAVA_HOME", "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home")
+        javac = str(Path(home) / "bin/javac") if (Path(home) / "bin/javac").is_file() else shutil.which("javac")
+        assert javac is not None
+        cls.java = str(Path(javac).with_name("java"))
+        text = JAVA.read_text()
+        classes = []
+        for name in ("AppsWindowSnapshot", "AppsWindowGate"):
+            start = text.index("    private static final class " + name)
+            body = text.index("{", start); depth = 1; end = body + 1
+            while depth:
+                depth += (text[end] == "{") - (text[end] == "}"); end += 1
+            classes.append(text[start:end])
+        methods = "\n".join(java_method(text, name) for name in (
+            "collectAppsWindow", "readInitialOfferAppsWindow", "initialOfferAppsClock",
+            "captureInitialOfferPreAppsWindow", "awaitInitialOfferAppsWindow"))
+        probe = r'''
+import java.util.*;
+public final class AppsProbe {
+ static final long UI_WAIT_MS=90000;
+ static long time=10000;
+ static boolean tapped;
+ static String scenario;
+ final FakeInstrumentation instrumentation=new FakeInstrumentation();
+ final FakeDevice device=new FakeDevice();
+ final List<String> actions=new ArrayList<>();
+ AppsWindowGate appsWindowGate;
+ int appsPreActionDelta, appsPostActionDelta, appsPreActionCount, appsTapActionDelta;
+ static class OtaFlowPolicy {static final String SETTINGS_PACKAGE="com.android.settings";}
+ static class Build {static class VERSION {static final int SDK_INT=36;}static class VERSION_CODES {static final int UPSIDE_DOWN_CAKE=34;}}
+ static class SystemClock {
+  static long uptimeMillis(){return time;}
+  static void sleep(long ms){if(ms<=0||ms>100)throw new AssertionError("unbounded/blind poll");time+=ms;}
+ }
+ static class Rect {
+  int left,top,right,bottom;
+  Rect(){} Rect(int l,int t,int r,int b){left=l;top=t;right=r;bottom=b;}
+  void set(Rect r){left=r.left;top=r.top;right=r.right;bottom=r.bottom;}
+  boolean isEmpty(){return left>=right||top>=bottom;}
+  boolean contains(Rect r){return !r.isEmpty()&&left<=r.left&&top<=r.top&&right>=r.right&&bottom>=r.bottom;}
+  public boolean equals(Object o){if(!(o instanceof Rect))return false;Rect r=(Rect)o;return left==r.left&&top==r.top&&right==r.right&&bottom==r.bottom;}
+ }
+ static class AccessibilityNodeInfo {
+  String pkg="com.android.settings",text="",clazz="android.view.View";
+  int id=4;boolean visible=true,enabled=true,clickable,scrollable;
+  Rect bounds=new Rect(0,0,1080,1920);
+  List<AccessibilityNodeInfo> children=new ArrayList<>();int declared=-1;
+  CharSequence getPackageName(){return pkg;}CharSequence getText(){return text;}CharSequence getClassName(){return clazz;}
+  int getWindowId(){return id;}boolean isVisibleToUser(){return visible;}boolean isEnabled(){return enabled;}
+  boolean isClickable(){return clickable;}boolean isScrollable(){return scrollable;}
+  void getBoundsInScreen(Rect r){r.set(bounds);}int getChildCount(){return declared>=0?declared:children.size();}
+  AccessibilityNodeInfo getChild(int i){return i<children.size()?children.get(i):null;}
+  void recycle(){if(tapped&&scenario.equals("late-complete")&&id==5&&bounds.top==0&&bounds.bottom==1920&&postReadyReads>=2)time=100000;}
+ }
+ static class AccessibilityWindowInfo {
+  static final int TYPE_APPLICATION=1;
+  int id=4,type=1;boolean active=true,focused=true;
+  Rect bounds=new Rect(0,0,1080,1920);
+  boolean isActive(){return active;}boolean isFocused(){return focused;}int getType(){return type;}int getId(){return id;}
+  void getBoundsInScreen(Rect r){r.set(bounds);}void recycle(){}
+ }
+ static AccessibilityNodeInfo node(int id,String text,Rect bounds){AccessibilityNodeInfo n=new AccessibilityNodeInfo();n.id=id;n.text=text;n.bounds=bounds;return n;}
+ static AccessibilityNodeInfo body(int id){
+  AccessibilityNodeInfo root=node(id,"",new Rect(0,0,1080,1920));
+  AccessibilityNodeInfo header=node(id,"Apps",new Rect(30,200,800,380));header.clazz="android.widget.TextView";
+  AccessibilityNodeInfo scroll=node(id,"",new Rect(0,500,1080,1850));scroll.scrollable=true;
+  root.children.add(header);root.children.add(scroll);
+  if(!tapped)return root;
+  if(scenario.equals("foreign-node"))scroll.pkg="foreign.package";
+  if(scenario.equals("wrong-child-window"))scroll.id=99;
+  if(scenario.equals("invalid-geometry"))scroll.bounds=new Rect(1,2,1,4);
+  if(scenario.equals("clipped-candidate"))scroll.bounds=new Rect(0,500,1080,1921);
+  if(scenario.equals("disabled"))scroll.enabled=false;
+  if(scenario.equals("hidden"))scroll.visible=false;
+  if(scenario.equals("ambiguous-scroll")){AccessibilityNodeInfo other=node(id,"",new Rect(10,600,1000,1800));other.scrollable=true;root.children.add(other);}
+  if(scenario.equals("duplicate"))root.children.add(scroll);
+  if(scenario.equals("cycle"))scroll.children.add(root);
+  if(scenario.equals("incomplete-after-scroll")){AccessibilityNodeInfo missing=node(id,"",new Rect(0,500,400,700));missing.declared=1;root.children.add(1,missing);}
+  if(scenario.equals("child-budget"))scroll.declared=129;
+  if(scenario.equals("node-budget"))for(int i=0;i<128;i++){AccessibilityNodeInfo a=node(id,"",new Rect(1,1,2,2));scroll.children.add(a);for(int j=0;j<4;j++)a.children.add(node(id,"",new Rect(1,1,2,2)));}
+  if(scenario.equals("depth-budget")){AccessibilityNodeInfo a=scroll;for(int i=0;i<67;i++){AccessibilityNodeInfo b=node(id,"",new Rect(1,1,2,2));a.children.add(b);a=b;}}
+  if(scenario.equals("header-missing"))header.text="Settings";
+  if(scenario.equals("special-access")||scenario.equals("nonactionable-label")){
+   scroll.scrollable=false;AccessibilityNodeInfo row=node(id,"",new Rect(0,700,1080,900));row.clickable=scenario.equals("special-access");
+   row.children.add(node(id,"Special app access",new Rect(40,740,800,820)));root.children.add(row);
+  }
+  return root;
+ }
+ static class FakeAutomation {
+  int refreshes;AccessibilityNodeInfo current;
+  boolean clearCache(){refreshes++;return !scenario.equals("cache-failed");}
+  List<AccessibilityWindowInfo> getWindows(){
+   AccessibilityWindowInfo w=new AccessibilityWindowInfo();
+   // Actual R2: Apps tap0, target query+63ms, START+76ms, display+1462ms,
+   // missing scroll result+1814ms. Complete AX at+1900ms is a synthetic continuation.
+   boolean old=tapped&&(scenario.equals("old-window")||(scenario.equals("actual-timeline")&&time<10076));
+   w.id=!tapped||old?4:5;current=body(w.id);
+   if(tapped&&scenario.equals("actual-timeline")&&time>=10076&&time<11900)current=null;
+   if(tapped&&scenario.equals("null-root"))current=null;
+   if(tapped&&scenario.equals("foreign-window"))current.pkg="foreign.package";
+   if(tapped&&scenario.equals("window-geometry"))w.bounds=new Rect(-1,0,1080,1920);
+   if(tapped&&scenario.equals("root-geometry"))current.bounds=new Rect(0,0,1081,1920);
+   if(tapped&&scenario.equals("not-focused"))w.focused=false;
+   if(tapped&&scenario.equals("ambiguous-window")){AccessibilityWindowInfo other=new AccessibilityWindowInfo();other.id=6;return List.of(w,other);}
+   if(tapped&&scenario.equals("window-list-incomplete"))return Arrays.asList(w,null);
+   if(tapped&&scenario.equals("deadline"))time=100000;
+   if(tapped&&scenario.equals("regressed-clock"))time=1;
+   if(tapped&&current!=null&&w.id==5)postReadyReads++;
+   return List.of(w);
+  }
+  AccessibilityNodeInfo getRootInActiveWindow(){return current;}
+ }
+ static class FakeInstrumentation {final FakeAutomation a=new FakeAutomation();FakeAutomation getUiAutomation(){return a;}}
+ static class FakeDevice {int getDisplayWidth(){return 1080;}int getDisplayHeight(){return 1920;}}
+ static int postReadyReads;
+ static void assertTrue(String message,boolean value){if(!value)throw new AssertionError(message);}
+ static void assertEquals(String message,int expected,int value){if(expected!=value)throw new AssertionError(message);}
+'''+"\n".join(classes)+methods+r'''
+ public static void main(String[] args){
+  scenario=args[0];AppsProbe p=new AppsProbe();
+  if(scenario.startsWith("snapshot:")){
+   scenario=scenario.substring(9);tapped=true;time=12000;
+   AppsWindowSnapshot snapshot=p.readInitialOfferAppsWindow(100000,true);
+   System.out.println("SNAPSHOT_STATUS="+snapshot.status);return;
+  }
+  p.captureInitialOfferPreAppsWindow();
+  tapped=true;time=10063;p.actions.add("Clicked exact visible system Settings control: Apps");
+  try{p.awaitInitialOfferAppsWindow();}catch(AssertionError failure){System.err.println("SCROLL_INPUTS=0;actions="+p.actions.size());throw failure;}
+  System.out.println("ACQUISITION_RETURNED");
+  assertTrue("unchanged single UI_WAIT budget",p.appsWindowGate.deadline-p.appsWindowGate.startedAt==UI_WAIT_MS);
+  assertTrue("different post window",p.appsWindowGate.pre.windowId!=p.appsWindowGate.ready.windowId);
+  assertEquals("two complete samples",2,p.appsWindowGate.stableSamples);
+  assertEquals("one public refresh per poll",p.appsWindowGate.polls,p.instrumentation.a.refreshes);
+  assertEquals("read-only pre acquisition",0,p.appsPreActionDelta);
+  assertEquals("read-only post acquisition",0,p.appsPostActionDelta);
+  assertEquals("exact Apps navigation",1,p.appsTapActionDelta);
+  assertTrue("bounded deadline",p.appsWindowGate.readyAt<p.appsWindowGate.deadline);
+  if(scenario.equals("actual-timeline"))assertTrue("waited past incomplete AX result",p.appsWindowGate.readyAt>=12000);
+  if(scenario.equals("special-access"))assertTrue("real actionable target",p.appsWindowGate.ready.kind.equals("special-access"));
+  System.out.println("PASS;SCROLL_INPUTS=0;polls="+p.appsWindowGate.polls+";readyAt="+p.appsWindowGate.readyAt);
+ }
+}
+'''
+        path = cls.directory / "AppsProbe.java"; path.write_text(probe)
+        p = subprocess.run([javac, "-d", str(cls.directory), str(path)], capture_output=True, text=True, timeout=60)
+        if p.returncode:
+            raise AssertionError(p.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def probe(self, scenario):
+        return subprocess.run([self.java, "-cp", str(self.directory), "AppsProbe", scenario], capture_output=True, text=True, timeout=15)
+
+    def test_actual_r2_transition_timeline_waits_without_scroll_or_deadline_increase(self):
+        result = self.probe("actual-timeline")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SCROLL_INPUTS=0", result.stdout)
+
+    def test_complete_unique_actionable_special_access_can_replace_scroll_readiness(self):
+        result = self.probe("special-access")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_strict_window_and_complete_dfs_guards_refuse_before_any_scroll(self):
+        self.assertEqual(self.probe("actual-timeline").returncode, 0)
+        for scenario in ("foreign-node", "foreign-window", "ambiguous-window", "ambiguous-scroll",
+                         "invalid-geometry", "window-geometry", "root-geometry", "clipped-candidate",
+                         "disabled", "hidden", "duplicate", "cycle", "incomplete-after-scroll",
+                         "wrong-child-window", "child-budget", "node-budget", "depth-budget",
+                         "header-missing", "nonactionable-label", "window-list-incomplete", "not-focused"):
+            with self.subTest(scenario=scenario):
+                result = self.probe(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("AssertionError", result.stderr)
+                self.assertIn("SCROLL_INPUTS=0;actions=1", result.stderr)
+                self.assertNotIn("ACQUISITION_RETURNED", result.stdout)
+
+    def test_snapshot_classification_requires_entire_valid_owned_tree(self):
+        expected = {
+            "foreign-node": "foreign", "foreign-window": "foreign",
+            "ambiguous-window": "ambiguous", "ambiguous-scroll": "ambiguous",
+            "invalid-geometry": "geometry", "window-geometry": "geometry", "root-geometry": "geometry",
+            "incomplete-after-scroll": "incomplete", "window-list-incomplete": "incomplete",
+            "wrong-child-window": "incomplete", "not-focused": "incomplete",
+            "duplicate": "duplicate", "cycle": "duplicate",
+            "child-budget": "budget", "node-budget": "budget", "depth-budget": "budget",
+            "clipped-candidate": "body-missing", "disabled": "body-missing", "hidden": "body-missing",
+            "header-missing": "body-missing", "nonactionable-label": "body-missing",
+        }
+        self.assertIn("SNAPSHOT_STATUS=ready", self.probe("snapshot:valid").stdout)
+        for scenario, status in expected.items():
+            with self.subTest(scenario=scenario):
+                result = self.probe("snapshot:" + scenario)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("SNAPSHOT_STATUS=" + status, result.stdout)
+
+    def test_old_window_null_timeout_late_and_regressed_clock_never_authorize_scroll(self):
+        self.assertEqual(self.probe("actual-timeline").returncode, 0)
+        for scenario in ("old-window", "null-root", "deadline", "late-complete", "regressed-clock", "cache-failed"):
+            with self.subTest(scenario=scenario):
+                result = self.probe(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("AssertionError", result.stderr)
+                self.assertNotIn("ACQUISITION_RETURNED", result.stdout)
 
 
 if __name__ == "__main__":

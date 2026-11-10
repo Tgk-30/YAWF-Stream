@@ -660,6 +660,62 @@ def validate_public88_to96_evidence_names(names: Sequence[str]) -> None:
         raise RuntimeGateError("Initial-offer native evidence names are incomplete or unexpected")
 
 
+def admitted_harness_evidence_name(name: str, binding: RuntimeBinding) -> bool:
+    return name == Path(name).name and (
+        SAFE_EVIDENCE_NAME.fullmatch(name) is not None
+        or (is_public88_to96_offer(binding) and name in {"cleanup-failure.png", "cleanup-failure.xml"})
+    )
+
+
+def validate_initial_offer_apps_acquisition(value: object) -> dict[str, object]:
+    fixed = {
+        "schemaVersion": 1, "status": "ready", "complete": True,
+        "activeWindowCount": 1, "stableSamples": 2,
+        "acquisitionActionLogDelta": 0, "appsTapActionLogDelta": 1,
+    }
+    numeric = {
+        "startedAtUptimeMs", "deadlineUptimeMs", "preObservedAtUptimeMs",
+        "tapCompletedAtUptimeMs", "readyAtUptimeMs", "polls", "cacheRefreshes",
+        "preWindowId", "preNodeCount", "readyWindowId", "readyNodeCount",
+        "displayWidth", "displayHeight",
+    }
+    keys = set(fixed) | numeric | {"kind", "windowBounds", "candidateBounds"}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise RuntimeGateError("Apps acquisition proof keys are not exact")
+    for key, expected in fixed.items():
+        if type(value[key]) is not type(expected) or value[key] != expected:
+            raise RuntimeGateError(f"Apps acquisition {key} mismatch")
+    if any(type(value[key]) is not int or not 0 <= value[key] <= JAVA_LONG_MAX for key in numeric):
+        raise RuntimeGateError("Apps acquisition numeric fields are invalid")
+    start, pre, tap, ready, deadline = (value[key] for key in (
+        "startedAtUptimeMs", "preObservedAtUptimeMs", "tapCompletedAtUptimeMs",
+        "readyAtUptimeMs", "deadlineUptimeMs"))
+    if not (start <= pre <= tap <= ready < deadline and deadline == start + 90_000 and ready >= tap + 100):
+        raise RuntimeGateError("Apps acquisition timing is invalid")
+    if not (3 <= value["polls"] <= 902 and value["cacheRefreshes"] == value["polls"]):
+        raise RuntimeGateError("Apps acquisition polling is invalid")
+    if not (0 <= value["preWindowId"] <= JAVA_INT_MAX and 0 <= value["readyWindowId"] <= JAVA_INT_MAX
+            and value["preWindowId"] != value["readyWindowId"]
+            and 1 <= value["preNodeCount"] <= 512 and 1 <= value["readyNodeCount"] <= 512):
+        raise RuntimeGateError("Apps acquisition window identity or completeness is invalid")
+    width, height = value["displayWidth"], value["displayHeight"]
+    if not (1 <= width <= 8192 and 1 <= height <= 8192 and type(value["kind"]) is str
+            and value["kind"] in {"scroll", "special-access"}):
+        raise RuntimeGateError("Apps acquisition surface is invalid")
+    for key in ("windowBounds", "candidateBounds"):
+        rect = value[key]
+        if type(rect) is not list or len(rect) != 4 or any(type(part) is not int for part in rect):
+            raise RuntimeGateError("Apps acquisition raw bounds are invalid")
+        left, top, right, bottom = rect
+        if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+            raise RuntimeGateError("Apps acquisition raw bounds leave the display")
+    left, top, right, bottom = value["windowBounds"]
+    a, b, c, d = value["candidateBounds"]
+    if not (left <= a < c <= right and top <= b < d <= bottom):
+        raise RuntimeGateError("Apps acquisition candidate leaves its owned window")
+    return value
+
+
 def require_successful_observation(
     result: subprocess.CompletedProcess[str], label: str
 ) -> None:
@@ -1898,7 +1954,12 @@ def validate_public88_to96_offer_receipt(
         PUBLIC88_TO96_OFFER_ADMISSION
     ):
         raise RuntimeGateError("Initial-offer receipt requires the exact separate public binding")
+    if not isinstance(value, dict):
+        raise RuntimeGateError("Initial-offer receipt is not an object")
+    proof = validate_initial_offer_apps_acquisition(value.get("appsWindowAcquisition"))
     expected: dict[str, object] = {
+        "appsWindowAcquisition": proof,
+        "cleanupFailureDiagnosticCaptured": False,
         "outcome": "passed",
         "persistentUiAutomationSession": True,
         "productPackage": PRODUCT_PACKAGE,
@@ -2205,7 +2266,7 @@ class AdmittedAdb:
         if (
             evidence_name is not None
             and evidence_name == Path(evidence_name).name
-            and SAFE_EVIDENCE_NAME.fullmatch(evidence_name) is not None
+            and admitted_harness_evidence_name(evidence_name, binding)
         ):
             return
         raise RuntimeGateError("Automatic ADB command is outside the exact allowlist")
@@ -2644,7 +2705,7 @@ class OtaRuntimeDriver:
         if not names or len(names) > 84 or len(names) != len(set(names)):
             raise RuntimeGateError("Harness evidence listing count/duplicates are invalid")
         for name in names:
-            if SAFE_EVIDENCE_NAME.fullmatch(name) is None or name != Path(name).name:
+            if not admitted_harness_evidence_name(name, self.binding):
                 raise RuntimeGateError(f"Unexpected harness evidence name: {name!r}")
             limit = 8 * 1024 * 1024 if name.endswith(".png") else 1024 * 1024
             if name in {"actions.txt", "instrumentation-receipt.json"}:
