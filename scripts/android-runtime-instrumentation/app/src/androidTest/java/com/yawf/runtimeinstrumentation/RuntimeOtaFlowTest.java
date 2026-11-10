@@ -4517,6 +4517,12 @@ public final class RuntimeOtaFlowTest {
         int nodes;
         int width;
         int height;
+        String failureReason = "none";
+        int activeWindows;
+        int headers;
+        int scrolls;
+        int outers;
+        int inners;
         final Rect window = new Rect();
         final Rect candidate = new Rect();
 
@@ -4540,6 +4546,7 @@ public final class RuntimeOtaFlowTest {
         String lastStatus = "not-started";
         AppsWindowSnapshot pre;
         AppsWindowSnapshot ready;
+        AppsWindowSnapshot lastSnapshot;
 
         AppsWindowGate(long startedAt) {
             this.startedAt = startedAt;
@@ -4556,6 +4563,7 @@ public final class RuntimeOtaFlowTest {
                 assertTrue("Apps acquisition clock regressed", before >= previousTime);
                 if (before >= deadline) break;
                 AppsWindowSnapshot snapshot = reader.read(deadline);
+                lastSnapshot = snapshot;
                 polls++;
                 long now = clock.now();
                 assertTrue("Apps acquisition clock regressed", now >= before);
@@ -4611,7 +4619,8 @@ public final class RuntimeOtaFlowTest {
             for (AccessibilityWindowInfo window : windows) {
                 if (window == null) { result.status = "incomplete"; return result; }
                 if (window.isActive()) {
-                    if (active != null) { result.status = "ambiguous"; return result; }
+                    result.activeWindows++;
+                    if (active != null) { result.status = "ambiguous"; result.failureReason = "active-windows"; return result; }
                     active = window;
                 }
             }
@@ -4637,6 +4646,10 @@ public final class RuntimeOtaFlowTest {
             int headers = 0;
             int controls = 0;
             int scrolls = 0;
+            int headerIndex = -1;
+            int outerIndex = -1;
+            int innerIndex = -1;
+            boolean ineligibleScroll = false;
             Rect controlBounds = new Rect();
             Rect scrollBounds = new Rect();
             while (!pending.isEmpty()) {
@@ -4652,9 +4665,27 @@ public final class RuntimeOtaFlowTest {
                 boolean contained = node.isVisibleToUser() && node.isEnabled()
                         && !bounds.isEmpty() && rootBounds.contains(bounds) && result.window.contains(bounds);
                 String text = node.getText() == null ? "" : node.getText().toString();
-                if (contained && "Apps".equals(text) && !node.isClickable()
-                        && "android.widget.TextView".contentEquals(node.getClassName() == null ? "" : node.getClassName())) headers++;
-                if (contained && node.isScrollable()) { scrolls++; scrollBounds.set(bounds); }
+                String description = node.getContentDescription() == null ? "" : node.getContentDescription().toString();
+                String resource = node.getViewIdResourceName() == null ? "" : node.getViewIdResourceName();
+                String className = node.getClassName() == null ? "" : node.getClassName().toString();
+                if (contained && text.isEmpty() && "Apps".equals(description) && !node.isClickable()
+                        && "android.widget.FrameLayout".equals(className)
+                        && "com.android.settings:id/collapsing_toolbar".equals(resource)) {
+                    headers++; headerIndex = cursor; result.headers = headers;
+                }
+                if (node.isScrollable()) {
+                    scrolls++; result.scrolls = scrolls;
+                    ineligibleScroll |= !contained;
+                    if (contained) scrollBounds.set(bounds);
+                    if ("android.widget.ScrollView".equals(className)
+                            && "com.android.settings:id/content_parent".equals(resource)) {
+                        result.outers++; outerIndex = cursor;
+                    }
+                    if ("androidx.recyclerview.widget.RecyclerView".equals(className)
+                            && "com.android.settings:id/recycler_view".equals(resource)) {
+                        result.inners++; innerIndex = cursor;
+                    }
+                }
                 if (contained && "Special app access".equals(text)) {
                     boolean actionable = node.isClickable();
                     for (int parent = parents.get(cursor); !actionable && parent >= 0; parent = parents.get(parent)) {
@@ -4678,9 +4709,38 @@ public final class RuntimeOtaFlowTest {
                 }
             }
             result.nodes = nodes.size();
-            if (appsBody && (headers != 1 || controls > 1 || (controls == 0 && scrolls != 1))) {
-                result.status = headers > 1 || controls > 1 || scrolls > 1 ? "ambiguous" : "body-missing";
-                return result;
+            if (appsBody) {
+                if (headers != 1) {
+                    result.status = headers > 1 ? "ambiguous" : "body-missing";
+                    result.failureReason = "header"; return result;
+                }
+                if (controls > 1) {
+                    result.status = "ambiguous"; result.failureReason = "target"; return result;
+                }
+                if (ineligibleScroll) {
+                    result.status = "body-missing"; result.failureReason = "scroll-geometry"; return result;
+                }
+                boolean pair = scrolls == 2 && result.outers == 1 && result.inners == 1;
+                if (pair) {
+                    boolean nested = false;
+                    for (int parent = parents.get(innerIndex); parent >= 0; parent = parents.get(parent))
+                        if (parent == outerIndex) nested = true;
+                    boolean headerNested = false;
+                    for (int parent = parents.get(headerIndex); parent >= 0; parent = parents.get(parent))
+                        if (parent == outerIndex) headerNested = true;
+                    Rect outer = new Rect(); nodes.get(outerIndex).getBoundsInScreen(outer);
+                    Rect inner = new Rect(); nodes.get(innerIndex).getBoundsInScreen(inner);
+                    Rect header = new Rect(); nodes.get(headerIndex).getBoundsInScreen(header);
+                    pair = nested && headerNested && outer.contains(inner) && outer.contains(header)
+                            && header.bottom <= inner.top;
+                    // The outer ancestor is the unchanged first By.scrollable(true) match.
+                    if (pair) scrollBounds.set(outer);
+                }
+                boolean unknownMultiple = scrolls > 1 || result.outers > 0 || result.inners > 0;
+                if ((unknownMultiple && !pair) || (controls == 0 && scrolls == 0)) {
+                    result.status = unknownMultiple ? "ambiguous" : "body-missing";
+                    result.failureReason = "scroll-topology"; return result;
+                }
             }
             result.kind = appsBody ? (controls == 1 ? "special-access" : "scroll") : "pre-apps";
             result.candidate.set(controls == 1 ? controlBounds : scrollBounds);
@@ -4745,6 +4805,15 @@ public final class RuntimeOtaFlowTest {
         proof.put("complete", gate.ready != null); proof.put("activeWindowCount", gate.ready == null ? 0 : 1);
         proof.put("preWindowId", gate.pre == null ? -1 : gate.pre.windowId);
         proof.put("preNodeCount", gate.pre == null ? 0 : gate.pre.nodes);
+        if (gate.ready == null && gate.lastSnapshot != null) {
+            AppsWindowSnapshot failed = gate.lastSnapshot;
+            proof.put("failureReason", failed.failureReason);
+            proof.put("observedActiveWindows", failed.activeWindows);
+            proof.put("observedHeaders", failed.headers);
+            proof.put("observedScrolls", failed.scrolls);
+            proof.put("observedOuters", failed.outers);
+            proof.put("observedInners", failed.inners);
+        }
         if (gate.ready != null) {
             AppsWindowSnapshot ready = gate.ready;
             proof.put("readyWindowId", ready.windowId); proof.put("readyNodeCount", ready.nodes);

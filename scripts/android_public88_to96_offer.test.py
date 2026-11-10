@@ -34,6 +34,89 @@ CAPTURED_ENABLE_BUTTON_XML = '''<node index="1" text="ENABLE" resource-id="andro
  visible-to-user="true" bounds="[783,1040][978,1166]" drawing-order="4" hint="" display-id="0" />'''
 
 
+# Run 42905575679 cleanup XML SHA256 51a20c90a8688fa1b04bc96232571a9d723a62f41578e826cada861d38e2a420.
+# Complete 47-node owned Settings subtree; only non-PII selector/geometry attributes retained.
+CAPTURED_APPS_WINDOW_XML = '''<node text="" resource-id="" class="android.widget.FrameLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,1920]">
+ <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,1920]">
+  <node text="" resource-id="android:id/content" class="android.widget.FrameLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,1920]">
+   <node text="" resource-id="com.android.settings:id/content_parent" class="android.widget.ScrollView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="true" visible-to-user="true" bounds="[0,63][1080,1857]">
+    <node text="" resource-id="com.android.settings:id/app_bar" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,63][1080,533]">
+     <node text="" resource-id="com.android.settings:id/collapsing_toolbar" class="android.widget.FrameLayout" package="com.android.settings" content-desc="Apps" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,63][1080,533]">
+      <node text="" resource-id="com.android.settings:id/action_bar" class="android.view.ViewGroup" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,63][1080,210]">
+       <node text="" resource-id="" class="android.widget.ImageButton" package="com.android.settings" content-desc="Navigate up" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,63][147,210]" />
+       <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,63][1080,210]" />
+      </node>
+     </node>
+    </node>
+    <node text="" resource-id="com.android.settings:id/content_frame" class="android.widget.FrameLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,533][1080,1857]">
+     <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,533][1080,1857]">
+      <node text="" resource-id="com.android.settings:id/main_content" class="android.widget.FrameLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,533][1080,1857]">
+       <node text="" resource-id="com.android.settings:id/container_material" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,533][1080,1857]">
+        <node text="" resource-id="android:id/list_container" class="android.widget.FrameLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,533][1080,1857]">
+         <node text="" resource-id="com.android.settings:id/recycler_view" class="androidx.recyclerview.widget.RecyclerView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="true" visible-to-user="true" bounds="[0,533][1080,1857]">
+          <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,575][1080,668]">
+           <node text="" resource-id="" class="android.widget.RelativeLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,575][1038,668]">
+            <node text="Recently opened apps" resource-id="android:id/title" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,596][1038,647]" />
+           </node>
+          </node>
+          <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,668][1080,874]">
+           <node text="" resource-id="com.android.settings:id/icon_frame" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,718][189,824]">
+            <node text="" resource-id="android:id/icon" class="android.widget.ImageView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,729][147,813]" />
+           </node>
+           <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,668][1038,874]">
+            <node text="YAWF Stream" resource-id="android:id/title" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,710][510,781]" />
+            <node text="0 minutes ago" resource-id="android:id/summary" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,781][1038,832]" />
+           </node>
+          </node>
+          <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,874][1080,1029]">
+           <node text="" resource-id="com.android.settings:id/icon_frame" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,909][189,994]">
+            <node text="" resource-id="android:id/icon" class="android.widget.ImageView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,920][126,983]" />
+           </node>
+           <node text="" resource-id="" class="android.widget.RelativeLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,874][1038,1029]">
+            <node text="See all 29 apps" resource-id="android:id/title" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,916][546,987]" />
+           </node>
+          </node>
+          <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,1071][1080,1164]">
+           <node text="" resource-id="" class="android.widget.RelativeLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1071][1038,1164]">
+            <node text="General" resource-id="android:id/title" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1092][1038,1143]" />
+           </node>
+          </node>
+          <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,1164][1080,1370]">
+           <node text="" resource-id="" class="android.widget.RelativeLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1164][1038,1370]">
+            <node text="Default apps" resource-id="android:id/title" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1206][361,1277]" />
+            <node text="Chrome, Phone, and Messages" resource-id="android:id/summary" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1277][569,1328]" />
+           </node>
+          </node>
+          <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,1370][1080,1576]">
+           <node text="" resource-id="" class="android.widget.RelativeLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1370][1038,1576]">
+            <node text="Screen time" resource-id="android:id/title" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1412][342,1483]" />
+            <node text="3 minutes today" resource-id="android:id/summary" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1483][326,1534]" />
+           </node>
+          </node>
+          <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,1576][1080,1782]">
+           <node text="" resource-id="" class="android.widget.RelativeLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1576][1038,1782]">
+            <node text="Cloud media app" resource-id="android:id/title" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1618][461,1689]" />
+            <node text="Google Photos" resource-id="android:id/summary" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1689][305,1740]" />
+           </node>
+          </node>
+          <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,1782][1080,1857]">
+           <node text="" resource-id="" class="android.widget.RelativeLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1782][1038,1857]">
+            <node text="Contacts storage" resource-id="android:id/title" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[63,1824][466,1857]" />
+           </node>
+          </node>
+         </node>
+        </node>
+       </node>
+      </node>
+     </node>
+    </node>
+   </node>
+  </node>
+ </node>
+</node>
+'''
+
+
 def module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
@@ -344,6 +427,13 @@ class OfferHostTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(host.RuntimeGateError):
                 host.validate_initial_offer_apps_acquisition({**valid, **change})
         producer = java_method(JAVA.read_text(), "initialOfferAppsProof")
+        marker = "if (gate.ready == null && gate.lastSnapshot != null)"
+        start = producer.index(marker); end = producer.index("{", start) + 1; depth = 1
+        while depth:
+            depth += (producer[end] == "{") - (producer[end] == "}"); end += 1
+        self.assertEqual(set(re.findall(r'proof\.put\("([^"]+)"', producer[start:end])), {
+            "failureReason", "observedActiveWindows", "observedHeaders", "observedScrolls", "observedOuters", "observedInners"})
+        producer = producer[:start] + producer[end:]
         self.assertEqual(set(re.findall(r'proof\.put\("([^"]+)"', producer)), set(valid))
 
     def test_cleanup_failure_evidence_is_readable_only_in_new_profile_and_never_passes(self):
@@ -643,6 +733,22 @@ class AppsWindowAcquisitionTests(unittest.TestCase):
         methods = "\n".join(java_method(text, name) for name in (
             "collectAppsWindow", "readInitialOfferAppsWindow", "initialOfferAppsClock",
             "captureInitialOfferPreAppsWindow", "awaitInitialOfferAppsWindow"))
+        captured_root = ET.fromstring(CAPTURED_APPS_WINDOW_XML)
+        captured_nodes = list(captured_root.iter("node"))
+        cls.captured_node_count = len(captured_nodes)
+        factory = [" static AccessibilityNodeInfo capturedBody(int id){"]
+        for index, node in enumerate(captured_nodes):
+            bounds = re.fullmatch(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+            assert bounds is not None
+            factory.append(f'  AccessibilityNodeInfo n{index}=node(id,{json.dumps(node.get("text", ""))},new Rect({",".join(bounds.groups())}));')
+            for field, attribute in (("pkg", "package"), ("clazz", "class"), ("description", "content-desc"), ("resource", "resource-id")):
+                factory.append(f'  n{index}.{field}={json.dumps(node.get(attribute, ""))};')
+            for field, attribute in (("visible", "visible-to-user"), ("enabled", "enabled"), ("clickable", "clickable"), ("scrollable", "scrollable")):
+                factory.append(f'  n{index}.{field}={node.get(attribute, "false")};')
+        for parent in captured_nodes:
+            for child in parent:
+                factory.append(f'  n{captured_nodes.index(parent)}.children.add(n{captured_nodes.index(child)});')
+        factory.append("  return n0;\n }")
         probe = r'''
 import java.util.*;
 public final class AppsProbe {
@@ -670,11 +776,12 @@ public final class AppsProbe {
   public boolean equals(Object o){if(!(o instanceof Rect))return false;Rect r=(Rect)o;return left==r.left&&top==r.top&&right==r.right&&bottom==r.bottom;}
  }
  static class AccessibilityNodeInfo {
-  String pkg="com.android.settings",text="",clazz="android.view.View";
+  String pkg="com.android.settings",text="",clazz="android.view.View",description="",resource="";
   int id=4;boolean visible=true,enabled=true,clickable,scrollable;
   Rect bounds=new Rect(0,0,1080,1920);
   List<AccessibilityNodeInfo> children=new ArrayList<>();int declared=-1;
   CharSequence getPackageName(){return pkg;}CharSequence getText(){return text;}CharSequence getClassName(){return clazz;}
+  CharSequence getContentDescription(){return description;}String getViewIdResourceName(){return resource;}
   int getWindowId(){return id;}boolean isVisibleToUser(){return visible;}boolean isEnabled(){return enabled;}
   boolean isClickable(){return clickable;}boolean isScrollable(){return scrollable;}
   void getBoundsInScreen(Rect r){r.set(bounds);}int getChildCount(){return declared>=0?declared:children.size();}
@@ -689,9 +796,40 @@ public final class AppsProbe {
   void getBoundsInScreen(Rect r){r.set(bounds);}void recycle(){}
  }
  static AccessibilityNodeInfo node(int id,String text,Rect bounds){AccessibilityNodeInfo n=new AccessibilityNodeInfo();n.id=id;n.text=text;n.bounds=bounds;return n;}
+'''+"\n".join(factory)+r'''
+ static AccessibilityNodeInfo find(AccessibilityNodeInfo root,String resource){if(root.resource.equals(resource))return root;for(AccessibilityNodeInfo n:root.children){AccessibilityNodeInfo found=find(n,resource);if(found!=null)return found;}return null;}
+ static void detach(AccessibilityNodeInfo root,AccessibilityNodeInfo target){if(root.children.remove(target))return;for(AccessibilityNodeInfo n:root.children)detach(n,target);}
+ static AccessibilityNodeInfo firstScrollable(AccessibilityNodeInfo root){if(root.scrollable)return root;for(AccessibilityNodeInfo n:root.children){AccessibilityNodeInfo found=firstScrollable(n);if(found!=null)return found;}return null;}
+ static String scalar(Object object,String field){try{java.lang.reflect.Field f=object.getClass().getDeclaredField(field);f.setAccessible(true);return String.valueOf(f.get(object));}catch(ReflectiveOperationException unavailable){return "missing";}}
+ static AccessibilityNodeInfo observedBody(int id){
+  AccessibilityNodeInfo root=capturedBody(id),outer=find(root,"com.android.settings:id/content_parent"),inner=find(root,"com.android.settings:id/recycler_view"),header=find(root,"com.android.settings:id/collapsing_toolbar");
+  if(scenario.equals("r3-wrong-outer-class"))outer.clazz="android.widget.FrameLayout";
+  if(scenario.equals("r3-wrong-outer-resource"))outer.resource="com.android.settings:id/unrelated";
+  if(scenario.equals("r3-wrong-inner-class"))inner.clazz="android.widget.ScrollView";
+  if(scenario.equals("r3-wrong-inner-resource"))inner.resource="com.android.settings:id/unrelated";
+  if(scenario.equals("r3-sibling-inner")){detach(root,inner);root.children.add(inner);}
+  if(scenario.equals("r3-sibling-header")){detach(root,header);root.children.add(header);}
+  if(scenario.equals("r3-third-scroll")){AccessibilityNodeInfo third=node(id,"",new Rect(0,800,900,1700));third.scrollable=true;root.children.add(third);}
+  if(scenario.equals("r3-missing-inner"))detach(root,inner);
+  if(scenario.equals("r3-disabled-outer"))outer.enabled=false;
+  if(scenario.equals("r3-hidden-inner"))inner.visible=false;
+  if(scenario.equals("r3-clipped-outer"))outer.bounds=new Rect(-1,63,1080,1857);
+  if(scenario.equals("r3-inner-outside-outer"))inner.bounds=new Rect(0,1,1080,1857);
+  if(scenario.equals("r3-header-overlap"))header.bounds=new Rect(0,63,1080,600);
+  if(scenario.equals("r3-wrong-title"))header.description="Apps now";
+  if(scenario.equals("r3-mixed-title"))header.text="Apps";
+  if(scenario.equals("r3-wrong-title-class"))header.clazz="android.widget.TextView";
+  if(scenario.equals("r3-wrong-title-resource"))header.resource="android:id/title";
+  if(scenario.equals("r3-duplicate-title")){AccessibilityNodeInfo other=node(id,"",new Rect(0,63,1080,533));other.clazz=header.clazz;other.description=header.description;other.resource=header.resource;root.children.add(other);}
+  if(scenario.equals("r3-title-child")){AccessibilityNodeInfo label=node(id,"Apps",new Rect(30,200,800,380));label.clazz="android.widget.TextView";header.children.add(label);}
+  if(scenario.equals("r3-foreign-inner"))inner.pkg="foreign.package";
+  if(scenario.equals("r3-incomplete"))inner.declared=inner.children.size()+1;
+  return root;
+ }
  static AccessibilityNodeInfo body(int id){
+  if(tapped&&scenario.startsWith("r3-"))return observedBody(id);
   AccessibilityNodeInfo root=node(id,"",new Rect(0,0,1080,1920));
-  AccessibilityNodeInfo header=node(id,"Apps",new Rect(30,200,800,380));header.clazz="android.widget.TextView";
+  AccessibilityNodeInfo header=node(id,"",new Rect(30,200,800,380));header.clazz="android.widget.FrameLayout";header.description="Apps";header.resource="com.android.settings:id/collapsing_toolbar";
   AccessibilityNodeInfo scroll=node(id,"",new Rect(0,500,1080,1850));scroll.scrollable=true;
   root.children.add(header);root.children.add(scroll);
   if(!tapped)return root;
@@ -730,7 +868,7 @@ public final class AppsProbe {
    if(tapped&&scenario.equals("window-geometry"))w.bounds=new Rect(-1,0,1080,1920);
    if(tapped&&scenario.equals("root-geometry"))current.bounds=new Rect(0,0,1081,1920);
    if(tapped&&scenario.equals("not-focused"))w.focused=false;
-   if(tapped&&scenario.equals("ambiguous-window")){AccessibilityWindowInfo other=new AccessibilityWindowInfo();other.id=6;return List.of(w,other);}
+   if(tapped&&(scenario.equals("ambiguous-window")||scenario.equals("r3-ambiguous-window"))){AccessibilityWindowInfo other=new AccessibilityWindowInfo();other.id=6;return List.of(w,other);}
    if(tapped&&scenario.equals("window-list-incomplete"))return Arrays.asList(w,null);
    if(tapped&&scenario.equals("deadline"))time=100000;
    if(tapped&&scenario.equals("regressed-clock"))time=1;
@@ -750,7 +888,7 @@ public final class AppsProbe {
   if(scenario.startsWith("snapshot:")){
    scenario=scenario.substring(9);tapped=true;time=12000;
    AppsWindowSnapshot snapshot=p.readInitialOfferAppsWindow(100000,true);
-   System.out.println("SNAPSHOT_STATUS="+snapshot.status);return;
+   System.out.println("SNAPSHOT_STATUS="+snapshot.status+";reason="+scalar(snapshot,"failureReason")+";active="+scalar(snapshot,"activeWindows")+";headers="+scalar(snapshot,"headers")+";scrolls="+scalar(snapshot,"scrolls"));return;
   }
   p.captureInitialOfferPreAppsWindow();
   tapped=true;time=10063;p.actions.add("Clicked exact visible system Settings control: Apps");
@@ -766,6 +904,10 @@ public final class AppsProbe {
   assertTrue("bounded deadline",p.appsWindowGate.readyAt<p.appsWindowGate.deadline);
   if(scenario.equals("actual-timeline"))assertTrue("waited past incomplete AX result",p.appsWindowGate.readyAt>=12000);
   if(scenario.equals("special-access"))assertTrue("real actionable target",p.appsWindowGate.ready.kind.equals("special-access"));
+  if(scenario.equals("r3-captured")||scenario.equals("r3-title-child")){
+   assertTrue("unchanged first scroll match",p.appsWindowGate.ready.candidate.equals(firstScrollable(p.instrumentation.a.current).bounds));
+   assertTrue("exact outer raw bounds",p.appsWindowGate.ready.candidate.equals(new Rect(0,63,1080,1857)));
+  }
   System.out.println("PASS;SCROLL_INPUTS=0;polls="+p.appsWindowGate.polls+";readyAt="+p.appsWindowGate.readyAt);
  }
 }
@@ -790,6 +932,34 @@ public final class AppsProbe {
     def test_complete_unique_actionable_special_access_can_replace_scroll_readiness(self):
         result = self.probe("special-access")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_captured_r3_owned_nested_body_and_logical_title_are_ready(self):
+        self.assertEqual(self.captured_node_count, 47)
+        for scenario in ("r3-captured", "r3-title-child"):
+            with self.subTest(scenario=scenario):
+                result = self.probe(scenario)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("PASS;SCROLL_INPUTS=0", result.stdout)
+
+    def test_captured_r3_topology_variants_fail_before_acquisition_returns(self):
+        self.assertEqual(self.probe("r3-captured").returncode, 0)
+        for scenario in ("r3-wrong-outer-class", "r3-wrong-outer-resource", "r3-wrong-inner-class",
+                         "r3-wrong-inner-resource", "r3-sibling-inner", "r3-sibling-header", "r3-third-scroll",
+                         "r3-missing-inner", "r3-disabled-outer", "r3-hidden-inner", "r3-clipped-outer",
+                         "r3-inner-outside-outer", "r3-header-overlap", "r3-wrong-title", "r3-mixed-title",
+                         "r3-wrong-title-class", "r3-wrong-title-resource", "r3-duplicate-title",
+                         "r3-foreign-inner", "r3-incomplete", "r3-ambiguous-window"):
+            with self.subTest(scenario=scenario):
+                result = self.probe(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("ACQUISITION_RETURNED", result.stdout)
+                self.assertIn("SCROLL_INPUTS=0;actions=1", result.stderr)
+
+    def test_failed_snapshot_distinguishes_active_window_and_topology_ambiguity(self):
+        topology = self.probe("snapshot:r3-wrong-outer-class")
+        self.assertIn("SNAPSHOT_STATUS=ambiguous;reason=scroll-topology;active=1;headers=1;scrolls=2", topology.stdout)
+        windows = self.probe("snapshot:r3-ambiguous-window")
+        self.assertIn("SNAPSHOT_STATUS=ambiguous;reason=active-windows;active=2", windows.stdout)
 
     def test_strict_window_and_complete_dfs_guards_refuse_before_any_scroll(self):
         self.assertEqual(self.probe("actual-timeline").returncode, 0)
