@@ -403,3 +403,18 @@ test("explicit Windows inventory preserves the existing required channels and si
   for (const key of WINDOWS_PLATFORMS) assert.notEqual(inventory({ windows: true, mutate: fixture => { delete fixture.platforms[key]; } }).status, 0);
   for (const asset of WINDOWS_ASSETS) assert.notEqual(inventory({ windows: true, mutate: fixture => { fixture.assets = fixture.assets.filter(value => value !== asset); } }).status, 0, asset);
 });
+
+test("server tests remain mandatory for shipping desktops but do not package a held Windows channel", () => {
+  const server = step(jobs("web-release").release, "Test server");
+  const condition = scalar(server, "if", 8);
+  assert.equal(condition, "matrix.os != 'windows' || vars.YAWF_RELEASE_WINDOWS == 'true'");
+  assert.equal(scalar(server, "working-directory", 8), "server");
+  assert.equal(scalar(server, "run", 8), "npm test");
+  for (const os of ["macos", "linux", "windows"]) {
+    for (const flag of ["", "false", "true"]) {
+      assert.equal(truthy(expression(condition, {
+        matrix: { os }, vars: { YAWF_RELEASE_WINDOWS: flag },
+      })), os !== "windows" || flag === "true", `${os}/${flag}`);
+    }
+  }
+});

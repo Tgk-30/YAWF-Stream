@@ -399,6 +399,8 @@ jobs:
         run: npm test
 
       - name: Test server
+        # CI still tests held Windows; only shipping platforms gate packaging.
+        if: matrix.os != 'windows' || vars.YAWF_RELEASE_WINDOWS == 'true'
         working-directory: server
         run: npm test
 
