@@ -1552,14 +1552,17 @@ export function VideoPlayer({
       activeWebSourceRef.current !== source || optimizationPendingRef.current != null) return;
     lastStallContextRef.current = { position, handoff };
     setServerLeaseExpired(true);
+    recordDiagnostic("player", "server_generation.expired", "warning");
+    const pending = freshStreamRequestRef.current;
+    if (pending?.owner === playbackOwner && pending.source === currentWebviewSourceRef.current) return;
+    if (refreshCurrentSource != null && !automaticStallRecoveryAttemptedRef.current &&
+      pending == null) {
+      void recoverPostStartStall(position, handoff);
+      return;
+    }
     setExternalError(refreshCurrentSource == null
       ? "This stream has expired. Choose another source or close the player."
       : "This stream has expired. Retry to request a fresh stream, or choose another source.");
-    recordDiagnostic("player", "server_generation.expired", "warning");
-    if (refreshCurrentSource != null && !automaticStallRecoveryAttemptedRef.current &&
-      freshStreamRequestRef.current == null) {
-      void recoverPostStartStall(position, handoff);
-    }
   }, [playbackOwner, recoverPostStartStall, refreshCurrentSource]);
 
   // State is scoped below for render-time safety. Reset it too, so a completed
@@ -5865,7 +5868,7 @@ function WebviewPlayer({
       const returnedPlayback = foregroundPlaybackRef.current;
       const retainsReturnedPlay = returnedPlayback?.video === video && returnedPlayback.source === url &&
         playbackSourceRef.current === url && returnedPlayback.play && returnedPlayback.returnedPosition != null;
-      if (!retainsReturnedPlay && video.error == null && !video.ended && !suspendedRef.current &&
+      if (!retainsReturnedPlay && !terminalRecoveryOwns(video) && video.error == null && !video.ended && !suspendedRef.current &&
           !documentSuspendedRef.current && document.visibilityState !== "hidden" &&
           backgroundPauseVideoRef.current !== video && !recoveryClockWasReset(video) &&
           !video.seeking && !rendererSeekingRef.current &&
@@ -6214,6 +6217,11 @@ function WebviewPlayer({
       if (!owns()) return;
       stop();
       const snapshot = captureRecoverySnapshot(video);
+      terminalRecoveryVideoRef.current = video;
+      terminalRecoverySourceRef.current = sourceIdentity;
+      terminalRecoveryStateRef.current = snapshot.state;
+      stallWatchdogRef.current?.stop();
+      if (!video.paused) video.pause();
       leaseExpiredCallbackRef.current(url, snapshot.position, snapshot.state);
     };
     const renew = async () => {

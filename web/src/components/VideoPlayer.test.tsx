@@ -14037,13 +14037,13 @@ describe("server generation HEAD retention", () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>).mockReturnValue("probably");
   }
-  it("automatically resolves expiry and keeps manual Retry from restoring an old URL", async () => {
+  it("reports failed automatic expiry resolution and keeps manual Retry from restoring an old URL", async () => {
     setupNative();
     let heads = 0;
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
       init?.method === "HEAD" ? new Response(null, { status: ++heads === 1 ? 200 : 404 }) : new Response(manifest));
     vi.stubGlobal("fetch", fetcher);
-    const refresh = vi.fn(async () => {});
+    const refresh = vi.fn(async () => { throw new Error("Synthetic fresh resolution failure"); });
     render(<VideoPlayer url={master} engine="webview-hls-transcode" timelineOffsetSeconds={46} title="Lease" serverOptimized={optimized} refreshCurrentSource={refresh} onClose={() => {}} />);
     await flushLease();
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
@@ -14052,7 +14052,7 @@ describe("server generation HEAD retention", () => {
     fireEvent.canPlay(video);
     fireEvent.pause(video);
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     expect(document.querySelector("video.player-video")).toBeNull();
     expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
@@ -14279,7 +14279,7 @@ describe("server generation HEAD retention", () => {
   it("keeps a committed lease owner through a suspended replacement until HEAD404 reaches fresh Retry", async () => {
     setupNative();
     const head = deferred<Response>();
-    const refresh = vi.fn(async () => {});
+    const refresh = vi.fn(async () => { throw new Error("Synthetic fresh resolution failure"); });
     const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
       init?.method === "HEAD" ? head.promise : Promise.resolve(new Response(manifest)));
     vi.stubGlobal("fetch", fetcher);
@@ -14297,7 +14297,7 @@ describe("server generation HEAD retention", () => {
     expect(committed.isConnected).toBe(true);
     expect(fetcher.mock.calls.find(([, init]) => init?.method === "HEAD")![1]!.signal!.aborted).toBe(false);
     head.resolve(new Response(null, { status: 404 })); await flushLease();
-    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     act(() => scenario.choose(false)); // Abort the never-committed replacement.
     fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
     await flushLease();
@@ -14312,7 +14312,7 @@ describe("server generation HEAD retention", () => {
     const scenario = suspendedReplacement(() => refresh.promise);
     render(<scenario.Scenario />);
     await flushLease();
-    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
     act(() => { startTransition(() => scenario.choose(true)); });
     await flushLease();
     expect(scenario.speculativeRenders()).toBeGreaterThan(0);
@@ -14391,7 +14391,7 @@ describe("server generation HEAD retention", () => {
   });
   it("keeps the committed expiry callback through an aborted engine-only transition on the reused child", async () => {
     setupNative();
-    const head = deferred<Response>(); const refresh = vi.fn(async () => {});
+    const head = deferred<Response>(); const refresh = vi.fn(async () => { throw new Error("Synthetic fresh resolution failure"); });
     const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
       init?.method === "HEAD" ? head.promise : Promise.resolve(new Response(manifest)));
     vi.stubGlobal("fetch", fetcher);
@@ -14407,7 +14407,7 @@ describe("server generation HEAD retention", () => {
     expect(video.src).toBe(master);
     expect(fetcher.mock.calls.find(([, init]) => init?.method === "HEAD")![1]!.signal!.aborted).toBe(false);
     head.resolve(new Response(null, { status: 404 })); await flushLease();
-    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     act(() => scenario.choose(false));
     fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flushLease();
     expect(refresh).toHaveBeenCalledWith(8.25, expect.objectContaining({ paused: true }));
@@ -14418,14 +14418,14 @@ describe("server generation HEAD retention", () => {
     const head = deferred<Response>();
     vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
       init?.method === "HEAD" ? head.promise : Promise.resolve(new Response(manifest))));
-    const scenario = suspendedReplacement(async () => {}, true, false);
+    const scenario = suspendedReplacement(async () => { throw new Error("Synthetic fresh resolution failure"); }, true, false);
     render(<scenario.Scenario />); await flushLease();
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
     fireEvent.canPlay(video); fireEvent.pause(video);
     act(() => scenario.choose(true)); await flushLease();
     expect(document.querySelector("video.player-video")).toBe(video);
     head.resolve(new Response(null, { status: 404 })); await flushLease();
-    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
   });
 
@@ -15447,41 +15447,135 @@ describe("mobile background playback lifecycle", () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 
-  it.each([[404, true], [403, false]] as const)("[resume-lease] automatically replaces expired %s generation preserving paused=%s exact handoff", async (status, paused) => {
-    layout(true);
-    const fixture = leaseFetch(status);
-    const pending = deferred<void>();
-    const refresh = vi.fn((_position: number, _state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => pending.promise);
-    const props = { title: "Resume lease", serverOptimized: optimized, refreshCurrentSource: refresh, onClose: () => {} };
+  async function expiredReader93(status: 403 | 404, paused: boolean, foreground = false) {
+    layout(true); const fixture = leaseFetch(status), pending = deferred<void>();
+    const refresh = vi.fn((_position: number, _state: PlaybackHandoffState) => pending.promise);
+    const ended = vi.fn();
+    const props = { title: "Resume lease", serverOptimized: optimized, refreshCurrentSource: refresh, onEnded: ended, onClose: () => {} };
     const view = render(<VideoPlayer {...props} url={master} engine="webview-hls-transcode" timelineOffsetSeconds={46} />);
     await flush();
     const old = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(old, {
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+      duration: { configurable: true, value: 674 },
+    });
     const state = mediaState(old, paused);
+    vi.mocked(old.pause).mockImplementation(() => {
+      if (!state.paused) { state.paused = true; fireEvent.pause(old); }
+    });
+    vi.mocked(old.play).mockImplementation(() => {
+      state.paused = false; fireEvent.play(old); fireEvent.playing(old); return Promise.resolve();
+    });
     const initialPlayCalls = vi.mocked(old.play).mock.calls.length;
     old.currentTime = 7.25; old.volume = 0.4; old.muted = true; old.playbackRate = 1.25;
+    if (foreground) {
+      if (!paused) { fireEvent.play(old); fireEvent.playing(old); }
+      expect(screen.getByRole("button", { name: paused ? "Play" : "Pause" })).toBeVisible();
+      fixture.expire();
+      if (!paused) {
+        for (let i = 0; i < 3; i += 1) {
+          await act(async () => { await vi.advanceTimersByTimeAsync(9_000); });
+          old.currentTime += 1; fireEvent.timeUpdate(old);
+        }
+        await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      } else await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      await flush();
+    } else await sleepPage(fixture.expire);
+    const publish = async (hls = false) => {
+      const [position, handoff] = refresh.mock.calls[0]!;
+      pending.resolve(); await flush();
+      view.rerender(<VideoPlayer {...props} url={hls
+        ? "https://server.example/api/stream/fresh-expiry93/index.m3u8?quality=480p" : "https://x/fresh.mp4"}
+        sourceRevision={2} engine={hls ? "webview-hls-transcode" : "webview-direct"}
+        startPositionSeconds={position} initialHandoffState={handoff} />);
+      await flush();
+      const fresh = document.querySelector("video.player-video") as HTMLVideoElement | null;
+      return { fresh, handoff };
+    };
+    const ready = async (fresh: HTMLVideoElement) => {
+      const freshPlayCalls = vi.mocked(fresh.play).mock.calls.length;
+      state.paused = true; fresh.currentTime = 0;
+      Object.defineProperties(fresh, {
+        currentSrc: { configurable: true, value: fresh.src }, error: { configurable: true, value: null },
+        duration: { configurable: true, value: 720 }, readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      });
+      fireEvent.loadStart(fresh); fireEvent.loadedMetadata(fresh); fireEvent.seeked(fresh); fireEvent.canPlay(fresh);
+      await flush(); return freshPlayCalls;
+    };
+    return { fixture, pending, refresh, props, view, old, state, initialPlayCalls, publish, ready, ended };
+  }
+
+  it.each([[403, false], [403, true], [404, false], [404, true]] as const)(
+    "[expiry-reader93] HEAD%s retains the activated reader and exact paused=%s handoff", async (status, paused) => {
+      const f = await expiredReader93(status, paused);
+      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
+      expect(document.querySelector("video.player-video")).toBe(f.old);
+      expect(f.old.isConnected).toBe(true); expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
+      expect(f.old.play).toHaveBeenCalledTimes(f.initialPlayCalls);
+      // Old generation callbacks must not spend another recovery or complete the item.
+      fireMediaError(f.old, 2); fireEvent.waiting(f.old); fireEvent.ended(f.old);
+      act(() => { window.dispatchEvent(new Event("pageshow")); window.dispatchEvent(new Event("pageshow")); });
+      await flush(); expect(f.refresh).toHaveBeenCalledTimes(1); expect(f.ended).not.toHaveBeenCalled();
+      expect(document.querySelector("video.player-video")).toBe(f.old); expect(screen.queryByRole("alert")).toBeNull();
+      const { fresh } = await f.publish();
+      expect(fresh).toBe(f.old); expect(fresh!.src).toBe("https://x/fresh.mp4");
+      const playCalls = await f.ready(fresh!);
+      expect(fresh!.currentTime).toBe(53.25); expect(fresh!.volume).toBe(0.4);
+      expect(fresh!.muted).toBe(true); expect(fresh!.playbackRate).toBe(1.25);
+      expect(fresh!.play).toHaveBeenCalledTimes(playCalls + (paused ? 0 : 1));
+      expect(f.state.paused).toBe(paused); expect(screen.getByRole("button", { name: paused ? "Play" : "Pause" })).toBeVisible();
+      expect(screen.queryByRole("alert")).toBeNull(); expect(f.ended).not.toHaveBeenCalled();
+      expect(f.fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+    },
+  );
+  it.each([false, true])("[expiry-reader93] latest explicit paused=%s updates the deferred handoff without playing the expired decoder", async paused => {
+    const f = await expiredReader93(404, !paused);
+    expect(document.querySelector("video.player-video")).toBe(f.old);
+    const calls = vi.mocked(f.old.play).mock.calls.length;
+    fireEvent.keyDown(window, { key: " ", code: "Space" }); await flush();
+    expect(f.refresh.mock.calls[0]![1].paused).toBe(paused);
+    expect(f.old.play).toHaveBeenCalledTimes(calls); expect(f.state.paused).toBe(true);
+    const { fresh } = await f.publish(); expect(fresh).toBe(f.old);
+    await f.ready(fresh!); expect(f.state.paused).toBe(paused);
+    expect(fresh!.currentTime).toBe(53.25); expect(f.refresh).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: paused ? "Play" : "Pause" })).toBeVisible();
+  });
+  it.each([false, true])("[expiry-reader93] foreground expiry keeps owned paused=%s despite its internal pause event", async paused => {
+    const f = await expiredReader93(404, paused, true), position = paused ? 53.25 : 56.25;
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(position, expect.objectContaining({ paused }));
+    expect(document.querySelector("video.player-video")).toBe(f.old);
+    fireEvent.pointerMove(f.old.closest(".webview-player")!); // Reveal normally hidden chrome without changing playback intent.
+    expect(screen.getByRole("button", { name: paused ? "Play" : "Pause" })).toBeVisible();
+    fireEvent.keyDown(window, { key: " ", code: "Space" }); await flush();
+    expect(f.refresh.mock.calls[0]![1].paused).toBe(!paused);
+    expect(f.state.paused).toBe(true); // The expired physical decoder remains quarantined.
+    const { fresh } = await f.publish(); expect(fresh).toBe(f.old); await f.ready(fresh!);
+    expect(fresh!.currentTime).toBe(position); expect(f.state.paused).toBe(!paused);
+    expect(screen.getByRole("button", { name: paused ? "Pause" : "Play" })).toBeVisible();
+    expect(f.refresh).toHaveBeenCalledTimes(1); expect(screen.queryByRole("alert")).toBeNull();
+  });
+  it("[expiry-reader93] failed automatic resolution exposes fresh Retry without reviving the expired URL", async () => {
+    const f = await expiredReader93(403, false);
+    f.pending.reject(new Error("Synthetic fresh resolution failure")); await flush();
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
+    expect(document.querySelector("video.player-video")).toBeNull(); expect(f.refresh).toHaveBeenCalledTimes(1);
+    expect(f.fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+  it("[expiry-reader93] unavailable automatic resolution stays terminal without old-URL Retry", async () => {
+    layout(true); const fixture = leaseFetch(404);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="No expiry resolver" serverOptimized={optimized} onClose={() => {}} />);
+    await flush(); mediaState(document.querySelector("video.player-video") as HTMLVideoElement, true);
     await sleepPage(fixture.expire);
-    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
-    expect(old.play).toHaveBeenCalledTimes(initialPlayCalls);
-    expect(document.querySelector("video.player-video")).toBeNull();
-    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
-    act(() => { window.dispatchEvent(new Event("pageshow")); window.dispatchEvent(new Event("pageshow")); });
-    await flush(); expect(refresh).toHaveBeenCalledTimes(1);
-    const handoff = refresh.mock.calls[0]![1];
-    view.rerender(<VideoPlayer {...props} url="https://x/fresh.mp4" sourceRevision={2} startPositionSeconds={53.25} initialHandoffState={handoff} />);
-    pending.resolve(); await flush();
-    const fresh = document.querySelector("video.player-video") as HTMLVideoElement;
-    expect(fresh).not.toBe(old); expect(fresh.src).toBe("https://x/fresh.mp4");
-    const freshPlayCalls = vi.mocked(fresh.play).mock.calls.length;
-    Object.defineProperties(fresh, {
-      duration: { configurable: true, value: 720 },
-      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
-    });
-    fireEvent.loadedMetadata(fresh); fireEvent.seeked(fresh);
-    expect(fresh.currentTime).toBe(53.25);
-    expect(fresh.volume).toBe(0.4); expect(fresh.muted).toBe(true); expect(fresh.playbackRate).toBe(1.25);
-    expect(fresh.play).toHaveBeenCalledTimes(freshPlayCalls + (paused ? 0 : 1));
-    expect(screen.queryByRole("alert")).toBeNull(); expect(state.paused).toBe(paused);
-    expect(fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(document.querySelector("video.player-video")).toBeNull(); expect(screen.queryByRole("button", { name: "Retry playback" })).toBeNull();
+  });
+  it("[expiry-reader93] an exhausted automatic budget exposes Retry instead of another renewal", async () => {
+    const f = await expiredReader93(404, true); await f.publish(true);
+    expect(f.refresh).toHaveBeenCalledTimes(1); expect(document.querySelector("video.player-video")).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
   });
 
   async function foregroundPipeline(replacement: boolean, paused = false, pendingSeek = false, touch = true, readyOnMount = true, hideReplacement = true, remoteExternal = false) {
@@ -15976,7 +16070,8 @@ describe("mobile background playback lifecycle", () => {
     await sleepPage(fixture.expire);
     expect(refresh).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(FRESH_STREAM_RESOLUTION_TIMEOUT_MS - 1); });
-    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
@@ -16018,11 +16113,12 @@ describe("mobile background playback lifecycle", () => {
     // The watchdog and second HEAD share the deadline; both must use one resolver.
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect(document.querySelector("video.player-video")).toBeNull();
-    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    expect(document.querySelector("video.player-video")).toBeNull();
   });
 
   it("[resume-lease] keeps 401 unauthorized handling separate from expired-generation recovery", async () => {
