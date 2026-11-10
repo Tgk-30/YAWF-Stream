@@ -18231,6 +18231,30 @@ describe("automatic starvation95 adaptation", () => {
     expect(p.request).toHaveBeenCalledTimes(1);
   });
 
+  it("[handoff96] a seekable wrong frame cannot confirm or replay the retained automatic target", async () => {
+    const p = await automaticHandoff96(); p.load(); p.readinessWhileSeeking();
+    p.state.range = [0, 20]; p.state.time = 1; p.confirm(); await settle();
+    expect(p.attempts).toEqual([]); expect(p.state.paused).toBe(true);
+    expect(screen.getByText("Synchronizing playback…")).toBeVisible();
+    p.state.time = 3.5; p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    expect(p.attempts).toEqual([{ retained: true, time: 3.5, seeking: false }]);
+    expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[handoff96] old-resource readiness cannot start the retained reader before its new source load is admitted", async () => {
+    const p = await automaticHandoff96();
+    p.state.time = 3.5; p.state.seeking = false; p.state.range = [0, 20];
+    p.state.ready = HTMLMediaElement.HAVE_CURRENT_DATA;
+    fireEvent.loadedData(p.replacement); fireEvent.canPlay(p.replacement); p.confirm(); await settle();
+    expect(p.attempts).toEqual([]);
+    expect(screen.getByText("Synchronizing playback…")).toBeVisible();
+    p.load(); p.confirm(); await settle();
+    expect(p.replacement).toBe(p.video);
+    expect(p.attempts).toEqual([{ retained: true, time: 3.5, seeking: false }]);
+    expect(p.state.paused).toBe(false);
+  });
+
   it("[handoff96] rejects a delayed internal pause event after the exact retained reader has started", async () => {
     const p = await automaticHandoff96(); p.load();
     // WebKit can begin decoding before our exact seek. Its internal pause task
