@@ -67,6 +67,9 @@ public final class RuntimeOtaFlowTest {
     private static final Pattern VERSION = Pattern.compile("\\d+\\.\\d+\\.\\d+");
     private static final String AUTOMATIC_OTA_MODE = "automatic-initial-cancel-due-resume";
     private static final String AUTOMATIC_EVIDENCE_SUBDIR = "automatic-public-ota-flow";
+    private static final String PUBLIC88_TO96_OFFER_PROFILE =
+            "public88-to96-initial-offer-native-install-v1";
+    private static final String PUBLIC88_TO96_OFFER_EVIDENCE = "public88-to96-initial-offer";
     private static final String FIXED42_AUTOMATIC_OTA_PROFILE =
             "public-fixed42-to59-initial-cancel-due-resume-v1";
     private static final String FIXED42_EVIDENCE_SUBDIR = "fixed42-automatic-public-ota-flow";
@@ -261,6 +264,9 @@ public final class RuntimeOtaFlowTest {
     private int productInstallSelections;
     private int systemUpdateSelections;
     private int systemOpenSelections;
+    private int initialOfferEnableSelections;
+    private boolean initialOfferObserved;
+    private boolean weeklyOnAtInitialOffer;
 
     @Test
     public void updateOfficialPublicBaselineThroughNativeUi() throws Throwable {
@@ -268,7 +274,8 @@ public final class RuntimeOtaFlowTest {
         device = UiDevice.getInstance(instrumentation);
         Bundle arguments = InstrumentationRegistry.getArguments();
         otaMode = arguments.getString("otaMode", "strict");
-        String expectedSubdir = isFixed42To74AutomaticMode()
+        String expectedSubdir = isPublic88To96OfferMode()
+                ? PUBLIC88_TO96_OFFER_EVIDENCE : isFixed42To74AutomaticMode()
                 ? FIXED42_TO74_EVIDENCE_SUBDIR
                 : isFixed42To61AutomaticMode()
                 ? FIXED42_TO61_EVIDENCE_SUBDIR
@@ -284,7 +291,9 @@ public final class RuntimeOtaFlowTest {
         String subdir = arguments.getString("evidenceSubdir", expectedSubdir);
         assertTrue("Unsafe evidence subdirectory", SAFE_SUBDIR.matcher(subdir).matches());
         assertEquals("Unexpected evidence subdirectory", expectedSubdir, subdir);
-        if (isAutomaticMode()) {
+        if (isPublic88To96OfferMode()) {
+            admitPublic88To96InitialOfferIdentity(arguments);
+        } else if (isAutomaticMode()) {
             admitAutomaticTargetIdentity(arguments);
         } else {
             assertTrue(
@@ -315,7 +324,9 @@ public final class RuntimeOtaFlowTest {
 
         Throwable primary = null;
         try {
-            if (isAutomaticMode()) {
+            if (isPublic88To96OfferMode()) {
+                runPublic88To96InitialOfferFlow();
+            } else if (isAutomaticMode()) {
                 runAutomaticFlow();
             } else {
                 runHistoricalFlow();
@@ -330,7 +341,7 @@ public final class RuntimeOtaFlowTest {
         }
 
         try {
-            if (isAutomaticMode()) {
+            if (isAutomaticMode() || isPublic88To96OfferMode()) {
                 cleanupUnknownSourcePermissionThroughVisibleSettings();
             } else {
                 cleanupUnknownSourcePermission();
@@ -353,6 +364,10 @@ public final class RuntimeOtaFlowTest {
 
     private boolean isAutomaticMode() {
         return AUTOMATIC_OTA_MODE.equals(otaMode) || isFixed42AutomaticMode();
+    }
+
+    private boolean isPublic88To96OfferMode() {
+        return PUBLIC88_TO96_OFFER_PROFILE.equals(otaMode);
     }
 
     private boolean isFixed42AutomaticMode() {
@@ -568,6 +583,118 @@ public final class RuntimeOtaFlowTest {
         assertEquals("Fixed42 public release admission was not explicit",
                 "true", arguments.getString("targetPublicRelease", ""));
         targetIdentityAdmitted = true;
+    }
+
+    private void admitPublic88To96InitialOfferIdentity(Bundle arguments) {
+        String[][] exact = {
+                {"otaMode", PUBLIC88_TO96_OFFER_PROFILE},
+                {"runtimeProfile", PUBLIC88_TO96_OFFER_PROFILE},
+                {"evidenceSubdir", PUBLIC88_TO96_OFFER_EVIDENCE},
+                {"baselineVersion", "2.3.88"},
+                {"baselineVersionCode", "2003088"},
+                {"baselineSha256", "932c6e3c73b54b8868a2a77d1faa4085161fa21238ae93d5b7ae9471d6ca5d92"},
+                {"baselineSize", "88673153"},
+                {"baselineSourceRevision", "d045f783bbd7d91d215f713c2f3c919e72fac20b"},
+                {"targetVersion", "2.3.96"},
+                {"targetVersionCode", "2003096"},
+                {"targetApkName", "YAWF.Stream_Android_2.3.96.apk"},
+                {"targetSha256", "e2b76d502b0fa10e90d47fb6158e456567be70c26421f64b106b56dd7c5fc4ef"},
+                {"targetSize", "88710017"},
+                {"targetSourceRevision", "887ae66714d1352e66be203cd837a3de0c12f036"},
+                {"targetManifestSha256", "535234bfa5cd195116b353ab1bf1de0035dee59bf258a819492436acccf8c7f7"},
+                {"targetVerificationSha256", "b97e63be919300d74884dd4eb1b98dfb4fce5ce1911ec3897afebf377f588a2e"},
+                {"targetBuildRun", "42867073313"},
+                {"signerSha256", OtaFlowPolicy.SIGNER_SHA256},
+                {"targetPublicRelease", "true"},
+        };
+        for (String[] entry : exact) {
+            assertEquals("Initial-offer identity " + entry[0] + " mismatch",
+                    entry[1], arguments.getString(entry[0], ""));
+        }
+        admittedBaselineVersion = arguments.getString("baselineVersion", "");
+        admittedBaselineSourceRevision = arguments.getString("baselineSourceRevision", "");
+        admittedTargetVersion = arguments.getString("targetVersion", "");
+        admittedTargetVersionCode = parseLongArgument(arguments, "targetVersionCode");
+        admittedTargetSha256 = arguments.getString("targetSha256", "");
+        admittedTargetSize = parseLongArgument(arguments, "targetSize");
+        admittedTargetSourceRevision = arguments.getString("targetSourceRevision", "");
+        admittedTargetManifestSha256 = arguments.getString("targetManifestSha256", "");
+        admittedTargetVerificationSha256 = arguments.getString("targetVerificationSha256", "");
+        admittedTargetBuildRun = parseLongArgument(arguments, "targetBuildRun");
+        targetIdentityAdmitted = true;
+    }
+
+    private UiObject2 requireInitialOfferSingle(BySelector selector, String label) {
+        assertTrue("Initial-offer selector used outside its admitted profile",
+                isPublic88To96OfferMode());
+        assertNoBindingTerms();
+        assertEquals("Initial-offer product window is not foreground",
+                OtaFlowPolicy.PRODUCT_PACKAGE, device.getCurrentPackageName());
+        List<UiObject2> matches = device.findObjects(selector);
+        assertEquals("Initial-offer control must be unique: " + label, 1, matches.size());
+        return matches.get(0);
+    }
+
+    /** Initial Enable offer only. No cancellation, due/resume or local-data proof. */
+    private void runPublic88To96InitialOfferFlow() throws Exception {
+        assertTrue("Initial-offer flow requires its exact identity admission",
+                isPublic88To96OfferMode() && targetIdentityAdmitted);
+        assertNoBindingTerms();
+        device.wakeUp();
+        launchProductFromVisibleLauncher("public88 initial-offer baseline");
+        waitFor(nativeDialogText("Enable Android update checks?"), UI_WAIT_MS,
+                "initial native update consent");
+        requireInitialOfferSingle(nativeDialogText("Enable Android update checks?"), "consent");
+        BySelector enable = By.res("android", "button1")
+                .pkg(OtaFlowPolicy.PRODUCT_PACKAGE).clazz("android.widget.Button")
+                .text("Enable").clickable(true).enabled(true);
+        requireInitialOfferSingle(enable, "Enable");
+        capture("initial-offer-consent");
+        initialOfferEnableSelections++;
+        assertEquals("Initial Enable must be selected exactly once", 1, initialOfferEnableSelections);
+        click(enable, "initial-offer Enable", SHORT_WAIT_MS, true);
+
+        String title = "YAWF Stream " + admittedTargetVersion + " is available";
+        String message = "Download the signed Android update now? Android will ask again before installing it.";
+        waitFor(nativeDialogText(title), UI_WAIT_MS, "exact initial public target offer");
+        requireInitialOfferSingle(nativeDialogText(title), "target offer title");
+        requireInitialOfferSingle(nativeDialogText(message), "target offer message");
+        UiObject2 weekly = requireInitialOfferSingle(
+                By.text("Check automatically each week").pkg(OtaFlowPolicy.PRODUCT_PACKAGE)
+                        .clazz("android.widget.CheckBox"), "initial-offer weekly checkbox");
+        assertTrue("Initial Enable did not enable weekly checks", weekly.isChecked());
+        requireInitialOfferSingle(nativeProductButton(OtaFlowPolicy.UPDATE)
+                .clazz("android.widget.Button").clickable(true).enabled(true), "Update");
+        initialOfferObserved = true;
+        weeklyOnAtInitialOffer = true;
+        assertEquals("Initial-offer case forbids manual discovery", 0, preOfferManualDiscoveries);
+        capture("initial-public-target-offer");
+        productUpdateSelections++;
+        assertEquals("Product Update must be selected exactly once", 1, productUpdateSelections);
+        click(nativeProductButton(OtaFlowPolicy.UPDATE), "initial-offer Update", SHORT_WAIT_MS, true);
+
+        String readyMessage = "YAWF Stream " + admittedTargetVersion
+                + " passed all checks. Android will show the system installer.";
+        waitFor(nativeDialogText("Update ready to install"), DOWNLOAD_WAIT_MS,
+                "verified initial-offer update ready");
+        requireInitialOfferSingle(nativeDialogText("Update ready to install"), "ready title");
+        requireInitialOfferSingle(nativeDialogText(readyMessage), "ready message");
+        requireInitialOfferSingle(nativeProductButton(OtaFlowPolicy.INSTALL)
+                .clazz("android.widget.Button").clickable(true).enabled(true), "Install");
+        capture("initial-offer-ready");
+        productInstallSelections++;
+        assertEquals("Product Install must be selected exactly once", 1, productInstallSelections);
+        click(nativeProductButton(OtaFlowPolicy.INSTALL), "initial-offer Install", SHORT_WAIT_MS, true);
+        enterUnknownSourcePermission();
+        assertFalse("Initial-offer case forbids legacy manual reconsent", legacyManualReconsentUsed);
+        assertEquals("Permission Back must not repeat product Install", 1, productInstallSelections);
+        confirmSystemInstaller();
+        waitFor(By.pkg(OtaFlowPolicy.PRODUCT_PACKAGE), UI_WAIT_MS,
+                "updated product after genuine system Open");
+        assertEquals("Updated product must own the foreground window",
+                OtaFlowPolicy.PRODUCT_PACKAGE, device.getCurrentPackageName());
+        updatedProductObserved = true;
+        capture("initial-offer-updated-product");
     }
 
     private void runAutomaticFlow() throws Exception {
@@ -4772,6 +4899,26 @@ public final class RuntimeOtaFlowTest {
         writeBounded(new File(evidenceDir, "actions.txt"), output.toString(), 64 * 1024);
     }
 
+    private void appendPublic88To96OfferReceipt(JSONObject receipt) throws Exception {
+        receipt.put("runtimeProfile", PUBLIC88_TO96_OFFER_PROFILE);
+        receipt.put("baselineSourceRevision", admittedBaselineSourceRevision);
+        receipt.put("targetSourceRevision", admittedTargetSourceRevision);
+        receipt.put("targetManifestSha256", admittedTargetManifestSha256);
+        receipt.put("targetVerificationSha256", admittedTargetVerificationSha256);
+        receipt.put("targetBuildRun", admittedTargetBuildRun);
+        receipt.put("initialOfferEnableSelections", initialOfferEnableSelections);
+        receipt.put("initialOfferObserved", initialOfferObserved);
+        receipt.put("weeklyOnAtInitialOffer", weeklyOnAtInitialOffer);
+        receipt.put("preOfferManualDiscoveries", preOfferManualDiscoveries);
+        receipt.put("permissionCleanupToggleSelections", permissionCleanupToggleSelections);
+        receipt.put("cancellationProven", false);
+        receipt.put("dueResumeSchedulingProven", false);
+        receipt.put("dataStatePersistenceProven", false);
+        receipt.put("weeklyElapsedSchedulingProven", false);
+        receipt.put("independentColdProcessProof", false);
+        receipt.put("physicalDeviceProof", false);
+    }
+
     private void writeReceipt(String outcome, Throwable failure) throws Exception {
         JSONObject receipt = new JSONObject();
         receipt.put("outcome", outcome);
@@ -4879,6 +5026,9 @@ public final class RuntimeOtaFlowTest {
                 receipt.put("profileNamePostInstallSetTextActions",
                         profileNamePostInstallSetTextActions);
             }
+        }
+        if (isPublic88To96OfferMode()) {
+            appendPublic88To96OfferReceipt(receipt);
         }
         receipt.put("captures", captureIndex);
         receipt.put(

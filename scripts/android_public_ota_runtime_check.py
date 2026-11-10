@@ -43,6 +43,28 @@ HARNESS_CLASS = (
 STRICT_OTA_MODE = "strict"
 LEGACY_MANUAL_RECONSENT_MODE = "legacy-manual-reconsent"
 AUTOMATIC_OTA_MODE = "automatic-initial-cancel-due-resume"
+PUBLIC88_TO96_OFFER_PROFILE = "public88-to96-initial-offer-native-install-v1"
+PUBLIC88_TO96_OFFER_ADMISSION = {
+    "profile": PUBLIC88_TO96_OFFER_PROFILE,
+    "evidenceSubdir": "public88-to96-initial-offer",
+    "otaMode": PUBLIC88_TO96_OFFER_PROFILE,
+    "baselineVersion": "2.3.88",
+    "baselineVersionCode": "2003088",
+    "baselineSha256": "932c6e3c73b54b8868a2a77d1faa4085161fa21238ae93d5b7ae9471d6ca5d92",
+    "baselineSize": "88673153",
+    "baselineSourceRevision": "d045f783bbd7d91d215f713c2f3c919e72fac20b",
+    "targetVersion": "2.3.96",
+    "targetVersionCode": "2003096",
+    "targetApkName": "YAWF.Stream_Android_2.3.96.apk",
+    "targetSha256": "e2b76d502b0fa10e90d47fb6158e456567be70c26421f64b106b56dd7c5fc4ef",
+    "targetSize": "88710017",
+    "signerSha256": "233ff9e26de50c5a560417e2c33956845422ea262168bffffadf4758301fc72a",
+    "targetSourceRevision": "887ae66714d1352e66be203cd837a3de0c12f036",
+    "targetManifestSha256": "535234bfa5cd195116b353ab1bf1de0035dee59bf258a819492436acccf8c7f7",
+    "targetVerificationSha256": "b97e63be919300d74884dd4eb1b98dfb4fce5ce1911ec3897afebf377f588a2e",
+    "targetBuildRun": "42867073313",
+    "targetPublicRelease": "true",
+}
 FIXED42_AUTOMATIC_OTA_PROFILE = "public-fixed42-to59-initial-cancel-due-resume-v1"
 FIXED42_EVIDENCE_SUBDIR = "fixed42-automatic-public-ota-flow"
 FIXED42_TO61_AUTOMATIC_OTA_PROFILE = (
@@ -462,6 +484,8 @@ def load_automatic_binding(path: Path) -> RuntimeBinding:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RuntimeGateError("Automatic admission file is invalid JSON") from error
+    if isinstance(value, dict) and value.get("profile") == PUBLIC88_TO96_OFFER_PROFILE:
+        return load_public88_to96_offer_binding(value)
     if isinstance(value, dict) and value.get("profile") == FIXED42_AUTOMATIC_OTA_PROFILE:
         return _load_fixed42_automatic_binding(value)
     if isinstance(value, dict) and value.get("profile") == FIXED42_TO61_AUTOMATIC_OTA_PROFILE:
@@ -562,6 +586,78 @@ def load_automatic_binding(path: Path) -> RuntimeBinding:
         target_manifest_sha256=target_manifest_sha256,
         target_verification_sha256=target_verification_sha256,
     )
+
+
+def load_public88_to96_offer_binding(value: object) -> RuntimeBinding:
+    """Separate fixed initial-offer case, not cancellation or due/resume proof."""
+    if (
+        not isinstance(value, dict)
+        or set(value) != set(PUBLIC88_TO96_OFFER_ADMISSION)
+        or any(type(value[key]) is not str or value[key] != expected
+               for key, expected in PUBLIC88_TO96_OFFER_ADMISSION.items())
+    ):
+        raise RuntimeGateError("Public88-to96 initial-offer admission is not exact")
+    return RuntimeBinding(
+        automatic=True,
+        ota_mode=PUBLIC88_TO96_OFFER_PROFILE,
+        evidence_subdir=value["evidenceSubdir"],
+        baseline_version=value["baselineVersion"],
+        baseline_code=int(value["baselineVersionCode"]),
+        baseline_sha256=value["baselineSha256"],
+        baseline_size=int(value["baselineSize"]),
+        baseline_source=value["baselineSourceRevision"],
+        baseline_tag="android-v2.3.88",
+        baseline_apk_name="YAWF.Stream_Android_2.3.88.apk",
+        target_version=value["targetVersion"],
+        target_code=int(value["targetVersionCode"]),
+        target_sha256=value["targetSha256"],
+        target_size=int(value["targetSize"]),
+        target_source=value["targetSourceRevision"],
+        target_build_run=int(value["targetBuildRun"]),
+        target_tag="android-v2.3.96",
+        target_apk_name=value["targetApkName"],
+        target_verification_name="Android_2.3.96_verification.json",
+        signer_pin=value["signerSha256"],
+        target_manifest_sha256=value["targetManifestSha256"],
+        target_verification_sha256=value["targetVerificationSha256"],
+        profile=PUBLIC88_TO96_OFFER_PROFILE,
+    )
+
+
+def is_public88_to96_offer(binding: RuntimeBinding | None) -> bool:
+    return binding is not None and binding.profile == PUBLIC88_TO96_OFFER_PROFILE
+
+
+def require_public88_to96_ci_emulator(serial: str, environment) -> None:
+    expected = {
+        "CI": "true",
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_REPOSITORY": "Tgk-30/YAWF-Stream",
+        "GITHUB_ACTOR": "Tgk-30",
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "YAWF_PUBLIC88_TO96_OWNED_FRESH_EMULATOR": "true",
+    }
+    if (
+        serial != "emulator-5554"
+        or any(environment.get(key) != wanted for key, wanted in expected.items())
+        or re.fullmatch(r"[1-9][0-9]*", environment.get("GITHUB_RUN_ID", "")) is None
+        or re.fullmatch(r"refs/heads/[^\s]+", environment.get("GITHUB_REF", "")) is None
+    ):
+        raise RuntimeGateError("Initial-offer runtime requires its fresh owned CI emulator")
+
+
+def validate_public88_to96_evidence_names(names: Sequence[str]) -> None:
+    labels = (
+        "initial-offer-consent", "initial-public-target-offer", "initial-offer-ready",
+        "unknown-source-before", "unknown-source-after", "installer-confirm",
+        "installer-success", "initial-offer-updated-product", "automatic-permission-cleanup-off",
+    )
+    expected = {"actions.txt", "instrumentation-receipt.json"} | {
+        f"{index:02d}-{label}.{extension}"
+        for index, label in enumerate(labels, 1) for extension in ("png", "xml")
+    }
+    if len(names) != len(expected) or set(names) != expected:
+        raise RuntimeGateError("Initial-offer native evidence names are incomplete or unexpected")
 
 
 def require_successful_observation(
@@ -1597,6 +1693,9 @@ def validate_receipt(
     ota_mode: str = STRICT_OTA_MODE,
     binding: RuntimeBinding = LEGACY_BINDING,
 ) -> None:
+    if is_public88_to96_offer(binding):
+        validate_public88_to96_offer_receipt(value, ota_mode, binding)
+        return
     expected = {
         "outcome": "passed",
         "persistentUiAutomationSession": True,
@@ -1792,6 +1891,63 @@ def validate_receipt(
         raise RuntimeGateError("Instrumentation receipt retained a failure")
 
 
+def validate_public88_to96_offer_receipt(
+    value: dict[str, object], ota_mode: str, binding: RuntimeBinding
+) -> None:
+    if ota_mode != PUBLIC88_TO96_OFFER_PROFILE or binding != load_public88_to96_offer_binding(
+        PUBLIC88_TO96_OFFER_ADMISSION
+    ):
+        raise RuntimeGateError("Initial-offer receipt requires the exact separate public binding")
+    expected: dict[str, object] = {
+        "outcome": "passed",
+        "persistentUiAutomationSession": True,
+        "productPackage": PRODUCT_PACKAGE,
+        "runtimeProfile": PUBLIC88_TO96_OFFER_PROFILE,
+        "otaMode": PUBLIC88_TO96_OFFER_PROFILE,
+        "baselineVersion": binding.baseline_version,
+        "baselineSourceRevision": binding.baseline_source,
+        "targetVersion": binding.target_version,
+        "targetVersionCode": binding.target_code,
+        "targetSha256": binding.target_sha256,
+        "targetSize": binding.target_size,
+        "targetIdentityAdmitted": True,
+        "targetSourceRevision": binding.target_source,
+        "targetManifestSha256": binding.target_manifest_sha256,
+        "targetVerificationSha256": binding.target_verification_sha256,
+        "targetBuildRun": binding.target_build_run,
+        "initialOfferEnableSelections": 1,
+        "initialOfferObserved": True,
+        "weeklyOnAtInitialOffer": True,
+        "preOfferManualDiscoveries": 0,
+        "productUpdateSelections": 1,
+        "productInstallSelections": 1,
+        "productPermissionPageObserved": True,
+        "permissionEnabledByTest": True,
+        "permissionBackReturnObserved": True,
+        "legacyManualReconsentUsed": False,
+        "systemUpdateSelections": 1,
+        "systemOpenSelections": 1,
+        "installerSuccessObserved": True,
+        "installerOpenObserved": True,
+        "updatedProductObserved": True,
+        "permissionCleanupObserved": True,
+        "permissionCleanupToggleSelections": 1,
+        "cancellationProven": False,
+        "dueResumeSchedulingProven": False,
+        "dataStatePersistenceProven": False,
+        "weeklyElapsedSchedulingProven": False,
+        "independentColdProcessProof": False,
+        "physicalDeviceProof": False,
+        "captures": 9,
+        "failure": None,
+    }
+    if not isinstance(value, dict) or set(value) != set(expected):
+        raise RuntimeGateError("Initial-offer instrumentation receipt keys are not exact")
+    for key, wanted in expected.items():
+        if type(value[key]) is not type(wanted) or value[key] != wanted:
+            raise RuntimeGateError(f"Initial-offer instrumentation receipt {key} mismatch")
+
+
 def automatic_instrumentation_arguments(binding: RuntimeBinding) -> list[str]:
     if not binding.automatic:
         raise RuntimeGateError("Automatic instrumentation requires an automatic binding")
@@ -1824,6 +1980,11 @@ def automatic_instrumentation_arguments(binding: RuntimeBinding) -> list[str]:
             "-e", "baselineVerificationSha256", binding.baseline_verification_sha256 or "",
             "-e", "baselineBuildRun", str(binding.baseline_build_run or 0),
             "-e", "updaterSourceSha256", binding.updater_source_sha256 or "",
+        ])
+    if is_public88_to96_offer(binding):
+        arguments.extend([
+            "-e", "runtimeProfile", PUBLIC88_TO96_OFFER_PROFILE,
+            "-e", "baselineSourceRevision", binding.baseline_source,
         ])
     arguments.append(HARNESS_INSTRUMENTATION)
     return arguments
@@ -1865,6 +2026,23 @@ class AdmittedAdb:
 
     def _assert_fixed42_install_inputs_are_not_target(self) -> None:
         binding = self.automatic_binding
+        if is_public88_to96_offer(binding):
+            assert binding is not None
+            for label, candidate in (
+                ("baseline", self.baseline_apk),
+                ("harness app", self.harness_app),
+                ("harness test", self.harness_test),
+            ):
+                try:
+                    aliases = candidate == self.target_apk or candidate.samefile(self.target_apk)
+                    digest = sha256_file(candidate)
+                except OSError as error:
+                    raise RuntimeGateError("Initial-offer install input identity unavailable") from error
+                if aliases or digest == binding.target_sha256:
+                    raise RuntimeGateError(f"Initial-offer {label} aliases the target APK")
+                if label == "baseline" and digest != binding.baseline_sha256:
+                    raise RuntimeGateError("Initial-offer baseline install input identity mismatch")
+            return
         if not is_fixed42_binding(binding):
             return
         assert binding is not None
@@ -2232,6 +2410,8 @@ class OtaRuntimeDriver:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.binding = binding_from_args(args)
+        if is_public88_to96_offer(self.binding):
+            require_public88_to96_ci_emulator(args.serial, os.environ)
         self.ota_mode = self.binding.ota_mode if self.binding.automatic else args.ota_mode
         self.evidence = args.evidence
         self.evidence.mkdir(parents=True, exist_ok=True)
@@ -2483,6 +2663,8 @@ class OtaRuntimeDriver:
             (destination / name).write_bytes(payload)
         if "instrumentation-receipt.json" not in names:
             raise RuntimeGateError("Harness receipt is missing")
+        if is_public88_to96_offer(self.binding):
+            validate_public88_to96_evidence_names(names)
 
     def verify_final(self, baseline: PackageIdentity, baseline_signer: str) -> None:
         final = record_package_identity(self.write, "final-package.txt", self.package_dump())
@@ -2571,6 +2753,16 @@ class OtaRuntimeDriver:
             result_receipt.update({
                 "persistenceProof": "task-relaunch-only",
                 "independentColdProcessProof": False,
+            })
+        if is_public88_to96_offer(self.binding):
+            result_receipt.update({
+                "runtimeProfile": PUBLIC88_TO96_OFFER_PROFILE,
+                "persistenceProof": "not-qualified",
+                "cancellationProven": False,
+                "dueResumeSchedulingProven": False,
+                "dataStatePersistenceProven": False,
+                "weeklyElapsedSchedulingProven": False,
+                "physicalDeviceProof": False,
             })
         if is_fixed42_binding(self.binding):
             result_receipt.update({
