@@ -247,7 +247,7 @@ jobs:
         run: node --test scripts/macos_stapler_workflow.test.mjs
 
       - name: Release channel scope and readiness contracts
-        run: node --test scripts/resolve_release_scope.test.mjs scripts/desktop_release_scope_contract.test.mjs scripts/release_scope_readiness.test.mjs
+        run: node --test scripts/resolve_release_scope.test.mjs scripts/desktop_release_scope_contract.test.mjs scripts/release_scope_readiness.test.mjs scripts/resolve_published_image_manifests.test.mjs
 
       - name: Set up JDK17 for native runtime harness contracts
         uses: actions/setup-java@v4
