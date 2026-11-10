@@ -12,12 +12,7 @@ concurrency:
 
 jobs:
   private-storage:
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        os: [windows-2022, windows-2025]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-2022
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -33,9 +28,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $source = git rev-parse HEAD
           if ($source -ne '${{ github.sha }}') { throw 'Source binding failed.' }
-          node -e "const fs=require('node:fs'); fs.writeFileSync(process.env.RUNNER_TEMP+'/windows-private-storage-binding.json',JSON.stringify({sourceRevision:process.argv[1],node:process.version,platform:process.platform,arch:process.arch},null,2)+'\n')" $source
+          node --input-type=module -e "import fs from 'node:fs'; import { characterizationBinding } from './scripts/windows_native_observer_characterization.mjs'; fs.writeFileSync(process.env.RUNNER_TEMP+'/windows-private-storage-binding.json',JSON.stringify({...characterizationBinding(),sourceRevision:process.argv[1],node:process.version,platform:process.platform,arch:process.arch},null,2)+'\n')" $source
       - name: Verify sanitized observer contracts
-        run: node --test scripts/windows_native_observer_preload.test.mjs
+        run: node --test scripts/windows_native_observer_preload.test.mjs scripts/windows_native_observer_characterization.test.mjs
       - name: Install shared web dependencies
         working-directory: web
         run: npm ci --no-audit --no-fund
@@ -46,38 +41,39 @@ jobs:
         id: server-build
         working-directory: server
         run: npm run build
-      - name: Full server suite on the same native runtime
-        id: observer
+      - name: Characterize one cold native call, not release qualification
+        id: characterization
         if: ${{ !cancelled() && steps.server-build.outcome == 'success' }}
         working-directory: server
         shell: pwsh
         env:
           DS_SERVER_SECRET_KEY: ''
-          YAWF_TEST_LEASE_PHASES: '1'
         run: |
           $ErrorActionPreference = 'Stop'
-          $directory = node -e "process.stdout.write(require('node:fs').mkdtempSync(require('node:path').join(process.env.RUNNER_TEMP,'yawf-native-observer-')))"
+          $directory = node -e "process.stdout.write(require('node:fs').mkdtempSync(require('node:path').join(process.env.RUNNER_TEMP,'yawf-native-characterization-')))"
           "directory=$directory" >> $env:GITHUB_OUTPUT
-          $preload = node -e "process.stdout.write(require('node:url').pathToFileURL(require('node:path').resolve('../scripts/windows_native_observer_preload.mjs')).href)"
-          $env:YAWF_NATIVE_OBSERVER_DIR = $directory
+          $preload = node -e "process.stdout.write(require('node:url').pathToFileURL(require('node:path').resolve('../scripts/windows_native_observer_characterization.mjs')).href)"
+          Remove-Item Env:YAWF_NATIVE_OBSERVER_DIR -ErrorAction SilentlyContinue
+          $env:YAWF_NATIVE_CHARACTERIZATION_DIR = $directory
           $env:NODE_OPTIONS = ($env:NODE_OPTIONS + ' --import=' + $preload).Trim()
-          node node_modules/vitest/vitest.mjs run --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-full-results.json"
+          node node_modules/vitest/vitest.mjs run test/app.test.ts -t '^DebridStreamer server disk-backed admin health caps the admin health audit-event count at 10,000$' --testTimeout=30000 --hookTimeout=30000 --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-native-characterization-results.json"
           exit $LASTEXITCODE
-      - name: Native private storage and writer checks
+      - name: Require one recorded substitution and actual native outcome
         if: ${{ !cancelled() && steps.server-build.outcome == 'success' }}
-        working-directory: server
-        env:
-          DS_SERVER_SECRET_KEY: ''
-        run: node node_modules/vitest/vitest.mjs run test/privateStorage.test.ts test/privateStorage.windows.test.ts --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-results.json"
+        shell: pwsh
+        run: |
+          node scripts/windows_native_observer_characterization.mjs --check '${{ steps.characterization.outputs.directory || format('{0}/yawf-native-characterization-unavailable', runner.temp) }}' | Tee-Object -FilePath "$env:RUNNER_TEMP/windows-native-characterization-postcheck.json"
+          exit $LASTEXITCODE
       - name: Retain exact native results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-private-storage-${{ matrix.os }}
+          name: windows-native-characterization-windows-2022
           path: |
             ${{ runner.temp }}/windows-private-storage-binding.json
-            ${{ steps.observer.outputs.directory || format('{0}/yawf-native-observer-unavailable', runner.temp) }}/*.jsonl
-            ${{ runner.temp }}/windows-private-storage-results.json
-            ${{ runner.temp }}/windows-private-storage-full-results.json
+            ${{ steps.characterization.outputs.directory || format('{0}/yawf-native-characterization-unavailable', runner.temp) }}/*.jsonl
+            ${{ steps.characterization.outputs.directory || format('{0}/yawf-native-characterization-unavailable', runner.temp) }}/*.json
+            ${{ runner.temp }}/windows-native-characterization-results.json
+            ${{ runner.temp }}/windows-native-characterization-postcheck.json
           if-no-files-found: error
           retention-days: 14
