@@ -647,7 +647,7 @@ public final class RuntimeOtaFlowTest {
         requireInitialOfferSingle(nativeDialogText("Enable Android update checks?"), "consent");
         BySelector enable = By.res("android", "button1")
                 .pkg(OtaFlowPolicy.PRODUCT_PACKAGE).clazz("android.widget.Button")
-                .text("Enable").clickable(true).enabled(true);
+                .text("ENABLE").clickable(true).enabled(true);
         requireInitialOfferSingle(enable, "Enable");
         capture("initial-offer-consent");
         initialOfferEnableSelections++;

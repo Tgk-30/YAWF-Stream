@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,14 @@ ROOT = Path(__file__).resolve().parents[1]
 HOST = Path(os.environ.get("YAWF_OFFER_HOST_UNDER_TEST", ROOT / "scripts/android_public_ota_runtime_check.py"))
 JAVA = Path(os.environ.get("YAWF_OFFER_JAVA_UNDER_TEST", ROOT / "scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeOtaFlowTest.java"))
 WORKFLOW = Path(os.environ.get("YAWF_OFFER_WORKFLOW_UNDER_TEST", ROOT / ".github/workflows/android-public88-to96-initial-offer.yml"))
+
+# Public CI run 42894154678, 01-failure.xml SHA256 106ec65fc68be58b282fd48ff76e1bd5d87da2f408a59e630f44fd7074082e74.
+# Only the non-PII native consent Button node is retained.
+CAPTURED_ENABLE_BUTTON_XML = '''<node index="1" text="ENABLE" resource-id="android:id/button1"
+ class="android.widget.Button" package="com.tgk30.debridstreamer" content-desc=""
+ checkable="false" checked="false" clickable="true" enabled="true" focusable="true"
+ focused="false" scrollable="false" long-clickable="false" password="false" selected="false"
+ visible-to-user="true" bounds="[783,1040][978,1166]" drawing-order="4" hint="" display-id="0" />'''
 
 
 def module(name, path):
@@ -349,6 +358,9 @@ class ExtractedNativeFlowTests(unittest.TestCase):
         native_args = dict(host.PUBLIC88_TO96_OFFER_ADMISSION)
         native_args["runtimeProfile"] = native_args.pop("profile")
         bundle = "\n".join(f"  b.put({json.dumps(key)},{json.dumps(value)});" for key, value in native_args.items())
+        captured_button = "\n".join(
+            f"  node.put({json.dumps(key)},{json.dumps(value)});"
+            for key, value in ET.fromstring(CAPTURED_ENABLE_BUTTON_XML).attrib.items())
         probe = r'''
 import java.util.*;
 import java.util.regex.Pattern;
@@ -379,15 +391,39 @@ public final class OfferProbe {
  }
  static class Bundle extends HashMap<String,String> { String getString(String key,String fallback){return getOrDefault(key,fallback);} }
  static final class BySelector {
-  String text; BySelector(String s){text=s;}
-  BySelector pkg(String s){return this;} BySelector clazz(String s){return this;}
+  String text, resource, packageName, className;
+  Boolean clickable, enabled;
+  BySelector(String s){text=s;}
+  BySelector pkg(String s){packageName=s;return this;} BySelector clazz(String s){className=s;return this;}
   BySelector text(String s){text=s;return this;}
-  BySelector clickable(boolean b){return this;} BySelector enabled(boolean b){return this;}
+  BySelector clickable(boolean b){clickable=b;return this;} BySelector enabled(boolean b){enabled=b;return this;}
+  boolean matches(Map<String,String> node){
+   return (text==null||text.equals(node.get("text")))
+    &&(resource==null||resource.equals(node.get("resource-id")))
+    &&(packageName==null||packageName.equals(node.get("package")))
+    &&(className==null||className.equals(node.get("class")))
+    &&(clickable==null||clickable.toString().equals(node.get("clickable")))
+    &&(enabled==null||enabled.toString().equals(node.get("enabled")));
+  }
  }
  static final class By {
-  static BySelector res(String a,String b){return new BySelector(b);}
+  static BySelector res(String a,String b){BySelector s=new BySelector(null);s.resource=a+":id/"+b;return s;}
   static BySelector text(String s){return new BySelector(s);}
   static BySelector pkg(String s){return new BySelector(s);}
+ }
+ static Map<String,String> capturedEnableNode(){
+  Map<String,String> node=new HashMap<>();
+'''+captured_button+r'''
+  if(fault.equals("enable-foreign"))node.put("package","foreign.package");
+  if(fault.equals("enable-disabled"))node.put("enabled","false");
+  if(fault.equals("enable-wrong-label"))node.put("text","ENABLE NOW");
+  if(fault.equals("enable-wrong-prefix"))node.put("text","XENABLE");
+  if(fault.equals("enable-titlecase"))node.put("text","Enable");
+  if(fault.equals("enable-wrong-resource"))node.put("resource-id","android:id/button2");
+  if(fault.equals("enable-wrong-class"))node.put("class","android.widget.TextView");
+  if(fault.equals("enable-nonclickable"))node.put("clickable","false");
+  if(fault.equals("enable-missing-label"))node.remove("text");
+  return node;
  }
  static final class UiObject2 { boolean isChecked(){return !fault.equals("weekly-off");} }
  static final class UiDevice {
@@ -395,6 +431,16 @@ public final class OfferProbe {
   String getCurrentPackageName(){return fault.equals("foreign")?"foreign.package":OtaFlowPolicy.PRODUCT_PACKAGE;}
   List<UiObject2> findObjects(BySelector selector){
    if(fault.equals("missing"))return List.of();
+   if(selector.resource!=null){
+    Map<String,String> node=capturedEnableNode();
+    List<UiObject2> matches=new ArrayList<>();
+    if(selector.matches(node)){
+     matches.add(new UiObject2());
+     if(fault.equals("enable-duplicate"))matches.add(new UiObject2());
+    }
+    System.out.println("CAPTURED_ENABLE_MATCH_COUNT="+matches.size());
+    return matches;
+   }
    return fault.equals("duplicate")?List.of(new UiObject2(),new UiObject2()):List.of(new UiObject2());
   }
  }
@@ -452,7 +498,7 @@ public final class OfferProbe {
   assertEquals("Update exactly once",1,p.productUpdateSelections);
   assertEquals("Install exactly once",1,p.productInstallSelections);
   List<String> clicks=new ArrayList<>();for(String a:p.actions)if(a.startsWith("click:"))clicks.add(a);
-  assertEquals("ordinary product sequence",List.of("click:Enable","click:Update","click:Install"),clicks);
+  assertEquals("ordinary product sequence",List.of("click:ENABLE","click:Update","click:Install"),clicks);
   System.out.println("PASS initial-offer sequence without transient progress");
  }
 }
@@ -476,6 +522,26 @@ public final class OfferProbe {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("PASS initial-offer sequence", result.stdout)
 
+    def test_captured_public88_enable_xml_matches_actual_new_selector(self):
+        node = ET.fromstring(CAPTURED_ENABLE_BUTTON_XML)
+        self.assertEqual(node.get("text"), "ENABLE")
+        self.assertEqual(node.get("resource-id"), "android:id/button1")
+        result = self.run_probe("valid")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CAPTURED_ENABLE_MATCH_COUNT=1", result.stdout)
+
+    def test_captured_enable_selector_refuses_invalid_exact_nodes_before_input(self):
+        self.assertEqual(self.run_probe("valid").returncode, 0)
+        for fault in ("enable-foreign", "enable-disabled", "enable-duplicate", "enable-wrong-label",
+                      "enable-wrong-prefix", "enable-titlecase", "enable-wrong-resource",
+                      "enable-wrong-class", "enable-nonclickable", "enable-missing-label"):
+            with self.subTest(fault=fault):
+                result = self.run_probe(fault)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("AssertionError", result.stderr)
+                self.assertIn("REJECTED_CLICKS=[]", result.stderr)
+                self.assertIn("CAPTURED_ENABLE_MATCH_COUNT=" + ("2" if fault == "enable-duplicate" else "0"), result.stdout)
+
     def test_native_flow_rejects_foreign_duplicate_missing_or_unadmitted_state(self):
         self.assertEqual(self.run_probe("valid").returncode, 0)
         fields = set(host.PUBLIC88_TO96_OFFER_ADMISSION) - {"profile"} | {"runtimeProfile"}
@@ -490,9 +556,9 @@ public final class OfferProbe {
                              "wrong-profile", "repeat-enable"}:
                     self.assertIn("REJECTED_CLICKS=[]", result.stderr)
                 elif fault in {"weekly-off", "no-offer", "repeat-update"}:
-                    self.assertIn("REJECTED_CLICKS=[click:Enable]", result.stderr)
+                    self.assertIn("REJECTED_CLICKS=[click:ENABLE]", result.stderr)
                 elif fault == "repeat-install":
-                    self.assertIn("REJECTED_CLICKS=[click:Enable, click:Update]", result.stderr)
+                    self.assertIn("REJECTED_CLICKS=[click:ENABLE, click:Update]", result.stderr)
 
 
 if __name__ == "__main__":
