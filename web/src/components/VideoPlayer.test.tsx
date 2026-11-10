@@ -3764,7 +3764,7 @@ describe("WebviewPlayer", () => {
     });
   });
 
-  it("defaults to Device Original and exposes Server Optimized qualities only when supported", async () => {
+  it("starts on original transport in Auto and exposes Server Optimized qualities only when supported", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const request = vi.fn(async () => ({
       url: "https://server.example/api/stream/session-1/index.m3u8?quality=360p&start=120",
@@ -3788,7 +3788,8 @@ describe("WebviewPlayer", () => {
       Object.defineProperty(video, "currentTime", { configurable: true, value: 120 });
       Object.defineProperty(video, "paused", { configurable: true, value: true });
       await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
-      expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "false");
+      expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
       expect(screen.getByRole("button", { name: "360p" })).toBeInTheDocument();
 
       await userEvent.click(screen.getByRole("button", { name: "360p" }));
@@ -10383,7 +10384,8 @@ describe("WebviewPlayer", () => {
       advance();
       expect(bar).not.toHaveClass("is-visible");
       expect(osd).not.toHaveClass("is-visible");
-      expect(document.activeElement).toBe(play);
+      if (layout === "touch") expect(play).not.toHaveFocus();
+      else expect(play).toHaveFocus();
       expect(video.paused).toBe(false);
     });
 
@@ -10404,7 +10406,7 @@ describe("WebviewPlayer", () => {
       advance(); expect(bar).toHaveClass("is-visible");
       pointer(play, "pointerdown", pointerType);
       advance(); expect(bar).not.toHaveClass("is-visible");
-      expect(document.activeElement).toBe(play);
+      expect(play).not.toHaveFocus();
       expect(video.paused).toBe(false);
     });
 
@@ -10428,14 +10430,14 @@ describe("WebviewPlayer", () => {
       advance();
       expect(bar).not.toHaveClass("is-visible");
       expect(osd).not.toHaveClass("is-visible");
-      expect(document.activeElement).toBe(more);
+      expect(more).not.toHaveFocus();
     });
 
     it("re-pins keyboard input on an already touch-focused control without another focus event", () => {
       const { bar, advance } = setup();
       const play = screen.getByRole("button", { name: "Pause" });
       pointer(play, "pointerdown", "touch"); act(() => play.focus());
-      advance(); expect(bar).not.toHaveClass("is-visible");
+      act(() => vi.advanceTimersByTime(3_100));
       fireEvent.keyDown(play, { key: "ArrowDown" });
       expect(document.activeElement).toBe(play);
       advance(); expect(bar).toHaveClass("is-visible");
@@ -10508,7 +10510,9 @@ describe("WebviewPlayer", () => {
       advance(); expect(bar).toHaveClass("is-visible");
       touchPress(within(dialog).getByRole("button", { name: "Close playback information" }));
       expect(trigger).toHaveFocus();
-      advance(); expect(bar).not.toHaveClass("is-visible"); expect(trigger).toHaveFocus();
+      advance(); expect(bar).not.toHaveClass("is-visible");
+      if (layout === "touch") expect(trigger).not.toHaveFocus();
+      else expect(trigger).toHaveFocus();
       expect(video.paused).toBe(false);
       act(() => trigger.blur()); act(() => trigger.focus());
       advance(); expect(bar).toHaveClass("is-visible"); expect(trigger).toHaveFocus();
@@ -10640,8 +10644,26 @@ describe("WebviewPlayer", () => {
       expect(video.paused).toBe(false); expect(button).toHaveFocus();
       advance();
       expect(bar).not.toHaveClass("is-visible"); expect(osd).not.toHaveClass("is-visible");
-      expect(transport).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+      expect(transport).not.toHaveClass("is-visible"); expect(button).not.toHaveFocus();
       expect(video.currentTime).toBe(240.333);
+    });
+
+    it("[hidden-focus95] retires pointer focus and remains hidden without a blur/reveal loop, then reveals operable controls", () => {
+      const { video, play, pause, bar, transport, advance } = setup();
+      const button = screen.getByRole("button", { name: "Play" });
+      lateTouchFocus(button);
+      expect(button).toHaveFocus(); expect(video.paused).toBe(false);
+      advance();
+      expect(button).not.toHaveFocus(); expect(bar).not.toHaveClass("is-visible");
+      expect(transport.parentElement).toHaveAttribute("inert");
+      advance(); advance();
+      expect(bar).not.toHaveClass("is-visible"); expect(transport).not.toHaveClass("is-visible");
+      expect(play).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+      fireEvent.pointerMove(video);
+      act(() => vi.advanceTimersByTime(20));
+      expect(bar).toHaveClass("is-visible"); expect(transport.parentElement).not.toHaveAttribute("inert");
+      lateTouchFocus(screen.getByRole("button", { name: "Pause" }));
+      expect(video.paused).toBe(true); expect(pause).toHaveBeenCalledTimes(1);
     });
 
     it.each([["Back 10 seconds", 230.333], ["Forward 10 seconds", 250.333]] as const)("[transport-focus] retires late touch %s focus while seeking exactly once", (name, target) => {
@@ -10658,7 +10680,7 @@ describe("WebviewPlayer", () => {
       expect(pause).not.toHaveBeenCalled(); expect(button).toHaveFocus();
       advance();
       expect(bar).not.toHaveClass("is-visible"); expect(osd).not.toHaveClass("is-visible");
-      expect(transport).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+      expect(transport).not.toHaveClass("is-visible"); expect(button).not.toHaveFocus();
     });
 
     it("[transport-focus] preserves the pause pin and resumes without retaining late touch Pause focus", () => {
@@ -10670,7 +10692,7 @@ describe("WebviewPlayer", () => {
       expect(video.paused).toBe(true); expect(button).toHaveFocus();
       advance(); expect(bar).toHaveClass("is-visible");
       act(() => { void video.play(); });
-      advance(); expect(bar).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+      advance(); expect(bar).not.toHaveClass("is-visible"); expect(button).not.toHaveFocus();
     });
 
     it("[transport-focus] preserves keyboard Play activation and its real focus pin", () => {
@@ -10706,7 +10728,7 @@ describe("WebviewPlayer", () => {
       expect(video.paused).toBe(false); expect(button).toHaveFocus();
       advance(); expect(bar).toHaveClass("is-visible");
       pointer(transport as HTMLElement, "pointerout", "mouse");
-      advance(); expect(bar).not.toHaveClass("is-visible"); expect(button).toHaveFocus();
+      advance(); expect(bar).not.toHaveClass("is-visible"); expect(button).not.toHaveFocus();
     });
   });
 
@@ -17635,5 +17657,481 @@ describe("interactive chrome pointer lifetime", () => {
       } else act(() => vi.advanceTimersByTime(9_201));
       expect(bar).not.toHaveClass("is-visible");
     } finally { parent.insertBefore(more, next); }
+  });
+});
+
+describe("automatic starvation95 adaptation", () => {
+  async function settle() { await act(async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); }); }
+  async function setup(options: {
+    auto?: boolean; fixedDefault?: boolean; capability?: boolean; height?: number; audio?: boolean;
+    fail?: boolean; pending?: boolean; qualities?: ServerTranscodeQuality[]; lease?: boolean;
+    sourceTracks?: ServerAudioTrack[]; audioChurn?: boolean; lazyAudio?: "pending" | "failed" | "ambiguous";
+    unknownFile?: boolean; reused?: boolean;
+  } = {}) {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const manifest = deferred<Response>();
+    let leaseExpired = false;
+    let view: ReturnType<typeof render>;
+    const refresh = vi.fn(async (position: number, handoff: PlaybackHandoffState) => {
+      if (!options.reused) return new Promise<void>(() => {});
+      view.rerender(<VideoPlayer {...props} url="https://server.example/api/stream/reused95/movie.mp4" sourceRevision={1}
+        startPositionSeconds={position} initialHandoffState={handoff} />);
+    });
+    const tracks = options.sourceTracks ?? [
+      { index: 0, label: "English", language: "eng", default: false },
+      { index: 1, label: "Japanese", language: "jpn", default: true },
+      ...(options.lazyAudio === "ambiguous" ? [{ index: 9, label: "Japanese", language: "jpn", default: false }] : []),
+    ];
+    const inventory = deferred<ServerAudioTrack[]>();
+    let sourceAudioUpdate: ServerAudioInventoryLoadOptions["onSourceInfo"];
+    const loadAudioTracks = vi.fn(async (loadOptions?: ServerAudioInventoryLoadOptions) => {
+      if (options.lazyAudio === "pending") return inventory.promise;
+      if (options.lazyAudio === "ambiguous") return tracks.map(track => ({ ...track }));
+      if (!loadOptions?.retryFailed) throw new Error("Optional inventory temporarily unavailable");
+      sourceAudioUpdate = loadOptions.onSourceInfo;
+      return tracks.map(track => ({ ...track }));
+    });
+    const request = vi.fn(async (quality: ServerTranscodeQuality, position: number, _audioTrack?: number) => {
+      if (options.fail) throw new Error("Preparation unavailable95");
+      return { url: `https://server.example/api/stream/starvation95/index.m3u8?quality=${quality}&start=${position}`,
+        quality, timelineOffsetSeconds: position, startPositionSeconds: 0, audioTrack: undefined };
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (options.lease && init?.method === "HEAD") return new Response(null, { status: leaseExpired ? 404 : 200 });
+      if (String(input).includes("starvation95/index.m3u8")) {
+        if (options.pending) return manifest.promise;
+        return new Response("#EXTM3U\n", { headers: options.audio || options.audioChurn || options.lazyAudio ? { "x-yawf-transcode-audio": "1" } : {} });
+      }
+      return new Response(options.lease ? "#EXTM3U\n480p.m3u8?generation=transcode-starvation95\n" : "#EXTM3U\n");
+    }));
+    const props = {
+      ...(options.lease || options.reused ? { refreshCurrentSource: refresh } : {}),
+      url: options.auto ? "https://server.example/api/stream/auto95/index.m3u8?quality=auto" : "https://server.example/api/stream/original95/movie.mp4",
+      title: "Starvation95", sourceFileName: options.unknownFile ? undefined : "Starvation95.mkv", imdbId: "tt-starvation95", onClose: vi.fn(),
+      serverOptimized: options.capability === false ? undefined : {
+        qualities: options.qualities ?? ["auto", "720p", "480p", "360p"] as ServerTranscodeQuality[],
+        defaultQuality: options.fixedDefault ? "480p" as const : options.auto ? "auto" as const : null, request,
+        ...(options.audio || options.sourceTracks != null
+          ? { loadSourceInfo: async () => ({ durationSeconds: 900, tracks: tracks.map(track => ({ ...track })) }) } : {}),
+        ...(options.audioChurn || options.lazyAudio ? { loadAudioTracks } : {}),
+      },
+    };
+    view = render(<VideoPlayer {...props} />);
+    await settle();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    let time = 100; let paused = false; let seeking = false; let ahead = 0;
+    Object.defineProperties(video, {
+      currentSrc: { configurable: true, get: () => video.src },
+      currentTime: { configurable: true, get: () => time, set: (value: number) => { time = value; } },
+      duration: { configurable: true, value: 900 }, videoHeight: { configurable: true, value: options.height ?? 1080 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, get: () => paused }, seeking: { configurable: true, get: () => seeking },
+      buffered: { configurable: true, get: () => ({ length: ahead > 0 ? 1 : 0, start: () => 0, end: () => time + ahead }) },
+      seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 900 } },
+    });
+    vi.mocked(video.play).mockImplementation(async () => { paused = false; fireEvent.play(video); fireEvent.playing(video); });
+    vi.mocked(video.pause).mockImplementation(() => { paused = true; fireEvent.pause(video); });
+    fireEvent.loadStart(video); fireEvent.loadedMetadata(video); fireEvent.canPlay(video);
+    await settle();
+    const progress = () => { time += 1; fireEvent.timeUpdate(video); };
+    const playing = () => { fireEvent.play(video); fireEvent.playing(video); };
+    const episode = () => { playing(); progress(); progress(); fireEvent.waiting(video); };
+    const episodes = () => { episode(); episode(); episode(); };
+    const settings = () => fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    if (options.reused) {
+      playing(); progress(); progress(); fireMediaError(video, 2); await settle();
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(document.querySelector("video.player-video")).toBe(video);
+      Object.defineProperty(video, "error", { configurable: true, value: null });
+      fireEvent.loadStart(video); fireEvent.loadedMetadata(video); fireEvent.loadedData(video); fireEvent.seeked(video); fireEvent.canPlay(video);
+      await settle();
+    }
+    return { view, props, video, request, manifest, inventory, loadAudioTracks, progress, playing, episode, episodes, settings, refresh,
+      expireLease: () => { leaseExpired = true; },
+      updateAudioInfo: (next = tracks) => act(() => sourceAudioUpdate?.({ durationSeconds: 900, tracks: next.map(track => ({ ...track })) })),
+      clock: () => time, setPaused: (value: boolean) => { paused = value; },
+      setSeeking: (value: boolean) => { seeking = value; }, setAhead: (value: number) => { ahead = value; } };
+  }
+
+  it.each([false, true])("[starvation95] adapts default-direct/Auto=%s after three genuine episodes, not duplicates", async auto => {
+    const p = await setup({ auto });
+    p.episode();
+    for (let i = 0; i < 5; i++) fireEvent.waiting(p.video);
+    await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.episode(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
+    expect(p.video.isConnected).toBe(false);
+    expect(screen.getByText("Auto reduced playback to 480p to help with repeated buffering.")).toBeInTheDocument();
+    p.settings(); expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("Auto is using 480p to help with repeated buffering.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "480p" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it.each(["startup", "healthy", "paused", "seeking", "scrubbing", "suspended", "hidden", "reset"])("[starvation95] excludes %s rather than optimizing", async reason => {
+    if (reason === "suspended") isTauriMock.mockReturnValue(true);
+    const p = await setup();
+    if (reason === "healthy") p.setAhead(10);
+    if (reason === "paused") p.setPaused(true);
+    if (reason === "seeking") p.setSeeking(true);
+    if (reason === "scrubbing") fireEvent.pointerDown(screen.getByTestId("scrub-bar"));
+    if (reason === "suspended") { p.settings(); fireEvent.click(screen.getByRole("button", { name: "test suspend playback" })); }
+    if (reason === "hidden") Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    try {
+      if (reason === "startup") { for (let i = 0; i < 6; i++) fireEvent.waiting(p.video); }
+      else if (reason === "reset") {
+        p.playing(); p.progress(); p.progress(); p.video.currentTime = 0;
+        for (let i = 0; i < 6; i++) { fireEvent.waiting(p.video); fireEvent.timeUpdate(p.video); }
+      } else p.episodes();
+      await settle(); expect(p.request).not.toHaveBeenCalled();
+    } finally { if (reason === "hidden") Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" }); }
+  });
+
+  it.each([{ capability: false }, { height: 0 }, { height: 360 }, { qualities: ["auto", "1080p"] as ServerTranscodeQuality[] }])("[starvation95] cannot request without capability or a reliable lower rung %j", async options => {
+    const p = await setup(options); p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it("[starvation95] attempts once after failure and keeps the source and live clock", async () => {
+    const p = await setup({ fail: true }); const source = p.video.src;
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("video.player-video")).toBe(p.video); expect(p.video.src).toBe(source);
+    expect(p.clock()).toBe(112);
+  });
+
+  it.each(["Device Original", "1080p", "720p", "480p", "360p"])("[starvation95] preserves explicit %s even after its preparation fails", async choice => {
+    const p = await setup({ fail: true, qualities: ["auto", "1080p", "720p", "480p", "360p"] });
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: choice })); await settle();
+    p.request.mockClear(); p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it("[starvation95] preserves fixed data-saver default", async () => {
+    const p = await setup({ fixedDefault: true, fail: true }); expect(p.request).toHaveBeenCalledTimes(1);
+    p.request.mockClear(); p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it.each(["pause", "seek", "manual", "fixed-quality", "owner", "revision", "hidden", "pagehide", "scrub", "reset"])("[starvation95] fences late preparation after newer %s intent", async intent => {
+    const p = await setup({ pending: true }); p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+    if (intent === "pause") { p.setPaused(true); fireEvent.pause(p.video); }
+    if (intent === "seek") { p.video.currentTime = 45; fireEvent.seeking(p.video); fireEvent.seeked(p.video); }
+    if (intent === "manual") { p.settings(); fireEvent.click(screen.getByRole("button", { name: "Device Original" })); }
+    if (intent === "fixed-quality") { p.settings(); fireEvent.click(screen.getByRole("button", { name: "360p" })); }
+    if (intent === "hidden") { Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" }); fireEvent(document, new Event("visibilitychange")); }
+    if (intent === "pagehide") fireEvent(window, new Event("pagehide"));
+    if (intent === "scrub") fireEvent.pointerDown(screen.getByTestId("scrub-bar"));
+    if (intent === "reset") { p.video.currentTime = 0; fireEvent.timeUpdate(p.video); }
+    if (intent === "revision") p.view.rerender(<VideoPlayer {...p.props} sourceRevision={1} />);
+    if (intent === "owner") p.view.rerender(<VideoPlayer {...p.props} url="https://server.example/api/stream/new95/movie.mp4" />);
+    await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n")); }); await settle();
+    if (intent === "hidden") Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    expect(screen.queryByText(/Auto reduced playback/)).toBeNull();
+    const current = document.querySelector("video.player-video") as HTMLVideoElement;
+    if (intent === "reset") { expect(current).toBeNull(); expect(hlsInstances).toHaveLength(0); return; }
+    if (intent === "fixed-quality") {
+      expect(p.request).toHaveBeenLastCalledWith("360p", 106);
+      expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("quality=360p"));
+    } else expect(current.src).not.toContain("starvation95/index.m3u8");
+    if (!["owner", "revision", "manual", "fixed-quality"].includes(intent)) expect(current).toBe(p.video);
+    if (intent === "seek") expect(current.currentTime).toBe(45);
+    if (intent === "pause") expect(current.paused).toBe(true);
+  });
+
+  it.each([false, true])("[starvation95] follows the live clock including quiet-clock=%s and confirmed audio with exact no-replay adoption", async quietClock => {
+    const p = await setup({ pending: true, audio: true });
+    p.video.volume = 0.35; p.video.muted = true; p.video.playbackRate = 1.25;
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+    p.progress(); p.progress();
+    if (quietClock) p.video.currentTime = 109.5;
+    const localTarget = quietClock ? 3.5 : 2;
+    await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "1" } })); }); await settle();
+    const next = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(next).not.toBe(p.video); expect(next.volume).toBe(0.35); expect(next.muted).toBe(true); expect(next.playbackRate).toBe(1.25);
+    expect(hlsInstances.at(-1)?.config.startPosition).toBe(localTarget);
+    expect(next.play).not.toHaveBeenCalled();
+    Object.defineProperties(next, {
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      currentTime: { configurable: true, writable: true, value: localTarget },
+      duration: { configurable: true, value: 794 },
+      seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 794 } },
+      seeking: { configurable: true, value: false },
+    });
+    fireEvent.loadedMetadata(next); fireEvent.loadedData(next); fireEvent.seeked(next); await settle();
+    expect(next.currentTime).toBe(localTarget); expect(next.play).toHaveBeenCalled();
+    p.settings(); expect(screen.getByRole("button", { name: "Japanese" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it.each([false, true])("[starvation95] does not rearm a failed automatic attempt on a fresh same-content URL with unknownFile=%s", async unknownFile => {
+    const p = await setup({ fail: true, unknownFile }); p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+    p.view.rerender(<VideoPlayer {...p.props} url="https://server.example/api/stream/fresh95/movie.mp4" sourceRevision={1} />);
+    await settle();
+    const next = document.querySelector("video.player-video") as HTMLVideoElement;
+    let time = 200;
+    Object.defineProperties(next, {
+      currentSrc: { configurable: true, get: () => next.src },
+      currentTime: { configurable: true, get: () => time, set: (value: number) => { time = value; } },
+      duration: { configurable: true, value: 900 }, videoHeight: { configurable: true, value: 1080 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, value: false },
+    });
+    fireEvent.loadStart(next); fireEvent.canPlay(next); fireEvent.play(next); fireEvent.playing(next);
+    for (let i = 0; i < 5; i++) {
+      time += 1; fireEvent.timeUpdate(next); time += 1; fireEvent.timeUpdate(next); fireEvent.waiting(next); fireEvent.playing(next);
+    }
+    for (let i = 0; i < 5; i++) { p.progress(); fireEvent.waiting(p.video); }
+    await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[starvation95] preserves local HLS fixed quality rather than treating it as Auto", async () => {
+    const p = await setup({ auto: true }); const hls = hlsInstances.at(-1)!;
+    hls.levels = [{ height: 1080 }, { height: 720 }];
+    act(() => hls.emit("manifestParsed")); p.settings();
+    fireEvent.click(screen.getByRole("button", { name: "1080p" }));
+    expect(hls.currentLevel).toBe(0); p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it("[starvation95] excludes an unconfirmed exact handoff instead of reading progress as starvation", async () => {
+    const p = await setup();
+    p.view.rerender(<VideoPlayer {...p.props} url="https://server.example/api/stream/exact95/movie.mp4" sourceRevision={1}
+      startPositionSeconds={400} initialHandoffState={{ paused: false, volume: 1, muted: false, playbackRate: 1 }} />);
+    await settle(); const next = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(next, {
+      currentSrc: { configurable: true, get: () => next.src },
+      duration: { configurable: true, value: 900 }, videoHeight: { configurable: true, value: 1080 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA }, paused: { configurable: true, value: false },
+      seekable: { configurable: true, value: { length: 0 } },
+    });
+    fireEvent.loadStart(next); fireEvent.playing(next);
+    for (let i = 1; i < 8; i++) { next.currentTime = i; fireEvent.timeUpdate(next); fireEvent.waiting(next); }
+    await settle(); expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it("[starvation95] excludes an expired lease and retained quarantined reader during fresh-source recovery", async () => {
+    vi.useFakeTimers();
+    const p = await setup({ auto: true, lease: true });
+    p.playing(); p.progress(); p.progress(); p.expireLease();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_001); }); await settle();
+    expect(p.refresh).toHaveBeenCalledTimes(1); expect(p.request).not.toHaveBeenCalled();
+    p.episodes(); await settle();
+    expect(p.request).not.toHaveBeenCalled(); expect(p.refresh).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+  });
+
+  it("[starvation95] keeps default-direct requested Auto exclusive before any reduction", async () => {
+    const p = await setup(); p.settings();
+    expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("[starvation95] retains requested Auto after an explicit Auto choice and same-file reader remount", async () => {
+    const p = await setup(); p.settings(); fireEvent.click(screen.getByRole("button", { name: "Auto" })); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("auto", 100);
+    p.view.rerender(<VideoPlayer {...p.props} sourceRevision={1} url="https://server.example/api/stream/retained-auto95/movie.mp4" />);
+    await settle();
+    const next = document.querySelector("video.player-video") as HTMLVideoElement;
+    let time = 200;
+    Object.defineProperties(next, {
+      currentSrc: { configurable: true, get: () => next.src },
+      currentTime: { configurable: true, get: () => time, set: (value: number) => { time = value; } },
+      duration: { configurable: true, value: 900 }, videoHeight: { configurable: true, value: 1080 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA }, paused: { configurable: true, value: false },
+    });
+    fireEvent.loadStart(next); fireEvent.loadedMetadata(next); fireEvent.play(next); fireEvent.playing(next);
+    p.settings();
+    expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "false");
+    for (let i = 0; i < 3; i++) {
+      time += 1; fireEvent.timeUpdate(next); time += 1; fireEvent.timeUpdate(next); fireEvent.waiting(next); fireEvent.playing(next);
+    }
+    await settle(); expect(p.request).toHaveBeenLastCalledWith("480p", 206);
+  });
+
+  it("[starvation95] preserves episodes through equivalent descriptor callbacks and genuinely replaced track objects", async () => {
+    const p = await setup({ audioChurn: true }); p.settings(); await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Retry audio tracks" })); await settle();
+    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.updateAudioInfo(); await settle();
+    const descriptor = p.props.serverOptimized!;
+    p.view.rerender(<VideoPlayer {...p.props} serverOptimized={{ ...descriptor,
+      qualities: descriptor.qualities.map(quality => quality),
+      request: (...args) => descriptor.request(...args),
+    }} />); await settle();
+    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.view.rerender(<VideoPlayer {...p.props} serverOptimized={{ ...descriptor,
+      qualities: descriptor.qualities.slice(), request: (...args) => descriptor.request(...args),
+    }} />); await settle();
+    p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+  });
+
+  it("[starvation95] retires episodes for a genuinely changed source-audio inventory", async () => {
+    const p = await setup({ audioChurn: true }); p.settings(); await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Retry audio tracks" })); await settle();
+    p.episode(); p.episode(); await settle();
+    p.updateAudioInfo([{ index: 0, label: "English", language: "eng", default: false },
+      { index: 1, label: "Japanese Main", language: "jpn", default: true }]); await settle();
+    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.episode(); p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 110, 1);
+  });
+
+  function nativeJapanese95() {
+    const list = Object.assign(new EventTarget(), {
+      0: { id: "native-english-802", label: "English", language: "en", enabled: false },
+      1: { id: "native-japanese-903", label: "Japanese", language: "ja", enabled: true }, length: 2,
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", { configurable: true, get: () => list });
+    return list;
+  }
+
+  it("[starvation95] maps actual native Japanese language to a unique source index, never its browser ID", async () => {
+    nativeJapanese95();
+    const p = await setup({ pending: true, sourceTracks: [
+      { index: 2, label: "English", language: "eng", default: true },
+      { index: 7, label: "Japanese Main", language: "jpn", default: false },
+    ] });
+    expect(p.request).not.toHaveBeenCalled(); p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 7);
+    await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "7" } })); }); await settle();
+    expect(p.video.isConnected).toBe(false);
+    p.settings(); expect(screen.getByRole("button", { name: "Japanese Main" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it.each(["ambiguous", "no inventory", "ID only"])("[starvation95] keeps native audio and reports an actionable limitation for %s mapping", async scenario => {
+    const list = nativeJapanese95();
+    if (scenario === "ID only") { list[1].language = ""; list[1].label = "Unknown"; list[1].id = "7"; }
+    const p = await setup({ sourceTracks: scenario === "no inventory" ? undefined : [
+      { index: 2, label: "English", language: "eng", default: true },
+      { index: 7, label: "Japanese Main", language: "jpn", default: false },
+      ...(scenario === "ambiguous" ? [{ index: 9, label: "Japanese Commentary", language: "jpn", default: false }] : []),
+    ] });
+    p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(p.video); expect(list[1].enabled).toBe(true);
+    expect(screen.getByText(/Auto cannot safely match/).closest("[role='status']")).not.toBeNull();
+    p.settings(); expect(screen.getByText(/Auto cannot safely match/)).toBeVisible();
+  });
+
+  it("[starvation95] cancels pending automatic preparation if the actual native audio selection changes", async () => {
+    const list = nativeJapanese95(); const p = await setup({ pending: true, sourceTracks: [
+      { index: 2, label: "English", language: "eng", default: true },
+      { index: 7, label: "Japanese Main", language: "jpn", default: false },
+    ] }); p.episodes(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 7);
+    list[0].enabled = true; list[1].enabled = false; act(() => list.dispatchEvent(new Event("change")));
+    await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "7" } })); }); await settle();
+    expect(document.querySelector("video.player-video")).toBe(p.video); expect(list[0].enabled).toBe(true);
+  });
+
+  it.each([false, true])("[starvation95] loads idle native-audio inventory once without settings for Auto-HLS=%s and preserves all three episodes while it warms", async auto => {
+    nativeJapanese95(); const p = await setup({ lazyAudio: "pending", auto });
+    expect(p.loadAudioTracks).not.toHaveBeenCalled();
+    p.episodes(); await settle();
+    expect(p.loadAudioTracks).toHaveBeenCalledExactlyOnceWith(); expect(p.request).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+    await act(async () => { p.inventory.resolve([
+      { index: 0, label: "English", language: "eng", default: false },
+      { index: 1, label: "Japanese", language: "jpn", default: true },
+    ]); }); await settle();
+    expect(p.loadAudioTracks).toHaveBeenCalledTimes(1);
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+    expect(p.video.isConnected).toBe(false);
+  });
+
+  it.each(["failed", "ambiguous"] as const)("[starvation95] bounds automatic idle-audio probing after %s and keeps selected native audio", async lazyAudio => {
+    const list = nativeJapanese95(); const p = await setup({ lazyAudio });
+    p.episodes(); await settle();
+    expect(p.loadAudioTracks).toHaveBeenCalledTimes(1); expect(p.request).not.toHaveBeenCalled();
+    p.episodes(); await settle(); expect(p.loadAudioTracks).toHaveBeenCalledTimes(1); expect(p.request).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(p.video); expect(list[1].enabled).toBe(true);
+    expect(screen.getByText(/Auto cannot safely match/).closest("[role='status']")).not.toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Playback settings" })).toBeNull();
+  });
+
+  it.each([[false, false], [false, true], [true, false], [true, true]])("[starvation95] counts owned starvation at readyState1 after progress2 with reused=%s metadata-timeupdate=%s", async (reused, metadataTimeupdate) => {
+    const p = await setup({ reused }); let ready: number = HTMLMediaElement.HAVE_CURRENT_DATA;
+    Object.defineProperty(p.video, "readyState", { configurable: true, get: () => ready });
+    for (let i = 0; i < 3; i++) {
+      ready = HTMLMediaElement.HAVE_CURRENT_DATA; p.playing(); p.progress(); p.progress();
+      ready = HTMLMediaElement.HAVE_METADATA;
+      if (metadataTimeupdate) fireEvent.timeUpdate(p.video);
+      fireEvent.waiting(p.video); fireEvent.waiting(p.video);
+      await settle();
+      if (i < 2) expect(p.request).not.toHaveBeenCalled();
+    }
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
+  });
+
+  it("[starvation95] lazily loads source inventory for hls.js local Japanese audio without native audio API", async () => {
+    const p = await setup({ auto: true, lazyAudio: "pending", pending: true });
+    const hls = hlsInstances.at(-1)!; hls.audioTracks = [{ name: "Japanese", lang: "ja" }]; hls.audioTrack = 0;
+    act(() => hls.emit("manifestParsed"));
+    expect((p.video as HTMLVideoElement & { audioTracks?: unknown }).audioTracks).toBeUndefined();
+    p.episodes(); await settle(); expect(p.loadAudioTracks).toHaveBeenCalledTimes(1); expect(p.request).not.toHaveBeenCalled();
+    await act(async () => { p.inventory.resolve([
+      { index: 0, label: "English", language: "eng", default: false },
+      { index: 7, label: "Japanese Main", language: "jpn", default: true },
+    ]); }); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 7);
+    // A different confirmed source index is required, not HLS-local audio0.
+    await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "7" } })); }); await settle();
+    expect(p.video.isConnected).toBe(false);
+  });
+
+  it.each(["native", "hls.js"])("[starvation95] refuses known English Commentary versus source English Main for %s", async renderer => {
+    if (renderer === "native") {
+      const list = nativeJapanese95(); list[0].enabled = true; list[0].label = "English Commentary"; list[1].enabled = false;
+    }
+    const p = await setup({ auto: renderer === "hls.js", sourceTracks: [
+      { index: 3, label: "English Main", language: "eng", default: true },
+    ] });
+    if (renderer === "hls.js") {
+      const hls = hlsInstances.at(-1)!; hls.audioTracks = [{ name: "English Commentary", lang: "en" }];
+      hls.audioTrack = 0; act(() => hls.emit("manifestParsed"));
+    }
+    p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(screen.getByText(/Auto cannot safely match/)).toBeInTheDocument();
+  });
+
+  it.each(["language", "label"])("[starvation95] cancels stale preparation when HLS local audio0 changes semantic %s", async change => {
+    const p = await setup({ auto: true, pending: true, sourceTracks: [
+      { index: 3, label: "English Main", language: "eng", default: false },
+      { index: 7, label: "Japanese Main", language: "jpn", default: true },
+    ] });
+    const hls = hlsInstances.at(-1)!;
+    hls.audioTracks = [{ name: "Japanese Main", lang: "ja" }]; hls.audioTrack = 0;
+    act(() => hls.emit("manifestParsed"));
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 7);
+    hls.audioTracks = [change === "language" ? { name: "English Main", lang: "en" }
+      : { name: "Japanese Commentary", lang: "ja" }];
+    act(() => hls.emit("audioTracksUpdated")); await settle(); expect(hls.audioTrack).toBe(0);
+    await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": "7" } })); }); await settle();
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(p.request).toHaveBeenCalledTimes(1); expect(hls.destroy).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Auto reduced playback/)).toBeNull();
+  });
+
+  it.each([[false, 0.001], [false, 0.033], [true, 0.001], [true, 0.033]] as const)("[starvation95] adapts default-direct/Auto=%s despite native %ss settling after each waiting episode", async (auto, regression) => {
+    const p = await setup({ auto });
+    for (let i = 0; i < 2; i++) {
+      p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+      p.video.currentTime -= regression; fireEvent.timeUpdate(p.video);
+      fireEvent.waiting(p.video); await settle(); expect(p.request).not.toHaveBeenCalled();
+    }
+    p.episode(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
+    expect(p.video.isConnected).toBe(false);
+  });
+
+  it.each([false, true])("[starvation95] explicit tiny seek clears prior episodes in default-direct/Auto=%s", async auto => {
+    const p = await setup({ auto }); p.episode(); p.episode(); await settle();
+    p.video.currentTime -= 0.001; fireEvent.seeking(p.video); fireEvent.seeked(p.video); await settle();
+    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
+  });
+
+  it("[starvation95] refuses unconfirmed selected audio without replacing the reader", async () => {
+    const p = await setup({ pending: true, audio: true }); p.episodes(); await settle();
+    await act(async () => { p.manifest.resolve(new Response("#EXTM3U\n")); }); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+    expect(document.querySelector("video.player-video")).toBe(p.video); expect(p.clock()).toBe(106);
   });
 });

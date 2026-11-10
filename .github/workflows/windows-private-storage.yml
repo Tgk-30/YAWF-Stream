@@ -46,11 +46,6 @@ jobs:
         id: server-build
         working-directory: server
         run: npm run build
-      - name: Native private storage and writer checks
-        working-directory: server
-        env:
-          DS_SERVER_SECRET_KEY: ''
-        run: node node_modules/vitest/vitest.mjs run test/privateStorage.test.ts test/privateStorage.windows.test.ts --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-results.json"
       - name: Full server suite on the same native runtime
         id: observer
         if: ${{ !cancelled() && steps.server-build.outcome == 'success' }}
@@ -68,6 +63,12 @@ jobs:
           $env:NODE_OPTIONS = ($env:NODE_OPTIONS + ' --import=' + $preload).Trim()
           node node_modules/vitest/vitest.mjs run --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-full-results.json"
           exit $LASTEXITCODE
+      - name: Native private storage and writer checks
+        if: ${{ !cancelled() && steps.server-build.outcome == 'success' }}
+        working-directory: server
+        env:
+          DS_SERVER_SECRET_KEY: ''
+        run: node node_modules/vitest/vitest.mjs run test/privateStorage.test.ts test/privateStorage.windows.test.ts --maxWorkers=1 --no-file-parallelism --reporter=json --outputFile="$env:RUNNER_TEMP/windows-private-storage-results.json"
       - name: Retain exact native results
         if: always()
         uses: actions/upload-artifact@v4
