@@ -246,11 +246,12 @@ test("manual verification checks image identity without build or publication pat
   assert.match(manual, /org\.opencontainers\.image\.revision/);
 });
 
-test("manual digest mode alone skips the regular build and publish job", () => {
+test("manual digest mode and explicit desktop scope skip the regular build and publish job", () => {
   const regular = workflowJob("docker");
+  assert.match(regular, /^    needs: release-scope$/m);
   assert.match(
     regular,
-    /^    if: github\.event_name != 'workflow_dispatch' \|\| inputs\.published_image_digest == ''$/m,
+    /^    if: needs\.release-scope\.result == 'success' && needs\.release-scope\.outputs\.desktop_only == 'false' && \(github\.event_name != 'workflow_dispatch' \|\| inputs\.published_image_digest == ''\)$/m,
   );
   assert.match(workflow, /published_image_digest:\n\s+description:/);
   assert.match(workflow, /expected_source_revision:\n\s+description:/);

@@ -52,13 +52,39 @@ permissions:
   contents: write
 
 jobs:
+  release-scope:
+    name: Resolve explicit release scope
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      desktop_only: ${{ steps.scope.outputs.desktop_only }}
+      include_android: ${{ steps.scope.outputs.include_android }}
+      include_server: ${{ steps.scope.outputs.include_server }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Validate and resolve scope without credentials
+        id: scope
+        env:
+          RELEASE_SCOPE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_SCOPE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_SCOPE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_SCOPE_DESKTOP_ONLY_TAG: ${{ vars.YAWF_RELEASE_DESKTOP_ONLY_TAG }}
+        run: node scripts/resolve_release_scope.mjs --github-output "$GITHUB_OUTPUT"
+
   macos-media-runtime:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: release-scope
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.release-scope.result == 'success' && (needs.release-scope.outputs.desktop_only == 'true' || needs.release-scope.outputs.desktop_only == 'false')
     uses: ./.github/workflows/macos-media-runtime.yml
 
   release:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: macos-media-runtime
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.release-scope.result == 'success' && (needs.release-scope.outputs.desktop_only == 'true' || needs.release-scope.outputs.desktop_only == 'false')
+    needs: [release-scope, macos-media-runtime]
     strategy:
       fail-fast: false
       matrix:
@@ -373,6 +399,8 @@ jobs:
         run: npm test
 
       - name: Test server
+        # CI still tests held Windows; only shipping platforms gate packaging.
+        if: matrix.os != 'windows' || vars.YAWF_RELEASE_WINDOWS == 'true'
         working-directory: server
         run: npm test
 
@@ -446,8 +474,17 @@ jobs:
       - name: Set release channel summary
         if: matrix.os != 'windows' || vars.YAWF_RELEASE_WINDOWS == 'true'
         shell: bash
+        env:
+          DESKTOP_ONLY: ${{ needs.release-scope.outputs.desktop_only }}
+          INCLUDE_WINDOWS: ${{ vars.YAWF_RELEASE_WINDOWS }}
         run: |
-          if [ "${{ vars.YAWF_RELEASE_WINDOWS }}" = "true" ]; then
+          if [ "$DESKTOP_ONLY" = "true" ]; then
+            if [ "$INCLUDE_WINDOWS" = "true" ]; then
+              echo "RELEASE_BODY=Signed macOS, Linux, and Windows desktop builds only. Android phone, TV, and server updates remain on their separately published channels. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
+            else
+              echo "RELEASE_BODY=Signed macOS and Linux desktop builds only. Android phone, TV, and server updates remain on their separately published channels. Windows remains held. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
+            fi
+          elif [ "$INCLUDE_WINDOWS" = "true" ]; then
             echo "RELEASE_BODY=Signed macOS, Linux, and Windows desktop builds, Android phone and TV apps, plus self-hosted server packages. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
           else
             echo "RELEASE_BODY=Signed macOS and Linux desktop builds, Android phone and TV apps, and self-hosted server packages. Windows is held until Authenticode signing is proven. Your Accounts. Watch Freely." >> "$GITHUB_ENV"
@@ -594,8 +631,8 @@ jobs:
 
   android-tv:
     name: Signed Android TV APK
-    needs: release
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [release-scope, release]
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.release-scope.result == 'success' && needs.release-scope.outputs.desktop_only == 'false'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -699,8 +736,8 @@ jobs:
 
   android-app:
     name: Signed Android phone APK
-    needs: release
-    if: always() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.release.result == 'success') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'))
+    needs: [release-scope, release]
+    if: always() && needs.release-scope.result == 'success' && needs.release-scope.outputs.desktop_only == 'false' && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.release.result == 'success') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -912,8 +949,8 @@ jobs:
   # give this job release-write permission and publish a verified candidate.
   android-app-publish:
     name: Publish signed Android phone APK
-    needs: android-app
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [release-scope, android-app]
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.release-scope.result == 'success' && needs.release-scope.outputs.desktop_only == 'false'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -970,8 +1007,14 @@ jobs:
 
   finalize-release-assets:
     name: Checksums and provenance
-    needs: [release, android-tv, android-app-publish]
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [release-scope, release, android-tv, android-app-publish]
+    if: >-
+      always() && !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' &&
+      needs.release-scope.result == 'success' && needs.release.result == 'success' &&
+      ((needs.release-scope.outputs.desktop_only == 'true' &&
+        needs.android-tv.result == 'skipped' && needs.android-app-publish.result == 'skipped') ||
+       (needs.release-scope.outputs.desktop_only == 'false' &&
+        needs.android-tv.result == 'success' && needs.android-app-publish.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1029,8 +1072,11 @@ jobs:
 
   clean-install:
     name: Verify clean installs
-    needs: finalize-release-assets
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [release-scope, finalize-release-assets]
+    if: >-
+      always() && !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' &&
+      needs.release-scope.result == 'success' && needs.finalize-release-assets.result == 'success' &&
+      (needs.release-scope.outputs.desktop_only == 'true' || needs.release-scope.outputs.desktop_only == 'false')
     permissions:
       # The reusable workflow must download assets from the draft release.
       contents: write
@@ -1038,3 +1084,5 @@ jobs:
     with:
       tag: ${{ github.ref_name }}
       include_windows: ${{ vars.YAWF_RELEASE_WINDOWS == 'true' }}
+      include_android: ${{ needs.release-scope.outputs.include_android == 'true' }}
+      include_server: ${{ needs.release-scope.outputs.include_server == 'true' }}

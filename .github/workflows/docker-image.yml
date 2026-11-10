@@ -55,8 +55,35 @@ permissions:
   packages: write
 
 jobs:
+  release-scope:
+    name: Resolve explicit release scope
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      desktop_only: ${{ steps.scope.outputs.desktop_only }}
+      include_android: ${{ steps.scope.outputs.include_android }}
+      include_server: ${{ steps.scope.outputs.include_server }}
+      stable_version: ${{ steps.scope.outputs.stable_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Validate and resolve scope without credentials
+        id: scope
+        env:
+          RELEASE_SCOPE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_SCOPE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_SCOPE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_SCOPE_DESKTOP_ONLY_TAG: ${{ vars.YAWF_RELEASE_DESKTOP_ONLY_TAG }}
+        run: node scripts/resolve_release_scope.mjs --github-output "$GITHUB_OUTPUT"
+
   docker:
-    if: github.event_name != 'workflow_dispatch' || inputs.published_image_digest == ''
+    needs: release-scope
+    if: needs.release-scope.result == 'success' && needs.release-scope.outputs.desktop_only == 'false' && (github.event_name != 'workflow_dispatch' || inputs.published_image_digest == '')
     runs-on: ubuntu-22.04
 
     steps:

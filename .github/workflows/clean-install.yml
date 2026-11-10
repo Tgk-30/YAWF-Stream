@@ -12,6 +12,16 @@ on:
         required: false
         default: false
         type: boolean
+      include_android:
+        description: Verify Android phone and TV artifacts for this release
+        required: false
+        default: true
+        type: boolean
+      include_server:
+        description: Verify self-hosted server packages for this release
+        required: false
+        default: true
+        type: boolean
   workflow_dispatch:
     inputs:
       tag:
@@ -23,9 +33,19 @@ on:
         required: false
         default: false
         type: boolean
+      include_android:
+        description: Verify Android phone and TV artifacts for this release
+        required: false
+        default: true
+        type: boolean
+      include_server:
+        description: Verify self-hosted server packages for this release
+        required: false
+        default: true
+        type: boolean
 
 # Draft releases are visible only to tokens with push access. The release stays
-# draft until this workflow has installed and verified every platform package.
+# draft until this workflow has verified every package in its explicit scope.
 permissions:
   contents: write
 
@@ -58,6 +78,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           INCLUDE_WINDOWS: ${{ inputs.include_windows }}
+          INCLUDE_ANDROID: ${{ inputs.include_android }}
+          INCLUDE_SERVER: ${{ inputs.include_server }}
           LEGACY_JSON: ${{ runner.temp }}/release-assets/latest.json
           MACOS11_JSON: ${{ runner.temp }}/release-assets/latest-macos11.json
           ASSET_NAMES: ${{ runner.temp }}/release-assets/names.txt
@@ -115,8 +137,6 @@ jobs:
             "YAWF.Stream_${expected_version}_amd64.AppImage.sig" \
             "YAWF.Stream_${expected_version}_amd64.deb" \
             "YAWF.Stream_${expected_version}_amd64.deb.sig" \
-            "YAWF.Stream_Android.TV_${expected_version}.apk" \
-            "YAWF.Stream_Android_${expected_version}.apk" \
             "YAWF.Stream_aarch64.app.tar.gz" \
             "YAWF.Stream_aarch64.app.tar.gz.sig" \
             "YAWF.Stream_x64.app.tar.gz" \
@@ -128,6 +148,26 @@ jobs:
               exit 1
             }
           done
+
+          if [ "$INCLUDE_ANDROID" = "true" ]; then
+            for asset in \
+              "YAWF.Stream_Android.TV_${expected_version}.apk" \
+              "YAWF.Stream_Android_${expected_version}.apk"; do
+              grep -Fxq "$asset" "$ASSET_NAMES" || {
+                echo "Required Android asset is missing: $asset" >&2
+                exit 1
+              }
+            done
+          elif grep -Eiq '[.]apk([.]sig)?$' "$ASSET_NAMES"; then
+            echo "An out-of-scope Android asset leaked into the draft release" >&2
+            exit 1
+          fi
+
+          if [ "$INCLUDE_SERVER" != "true" ] && \
+            grep -Eiq '^(debridstreamer-server|yawf-server-updater_|server-update[.]json$|Server_.*_verification[.]json$)' "$ASSET_NAMES"; then
+            echo "An out-of-scope server asset leaked into the draft release" >&2
+            exit 1
+          fi
 
           if [ "$INCLUDE_WINDOWS" = "true" ]; then
             for asset in \
@@ -148,6 +188,7 @@ jobs:
 
   android-phone:
     name: Signed Android phone artifact verification
+    if: inputs.include_android
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout release source
@@ -197,6 +238,7 @@ jobs:
 
   android-tv:
     name: Android TV package verification
+    if: inputs.include_android
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout release source
@@ -604,6 +646,7 @@ jobs:
 
   server-deb:
     name: Server deb clean install (${{ matrix.runner }})
+    if: inputs.include_server
     strategy:
       fail-fast: false
       matrix:
