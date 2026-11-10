@@ -879,7 +879,7 @@ public final class AppsProbe {
   boolean isClickable(){return clickable;}boolean isScrollable(){return scrollable;}
   void getBoundsInScreen(Rect r){r.set(bounds);}int getChildCount(){return declared>=0?declared:children.size();}
   AccessibilityNodeInfo getChild(int i){return i<children.size()?children.get(i):null;}
-  void recycle(){if(tapped&&scenario.equals("late-complete")&&id==5&&bounds.top==0&&bounds.bottom==1920&&postReadyReads>=2)time=100000;}
+  void recycle(){if(tapped&&id==5&&bounds.top==0&&bounds.bottom==1920&&((scenario.equals("late-complete")&&postReadyReads>=2)||(scenario.equals("r7-prefix-late")&&postReadyReads>=5)))time=100000;}
  }
  static class AccessibilityWindowInfo {
   static final int TYPE_APPLICATION=1;
@@ -917,10 +917,31 @@ public final class AppsProbe {
   if(scenario.equals("r3-title-child")){AccessibilityNodeInfo label=node(id,"Apps",new Rect(30,200,800,380));label.clazz="android.widget.TextView";header.children.add(label);}
   if(scenario.equals("r3-foreign-inner"))inner.pkg="foreign.package";
   if(scenario.equals("r3-incomplete"))inner.declared=inner.children.size()+1;
+  // R7 observed one outer scroll and no scrollable inner. Its instantaneous tree was not retained.
+  // Later XML a2495459a30cdc6f24abc4d6345bedffe8a43696fd77f7a0fc8c836a25e6599c has this valid pair.
+  boolean transition=scenario.equals("r7-prefix-absent")||scenario.equals("r7-prefix-nonscroll")||scenario.equals("r7-prefix-late");
+  boolean partial=scenario.startsWith("r7-")&&(scenario.equals("r7-prefix-reset")?postReadyReads==1:
+    scenario.equals("r7-prefix-stale")?time<10363:transition?postReadyReads<3:true);
+  if(partial){if(scenario.contains("nonscroll"))inner.scrollable=false;else detach(root,inner);}
+  if(scenario.equals("r7-prefix-header-sibling")){detach(root,header);root.children.add(header);}
+  if(scenario.equals("r7-prefix-header-outside"))header.bounds=new Rect(0,0,1080,533);
+  if(scenario.equals("r7-prefix-header-fills-outer"))header.bounds=new Rect(0,63,1080,1857);
+  if(scenario.equals("r7-prefix-extra-scroll")||scenario.equals("r7-prefix-noncanonical-scroll")){
+   AccessibilityNodeInfo other=node(id,"",new Rect(0,800,900,1700));other.scrollable=true;
+   if(scenario.equals("r7-prefix-noncanonical-scroll")){other.clazz="androidx.recyclerview.widget.RecyclerView";other.resource="com.android.settings:id/unrelated";}
+   root.children.add(other);
+  }
+  if(scenario.equals("r7-prefix-duplicate-header")){AccessibilityNodeInfo other=find(capturedBody(id),"com.android.settings:id/collapsing_toolbar");root.children.add(other);}
+  if(scenario.equals("r7-prefix-foreign-node")){AccessibilityNodeInfo other=node(id,"",new Rect(1,1,2,2));other.pkg="foreign.package";root.children.add(other);}
+  if(scenario.equals("r7-prefix-duplicate-node"))root.children.add(outer);
+  if(scenario.equals("r7-prefix-invalid-geometry"))outer.bounds=new Rect(1,2,1,4);
+  if(scenario.equals("r7-prefix-budget"))outer.declared=129;
+  if(scenario.equals("r7-prefix-incomplete-tree"))outer.declared=outer.children.size()+1;
+  if(scenario.equals("r7-prefix-wrong-window"))outer.id=99;
   return root;
  }
  static AccessibilityNodeInfo body(int id){
-  if(tapped&&scenario.startsWith("r3-"))return observedBody(id);
+  if(tapped&&(scenario.startsWith("r3-")||scenario.startsWith("r7-")))return observedBody(id);
   AccessibilityNodeInfo root=node(id,"",new Rect(0,0,1080,1920));
   AccessibilityNodeInfo header=node(id,"",new Rect(30,200,800,380));header.clazz="android.widget.FrameLayout";header.description="Apps";header.resource="com.android.settings:id/collapsing_toolbar";
   AccessibilityNodeInfo scroll=node(id,"",new Rect(0,500,1080,1850));scroll.scrollable=true;
@@ -953,7 +974,7 @@ public final class AppsProbe {
    AccessibilityWindowInfo w=new AccessibilityWindowInfo();
    // Actual R2: Apps tap0, target query+63ms, START+76ms, display+1462ms,
    // missing scroll result+1814ms. Complete AX at+1900ms is a synthetic continuation.
-   boolean old=tapped&&(scenario.equals("old-window")||(scenario.equals("actual-timeline")&&time<10076));
+   boolean old=tapped&&(scenario.equals("old-window")||scenario.equals("r7-prefix-stale")||(scenario.equals("actual-timeline")&&time<10076));
    w.id=!tapped||old?4:5;current=body(w.id);
    if(tapped&&scenario.equals("actual-timeline")&&time>=10076&&time<11900)current=null;
    if(tapped&&scenario.equals("null-root"))current=null;
@@ -961,7 +982,7 @@ public final class AppsProbe {
    if(tapped&&scenario.equals("window-geometry"))w.bounds=new Rect(-1,0,1080,1920);
    if(tapped&&scenario.equals("root-geometry"))current.bounds=new Rect(0,0,1081,1920);
    if(tapped&&scenario.equals("not-focused"))w.focused=false;
-   if(tapped&&(scenario.equals("ambiguous-window")||scenario.equals("r3-ambiguous-window"))){AccessibilityWindowInfo other=new AccessibilityWindowInfo();other.id=6;return List.of(w,other);}
+   if(tapped&&(scenario.equals("ambiguous-window")||scenario.equals("r3-ambiguous-window")||scenario.equals("r7-prefix-multiple-windows"))){AccessibilityWindowInfo other=new AccessibilityWindowInfo();other.id=6;return List.of(w,other);}
    if(tapped&&scenario.equals("window-list-incomplete"))return Arrays.asList(w,null);
    if(tapped&&scenario.equals("deadline"))time=100000;
    if(tapped&&scenario.equals("regressed-clock"))time=1;
@@ -981,11 +1002,11 @@ public final class AppsProbe {
   if(scenario.startsWith("snapshot:")){
    scenario=scenario.substring(9);tapped=true;time=12000;
    AppsWindowSnapshot snapshot=p.readInitialOfferAppsWindow(100000,true);
-   System.out.println("SNAPSHOT_STATUS="+snapshot.status+";reason="+scalar(snapshot,"failureReason")+";active="+scalar(snapshot,"activeWindows")+";headers="+scalar(snapshot,"headers")+";scrolls="+scalar(snapshot,"scrolls"));return;
+   System.out.println("SNAPSHOT_STATUS="+snapshot.status+";reason="+scalar(snapshot,"failureReason")+";active="+scalar(snapshot,"activeWindows")+";headers="+scalar(snapshot,"headers")+";scrolls="+scalar(snapshot,"scrolls")+";outers="+scalar(snapshot,"outers")+";inners="+scalar(snapshot,"inners"));return;
   }
   p.captureInitialOfferPreAppsWindow();
   tapped=true;time=10063;p.actions.add("Clicked exact visible system Settings control: Apps");
-  try{p.awaitInitialOfferAppsWindow();}catch(AssertionError failure){System.err.println("SCROLL_INPUTS=0;actions="+p.actions.size());throw failure;}
+  try{p.awaitInitialOfferAppsWindow();}catch(AssertionError failure){System.err.println("SCROLL_INPUTS=0;actions="+p.actions.size()+";time="+time+";readyAt="+p.appsWindowGate.readyAt);throw failure;}
   System.out.println("ACQUISITION_RETURNED");
   assertTrue("unchanged single UI_WAIT budget",p.appsWindowGate.deadline-p.appsWindowGate.startedAt==UI_WAIT_MS);
   assertTrue("different post window",p.appsWindowGate.pre.windowId!=p.appsWindowGate.ready.windowId);
@@ -997,10 +1018,12 @@ public final class AppsProbe {
   assertTrue("bounded deadline",p.appsWindowGate.readyAt<p.appsWindowGate.deadline);
   if(scenario.equals("actual-timeline"))assertTrue("waited past incomplete AX result",p.appsWindowGate.readyAt>=12000);
   if(scenario.equals("special-access"))assertTrue("real actionable target",p.appsWindowGate.ready.kind.equals("special-access"));
-  if(scenario.equals("r3-captured")||scenario.equals("r3-title-child")){
+  if(scenario.equals("r3-captured")||scenario.equals("r3-title-child")||scenario.startsWith("r7-")){
    assertTrue("unchanged first scroll match",p.appsWindowGate.ready.candidate.equals(firstScrollable(p.instrumentation.a.current).bounds));
    assertTrue("exact outer raw bounds",p.appsWindowGate.ready.candidate.equals(new Rect(0,63,1080,1857)));
   }
+  if(scenario.equals("r7-prefix-absent")||scenario.equals("r7-prefix-nonscroll"))assertTrue("two full pairs after three unready prefixes",p.appsWindowGate.readyAt==10463);
+  if(scenario.equals("r7-prefix-reset"))assertTrue("prefix resets previous full pair",p.appsWindowGate.readyAt==10363);
   System.out.println("PASS;SCROLL_INPUTS=0;polls="+p.appsWindowGate.polls+";readyAt="+p.appsWindowGate.readyAt);
  }
 }
@@ -1094,6 +1117,52 @@ public final class AppsProbe {
                 result = self.probe(scenario)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("AssertionError", result.stderr)
+                self.assertNotIn("ACQUISITION_RETURNED", result.stdout)
+
+    def test_r7_recognized_partial_prefix_is_unready_until_two_complete_pairs(self):
+        for scenario in ("r7-prefix-absent", "r7-prefix-nonscroll"):
+            with self.subTest(scenario=scenario):
+                snapshot = self.probe("snapshot:" + scenario)
+                self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+                self.assertIn("SNAPSHOT_STATUS=body-missing;reason=scroll-topology;active=1;headers=1;scrolls=1;outers=1;inners=0", snapshot.stdout)
+                result = self.probe(scenario)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("PASS;SCROLL_INPUTS=0;polls=6;readyAt=10463", result.stdout)
+
+    def test_r7_partial_prefix_resets_stability_without_extending_original_deadline(self):
+        reset = self.probe("r7-prefix-reset")
+        self.assertEqual(reset.returncode, 0, reset.stderr)
+        self.assertIn("readyAt=10363", reset.stdout)
+        for scenario in ("r7-prefix-never-absent", "r7-prefix-never-nonscroll", "r7-prefix-late", "r7-prefix-stale"):
+            with self.subTest(scenario=scenario):
+                result = self.probe(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Apps window acquisition timed out", result.stderr)
+                self.assertIn("SCROLL_INPUTS=0;actions=1;time=100000;readyAt=0", result.stderr)
+                self.assertNotIn("ACQUISITION_RETURNED", result.stdout)
+
+    def test_r7_partial_prefix_does_not_hide_true_ambiguity_or_unsafe_owned_trees(self):
+        self.assertEqual(self.probe("r7-prefix-absent").returncode, 0)
+        for suffix, status in (("header-sibling", "ambiguous"), ("header-outside", "ambiguous"),
+                               ("header-fills-outer", "ambiguous"), ("extra-scroll", "ambiguous"),
+                               ("noncanonical-scroll", "ambiguous"), ("duplicate-header", "ambiguous"),
+                               ("multiple-windows", "ambiguous"), ("foreign-node", "foreign"),
+                               ("duplicate-node", "duplicate"), ("invalid-geometry", "geometry"), ("budget", "budget")):
+            with self.subTest(suffix=suffix):
+                scenario = "r7-prefix-" + suffix
+                snapshot = self.probe("snapshot:" + scenario)
+                self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+                self.assertIn("SNAPSHOT_STATUS=" + status, snapshot.stdout)
+                result = self.probe(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Apps acquisition refused unsafe window: " + status, result.stderr)
+                self.assertIn("SCROLL_INPUTS=0;actions=1;time=10063;readyAt=0", result.stderr)
+                self.assertNotIn("ACQUISITION_RETURNED", result.stdout)
+        for suffix in ("incomplete-tree", "wrong-window"):
+            with self.subTest(incomplete=suffix):
+                result = self.probe("r7-prefix-" + suffix)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Apps window acquisition timed out: incomplete", result.stderr)
                 self.assertNotIn("ACQUISITION_RETURNED", result.stdout)
 
 

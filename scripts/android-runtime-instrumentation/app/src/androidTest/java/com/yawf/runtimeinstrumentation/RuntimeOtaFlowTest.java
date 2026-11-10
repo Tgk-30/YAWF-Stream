@@ -4980,6 +4980,16 @@ public final class RuntimeOtaFlowTest {
                 if (ineligibleScroll) {
                     result.status = "body-missing"; result.failureReason = "scroll-geometry"; return result;
                 }
+                if (scrolls == 1 && result.outers == 1 && result.inners == 0) {
+                    boolean headerNested = false;
+                    for (int parent = parents.get(headerIndex); parent >= 0; parent = parents.get(parent))
+                        if (parent == outerIndex) headerNested = true;
+                    Rect outer = new Rect(); nodes.get(outerIndex).getBoundsInScreen(outer);
+                    Rect header = new Rect(); nodes.get(headerIndex).getBoundsInScreen(header);
+                    if (headerNested && outer.contains(header) && header.bottom < outer.bottom) {
+                        result.status = "body-missing"; result.failureReason = "scroll-topology"; return result;
+                    }
+                }
                 boolean pair = scrolls == 2 && result.outers == 1 && result.inners == 1;
                 if (pair) {
                     boolean nested = false;
