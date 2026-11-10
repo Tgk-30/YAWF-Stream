@@ -29,7 +29,6 @@ import {
 import { readInitialMpegTsVideoPresentationTimestamp } from "./transcodeTsClock.js";
 
 export const MANIFEST_NAME = "stream.m3u8";
-const FIRST_ADAPTIVE_SEGMENT = "1080p_seg_00000.ts";
 const IDLE_MS = 120_000;
 const REAP_INTERVAL_MS = 30_000;
 const KILL_GRACE_MS = 3000;
@@ -84,6 +83,25 @@ export interface HlsTranscodeOptions {
   includeAudio?: boolean;
   /** Internal stream-table probe result. */
   includeSubtitle?: boolean;
+  /** Internal validated, unrotated source probe. Unknown retains the full ladder. */
+  sourceVideoHeight?: number | null;
+}
+
+const AUTO_RENDITIONS = [
+  { name: "1080p", height: 1080, video: "8000k", audio: "192k" },
+  { name: "720p", height: 720, video: "4500k", audio: "160k" },
+  { name: "480p", height: 480, video: "1800k", audio: "128k" },
+  { name: "360p", height: 360, video: "700k", audio: "96k" },
+] as const;
+
+function autoRenditions(height: number | null | undefined) {
+  if (height == null || !Number.isInteger(height) || height <= 0 || height > 16_384) {
+    return AUTO_RENDITIONS.slice();
+  }
+  // Keep one source-sized top rendition and every genuinely smaller rendition.
+  const top = AUTO_RENDITIONS.findIndex((level, index) =>
+    index === AUTO_RENDITIONS.length - 1 || height > AUTO_RENDITIONS[index + 1]!.height);
+  return AUTO_RENDITIONS.slice(top);
 }
 
 export interface TranscodeSourceInfo {
@@ -142,13 +160,14 @@ function toneMapPrefix(policy: TranscodeHdrPolicy): string {
   return "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p,";
 }
 
-/** Build a seek-aware HLS transcode. Auto clients get 1080p, 720p, 480p, and
- *  360p renditions; fixed qualities get one bounded rendition. The source is
- *  never upscaled. */
-export function hlsArgs(
+/** Build seek-aware HLS without duplicate source-sized Auto encodes. Unknown
+ * source dimensions retain the full ladder; fixed qualities stay unchanged.
+ * The source is never upscaled. */
+function buildHlsArgs(
   upstreamUrl: string,
   dir: string,
   options: HlsTranscodeOptions = {},
+  ladder = autoRenditions(options.sourceVideoHeight),
 ): string[] {
   const quality = options.quality ?? qualityForProfile(options.profile ?? "adaptive");
   const startSeconds =
@@ -198,43 +217,22 @@ export function hlsArgs(
 
   if (quality === "auto") {
     const prefix = toneMapPrefix(hdrPolicy);
+    const split = ladder.length === 1 ? "" :
+      `[0:v:0]split=${ladder.length}${ladder.map((level) => `[v${level.height}i]`).join("")};`;
+    const filters = ladder.map((level) =>
+      `${ladder.length === 1 ? "[0:v:0]" : `[v${level.height}i]`}${prefix}scale=w=-2:h='min(${level.height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[v${level.height}]`).join(";");
     args.push(
       "-filter_complex",
-      `[0:v:0]split=4[v1080i][v720i][v480i][v360i];[v1080i]${prefix}scale=w=-2:h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[v1080];[v720i]${prefix}scale=w=-2:h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[v720];[v480i]${prefix}scale=w=-2:h='min(480,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[v480];[v360i]${prefix}scale=w=-2:h='min(360,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[v360]`,
-      "-map",
-      "[v1080]",
-      "-map",
-      "[v720]",
-      "-map",
-      "[v480]",
-      "-map",
-      "[v360]",
-      ...(includeAudio
-        ? [
-            "-map",
-            audioMap,
-            "-map",
-            audioMap,
-            "-map",
-            audioMap,
-            "-map",
-            audioMap,
-          ]
-        : []),
+      split + filters,
+      ...ladder.flatMap((level) => ["-map", `[v${level.height}]`]),
+      ...(includeAudio ? ladder.flatMap(() => ["-map", audioMap]) : []),
       ...(includeSubtitle ? ["-map", "0:s:0"] : []),
-      ...encoderArgs(encoder, ["8000k", "4500k", "1800k", "700k"]),
+      ...encoderArgs(encoder, ladder.map((level) => level.video)),
       ...(includeAudio
         ? [
             "-c:a",
             "aac",
-            "-b:a:0",
-            "192k",
-            "-b:a:1",
-            "160k",
-            "-b:a:2",
-            "128k",
-            "-b:a:3",
-            "96k",
+            ...ladder.flatMap((level, index) => [`-b:a:${index}`, level.audio]),
             "-ac",
             "2",
           ]
@@ -268,13 +266,7 @@ export function hlsArgs(
       "-master_pl_name",
       MANIFEST_NAME,
       "-var_stream_map",
-      includeAudio
-        ? includeSubtitle
-          ? "v:0,a:0,s:0,sgroup:subs,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p v:3,a:3,name:360p"
-          : "v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p v:3,a:3,name:360p"
-        : includeSubtitle
-          ? "v:0,s:0,sgroup:subs,name:1080p v:1,name:720p v:2,name:480p v:3,name:360p"
-          : "v:0,name:1080p v:1,name:720p v:2,name:480p v:3,name:360p",
+      ladder.map((level, index) => `v:${index}${includeAudio ? `,a:${index}` : ""}${includeSubtitle && index === 0 ? ",s:0,sgroup:subs" : ""},name:${level.name}`).join(" "),
       ...(includeSubtitle
         ? ["-hls_subtitle_path", join(dir, TRANSCODE_SUBTITLE_PLAYLIST_PATTERN)]
         : []),
@@ -353,6 +345,14 @@ export function hlsArgs(
     );
   }
   return args;
+}
+
+export function hlsArgs(
+  upstreamUrl: string,
+  dir: string,
+  options: HlsTranscodeOptions = {},
+): string[] {
+  return buildHlsArgs(upstreamUrl, dir, options);
 }
 
 interface Job {
@@ -1182,15 +1182,17 @@ export class TranscodeRegistry {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
       throw Object.assign(new Error("The transcode session was closed."), { statusCode: 410 });
     }
+    const ladder = autoRenditions(streamProbe?.videoHeight);
     const processOptions = {
       ...options,
+      sourceVideoHeight: streamProbe?.videoHeight,
       includeAudio: streamProbe?.audio ?? true,
       includeSubtitle:
         options.preserveSubtitles === true && streamProbe?.subtitle === true,
     };
     try {
       child = this.transcoder.spawnHls(
-        hlsArgs(upstreamUrl, dir, processOptions),
+        buildHlsArgs(upstreamUrl, dir, processOptions, ladder),
       );
     } catch (err) {
       // spawn threw synchronously (e.g. fd/memory exhaustion) BEFORE the job was
@@ -1235,9 +1237,9 @@ export class TranscodeRegistry {
     const quality = options.quality ?? qualityForProfile(options.profile ?? "adaptive");
     const firstSeg = join(
       dir,
-      quality === "auto" ? FIRST_ADAPTIVE_SEGMENT : `${quality}_seg_00000.ts`,
+      `${quality === "auto" ? ladder[0]!.name : quality}_seg_00000.ts`,
     );
-    const firstSubtitlePrefix = quality === "auto" ? "1080p" : quality;
+    const firstSubtitlePrefix = quality === "auto" ? ladder[0]!.name : quality;
     const subtitlePlaylist = join(dir, `${firstSubtitlePrefix}_subtitles.m3u8`);
     const firstSubtitleSegment = join(
       dir,

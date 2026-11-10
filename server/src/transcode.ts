@@ -34,6 +34,8 @@ export interface TranscoderStreamProbe {
   audioTracks?: TranscoderAudioTrack[];
   /** Original source-container duration from ffprobe format metadata. */
   durationSeconds?: number | null;
+  /** Decoded height only when the probe has no uncertain display rotation. */
+  videoHeight?: number | null;
 }
 
 export const STREAM_PROBE_FAST_TIMEOUT_MS = 5_000;
@@ -224,7 +226,7 @@ export const realTranscoder: Transcoder = {
             "-v",
             "error",
             "-show_entries",
-            "stream=index,codec_type:stream_tags=language,title:stream_disposition=default:format=duration",
+            "stream=index,codec_type,height:stream_tags=language,title,rotate:stream_side_data=rotation:stream_disposition=default:format=duration",
             "-of",
             "json",
             upstreamUrl,
@@ -246,12 +248,29 @@ export const realTranscoder: Transcoder = {
             const parsed = JSON.parse(output) as {
               streams?: Array<{
                 codec_type?: unknown;
-                tags?: { language?: unknown; title?: unknown };
+                height?: unknown;
+                side_data_list?: unknown;
+                tags?: { language?: unknown; title?: unknown; rotate?: unknown };
                 disposition?: { default?: unknown };
               }>;
               format?: { duration?: unknown };
             };
             const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
+            const video = streams.find((stream) => stream.codec_type === "video");
+            const tags = video?.tags;
+            const rotation = tags?.rotate;
+            const unrotatedTag = tags === undefined ||
+              (tags != null && typeof tags === "object" && !Array.isArray(tags) &&
+                (rotation === undefined ||
+                  (typeof rotation === "string" && /^[+-]?0(?:\.0+)?$/.test(rotation))));
+            const sideData = video?.side_data_list;
+            const unrotatedSideData = sideData === undefined ||
+              (Array.isArray(sideData) && sideData.every((entry: unknown) =>
+                entry != null && typeof entry === "object" &&
+                "rotation" in entry && entry.rotation === 0));
+            const videoHeight = typeof video?.height === "number" &&
+              Number.isInteger(video.height) && video.height > 0 && video.height <= 16_384 &&
+              unrotatedTag && unrotatedSideData ? video.height : null;
             const clean = (value: unknown, maxLength: number): string | null => {
               if (typeof value !== "string") return null;
               const normalized = value.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
@@ -274,6 +293,7 @@ export const realTranscoder: Transcoder = {
                   ? Number(rawDuration)
                   : Number.NaN;
             finish({
+              videoHeight,
               audio: audioTracks.length > 0,
               subtitle: streams.some((stream) => stream.codec_type === "subtitle"),
               audioTracks,

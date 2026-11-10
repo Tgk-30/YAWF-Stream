@@ -28,6 +28,48 @@ function fakeMpegTsSegment(): Buffer {
 }
 
 describe("HLS transcode arguments", () => {
+  it.each([
+    [240, ["360p"]], [360, ["360p"]], [480, ["480p", "360p"]],
+    [540, ["720p", "480p", "360p"]], [720, ["720p", "480p", "360p"]],
+    [1080, ["1080p", "720p", "480p", "360p"]],
+  ] as const)("does not encode duplicate source-sized Auto renditions for height %i", (sourceVideoHeight, names) => {
+    const args = hlsArgs("/owned/video.mp4", "/owned/output", { sourceVideoHeight });
+    expect(valueAfter(args, "-var_stream_map")).toBe(names.map((name, index) =>
+      `v:${index},a:${index},name:${name}`).join(" "));
+    expect(args.filter((arg) => arg === "0:a:0")).toHaveLength(names.length);
+    const graph = valueAfter(args, "-filter_complex")!;
+    if (names.length === 1) expect(graph).not.toContain("split=");
+    else expect(graph).toContain(`split=${names.length}`);
+  });
+
+  it("retains Auto audio bitrates and subtitle ownership after compacting its indices", () => {
+    const args = hlsArgs("/owned/video.mp4", "/owned/output", {
+      sourceVideoHeight: 480, audioTrack: 1, preserveSubtitles: true, includeSubtitle: true,
+    });
+    expect(valueAfter(args, "-b:v:0")).toBe("1800k");
+    expect(valueAfter(args, "-b:a:0")).toBe("128k");
+    expect(valueAfter(args, "-b:a:1")).toBe("96k");
+    expect(args.filter((arg) => arg === "0:a:1")).toHaveLength(2);
+    expect(valueAfter(args, "-var_stream_map")).toBe(
+      "v:0,a:0,s:0,sgroup:subs,name:480p v:1,a:1,name:360p",
+    );
+    const silent = hlsArgs("/owned/video.mp4", "/owned/output", {
+      sourceVideoHeight: 360, includeAudio: false,
+    });
+    expect(valueAfter(silent, "-var_stream_map")).toBe("v:0,name:360p");
+    expect(silent).not.toContain("-c:a");
+  });
+
+  it.each([undefined, null, NaN, -1, 0, 480.5, 16385])("retains the full Auto ladder for uncertain height %s", (sourceVideoHeight) => {
+    expect(hlsArgs("/owned/video.mp4", "/owned/output", { sourceVideoHeight }))
+      .toEqual(hlsArgs("/owned/video.mp4", "/owned/output"));
+  });
+
+  it.each(["1080p", "720p", "480p", "360p"] as const)("leaves explicit %s quality unchanged by source-height pruning", (quality) => {
+    expect(hlsArgs("/owned/video.mp4", "/owned/output", { quality, sourceVideoHeight: 360 }))
+      .toEqual(hlsArgs("/owned/video.mp4", "/owned/output", { quality }));
+  });
+
   it.each(["http", "https"] as const)("resumes seekable %s inputs with bounded reconnect before seek and input", (protocol) => {
     const url = `${protocol}://provider.example/video.mp4`;
     const args = hlsArgs(url, "/owned/yawf", {
@@ -386,6 +428,46 @@ function playableSpawn() {
 }
 
 describe("transcode staged lifecycle", () => {
+  it("binds Auto readiness, subtitles and staged handoff to the same cached source-sized ladder", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "yawf-source-sized-auto-"));
+    const database = new AppDatabase(":memory:");
+    seedTranscodeSession(database, "source-sized");
+    const probeStreams = vi.fn(async () => ({ audio: true, subtitle: true, videoHeight: 480 }));
+    const spawnHls = vi.fn((args: string[]) => {
+      const dir = dirname(args.at(-1)!);
+      writeFileSync(join(dir, "stream.m3u8"), "#EXTM3U\n480p.m3u8\n");
+      writeFileSync(join(dir, "480p.m3u8"), "#EXTM3U\n#EXTINF:6,\n480p_seg_00000.ts\n");
+      writeFileSync(join(dir, "480p_seg_00000.ts"), fakeMpegTsSegment());
+      writeFileSync(join(dir, "480p_subtitles.m3u8"), "#EXTM3U\n#EXTINF:6,\n480p0.vtt\n");
+      writeFileSync(join(dir, "480p0.vtt"), "WEBVTT\n");
+      const child = new EventEmitter() as EventEmitter & { kill: () => boolean; stderr: null };
+      child.stderr = null;
+      child.kill = () => { child.emit("exit", 0); return true; };
+      return child as unknown as ChildProcess;
+    });
+    const registry = new TranscodeRegistry(database, {
+      dataDir, maxTranscodes: 2, transcodeVideoEncoder: "libx264", transcodeStartTimeoutMs: 125,
+    } as ServerConfig, { async detect() { return true; }, probeStreams, spawnHls });
+    try {
+      const options = { quality: "auto" as const, preserveSubtitles: true };
+      const original = await registry.ensureJob("source-sized", "https://provider.example/video", options);
+      const replacement = await registry.ensureJob("source-sized", "https://provider.example/video", { ...options, startSeconds: 90 });
+      expect(replacement).not.toBe(original);
+      expect(registry.dirFor("source-sized")).toBe(original);
+      expect(probeStreams).toHaveBeenCalledTimes(1);
+      for (const [args] of spawnHls.mock.calls) {
+        expect(valueAfter(args, "-var_stream_map")).toBe(
+          "v:0,a:0,s:0,sgroup:subs,name:480p v:1,a:1,name:360p",
+        );
+      }
+      const generation = registry.generationFor("source-sized", replacement)!;
+      expect(registry.dirForAsset("source-sized", "480p.m3u8", generation, true)).toBe(replacement);
+      expect(registry.dirFor("source-sized")).toBe(replacement);
+    } finally {
+      await registry.stop(); database.close(); rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["playlist", false, false, true],
     ["first WebVTT segment", true, false, true],
