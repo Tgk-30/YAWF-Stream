@@ -18286,6 +18286,7 @@ describe("automatic starvation95 adaptation", () => {
     p.state.range = [0, 20]; p.confirm(); await settle();
     expect(p.replacement).toBe(p.video);
     expect(p.attempts).toEqual([{ retained: true, time: 3.5, seeking: false }]);
+    expect(screen.getByRole("button", { name: "Play" })).toBeVisible();
     fireEvent.pause(p.replacement); fireEvent.canPlay(p.replacement); fireEvent.seeked(p.replacement); await settle();
     expect(p.attempts).toHaveLength(1); expect(p.state.paused).toBe(true);
     expect(screen.getByRole("button", { name: "Play" })).toBeVisible();
