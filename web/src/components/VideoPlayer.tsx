@@ -74,7 +74,7 @@ import { AdjustmentRange } from "./player/AdjustmentRange";
 import { CaptionsMenu, type EmbeddedCaptions } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { CastControls } from "./CastControls";
-import { PlaybackStarvation, lowerStarvationQuality } from "../lib/playbackStarvation";
+import { PlaybackStarvation, STARVATION_WAIT_CONFIRMATION_MS, lowerStarvationQuality } from "../lib/playbackStarvation";
 import { predictEpisodeEnd } from "../lib/endPredictor";
 import type { PlaybackPrefs } from "../storage/models";
 import {
@@ -4039,6 +4039,7 @@ function WebviewPlayer({
   const requestPlaybackState = useCallback((shouldPlay: boolean) => {
     const video = videoRef.current;
     if (video == null || !ownsSource(video)) return;
+    starvationPolicy.interrupt();
     explicitPlaybackIntentRef.current = true;
     clearReturnedPlayback(video);
     playbackAttemptRef.current += 1;
@@ -4090,7 +4091,7 @@ function WebviewPlayer({
     } else {
       video.pause();
     }
-  }, [applyOwnedPlayback, clearReturnedPlayback, onPausedChange, onPendingHandoffPausedChange]);
+  }, [applyOwnedPlayback, clearReturnedPlayback, onPausedChange, onPendingHandoffPausedChange, starvationPolicy]);
 
   useLayoutEffect(() => {
     const pauseOwnedReader = (video: HTMLVideoElement) => {
@@ -7390,6 +7391,15 @@ function WebviewPlayer({
   useEffect(() => {
     const video = videoRef.current;
     if (video == null) return;
+    let confirmationTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearConfirmationTimer = () => {
+      if (confirmationTimer != null) clearTimeout(confirmationTimer);
+      confirmationTimer = null;
+    };
+    const cancelConfirmation = () => {
+      clearConfirmationTimer();
+      starvationPolicy.cancelWaitingConfirmation();
+    };
     const lowerQuality = () => lowerStarvationQuality(video.videoHeight, serverOptimized?.qualities ?? []);
     const eligible = () => automaticQualityIntent && serverOptimized != null && lowerQuality() != null &&
       currentMediaEvent(video) && video.readyState >= HTMLMediaElement.HAVE_METADATA && verifiedPlaybackProgressReportedRef.current &&
@@ -7408,11 +7418,13 @@ function WebviewPlayer({
       (serverAudioLoadPendingRef.current || serverAudioInventoryStatus === "loading" ||
         (serverAudioInventoryStatus === "idle" && !starvationPolicy.audioInventoryLoadAttempted));
     const progress = () => {
-      if (!eligible()) { starvationPolicy.interrupt(); return; }
+      if (!eligible()) { cancelConfirmation(); starvationPolicy.interrupt(); return; }
       // Depletion can emit timeupdate at metadata readiness before waiting.
       // It is neither resumed decoded progress nor a new playback context.
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
       starvationPolicy.progress(video.currentTime, true);
+      if (video.readyState > HTMLMediaElement.HAVE_CURRENT_DATA) cancelConfirmation();
+      else if (starvationPolicy.waitingConfirmation == null) clearConfirmationTimer();
       if (needsLocalAudioInventory() && serverAudioInventoryStatus === "idle" &&
         starvationPolicy.claimAudioInventoryLoad()) startServerAudioInventoryLoad(false);
     };
@@ -7476,6 +7488,18 @@ function WebviewPlayer({
           label: selected?.logicalLabel ?? activeServerAudioPreference?.label ?? null,
         });
     };
+    const scheduleConfirmation = () => {
+      const pending = starvationPolicy.waitingConfirmation;
+      if (pending == null || confirmationTimer != null) return;
+      confirmationTimer = setTimeout(() => {
+        confirmationTimer = null;
+        if (starvationPolicy.waitingConfirmation !== pending) { scheduleConfirmation(); return; }
+        if (video.readyState > HTMLMediaElement.HAVE_CURRENT_DATA) { cancelConfirmation(); return; }
+        if (starvationPolicy.confirmWaiting(pending, performance.now(), video.currentTime,
+          playbackAttemptRef.current, eligible(), !inventoryPending())) reduce();
+        else scheduleConfirmation();
+      }, Math.max(1, Math.ceil(pending.at + STARVATION_WAIT_CONFIRMATION_MS - performance.now())));
+    };
     const waiting = () => {
       let ahead = 0;
       try {
@@ -7485,26 +7509,41 @@ function WebviewPlayer({
             break;
           }
         }
-      } catch { starvationPolicy.interrupt(); return; }
-      if (starvationPolicy.waiting(Date.now(), ahead, eligible(), !inventoryPending())) reduce();
+      } catch { cancelConfirmation(); starvationPolicy.interrupt(); return; }
+      if (starvationPolicy.waiting(performance.now(), ahead, eligible(), !inventoryPending())) { clearConfirmationTimer(); reduce(); }
+      // Some decoders expose buffered timestamps beyond the last decodable
+      // frame. Keep the fast depletion path, but corroborate such a wait with
+      // two foreground seconds at this exact clock and no future frame data.
+      else if (Number.isFinite(ahead) && ahead > 0.5 && video.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        starvationPolicy.beginWaitingConfirmation(performance.now(), video.currentTime, playbackAttemptRef.current, eligible());
+      } else cancelConfirmation();
+      scheduleConfirmation();
     };
     // A bounded inventory probe can finish after the third episode. Complete
     // that already-earned decision without fabricating another waiting event.
-    if (!inventoryPending() && starvationPolicy.claimAttempt(Date.now(), eligible())) reduce();
-    const interrupt = () => { starvationPolicy.interrupt(); onCancelAutomaticQualityReduction(); };
+    if (!inventoryPending() && starvationPolicy.claimAttempt(performance.now(), eligible())) reduce();
+    scheduleConfirmation();
+    const interrupt = () => { cancelConfirmation(); starvationPolicy.interrupt(); onCancelAutomaticQualityReduction(); };
     const seeking = interrupt;
     const nativeAudio = (video as BrowserAudioVideoElement).audioTracks;
     nativeAudio?.addEventListener?.("change", interrupt);
     video.addEventListener("timeupdate", progress);
+    video.addEventListener("progress", progress);
     video.addEventListener("waiting", waiting);
+    video.addEventListener("playing", cancelConfirmation);
+    video.addEventListener("canplay", cancelConfirmation);
     video.addEventListener("seeking", seeking);
     video.addEventListener("pause", interrupt);
     document.addEventListener("visibilitychange", interrupt);
     window.addEventListener("pagehide", interrupt);
     return () => {
+      clearConfirmationTimer();
       nativeAudio?.removeEventListener?.("change", interrupt);
       video.removeEventListener("timeupdate", progress);
+      video.removeEventListener("progress", progress);
       video.removeEventListener("waiting", waiting);
+      video.removeEventListener("playing", cancelConfirmation);
+      video.removeEventListener("canplay", cancelConfirmation);
       video.removeEventListener("seeking", seeking);
       video.removeEventListener("pause", interrupt);
       document.removeEventListener("visibilitychange", interrupt);
