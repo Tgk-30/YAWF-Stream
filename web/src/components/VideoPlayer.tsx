@@ -1552,14 +1552,17 @@ export function VideoPlayer({
       activeWebSourceRef.current !== source || optimizationPendingRef.current != null) return;
     lastStallContextRef.current = { position, handoff };
     setServerLeaseExpired(true);
+    recordDiagnostic("player", "server_generation.expired", "warning");
+    const pending = freshStreamRequestRef.current;
+    if (pending?.owner === playbackOwner && pending.source === currentWebviewSourceRef.current) return;
+    if (refreshCurrentSource != null && !automaticStallRecoveryAttemptedRef.current &&
+      pending == null) {
+      void recoverPostStartStall(position, handoff);
+      return;
+    }
     setExternalError(refreshCurrentSource == null
       ? "This stream has expired. Choose another source or close the player."
       : "This stream has expired. Retry to request a fresh stream, or choose another source.");
-    recordDiagnostic("player", "server_generation.expired", "warning");
-    if (refreshCurrentSource != null && !automaticStallRecoveryAttemptedRef.current &&
-      freshStreamRequestRef.current == null) {
-      void recoverPostStartStall(position, handoff);
-    }
   }, [playbackOwner, recoverPostStartStall, refreshCurrentSource]);
 
   // State is scoped below for render-time safety. Reset it too, so a completed
@@ -3547,6 +3550,7 @@ function WebviewPlayer({
   const serverAudioModeRef = useRef(serverOptimized?.loadAudioTracks != null);
   serverAudioModeRef.current = serverOptimized?.loadAudioTracks != null;
   const appliedServerAudioPreferenceRef = useRef(false);
+  const appliedRetainedServerQualityOwnerRef = useRef<string | null>(null);
   const autoplayAttemptedRef = useRef(false);
   const playbackAttemptRef = useRef(0);
   const foregroundPlaybackRef = useRef<{ video: HTMLVideoElement; source: string; play: boolean; returnedPosition?: number } | null>(null);
@@ -5864,7 +5868,7 @@ function WebviewPlayer({
       const returnedPlayback = foregroundPlaybackRef.current;
       const retainsReturnedPlay = returnedPlayback?.video === video && returnedPlayback.source === url &&
         playbackSourceRef.current === url && returnedPlayback.play && returnedPlayback.returnedPosition != null;
-      if (!retainsReturnedPlay && video.error == null && !video.ended && !suspendedRef.current &&
+      if (!retainsReturnedPlay && !terminalRecoveryOwns(video) && video.error == null && !video.ended && !suspendedRef.current &&
           !documentSuspendedRef.current && document.visibilityState !== "hidden" &&
           backgroundPauseVideoRef.current !== video && !recoveryClockWasReset(video) &&
           !video.seeking && !rendererSeekingRef.current &&
@@ -6213,6 +6217,11 @@ function WebviewPlayer({
       if (!owns()) return;
       stop();
       const snapshot = captureRecoverySnapshot(video);
+      terminalRecoveryVideoRef.current = video;
+      terminalRecoverySourceRef.current = sourceIdentity;
+      terminalRecoveryStateRef.current = snapshot.state;
+      stallWatchdogRef.current?.stop();
+      if (!video.paused) video.pause();
       leaseExpiredCallbackRef.current(url, snapshot.position, snapshot.state);
     };
     const renew = async () => {
@@ -7367,8 +7376,13 @@ function WebviewPlayer({
   ]);
 
   useEffect(() => {
+    if (retainedServerOptimizedQuality != null && retainedServerOptimizedQuality === activeServerOptimizedQuality) {
+      appliedRetainedServerQualityOwnerRef.current = serverAudioOwner;
+    }
+    const restoreRetainedQuality = appliedRetainedServerQualityOwnerRef.current !== serverAudioOwner &&
+      retainedServerOptimizedQuality != null && retainedServerOptimizedQuality !== activeServerOptimizedQuality;
     if (
-      appliedServerAudioPreferenceRef.current ||
+      (appliedServerAudioPreferenceRef.current && !restoreRetainedQuality) ||
       serverAudioInventoryStatus !== "ready" ||
       serverAudioTracks.length === 0 ||
       serverOptimizationPending
@@ -7380,7 +7394,9 @@ function WebviewPlayer({
       ? null
       : savedPrefs;
     const selected =
-      matchedRetainedServerAudio ?? findPreferredLanguageMatch(
+      (appliedServerAudioPreferenceRef.current
+        ? serverAudioTracks.find((track) => track.index === resolvedServerAudioTrack)
+        : null) ?? matchedRetainedServerAudio ?? findPreferredLanguageMatch(
         perTitlePrefs?.preferredAudioLang,
         serverAudioTracks,
         (track) => track.language,
@@ -7398,7 +7414,8 @@ function WebviewPlayer({
       ) ??
       serverAudioTracks.find((track) => track.isDefault) ??
       serverAudioTracks[0];
-    if (selected.index === resolvedServerAudioTrack || serverOptimized == null) {
+    const audioMatches = selected.index === resolvedServerAudioTrack;
+    if ((audioMatches && !restoreRetainedQuality) || serverOptimized == null) {
       appliedServerAudioPreferenceRef.current = true;
       return;
     }
@@ -7420,7 +7437,12 @@ function WebviewPlayer({
       }
     }
     appliedServerAudioPreferenceRef.current = true;
+    appliedRetainedServerQualityOwnerRef.current = serverAudioOwner;
     const quality = retainedServerOptimizedQuality ?? activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";
+    // A quality-only restore keeps an implicit server default implicit. An
+    // explicit track, including zero, and a retained audio choice remain owned.
+    const implicitAudio = audioMatches && matchedRetainedServerAudio == null &&
+      activeServerAudioPreference == null && !initialServerAudioTrackExplicit;
     void onSwitchServerOptimized(
       quality,
       position,
@@ -7431,8 +7453,8 @@ function WebviewPlayer({
         return { ...state, paused: intent === "play" ? false : intent === "pause" ? true
           : sourceSwitchStateRef.current?.paused ?? state.paused };
       },
-      selected.index,
-      { id: selected.id, language: selected.language, label: selected.logicalLabel },
+      implicitAudio ? undefined : selected.index,
+      implicitAudio ? undefined : { id: selected.id, language: selected.language, label: selected.logicalLabel },
       "follow-current",
       false,
       "remembered-audio",
@@ -7440,6 +7462,9 @@ function WebviewPlayer({
   }, [
     resolvedServerAudioTrack,
     activeServerOptimizedQuality,
+    activeServerAudioPreference,
+    initialServerAudioTrackExplicit,
+    serverAudioOwner,
     retainedServerOptimizedQuality,
     matchedRetainedServerAudio,
     duration,

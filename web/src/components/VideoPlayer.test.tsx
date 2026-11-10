@@ -14037,13 +14037,13 @@ describe("server generation HEAD retention", () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>).mockReturnValue("probably");
   }
-  it("automatically resolves expiry and keeps manual Retry from restoring an old URL", async () => {
+  it("reports failed automatic expiry resolution and keeps manual Retry from restoring an old URL", async () => {
     setupNative();
     let heads = 0;
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
       init?.method === "HEAD" ? new Response(null, { status: ++heads === 1 ? 200 : 404 }) : new Response(manifest));
     vi.stubGlobal("fetch", fetcher);
-    const refresh = vi.fn(async () => {});
+    const refresh = vi.fn(async () => { throw new Error("Synthetic fresh resolution failure"); });
     render(<VideoPlayer url={master} engine="webview-hls-transcode" timelineOffsetSeconds={46} title="Lease" serverOptimized={optimized} refreshCurrentSource={refresh} onClose={() => {}} />);
     await flushLease();
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
@@ -14052,7 +14052,7 @@ describe("server generation HEAD retention", () => {
     fireEvent.canPlay(video);
     fireEvent.pause(video);
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     expect(document.querySelector("video.player-video")).toBeNull();
     expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
@@ -14279,7 +14279,7 @@ describe("server generation HEAD retention", () => {
   it("keeps a committed lease owner through a suspended replacement until HEAD404 reaches fresh Retry", async () => {
     setupNative();
     const head = deferred<Response>();
-    const refresh = vi.fn(async () => {});
+    const refresh = vi.fn(async () => { throw new Error("Synthetic fresh resolution failure"); });
     const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
       init?.method === "HEAD" ? head.promise : Promise.resolve(new Response(manifest)));
     vi.stubGlobal("fetch", fetcher);
@@ -14297,7 +14297,7 @@ describe("server generation HEAD retention", () => {
     expect(committed.isConnected).toBe(true);
     expect(fetcher.mock.calls.find(([, init]) => init?.method === "HEAD")![1]!.signal!.aborted).toBe(false);
     head.resolve(new Response(null, { status: 404 })); await flushLease();
-    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     act(() => scenario.choose(false)); // Abort the never-committed replacement.
     fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
     await flushLease();
@@ -14312,7 +14312,7 @@ describe("server generation HEAD retention", () => {
     const scenario = suspendedReplacement(() => refresh.promise);
     render(<scenario.Scenario />);
     await flushLease();
-    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
     act(() => { startTransition(() => scenario.choose(true)); });
     await flushLease();
     expect(scenario.speculativeRenders()).toBeGreaterThan(0);
@@ -14391,7 +14391,7 @@ describe("server generation HEAD retention", () => {
   });
   it("keeps the committed expiry callback through an aborted engine-only transition on the reused child", async () => {
     setupNative();
-    const head = deferred<Response>(); const refresh = vi.fn(async () => {});
+    const head = deferred<Response>(); const refresh = vi.fn(async () => { throw new Error("Synthetic fresh resolution failure"); });
     const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
       init?.method === "HEAD" ? head.promise : Promise.resolve(new Response(manifest)));
     vi.stubGlobal("fetch", fetcher);
@@ -14407,7 +14407,7 @@ describe("server generation HEAD retention", () => {
     expect(video.src).toBe(master);
     expect(fetcher.mock.calls.find(([, init]) => init?.method === "HEAD")![1]!.signal!.aborted).toBe(false);
     head.resolve(new Response(null, { status: 404 })); await flushLease();
-    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     act(() => scenario.choose(false));
     fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flushLease();
     expect(refresh).toHaveBeenCalledWith(8.25, expect.objectContaining({ paused: true }));
@@ -14418,14 +14418,14 @@ describe("server generation HEAD retention", () => {
     const head = deferred<Response>();
     vi.stubGlobal("fetch", vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
       init?.method === "HEAD" ? head.promise : Promise.resolve(new Response(manifest))));
-    const scenario = suspendedReplacement(async () => {}, true, false);
+    const scenario = suspendedReplacement(async () => { throw new Error("Synthetic fresh resolution failure"); }, true, false);
     render(<scenario.Scenario />); await flushLease();
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
     fireEvent.canPlay(video); fireEvent.pause(video);
     act(() => scenario.choose(true)); await flushLease();
     expect(document.querySelector("video.player-video")).toBe(video);
     head.resolve(new Response(null, { status: 404 })); await flushLease();
-    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
   });
 
@@ -14728,6 +14728,186 @@ describe("explicit Device Original audio intent", () => {
   });
 });
 
+
+describe("matching-audio retained quality93", () => {
+  const position = 90.25;
+  async function settleQuality93() {
+    await act(async () => { for (let i = 0; i < 24; i += 1) await Promise.resolve(); });
+  }
+  async function setupQuality93(language: "eng" | "jpn" = "eng", outcome: "ready" | "failed" | "pending" = "ready") {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const states = new WeakMap<HTMLVideoElement, { time: number; paused: boolean }>();
+    const plays: Array<{ time: number | null; src: string }> = [];
+    vi.mocked(HTMLMediaElement.prototype.play).mockImplementation(function (this: HTMLVideoElement) {
+      const state = states.get(this);
+      plays.push({ time: state?.time ?? null, src: this.src });
+      if (state != null) { state.paused = false; fireEvent.play(this); fireEvent.playing(this); }
+      return Promise.resolve();
+    });
+    vi.mocked(HTMLMediaElement.prototype.pause).mockImplementation(function (this: HTMLVideoElement) {
+      const state = states.get(this);
+      if (state != null && !state.paused) { state.paused = true; fireEvent.pause(this); }
+    });
+    const pendingManifest = deferred<Response>();
+    let generation = 0;
+    let implicitAudioIndex = language === "eng" ? 0 : 1;
+    const request = vi.fn(async (quality: ServerTranscodeQuality, absolute: number, audioTrack?: number) => ({
+      url: `https://server.example/api/stream/quality93-${++generation}/index.m3u8?quality=${quality}&start=${absolute}${audioTrack == null ? "" : `&audio=${audioTrack}`}`,
+      timelineOffsetSeconds: absolute, startPositionSeconds: 0, quality, audioTrack,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("quality93-1/")) {
+        if (outcome === "pending") return pendingManifest.promise;
+        if (outcome === "failed") return new Response(null, { status: 500 });
+      }
+      return new Response("#EXTM3U\n", { headers: { "x-yawf-transcode-audio": new URL(String(input)).searchParams.get("audio") ?? String(implicitAudioIndex) } });
+    }));
+    const tracks = [
+      { index: 0, language: "eng", label: "English", default: language === "eng" },
+      { index: 1, language: "jpn", label: "Japanese", default: language === "jpn" },
+    ];
+    const props = {
+      url: "https://server.example/api/stream/quality93-original/fixture.mp4", title: "Quality continuity93",
+      sourceFileName: "Quality93.Movie.mkv", imdbId: "tt-quality93", startPositionSeconds: position,
+      initialHandoffState: { paused: true, volume: 0.35, muted: true, playbackRate: 1.25 },
+      playerPreferences: { defaultAudioLanguage: language },
+      serverOptimized: { qualities: ["480p", "360p"] as ServerTranscodeQuality[], defaultQuality: null,
+        loadSourceInfo: async () => ({ durationSeconds: 720, tracks }), request },
+      onClose: vi.fn(),
+    };
+    const view = render(<VideoPlayer {...props} />);
+    const ready = async (video: HTMLVideoElement, offset = 0) => {
+      const state = { time: Number(/#t=(\d+(?:\.\d+)?)/.exec(video.src)?.[1] ?? 0), paused: true };
+      states.set(video, state);
+      Object.defineProperties(video, {
+        currentSrc: { configurable: true, value: video.src }, error: { configurable: true, value: null },
+        currentTime: { configurable: true, get: () => state.time, set: (value: number) => { state.time = value; } },
+        duration: { configurable: true, value: 720 - offset }, readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+        paused: { configurable: true, get: () => state.paused }, seeking: { configurable: true, value: false },
+        ended: { configurable: true, value: false },
+        seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 720 - offset } },
+      });
+      fireEvent.loadStart(video); fireEvent.loadedMetadata(video); fireEvent.loadedData(video); fireEvent.seeked(video); fireEvent.canPlay(video);
+      await settleQuality93(); return state;
+    };
+    const settings = () => {
+      if (screen.queryByRole("button", { name: "Close playback settings" }) == null)
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    };
+    await ready(document.querySelector("video.player-video") as HTMLVideoElement);
+    settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settleQuality93();
+    expect(request).toHaveBeenCalledTimes(1);
+    if (outcome === "ready") await ready(document.querySelector("video.player-video") as HTMLVideoElement, position);
+    const replace = async (transport: "raw" | "360p" | "480p" = "raw", options: { otherContent?: boolean; handoff?: PlaybackHandoffState; offset?: number; absolute?: number; preferredLanguage?: string; explicitAudioZero?: boolean } = {}) => {
+      const sourceInfo = deferred<{ durationSeconds: number; tracks: ServerAudioTrack[] }>();
+      const nextTracks = language === "jpn"
+        ? [{ index: 0, language: "eng", label: "English", default: false }, { index: 4, language: "jpn", label: "Japanese", default: true }]
+        : tracks;
+      implicitAudioIndex = language === "eng" ? 0 : 4;
+      const absolute = options.absolute ?? position;
+      const offset = options.offset ?? (transport === "raw" ? 0 : absolute);
+      const fresh = transport === "raw" ? "https://server.example/api/stream/quality93-fresh/fixture.mp4"
+        : `https://server.example/api/stream/quality93-fresh/index.m3u8?quality=${transport}&start=${offset}${options.explicitAudioZero ? "&audio=0" : ""}`;
+      view.rerender(<VideoPlayer {...props} url={fresh} sourceRevision={1} engine={transport === "raw" ? "webview-direct" : "webview-hls-transcode"}
+        sourceFileName={options.otherContent ? "Other93.Movie.mkv" : props.sourceFileName}
+        playerPreferences={{ defaultAudioLanguage: options.preferredLanguage ?? language }}
+        startPositionSeconds={absolute - offset} timelineOffsetSeconds={offset} initialHandoffState={options.handoff ?? props.initialHandoffState}
+        serverOptimized={{ ...props.serverOptimized, loadSourceInfo: () => sourceInfo.promise }} />);
+      await settleQuality93();
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      await ready(video, offset);
+      await act(async () => { sourceInfo.resolve({ durationSeconds: 720, tracks: nextTracks }); });
+      await settleQuality93();
+      return { video, fresh };
+    };
+    return { props, view, request, states, ready, settings, replace, pendingManifest, plays };
+  }
+
+  it.each([["eng", "raw"], ["eng", "360p"], ["jpn", "raw"], ["jpn", "360p"]] as const)(
+    "[quality-match93] restores480 with matching %s audio after %s successor", async (language, transport) => {
+      const f = await setupQuality93(language); await f.replace(transport);
+      expect(f.request).toHaveBeenCalledTimes(2);
+      // Quality-only restoration must not turn the fresh server's implicit default into explicit audio=0/4.
+      const expectedPosition = position + (transport === "raw" ? 0 : 0.001);
+      expect(f.request.mock.lastCall, JSON.stringify(f.request.mock.calls)).toEqual(["480p", expectedPosition]);
+      const optimized = document.querySelector("video.player-video") as HTMLVideoElement;
+      const state = await f.ready(optimized, expectedPosition);
+      expect(state.time).toBe(0.001);
+      expect(state.time + expectedPosition).toBeCloseTo(expectedPosition + 0.001, 6);
+      expect(optimized.volume).toBe(0.35); expect(optimized.muted).toBe(true); expect(optimized.playbackRate).toBe(1.25);
+      expect(screen.getByRole("button", { name: "Play" })).toBeVisible();
+    },
+  );
+  it("[quality-match93] automatic recovery keeps the authorized node and latest playing handoff", async () => {
+    const f = await setupQuality93();
+    const old = document.querySelector("video.player-video") as HTMLVideoElement;
+    const pending = deferred<void>();
+    const refresh = vi.fn((_absolute: number, _handoff: PlaybackHandoffState) => pending.promise);
+    f.view.rerender(<VideoPlayer {...f.props} refreshCurrentSource={refresh} />); await settleQuality93();
+    const closeSettings = screen.queryByRole("button", { name: "Close playback settings" });
+    if (closeSettings != null) fireEvent.click(closeSettings);
+    fireEvent.click(screen.getByRole("button", { name: "Play" }));
+    const state = f.states.get(old)!;
+    state.time = 1; fireEvent.timeUpdate(old); state.time = 2; fireEvent.timeUpdate(old);
+    fireMediaError(old, 2); await settleQuality93();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(position + 2, expect.objectContaining({ paused: false }));
+    const [absolute, handoff] = refresh.mock.calls[0]!;
+    await act(async () => { pending.resolve(); }); await settleQuality93();
+    // The controlled parent publishes Detail's exact captured handoff after resolution.
+    await f.replace("raw", { handoff, absolute });
+    const successor = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(successor).toBe(old); expect(f.request).toHaveBeenCalledTimes(2);
+    expect(f.request).toHaveBeenLastCalledWith("480p", position + 2);
+    // replace() already delivered this resource's loadstart/readiness and Play.
+    // Inspect the live state rather than manufacture another load on the same resource.
+    const resumed = f.states.get(successor)!;
+    expect(document.querySelector("video.player-video")).toBe(old);
+    expect(resumed.time + position + 2).toBeCloseTo(position + 2.001, 6);
+    expect(resumed.paused, JSON.stringify({ plays: f.plays, calls: f.request.mock.calls, handoff })).toBe(false); expect(successor.volume).toBe(0.35);
+    expect(successor.muted).toBe(true); expect(successor.playbackRate).toBe(1.25);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
+  });
+  it("[quality-match93] keeps explicit audio zero while restoring quality", async () => {
+    const f = await setupQuality93(); await f.replace("360p", { explicitAudioZero: true, preferredLanguage: "jpn" });
+    expect(f.request).toHaveBeenCalledTimes(2); expect(f.request).toHaveBeenLastCalledWith("480p", position + 0.001, 0);
+  });
+  it("[quality-match93] retained manual Japanese still outranks a fresh explicit default zero", async () => {
+    const f = await setupQuality93("jpn"); f.settings();
+    fireEvent.click(screen.getByRole("button", { name: "Japanese" })); await settleQuality93();
+    expect(f.request).toHaveBeenCalledTimes(2); expect(f.request).toHaveBeenLastCalledWith("480p", position + 0.001, 1);
+    await f.ready(document.querySelector("video.player-video") as HTMLVideoElement, position + 0.001);
+    await f.replace("360p", { explicitAudioZero: true });
+    expect(f.request).toHaveBeenCalledTimes(3);
+    expect(f.request).toHaveBeenLastCalledWith("480p", position + 0.001, 4);
+  });
+  it("[quality-match93] leaves already active480 with matching audio alone", async () => {
+    const f = await setupQuality93(); const { fresh } = await f.replace("480p");
+    expect(f.request).toHaveBeenCalledTimes(1); expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toContain(fresh);
+  });
+  it("[quality-match93] explicit Original keeps the same owner unoptimized", async () => {
+    const f = await setupQuality93(); f.settings(); fireEvent.click(screen.getByRole("button", { name: "Device Original" })); await settleQuality93();
+    await f.ready(document.querySelector("video.player-video") as HTMLVideoElement);
+    expect(f.request).toHaveBeenCalledTimes(1); f.settings();
+    expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "true");
+  });
+  it("[quality-match93] failed manual quality is not retained by a fresh owner", async () => {
+    const f = await setupQuality93("eng", "failed"); await f.replace();
+    expect(f.request).toHaveBeenCalledTimes(1);
+  });
+  it("[quality-match93] superseded pending manual quality cannot become retained", async () => {
+    const f = await setupQuality93("eng", "pending");
+    // A committed new source supersedes the pending owner; a disabled Original button is not a command.
+    await f.replace();
+    await act(async () => { f.pendingManifest.resolve(new Response("#EXTM3U\n")); }); await settleQuality93();
+    expect(f.request.mock.calls, JSON.stringify(f.request.mock.calls)).toHaveLength(1);
+  });
+  it("[quality-match93] a different file cannot inherit the retained quality", async () => {
+    const f = await setupQuality93(); await f.replace("raw", { otherContent: true });
+    expect(f.request).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("Original pending-generation cancellation contract", () => {
   it("allows Original during pending preparation and rejects its late same-owner manifest", async () => {
@@ -15267,41 +15447,135 @@ describe("mobile background playback lifecycle", () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 
-  it.each([[404, true], [403, false]] as const)("[resume-lease] automatically replaces expired %s generation preserving paused=%s exact handoff", async (status, paused) => {
-    layout(true);
-    const fixture = leaseFetch(status);
-    const pending = deferred<void>();
-    const refresh = vi.fn((_position: number, _state: { paused: boolean; volume: number; muted: boolean; playbackRate: number }) => pending.promise);
-    const props = { title: "Resume lease", serverOptimized: optimized, refreshCurrentSource: refresh, onClose: () => {} };
+  async function expiredReader93(status: 403 | 404, paused: boolean, foreground = false) {
+    layout(true); const fixture = leaseFetch(status), pending = deferred<void>();
+    const refresh = vi.fn((_position: number, _state: PlaybackHandoffState) => pending.promise);
+    const ended = vi.fn();
+    const props = { title: "Resume lease", serverOptimized: optimized, refreshCurrentSource: refresh, onEnded: ended, onClose: () => {} };
     const view = render(<VideoPlayer {...props} url={master} engine="webview-hls-transcode" timelineOffsetSeconds={46} />);
     await flush();
     const old = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(old, {
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+      duration: { configurable: true, value: 674 },
+    });
     const state = mediaState(old, paused);
+    vi.mocked(old.pause).mockImplementation(() => {
+      if (!state.paused) { state.paused = true; fireEvent.pause(old); }
+    });
+    vi.mocked(old.play).mockImplementation(() => {
+      state.paused = false; fireEvent.play(old); fireEvent.playing(old); return Promise.resolve();
+    });
     const initialPlayCalls = vi.mocked(old.play).mock.calls.length;
     old.currentTime = 7.25; old.volume = 0.4; old.muted = true; old.playbackRate = 1.25;
+    if (foreground) {
+      if (!paused) { fireEvent.play(old); fireEvent.playing(old); }
+      expect(screen.getByRole("button", { name: paused ? "Play" : "Pause" })).toBeVisible();
+      fixture.expire();
+      if (!paused) {
+        for (let i = 0; i < 3; i += 1) {
+          await act(async () => { await vi.advanceTimersByTimeAsync(9_000); });
+          old.currentTime += 1; fireEvent.timeUpdate(old);
+        }
+        await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      } else await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      await flush();
+    } else await sleepPage(fixture.expire);
+    const publish = async (hls = false) => {
+      const [position, handoff] = refresh.mock.calls[0]!;
+      pending.resolve(); await flush();
+      view.rerender(<VideoPlayer {...props} url={hls
+        ? "https://server.example/api/stream/fresh-expiry93/index.m3u8?quality=480p" : "https://x/fresh.mp4"}
+        sourceRevision={2} engine={hls ? "webview-hls-transcode" : "webview-direct"}
+        startPositionSeconds={position} initialHandoffState={handoff} />);
+      await flush();
+      const fresh = document.querySelector("video.player-video") as HTMLVideoElement | null;
+      return { fresh, handoff };
+    };
+    const ready = async (fresh: HTMLVideoElement) => {
+      const freshPlayCalls = vi.mocked(fresh.play).mock.calls.length;
+      state.paused = true; fresh.currentTime = 0;
+      Object.defineProperties(fresh, {
+        currentSrc: { configurable: true, value: fresh.src }, error: { configurable: true, value: null },
+        duration: { configurable: true, value: 720 }, readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      });
+      fireEvent.loadStart(fresh); fireEvent.loadedMetadata(fresh); fireEvent.seeked(fresh); fireEvent.canPlay(fresh);
+      await flush(); return freshPlayCalls;
+    };
+    return { fixture, pending, refresh, props, view, old, state, initialPlayCalls, publish, ready, ended };
+  }
+
+  it.each([[403, false], [403, true], [404, false], [404, true]] as const)(
+    "[expiry-reader93] HEAD%s retains the activated reader and exact paused=%s handoff", async (status, paused) => {
+      const f = await expiredReader93(status, paused);
+      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
+      expect(document.querySelector("video.player-video")).toBe(f.old);
+      expect(f.old.isConnected).toBe(true); expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
+      expect(f.old.play).toHaveBeenCalledTimes(f.initialPlayCalls);
+      // Old generation callbacks must not spend another recovery or complete the item.
+      fireMediaError(f.old, 2); fireEvent.waiting(f.old); fireEvent.ended(f.old);
+      act(() => { window.dispatchEvent(new Event("pageshow")); window.dispatchEvent(new Event("pageshow")); });
+      await flush(); expect(f.refresh).toHaveBeenCalledTimes(1); expect(f.ended).not.toHaveBeenCalled();
+      expect(document.querySelector("video.player-video")).toBe(f.old); expect(screen.queryByRole("alert")).toBeNull();
+      const { fresh } = await f.publish();
+      expect(fresh).toBe(f.old); expect(fresh!.src).toBe("https://x/fresh.mp4");
+      const playCalls = await f.ready(fresh!);
+      expect(fresh!.currentTime).toBe(53.25); expect(fresh!.volume).toBe(0.4);
+      expect(fresh!.muted).toBe(true); expect(fresh!.playbackRate).toBe(1.25);
+      expect(fresh!.play).toHaveBeenCalledTimes(playCalls + (paused ? 0 : 1));
+      expect(f.state.paused).toBe(paused); expect(screen.getByRole("button", { name: paused ? "Play" : "Pause" })).toBeVisible();
+      expect(screen.queryByRole("alert")).toBeNull(); expect(f.ended).not.toHaveBeenCalled();
+      expect(f.fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+    },
+  );
+  it.each([false, true])("[expiry-reader93] latest explicit paused=%s updates the deferred handoff without playing the expired decoder", async paused => {
+    const f = await expiredReader93(404, !paused);
+    expect(document.querySelector("video.player-video")).toBe(f.old);
+    const calls = vi.mocked(f.old.play).mock.calls.length;
+    fireEvent.keyDown(window, { key: " ", code: "Space" }); await flush();
+    expect(f.refresh.mock.calls[0]![1].paused).toBe(paused);
+    expect(f.old.play).toHaveBeenCalledTimes(calls); expect(f.state.paused).toBe(true);
+    const { fresh } = await f.publish(); expect(fresh).toBe(f.old);
+    await f.ready(fresh!); expect(f.state.paused).toBe(paused);
+    expect(fresh!.currentTime).toBe(53.25); expect(f.refresh).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: paused ? "Play" : "Pause" })).toBeVisible();
+  });
+  it.each([false, true])("[expiry-reader93] foreground expiry keeps owned paused=%s despite its internal pause event", async paused => {
+    const f = await expiredReader93(404, paused, true), position = paused ? 53.25 : 56.25;
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(position, expect.objectContaining({ paused }));
+    expect(document.querySelector("video.player-video")).toBe(f.old);
+    fireEvent.pointerMove(f.old.closest(".webview-player")!); // Reveal normally hidden chrome without changing playback intent.
+    expect(screen.getByRole("button", { name: paused ? "Play" : "Pause" })).toBeVisible();
+    fireEvent.keyDown(window, { key: " ", code: "Space" }); await flush();
+    expect(f.refresh.mock.calls[0]![1].paused).toBe(!paused);
+    expect(f.state.paused).toBe(true); // The expired physical decoder remains quarantined.
+    const { fresh } = await f.publish(); expect(fresh).toBe(f.old); await f.ready(fresh!);
+    expect(fresh!.currentTime).toBe(position); expect(f.state.paused).toBe(!paused);
+    expect(screen.getByRole("button", { name: paused ? "Pause" : "Play" })).toBeVisible();
+    expect(f.refresh).toHaveBeenCalledTimes(1); expect(screen.queryByRole("alert")).toBeNull();
+  });
+  it("[expiry-reader93] failed automatic resolution exposes fresh Retry without reviving the expired URL", async () => {
+    const f = await expiredReader93(403, false);
+    f.pending.reject(new Error("Synthetic fresh resolution failure")); await flush();
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
+    expect(document.querySelector("video.player-video")).toBeNull(); expect(f.refresh).toHaveBeenCalledTimes(1);
+    expect(f.fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+  });
+  it("[expiry-reader93] unavailable automatic resolution stays terminal without old-URL Retry", async () => {
+    layout(true); const fixture = leaseFetch(404);
+    render(<VideoPlayer url={master} engine="webview-hls-transcode" title="No expiry resolver" serverOptimized={optimized} onClose={() => {}} />);
+    await flush(); mediaState(document.querySelector("video.player-video") as HTMLVideoElement, true);
     await sleepPage(fixture.expire);
-    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
-    expect(old.play).toHaveBeenCalledTimes(initialPlayCalls);
-    expect(document.querySelector("video.player-video")).toBeNull();
-    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
-    act(() => { window.dispatchEvent(new Event("pageshow")); window.dispatchEvent(new Event("pageshow")); });
-    await flush(); expect(refresh).toHaveBeenCalledTimes(1);
-    const handoff = refresh.mock.calls[0]![1];
-    view.rerender(<VideoPlayer {...props} url="https://x/fresh.mp4" sourceRevision={2} startPositionSeconds={53.25} initialHandoffState={handoff} />);
-    pending.resolve(); await flush();
-    const fresh = document.querySelector("video.player-video") as HTMLVideoElement;
-    expect(fresh).not.toBe(old); expect(fresh.src).toBe("https://x/fresh.mp4");
-    const freshPlayCalls = vi.mocked(fresh.play).mock.calls.length;
-    Object.defineProperties(fresh, {
-      duration: { configurable: true, value: 720 },
-      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
-    });
-    fireEvent.loadedMetadata(fresh); fireEvent.seeked(fresh);
-    expect(fresh.currentTime).toBe(53.25);
-    expect(fresh.volume).toBe(0.4); expect(fresh.muted).toBe(true); expect(fresh.playbackRate).toBe(1.25);
-    expect(fresh.play).toHaveBeenCalledTimes(freshPlayCalls + (paused ? 0 : 1));
-    expect(screen.queryByRole("alert")).toBeNull(); expect(state.paused).toBe(paused);
-    expect(fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(document.querySelector("video.player-video")).toBeNull(); expect(screen.queryByRole("button", { name: "Retry playback" })).toBeNull();
+  });
+  it("[expiry-reader93] an exhausted automatic budget exposes Retry instead of another renewal", async () => {
+    const f = await expiredReader93(404, true); await f.publish(true);
+    expect(f.refresh).toHaveBeenCalledTimes(1); expect(document.querySelector("video.player-video")).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent("This stream has expired");
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
   });
 
   async function foregroundPipeline(replacement: boolean, paused = false, pendingSeek = false, touch = true, readyOnMount = true, hideReplacement = true, remoteExternal = false) {
@@ -15796,7 +16070,8 @@ describe("mobile background playback lifecycle", () => {
     await sleepPage(fixture.expire);
     expect(refresh).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(FRESH_STREAM_RESOLUTION_TIMEOUT_MS - 1); });
-    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
@@ -15838,11 +16113,12 @@ describe("mobile background playback lifecycle", () => {
     // The watchdog and second HEAD share the deadline; both must use one resolver.
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect(document.querySelector("video.player-video")).toBeNull();
-    expect(screen.getByRole("button", { name: "Preparing fresh stream" })).toBeDisabled();
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    expect(document.querySelector("video.player-video")).toBeNull();
   });
 
   it("[resume-lease] keeps 401 unauthorized handling separate from expired-generation recovery", async () => {
