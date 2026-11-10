@@ -1,0 +1,103 @@
+name: windows96-passive-diagnostic
+
+on:
+  push:
+    branches: [codex/windows96-passive]
+    paths:
+      - scripts/windows_native_observer_preload.mjs
+      - scripts/windows_native_observer_preload.test.mjs
+      - scripts/windows96_passive_postcheck.mjs
+      - scripts/windows96_passive_postcheck.test.mjs
+      - .github/workflows/windows96-passive.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows96-passive-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-only:
+    if: >-
+      github.event_name == 'push' && github.repository == 'Tgk-30/YAWF-Stream' &&
+      github.repository_owner == 'Tgk-30' && github.actor == 'Tgk-30' &&
+      github.ref_type == 'branch' && github.ref == 'refs/heads/codex/windows96-passive'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.2'
+      - name: Read-only source binding and host contracts, no native observer calls
+        run: |
+          node scripts/windows96_passive_postcheck.mjs --validate-source
+          node --test scripts/windows_native_observer_preload.test.mjs scripts/windows96_passive_postcheck.test.mjs
+
+  native-diagnostic-only:
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.repository == 'Tgk-30/YAWF-Stream' &&
+      github.repository_owner == 'Tgk-30' && github.actor == 'Tgk-30' &&
+      github.ref_type == 'branch' && github.ref == 'refs/heads/codex/windows96-passive'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.2'
+      - name: Bind actual source, frozen887 product bytes and exact runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = git rev-parse HEAD
+          if ($source -ne '${{ github.sha }}') { throw 'Source binding failed.' }
+          node scripts/windows96_passive_postcheck.mjs --bind $source
+          exit $LASTEXITCODE
+      - name: Install shared web dependencies without native warmup
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+      - name: Install server dependencies without native warmup
+        working-directory: server
+        run: npm ci --no-audit --no-fund
+      - name: Compile and typecheck, no native storage probe
+        id: server-build
+        working-directory: server
+        run: npm run build
+      - name: One actual admin-health case, passive7000ms observer, not release qualification
+        if: ${{ !cancelled() && steps.server-build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          DS_SERVER_SECRET_KEY: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/windows96_passive_postcheck.mjs --run '${{ github.sha }}'
+          exit $LASTEXITCODE
+      - name: Require exact scalar observations even when the actual case failed
+        if: ${{ !cancelled() && steps.server-build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          node scripts/windows96_passive_postcheck.mjs --check '${{ github.sha }}'
+          exit $LASTEXITCODE
+      - name: Retain sanitized diagnostic evidence, never raw Vitest JSON or process output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows96-passive-diagnostic-windows-2022
+          path: |
+            ${{ runner.temp }}/windows96-passive-binding.json
+            ${{ runner.temp }}/windows96-passive-invocation.json
+            ${{ runner.temp }}/windows96-passive-run-status.json
+            ${{ runner.temp }}/windows96-passive-test-summary.json
+            ${{ runner.temp }}/windows96-passive-postcheck.json
+            ${{ runner.temp }}/yawf-native-observer-*/*.jsonl
+          if-no-files-found: error
+          retention-days: 14
