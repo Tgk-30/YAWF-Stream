@@ -26,6 +26,7 @@ import tempfile
 import time
 import traceback
 import unittest
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -147,6 +148,11 @@ EMERGENCY_36_SCOPE = (
 STANDARD_VERIFICATION_KEYS = frozenset({
     "version", "sourceRevision", "buildRun", "apk", "certificateSha256",
     "checks", "pending", "limits",
+})
+DISTRIBUTION_V1_VERIFICATION_KEYS = frozenset({
+    "schemaVersion", "version", "versionCode", "packageName", "sourceRevision",
+    "apk", "buildRun", "certificateSha256", "verifiedAt", "checks", "runtime",
+    "knownLimitations",
 })
 EMERGENCY_VERIFICATION_KEYS = frozenset({
     "schemaVersion", "version", "versionCode", "packageName", "sourceRevision",
@@ -964,6 +970,62 @@ def validate_target_manifest(
     return value
 
 
+def validate_distribution_v1_fields(
+    value: dict[str, object], path: Path, binding: RuntimeBinding
+) -> None:
+    if not binding.automatic or binding.target_version == EMERGENCY_36_VERSION:
+        raise RuntimeGateError("Distribution verification schema is not admitted for this target")
+    if binding.target_verification_sha256 is None:
+        raise RuntimeGateError("Distribution verification requires a raw JSON hash pin")
+    validate_file(
+        path, binding.target_verification_sha256, path.stat().st_size,
+        "distribution verification receipt",
+    )
+    for key, expected in {
+        "schemaVersion": 1, "versionCode": binding.target_code,
+        "packageName": PRODUCT_PACKAGE,
+    }.items():
+        if type(value.get(key)) is not type(expected) or value.get(key) != expected:
+            raise RuntimeGateError(f"Distribution verification {key} mismatch")
+    verified_at = value.get("verifiedAt")
+    if (not isinstance(verified_at, str) or len(verified_at) > 40 or re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})",
+            verified_at) is None):
+        raise RuntimeGateError("Distribution verification date is invalid")
+    try:
+        parsed_date = datetime.fromisoformat(verified_at.replace("Z", "+00:00"))
+        if parsed_date.utcoffset() is None:
+            raise ValueError("Missing timezone")
+    except ValueError as error:
+        raise RuntimeGateError("Distribution verification date is invalid") from error
+    runtime = value.get("runtime")
+    if not isinstance(runtime, dict) or not runtime:
+        raise RuntimeGateError("Distribution verification runtime is missing")
+
+    def bounded_nodes(item: object, depth: int = 0) -> int:
+        if depth > 8:
+            raise RuntimeGateError("Distribution verification runtime is too deep")
+        if isinstance(item, (dict, list)):
+            if len(item) > 64 or (isinstance(item, dict) and any(
+                    not key or len(key) > 128 for key in item)):
+                raise RuntimeGateError("Distribution verification runtime is oversized")
+            children = item.values() if isinstance(item, dict) else item
+            return 1 + sum(bounded_nodes(child, depth + 1) for child in children)
+        return 1
+
+    try:
+        if (bounded_nodes(runtime) > 512 or len(json.dumps(
+                runtime, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 16 * 1024):
+            raise RuntimeGateError("Distribution verification runtime is oversized")
+        limits = value.get("knownLimitations")
+        if (not isinstance(limits, list) or len(limits) > 32 or any(
+                not isinstance(entry, str) or not entry.strip()
+                or len(entry.encode("utf-8")) > 2048 for entry in limits)):
+            raise RuntimeGateError("Distribution verification knownLimitations is invalid")
+    except (ValueError, TypeError, UnicodeError, RecursionError) as error:
+        raise RuntimeGateError("Distribution verification metadata is invalid") from error
+
+
 def validate_target_verification(
     path: Path, binding: RuntimeBinding = LEGACY_BINDING
 ) -> dict[str, object]:
@@ -1049,7 +1111,10 @@ def validate_target_verification(
             "emergency target verification receipt",
         )
         return value
-    if set(value) != STANDARD_VERIFICATION_KEYS:
+    distribution_v1 = set(value) == DISTRIBUTION_V1_VERIFICATION_KEYS
+    if distribution_v1:
+        validate_distribution_v1_fields(value, path, binding)
+    elif set(value) != STANDARD_VERIFICATION_KEYS:
         raise RuntimeGateError("Target verification receipt keys are not exact")
     if not binding.automatic:
         if value.get("version") != TARGET_VERSION or value.get("sourceRevision") != TARGET_SOURCE:
@@ -1081,11 +1146,12 @@ def validate_target_verification(
             raise RuntimeGateError("Target verification provenance source mismatch")
         if provenance.get("canonicalSignedCandidateUnchanged") is not True:
             raise RuntimeGateError("Target verification canonical candidate state mismatch")
-    for name in ("pending", "limits"):
-        entries = value.get(name)
-        if (not isinstance(entries, list) or len(entries) > 32
-                or any(not isinstance(entry, str) or not entry for entry in entries)):
-            raise RuntimeGateError(f"Target verification {name} is invalid")
+    if not distribution_v1:
+        for name in ("pending", "limits"):
+            entries = value.get(name)
+            if (not isinstance(entries, list) or len(entries) > 32
+                    or any(not isinstance(entry, str) or not entry for entry in entries)):
+                raise RuntimeGateError(f"Target verification {name} is invalid")
     if binding.target_verification_sha256 is not None:
         validate_file(
             path, binding.target_verification_sha256, path.stat().st_size,
@@ -2655,6 +2721,134 @@ class PolicyTests(unittest.TestCase):
             (root / "page-1.json").write_text(json.dumps([release]))
             with self.assertRaises(RuntimeGateError):
                 validate_release_pages(root, verification)
+
+    def _distribution_fixture(self) -> tuple[dict[str, object], RuntimeBinding]:
+        binding = dataclasses.replace(
+            LEGACY_BINDING, automatic=True, target_version="90.1.2",
+            target_code=90_001_002, target_source="a" * 40,
+            target_build_run=9_000_012, target_sha256="b" * 64, target_size=123,
+            target_apk_name="YAWF.Stream_Android_90.1.2.apk",
+        )
+        value = {
+            "schemaVersion": 1, "version": binding.target_version,
+            "versionCode": binding.target_code, "packageName": PRODUCT_PACKAGE,
+            "sourceRevision": binding.target_source, "buildRun": binding.target_build_run,
+            "apk": {"name": binding.target_apk_name, "sha256": binding.target_sha256, "size": binding.target_size},
+            "certificateSha256": binding.signer_pin,
+            "verifiedAt": "2026-11-10T19:08:28.389104+00:00",
+            "checks": {"buildProvenance": {"workflowRun": binding.target_build_run,
+                "sourceRevision": binding.target_source, "canonicalSignedCandidateUnchanged": True}},
+            "runtime": {"notPublicOTA": True, "physicalDeviceQualified": False},
+            "knownLimitations": ["Synthetic test metadata, not native OTA proof."],
+        }
+        return value, binding
+
+    def _check_distribution(self, value: dict[str, object], binding: RuntimeBinding) -> dict[str, object]:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "verification.json"
+            raw = json.dumps(value).encode("utf-8")
+            path.write_bytes(raw)
+            pinned = dataclasses.replace(binding, target_verification_sha256=hashlib.sha256(raw).hexdigest())
+            result = validate_target_verification(path, pinned)
+            self.assertEqual(path.read_bytes(), raw)
+            return result
+
+    def test_distribution_v1_accepts_exact_envelope_without_inventing_states(self) -> None:
+        value, binding = self._distribution_fixture()
+        result = self._check_distribution(value, binding)
+        self.assertEqual(result, value)
+        self.assertNotIn("pending", result)
+        self.assertNotIn("limits", result)
+        self.assertIs(result["runtime"]["physicalDeviceQualified"], False)
+        value["knownLimitations"] = []
+        self.assertEqual(self._check_distribution(value, binding)["knownLimitations"], [])
+
+    def test_distribution_v1_exact_keys_identity_and_provenance_are_required(self) -> None:
+        value, binding = self._distribution_fixture()
+        self._check_distribution(value, binding)
+        for key in value:
+            missing = {name: entry for name, entry in value.items() if name != key}
+            with self.subTest(missing=key), self.assertRaises(RuntimeGateError):
+                self._check_distribution(missing, binding)
+        corruptions = [
+            ("unexpected", True), ("pending", []), ("schemaVersion", True),
+            ("schemaVersion", 2), ("schemaVersion", "1"),
+            ("packageName", "other.package"), ("versionCode", True),
+            ("versionCode", str(binding.target_code)), ("versionCode", binding.target_code + 1),
+            ("version", "90.1.3"), ("sourceRevision", "0" * 40),
+            ("buildRun", True), ("buildRun", binding.target_build_run + 1),
+            ("certificateSha256", "0" * 64), ("checks", {}),
+            ("apk", {**value["apk"], "size": 124}),
+            ("apk", {**value["apk"], "sha256": "0" * 64}),
+            ("apk", {**value["apk"], "name": "other.apk"}),
+            ("apk", {**value["apk"], "extra": True}),
+        ]
+        for key, bad in corruptions:
+            with self.subTest(key=key, value=bad), self.assertRaises(RuntimeGateError):
+                self._check_distribution({**value, key: bad}, binding)
+        for key, bad in [("workflowRun", binding.target_build_run + 1),
+                         ("sourceRevision", "0" * 40), ("canonicalSignedCandidateUnchanged", False)]:
+            damaged = {**value, "checks": {"buildProvenance": {**value["checks"]["buildProvenance"], key: bad}}}
+            with self.subTest(provenance=key), self.assertRaises(RuntimeGateError):
+                self._check_distribution(damaged, binding)
+
+    def test_distribution_v1_date_and_runtime_are_valid_and_bounded(self) -> None:
+        value, binding = self._distribution_fixture()
+        self._check_distribution(value, binding)
+        for good in ["2026-11-10T19:08:28Z", "2026-11-10T19:08:28.123456+05:30"]:
+            self._check_distribution({**value, "verifiedAt": good}, binding)
+        for bad in [None, True, 123, "", "2026-11-10", "2026-11-10T19:08:28",
+                    "2026-02-30T19:08:28Z", "2026-11-10T25:08:28Z", "2026-13-10T19:08:28Z",
+                    "2026-11-10T19:08:28+99:99", "2026-11-10T19:08:28Z "]:
+            with self.subTest(date=bad), self.assertRaises(RuntimeGateError):
+                self._check_distribution({**value, "verifiedAt": bad}, binding)
+        deep = 1
+        for _ in range(10):
+            deep = {"next": deep}
+        invalid_runtime = [{}, [], False, None, {str(i): i for i in range(65)},
+            {"deep": deep}, {"many": [list(range(64)) for _ in range(9)]},
+            {"large": "x" * (16 * 1024)}, {"number": float("nan")}, {"text": "\ud800"}]
+        for bad in invalid_runtime:
+            with self.subTest(runtime_type=type(bad).__name__), self.assertRaises(RuntimeGateError):
+                self._check_distribution({**value, "runtime": bad}, binding)
+
+    def test_distribution_v1_limitations_and_schema_domains_fail_closed(self) -> None:
+        value, binding = self._distribution_fixture()
+        self._check_distribution(value, binding)
+        for bad in [None, {}, "none", [None], [False], [""], [" "], ["x"] * 33,
+                    ["x" * 2049], ["\ud800"]]:
+            with self.subTest(limits_type=type(bad).__name__), self.assertRaises(RuntimeGateError):
+                self._check_distribution({**value, "knownLimitations": bad}, binding)
+        with self.assertRaises(RuntimeGateError):
+            self._check_distribution(value, dataclasses.replace(binding, automatic=False))
+        emergency = dataclasses.replace(binding, target_version=EMERGENCY_36_VERSION,
+            target_code=EMERGENCY_36_CODE, target_source=EMERGENCY_36_SOURCE,
+            target_build_run=EMERGENCY_36_PRODUCER_RUN, target_sha256=EMERGENCY_36_APK_SHA256,
+            target_size=EMERGENCY_36_APK_SIZE, target_apk_name="YAWF.Stream_Android_2.3.36.apk")
+        emergency_value = {**value, "version": emergency.target_version,
+            "versionCode": emergency.target_code, "sourceRevision": emergency.target_source,
+            "buildRun": emergency.target_build_run, "apk": {"name": emergency.target_apk_name,
+                "sha256": emergency.target_sha256, "size": emergency.target_size},
+            "checks": {"buildProvenance": {"workflowRun": emergency.target_build_run,
+                "sourceRevision": emergency.target_source, "canonicalSignedCandidateUnchanged": True}}}
+        with self.assertRaises(RuntimeGateError):
+            self._check_distribution(emergency_value, emergency)
+
+    def test_distribution_v1_hashes_original_bytes_not_normalized_json(self) -> None:
+        value, binding = self._distribution_fixture()
+        self._check_distribution(value, binding)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "verification.json"
+            raw = json.dumps(value, indent=2).encode("utf-8") + b"\n"
+            path.write_bytes(raw)
+            pinned = dataclasses.replace(binding, target_verification_sha256=hashlib.sha256(raw).hexdigest())
+            self.assertEqual(validate_target_verification(path, pinned), value)
+            with self.assertRaises(RuntimeGateError):
+                validate_target_verification(path, dataclasses.replace(pinned, target_verification_sha256=None))
+            path.write_bytes(raw + b" ")
+            with self.assertRaises(RuntimeGateError):
+                validate_target_verification(path, pinned)
+            self.assertEqual(path.read_bytes(), raw + b" ")
 
     def test_verification_receipt_matches_actual_asset_shape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
