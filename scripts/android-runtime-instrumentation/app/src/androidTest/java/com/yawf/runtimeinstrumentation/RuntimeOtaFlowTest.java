@@ -4431,13 +4431,17 @@ public final class RuntimeOtaFlowTest {
                 SHORT_WAIT_MS,
                 true);
 
-        UiObject2 success = waitFor(
-                By.text("App installed.").pkg(installerPackage),
-                UI_WAIT_MS,
-                "Package Installer success");
-        assertTrue(
-                "Installer success resource was not exact",
-                success.getResourceName() != null && success.getResourceName().endsWith(":id/install_success"));
+        if (isPublic88To96OfferMode()) {
+            awaitInitialOfferInstallerSuccess(installerPackage);
+        } else {
+            UiObject2 success = waitFor(
+                    By.text("App installed.").pkg(installerPackage),
+                    UI_WAIT_MS,
+                    "Package Installer success");
+            assertTrue(
+                    "Installer success resource was not exact",
+                    success.getResourceName() != null && success.getResourceName().endsWith(":id/install_success"));
+        }
         installerSuccessObserved = true;
         capture("installer-success");
         systemOpenSelections++;
@@ -4508,6 +4512,208 @@ public final class RuntimeOtaFlowTest {
             SystemClock.sleep(250);
         }
         return false;
+    }
+
+    private static final class InitialOfferObservation {
+        String status = "missing";
+        int windowId = -1;
+        int width;
+        int height;
+        final Rect window = new Rect();
+        final Rect title = new Rect();
+        final Rect target = new Rect();
+        final Rect action = new Rect();
+        final Rect container = new Rect();
+
+        boolean sameBinding(InitialOfferObservation previous) {
+            return previous != null && windowId == previous.windowId && width == previous.width
+                    && height == previous.height && window.equals(previous.window)
+                    && title.equals(previous.title) && target.equals(previous.target)
+                    && action.equals(previous.action) && container.equals(previous.container);
+        }
+    }
+
+    private static boolean initialOfferDescendant(List<Integer> parents, int child, int ancestor) {
+        for (int parent = parents.get(child); parent >= 0; parent = parents.get(parent))
+            if (parent == ancestor) return true;
+        return false;
+    }
+
+    private static int initialOfferActionableRow(List<AccessibilityNodeInfo> nodes, List<Integer> parents, int child) {
+        for (int parent = parents.get(child); parent >= 0; parent = parents.get(parent)) {
+            AccessibilityNodeInfo node = nodes.get(parent);
+            if (node.isClickable() && node.isVisibleToUser() && node.isEnabled()
+                    && "android.view.View".contentEquals(node.getClassName() == null ? "" : node.getClassName())) return parent;
+        }
+        return -1;
+    }
+
+    private static InitialOfferObservation collectInitialOfferObservation(
+            List<AccessibilityWindowInfo> windows, AccessibilityNodeInfo root,
+            int width, int height, int phase, long deadline, AppsWindowGate.Clock clock) {
+        assertTrue("Unknown initial-offer observer phase", phase == 1 || phase == 2);
+        String owner = phase == 1 ? "com.google.android.packageinstaller" : OtaFlowPolicy.SETTINGS_PACKAGE;
+        InitialOfferObservation result = new InitialOfferObservation();
+        result.width = width; result.height = height;
+        List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+        List<Integer> parents = new ArrayList<>();
+        List<Integer> depths = new ArrayList<>();
+        List<Integer> pending = new ArrayList<>();
+        List<Rect> bounds = new ArrayList<>();
+        try {
+            if (root == null || windows == null) return result;
+            if (windows.size() > 16) { result.status = "budget"; return result; }
+            AccessibilityWindowInfo active = null;
+            for (AccessibilityWindowInfo window : windows) {
+                if (window == null) { result.status = "incomplete"; return result; }
+                if (window.isActive()) {
+                    if (active != null) { result.status = "ambiguous"; return result; }
+                    active = window;
+                }
+            }
+            if (active == null) return result;
+            if (active.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) { result.status = "foreign"; return result; }
+            if (!active.isFocused()) { result.status = "incomplete"; return result; }
+            result.windowId = active.getId();
+            if (result.windowId < 0 || root.getWindowId() != result.windowId) { result.status = "incomplete"; return result; }
+            active.getBoundsInScreen(result.window);
+            Rect rootBounds = new Rect(); root.getBoundsInScreen(rootBounds);
+            Rect display = new Rect(0, 0, width, height);
+            if (display.isEmpty() || result.window.isEmpty() || rootBounds.isEmpty()
+                    || !display.contains(result.window) || !result.window.contains(rootBounds)) {
+                result.status = "geometry"; return result;
+            }
+            nodes.add(root); parents.add(-1); depths.add(0); pending.add(0);
+            while (!pending.isEmpty()) {
+                int cursor = pending.remove(pending.size() - 1);
+                if (clock.now() >= deadline) { result.status = "deadline"; return result; }
+                AccessibilityNodeInfo node = nodes.get(cursor);
+                if (node.getWindowId() != result.windowId) { result.status = "incomplete"; return result; }
+                if (!owner.contentEquals(node.getPackageName() == null ? "" : node.getPackageName())) {
+                    result.status = "foreign"; return result;
+                }
+                Rect raw = new Rect(); node.getBoundsInScreen(raw);
+                if (node.isVisibleToUser() && (raw.isEmpty() || !rootBounds.contains(raw) || !result.window.contains(raw))) {
+                    result.status = "geometry"; return result;
+                }
+                int count = node.getChildCount();
+                if (count < 0 || count > 128 || depths.get(cursor) > 64) { result.status = "budget"; return result; }
+                for (int index = 0; index < count; index++) {
+                    AccessibilityNodeInfo child = node.getChild(index);
+                    if (child == null) { result.status = "incomplete"; return result; }
+                    if (nodes.contains(child)) { child.recycle(); result.status = "duplicate"; return result; }
+                    nodes.add(child); parents.add(cursor); depths.add(depths.get(cursor) + 1); pending.add(nodes.size() - 1);
+                    if (nodes.size() > 512) { result.status = "budget"; return result; }
+                }
+            }
+            int title = -1, target = -1, action = -1, panel = -1;
+            int titles = 0, targets = 0, actions = 0, panels = 0;
+            for (int index = 0; index < nodes.size(); index++) {
+                AccessibilityNodeInfo node = nodes.get(index);
+                Rect raw = new Rect(); node.getBoundsInScreen(raw); bounds.add(raw);
+                if (!node.isVisibleToUser() || !node.isEnabled()) continue;
+                String text = node.getText() == null ? "" : node.getText().toString();
+                String resource = node.getViewIdResourceName() == null ? "" : node.getViewIdResourceName();
+                String className = node.getClassName() == null ? "" : node.getClassName().toString();
+                String description = node.getContentDescription() == null ? "" : node.getContentDescription().toString();
+                if (!description.isEmpty()) continue;
+                boolean label = "android.widget.TextView".equals(className) && !node.isClickable();
+                if (phase == 1) {
+                    if (label && "YAWF Stream".equals(text) && "android:id/alertTitle".equals(resource)) { title = index; titles++; }
+                    if (label && "App installed.".equals(text)
+                            && "com.android.packageinstaller:id/install_success".equals(resource)) { target = index; targets++; }
+                    if (node.isClickable() && "android.widget.Button".equals(className)
+                            && "Open".equals(text) && "android:id/button1".equals(resource)) { action = index; actions++; }
+                    if ("android.widget.LinearLayout".equals(className) && "android:id/parentPanel".equals(resource)) { panel = index; panels++; }
+                } else if (label && resource.isEmpty()) {
+                    if ("Install unknown apps".equals(text)) { title = index; titles++; }
+                    if ("YAWF Stream".equals(text)) { target = index; targets++; }
+                    if ("Allowed".equals(text)) { action = index; actions++; }
+                }
+            }
+            if (titles > 1 || targets > 1 || actions > 1 || panels > 1) { result.status = "ambiguous"; return result; }
+            if (titles != 1 || targets != 1 || actions != 1 || (phase == 1 && panels != 1)) {
+                result.status = "body-missing"; return result;
+            }
+            if (phase == 1) {
+                if (!initialOfferDescendant(parents, title, panel) || !initialOfferDescendant(parents, target, panel)
+                        || !initialOfferDescendant(parents, action, panel)) { result.status = "body-missing"; return result; }
+            } else {
+                panel = initialOfferActionableRow(nodes, parents, target);
+                if (panel < 0 || panel != initialOfferActionableRow(nodes, parents, action)) {
+                    result.status = "body-missing"; return result;
+                }
+            }
+            if (!bounds.get(panel).contains(bounds.get(target)) || !bounds.get(panel).contains(bounds.get(action))
+                    || (phase == 1 && !bounds.get(panel).contains(bounds.get(title)))) {
+                result.status = "geometry"; return result;
+            }
+            result.title.set(bounds.get(title)); result.target.set(bounds.get(target));
+            result.action.set(bounds.get(action)); result.container.set(bounds.get(panel));
+            result.status = "ready";
+            return result;
+        } finally {
+            for (int index = 1; index < nodes.size(); index++) nodes.get(index).recycle();
+        }
+    }
+
+    private InitialOfferObservation readInitialOfferObservation(int phase, long deadline) {
+        assertTrue("Initial-offer observation cache refresh requires API34", Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE);
+        assertTrue("Initial-offer observation cache refresh failed", instrumentation.getUiAutomation().clearCache());
+        List<AccessibilityWindowInfo> windows = instrumentation.getUiAutomation().getWindows();
+        AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
+        try {
+            return collectInitialOfferObservation(windows, root, device.getDisplayWidth(), device.getDisplayHeight(),
+                    phase, deadline, initialOfferAppsClock());
+        } finally {
+            if (root != null) root.recycle();
+            if (windows != null) for (AccessibilityWindowInfo window : windows) if (window != null) window.recycle();
+        }
+    }
+
+    private void awaitInitialOfferObservation(int phase, long deadline) {
+        long previousTime = SystemClock.uptimeMillis();
+        int beforeActions = actions.size();
+        InitialOfferObservation previous = null;
+        int stable = 0;
+        String status = "deadline";
+        for (int polls = 0; polls < UI_WAIT_MS / 100L + 2L; polls++) {
+            long before = SystemClock.uptimeMillis();
+            assertTrue("Initial-offer observer clock regressed", before >= previousTime);
+            if (before >= deadline) break;
+            InitialOfferObservation snapshot = readInitialOfferObservation(phase, deadline);
+            long now = SystemClock.uptimeMillis();
+            assertTrue("Initial-offer observer clock regressed", now >= before);
+            assertEquals("Initial-offer observer must not issue inputs", beforeActions, actions.size());
+            previousTime = now; status = snapshot.status;
+            if (now >= deadline) break;
+            assertTrue("Initial-offer observer refused unsafe snapshot: " + status,
+                    !status.equals("foreign") && !status.equals("ambiguous") && !status.equals("geometry")
+                            && !status.equals("duplicate") && !status.equals("budget"));
+            if (status.equals("ready")) {
+                stable = snapshot.sameBinding(previous) ? stable + 1 : 1;
+                previous = snapshot;
+                if (stable == 2) return;
+            } else { stable = 0; previous = null; }
+            long after = SystemClock.uptimeMillis();
+            assertTrue("Initial-offer observer clock regressed", after >= now);
+            long remaining = deadline - after;
+            if (remaining <= 0) break;
+            SystemClock.sleep(Math.min(100L, remaining));
+        }
+        throw new AssertionError("Initial-offer observer timed out phase=" + phase + " status=" + status);
+    }
+
+    private void awaitInitialOfferInstallerSuccess(String installerPackage) {
+        assertTrue("Initial-offer installer observer is profile-only", isPublic88To96OfferMode());
+        assertEquals("Initial-offer installer owner changed", "com.google.android.packageinstaller", installerPackage);
+        awaitInitialOfferObservation(1, SystemClock.uptimeMillis() + UI_WAIT_MS);
+    }
+
+    private void awaitInitialOfferCleanupTarget() {
+        assertTrue("Initial-offer cleanup observer is profile-only", isPublic88To96OfferMode());
+        assertTrue("Cleanup target requires the admitted Apps acquisition", appsWindowGate != null && appsWindowGate.ready != null);
+        awaitInitialOfferObservation(2, appsWindowGate.deadline);
     }
 
     private static final class AppsWindowSnapshot {
@@ -4859,6 +5065,7 @@ public final class RuntimeOtaFlowTest {
         device.waitForIdle(750);
         scrollUntilVisibleSystemText("Install unknown apps", Direction.DOWN).click();
         device.waitForIdle(750);
+        if (isPublic88To96OfferMode()) awaitInitialOfferCleanupTarget();
         scrollUntilVisibleSystemText("YAWF Stream", Direction.DOWN).click();
         waitFor(By.text("Allow from this source"), SHORT_WAIT_MS,
                 "visible cleanup unknown-source title");

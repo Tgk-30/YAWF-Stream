@@ -117,6 +117,91 @@ CAPTURED_APPS_WINDOW_XML = '''<node text="" resource-id="" class="android.widget
 '''
 
 
+# Run 42910612525 07-failure.xml SHA256 91f8a09a4737cb7ebe1dadaad986728483ee624e636285400a690133226ae750.
+# Complete non-PII 16-node owned subtree.
+CAPTURED_INSTALL_SUCCESS_XML = '''<node text="" resource-id="" class="android.widget.FrameLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[28,700][1052,1220]">
+ <node text="" resource-id="" class="android.widget.FrameLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,742][1010,1178]">
+  <node text="" resource-id="android:id/content" class="android.widget.FrameLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,742][1010,1178]">
+   <node text="" resource-id="android:id/parentPanel" class="android.widget.LinearLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,742][1010,1178]">
+    <node text="" resource-id="android:id/topPanel" class="android.widget.LinearLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,742][1010,873]">
+     <node text="" resource-id="android:id/title_template" class="android.widget.LinearLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,742][1010,873]">
+      <node text="" resource-id="android:id/icon" class="android.widget.ImageView" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[133,789][217,873]" />
+      <node text="YAWF Stream" resource-id="android:id/alertTitle" class="android.widget.TextView" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[238,795][947,866]" />
+     </node>
+    </node>
+    <node text="" resource-id="android:id/customPanel" class="android.widget.FrameLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,873][1010,1014]">
+     <node text="" resource-id="android:id/custom" class="android.widget.FrameLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,873][1010,1014]">
+      <node text="" resource-id="" class="android.widget.FrameLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,873][1010,1014]">
+       <node text="App installed." resource-id="com.android.packageinstaller:id/install_success" class="android.widget.TextView" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[133,894][387,951]" />
+      </node>
+     </node>
+    </node>
+    <node text="" resource-id="android:id/buttonPanel" class="android.widget.ScrollView" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,1014][1010,1178]">
+     <node text="" resource-id="" class="android.widget.LinearLayout" package="com.google.android.packageinstaller" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[70,1014][1010,1178]">
+      <node text="Done" resource-id="android:id/button2" class="android.widget.Button" package="com.google.android.packageinstaller" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[642,1025][810,1167]" />
+      <node text="Open" resource-id="android:id/button1" class="android.widget.Button" package="com.google.android.packageinstaller" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[810,1025][978,1167]" />
+     </node>
+    </node>
+   </node>
+  </node>
+ </node>
+</node>
+'''
+
+
+# Run 42910612525 cleanup-failure.xml SHA256 4c8188751521dcf9b2710b5f311ab9bfd08944ae67199af786b29c74b6185f30.
+# Complete non-PII 32-node owned subtree.
+CAPTURED_CLEANUP_TARGET_XML = '''<node text="" resource-id="" class="android.widget.FrameLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,1920]">
+ <node text="" resource-id="" class="android.widget.LinearLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,1920]">
+  <node text="" resource-id="android:id/content" class="android.widget.FrameLayout" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,1920]">
+   <node text="" resource-id="" class="androidx.compose.ui.platform.ComposeView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,1920]">
+    <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,1920]">
+     <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,1920]">
+      <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,525][1080,1920]">
+       <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,525][1080,1920]">
+        <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,525][1080,724]">
+         <node text="Chrome" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,572][380,634]" />
+         <node text="Not allowed" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,639][387,682]" />
+        </node>
+        <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,724][1080,923]">
+         <node text="Drive" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,771][312,833]" />
+         <node text="Not allowed" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,838][387,881]" />
+        </node>
+        <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,923][1080,1122]">
+         <node text="Gmail" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,970][330,1032]" />
+         <node text="Not allowed" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,1037][387,1080]" />
+        </node>
+        <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,1122][1080,1321]">
+         <node text="YAWF Stream" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,1169][517,1231]" />
+         <node text="Allowed" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[189,1236][321,1279]" />
+        </node>
+       </node>
+      </node>
+      <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[0,0][1080,525]">
+       <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[12,74][138,200]">
+        <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="Navigate up" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[43,105][106,168]" />
+        <node text="" resource-id="" class="android.widget.Button" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[22,84][127,189]" />
+       </node>
+       <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[148,99][769,173]" />
+       <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[818,74][944,200]">
+        <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="Search" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[849,105][912,168]" />
+        <node text="" resource-id="" class="android.widget.Button" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[828,84][933,189]" />
+       </node>
+       <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="" clickable="true" enabled="true" scrollable="false" visible-to-user="true" bounds="[944,74][1070,200]">
+        <node text="" resource-id="" class="android.view.View" package="com.android.settings" content-desc="More options" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[975,105][1038,168]" />
+        <node text="" resource-id="" class="android.widget.Button" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[954,84][1059,189]" />
+       </node>
+       <node text="Install unknown apps" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" clickable="false" enabled="true" scrollable="false" visible-to-user="true" bounds="[64,361][952,477]" />
+      </node>
+     </node>
+    </node>
+   </node>
+  </node>
+ </node>
+</node>
+'''
+
+
 def module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
@@ -376,6 +461,14 @@ class OfferHostTests(unittest.TestCase):
             if name == "cleanupUnknownSourcePermissionThroughVisibleSettings":
                 body = body.replace("        if (isPublic88To96OfferMode()) captureInitialOfferPreAppsWindow();\n", "")
                 body = body.replace("        if (isPublic88To96OfferMode()) awaitInitialOfferAppsWindow();\n", "")
+                body = body.replace("        if (isPublic88To96OfferMode()) awaitInitialOfferCleanupTarget();\n", "")
+            if name == "confirmSystemInstaller" and "awaitInitialOfferInstallerSuccess(installerPackage);" in body:
+                start = body.index("        if (isPublic88To96OfferMode()) {", body.index("systemUpdateSelections++"))
+                end = body.index("        installerSuccessObserved = true;", start)
+                branch = body[start:end]
+                old = branch[branch.index("        } else {\n") + len("        } else {\n"):-len("        }\n")]
+                old = "\n".join(line[4:] for line in old.splitlines()) + "\n"
+                body = body[:start] + old + body[end:]
             self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), digest, name)
 
     def test_native_dispatch_and_nonclaims_remain_separate(self):
@@ -1002,6 +1095,239 @@ public final class AppsProbe {
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("AssertionError", result.stderr)
                 self.assertNotIn("ACQUISITION_RETURNED", result.stdout)
+
+
+class InitialOfferR4ObserverTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory(prefix="ota88-r4-observers-")
+        cls.directory = Path(cls.temporary.name)
+        home = os.environ.get("JAVA_HOME", "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home")
+        javac = str(Path(home) / "bin/javac") if (Path(home) / "bin/javac").is_file() else shutil.which("javac")
+        assert javac is not None
+        cls.java = str(Path(javac).with_name("java"))
+        source = JAVA.read_text()
+        classes = []
+        for name in ("AppsWindowSnapshot", "AppsWindowGate", "InitialOfferObservation"):
+            marker = "    private static final class " + name
+            if marker not in source:
+                continue
+            start = source.index(marker); end = source.index("{", start) + 1; depth = 1
+            while depth:
+                depth += (source[end] == "{") - (source[end] == "}"); end += 1
+            classes.append(source[start:end])
+        methods = java_method(source, "initialOfferAppsClock") + java_method(source, "scrollUntilVisibleSystemText")
+        if "private void awaitInitialOfferInstallerSuccess(" in source:
+            methods += "\n".join(java_method(source, name) for name in (
+                "initialOfferDescendant", "initialOfferActionableRow", "collectInitialOfferObservation",
+                "readInitialOfferObservation", "awaitInitialOfferObservation",
+                "awaitInitialOfferInstallerSuccess", "awaitInitialOfferCleanupTarget"))
+            methods += "\n String observedStatus(int phase){return readInitialOfferObservation(phase,100000).status;}\n"
+        else:
+            methods += '''
+ void awaitInitialOfferInstallerSuccess(String owner){throw new AssertionError("observer absent");}
+ void awaitInitialOfferCleanupTarget(){throw new AssertionError("observer absent");}
+ String observedStatus(int phase){return "observer-absent";}
+'''
+        confirmation = java_method(source, "confirmSystemInstaller")
+        end = confirmation.index("        installerSuccessObserved = true;")
+        marker = "        if (isPublic88To96OfferMode()) {"
+        start = confirmation.index(marker, confirmation.index("systemUpdateSelections++")) if "awaitInitialOfferInstallerSuccess(installerPackage);" in confirmation else confirmation.index("        UiObject2 success = waitFor(")
+        methods += "\n void exerciseSuccessRegion(String installerPackage){\n" + confirmation[start:end] + "\n }\n"
+        cleanup = java_method(source, "cleanupUnknownSourcePermissionThroughVisibleSettings")
+        anchor = 'scrollUntilVisibleSystemText("Install unknown apps", Direction.DOWN).click();\n        device.waitForIdle(750);'
+        start = cleanup.index(anchor) + len(anchor)
+        end = cleanup.index('        waitFor(By.text("Allow from this source")', start)
+        methods += "\n void exerciseCleanupRegion(){\n" + cleanup[start:end] + "\n }\n"
+        factories = []
+        for xml, method in ((CAPTURED_INSTALL_SUCCESS_XML, "installerBody"), (CAPTURED_CLEANUP_TARGET_XML, "cleanupBody")):
+            root = ET.fromstring(xml); nodes = list(root.iter("node"))
+            factories.append(" static AccessibilityNodeInfo " + method + "(int id){")
+            for index, node in enumerate(nodes):
+                rect = re.fullmatch(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", "")); assert rect
+                factories.append(f'  AccessibilityNodeInfo n{index}=new AccessibilityNodeInfo();n{index}.id=id;n{index}.bounds=new Rect({",".join(rect.groups())});')
+                for field, attribute in (("pkg", "package"), ("text", "text"), ("clazz", "class"), ("description", "content-desc"), ("resource", "resource-id")):
+                    factories.append(f'  n{index}.{field}={json.dumps(node.get(attribute, ""))};')
+                for field, attribute in (("visible", "visible-to-user"), ("enabled", "enabled"), ("clickable", "clickable"), ("scrollable", "scrollable")):
+                    factories.append(f'  n{index}.{field}={node.get(attribute, "false")};')
+            for parent in nodes:
+                for child in parent:
+                    factories.append(f'  n{nodes.index(parent)}.children.add(n{nodes.index(child)});')
+            factories.append("  n0.root=true;return n0;\n }")
+        probe = r'''
+import java.util.*;
+public final class ObserverProbe {
+ static final long UI_WAIT_MS=90000,SHORT_WAIT_MS=20000;
+ static long time=10000;static String scenario;static int phase,inputs,getters,lookups,scrollQueries,readyReads;static ObserverProbe live;
+ final FakeInstrumentation instrumentation=new FakeInstrumentation();final FakeDevice device=new FakeDevice();
+ final List<String> actions=new ArrayList<>();AppsWindowGate appsWindowGate;
+ static class OtaFlowPolicy {static final String SETTINGS_PACKAGE="com.android.settings";}
+ static class Build {static class VERSION {static final int SDK_INT=36;}static class VERSION_CODES {static final int UPSIDE_DOWN_CAKE=34;}}
+ static class SystemClock {static long uptimeMillis(){return time;}static void sleep(long ms){assertTrue("bounded conditional poll",ms>0&&ms<=100);time+=ms;}}
+ static class Rect {
+  int left,top,right,bottom;Rect(){}Rect(int l,int t,int r,int b){left=l;top=t;right=r;bottom=b;}
+  void set(Rect r){left=r.left;top=r.top;right=r.right;bottom=r.bottom;}boolean isEmpty(){return left>=right||top>=bottom;}
+  boolean contains(Rect r){return !r.isEmpty()&&left<=r.left&&top<=r.top&&right>=r.right&&bottom>=r.bottom;}
+  public boolean equals(Object o){if(!(o instanceof Rect))return false;Rect r=(Rect)o;return left==r.left&&top==r.top&&right==r.right&&bottom==r.bottom;}
+ }
+ static class AccessibilityNodeInfo {
+  String pkg="",text="",clazz="android.view.View",description="",resource="";int id=5,declared=-1;
+  boolean visible=true,enabled=true,clickable,scrollable,root;Rect bounds=new Rect(0,0,1080,1920);List<AccessibilityNodeInfo> children=new ArrayList<>();
+  CharSequence getPackageName(){return pkg;}CharSequence getText(){return text;}CharSequence getClassName(){return clazz;}
+  CharSequence getContentDescription(){return description;}String getViewIdResourceName(){return resource;}int getWindowId(){return id;}
+  boolean isVisibleToUser(){return visible;}boolean isEnabled(){return enabled;}boolean isClickable(){return clickable;}boolean isScrollable(){return scrollable;}
+  void getBoundsInScreen(Rect r){r.set(bounds);}int getChildCount(){return declared>=0?declared:children.size();}AccessibilityNodeInfo getChild(int i){return i<children.size()?children.get(i):null;}
+  void recycle(){if(root&&scenario.endsWith("late")&&readyReads>=2)time=phase==1?100000:90000;}
+ }
+ static class AccessibilityWindowInfo {
+  static final int TYPE_APPLICATION=1;int id=5,type=1;boolean active=true,focused=true;Rect bounds=new Rect(0,0,1080,1920);
+  int getId(){return id;}int getType(){return type;}boolean isActive(){return active;}boolean isFocused(){return focused;}void getBoundsInScreen(Rect r){r.set(bounds);}void recycle(){}
+ }
+'''+"\n".join(factories)+r'''
+ static AccessibilityNodeInfo byText(AccessibilityNodeInfo root,String text){if(root==null)return null;if(root.text.equals(text))return root;for(AccessibilityNodeInfo n:root.children){AccessibilityNodeInfo r=byText(n,text);if(r!=null)return r;}return null;}
+ static AccessibilityNodeInfo byResource(AccessibilityNodeInfo root,String res){if(root.resource.equals(res))return root;for(AccessibilityNodeInfo n:root.children){AccessibilityNodeInfo r=byResource(n,res);if(r!=null)return r;}return null;}
+ static AccessibilityNodeInfo parent(AccessibilityNodeInfo root,AccessibilityNodeInfo child){if(root.children.contains(child))return root;for(AccessibilityNodeInfo n:root.children){AccessibilityNodeInfo p=parent(n,child);if(p!=null)return p;}return null;}
+ static int scrolls(AccessibilityNodeInfo root){if(root==null)return 0;int count=root.scrollable?1:0;for(AccessibilityNodeInfo n:root.children)count+=scrolls(n);return count;}
+ static AccessibilityNodeInfo observedBody(){
+  AccessibilityNodeInfo r=phase==1?installerBody(5):cleanupBody(5);
+  AccessibilityNodeInfo target=phase==1?byText(r,"App installed."):byText(r,"YAWF Stream");
+  AccessibilityNodeInfo action=phase==1?byText(r,"Open"):byText(r,"Allowed");
+  if(scenario.endsWith("foreign"))action.pkg="foreign.package";
+  if(scenario.endsWith("wrong-namespace"))target.resource="com.google.android.packageinstaller:id/install_success";
+  if(scenario.endsWith("missing-resource"))target.resource="";
+  if(scenario.endsWith("wrong-label"))target.text+=" now";
+  if(scenario.endsWith("wrong-title"))(phase==1?byText(r,"YAWF Stream"):byText(r,"Install unknown apps")).text="Different page";
+  if(scenario.endsWith("missing-action"))action.text="Not allowed";
+  if(scenario.endsWith("disabled"))action.enabled=false;
+  if(scenario.endsWith("hidden"))action.visible=false;
+  if(scenario.endsWith("clipped"))target.bounds.right=1081;
+  if(scenario.endsWith("incomplete"))target.declared=1;
+  if(scenario.endsWith("duplicate"))r.children.add(target);
+  if(scenario.endsWith("duplicate-role")){AccessibilityNodeInfo other=phase==1?byText(installerBody(5),"Open"):byText(cleanupBody(5),"YAWF Stream");r.children.add(other);}
+  if(scenario.endsWith("wrong-pair")){
+   AccessibilityNodeInfo p=parent(r,action);p.children.remove(action);
+   if(phase==1)r.children.add(action);else parent(r,byText(r,"Chrome")).children.add(action);
+  }
+  if(scenario.endsWith("depth-budget")){AccessibilityNodeInfo n=target;for(int i=0;i<66;i++){AccessibilityNodeInfo child=new AccessibilityNodeInfo();child.pkg=r.pkg;n.children.add(child);n=child;}}
+  if(scenario.endsWith("child-budget"))target.declared=129;
+  return r;
+ }
+ static class FakeAutomation {
+  AccessibilityNodeInfo current;int refreshes;
+  boolean clearCache(){refreshes++;return !scenario.endsWith("cache-failed");}
+  List<AccessibilityWindowInfo> getWindows(){
+   AccessibilityWindowInfo w=new AccessibilityWindowInfo();
+   if(time<10200||scenario.endsWith("timeout")){current=new AccessibilityNodeInfo();current.pkg=phase==1?"com.google.android.packageinstaller":"com.android.settings";}
+   else {current=observedBody();readyReads++;}
+   if(scenario.endsWith("null-root"))current=null;
+   if(scenario.endsWith("wrong-owner")&&current!=null)current.pkg="foreign.package";
+   if(scenario.endsWith("window-geometry"))w.bounds=new Rect(-1,0,1080,1920);
+   if(scenario.endsWith("not-focused"))w.focused=false;
+   if(scenario.endsWith("input"))live.actions.add("unexpected input");
+   if(scenario.endsWith("regress"))time=1;
+   if(scenario.endsWith("multiple-windows")){AccessibilityWindowInfo second=new AccessibilityWindowInfo();second.id=6;return List.of(w,second);}
+   return List.of(w);
+  }
+  AccessibilityNodeInfo getRootInActiveWindow(){return current;}
+ }
+ static class FakeInstrumentation {final FakeAutomation a=new FakeAutomation();FakeAutomation getUiAutomation(){return a;}}
+ static class BySelector {String text;boolean scrollable;BySelector(String s){text=s;}BySelector pkg(String s){return this;}}
+ static class By {static BySelector text(String s){return new BySelector(s);}static BySelector scrollable(boolean s){BySelector b=new BySelector(null);b.scrollable=s;return b;}}
+ enum Direction {DOWN}
+ static class StaleObjectException extends RuntimeException {}
+ static class UiObject2 {
+  final AccessibilityNodeInfo node;UiObject2(AccessibilityNodeInfo n){node=n;}boolean isEnabled(){return node==null||node.enabled;}
+  String getResourceName(){getters++;throw new StaleObjectException();}
+  void click(){inputs++;}void scroll(Direction d,float fraction){throw new AssertionError("forced scroll forbidden");}
+ }
+ static class FakeDevice {
+  int getDisplayWidth(){return 1080;}int getDisplayHeight(){return 1920;}
+  UiObject2 findObject(BySelector selector){live.instrumentation.a.getWindows();if(selector.scrollable){scrollQueries++;return null;}lookups++;AccessibilityNodeInfo n=byText(live.instrumentation.a.current,selector.text);return n==null?null:new UiObject2(n);}
+  void waitForIdle(long ms){}
+ }
+ boolean isPublic88To96OfferMode(){return true;}
+ void assertNoBindingTerms(){}
+ UiObject2 waitFor(BySelector s,long timeout,String label){time=10200;instrumentation.a.getWindows();return new UiObject2(byText(instrumentation.a.current,s.text));}
+ static void assertTrue(String label,boolean condition){if(!condition)throw new AssertionError(label);}
+ static void assertNotNull(String label,Object value){assertTrue(label,value!=null);}
+ static void assertEquals(String label,Object expected,Object value){assertTrue(label,Objects.equals(expected,value));}
+ static void fail(String message){throw new AssertionError(message);}
+'''+"\n".join(classes)+methods+r'''
+ public static void main(String[] args){
+  scenario=args[0];boolean snapshot=scenario.startsWith("snapshot:");if(snapshot)scenario=scenario.substring(9);
+  phase=scenario.startsWith("success")?1:2;ObserverProbe p=new ObserverProbe();live=p;
+  p.appsWindowGate=new AppsWindowGate(0);p.appsWindowGate.ready=new AppsWindowSnapshot();p.appsWindowGate.ready.windowId=5;
+  if(scenario.endsWith("expired"))time=90000;
+  if(snapshot){time=10500;System.out.println("SNAPSHOT="+p.observedStatus(phase));return;}
+  try {
+   if(phase==1)p.exerciseSuccessRegion("com.google.android.packageinstaller");else p.exerciseCleanupRegion();
+  }catch(Throwable failure){System.err.println("REFUSED;inputs="+inputs+";getters="+getters+";scrollQueries="+scrollQueries);throw failure;}
+  System.out.println("OBSERVER_RETURNED");
+  assertEquals("no retained success getter",0,getters);
+  assertEquals("exact normal input count",phase==1?0:1,inputs);
+  assertEquals("no forced scroll queries",0,scrollQueries);
+  if(phase==2){assertEquals("one unchanged target lookup",1,lookups);assertEquals("captured page fits without scrolling",0,scrolls(p.instrumentation.a.current));assertTrue("shared cleanup deadline",time<90000);}
+  assertTrue("two fresh ready samples",readyReads>=2);
+  System.out.println("PASS;inputs="+inputs+";getters="+getters+";refreshes="+p.instrumentation.a.refreshes+";time="+time);
+ }
+}
+'''
+        path = cls.directory / "ObserverProbe.java"; path.write_text(probe)
+        p = subprocess.run([javac, "-d", str(cls.directory), str(path)], capture_output=True, text=True, timeout=60)
+        if p.returncode:
+            raise AssertionError(p.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def probe(self, scenario):
+        return subprocess.run([self.java, "-cp", str(self.directory), "ObserverProbe", scenario], capture_output=True, text=True, timeout=20)
+
+    def test_r4_installer_capture_succeeds_without_the_actual_stale_postgetter(self):
+        self.assertEqual(len(list(ET.fromstring(CAPTURED_INSTALL_SUCCESS_XML).iter("node"))), 16)
+        result = self.probe("success-valid")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS;inputs=0;getters=0", result.stdout)
+
+    def test_r4_visible_non_scrollable_cleanup_target_waits_before_unchanged_lookup(self):
+        self.assertEqual(len(list(ET.fromstring(CAPTURED_CLEANUP_TARGET_XML).iter("node"))), 32)
+        result = self.probe("cleanup-valid")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS;inputs=1;getters=0", result.stdout)
+
+    def test_observers_refuse_wrong_namespace_missing_resource_and_cross_owner_pairings(self):
+        self.assertEqual(self.probe("success-valid").returncode, 0)
+        self.assertEqual(self.probe("cleanup-valid").returncode, 0)
+        for scenario in ("success-wrong-namespace", "success-missing-resource", "success-foreign", "success-wrong-title",
+                         "success-wrong-label", "success-missing-action", "success-wrong-pair", "success-duplicate-role",
+                         "cleanup-wrong-title", "cleanup-wrong-label", "cleanup-missing-action", "cleanup-wrong-pair", "cleanup-duplicate-role"):
+            with self.subTest(scenario=scenario):
+                result = self.probe(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("OBSERVER_RETURNED", result.stdout)
+                self.assertIn("REFUSED;inputs=0;getters=0", result.stderr)
+
+    def test_observers_refuse_partial_foreign_or_invalid_raw_snapshots(self):
+        self.assertEqual(self.probe("cleanup-valid").returncode, 0)
+        for phase in ("success", "cleanup"):
+            for suffix in ("null-root", "wrong-owner", "multiple-windows", "not-focused", "disabled", "hidden",
+                           "clipped", "incomplete", "duplicate", "window-geometry", "depth-budget", "child-budget"):
+                with self.subTest(phase=phase, suffix=suffix):
+                    result = self.probe(phase + "-" + suffix)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("OBSERVER_RETURNED", result.stdout)
+                    self.assertIn("REFUSED;inputs=0;getters=0", result.stderr)
+
+    def test_observers_keep_deadlines_two_samples_and_input_free_acquisition(self):
+        self.assertEqual(self.probe("success-valid").returncode, 0)
+        for scenario in ("success-timeout", "success-late", "success-regress", "success-cache-failed", "success-input",
+                         "cleanup-expired", "cleanup-timeout", "cleanup-late", "cleanup-regress", "cleanup-input"):
+            with self.subTest(scenario=scenario):
+                result = self.probe(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("OBSERVER_RETURNED", result.stdout)
+                self.assertIn("REFUSED;inputs=0;getters=0", result.stderr)
 
 
 if __name__ == "__main__":
