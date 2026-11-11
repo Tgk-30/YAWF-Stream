@@ -1,7 +1,7 @@
 // Node22 remains supported LTS and its official macOS binaries retain min11.
 // Other packages keep Node24. Final package gates still inspect actual binaries.
-export const MACOS_NODE_RUNTIME_VERSION = "22.23.3";
-export const DEFAULT_NODE_RUNTIME_VERSION = "24.17.0";
+export const MACOS_NODE_RUNTIME_VERSION = "22.23.4";
+export const DEFAULT_NODE_RUNTIME_VERSION = "24.22.2";
 
 export function desktopNodeRuntimeVersion(platform, override) {
   if (override != null) {
