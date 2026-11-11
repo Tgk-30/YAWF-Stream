@@ -418,7 +418,7 @@ jobs:
       - name: Bundle Node runtime (macOS)
         if: matrix.os == 'macos'
         env:
-          NODE_RUNTIME_VERSION: "22.23.3"
+          NODE_RUNTIME_VERSION: "22.23.4"
         run: node scripts/download_tauri_node_runtime.mjs ${{ matrix.node_runtime }}
 
       # Notarization rejects the app if any nested executable is unsigned, so the

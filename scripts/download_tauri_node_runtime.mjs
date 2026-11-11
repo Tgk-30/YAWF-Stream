@@ -5,11 +5,10 @@ import { get } from "node:https";
 import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_NODE_RUNTIME_VERSION } from "./desktop_node_runtime_policy.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const currentNodeVersion = process.versions.node.replace(/^v/, "");
-const defaultNodeRuntimeVersion = currentNodeVersion.startsWith("24.") ? currentNodeVersion : "24.17.0";
-const version = (process.env.NODE_RUNTIME_VERSION ?? defaultNodeRuntimeVersion).replace(/^v/, "");
+const version = (process.env.NODE_RUNTIME_VERSION ?? DEFAULT_NODE_RUNTIME_VERSION).replace(/^v/, "");
 const nodeDistOrigin = "https://nodejs.org";
 const minArchiveBytes = 1_000_000;
 const platforms = process.argv.slice(2);
@@ -30,7 +29,7 @@ if (platforms.length === 0) {
 
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
   console.error(`Unsupported NODE_RUNTIME_VERSION: ${version}`);
-  console.error("Expected a plain semver version such as 24.17.0.");
+  console.error(`Expected a plain semver version such as ${DEFAULT_NODE_RUNTIME_VERSION}.`);
   process.exit(1);
 }
 
