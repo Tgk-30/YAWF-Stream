@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { readFileSync } from "node:fs";
 import type { MediaPreview, MediaItem } from "../models/media";
 import type { DetailState } from "../data/detail";
@@ -89,6 +90,7 @@ let mockSettings: any = { transcode: false };
 vi.mock("../store/AppStore", () => ({
   useAppStore: () => {
     const [detailSourcesOpen, setDetailSourcesOpen] = useState(false);
+    const [trailerOpen, setTrailerOpen] = useState(false);
     return {
     detailItem: mockDetailItem,
     closeDetail,
@@ -117,9 +119,9 @@ vi.mock("../store/AppStore", () => ({
       setDetailSourcesOpen(false);
     },
     closeDetailPlayer,
-    trailerOpen: false,
-    openTrailer,
-    closeTrailer,
+    trailerOpen,
+    openTrailer: () => { openTrailer(); setTrailerOpen(true); },
+    closeTrailer: () => { closeTrailer(); setTrailerOpen(false); },
     activeProfile: mockActiveProfile,
     };
   },
@@ -494,7 +496,7 @@ vi.mock("../components/VideoPlayer", () => ({
   }: any) => {
     capturedRefreshCurrentSource = refreshCurrentSource ?? null;
     capturedTryNextSource = onTryNextSource ?? null;
-    return (
+    return createPortal(
     <div
       data-testid="player"
       data-url={url}
@@ -573,7 +575,8 @@ vi.mock("../components/VideoPlayer", () => ({
       >
         refresh-current-source
       </button>
-    </div>
+    </div>,
+    document.body,
     );
   },
 }));
@@ -1602,6 +1605,78 @@ describe("Detail base render", () => {
     await userEvent.keyboard("{Escape}");
     expect(closeDetailSources).toHaveBeenCalledTimes(2);
     expect(closeDetail).not.toHaveBeenCalled();
+  });
+
+  it("restores movie Detail semantics after the body-level player closes", async () => {
+    render(<Detail />);
+    const detail = screen.getByRole("dialog", { name: "Selected details" });
+    const chrome = detail.querySelector(":scope > .detail-sticky-chrome");
+    const content = detail.querySelector(":scope > .detail-inner");
+    await userEvent.click(screen.getByTestId("play-stream"));
+    const player = await screen.findByTestId("player");
+    expect(player.parentElement).toBe(document.body);
+    expect(player.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(detail).not.toHaveAttribute("aria-modal");
+    for (const region of [chrome, content]) {
+      expect(region).toHaveAttribute("inert");
+      expect(region).toHaveAttribute("aria-hidden", "true");
+    }
+    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "play-stream" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "close-player" }));
+    expect(detail).toHaveAttribute("aria-modal", "true");
+    for (const region of [chrome, content]) {
+      expect(region).not.toHaveAttribute("inert");
+      expect(region).not.toHaveAttribute("aria-hidden");
+    }
+    expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "play-stream" })).toBeEnabled();
+    expect(closeDetail).not.toHaveBeenCalled();
+  });
+
+  it("keeps the nested trailer active and restores Detail when it closes", async () => {
+    mockServices.tmdb = { getTrailer: vi.fn(async () => "synthetic-trailer") };
+    render(<Detail />);
+    const detail = screen.getByRole("dialog", { name: "Selected details" });
+    await userEvent.click(await screen.findByRole("button", { name: "Watch trailer" }));
+    const trailer = screen.getByRole("dialog", { name: "Trailer: Selected" });
+    expect(detail).toContainElement(trailer);
+    expect(detail).not.toHaveAttribute("aria-modal");
+    expect(trailer).toHaveAttribute("aria-modal", "true");
+    expect(trailer.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(detail.querySelector(".detail-inner")).toHaveAttribute("inert");
+    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Close trailer" }));
+    expect(screen.queryByRole("dialog", { name: "Trailer: Selected" })).toBeNull();
+    expect(detail).toHaveAttribute("aria-modal", "true");
+    expect(detail.querySelector(".detail-inner")).not.toHaveAttribute("inert");
+    expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+    expect(closeDetail).not.toHaveBeenCalled();
+    expect(closeTrailer).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores streams portal ownership and preserves pre-existing inert content", async () => {
+    mockDetailItem = preview("s1", { type: "series", title: "The Series", tmdbId: 200 });
+    mockDetail = detailState({ item: mediaItem({ type: "series", id: "s1", tmdbId: 200 }) });
+    render(<Detail />);
+    const detail = screen.getByRole("dialog", { name: "The Series details" });
+    const chrome = detail.querySelector(".detail-sticky-chrome")!;
+    const content = detail.querySelector(".detail-inner")!;
+    chrome.setAttribute("inert", "");
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    const streams = screen.getByRole("dialog", { name: /Streams/ });
+    expect(detail).not.toHaveAttribute("aria-modal");
+    expect(streams).toHaveAttribute("aria-modal", "true");
+    expect(streams.parentElement).toBe(document.body);
+    expect(streams.closest("[inert], [aria-hidden='true']")).toBeNull();
+    expect(content).toHaveAttribute("inert");
+    expect(content).toHaveAttribute("aria-hidden", "true");
+    await userEvent.click(screen.getByRole("button", { name: /Episodes/ }));
+    expect(detail).toHaveAttribute("aria-modal", "true");
+    expect(chrome).toHaveAttribute("inert");
+    expect(content).not.toHaveAttribute("inert");
+    expect(content).not.toHaveAttribute("aria-hidden");
+    expect(screen.getByTestId("pick-episode")).toBeEnabled();
   });
 
   it("inerts and restores both Detail content regions around the streams portal", async () => {

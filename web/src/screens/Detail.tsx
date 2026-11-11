@@ -719,26 +719,29 @@ export function Detail() {
     }
   };
   const streamsBackRef = useRef<HTMLButtonElement>(null);
+  const trailerVisible = trailerOpen && trailer.key != null;
+  const streamsPageVisible = isSeries && streamsPageOpen && selected != null;
+  const detailCovered = player != null || trailerVisible || streamsPageVisible;
   // Each portal owns its own modal focus scope. Suspending the outer Detail
   // scope while the streams page is open prevents its Tab handler from pulling
   // focus back out of the body-level portal.
   const rootRef = useModalA11y<HTMLDivElement>(
     closeDetail,
-    player == null && !trailerOpen,
-    streamsPageOpen,
+    player == null && !trailerVisible,
+    streamsPageVisible,
   );
   const streamsPageRef = useModalA11y<HTMLDivElement>(
     closeDetailSources,
-    streamsPageOpen && player == null,
+    streamsPageVisible && player == null && !trailerVisible,
   );
-  // The streams portal is outside .detail in the DOM, so explicitly inert the
-  // covered content. Focus, Escape, Tab containment, and focus restoration are
-  // handled by useModalA11y. While a player is mounted, the player owns Escape.
-  useEffect(() => {
-    if (!streamsPageOpen || player != null) return;
+  // Cover only Detail's content, not its nested trailer or body-level portals.
+  // The front dialog owns interaction until it closes; preserve prior inertness.
+  useLayoutEffect(() => {
+    if (!detailCovered) return;
     const covered = [
       rootRef.current?.querySelector<HTMLElement>(":scope > .detail-sticky-chrome"),
       rootRef.current?.querySelector<HTMLElement>(":scope > .detail-inner"),
+      player != null || trailerVisible ? streamsPageRef.current : null,
     ].filter((element): element is HTMLElement => element != null);
     const originallyInert = new Map(
       covered.map((element) => [element, element.hasAttribute("inert")]),
@@ -749,7 +752,7 @@ export function Detail() {
         if (!originallyInert.get(element)) element.removeAttribute("inert");
       });
     };
-  }, [player, streamsPageOpen]);
+  }, [detailCovered, player, trailerVisible, streamsPageVisible]);
   useEffect(() => {
     if (autoPlayPending == null || streams.loading || autoPlayBusy.current) return;
     if (
@@ -1911,11 +1914,11 @@ export function Detail() {
       className="detail"
       ref={rootRef}
       role="dialog"
-      aria-modal="true"
+      aria-modal={detailCovered ? undefined : true}
       aria-label={`${detailItem.title} details`}
       tabIndex={-1}
     >
-      <div className="detail-sticky-chrome">
+      <div className="detail-sticky-chrome" aria-hidden={detailCovered || undefined}>
         <button
           type="button"
           className="detail-back"
@@ -1926,7 +1929,7 @@ export function Detail() {
           <Icon name="xmark" size={17} />
         </button>
       </div>
-      <div className="detail-inner">
+      <div className="detail-inner" aria-hidden={detailCovered || undefined}>
       {item && (
         <DetailHero
           item={item}
@@ -2306,12 +2309,13 @@ export function Detail() {
 
       {/* Series streams live on their own page (opened by picking an episode),
           instead of loading inline at the bottom of Detail. */}
-      {isSeries && streamsPageOpen && selected != null && createPortal(
+      {streamsPageVisible && createPortal(
         <div
           ref={streamsPageRef}
           className="episode-streams"
           role="dialog"
-          aria-modal="true"
+          aria-modal={player == null && !trailerVisible ? true : undefined}
+          aria-hidden={player != null || trailerVisible || undefined}
           aria-label={`Streams - ${episodeLabel(selected.season, selected.episode)}`}
           tabIndex={-1}
         >
