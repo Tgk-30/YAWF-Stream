@@ -40,7 +40,7 @@ encryption key. Public multi-tenant hosting is not supported.
 
 | SEC-017 | Accepted | The native updater uses the fixed official Android phone channel only. Checks require native consent, downloads require native confirmation, and installation requires Android OS approval. A local-only no-argument Tauri command can open its dialog; remote pages cannot supply URLs, APK metadata or file paths. Bounded GitHub metadata, exact byte count and SHA-256, package identity, monotonic version code and the installed signing certificate must agree. Verified APK bytes are staged in private internal storage and shared only through a dedicated non-exported FileProvider with temporary read permission. Durable download state survives process interruption, failure does not consume the weekly success cadence, and remote pages gain no new native access. | Kotlin behavior and mutation tests, exact SDK compilation, generated-project and ACL guards, strict APK verification, and signed-artifact emulator upgrade checks before publication |
 
-| SEC-019 | Candidate, native qualification pending | Windows key, database, sidecar and backup writes require a private inheritable DACL before file creation. Existing artifacts are admitted read-only, never silently re-permissioned. Only the current account, SYSTEM and Administrators are data principals; TrustedInstaller is allowed only for OS ancestors. Reparse points and untrusted ancestor replacement rights fail closed. The bounded native observer uses static code, JSON stdin, builtin modules and only necessary OS environment fields, without credentials, ACL writes or raw diagnostic output. POSIX modes remain unchanged. | Pure policy controls, native private/shared-folder and forensic-byte tests, full server suites and package checks; Windows publication remains held until its separate gates pass |
+| SEC-019 | Native source qualified, signed release pending | Windows key, database, sidecar and backup writes require a private inheritable DACL before file creation. Existing artifacts are admitted read-only, never silently re-permissioned. Only the current account, SYSTEM and Administrators are data principals; TrustedInstaller is allowed only for OS ancestors. Reparse points and untrusted ancestor replacement rights fail closed. The bounded observer is precompiled from fixed source and reference assemblies. Production CommonJS embeds the final executable binding and rehashes it before every fresh read, refusing loader sidecars and redirection. JSON stdin and only necessary OS environment fields carry no credentials; there is no runtime compilation, shell fallback, privacy-approval cache, ACL write or raw diagnostic output. Public Windows preparation requires Authenticode signing before final hash binding; unsigned source-test artifacts are not release evidence. POSIX modes remain unchanged. | Immutable policy and transport controls, native raw-descriptor parity, fresh permission and forensic-byte checks, fresh Windows suites and package checks; signing and Windows publication remain separately held |
 
 ## Release rules
 
@@ -60,6 +60,12 @@ encryption key. Public multi-tenant hosting is not supported.
 
 ## Windows security blocker
 
+- Source revision `03b0777752e5ad8d683a2b4bdd34f9c89151c145` passed all
+  659 server tests on each fresh Windows 2022 and Windows 2025 consumer in
+  `windows-storage-observer-cold.yml` run `43004933823`. Both consumers also
+  booted the packaged server with the relocated Node 24.22.2 runtime. The
+  observer was compiled only on the separate producer. These unsigned CI
+  checks do not qualify signed installation, updates or application UI.
 - Windows remains held while `YAWF_RELEASE_WINDOWS` is absent or false.
 - Before setting it to true, provision the Azure Artifact Signing account,
   certificate profile, service principal permissions, and six repository

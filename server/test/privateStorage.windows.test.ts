@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { acquireDatabaseLease, AppDatabase, createPreUpgradeSnapshotIfNeeded, databaseLockPath } from "../src/db.js";
@@ -56,6 +57,40 @@ describe.skipIf(process.platform !== "win32")("native Windows private storage", 
       loadConfig({ dataDir: data });
       new AppDatabase(join(data, "database.sqlite")).close();
     } finally { rmSync(data, { recursive: true, force: true }); }
+  }, 30_000);
+
+  it("compares native descriptor and synthetic raw-ACL projections only after a real admission", () => {
+    try {
+      const path = join(root, "equivalence.sqlite"); writeFileSync(path, "disposable equivalence fixture");
+      // No helper/compiler/version probe precedes this actual admission.
+      assertPrivateWindowsStorage([path]);
+      const directory = fileURLToPath(new URL("../.build/windows-storage-observer/runtime/", import.meta.url));
+      const binding = JSON.parse(readFileSync(join(directory, "binding.json"), "utf8"));
+      const helper = join(directory, "StorageDescriptorObserver.exe");
+      const admitted = createHash("sha256").update(readFileSync(helper)).digest("hex") === binding.helperSha256;
+      if (!admitted) throw new Error("Observer identity unavailable.");
+      const entries = [{ path, kind: "file", id: 0 }, { path: root, kind: "directory", id: 1 }];
+      const options = { encoding: "utf8" as const, timeout: 7000, maxBuffer: 256_000, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
+      const current = JSON.parse(execFileSync(helper, [], { ...options, input: JSON.stringify({ protocol: binding.protocol, entries }) }));
+      const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      const oldScript = fileURLToPath(new URL("./fixtures/windowsStorageOriginalObserver.ps1", import.meta.url));
+      const previous = JSON.parse(execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", oldScript],
+        { ...options, timeout: 20_000, input: JSON.stringify(entries) }).replace(/^\uFEFF/, "").trim());
+      expect(isDeepStrictEqual(current.descriptors, previous)).toBe(true);
+      const projectionScript = fileURLToPath(new URL("./fixtures/windowsStorageProjectionEquivalence.ps1", import.meta.url));
+      const scalar = JSON.parse(execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", projectionScript],
+        { ...options, timeout: 20_000, input: JSON.stringify({ helper, sha256: binding.helperSha256 }) }).replace(/^\uFEFF/, "").trim());
+      expect(scalar).toEqual({ equivalent: true, cases: 8 });
+    } catch {
+      throw new Error("Native descriptor equivalence failed. Raw observations were not retained.");
+    }
+  }, 60_000);
+
+  it("rejects a same-process permission change on a previously admitted file without changing its bytes", () => {
+    const data = parent("fresh-reading"); const path = join(data, "probe.sqlite"); writeFileSync(path, "disposable forensic bytes");
+    assertPrivateWindowsStorage([path]);
+    fixture({ path }, "public-test-file");
+    expectUnchanged(data, () => assertPrivateWindowsStorage([path]));
   }, 30_000);
 
   it("boots and independently verifies key, DB, lease, WAL, SHM, snapshot and online backup DACLs", async () => {

@@ -167,6 +167,20 @@ jobs:
         working-directory: server
         run: npm ci
 
+      - name: Prepare unsigned Windows storage observer for CI bundles
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/prepare_windows_storage_observer.mjs compile
+          if ($LASTEXITCODE -ne 0) { throw 'Storage observer compilation failed.' }
+          $compiled = Get-Content server/.build/windows-storage-observer/compile.json -Raw | ConvertFrom-Json
+          $helper = 'server/.build/windows-storage-observer/unsigned/StorageDescriptorObserver.exe'
+          $pin = (Get-FileHash $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($pin -cne $compiled.unsignedHelperSha256) { throw 'Unsigned storage observer identity failed.' }
+          node scripts/prepare_windows_storage_observer.mjs bind --sha256 $pin
+          if ($LASTEXITCODE -ne 0) { throw 'Storage observer binding failed.' }
+
       - name: Build server bundle
         working-directory: server
         run: npm run build

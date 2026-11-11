@@ -47,6 +47,19 @@ jobs:
         working-directory: server
         run: npm ci
 
+      - name: Prepare unsigned Windows storage observer for source tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/prepare_windows_storage_observer.mjs compile
+          if ($LASTEXITCODE -ne 0) { throw 'Storage observer compilation failed.' }
+          $compiled = Get-Content server/.build/windows-storage-observer/compile.json -Raw | ConvertFrom-Json
+          $helper = 'server/.build/windows-storage-observer/unsigned/StorageDescriptorObserver.exe'
+          $pin = (Get-FileHash $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($pin -cne $compiled.unsignedHelperSha256) { throw 'Unsigned storage observer identity failed.' }
+          node scripts/prepare_windows_storage_observer.mjs bind --sha256 $pin
+          if ($LASTEXITCODE -ne 0) { throw 'Storage observer binding failed.' }
+
       # Preserve races inside each scenario and their original deadlines,
       # without running independent native process-heavy files simultaneously.
       - name: Test server
@@ -239,6 +252,9 @@ jobs:
 
       - name: macOS media notices and artifact transport tests
         run: node --test scripts/prepare_macos_media_notices.test.mjs scripts/macos_media_workflow.test.mjs
+
+      - name: Windows storage observer source, artifact and workflow contracts
+        run: node --test scripts/prepare_windows_storage_observer.test.mjs scripts/prepare_tauri_server_resources.test.mjs scripts/ci/windows_storage_packet.test.mjs scripts/windows_storage_workflow.test.mjs scripts/generate_windows_signing_config.test.mjs
 
       - name: macOS disk-image workflow tests
         run: node --test scripts/macos_hdiutil_workflow.test.mjs

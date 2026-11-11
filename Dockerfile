@@ -24,6 +24,7 @@ COPY web/package*.json ./web/
 RUN cd web && npm ci
 COPY server/ ./server/
 COPY web/src ./web/src
+COPY scripts/prepare_windows_storage_observer.mjs ./scripts/prepare_windows_storage_observer.mjs
 RUN cd server && npm run build
 
 FROM node:24-bookworm-slim AS runtime
