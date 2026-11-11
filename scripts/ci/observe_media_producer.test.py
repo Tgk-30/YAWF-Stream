@@ -728,10 +728,27 @@ class ObserverTests(unittest.TestCase):
         self.assertIsNone(summary["producerExit"])
         self.assertFalse(summary["observerValid"])
 
+    def test_cli_fixture_does_not_copy_unrelated_parent_environment(self):
+        with mock.patch.dict(os.environ, {"UNRELATED_CREDENTIAL_FIXTURE": "synthetic-parent-only"}):
+            self.test_cli_preserves_exact_argv_environment_stdout_stderr()
+        identity = json.loads((self.root / "identity.json").read_text())
+        self.assertNotIn("UNRELATED_CREDENTIAL_FIXTURE", identity["env"])
+
     def test_cli_preserves_exact_argv_environment_stdout_stderr(self):
         output = self.root / "identity.json"
         workspace, evidence = self.root / "workspace", self.root / "evidence"
-        environment = dict(os.environ, MEDIA_OBSERVER_FIXTURE="PRIVATE_MARKER")
+        # Persist only a synthetic fixture environment, never inherited credentials.
+        environment = {
+            "PATH": os.defpath,
+            "HOME": str(self.root),
+            "TMPDIR": str(self.root),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "__CF_USER_TEXT_ENCODING": f"0x{os.getuid():X}:0x0:0x0",
+            "MEDIA_OBSERVER_FIXTURE": "PRIVATE_MARKER",
+            "MEDIA_OBSERVER_EMPTY": "",
+            "MEDIA_OBSERVER_UNICODE": "fixture-\u00e9",
+        }
         args = ["", " spaced ", "--literal", "line\nbreak", "unicode-\u00e9"]
         body = "import json,os,pathlib,sys,time;pathlib.Path(sys.argv[1]).write_text(json.dumps({'argv':sys.argv[2:],'env':dict(os.environ)}));print('fixture stdout');print('fixture stderr',file=sys.stderr);time.sleep(.12)"
         command = [sys.executable, "-I", "-B", str(MODULE), "--workspace", str(workspace), "--evidence", str(evidence), "--max-seconds", "3", "--", sys.executable, "-I", "-B", "-c", body, str(output), *args]
