@@ -4,6 +4,8 @@ import ast
 import hashlib
 from pathlib import Path
 import re
+import subprocess
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +47,8 @@ def validate(text):
         errors.append('fixed-source-artifact')
     if f'test "$(git -C frozen-production rev-parse HEAD)" = {FROZEN}' not in native or f'archive=yawf-macos-media-runtime-source-{SOURCE}.tar.gz' not in native or f'= {SOURCE}\n' not in native:
         errors.append('source-admission')
+    if 'name: Admit immutable source and independent observation contracts\n        shell: bash\n        env:\n          TMPDIR: ${{ runner.temp }}' not in native:
+        errors.append('controlled-test-temp')
     frozen_tests = ['scripts/stage_macos_media_runtime.test.mjs', 'scripts/smoke_macos_media_runtime.test.mjs', 'scripts/prepare_macos_replay_notices.test.mjs', 'scripts/macos_media_workflow.test.mjs', 'scripts/ci/run_macos_media_replay_experiment.test.py', 'scripts/ci/produce_macos_media_runtime.test.py']
     if any(value not in native for value in frozen_tests) or 'working-directory: frozen-production' not in native:
         errors.append('original-controls')
@@ -64,9 +68,11 @@ def validate(text):
         errors.append('unchanged-producer-invocation')
     if native.index('Bind the actual job start before setup') > native.index('Checkout external observation tooling') or 'attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100' not in native or '.runner_name == env.RUNNER_NAME' not in native:
         errors.append('job-start-binding')
-    budget_tokens = ['7200 - 720 - 120 - elapsed_seconds', 'remaining_producer_seconds(value["initialRemainingSeconds"], value["clockMonotonicNs"], time.monotonic_ns())', 'if maximum < 60:', 'raise SystemExit("Setup consumed the safe producer budget")']
+    budget_tokens = ['7200 - 720 - 120 - elapsed_seconds', 'remaining_producer_seconds(value["initialRemainingSeconds"], value["clockContinuousNs"], time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW))', 'if maximum < 60:', 'raise SystemExit("Setup consumed the safe producer budget")']
     if any(value not in native for value in budget_tokens) or '${{ runner.temp }}/media-intel96-preflight.json' not in native:
         errors.append('job-relative-budget')
+    if native.count('time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)') != 2 or 'time.monotonic_ns()' in native or 'assert value["clockDomain"] == "Darwin-CLOCK_MONOTONIC_RAW"' not in native:
+        errors.append('cross-process-clock')
     archive = native.split('      - name: Archive only a fully passed unsigned candidate', 1)[-1].split('      - name: Retain bounded observations', 1)[0]
     exact = '{"schemaVersion": 1, "result": "pass", "arch": "x86_64", "target": "11.0", "shippingRegularFiles": 57, "sourceSha256": "'+SOURCE+'"}'
     if 'assert value == '+exact not in archive or 'if: always()' in archive or 'continue-on-error' in native:
@@ -111,6 +117,8 @@ class WorkflowContracts(unittest.TestCase):
             ('run-id: 42916926303', 'run-id: 42916926304', 'fixed-source-artifact'),
             ('--max-seconds "$maximum_seconds"', '--max-seconds 7200', 'unchanged-producer-invocation'),
             ('--jobs 8', '--jobs 16', 'unchanged-producer-invocation'),
+            ('time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)', 'time.monotonic_ns()', 'cross-process-clock'),
+            ('TMPDIR: ${{ runner.temp }}', 'TMPDIR: /var/tmp', 'controlled-test-temp'),
             ('7200 - 720 - 120 - elapsed_seconds', '7200 - 720 - 120', 'job-relative-budget'),
             ('.runner_name == env.RUNNER_NAME', 'true', 'job-start-binding'),
             ('scripts/stage_macos_media_runtime.test.mjs', 'scripts/not-a-check.mjs', 'original-controls'),
@@ -151,6 +159,17 @@ class WorkflowContracts(unittest.TestCase):
         for values in ((6360, 2, 1), (7201, 1, 1), (True, 1, 1), (6360, 0, 1)):
             with self.assertRaises(ValueError):
                 remaining(*values)
+
+    def test_actual_workflow_clock_is_comparable_across_system_python_processes(self):
+        expression = 'time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)'
+        self.assertEqual(self.text.count(expression), 2)
+        def read_clock(expr):
+            return int(subprocess.check_output(['/usr/bin/python3', '-I', '-B', '-c', 'import time; print(' + expr + ')'], text=True, timeout=5).strip())
+        before = read_clock(expression)
+        time.sleep(.2)
+        after = read_clock(expression)
+        self.assertGreaterEqual(after - before, 200000000)
+        self.assertLess(after - before, 5000000000)
 
     def test_legacy_steps_are_hash_bound(self):
         changed = self.text.replace('Run the confined toolchain probe or clean replay', 'Skip the original replay', 1)

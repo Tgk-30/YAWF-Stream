@@ -274,7 +274,7 @@ jobs:
           remaining = initial_remaining_seconds(elapsed)
           path = pathlib.Path(sys.argv[2])
           assert not path.exists()
-          value = {"schemaVersion": 1, "stage": "job-clock-bound", "jobStartedUtc": sys.argv[1], "clockMonotonicNs": time.monotonic_ns(), "elapsedBeforeClockBindingSeconds": elapsed, "initialRemainingSeconds": remaining, "retentionReserveSeconds": 720, "clockSlackSeconds": 120}
+          value = {"schemaVersion": 1, "stage": "job-clock-bound", "jobStartedUtc": sys.argv[1], "clockContinuousNs": time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW), "clockDomain": "Darwin-CLOCK_MONOTONIC_RAW", "elapsedBeforeClockBindingSeconds": elapsed, "initialRemainingSeconds": remaining, "retentionReserveSeconds": 720, "clockSlackSeconds": 120}
           path.write_text(json.dumps(value, indent=2) + "\n")
           if remaining < 60:
               raise SystemExit("No safe producer budget remains")
@@ -303,6 +303,8 @@ jobs:
           run-id: 42916926303
       - name: Admit immutable source and independent observation contracts
         shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: |
           set -euo pipefail
           test "$(git -C frozen-production rev-parse HEAD)" = 2edc189a33539bf1742435590810fb84aa653ce5
@@ -364,7 +366,8 @@ jobs:
               return min(6600, first_remaining - elapsed)
           path = pathlib.Path(sys.argv[1])
           value = json.loads(path.read_text())
-          maximum = remaining_producer_seconds(value["initialRemainingSeconds"], value["clockMonotonicNs"], time.monotonic_ns())
+          assert value["clockDomain"] == "Darwin-CLOCK_MONOTONIC_RAW"
+          maximum = remaining_producer_seconds(value["initialRemainingSeconds"], value["clockContinuousNs"], time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW))
           value.update(stage="producer-budget-admitted" if maximum >= 60 else "producer-budget-refused", producerBudgetSeconds=maximum)
           path.write_text(json.dumps(value, indent=2) + "\n")
           if maximum < 60:
