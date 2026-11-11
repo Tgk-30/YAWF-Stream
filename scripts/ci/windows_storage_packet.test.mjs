@@ -3,8 +3,9 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import test from "node:test";
 import { admitPacket, createPacket, inspectCheckout, PACKET_LIMITS, packetFailure, packetOverlapsGeneratedTree, validatePacketManifest } from "./windows_storage_packet.mjs";
 
@@ -58,6 +59,34 @@ test("checkout admission binds exact HEAD, clean source and file bytes using rea
   assert.throws(() => inspectCheckout(f.repo, "d".repeat(40), { run }));
   assert.throws(() => inspectCheckout(f.repo, source, { run(...args) { if (args[1].includes("show")) return Buffer.from("different source"); return run(...args); } }));
 }));
+
+test("Windows checkout invocation isolates Git config with portable null paths, never the Windows device", () => {
+  const text = readFileSync(new URL("./windows_storage_packet.mjs", import.meta.url), "utf8");
+  const start = text.indexOf("export function inspectCheckout(");
+  const end = text.indexOf("\nexport function validatePacketManifest", start);
+  assert.ok(start >= 0 && end > start);
+  const repo = "C:\\qa\\repo", bytes = Buffer.from("fixed source bytes"), calls = [];
+  const inspect = vm.runInNewContext(text.slice(start, end).replace("export function", "function") + "\ninspectCheckout;", {
+    process: { env: { PATH: "fixture-git-path", SYSTEMROOT: "C:\\Windows", GIT_CONFIG_GLOBAL: "untrusted-global-config",
+      GIT_CONFIG_SYSTEM: "untrusted-system-config", GIT_CONFIG_COUNT: "9", NODE_OPTIONS: "untrusted-node-options" } },
+    devNull: "\\\\.\\nul", SOURCE: /^[0-9a-f]{40}$/, PACKET_LIMITS, PRIVATE_SOURCE: privatePath, CS_SOURCE: csPath,
+    absolute(path) { assert.equal(path, repo); }, requireUnredirected() {}, atStage(_stage, operation) { return operation(); },
+    execFileSync() { assert.fail("Only the explicit test double may run"); }, resolve: win32.resolve, at: win32.join,
+    read() { return bytes; }, digest: hash, fail() { assert.fail("Unexpected checkout refusal"); },
+  }, { timeout: 1000 });
+  inspect(repo, source, { run(command, args, options) {
+    assert.equal(command, "git"); calls.push(Array.from(args));
+    assert.deepEqual(Array.from(args).slice(0, 8), ["--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", repo]);
+    assert.deepEqual({ ...options.env }, { PATH: "fixture-git-path", SYSTEMROOT: "C:\\Windows", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
+    assert.equal(options.timeout, 10_000); assert.equal(options.maxBuffer, 65_536);
+    assert.deepEqual(Array.from(options.stdio), ["ignore", "pipe", "pipe"]);
+    if (args.includes("--verify")) return Buffer.from(source + "\n");
+    if (args.includes("--show-toplevel")) return Buffer.from(repo + "\n");
+    return args.includes("show") ? bytes : Buffer.alloc(0);
+  } });
+  assert.deepEqual(calls.map(args => args.slice(8)), [["rev-parse", "--verify", "HEAD"], ["rev-parse", "--show-toplevel"],
+    ["diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--"], ["show", `${source}:${privatePath}`], ["show", `${source}:${csPath}`]]);
+});
 
 test("operator digest and source pins are checked before checkout or destination creation", () => fixture(f => {
   const receipt = create(f); let calls = 0; const denied = () => { calls++; throw Error("must not inspect checkout"); };

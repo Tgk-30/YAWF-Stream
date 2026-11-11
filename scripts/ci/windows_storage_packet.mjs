@@ -2,7 +2,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { devNull } from "node:os";
 import { dirname, isAbsolute, join, posix, relative, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundledObserverBinding, preparedObserver, requireUnredirected, validateObserverBinding,
@@ -60,8 +59,9 @@ function allowed(path) {
 export function inspectCheckout(repo, source, { run = execFileSync } = {}) {
   atStage("path", () => { absolute(repo); if (!SOURCE.test(source)) fail(); requireUnredirected(repo); });
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(?:PATH|SYSTEMROOT|WINDIR|TEMP|TMP)$/i.test(key)));
-  Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: devNull, GIT_TERMINAL_PROMPT: "0" });
-  const git = args => run("git", ["--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false", "-c", `core.hooksPath=${devNull}`, "-C", repo, ...args],
+  // Git for Windows accepts its portable null path, not Node's Windows device path.
+  Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
+  const git = args => run("git", ["--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...args],
     { env, timeout: 10_000, maxBuffer: PACKET_LIMITS.manifestBytes, stdio: ["ignore", "pipe", "pipe"] });
   atStage("checkout-git-head", () => { if (git(["rev-parse", "--verify", "HEAD"]).toString().trim() !== source) fail("source-mismatch"); });
   atStage("checkout-git-root", () => { if (resolve(git(["rev-parse", "--show-toplevel"]).toString().trim()).toLowerCase() !== repo.toLowerCase()) fail(); });
