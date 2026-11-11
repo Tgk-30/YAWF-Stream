@@ -30,18 +30,23 @@ for (const { name, from, to } of [
   },
   {
     name: "Android phone tag",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.96', tag: 'android-v2.3.96' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.97', tag: 'android-v2.3.97' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.13' };",
   },
   {
     name: "stale Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.96', tag: 'android-v2.3.96' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.97', tag: 'android-v2.3.97' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.88', tag: 'android-v2.3.88' };",
   },
   {
+    name: "previous published Android phone channel",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.97', tag: 'android-v2.3.97' };",
+    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.96', tag: 'android-v2.3.96' };",
+  },
+  {
     name: "unpublished future Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.96', tag: 'android-v2.3.96' };",
-    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.97', tag: 'android-v2.3.97' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.97', tag: 'android-v2.3.97' };",
+    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.98', tag: 'android-v2.3.98' };",
   },
   {
     name: "Android TV filename",
