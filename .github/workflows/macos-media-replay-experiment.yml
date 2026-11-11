@@ -3,6 +3,11 @@ name: macOS media source replay experiment
 on:
   workflow_dispatch:
     inputs:
+      observe_intel96:
+        description: Observe one frozen Intel96 producer without signing or publication
+        required: false
+        default: false
+        type: boolean
       probe_only:
         description: Run only the same-profile toolchain canary before authorizing a full replay
         required: true
@@ -22,14 +27,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-media-replay-experiment-arm64
+  group: macos-media-replay-experiment-${{ inputs.observe_intel96 && 'intel96-observed' || 'arm64' }}
   cancel-in-progress: false
 
 jobs:
   arm64-replay:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      !inputs.observe_intel96 &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     name: Confined ARM source replay, no publication
     runs-on: macos-15
     timeout-minutes: ${{ (github.event_name == 'pull_request' || inputs.probe_only) && 20 || 90 }}
@@ -237,5 +243,177 @@ jobs:
         with:
           name: macos-media-replay-experiment-arm64-${{ github.run_attempt }}
           path: ${{ runner.temp }}/media-replay-evidence
+          if-no-files-found: error
+          retention-days: 14
+
+
+  intel96-observed:
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.observe_intel96 &&
+      github.repository == 'Tgk-30/YAWF-Stream' && github.actor == 'Tgk-30' &&
+      github.ref == 'refs/heads/codex/desktop96-media-observe'
+    name: Observe frozen Intel96 media producer, no publication
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - name: Bind the actual job start before setup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          job_started=$(gh api "repos/Tgk-30/YAWF-Stream/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq '[.jobs[] | select(.name == "Observe frozen Intel96 media producer, no publication" and .runner_name == env.RUNNER_NAME and .status == "in_progress")] | if length == 1 then .[0].started_at else error("Current job start is not uniquely available") end')
+          /usr/bin/python3 -I -B - "$job_started" "$RUNNER_TEMP/media-intel96-preflight.json" <<'CLOCK'
+          import datetime, json, math, pathlib, sys, time
+          def initial_remaining_seconds(elapsed_seconds):
+              if type(elapsed_seconds) is not int or elapsed_seconds < 0:
+                  raise ValueError("Invalid job clock")
+              return max(0, 7200 - 720 - 120 - elapsed_seconds)
+          started = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+          elapsed = math.ceil((datetime.datetime.now(datetime.timezone.utc) - started).total_seconds())
+          remaining = initial_remaining_seconds(elapsed)
+          path = pathlib.Path(sys.argv[2])
+          assert not path.exists()
+          value = {"schemaVersion": 1, "stage": "job-clock-bound", "jobStartedUtc": sys.argv[1], "clockMonotonicNs": time.monotonic_ns(), "elapsedBeforeClockBindingSeconds": elapsed, "initialRemainingSeconds": remaining, "retentionReserveSeconds": 720, "clockSlackSeconds": 120}
+          path.write_text(json.dumps(value, indent=2) + "\n")
+          if remaining < 60:
+              raise SystemExit("No safe producer budget remains")
+          CLOCK
+      - name: Checkout external observation tooling
+        uses: actions/checkout@v4
+        with:
+          path: observation-tools
+          persist-credentials: false
+      - name: Checkout immutable production controls separately
+        uses: actions/checkout@v4
+        with:
+          ref: 2edc189a33539bf1742435590810fb84aa653ce5
+          path: frozen-production
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Download only the already admitted corresponding source
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-media-corresponding-source
+          path: ${{ runner.temp }}/frozen-corresponding-source
+          github-token: ${{ github.token }}
+          repository: Tgk-30/YAWF-Stream
+          run-id: 42916926303
+      - name: Admit immutable source and independent observation contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C frozen-production rev-parse HEAD)" = 2edc189a33539bf1742435590810fb84aa653ce5
+          source="$RUNNER_TEMP/frozen-corresponding-source"
+          archive=yawf-macos-media-runtime-source-6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c.tar.gz
+          test "$(shasum -a 256 "$source/$archive" | awk '{print $1}')" = 6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c
+          /usr/bin/python3 -I -B - "$source/SOURCE-RECEIPT.json" "$archive" <<'SOURCE'
+          import json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          assert path.is_file() and not path.is_symlink() and path.stat().st_size <= 1048576
+          value = json.loads(path.read_text())
+          assert value["schemaVersion"] == 1 and value["result"] == "pass" and value["licensingCleared"] is False
+          assert value["archiveFile"] == sys.argv[2]
+          assert value["archiveSha256"] == "6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c"
+          assert value["archiveBytes"] == 456776628
+          SOURCE
+          /usr/bin/python3 -I -B observation-tools/scripts/ci/observe_media_producer.test.py -v
+          /usr/bin/python3 -I -B observation-tools/scripts/ci/observe_media_workflow_contract.test.py -v
+      - name: Install build tools only, not host media libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install cmake meson ninja autoconf automake libtool nasm pkgconf
+          libtool_prefix="$(brew --prefix libtool)"
+          test -x "$libtool_prefix/bin/glibtoolize"
+          test -f "$libtool_prefix/share/aclocal/libtool.m4"
+          echo "ACLOCAL_PATH=$libtool_prefix/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}" >> "$GITHUB_ENV"
+      - name: Recheck the original frozen producer controls
+        working-directory: frozen-production
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            scripts/macos-media-replay/replay_macos_media_sources.test.mjs \
+            scripts/stage_macos_media_runtime.test.mjs \
+            scripts/smoke_macos_media_runtime.test.mjs \
+            scripts/prepare_macos_replay_notices.test.mjs \
+            scripts/macos_media_workflow.test.mjs
+          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/test-home" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C /usr/bin/python3 -B scripts/macos-media-replay/normalize_source_archive_test.py -v
+          /usr/bin/python3 -I -B scripts/ci/run_macos_media_replay_experiment.test.py -v
+          /usr/bin/python3 -I -B scripts/ci/produce_macos_media_runtime.test.py -v
+      - name: Observe the unchanged confined producer within the existing job ceiling
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          brew_prefix="$(brew --prefix)"
+          libtool_prefix="$(brew --prefix libtool)"
+          developer_dir="$(/usr/bin/xcode-select -p)"
+          toolchain_bin="$developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          developer_bin="$developer_dir/usr/bin"
+          tool_path="$(dirname "$(command -v node)"):$brew_prefix/bin:$libtool_prefix/bin:$toolchain_bin:$developer_bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          maximum_seconds=$(/usr/bin/python3 -I -B - "$RUNNER_TEMP/media-intel96-preflight.json" <<'BUDGET'
+          import json, pathlib, sys, time
+          def remaining_producer_seconds(first_remaining, started_ns, now_ns):
+              if any(type(v) is not int for v in (first_remaining, started_ns, now_ns)) or not 0 <= first_remaining <= 7200 or started_ns <= 0 or now_ns < started_ns:
+                  raise ValueError("Invalid observation clock")
+              elapsed = (now_ns - started_ns + 999999999) // 1000000000
+              return min(6600, first_remaining - elapsed)
+          path = pathlib.Path(sys.argv[1])
+          value = json.loads(path.read_text())
+          maximum = remaining_producer_seconds(value["initialRemainingSeconds"], value["clockMonotonicNs"], time.monotonic_ns())
+          value.update(stage="producer-budget-admitted" if maximum >= 60 else "producer-budget-refused", producerBudgetSeconds=maximum)
+          path.write_text(json.dumps(value, indent=2) + "\n")
+          if maximum < 60:
+              raise SystemExit("Setup consumed the safe producer budget")
+          print(maximum)
+          BUDGET
+          )
+          /usr/bin/python3 -I -B observation-tools/scripts/ci/observe_media_producer.py \
+            --workspace "$RUNNER_TEMP/media-intel96-observed" \
+            --evidence "$RUNNER_TEMP/media-intel96-observer-evidence" \
+            --max-seconds "$maximum_seconds" \
+            -- /usr/bin/python3 -I -B "$GITHUB_WORKSPACE/frozen-production/scripts/ci/produce_macos_media_runtime.py" \
+            --build \
+            --source-dir "$RUNNER_TEMP/frozen-corresponding-source" \
+            --workspace "$RUNNER_TEMP/media-intel96-observed" \
+            --arch x86_64 \
+            --jobs 8 \
+            --node "$(command -v node)" \
+            --tool-path "$tool_path" \
+            --developer-dir "$developer_dir"
+      - name: Archive only a fully passed unsigned candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          child="$RUNNER_TEMP/media-intel96-observed/owned-output/replay-x86_64-macos11"
+          /usr/bin/python3 -I -B - "$child/SHIPPING-RESULTS.json" <<'CHECK'
+          import json, sys
+          value = json.load(open(sys.argv[1]))
+          assert value == {"schemaVersion": 1, "result": "pass", "arch": "x86_64", "target": "11.0", "shippingRegularFiles": 57, "sourceSha256": "6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c"}
+          CHECK
+          tar -czf "$RUNNER_TEMP/macos-media-runtime-x86_64.tar.gz" -C "$child/media-candidate" .
+          (cd "$RUNNER_TEMP" && shasum -a 256 macos-media-runtime-x86_64.tar.gz > macos-media-runtime-x86_64.tar.gz.sha256)
+      - name: Retain unsigned verification transport, never a release
+        uses: actions/upload-artifact@v4
+        with:
+          name: intel96-observed-unsigned-runtime
+          path: |
+            ${{ runner.temp }}/macos-media-runtime-x86_64.tar.gz
+            ${{ runner.temp }}/macos-media-runtime-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Retain bounded observations including nested phase logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intel96-observed-bounded-evidence
+          path: |
+            ${{ runner.temp }}/media-intel96-observer-evidence
+            ${{ runner.temp }}/media-intel96-preflight.json
           if-no-files-found: error
           retention-days: 14
