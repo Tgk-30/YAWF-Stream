@@ -60,7 +60,7 @@ jobs:
           ref: c5d6106efe0ea7a7a62197ff5f6957006d1e026f
           persist-credentials: false
           lfs: false
-      - name: Repair only known Azure Ubuntu mirrors
+      - name: Repair only exact Ubuntu URI tokens to HTTPS mirror
         shell: bash
         run: |
           set -euo pipefail
@@ -71,7 +71,10 @@ jobs:
           from pathlib import Path
           import re
           root = Path('/etc/apt')
-          azure = re.compile(r'(?<!\S)https?://azure\.archive\.ubuntu\.com/ubuntu/?(?=\s|$)')
+          ubuntu = re.compile(r'(?<!\S)https?://(?:azure\.archive\.ubuntu\.com|archive\.ubuntu\.com|security\.ubuntu\.com)/ubuntu/?(?=\s|$)')
+          mirror = 'https://mirrors.edge.kernel.org/ubuntu'
+          if root.is_symlink() or (root / 'sources.list.d').is_symlink():
+              raise SystemExit('Unexpected Ubuntu source indirection')
           changed = 0
           for relative in ['sources.list', 'sources.list.d/ubuntu.sources', 'apt-mirrors.txt', 'apt-mirrors-security.txt']:
               path = root / relative
@@ -79,39 +82,34 @@ jobs:
                   raise SystemExit('Unexpected Ubuntu source indirection')
               if not path.exists():
                   continue
+              if not path.is_file():
+                  raise SystemExit('Unexpected Ubuntu source type')
               before = path.read_text()
-              if relative.endswith('.sources'):
-                  stanzas = re.split(r'(\n[ \t]*\n)', before)
-                  for i in range(0, len(stanzas), 2):
-                      stanza = stanzas[i]
-                      suites = re.findall(r'^Suites:[ \t]*(.*)$', stanza, re.M)
-                      security = bool(suites and all(s.endswith('-security') for s in suites[0].split()))
-                      uri = 'https://security.ubuntu.com/ubuntu' if security else 'https://archive.ubuntu.com/ubuntu'
-                      def replace_uris(match):
-                          value = match.group()
-                          comment = re.search(r'(?<!\S)#', value)
-                          return azure.sub(uri, value[:comment.start()]) + value[comment.start():] if comment else azure.sub(uri, value)
-                      stanzas[i] = re.sub(r'^URIs:.*$', replace_uris, stanza, flags=re.M)
-                  after = ''.join(stanzas)
-              else:
-                  lines = []
-                  for line in before.splitlines(keepends=True):
+              lines = []
+              in_uris = False
+              for line in before.splitlines(keepends=True):
+                  if relative.endswith('.sources'):
+                      if line.startswith('URIs:'):
+                          in_uris = True
+                      elif not line.startswith((' ', '\t')):
+                          in_uris = False
+                      if in_uris:
+                          comment = re.search(r'(?<!\S)#', line)
+                          boundary = comment.start() if comment else len(line)
+                          line = ubuntu.sub(mirror, line[:boundary]) + line[boundary:]
+                  else:
                       if relative.endswith('.txt'):
                           match = re.match(r'^[ \t]*(\S+)', line)
-                          security = relative == 'apt-mirrors-security.txt'
                       else:
                           match = re.match(r'^[ \t]*deb(?:-src)?[ \t]+(?:\[[^\]\n]*\][ \t]+)?(\S+)', line)
-                          remainder = line[match.end(1):].split() if match else []
-                          security = bool(remainder and remainder[0].endswith('-security'))
-                      if match and azure.fullmatch(match.group(1)):
-                          uri = 'https://security.ubuntu.com/ubuntu' if security else 'https://archive.ubuntu.com/ubuntu'
-                          line = line[:match.start(1)] + uri + line[match.end(1):]
-                      lines.append(line)
-                  after = ''.join(lines)
+                      if match and ubuntu.fullmatch(match.group(1)):
+                          line = line[:match.start(1)] + mirror + line[match.end(1):]
+                  lines.append(line)
+              after = ''.join(lines)
               if after != before:
                   path.write_text(after)
                   changed += 1
-          print('Canonical Ubuntu source files repaired:', changed)
+          print('Exact Ubuntu source files repaired:', changed)
           PYTHON
       - name: Install bounded disposable Node24 and FFmpeg prerequisites
         shell: bash
@@ -119,6 +117,28 @@ jobs:
         run: |
           set -euo pipefail
           {
+            # BEGIN fixed Ubuntu HTTPS preflight
+            . /etc/os-release
+            case "$VERSION_CODENAME" in jammy|noble) ;; *) echo 'Unsupported Ubuntu codename' >&2; exit 1;; esac
+            mkdir -p "$RUNNER_TEMP/ubuntu-mirror-preflight"
+            for suite in "$VERSION_CODENAME" "$VERSION_CODENAME-updates" "$VERSION_CODENAME-backports" "$VERSION_CODENAME-security"; do
+              curl --fail --silent --show-error --proto '=https' --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
+                --write-out '\n%{http_code}' "https://mirrors.edge.kernel.org/ubuntu/dists/$suite/InRelease" \
+                | python3 -c '
+          import hashlib, json, sys
+          from pathlib import Path
+          data = sys.stdin.buffer.read(1048581)
+          if len(data) > 1048580 or not data.endswith(b"\n200"):
+              raise SystemExit("Ubuntu mirror HTTP or size preflight failed")
+          body = data[:-4]
+          prefix = b"-----BEGIN PGP SIGNED MESSAGE-----"
+          if len(body) > 1048576 or not body.startswith((prefix + b"\n", prefix + b"\r\n")):
+              raise SystemExit("Ubuntu mirror clear-signed prefix preflight failed")
+          Path(sys.argv[1]).write_bytes(body)
+          print(json.dumps({"suite": sys.argv[2], "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(), "clearSignedPrefix": True}))
+          ' "$RUNNER_TEMP/ubuntu-mirror-preflight/$suite.InRelease" "$suite"
+            done
+            # END fixed Ubuntu HTTPS preflight
             printf '%s\n' \
               'Acquire::http::Timeout "30";' \
               'Acquire::https::Timeout "30";' \
@@ -138,7 +158,7 @@ jobs:
               printf '%s\n' "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" \
                 | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
             fi
-            sudo apt-get update
+            sudo apt-get -o APT::Update::Error-Mode=any update
             sudo apt-get install -y nodejs ffmpeg
             /usr/bin/node --version | grep -Eq '^v24\.'
             test "$(dpkg-query -W -f='${Status}' nodejs)" = 'install ok installed'
@@ -328,6 +348,7 @@ jobs:
             ${{ runner.temp }}/systemd-index.headers
             ${{ runner.temp }}/systemd-shim.headers
             ${{ runner.temp }}/native-install-prerequisites.log
+            ${{ runner.temp }}/ubuntu-mirror-preflight/*.InRelease
             ${{ runner.temp }}/native-install-diagnostics.txt
           if-no-files-found: warn
           retention-days: 14
