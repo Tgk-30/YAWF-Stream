@@ -15,7 +15,28 @@ const CS_SOURCE = "server/native/windows/StorageDescriptorObserver.cs";
 const HASH = /^[0-9a-f]{64}$/;
 const SOURCE = /^[0-9a-f]{40}$/;
 const digest = value => createHash("sha256").update(value).digest("hex");
-const fail = () => { throw new Error("Windows storage QA packet admission failed."); };
+const STAGES = new Set(["arguments", "path", "checkout", "checkout-git-head", "checkout-git-root", "checkout-git-diff",
+  "checkout-source", "prepared-binding", "collect", "manifest", "write", "packet-digest", "payload-binding", "destination"]);
+const REASONS = new Set(["guard-rejected", "operation-failed", "entry-path", "file-count", "file-type", "file-size",
+  "aggregate-size", "empty-directory", "digest-mismatch", "source-mismatch"]);
+class PacketAdmissionError extends Error {
+  constructor(stage, reason) {
+    super("Windows storage QA packet admission failed.");
+    this.name = "PacketAdmissionError"; this.stage = stage; this.reason = reason;
+  }
+}
+const fail = (reason = "guard-rejected") => { throw new PacketAdmissionError(null, reason); };
+function atStage(stage, operation) {
+  try { return operation(); } catch (error) {
+    if (error instanceof PacketAdmissionError && STAGES.has(error.stage)) throw error;
+    throw new PacketAdmissionError(stage, error instanceof PacketAdmissionError && REASONS.has(error.reason) ? error.reason : "operation-failed");
+  }
+}
+export function packetFailure(error) {
+  return { ok: false, error: "WINDOWS_STORAGE_PACKET_FAILED",
+    stage: error instanceof PacketAdmissionError && STAGES.has(error.stage) ? error.stage : "arguments",
+    reason: error instanceof PacketAdmissionError && REASONS.has(error.reason) ? error.reason : "operation-failed" };
+}
 const exact = (value, keys) => value != null && typeof value === "object" && !Array.isArray(value)
   && Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
 const at = (root, path) => join(root, ...path.split("/"));
@@ -37,18 +58,18 @@ function allowed(path) {
 }
 
 export function inspectCheckout(repo, source, { run = execFileSync } = {}) {
-  absolute(repo); if (!SOURCE.test(source)) fail(); requireUnredirected(repo);
+  atStage("path", () => { absolute(repo); if (!SOURCE.test(source)) fail(); requireUnredirected(repo); });
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(?:PATH|SYSTEMROOT|WINDIR|TEMP|TMP)$/i.test(key)));
   Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: devNull, GIT_TERMINAL_PROMPT: "0" });
   const git = args => run("git", ["--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false", "-c", `core.hooksPath=${devNull}`, "-C", repo, ...args],
     { env, timeout: 10_000, maxBuffer: PACKET_LIMITS.manifestBytes, stdio: ["ignore", "pipe", "pipe"] });
-  if (git(["rev-parse", "--verify", "HEAD"]).toString().trim() !== source ||
-    resolve(git(["rev-parse", "--show-toplevel"]).toString().trim()).toLowerCase() !== repo.toLowerCase()) fail();
-  git(["diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--"]);
-  const hashes = [PRIVATE_SOURCE, CS_SOURCE].map(path => {
+  atStage("checkout-git-head", () => { if (git(["rev-parse", "--verify", "HEAD"]).toString().trim() !== source) fail("source-mismatch"); });
+  atStage("checkout-git-root", () => { if (resolve(git(["rev-parse", "--show-toplevel"]).toString().trim()).toLowerCase() !== repo.toLowerCase()) fail(); });
+  atStage("checkout-git-diff", () => git(["diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--"]));
+  const hashes = atStage("checkout-source", () => [PRIVATE_SOURCE, CS_SOURCE].map(path => {
     const bytes = read(at(repo, path), PACKET_LIMITS.manifestBytes);
-    if (digest(bytes) !== digest(git(["show", `${source}:${path}`]))) fail(); return digest(bytes);
-  });
+    if (digest(bytes) !== digest(git(["show", `${source}:${path}`]))) fail("source-mismatch"); return digest(bytes);
+  }));
   return { privateStorageSha256: hashes[0], observerSourceSha256: hashes[1] };
 }
 
@@ -75,15 +96,18 @@ export function validatePacketManifest(value, source) {
 function collect(root, packet = false) {
   const entries = [], bytes = new Map(); let total = 0;
   function walk(directory) {
-    requireUnredirected(directory); const names = readdirSync(directory).sort(); if (!names.length) fail();
+    requireUnredirected(directory); const names = readdirSync(directory).sort(); if (!names.length) fail("empty-directory");
     for (const name of names) {
       const path = join(directory, name); const rel = relative(root, path).split("\\").join("/");
       if (packet && rel === "packet.json") continue;
       requireUnredirected(path); const stat = lstatSync(path);
       if (stat.isDirectory()) walk(path);
       else {
-        if (!allowed(rel) || entries.length >= PACKET_LIMITS.files || !stat.isFile() || stat.size > PACKET_LIMITS.fileBytes) fail();
-        total += stat.size; if (total > PACKET_LIMITS.bytes) fail();
+        if (!allowed(rel)) fail("entry-path");
+        if (entries.length >= PACKET_LIMITS.files) fail("file-count");
+        if (!stat.isFile()) fail("file-type");
+        if (stat.size > PACKET_LIMITS.fileBytes) fail("file-size");
+        total += stat.size; if (total > PACKET_LIMITS.bytes) fail("aggregate-size");
         const content = read(path, PACKET_LIMITS.fileBytes); entries.push({ path: rel, bytes: content.length, sha256: digest(content) }); bytes.set(rel, content);
       }
     }
@@ -118,34 +142,45 @@ export function packetOverlapsGeneratedTree(repo, packet, platform = process.pla
 }
 
 export function createPacket({ repo, packet, source, checkout = inspectCheckout }) {
-  absolute(repo); absolute(packet); if (!SOURCE.test(source)) fail(); absent(packet); parentSafe(packet);
-  if (packetOverlapsGeneratedTree(repo, packet)) fail();
-  const identity = checkout(repo, source); preparedObserver(repo); verifyBindings(repo, identity.observerSourceSha256);
-  const tree = collect(repo); const manifest = validatePacketManifest({ schemaVersion: 1, sourceRevision: source, ...identity, files: tree.entries }, source);
-  const encoded = Buffer.from(JSON.stringify(manifest, null, 2) + "\n"); if (encoded.length > PACKET_LIMITS.manifestBytes) fail();
-  mkdirSync(packet);
-  try { writeFiles(packet, tree.bytes); writeFileSync(join(packet, "packet.json"), encoded, { flag: "wx" }); }
-  catch { rmSync(packet, { recursive: true, force: true }); fail(); }
+  atStage("path", () => {
+    absolute(repo); absolute(packet); if (!SOURCE.test(source)) fail(); absent(packet); parentSafe(packet);
+    if (packetOverlapsGeneratedTree(repo, packet)) fail();
+  });
+  const identity = atStage("checkout", () => checkout(repo, source));
+  atStage("prepared-binding", () => { preparedObserver(repo); verifyBindings(repo, identity.observerSourceSha256); });
+  const tree = atStage("collect", () => collect(repo));
+  const encoded = atStage("manifest", () => {
+    const manifest = validatePacketManifest({ schemaVersion: 1, sourceRevision: source, ...identity, files: tree.entries }, source);
+    const bytes = Buffer.from(JSON.stringify(manifest, null, 2) + "\n"); if (bytes.length > PACKET_LIMITS.manifestBytes) fail(); return bytes;
+  });
+  atStage("write", () => {
+    mkdirSync(packet);
+    try { writeFiles(packet, tree.bytes); writeFileSync(join(packet, "packet.json"), encoded, { flag: "wx" }); }
+    catch { rmSync(packet, { recursive: true, force: true }); fail(); }
+  });
   return { packetSha256: digest(encoded), files: tree.entries.length, bytes: tree.entries.reduce((sum, file) => sum + file.bytes, 0) };
 }
 
 export function admitPacket({ repo, packet, source, sha256, checkout = inspectCheckout }) {
-  absolute(repo); absolute(packet); if (!SOURCE.test(source) || !HASH.test(sha256)) fail();
+  atStage("path", () => { absolute(repo); absolute(packet); if (!SOURCE.test(source) || !HASH.test(sha256)) fail(); });
   // The operator's digest is checked before parsing or inspecting any payload.
-  const encoded = read(join(packet, "packet.json"), PACKET_LIMITS.manifestBytes); if (digest(encoded) !== sha256) fail();
-  const manifest = validatePacketManifest(JSON.parse(encoded), source);
-  const identity = checkout(repo, source);
-  if (identity.privateStorageSha256 !== manifest.privateStorageSha256 || identity.observerSourceSha256 !== manifest.observerSourceSha256) fail();
-  const tree = collect(packet, true);
-  if (JSON.stringify(tree.entries) !== JSON.stringify(manifest.files)) fail();
-  verifyBindings(packet, manifest.observerSourceSha256);
-  const fresh = collect(packet, true); if (JSON.stringify(fresh.entries) !== JSON.stringify(manifest.files)) fail();
-  for (const target of TREES) { absent(at(repo, target)); parentSafe(at(repo, target)); }
+  const encoded = atStage("packet-digest", () => {
+    const bytes = read(join(packet, "packet.json"), PACKET_LIMITS.manifestBytes); if (digest(bytes) !== sha256) fail("digest-mismatch"); return bytes;
+  });
+  const manifest = atStage("manifest", () => validatePacketManifest(JSON.parse(encoded), source));
+  const identity = atStage("checkout", () => checkout(repo, source));
+  atStage("checkout-source", () => { if (identity.privateStorageSha256 !== manifest.privateStorageSha256 || identity.observerSourceSha256 !== manifest.observerSourceSha256) fail("source-mismatch"); });
+  const tree = atStage("collect", () => { const value = collect(packet, true); if (JSON.stringify(value.entries) !== JSON.stringify(manifest.files)) fail(); return value; });
+  atStage("payload-binding", () => verifyBindings(packet, manifest.observerSourceSha256));
+  const fresh = atStage("collect", () => { const value = collect(packet, true); if (JSON.stringify(value.entries) !== JSON.stringify(manifest.files)) fail(); return value; });
+  atStage("destination", () => { for (const target of TREES) { absent(at(repo, target)); parentSafe(at(repo, target)); } });
   const created = [];
-  try {
-    for (const target of TREES) { const path = at(repo, target); mkdirSync(path, { recursive: true }); created.push(path); }
-    writeFiles(repo, fresh.bytes);
-  } catch { for (const path of created.reverse()) rmSync(path, { recursive: true, force: true }); fail(); }
+  atStage("write", () => {
+    try {
+      for (const target of TREES) { const path = at(repo, target); mkdirSync(path, { recursive: true }); created.push(path); }
+      writeFiles(repo, fresh.bytes);
+    } catch { for (const path of created.reverse()) rmSync(path, { recursive: true, force: true }); fail(); }
+  });
   return { packetSha256: sha256, files: tree.entries.length, bytes: tree.entries.reduce((sum, file) => sum + file.bytes, 0) };
 }
 
@@ -156,5 +191,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (!keys.length || args.length !== keys.length * 2) fail();
     for (let i = 0; i < args.length; i += 2) { const key = args[i].slice(2); if (args[i] !== "--" + key || !keys.includes(key) || key in options) fail(); options[key] = args[i + 1]; }
     console.log(JSON.stringify(mode === "create" ? createPacket(options) : admitPacket(options)));
-  } catch { console.error("Windows storage QA packet admission failed."); process.exitCode = 1; }
+  } catch (error) { console.error(JSON.stringify(packetFailure(error))); process.exitCode = 1; }
 }

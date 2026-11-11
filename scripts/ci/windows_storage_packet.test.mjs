@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { admitPacket, createPacket, inspectCheckout, PACKET_LIMITS, packetOverlapsGeneratedTree, validatePacketManifest } from "./windows_storage_packet.mjs";
+import { admitPacket, createPacket, inspectCheckout, PACKET_LIMITS, packetFailure, packetOverlapsGeneratedTree, validatePacketManifest } from "./windows_storage_packet.mjs";
 
 const source = "a".repeat(40), hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const trees = ["server/.build/windows-storage-observer", "server/dist", "web/dist"];
@@ -129,3 +131,49 @@ test("manifest, file count, per-file and aggregate bounds reject without large f
   writeFileSync(join(f.packet, "packet.json"), " ".repeat(PACKET_LIMITS.manifestBytes + 1));
   assert.throws(() => admit(f, receipt.packetSha256)); untouched(f);
 }));
+
+test("checkout failures expose fixed Git stages without retaining raw process data", () => fixture(f => {
+  for (const [stage, command] of [["checkout-git-head", "--verify"], ["checkout-git-root", "--show-toplevel"],
+    ["checkout-git-diff", "diff"], ["checkout-source", "show"]]) {
+    let failure;
+    try { inspectCheckout(f.repo, source, { run(_file, args) {
+      if (args.includes(command)) throw Object.assign(Error("raw-private-stderr /private/fixture source-body"), { stderr: "raw-private-stderr", stdout: "source-body", path: "/private/fixture" });
+      if (args.includes("--verify")) return Buffer.from(source + "\n");
+      if (args.includes("--show-toplevel")) return Buffer.from(f.repo + "\n");
+      return Buffer.alloc(0);
+    } }); } catch (error) { failure = error; }
+    assert.deepEqual(packetFailure(failure), { ok: false, error: "WINDOWS_STORAGE_PACKET_FAILED", stage, reason: "operation-failed" });
+    for (const key of ["cause", "stdout", "stderr", "path"]) assert.equal(Object.hasOwn(failure, key), false);
+    assert.doesNotMatch(JSON.stringify(packetFailure(failure)), /raw-private|source-body|\/private/);
+  }
+}));
+
+test("create failure stages preserve refusals and expose no offending paths or source content", () => fixture(f => {
+  function refused(action, stage, reason) {
+    let failure; try { action(); } catch (error) { failure = error; }
+    assert.deepEqual(packetFailure(failure), { ok: false, error: "WINDOWS_STORAGE_PACKET_FAILED", stage, reason });
+    assert.equal(existsSync(f.packet), false);
+  }
+  refused(() => createPacket({ repo: f.repo, packet: join(f.repo, "server/dist/forbidden"), source, checkout }), "path", "guard-rejected");
+  refused(() => createPacket({ repo: f.repo, packet: f.packet, source, checkout() { throw Error("raw-private-checkout"); } }), "checkout", "operation-failed");
+  const binding = join(f.repo, trees[0], "runtime/binding.json"), original = readFileSync(binding);
+  writeFileSync(binding, "invalid"); refused(() => create(f), "prepared-binding", "operation-failed"); writeFileSync(binding, original);
+  const invalid = join(f.repo, "web/dist/bad private name.js"); writeFileSync(invalid, "not retained");
+  refused(() => create(f), "collect", "entry-path"); rmSync(invalid);
+  refused(() => createPacket({ repo: f.repo, packet: f.packet, source, checkout(...args) { return { ...checkout(...args), extra: true }; } }), "manifest", "guard-rejected");
+  refused(() => createPacket({ repo: f.repo, packet: join(f.root, "missing-parent/new-packet"), source, checkout }), "write", "operation-failed");
+  const receipt = create(f); let failure;
+  try { admit(f, "0".repeat(64)); } catch (error) { failure = error; }
+  assert.deepEqual(packetFailure(failure), { ok: false, error: "WINDOWS_STORAGE_PACKET_FAILED", stage: "packet-digest", reason: "digest-mismatch" });
+  assert.match(receipt.packetSha256, /^[0-9a-f]{64}$/); untouched(f);
+}));
+
+test("CLI failure emits only the exact fixed classification schema", () => {
+  assert.deepEqual(packetFailure(Object.assign(Error("private raw message"), { stage: "private path", stderr: "private raw stderr" })),
+    { ok: false, error: "WINDOWS_STORAGE_PACKET_FAILED", stage: "arguments", reason: "operation-failed" });
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("./windows_storage_packet.mjs", import.meta.url)), "invalid-mode"],
+    { encoding: "utf8", timeout: 5000, maxBuffer: 16_000, env: { PATH: process.env.PATH ?? "", TMPDIR: process.env.TMPDIR ?? tmpdir() } });
+  assert.equal(result.status, 1); assert.equal(result.stdout, "");
+  assert.match(result.stderr.trim(), /^\{"ok":false,"error":"WINDOWS_STORAGE_PACKET_FAILED",/);
+  assert.deepEqual(JSON.parse(result.stderr), { ok: false, error: "WINDOWS_STORAGE_PACKET_FAILED", stage: "arguments", reason: "guard-rejected" });
+});
