@@ -1,133 +1,73 @@
-name: macOS media runtime
+# One distinct fixed-source production export after an incomplete external diagnostic.
+# The old observed case remains FAIL. This runs the original production gates,
+# not a second observation, signing, release, recipe change or tag mutation.
+name: Intel96 frozen production export
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "scripts/*macos*"
-      - "scripts/ci/produce_macos_media_runtime.py"
-      - "scripts/ci/produce_macos_media_runtime.test.py"
-      - "scripts/ci/run_macos_media_replay_experiment.py"
-      - "scripts/ci/run_macos_media_replay_experiment.test.py"
-      - "scripts/macos-media-replay/**"
-      - "docs/MACOS_MEDIA_RUNTIME.md"
-      - ".github/workflows/macos-media-runtime.yml"
   workflow_dispatch:
-  workflow_call:
 
 permissions:
   actions: read
   contents: read
 
+concurrency:
+  group: intel96-fixed-production-export
+  cancel-in-progress: false
+
 jobs:
-  transport:
-    # GitHub requires push access to read an unpublished draft. Keep that
-    # credential in a static transport job with no checkout or project code.
-    if: github.event_name != 'pull_request'
-    name: Retrieve the pinned private source seed
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    env:
-      SOURCE_RELEASE_ID: "417897650"
-      SOURCE_ASSET_ID: "657879542"
-      SOURCE_FILE: macos-media-runtime-arm64.tar.gz
-      OUTER_SHA256: 11af8849872ae1c302b6a5fb6ba823e369648be3e9597c1ba2c5150e7a9f4d50
-    steps:
-      - name: Retrieve only the fixed draft asset and metadata
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          transport="$RUNNER_TEMP/source-transport"
-          mkdir -p "$transport"
-          gh api "repos/Tgk-30/YAWF-Stream/releases/$SOURCE_RELEASE_ID" > "$transport/source-transport-metadata.json"
-          gh api "repos/Tgk-30/YAWF-Stream/releases/assets/$SOURCE_ASSET_ID" \
-            -H 'Accept: application/octet-stream' > "$transport/$SOURCE_FILE"
-          test "$(sha256sum "$transport/$SOURCE_FILE" | awk '{print $1}')" = "$OUTER_SHA256"
-          printf '%s  %s\n' "$OUTER_SHA256" "$SOURCE_FILE" > "$transport/$SOURCE_FILE.sha256"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pinned-source-seed-transport
-          path: ${{ runner.temp }}/source-transport
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-
-  source:
-    needs: transport
-    name: Prepare one exact corresponding-source archive
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    outputs:
-      archive_sha256: ${{ steps.source.outputs.archive_sha256 }}
-      archive_file: ${{ steps.source.outputs.archive_file }}
-    env:
-      SOURCE_RELEASE_ID: "417897650"
-      SOURCE_ASSET_ID: "657879542"
-      SOURCE_FILE: macos-media-runtime-arm64.tar.gz
-      OUTER_SHA256: 11af8849872ae1c302b6a5fb6ba823e369648be3e9597c1ba2c5150e7a9f4d50
-      INNER_SOURCE_SHA256: baf26db61e0e50011f748e2ddfe06a764972d8fd9ff5a562f50da94d2727dbff
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: pinned-source-seed-transport
-          path: ${{ runner.temp }}/source-transport
-      - name: Validate the exact pinned durable source transport
-        shell: bash
-        run: |
-          set -euo pipefail
-          transport="$RUNNER_TEMP/source-transport"
-          python3 -I -B scripts/ci/produce_macos_media_runtime.py \
-            --verify-source-transport-metadata "$transport/source-transport-metadata.json" \
-            > "$transport/transport-verification.json"
-      - name: Prepare and freshly admit the canonical source archive
-        id: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(sha256sum "$RUNNER_TEMP/source-transport/macos-media-runtime-arm64.tar.gz" | awk '{print $1}')" = "$OUTER_SHA256"
-          test "$(python3 -c 'import json; print(json.load(open("scripts/macos-media-replay/shipping-source-pins.json"))["source"]["sha256"])')" = "$INNER_SOURCE_SHA256"
-          python3 -I -B scripts/ci/produce_macos_media_runtime.py \
-            --prepare-source \
-            --candidate-dir "$RUNNER_TEMP/source-transport" \
-            --source-transport-metadata "$RUNNER_TEMP/source-transport/source-transport-metadata.json" \
-            --output-dir "$RUNNER_TEMP/corresponding-source" \
-            --github-output "$GITHUB_OUTPUT"
-      - name: Retain the one byte-identical source input for both native jobs
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-media-corresponding-source
-          path: ${{ runner.temp }}/corresponding-source
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-
-  build:
-    needs: source
-    name: Confined native ${{ matrix.arch }} media runtime
-    runs-on: ${{ matrix.runner }}
+  export-intel96:
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.repository == 'Tgk-30/YAWF-Stream' &&
+      github.actor == 'Tgk-30' && github.ref == 'refs/heads/codex/desktop96-media-observe'
+    name: Export frozen Intel96 production runtime, no signing
+    runs-on: macos-15-intel
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        include:
-          - runner: macos-15
-            arch: arm64
-          - runner: macos-15-intel
-            arch: x86_64
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout immutable production controls separately
+        uses: actions/checkout@v4
+        with:
+          ref: 2edc189a33539bf1742435590810fb84aa653ce5
+          path: frozen-production
+          persist-credentials: false
+      - name: Checkout separate receipt retention tools
+        uses: actions/checkout@v4
+        with:
+          path: export-tools
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Install build tools, not host media libraries
+      - name: Download only the already admitted corresponding source
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-media-corresponding-source
+          path: ${{ runner.temp }}/frozen-corresponding-source
+          github-token: ${{ github.token }}
+          repository: Tgk-30/YAWF-Stream
+          run-id: 42916926303
+      - name: Admit immutable corresponding source and export contracts
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          test "$(git -C frozen-production rev-parse HEAD)" = 2edc189a33539bf1742435590810fb84aa653ce5
+          source="$RUNNER_TEMP/frozen-corresponding-source"
+          archive=yawf-macos-media-runtime-source-6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c.tar.gz
+          test "$(shasum -a 256 "$source/$archive" | awk '{print $1}')" = 6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c
+          /usr/bin/python3 -I -B - "$source/SOURCE-RECEIPT.json" "$archive" <<'SOURCE'
+          import json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          assert path.is_file() and not path.is_symlink() and path.stat().st_size <= 1048576
+          value = json.loads(path.read_text())
+          assert value["schemaVersion"] == 1 and value["result"] == "pass" and value["licensingCleared"] is False
+          assert value["archiveFile"] == sys.argv[2]
+          assert value["archiveSha256"] == "6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c"
+          assert value["archiveBytes"] == 456776628
+          SOURCE
+          /usr/bin/python3 -I -B export-tools/scripts/ci/observe_media_producer.test.py -v
+          /usr/bin/python3 -I -B export-tools/scripts/ci/intel96_production_export_workflow.test.py -v
+      - name: Install build tools only, not host media libraries
         shell: bash
         run: |
           set -euo pipefail
@@ -136,12 +76,8 @@ jobs:
           test -x "$libtool_prefix/bin/glibtoolize"
           test -f "$libtool_prefix/share/aclocal/libtool.m4"
           echo "ACLOCAL_PATH=$libtool_prefix/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}" >> "$GITHUB_ENV"
-      - name: Download the canonical source archive
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-media-corresponding-source
-          path: ${{ runner.temp }}/corresponding-source
-      - name: Verify controls and unsigned packaging contracts
+      - name: Recheck the original frozen producer controls
+        working-directory: frozen-production
         shell: bash
         run: |
           set -euo pipefail
@@ -154,65 +90,71 @@ jobs:
           env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/test-home" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C /usr/bin/python3 -B scripts/macos-media-replay/normalize_source_archive_test.py -v
           /usr/bin/python3 -I -B scripts/ci/run_macos_media_replay_experiment.test.py -v
           /usr/bin/python3 -I -B scripts/ci/produce_macos_media_runtime.test.py -v
-      - name: Rebuild, audit, relocate and smoke under one confinement profile
+      - name: Run the unchanged production qualification path
         id: media
         shell: bash
-        env:
-          MEDIA_ARCH: ${{ matrix.arch }}
-          EXPECTED_SOURCE_SHA256: ${{ needs.source.outputs.archive_sha256 }}
-          EXPECTED_SOURCE_FILE: ${{ needs.source.outputs.archive_file }}
         run: |
           set -euo pipefail
-          test "$(uname -m)" = "$MEDIA_ARCH"
-          test "$(shasum -a 256 "$RUNNER_TEMP/corresponding-source/$EXPECTED_SOURCE_FILE" | awk '{print $1}')" = "$EXPECTED_SOURCE_SHA256"
+          test "$(uname -m)" = x86_64
           brew_prefix="$(brew --prefix)"
           libtool_prefix="$(brew --prefix libtool)"
           developer_dir="$(/usr/bin/xcode-select -p)"
           toolchain_bin="$developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin"
           developer_bin="$developer_dir/usr/bin"
           tool_path="$(dirname "$(command -v node)"):$brew_prefix/bin:$libtool_prefix/bin:$toolchain_bin:$developer_bin:/usr/bin:/bin:/usr/sbin:/sbin"
-          /usr/bin/python3 -I -B scripts/ci/produce_macos_media_runtime.py \
+          /usr/bin/python3 -I -B "$GITHUB_WORKSPACE/frozen-production/scripts/ci/produce_macos_media_runtime.py" \
             --build \
-            --source-dir "$RUNNER_TEMP/corresponding-source" \
-            --workspace "$RUNNER_TEMP/media-shipping-$MEDIA_ARCH" \
-            --arch "$MEDIA_ARCH" \
+            --source-dir "$RUNNER_TEMP/frozen-corresponding-source" \
+            --workspace "$RUNNER_TEMP/media-intel96-export" \
+            --arch x86_64 \
             --jobs 8 \
             --node "$(command -v node)" \
             --tool-path "$tool_path" \
             --developer-dir "$developer_dir" \
             --github-output "$GITHUB_OUTPUT"
-      - name: Upload unsigned verification candidate, not a release
-        env:
-          MEDIA_ARCH: ${{ matrix.arch }}
-          MEDIA_STAGE: ${{ steps.media.outputs.stage }}
+      - name: Archive only a fully passed unsigned candidate
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP"
-          tar -czf "macos-media-runtime-$MEDIA_ARCH.tar.gz" -C "$MEDIA_STAGE" .
-          shasum -a 256 "macos-media-runtime-$MEDIA_ARCH.tar.gz" > "macos-media-runtime-$MEDIA_ARCH.tar.gz.sha256"
-      - name: Preserve executable modes and aliases in archived transport
+          child="$RUNNER_TEMP/media-intel96-export/owned-output/replay-x86_64-macos11"
+          /usr/bin/python3 -I -B - "$child/SHIPPING-RESULTS.json" <<'CHECK'
+          import json, sys
+          value = json.load(open(sys.argv[1]))
+          assert value == {"schemaVersion": 1, "result": "pass", "arch": "x86_64", "target": "11.0", "shippingRegularFiles": 57, "sourceSha256": "6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c"}
+          CHECK
+          tar -czf "$RUNNER_TEMP/macos-media-runtime-x86_64.tar.gz" -C "$child/media-candidate" .
+          (cd "$RUNNER_TEMP" && shasum -a 256 macos-media-runtime-x86_64.tar.gz > macos-media-runtime-x86_64.tar.gz.sha256)
+      - name: Retain unsigned verification transport, never a release
         uses: actions/upload-artifact@v4
         with:
-          name: macos-media-runtime-${{ matrix.arch }}
+          name: intel96-fixed-production-export-runtime
           path: |
-            ${{ runner.temp }}/macos-media-runtime-${{ matrix.arch }}.tar.gz
-            ${{ runner.temp }}/macos-media-runtime-${{ matrix.arch }}.tar.gz.sha256
+            ${{ runner.temp }}/macos-media-runtime-x86_64.tar.gz
+            ${{ runner.temp }}/macos-media-runtime-x86_64.tar.gz.sha256
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
-      - name: Retain bounded runtime failure or success evidence
+      - name: Collect fixed allowlisted production receipts and nested phase logs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -I -B - "$GITHUB_WORKSPACE/export-tools/scripts/ci/observe_media_producer.py" "$RUNNER_TEMP/media-intel96-export" "$RUNNER_TEMP/intel96-export-evidence" <<'RETAIN'
+          import importlib.util, json, pathlib, sys
+          spec = importlib.util.spec_from_file_location("fixed_retention", sys.argv[1])
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          evidence = pathlib.Path(sys.argv[3])
+          evidence.mkdir()
+          records = module.retain_files(pathlib.Path(sys.argv[2]), evidence)
+          receipt = {"schemaVersion": 1, "scope": "fixed source production receipts only; no external process-history, signing or publication claim", "producerSource": "2edc189a33539bf1742435590810fb84aa653ce5", "sourceSha256": "6c850c418e17824d70ba2dcb9bb71a1c829906d8238c3ba616981001098e941c", "priorDiagnosticRun": 42955542025, "priorDiagnosticObserverValid": False, "files": records}
+          (evidence / "RETENTION.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
+          RETAIN
+      - name: Retain bounded production evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: macos-media-evidence-${{ matrix.arch }}
-          path: |
-            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/trusted-logs
-            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/STATUS.json
-            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/TOOLCHAIN-PROBE.json
-            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/INSTALL-AUDIT.json
-            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/INSTALL-INVENTORY.json
-            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/SHIPPING-RESULTS.json
-            ${{ runner.temp }}/media-shipping-${{ matrix.arch }}/owned-output/replay-${{ matrix.arch }}-macos11/media-smoke/RESULTS.json
-          if-no-files-found: ignore
+          name: intel96-fixed-production-export-evidence
+          path: ${{ runner.temp }}/intel96-export-evidence
+          if-no-files-found: error
           retention-days: 14
