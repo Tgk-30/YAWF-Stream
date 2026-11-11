@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -82,7 +82,8 @@ beforeEach(() => {
   vi.unstubAllGlobals(); mocked.files.clear(); mocked.dirs.clear(); mocked.redirected.clear(); mocked.sidecars = [];
   mocked.exec.mockReset(); mocked.realpath.mockReset().mockImplementation(value => value);
   Object.defineProperty(process, "platform", { ...originalPlatform, value: "win32" });
-  root = mkdtempSync(join(tmpdir(), "yawf-storage-transport-")); path = join(root, "private ' ü & $(not-a-command).sqlite"); writeFileSync(path, "unchanged forensic fixture");
+  // Canonicalize only the owned fixture root, not any production admission path.
+  root = mkdtempSync(join(realpathSync.native(tmpdir()), "yawf-storage-transport-")); path = join(root, "private ' ü & $(not-a-command).sqlite"); writeFileSync(path, "unchanged forensic fixture");
   const bytes = Buffer.from("fixed test helper, never executed");
   binding = { schemaVersion: 1, protocol, sourceSha256: digest(readFileSync(source)), compilerSha256: "a".repeat(64),
     frameworkTarget: ".NETFramework,Version=v4.8", referenceSha256: Object.fromEntries(["mscorlib.dll", "System.dll", "System.Core.dll", "System.Web.Extensions.dll"].map(name => [name, "b".repeat(64)])),
