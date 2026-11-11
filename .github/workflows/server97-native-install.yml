@@ -1,0 +1,333 @@
+# Follow-up only: run43049144954 native installs were cancelled after Azure mirror DNS failures.
+# The existing .deb and completed producer/Compose evidence are not rebuilt or reclassified.
+name: server97-native-installed-deb
+
+on:
+  push:
+    branches: [codex/server97-native-install]
+    paths:
+      - .github/workflows/server97-native-install.yml
+      - scripts/server97_native_install_workflow.test.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: server97-native-install-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  host-contracts:
+    if: >-
+      github.repository == 'Tgk-30/YAWF-Stream' && github.repository_owner == 'Tgk-30' &&
+      github.actor == 'Tgk-30' && github.ref_type == 'branch' &&
+      github.ref == 'refs/heads/codex/server97-native-install'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.2'
+      - run: node --test scripts/server97_native_install_workflow.test.mjs
+
+  native-install:
+    name: Exact server97 installed package (${{ matrix.runner }})
+    needs: host-contracts
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'Tgk-30/YAWF-Stream' && github.repository_owner == 'Tgk-30' &&
+      github.actor == 'Tgk-30' && github.ref_type == 'branch' &&
+      github.ref == 'refs/heads/codex/server97-native-install'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout immutable package source
+        uses: actions/checkout@v4
+        with:
+          ref: c5d6106efe0ea7a7a62197ff5f6957006d1e026f
+          persist-credentials: false
+          lfs: false
+      - name: Repair only known Azure Ubuntu mirrors
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          sudo python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+          root = Path('/etc/apt')
+          azure = re.compile(r'(?<!\S)https?://azure\.archive\.ubuntu\.com/ubuntu/?(?=\s|$)')
+          changed = 0
+          for relative in ['sources.list', 'sources.list.d/ubuntu.sources', 'apt-mirrors.txt', 'apt-mirrors-security.txt']:
+              path = root / relative
+              if path.is_symlink():
+                  raise SystemExit('Unexpected Ubuntu source indirection')
+              if not path.exists():
+                  continue
+              before = path.read_text()
+              if relative.endswith('.sources'):
+                  stanzas = re.split(r'(\n[ \t]*\n)', before)
+                  for i in range(0, len(stanzas), 2):
+                      stanza = stanzas[i]
+                      suites = re.findall(r'^Suites:[ \t]*(.*)$', stanza, re.M)
+                      security = bool(suites and all(s.endswith('-security') for s in suites[0].split()))
+                      uri = 'https://security.ubuntu.com/ubuntu' if security else 'https://archive.ubuntu.com/ubuntu'
+                      def replace_uris(match):
+                          value = match.group()
+                          comment = re.search(r'(?<!\S)#', value)
+                          return azure.sub(uri, value[:comment.start()]) + value[comment.start():] if comment else azure.sub(uri, value)
+                      stanzas[i] = re.sub(r'^URIs:.*$', replace_uris, stanza, flags=re.M)
+                  after = ''.join(stanzas)
+              else:
+                  lines = []
+                  for line in before.splitlines(keepends=True):
+                      if relative.endswith('.txt'):
+                          match = re.match(r'^[ \t]*(\S+)', line)
+                          security = relative == 'apt-mirrors-security.txt'
+                      else:
+                          match = re.match(r'^[ \t]*deb(?:-src)?[ \t]+(?:\[[^\]\n]*\][ \t]+)?(\S+)', line)
+                          remainder = line[match.end(1):].split() if match else []
+                          security = bool(remainder and remainder[0].endswith('-security'))
+                      if match and azure.fullmatch(match.group(1)):
+                          uri = 'https://security.ubuntu.com/ubuntu' if security else 'https://archive.ubuntu.com/ubuntu'
+                          line = line[:match.start(1)] + uri + line[match.end(1):]
+                      lines.append(line)
+                  after = ''.join(lines)
+              if after != before:
+                  path.write_text(after)
+                  changed += 1
+          print('Canonical Ubuntu source files repaired:', changed)
+          PYTHON
+      - name: Install bounded disposable Node24 and FFmpeg prerequisites
+        shell: bash
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n' \
+              'Acquire::http::Timeout "30";' \
+              'Acquire::https::Timeout "30";' \
+              'Acquire::Retries "1";' \
+              'DPkg::Lock::Timeout "60";' \
+              | sudo tee /etc/apt/apt.conf.d/99-yawf-native-install-bounds >/dev/null
+            if [ -x /usr/bin/node ] && /usr/bin/node --version | grep -Eq '^v24\.' \
+              && [ "$(dpkg-query -W -f='${Status}' nodejs 2>/dev/null)" = 'install ok installed' ] \
+              && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' nodejs)" ge 24; then
+              echo 'Existing system Node24 and genuine dpkg dependency admitted.'
+            else
+              curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+                https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+                --output "$RUNNER_TEMP/nodesource-repo.gpg.key"
+              gpg --batch --yes --dearmor --output "$RUNNER_TEMP/nodesource.gpg" "$RUNNER_TEMP/nodesource-repo.gpg.key"
+              sudo install -o root -g root -m 0644 "$RUNNER_TEMP/nodesource.gpg" /usr/share/keyrings/nodesource.gpg
+              printf '%s\n' "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" \
+                | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
+            fi
+            sudo apt-get update
+            sudo apt-get install -y nodejs ffmpeg
+            /usr/bin/node --version | grep -Eq '^v24\.'
+            test "$(dpkg-query -W -f='${Status}' nodejs)" = 'install ok installed'
+            dpkg --compare-versions "$(dpkg-query -W -f='${Version}' nodejs)" ge 24
+            echo /usr/bin >> "$GITHUB_PATH"
+            ffmpeg -version | sed -n '1p'
+          } 2>&1 | tee "$RUNNER_TEMP/native-install-prerequisites.log"
+      - name: Download exact existing97 candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: debridstreamer-server-deb
+          repository: Tgk-30/YAWF-Stream
+          run-id: 43049144954
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/server-candidate
+      - name: Admit fixed97 bytes before package installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = c5d6106efe0ea7a7a62197ff5f6957006d1e026f
+          test "$(node -p "require('./server/package.json').version")" = 2.3.97
+          candidate="$RUNNER_TEMP/server-candidate/debridstreamer-server_2.3.97_all.deb"
+          test -f "$candidate"
+          test ! -L "$candidate"
+          test "$(stat -c '%s' "$candidate")" = 4252472
+          echo "7588c5fa126942982b6179d46ffdf37311a909c5740de0a64804170d53db278e  $candidate" | sha256sum --check -
+      - name: Verify and install exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_version="$(node -p "require('./server/package.json').version")"
+          candidate="$RUNNER_TEMP/server-candidate/debridstreamer-server_${expected_version}_all.deb"
+          test -f "$candidate"
+          (
+            cd "$RUNNER_TEMP/server-candidate"
+            sha256sum --check SHA256SUMS
+          )
+          test "$(dpkg-deb -f "$candidate" Architecture)" = "all"
+          test "$(dpkg-deb -f "$candidate" Version)" = "$expected_version"
+          depends="$(dpkg-deb -f "$candidate" Depends)"
+          grep -Eq '(^|, )nodejs \(>= 24\)(,|$)' <<<"$depends"
+          grep -Eq '(^|, )ffmpeg(,|$)' <<<"$depends"
+          sudo apt-get install -y "$candidate"
+          test "$(dpkg-query -W -f='${Version}' debridstreamer-server)" = "$expected_version"
+          echo "SERVER_DEB=$candidate" >> "$GITHUB_ENV"
+          echo "SERVER_VERSION=$expected_version" >> "$GITHUB_ENV"
+
+      - name: Verify installed service metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f /opt/debridstreamer/server/dist/index.cjs
+          test -f /opt/debridstreamer/web-dist/index.html
+          test -f /lib/systemd/system/debridstreamer.service
+          test -f /etc/debridstreamer/debridstreamer.env
+          test "$(stat -c '%a' /etc/debridstreamer/debridstreamer.env)" = "600"
+          test "$(stat -c '%U:%G' /var/lib/debridstreamer)" = "debridstreamer:debridstreamer"
+          test "$(getent passwd debridstreamer | cut -d: -f6)" = "/var/lib/debridstreamer"
+          systemctl is-enabled debridstreamer | grep -qx enabled
+          grep -q '^User=debridstreamer$' /lib/systemd/system/debridstreamer.service
+          grep -q '^NoNewPrivileges=true$' /lib/systemd/system/debridstreamer.service
+          grep -q '^ProtectSystem=strict$' /lib/systemd/system/debridstreamer.service
+
+      - name: Smoke exact installed payload as service user
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemctl stop debridstreamer
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          cp "$GITHUB_WORKSPACE/scripts/smoke_server_artifact.mjs" "$smoke_dir/smoke_server_artifact.mjs"
+          chmod 0755 "$smoke_dir"
+          chmod 0644 "$smoke_dir/smoke_server_artifact.mjs"
+          sudo -u debridstreamer /usr/bin/node "$smoke_dir/smoke_server_artifact.mjs" \
+            --expected-version "$SERVER_VERSION" \
+            --server-entry /opt/debridstreamer/server/dist/index.cjs \
+            --web-dist /opt/debridstreamer/web-dist \
+            | tee "$RUNNER_TEMP/installed-server-smoke.json"
+
+      - name: Start, restart, and inspect the systemd service
+        shell: bash
+        run: |
+          set -euo pipefail
+          port="$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")"
+          setup_token="$(openssl rand -base64 32 | tr -d '\n')"
+          # Append a test env file after the packaged configuration. Systemd
+          # EnvironmentFile values override Environment directives in drop-ins.
+          sudo install -m 0600 /dev/null /etc/debridstreamer/ci-smoke.env
+          printf '%s\n' \
+            'HOST=127.0.0.1' \
+            "PORT=$port" \
+            "DS_SERVER_SETUP_TOKEN=$setup_token" \
+            'DS_SERVER_COOKIE_SECURE=false' \
+            'DS_SERVER_UPDATE_CHECK=false' \
+            'DS_SERVER_ENABLE_DIRECT_TORRENT=false' \
+            'DS_SERVER_ENABLE_TRANSCODE=false' \
+            'DS_SERVER_LOGGER=false' \
+            | sudo tee /etc/debridstreamer/ci-smoke.env >/dev/null
+          sudo chmod 0600 /etc/debridstreamer/ci-smoke.env
+          sudo install -d -m 0755 /etc/systemd/system/debridstreamer.service.d
+          sudo install -m 0600 /dev/null /etc/systemd/system/debridstreamer.service.d/10-ci-smoke.conf
+          printf '%s\n' '[Service]' 'EnvironmentFile=/etc/debridstreamer/ci-smoke.env' \
+            | sudo tee /etc/systemd/system/debridstreamer.service.d/10-ci-smoke.conf >/dev/null
+          sudo chmod 0600 /etc/systemd/system/debridstreamer.service.d/10-ci-smoke.conf
+          unset setup_token
+          sudo systemctl daemon-reload
+          sudo systemctl start debridstreamer
+
+          wait_for_health() {
+            for attempt in $(seq 1 80); do
+              if curl --fail --silent "http://127.0.0.1:$port/api/health" \
+                | grep -q '"ok":true'; then
+                return 0
+              fi
+              if [ "$attempt" -eq 80 ]; then
+                echo "Installed systemd service did not become healthy" >&2
+                systemctl show debridstreamer \
+                  --property=ActiveState,SubState,Result,ExecMainStatus >&2
+                return 1
+              fi
+              sleep 0.25
+            done
+          }
+          wait_for_health
+          test "$(systemctl show debridstreamer --property=User --value)" = "debridstreamer"
+          main_pid="$(systemctl show debridstreamer --property=MainPID --value)"
+          test "$main_pid" -gt 1
+          test "$(awk '/^Uid:/{print $2}' "/proc/$main_pid/status")" != "0"
+
+          curl --fail --silent --show-error \
+            --dump-header "$RUNNER_TEMP/systemd-index.headers" \
+            --output "$RUNNER_TEMP/systemd-index.html" \
+            "http://127.0.0.1:$port/"
+          grep -Eqi '^content-type: text/html' "$RUNNER_TEMP/systemd-index.headers"
+          grep -Eqi '^cache-control: no-store' "$RUNNER_TEMP/systemd-index.headers"
+          curl --fail --silent --show-error \
+            --dump-header "$RUNNER_TEMP/systemd-shim.headers" \
+            --output "$RUNNER_TEMP/systemd-shim.js" \
+            "http://127.0.0.1:$port/server-mode.js"
+          grep -Eqi '^cache-control: no-store' "$RUNNER_TEMP/systemd-shim.headers"
+          grep -Fq 'globalThis.__DEBRIDSTREAMER_SERVER_URL__ = globalThis.location.origin;' "$RUNNER_TEMP/systemd-shim.js"
+
+          PORT="$port" node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { createHash } from "node:crypto";
+          import { readFile } from "node:fs/promises";
+          const base = `http://127.0.0.1:${process.env.PORT}`;
+          const html = await (await fetch(`${base}/`)).text();
+          const paths = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+\.(?:js|css))"/g)].map((match) => match[1]);
+          assert.ok(paths.some((path) => path.endsWith(".js")));
+          assert.ok(paths.some((path) => path.endsWith(".css")));
+          for (const path of new Set(paths)) {
+            assert.match(path, /-[A-Za-z0-9_-]{8,}\.(?:js|css)$/);
+            const response = await fetch(`${base}${path}`);
+            assert.equal(response.status, 200);
+            assert.equal(response.headers.get("cache-control"), "public, max-age=31536000, immutable");
+            assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+            const served = Buffer.from(await response.arrayBuffer());
+            const packaged = await readFile(`/opt/debridstreamer/web-dist${path}`);
+            const digest = (value) => createHash("sha256").update(value).digest("hex");
+            assert.equal(digest(served), digest(packaged));
+          }
+          NODE
+
+          sudo systemctl restart debridstreamer
+          wait_for_health
+          sudo systemctl stop debridstreamer
+          service_state="$(systemctl is-active debridstreamer || true)"
+          test "$service_state" = "inactive"
+
+      - name: Retain bounded non-secret failure diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            systemctl show debridstreamer --property=ActiveState,SubState,Result,ExecMainStatus || true
+            dpkg-query -W -f='${Package} ${Version} ${Status}\n' nodejs ffmpeg debridstreamer-server || true
+          } > "$RUNNER_TEMP/native-install-diagnostics.txt"
+      - name: Upload native installation evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server97-native-install-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/installed-server-smoke.json
+            ${{ runner.temp }}/systemd-index.headers
+            ${{ runner.temp }}/systemd-shim.headers
+            ${{ runner.temp }}/native-install-prerequisites.log
+            ${{ runner.temp }}/native-install-diagnostics.txt
+          if-no-files-found: warn
+          retention-days: 14
