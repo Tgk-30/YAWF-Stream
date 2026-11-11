@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -36,6 +37,144 @@ class ObserverTests(unittest.TestCase):
         result = observer.observe(workspace, evidence, [sys.executable, "-I", "-B", "-c", code],
                                   kwargs.pop("max_seconds", 3), sample_seconds=.025, cleanup_grace=.15, **kwargs)
         summary = json.loads((evidence / "summary.json").read_text())
+        ledger = [json.loads(line) for line in (evidence / "events.jsonl").read_text().splitlines()]
+        return result, summary, ledger
+
+    @contextmanager
+    def ready_fixture(self, mode, fault=None, audit=None):
+        self.assertIn(mode, ("owned-child", "term-ignore", "detached-child"))
+        audit = {} if audit is None else audit
+        process = None
+        group_owned = False
+        started = time.monotonic()
+        # Bounded fixture setup is separate from residual behavior, not startup-performance proof.
+        deadline = started + 5
+        with tempfile.TemporaryDirectory(prefix="ready-fixture-", dir=self.root) as directory:
+            read_fd, write_fd = os.pipe()
+            root = Path(directory)
+            pidfile = root / ("detached-pid" if mode == "detached-child" else "child-pid")
+            ready, go = root / "fixture-ready", root / "fixture-go"
+            child_code = (
+                "import os,pathlib,select,time\n"
+                f"fd={read_fd}\n"
+                f"if {mode!r} == 'detached-child':\n"
+                f" while not pathlib.Path({str(go)!r}).exists():\n"
+                "  if select.select([fd],[],[],.01)[0]: os.read(fd,1);raise SystemExit(0)\n"
+                " os.setsid()\n"
+                f" if {fault!r} != 'no-ready':\n"
+                f"  p=pathlib.Path({str(ready)!r});t=p.with_suffix('.new');t.write_text(str(0 if {fault!r} == 'wrong-ready' else os.getpid()));t.replace(p)\n"
+                "os.read(fd,1)\n"
+            )
+            code = (
+                "import os,pathlib,signal,subprocess,sys,time\n"
+                "def write(path,value):\n"
+                " p=pathlib.Path(path);t=p.with_suffix('.new');t.write_text(str(value));t.replace(p)\n"
+                "child=None\n"
+                "try:\n"
+                f" if {mode!r} == 'term-ignore':\n"
+                "  signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+                f"  write({str(pidfile)!r},os.getpid())\n"
+                " else:\n"
+                f"  child=subprocess.Popen([sys.executable,'-I','-B','-c',{child_code!r}],pass_fds=({read_fd},))\n"
+                f"  write({str(pidfile)!r},os.getppid() if {fault!r} == 'wrong-pid' else child.pid)\n"
+                f"  if {mode!r} == 'owned-child':\n"
+                "   def stop(*_): child.wait(timeout=1);sys.exit(23)\n"
+                "   signal.signal(signal.SIGTERM,stop)\n"
+                f" if {mode!r} != 'detached-child' and {fault!r} != 'no-ready': write({str(ready)!r},0 if {fault!r} == 'wrong-ready' else os.getpid())\n"
+                " time.sleep(60)\n"
+                "finally:\n"
+                f" if child is not None and child.poll() is None and not pathlib.Path({str(go)!r}).exists(): child.kill();child.wait(timeout=2)\n"
+            )
+            command = [sys.executable, "-I", "-B", "-c", code]
+            try:
+                process = subprocess.Popen(command, start_new_session=True, pass_fds=(read_fd,))
+                os.close(read_fd)
+                read_fd = None
+                audit.update(process=process, command=command, rootPid=process.pid, childPid=None,
+                             pidfile=pidfile, bootstrapStarted=started, bootstrapDeadline=deadline, cleaned=False)
+                group_owned = os.getpgid(process.pid) == process.pid
+                self.assertTrue(group_owned, "Fixture producer did not own its new group")
+
+                def await_pid(path):
+                    while time.monotonic() < deadline:
+                        self.assertIsNone(process.poll(), "Fixture exited during bootstrap")
+                        if path.exists():
+                            value = path.read_text()
+                            self.assertTrue(value.isascii() and value.isdecimal() and len(value) <= 32)
+                            self.assertGreater(int(value), 1)
+                            self.assertLess(time.monotonic(), deadline, "Fixture bootstrap deadline")
+                            return int(value)
+                        time.sleep(min(.01, max(0, deadline - time.monotonic())))
+                    self.fail("Fixture bootstrap deadline")
+
+                pid = await_pid(pidfile)
+                rows = observer.collect_snapshot()
+                self.assertLess(time.monotonic(), deadline, "Fixture bootstrap deadline")
+                self.assertEqual(rows[process.pid]["groupPid"], process.pid)
+                if mode == "term-ignore":
+                    self.assertEqual(pid, process.pid)
+                else:
+                    self.assertEqual(rows[pid]["parentPid"], process.pid)
+                    self.assertEqual(rows[pid]["groupPid"], process.pid)
+                    audit.update(childPid=pid, childIdentity=rows[pid]["startIdentity"])
+                if mode == "detached-child":
+                    go.write_text("detach")
+                self.assertEqual(await_pid(ready), pid if mode == "detached-child" else process.pid)
+                rows = observer.collect_snapshot()
+                self.assertLess(time.monotonic(), deadline, "Fixture bootstrap deadline")
+                self.assertIsNone(process.poll())
+                if mode != "term-ignore":
+                    self.assertEqual(rows[pid]["parentPid"], process.pid)
+                    self.assertEqual(rows[pid]["startIdentity"], audit["childIdentity"])
+                    self.assertEqual(rows[pid]["groupPid"], pid if mode == "detached-child" else process.pid)
+                audit["bootstrapSeconds"] = time.monotonic() - started
+                self.last_ready_fixture = audit
+                yield audit
+            finally:
+                if read_fd is not None:
+                    os.close(read_fd)
+                os.close(write_fd)
+                if process is not None:
+                    if process.poll() is None:
+                        if group_owned:
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        else:
+                            process.kill()
+                    process.wait(timeout=2)
+                    end = time.monotonic() + 2
+                    while True:
+                        rows = observer.collect_snapshot()
+                        live = [item for item in rows.values() if item["state"] != "Z" and (
+                            item["groupPid"] == process.pid or (item["pid"] == audit.get("childPid")
+                            and item["startIdentity"] == audit.get("childIdentity")))]
+                        if not live or time.monotonic() >= end:
+                            break
+                        time.sleep(.01)
+                    self.assertFalse(live, "Fixture left a live owned process")
+                    audit["cleaned"] = True
+
+    def observe_ready_fixture(self, ready, maximum):
+        real_popen = subprocess.Popen
+        claimed = []
+        def handoff(command, *args, **kwargs):
+            if command == ready["command"]:
+                self.assertEqual(args, ())
+                self.assertEqual(kwargs, {"start_new_session": True})
+                self.assertFalse(claimed, "Fixture handle was handed off more than once")
+                claimed.append(True)
+                return ready["process"]
+            self.assertEqual(command, ["/bin/ps", "-axo", "pid=,ppid=,pgid=,lstart=,etime=,time=,state=,comm="])
+            return real_popen(command, *args, **kwargs)
+        workspace, evidence = self.root / "workspace", self.root / "evidence"
+        with mock.patch.object(observer.subprocess, "Popen", new=handoff):
+            result = observer.observe(workspace, evidence, ready["command"], maximum,
+                                      sample_seconds=.025, cleanup_grace=.15)
+        self.assertEqual(claimed, [True])
+        summary = json.loads((evidence / "summary.json").read_text())
+        self.assertEqual(summary["maxSeconds"], maximum)
         ledger = [json.loads(line) for line in (evidence / "events.jsonl").read_text().splitlines()]
         return result, summary, ledger
 
@@ -479,39 +618,107 @@ class ObserverTests(unittest.TestCase):
                     pass
 
     def test_timeout_cleans_only_owned_group_and_records_not_success(self):
-        pidfile = self.root / "child-pid"
-        body = f"child=subprocess.Popen([sys.executable,'-I','-B','-c','import time;time.sleep(60)'])\npathlib.Path({str(pidfile)!r}).write_text(str(child.pid))\nsignal.signal(signal.SIGTERM,lambda *_:(child.wait(timeout=1),sys.exit(23)))\ntime.sleep(60)\n"
-        result, summary, _ = self.fixture(body, max_seconds=.25)
-        self.assertEqual(result, 124)
-        self.assertTrue(summary["timedOut"])
-        self.assertTrue(summary["cleanup"]["termSent"])
-        self.assertEqual(summary["cleanup"]["ownedResidual"], 0)
-        child = int(pidfile.read_text())
-        self.assertNotIn(child, observer.collect_snapshot())
+        with self.ready_fixture("owned-child") as ready:
+            result, summary, _ = self.observe_ready_fixture(ready, .25)
+            self.assertEqual(summary["maxSeconds"], .25)
+            self.assertEqual(result, 124)
+            self.assertTrue(summary["timedOut"])
+            self.assertTrue(summary["cleanup"]["termSent"])
+            self.assertEqual(summary["cleanup"]["ownedResidual"], 0)
+            child = int(ready["pidfile"].read_text())
+            self.assertNotIn(child, observer.collect_snapshot())
 
     def test_timeout_escalates_owned_term_ignoring_child(self):
-        result, summary, _ = self.fixture("signal.signal(signal.SIGTERM,signal.SIG_IGN)\ntime.sleep(60)\n", max_seconds=.15)
-        self.assertEqual(result, 124)
-        self.assertTrue(summary["cleanup"]["killSent"])
-        self.assertEqual(summary["producerExit"], -signal.SIGKILL)
+        with self.ready_fixture("term-ignore") as ready:
+            result, summary, _ = self.observe_ready_fixture(ready, .15)
+            self.assertEqual(summary["maxSeconds"], .15)
+            self.assertEqual(result, 124)
+            self.assertTrue(summary["cleanup"]["killSent"])
+            self.assertEqual(summary["producerExit"], -signal.SIGKILL)
 
     def test_detached_child_not_signalled_and_fixture_cleans_it(self):
-        pidfile = self.root / "detached-pid"
-        body = f"child=subprocess.Popen([sys.executable,'-I','-B','-c','import time;time.sleep(60)'],start_new_session=True)\npathlib.Path({str(pidfile)!r}).write_text(str(child.pid))\ntime.sleep(60)\n"
-        try:
-            result, summary, _ = self.fixture(body, max_seconds=.25)
-            pid = int(pidfile.read_text())
+        with self.ready_fixture("detached-child") as ready:
+            result, summary, _ = self.observe_ready_fixture(ready, .25)
+            self.assertEqual(summary["maxSeconds"], .25)
+            pid = int(ready["pidfile"].read_text())
             self.assertEqual(result, 124)
             self.assertFalse(summary["observerValid"])
             self.assertEqual(summary["cleanup"]["detachedResidual"], 1)
             self.assertIn(pid, observer.collect_snapshot())
-        finally:
-            if pidfile.exists():
-                pid = int(pidfile.read_text())
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+
+    def cold_fixture_case(self, method, marker):
+        real_popen = subprocess.Popen
+        delayed = []
+        def cold_start(command, *args, **kwargs):
+            if command[:4] == [sys.executable, "-I", "-B", "-c"] and marker in command[4]:
+                delayed.append(True)
+                command = command[:4] + ["import time;time.sleep(.4)\n" + command[4]]
+            return real_popen(command, *args, **kwargs)
+        with mock.patch.object(subprocess, "Popen", new=cold_start):
+            getattr(self, method)()
+        self.assertEqual(delayed, [True])
+        self.assertEqual(self.last_ready_fixture["bootstrapDeadline"], self.last_ready_fixture["bootstrapStarted"] + 5)
+        self.assertGreaterEqual(self.last_ready_fixture["bootstrapSeconds"], .4)
+        self.assertTrue(self.last_ready_fixture["cleaned"])
+
+    def test_owned_child_readiness_excludes_controlled_cold_bootstrap(self):
+        self.cold_fixture_case("test_timeout_cleans_only_owned_group_and_records_not_success", "child-pid")
+
+    def test_term_ignore_readiness_excludes_controlled_cold_bootstrap(self):
+        self.cold_fixture_case("test_timeout_escalates_owned_term_ignoring_child", "signal.signal(signal.SIGTERM,signal.SIG_IGN)")
+
+    def test_detached_readiness_excludes_controlled_cold_bootstrap(self):
+        self.cold_fixture_case("test_detached_child_not_signalled_and_fixture_cleans_it", "detached-pid")
+
+    def test_bootstrap_deadline_and_failure_cleanup_cover_owned_and_detached_processes(self):
+        self.cold_fixture_case("test_detached_child_not_signalled_and_fixture_cleans_it", "detached-pid")
+        for mode, fault in (("detached-child", "no-ready"), ("detached-child", "wrong-ready"),
+                            ("owned-child", "wrong-pid"), ("term-ignore", "wrong-ready")):
+            with self.subTest(mode=mode, fault=fault):
+                audit = {}
+                admitted = []
+                real_killpg = os.killpg
+                with mock.patch.object(os, "killpg", wraps=real_killpg) as signalled:
+                    with self.assertRaises(AssertionError) as rejected:
+                        with self.ready_fixture(mode, fault, audit):
+                            admitted.append(True)
+                self.assertFalse(admitted)
+                if fault == "no-ready":
+                    self.assertIn("Fixture bootstrap deadline", str(rejected.exception))
+                    self.assertGreaterEqual(time.monotonic(), audit["bootstrapDeadline"])
+                self.assertTrue(audit["cleaned"])
+                self.assertIsNotNone(audit["process"].poll())
+                self.assertTrue(all(call.args[0] == audit["rootPid"] for call in signalled.call_args_list))
+        for mode in ("owned-child", "term-ignore", "detached-child"):
+            with self.subTest(consumer_failure=mode):
+                audit = {}
+                with self.assertRaisesRegex(RuntimeError, "consumer failed"):
+                    with self.ready_fixture(mode, audit=audit):
+                        raise RuntimeError("consumer failed")
+                self.assertTrue(audit["cleaned"])
+
+    def test_ready_handle_handoff_refuses_second_launch_or_unowned_commands(self):
+        self.cold_fixture_case("test_detached_child_not_signalled_and_fixture_cleans_it", "detached-pid")
+        for fault in ("second", "wrong-command", "wrong-session"):
+            with self.subTest(fault=fault):
+                audit = {}
+                admitted = []
+                with self.ready_fixture("detached-child", audit=audit) as ready:
+                    def misuse(workspace, evidence, command, maximum, **kwargs):
+                        if fault == "wrong-command":
+                            result = subprocess.Popen([str(self.root / "absent-unowned-command")], start_new_session=True)
+                        elif fault == "wrong-session":
+                            result = subprocess.Popen(command, start_new_session=False)
+                        else:
+                            self.assertIs(subprocess.Popen(command, start_new_session=True), ready["process"])
+                            result = subprocess.Popen(command, start_new_session=True)
+                        admitted.append(True)
+                        return result
+                    with mock.patch.object(observer, "observe", side_effect=misuse):
+                        with self.assertRaises(AssertionError):
+                            self.observe_ready_fixture(ready, .25)
+                self.assertFalse(admitted)
+                self.assertTrue(audit["cleaned"])
 
     def test_launch_failure_is_unavailable_not_product_success(self):
         workspace, evidence = self.root / "workspace", self.root / "evidence"

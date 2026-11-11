@@ -165,11 +165,18 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(self.text.count(expression), 2)
         def read_clock(expr):
             return int(subprocess.check_output(['/usr/bin/python3', '-I', '-B', '-c', 'import time; print(' + expr + ')'], text=True, timeout=5).strip())
+        lower_before = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
         before = read_clock(expression)
+        upper_before = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
         time.sleep(.2)
+        lower_after = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
         after = read_clock(expression)
+        upper_after = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+        self.assertLessEqual(lower_before, before)
+        self.assertLessEqual(before, upper_before)
+        self.assertLessEqual(lower_after, after)
+        self.assertLessEqual(after, upper_after)
         self.assertGreaterEqual(after - before, 200000000)
-        self.assertLess(after - before, 5000000000)
 
     def test_legacy_steps_are_hash_bound(self):
         changed = self.text.replace('Run the confined toolchain probe or clean replay', 'Skip the original replay', 1)
