@@ -5,6 +5,11 @@ export const STARVATION_WAIT_CONFIRMATION_MS = 2_000;
 const WAIT_CONFIRMATION_MAX_AGE_MS = 5_000;
 type WaitingConfirmation = Readonly<{ at: number; position: number; playbackIntent: number }>;
 
+function isWaitingClockSample(position: number, highWater: number): boolean {
+  return Number.isFinite(position) && position <= highWater &&
+    position >= highWater - CLOCK_REGRESSION_TOLERANCE_SECONDS;
+}
+
 /** One foreground episode needs new owned clock progress, not another waiting event. */
 export class PlaybackStarvation {
   private lastPosition: number | null = null;
@@ -45,7 +50,9 @@ export class PlaybackStarvation {
 
   progress(position: number, eligible: boolean): void {
     if (!eligible || !Number.isFinite(position)) { this.interrupt(); return; }
-    if (this.confirmation != null && position !== this.confirmation.position) this.confirmation = null;
+    // A settled decoder clock may be slightly behind, but never move the
+    // original confirmation anchor or accept forward progress as a stall.
+    if (this.confirmation != null && !isWaitingClockSample(position, this.confirmation.position)) this.confirmation = null;
     if (this.lastPosition != null && position < this.lastPosition) {
       // Native decoders can settle a few milliseconds backward after buffer
       // depletion. Keep the high-water sample: this is not resumed progress,
@@ -68,13 +75,13 @@ export class PlaybackStarvation {
     if (!eligible || !Number.isFinite(now)) { this.interrupt(); return null; }
     this.progress(position, true);
     if (this.attempted || !this.progressed) return null;
-    return this.confirmation ??= { at: now, position, playbackIntent };
+    return this.confirmation ??= { at: now, position: this.lastPosition ?? position, playbackIntent };
   }
 
   confirmWaiting(pending: WaitingConfirmation, now: number, position: number, playbackIntent: number, eligible: boolean, attemptReady = true): boolean {
     if (this.confirmation !== pending) return false;
     if (!eligible || playbackIntent !== pending.playbackIntent) { this.interrupt(); return false; }
-    if (position !== pending.position) { this.progress(position, true); this.confirmation = null; return false; }
+    if (!isWaitingClockSample(position, pending.position)) { this.progress(position, true); this.confirmation = null; return false; }
     // A timer is corroboration only while this same wait is recent. Delayed
     // callbacks after a busy/suspended document cannot manufacture an episode.
     const age = now - pending.at;

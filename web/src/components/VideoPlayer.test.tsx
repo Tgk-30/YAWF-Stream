@@ -17790,6 +17790,31 @@ describe("automatic starvation95 adaptation", () => {
     expect(document.querySelector("video.player-video")).toBe(p.video);
   });
 
+  it.each([
+    [false, 0.001], [false, 0.033], [false, 0.05],
+    [true, 0.001], [true, 0.033], [true, 0.05],
+  ] as const)("[starvation97] Auto=%s preserves a single waiting timer across %ss backward settling", async (auto, regression) => {
+    vi.useFakeTimers(); const p = await setup({ auto, height: 720, pending: true });
+    let lastWaitingPosition = 0;
+    for (let i = 0; i < 3; i++) {
+      beginConfirmedEpisode96(p);
+      lastWaitingPosition = p.clock();
+      await advance96(262);
+      p.video.currentTime = lastWaitingPosition - regression;
+      fireEvent.timeUpdate(p.video);
+      // No second waiting event may be needed to keep this same stall armed.
+      await advance96(1_737); expect(p.request).not.toHaveBeenCalled();
+      await advance96(1);
+      if (i < 2) {
+        expect(p.request).not.toHaveBeenCalled();
+        await advance96(4_000);
+        fireEvent.canPlay(p.video); p.playing(); p.progress();
+      }
+    }
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", lastWaitingPosition - regression);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+  });
+
   it("[starvation96] changed-clock waiting replaces a probe without losing the later confirmation deadline", async () => {
     vi.useFakeTimers(); const p = await setup({ pending: true });
     await confirmedEpisode96(p); await confirmedEpisode96(p);
