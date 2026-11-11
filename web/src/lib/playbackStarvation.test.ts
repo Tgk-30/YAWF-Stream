@@ -156,8 +156,60 @@ describe("PlaybackStarvation", () => {
     expect(policy.waiting(6_000, 0, true)).toBe(true);
   });
 
-  it("[starvation96-policy] cancels reported or quiet clock movement rather than confirming a stale sample", () => {
-    for (const delta of [0.001, 0.3, -0.001, -1, NaN]) {
+  it.each([
+    ["reported", 0.001], ["reported", 0.033], ["reported", 0.05],
+    ["quiet", 0.001], ["quiet", 0.033], ["quiet", 0.05],
+  ] as const)("[starvation97-policy] %s backward settling of %ss preserves three original-clock confirmations", (sample, regression) => {
+    const policy = new PlaybackStarvation(); policy.progress(70, true);
+    for (let i = 0; i < 3; i++) {
+      const position = 71 + i * 6, at = i * 12_000;
+      policy.progress(position, true);
+      const pending = policy.beginWaitingConfirmation(at, position, 1, true)!;
+      expect(pending).not.toBeNull();
+      if (sample === "reported") policy.progress(position - regression, true);
+      expect(policy.waitingConfirmation).toBe(pending);
+      expect(pending.position).toBe(position);
+      expect(policy.confirmWaiting(pending, at + 1_999, position - regression, 1, true)).toBe(false);
+      expect(policy.waitingConfirmation).toBe(pending);
+      expect(policy.confirmWaiting(pending, at + 2_000, position - regression, 1, true)).toBe(i === 2);
+      expect(policy.confirmWaiting(pending, at + 3_000, position - regression, 1, true)).toBe(false);
+      expect(policy.beginWaitingConfirmation(at + 3_000, position - regression, 1, true)).toBeNull();
+    }
+    policy.interrupt(); policy.progress(90, true); policy.progress(91, true);
+    expect(policy.beginWaitingConfirmation(40_000, 91, 1, true)).toBeNull();
+  });
+
+  it("[starvation97-policy] a wait beginning after settling retains the original progress high-water", () => {
+    const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
+    policy.progress(10.967, true);
+    const pending = policy.beginWaitingConfirmation(0, 10.967, 1, true)!;
+    expect(pending.position).toBe(11);
+    expect(policy.confirmWaiting(pending, 2_000, 10.934, 1, true)).toBe(false);
+    expect(policy.waitingConfirmation).toBeNull();
+  });
+
+  it.each(["reported", "quiet"] as const)("[starvation97-policy] rejects %s out-of-window, cumulative, forward and nonfinite clocks", sample => {
+    for (const delta of [-0.050001, -0.051, -1, 0.001, 0.3, NaN, Infinity, -Infinity]) {
+      const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
+      const pending = policy.beginWaitingConfirmation(0, 11, 1, true)!;
+      if (sample === "reported") policy.progress(11 + delta, true);
+      expect(policy.confirmWaiting(pending, 2_000, 11 + delta, 1, true)).toBe(false);
+      expect(policy.waitingConfirmation).toBeNull();
+      expect(policy.confirmWaiting(pending, 3_000, 11, 1, true)).toBe(false);
+    }
+    const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
+    const pending = policy.beginWaitingConfirmation(0, 11, 1, true)!;
+    policy.progress(10.967, true);
+    if (sample === "reported") policy.progress(10.934, true);
+    expect(policy.confirmWaiting(pending, 2_000, 10.934, 1, true)).toBe(false);
+    expect(policy.waitingConfirmation).toBeNull();
+    expect(policy.confirmWaiting(pending, 3_000, 11, 1, true)).toBe(false);
+  });
+
+  it("[starvation96-policy] cancels forward movement or backward clocks beyond the existing 50ms bound", () => {
+    // Only backward settling within the original high-water window is allowed.
+    // Forward progress and larger rewinds must still retire the confirmation.
+    for (const delta of [0.001, 0.3, -0.050001, -1, NaN]) {
       const policy = new PlaybackStarvation(); policy.progress(10, true); policy.progress(11, true);
       const pending = policy.beginWaitingConfirmation(0, 11, 1, true)!;
       expect(policy.confirmWaiting(pending, 2_000, 11 + delta, 1, true)).toBe(false);
