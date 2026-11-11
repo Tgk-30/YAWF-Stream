@@ -20,7 +20,7 @@ test("website release catalog rejects server90 while leaving independent channel
 for (const { name, from, to } of [
   {
     name: "desktop version",
-    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.58', tag: 'v2.3.58-web' };",
+    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.96', tag: 'v2.3.96-web' };",
     to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.25', tag: 'v2.3.28-web' };",
   },
   {
