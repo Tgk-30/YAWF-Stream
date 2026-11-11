@@ -17666,7 +17666,7 @@ describe("automatic starvation95 adaptation", () => {
     auto?: boolean; fixedDefault?: boolean; capability?: boolean; height?: number; audio?: boolean;
     fail?: boolean; pending?: boolean; qualities?: ServerTranscodeQuality[]; lease?: boolean;
     sourceTracks?: ServerAudioTrack[]; audioChurn?: boolean; lazyAudio?: "pending" | "failed" | "ambiguous";
-    unknownFile?: boolean; reused?: boolean;
+    unknownFile?: boolean; reused?: boolean; compatibility?: boolean; fixedUrl?: boolean;
   } = {}) {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const manifest = deferred<Response>();
@@ -17706,11 +17706,12 @@ describe("automatic starvation95 adaptation", () => {
     }));
     const props = {
       ...(options.lease || options.reused ? { refreshCurrentSource: refresh } : {}),
-      url: options.auto ? "https://server.example/api/stream/auto95/index.m3u8?quality=auto" : "https://server.example/api/stream/original95/movie.mp4",
+      url: options.compatibility || options.fixedUrl ? "https://server.example/api/stream/compat95/index.m3u8?quality=480p" : options.auto ? "https://server.example/api/stream/auto95/index.m3u8?quality=auto" : "https://server.example/api/stream/original95/movie.mp4",
       title: "Starvation95", sourceFileName: options.unknownFile ? undefined : "Starvation95.mkv", imdbId: "tt-starvation95", onClose: vi.fn(),
       serverOptimized: options.capability === false ? undefined : {
         qualities: options.qualities ?? ["auto", "720p", "480p", "360p"] as ServerTranscodeQuality[],
         defaultQuality: options.fixedDefault ? "480p" as const : options.auto ? "auto" as const : null, request,
+        ...(options.compatibility ? { initialQualityIntent: "automatic" as const } : {}),
         ...(options.audio || options.sourceTracks != null
           ? { loadSourceInfo: async () => ({ durationSeconds: 900, tracks: tracks.map(track => ({ ...track })) }) } : {}),
         ...(options.audioChurn || options.lazyAudio ? { loadAudioTracks } : {}),
@@ -18004,14 +18005,52 @@ describe("automatic starvation95 adaptation", () => {
     expect(p.clock()).toBe(112);
   });
 
-  it.each(["Device Original", "1080p", "720p", "480p", "360p"])("[starvation95] preserves explicit %s even after its preparation fails", async choice => {
-    const p = await setup({ fail: true, qualities: ["auto", "1080p", "720p", "480p", "360p"] });
+  it.each(["Device Original", "1080p", "720p", "480p", "360p"].flatMap(choice => [false, true].map(compatibility => ({ choice, compatibility }))))("[starvation95] preserves explicit $choice after preparation fails, compatibility=$compatibility", async ({ choice, compatibility }) => {
+    const p = await setup({ compatibility, height: compatibility ? 480 : 1080, fail: true, qualities: ["auto", "1080p", "720p", "480p", "360p"] });
     p.settings(); fireEvent.click(screen.getByRole("button", { name: choice })); await settle();
     p.request.mockClear(); p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
   });
 
-  it("[starvation95] preserves fixed data-saver default", async () => {
-    const p = await setup({ fixedDefault: true, fail: true }); expect(p.request).toHaveBeenCalledTimes(1);
+  it("[starvation98] reduces an implicit compatibility 480p after repeated starvation", async () => {
+    const p = await setup({ compatibility: true, height: 480 });
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("360p", 106);
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[starvation98] leaves a fixed 480p URL without automatic provenance protected", async () => {
+    const p = await setup({ fixedUrl: true, height: 480 });
+    p.episodes(); await settle();
+    expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it("[starvation98] keeps an explicit fixed selection over compatibility provenance after source refresh", async () => {
+    const p = await setup({ compatibility: true, height: 480 });
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settle();
+    expect(p.request).toHaveBeenCalledWith("480p", 100);
+    p.request.mockClear();
+    p.view.rerender(<VideoPlayer {...p.props} sourceRevision={1} url="https://server.example/api/stream/renewed95/index.m3u8?quality=480p" />);
+    await settle();
+    const next = document.querySelector("video.player-video") as HTMLVideoElement;
+    let time = 200;
+    Object.defineProperties(next, {
+      currentSrc: { configurable: true, get: () => next.src },
+      currentTime: { configurable: true, get: () => time, set: (value: number) => { time = value; } },
+      duration: { configurable: true, value: 900 }, videoHeight: { configurable: true, value: 480 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA }, paused: { configurable: true, value: false },
+    });
+    fireEvent.loadStart(next); fireEvent.loadedMetadata(next); fireEvent.canPlay(next);
+    for (let i = 0; i < 3; i++) {
+      fireEvent.play(next); fireEvent.playing(next);
+      time++; fireEvent.timeUpdate(next); time++; fireEvent.timeUpdate(next); fireEvent.waiting(next);
+    }
+    await settle(); expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("[starvation95] preserves fixed data-saver default, compatibility=%s", async compatibility => {
+    const p = await setup({ compatibility, height: compatibility ? 480 : 1080, fixedDefault: true, fail: true });
+    expect(p.request).toHaveBeenCalledTimes(compatibility ? 0 : 1);
     p.request.mockClear(); p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
   });
 

@@ -280,6 +280,8 @@ interface VideoPlayerProps {
    * original-device player without rendering unavailable controls. */
   serverOptimized?: {
     qualities: readonly ServerTranscodeQuality[];
+    /** Provenance of a fixed initial compatibility rendition, not a user selection. */
+    initialQualityIntent?: "automatic" | null;
     loadAudioTracks?: (
       options?: ServerAudioInventoryLoadOptions,
     ) => Promise<ServerAudioTrack[]>;
@@ -1007,7 +1009,8 @@ export function VideoPlayer({
     ? qualityIntent.automatic
     : retainedServerOptimizedQuality === "auto" || (retainedServerOptimizedQuality == null &&
       (serverOptimized?.defaultQuality == null || serverOptimized.defaultQuality === "auto") &&
-      (serverOptimizedQualityFromURL(url, serverOptimized?.qualities ?? []) == null ||
+      (serverOptimized?.initialQualityIntent === "automatic" ||
+        serverOptimizedQualityFromURL(url, serverOptimized?.qualities ?? []) == null ||
         serverOptimizedQualityFromURL(url, serverOptimized?.qualities ?? []) === "auto"));
   const starvationPolicy = useMemo(() => new PlaybackStarvation(), [automaticQualityOwner]);
   const [automaticReduction, setAutomaticReduction] = useState<{ owner: string; quality: ServerTranscodeQuality } | null>(null);
