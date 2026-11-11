@@ -34,7 +34,7 @@ jobs:
           node-version: 24
       - name: Validate unsigned admission controls before reading metadata
         run: |
-          node --test scripts/ci/admit_desktop96_recovery.test.mjs scripts/ci/desktop96_recovery_workflow.test.mjs
+          node --test scripts/ci/admit_desktop96_recovery.test.mjs scripts/ci/desktop96_recovery_workflow.test.mjs scripts/ci/bundled_node_fetch_guard.test.mjs
           python3 -I -B scripts/ci/validate_desktop96_media_recovery.test.py -v
       - name: Validate exact source and completed producer metadata
         id: admit
@@ -71,6 +71,7 @@ jobs:
           - platform: macos-15
             os: macos
             media_arch: arm64
+            node_sha256: 2cc28a1880d0774616959f2210ee739bffa6ac695c887e8988a496a21271f6c0
             media_run: 42916926303
             media_artifact: 13810464736
             media_sha256: c3a076d075b70e39f07dd5a048d842f41696428818ea5848198e0a5e7836a4ec
@@ -80,6 +81,7 @@ jobs:
           - platform: macos-15-intel
             os: macos
             media_arch: x86_64
+            node_sha256: e55a748c81980fda1399e65b686708960d6bb9b7e8ea5913d85a97c6a19e7a7b
             media_run: 42963084399
             media_artifact: 13833037325
             media_sha256: 88a499bda51a7baba874e342ded2d73d9578b5648d58991dec952cf17576400b
@@ -317,6 +319,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ matrix.media_artifact }}
+          merge-multiple: true
           run-id: ${{ matrix.media_run }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/media-transfer
@@ -427,8 +430,39 @@ jobs:
       - name: Bundle Node runtime (macOS)
         if: matrix.os == 'macos'
         env:
-          NODE_RUNTIME_VERSION: "22.23.3"
+          NODE_RUNTIME_VERSION: "22.23.4"
         run: node scripts/download_tauri_node_runtime.mjs ${{ matrix.node_runtime }}
+
+      - name: Verify patched bundled Node and handled malformed response
+        if: matrix.os == 'macos'
+        env:
+          NODE_RUNTIME: ${{ matrix.node_runtime }}
+          NODE_SHA256: ${{ matrix.node_sha256 }}
+        run: |
+          set -euo pipefail
+          node .recovery-tools/scripts/ci/bundled_node_fetch_guard.mjs \
+            --binary "$PWD/web/src-tauri/resources/server/node/$NODE_RUNTIME/bin/node" \
+            --sha256 "$NODE_SHA256" \
+            --output "$RUNNER_TEMP/bundled-node-${{ matrix.media_arch }}.json"
+
+      - name: Test full server with exact patched bundled Node
+        if: matrix.os == 'macos'
+        working-directory: server
+        env:
+          NODE_RUNTIME: ${{ matrix.node_runtime }}
+        run: |
+          set -euo pipefail
+          "../web/src-tauri/resources/server/node/$NODE_RUNTIME/bin/node" \
+            node_modules/vitest/vitest.mjs run --maxWorkers=1 --no-file-parallelism
+
+      - name: Retain patched runtime admission
+        if: always() && matrix.os == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop96-patched-node-${{ matrix.media_arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundled-node-${{ matrix.media_arch }}.json
+          if-no-files-found: warn
+          retention-days: 14
 
       # Notarization rejects the app if any nested executable is unsigned, so the
       # fetched ffmpeg/ffprobe must be Developer ID signed with hardened runtime
@@ -448,7 +482,26 @@ jobs:
 
       - name: Bundle Node runtime for Linux
         if: matrix.os == 'linux'
+        env:
+          NODE_RUNTIME_VERSION: "24.22.2"
         run: node scripts/download_tauri_node_runtime.mjs linux-x64
+
+      - name: Verify fixed Linux bundled runtime identity
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          web/src-tauri/resources/server/node/linux-x64/bin/node -e \
+            'const a=require("node:assert/strict");a.equal(process.versions.node,"24.22.2");a.equal(process.versions.undici,"7.30.1");console.log(JSON.stringify({node:process.version,undici:process.versions.undici}))' \
+            > "$RUNNER_TEMP/bundled-node-linux.json"
+
+      - name: Retain Linux runtime identity
+        if: always() && matrix.os == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop96-patched-node-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundled-node-linux.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Bundle ffmpeg for Linux
         if: matrix.os == 'linux'

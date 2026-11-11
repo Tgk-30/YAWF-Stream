@@ -5,6 +5,9 @@ import { pathToFileURL } from 'node:url';
 
 export const PINS = Object.freeze({
   repository: 'Tgk-30/YAWF-Stream', repositoryId: 1275935363,
+  macosNodeVersion: '22.23.4', macosUndiciVersion: '6.29.1',
+  linuxNodeVersion: '24.22.2', linuxUndiciVersion: '7.30.1',
+  macosNodeSha256: Object.freeze({ arm64: '2cc28a1880d0774616959f2210ee739bffa6ac695c887e8988a496a21271f6c0', x86_64: 'e55a748c81980fda1399e65b686708960d6bb9b7e8ea5913d85a97c6a19e7a7b' }),
   tag: 'v2.3.96-web', tagObject: '20b1ec2db9df5282a6db077ce54a0d4f487e67eb',
   source: '2edc189a33539bf1742435590810fb84aa653ce5',
   originalRun: 42916926303, armJob: 130182421368, armArtifact: 13810464736,
@@ -64,6 +67,8 @@ export function admitRecoveryMetadata(input, pins = PINS) {
   checkArtifact(input.intelArtifact, pins.intelArtifact, 'intel96-fixed-production-export-runtime', pins.intelArtifactBytes, pins.intelArtifactDigest, pins.intelRun, pins.exporterSource, 'codex/desktop96-media-observe');
   return { schemaVersion: 1, result: 'metadata-admitted', repository: pins.repository, productSource: pins.source,
     tag: pins.tag, tagObject: pins.tagObject, exporterSource: pins.exporterSource,
+    requiredMacosNode: { version: pins.macosNodeVersion, undici: pins.macosUndiciVersion, sha256: pins.macosNodeSha256 },
+    requiredLinuxNode: { version: pins.linuxNodeVersion, undici: pins.linuxUndiciVersion },
     originalRun: pins.originalRun, armJob: pins.armJob, armArtifact: pins.armArtifact,
     intelRun: pins.intelRun, intelJob: pins.intelJob, intelArtifact: pins.intelArtifact,
     armArchiveSha256: pins.armArchiveSha256, intelArchiveSha256: pins.intelArchiveSha256,

@@ -85,3 +85,37 @@ for (const [name, hash] of Object.entries(heldChannelJobs)) test(`preserves disa
   assert.equal(createHash('sha256').update(body).digest('hex'), hash);
   assert.ok(body.includes("needs.release-scope.outputs.desktop_only == 'false'"));
 });
+
+test('fixed-ID downloads flatten into the exact pinned archive path', () => {
+  const fetch = steps['Fetch verified source-built macOS media runtime'];
+  assert.match(fetch, /artifact-ids: \$\{\{ matrix.media_artifact \}\}/);
+  assert.match(fetch, /merge-multiple: true/);
+});
+test('patched Node identity, malformed response and full server gates precede packaging', () => {
+  assert.match(steps['Bundle Node runtime (macOS)'], /NODE_RUNTIME_VERSION: "22\.23\.4"/);
+  const ordered = headers.map(x => x[1]);
+  for (const name of ['Verify patched bundled Node and handled malformed response', 'Test full server with exact patched bundled Node']) {
+    assert.ok(ordered.indexOf(name) > ordered.indexOf('Bundle Node runtime (macOS)'));
+    assert.ok(ordered.indexOf(name) < ordered.indexOf('Build, bundle, sign & release'));
+  }
+  assert.match(steps['Test full server with exact patched bundled Node'], /resources\/server\/node\/\$NODE_RUNTIME\/bin\/node/);
+  assert.match(steps['Test full server with exact patched bundled Node'], /vitest\.mjs run --maxWorkers=1 --no-file-parallelism/);
+  assert.match(steps['Verify patched bundled Node and handled malformed response'], /--sha256 "\$NODE_SHA256"/);
+  assert.ok(text.includes('node_sha256: 2cc28a1880d0774616959f2210ee739bffa6ac695c887e8988a496a21271f6c0'));
+  assert.ok(text.includes('node_sha256: e55a748c81980fda1399e65b686708960d6bb9b7e8ea5913d85a97c6a19e7a7b'));
+});
+
+test('recovery metadata pins the same patched Node component as both consumers', () => {
+  assert.equal(PINS.macosNodeVersion, '22.23.4'); assert.equal(PINS.macosUndiciVersion, '6.29.1');
+  for (const sha of Object.values(PINS.macosNodeSha256)) assert.ok(text.includes(`node_sha256: ${sha}\n`));
+  assert.ok(steps['Bundle Node runtime (macOS)'].includes(`NODE_RUNTIME_VERSION: "${PINS.macosNodeVersion}"`));
+});
+
+test('Linux bundled runtime is explicit and independently read back before packaging', () => {
+  assert.equal(PINS.linuxNodeVersion, '24.22.2'); assert.equal(PINS.linuxUndiciVersion, '7.30.1');
+  assert.ok(steps['Bundle Node runtime for Linux'].includes(`NODE_RUNTIME_VERSION: "${PINS.linuxNodeVersion}"`));
+  const body = steps['Verify fixed Linux bundled runtime identity'];
+  assert.ok(body.includes(`a.equal(process.versions.node,"${PINS.linuxNodeVersion}")`));
+  assert.ok(body.includes(`a.equal(process.versions.undici,"${PINS.linuxUndiciVersion}")`));
+  assert.ok(headers.findIndex(x => x[1] === 'Verify fixed Linux bundled runtime identity') < headers.findIndex(x => x[1] === 'Build, bundle, sign & release'));
+});
