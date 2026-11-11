@@ -14,6 +14,12 @@ on:
         description: Exact reviewed source commit, not a tag or branch
         required: true
         type: string
+      profile:
+        description: Full native qualification or read-only Git guard diagnosis
+        required: false
+        default: full
+        type: choice
+        options: [full, git-probe]
 
 permissions:
   contents: read
@@ -53,7 +59,7 @@ jobs:
   producer:
     name: Compile unsigned observer and server on producer only
     needs: host-contracts
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.profile == 'full'
     runs-on: windows-2022
     timeout-minutes: 20
     defaults:
@@ -111,6 +117,63 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
+
+  git-environment:
+    name: Read-only Windows Git guard diagnosis
+    needs: host-contracts
+    if: github.event_name == 'workflow_dispatch' && inputs.profile == 'git-probe'
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.2'
+      - name: Compare fixed read-only Git launch configurations without raw output
+        shell: pwsh
+        run: |
+          node --input-type=module -e @'
+          import { execFileSync } from 'node:child_process';
+          import { devNull } from 'node:os';
+          import { join } from 'node:path';
+          const repo = process.env.GITHUB_WORKSPACE;
+          const original = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(?:PATH|SYSTEMROOT|WINDIR|TEMP|TMP)$/i.test(key)));
+          Object.assign(original, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: devNull, GIT_TERMINAL_PROMPT: '0' });
+          const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/TOKEN|SECRET|PASSWORD|CREDENTIAL|(?:^|_)KEY(?:$|_)/i.test(key)));
+          const cases = [
+            ['inherited', 'git', inherited, devNull, false],
+            ['filtered', 'git', original, devNull, false],
+            ['filtered-exe', 'git.exe', original, devNull, false],
+            ['posix-null', 'git.exe', { ...original, GIT_CONFIG_GLOBAL: '/dev/null' }, '/dev/null', false],
+            ['exact-safe-directory', 'git.exe', original, devNull, true],
+            ['absent-global', 'git.exe', { ...original, GIT_CONFIG_GLOBAL: join(repo, '.git', 'yawf-absent-config') }, devNull, false],
+          ];
+          for (const [variant, file, env, hooks, safe] of cases) {
+            const args = ['--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=' + hooks];
+            if (safe) args.push('-c', 'safe.directory=' + repo);
+            args.push('-C', repo, 'rev-parse', '--verify', 'HEAD');
+            let result;
+            try {
+              const output = execFileSync(file, args, { env, timeout: 10000, maxBuffer: 65536, stdio: ['ignore', 'pipe', 'pipe'] });
+              result = { variant, returned: true, sourceMatches: output.toString().trim() === process.env.GITHUB_SHA };
+            } catch (error) {
+              const text = typeof error.stderr?.toString === 'function' ? error.stderr.toString() : '';
+              const classification = /dubious ownership/i.test(text) ? 'dubious-ownership'
+                : /unable to read config|bad config|config file/i.test(text) ? 'config-error'
+                : /unknown option|unrecognized option/i.test(text) ? 'unsupported-option'
+                : /not a git repository/i.test(text) ? 'not-repository' : 'unclassified';
+              const code = ['ENOENT', 'EACCES', 'ETIMEDOUT', 'ENOBUFS'].includes(error.code) ? error.code : 'unavailable';
+              const status = Number.isInteger(error.status) && error.status >= 0 && error.status <= 255 ? error.status : null;
+              result = { variant, returned: false, status, code, classification };
+            }
+            console.log(JSON.stringify(result));
+          }
+          '@
+          if ($LASTEXITCODE -ne 0) { throw 'Read-only Git diagnostic failed.' }
 
   consumer:
     name: Fresh ${{ matrix.os }} full suite before other native probes

@@ -118,6 +118,34 @@ function validateCold(source) {
 
 test('fresh consumers hash-admit an immutable producer packet before unfiltered full suites without warmup', () => validateCold(cold));
 
+test('Git diagnosis is a separate read-only profile and reports classifications without raw output', () => {
+  assert.ok(cold.includes("github.event_name == 'workflow_dispatch' && inputs.profile == 'git-probe'"));
+  assert.ok(cold.includes("github.event_name == 'workflow_dispatch' && inputs.profile == 'full'"));
+  const block = step(cold, 'Compare fixed read-only Git launch configurations without raw output');
+  assert.doesNotMatch(block, /prepare_windows_storage_observer|StorageDescriptorObserver\.exe|npm |writeFile/);
+  const body = block.split('\n').map(line => line.startsWith('          ') ? line.slice(10) : line).join('\n');
+  const match = body.match(/node --input-type=module -e @'\n([\s\S]*?)\n'@/); assert.ok(match);
+  const program = match[1].replace(/^import .*;\n/gm, '');
+  const calls = [], logs = [];
+  const env = { GITHUB_WORKSPACE: 'fixture-root', GITHUB_SHA: 'a'.repeat(40), PATH: 'fixture-path',
+    GITHUB_TOKEN: 'synthetic-sensitive-token', AZURE_CLIENT_SECRET: 'synthetic-sensitive-secret' };
+  new Function('execFileSync', 'devNull', 'join', 'console', 'process', `"use strict";\n${program}`)(
+    (file, args, options) => {
+      assert.ok(['git', 'git.exe'].includes(file)); assert.deepEqual(args.slice(-3), ['rev-parse', '--verify', 'HEAD']);
+      assert.equal(options.timeout, 10000); assert.equal(options.maxBuffer, 65536);
+      assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
+      assert.equal(options.env.GITHUB_TOKEN, undefined); assert.equal(options.env.AZURE_CLIENT_SECRET, undefined);
+      calls.push(file);
+      throw Object.assign(new Error('synthetic raw message'), { status: 128, stderr: Buffer.from('dubious ownership synthetic-sensitive-token fixture-path') });
+    }, 'fixture-null', (...parts) => parts.join('/'), { log: value => logs.push(JSON.parse(value)) }, { env });
+  assert.equal(calls.length, 6); assert.equal(logs.length, 6);
+  for (const value of logs) {
+    assert.deepEqual(Object.keys(value).sort(), ['classification', 'code', 'returned', 'status', 'variant']);
+    assert.equal(value.classification, 'dubious-ownership'); assert.equal(value.status, 128);
+    assert.doesNotMatch(JSON.stringify(value), /synthetic|fixture-path|raw message/);
+  }
+});
+
 for (const [name, from, to] of [
   ['consumer compilation warmup', '      - name: Full source suite first, unchanged native and test deadlines', '      - run: node scripts/prepare_windows_storage_observer.mjs compile\n      - name: Full source suite first, unchanged native and test deadlines'],
   ['unbound artifact selection', 'artifact-ids: ${{ needs.producer.outputs.artifact_id }}', 'name: latest-observer'],
